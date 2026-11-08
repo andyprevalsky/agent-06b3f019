@@ -18,6 +18,232 @@ import deploy_test_cycle as c
 import deploy_gate_progress as progress
 
 class Cycle(unittest.TestCase):
+    def custody_fixture(self):
+        import deploy_test_historical_custody as h
+        mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
+        mocked.start(); self.addCleanup(mocked.stop)
+        names = ['agent-payment-abandonment', 'agent-payment-idempotent-abandonment']
+        catalog = [t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text()) if t['name'] in names]
+        path = self.root / 'agents/benchmarks/tasks.json'
+        path.parent.mkdir(parents=True); c.write(path, catalog)
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'catalog'], check=True)
+        gate = self.plan['gates'][1]
+        gate.update(checks=names + ['peer-' + str(i) for i in range(13)], case_protocol=True)
+        self.plan['source'] = c.source(self.root)
+        self.state = c.initialize(self.plan, self.root)
+        failures, reports = [], []
+        for i, name in enumerate(names):
+            task = next(t for t in catalog if t['name'] == name)
+            snap = copy.deepcopy(task['expected_payment_lifecycle'])
+            snap.update(agentId='root-' + str(i), stripeRefund=None)
+            snap['purchase'].update(id='purchase-' + str(i), cardId='card-' + str(i), status='HELD')
+            snap['walletFunding'].update(providerTransferId='transfer-' + str(i), status='RECLAIMING')
+            snap['agentCard'].update(id='card-' + str(i), status='CLOSED', balanceCents=0)
+            snap['orgTransfer'].update(id='transfer-' + str(i), cardId='card-' + str(i), status='consumed',
+                                       releasedCents=0, transferredCents=4396, amountCents=4396, livemode=False)
+            snap['stripeHold']['livemode'] = False
+            final = dict(root_deleted=True, tree_agent_ids=[snap['agentId']], unsealed_tree_agent_ids=[], browser_sessions=[],
+                         purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
+                          card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
+                          total_cents=4396, status='HELD', funding_status='RECLAIMING')])
+            row = dict(name=name, agent_id=snap['agentId'], passed=False, status='ACTIVE' if i else 'SKIPPED',
+                       benchmark_status='FAILED' if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
+            native = dict(**row, cleanup_failure=None, context_violations=[],
+                          execution_provenance={'base_sha': self.state['source']['head']},
+                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=snap['agentId'], final=final,
+                                provider_receipts=[], agentcard_release_stall_lifecycles={snap['agentId']: snap})})
+            if not i: native['logs']['agentcard_release_stall_lifecycle'] = snap
+            file = self.root / '.context/native' / name / 'cloudbench-run.json'; c.write(file, {'tasks': [native]})
+            evidence = dict(native_task=row, path=str(file), sha256=c.sha_file(file))
+            result = file.parent / 'result.json'
+            c.write(result, dict(source=self.state['source'], gate='api', complete=True, cleanup_complete=True,
+                                 evidence={name: evidence}))
+            f = dict(id='failure-' + str(i), check='api/' + name, gate='api', source=self.state['source'],
+                     native_result='FAIL', complete=True, command=gate['command'], finished_at=1000,
+                     worker_evidence=evidence, worker_result=str(result))
+            failures.append(f)
+            entry = dict(id=f['id'], check=f['check'], source=f['source'], command=f['command'], native_result='FAIL',
+                         attribution='NOT_INTRODUCED', description='native original failure', evidence=str(file))
+            if i:
+                entry['post_merge'] = dict(test=f['check'], command=f['command'], scope='original auth failure',
+                                          error='auth then timeout', source=f['source'], evidence=str(file))
+            else:
+                entry['resource_skip'] = self.stall_confirmation(receipt_sha256=evidence['sha256'])
+            reports.append(entry)
+        self.state.update(phase='triage', failure_phase='final', pending=[f['id'] for f in failures], failures=failures)
+        c.adjudicate(self.state, {'failures': reports})
+        self.state.update(phase='ready', ready=True)
+        (self.root / 'code').write_text('changed payment backend contract')
+        new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
+        return new
+
+    def test_historical_stall_cannot_refresh_into_new_card_request_without_proof(self):
+        new = self.custody_fixture()
+        before = copy.deepcopy(self.state)
+        with self.assertRaisesRegex(ValueError, 'historical custody'):
+            c.refresh(self.state, self.plan, new, self.root)
+        self.assertEqual(before, self.state)
+
+    def test_historical_custody_refresh_runs_all_peers_and_keeps_native_debt(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        originals = copy.deepcopy(self.state['failures'])
+        debt = copy.deepcopy(self.state['pending_post_merge'])
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        same = copy.deepcopy(self.state)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual(same, self.state)
+        with self.assertRaisesRegex(ValueError, 'mix election'):
+            c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof, election_proof={})
+        self.assertEqual(same, self.state)
+        self.assertEqual(originals, self.state['failures'])
+        self.assertEqual(debt, self.state['pending_post_merge'])
+        self.assertEqual({}, self.state['skips']); self.assertEqual([], self.state['resource_warnings'])
+        h.verify(self.state, self.root)
+        self.state.update(phase='final')
+        gate = self.state['plan']['gates'][1]
+        def worker(argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['peer-' + str(i) for i in range(13)], request['checks'])
+            self.assertEqual(2, len(request['skips']))
+            self.assertTrue(all(x['disposition'] == h.DISPOSITION for x in request['skips'].values()))
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases=dict.fromkeys(request['checks'], 'PASS'), complete=True, cleanup_complete=True, reused=False))
+            return 0, False, False, False
+        c.write(self.directory / 'cycle.json', self.state)
+        with patch.object(c, 'run_command', side_effect=worker):
+            result = c.execute(gate, self.state, self.directory, self.root)
+        self.assertEqual('PASS', result['status'], result); self.assertTrue(result['complete'])
+        for check in gate['checks'][:2]:
+            self.assertEqual('SKIP', result['cases'][check])
+            self.assertFalse(result['case_complete'][check]); self.assertEqual('UNVERIFIED', result['current_execution'][check])
+        self.assertEqual(originals, self.state['failures'])
+        self.state['attempts'].append(dict(phase='final', results=[result]))
+        self.assertIsNotNone(c.full_pass_binding(self.state, gate, root=self.root))
+        failed_directory = self.directory / 'peer-failure'
+        c.write(failed_directory / 'cycle.json', self.state)
+        def peer_failure(argv, **kw):
+            worker(argv, **kw)
+            path = Path(kw['env']['DEPLOY_GATE_RESULT']); value = c.read(path)
+            value['cases']['peer-12'] = 'FAIL'; c.write(path, value)
+            return 1, False, False, False
+        with patch.object(c, 'run_command', side_effect=peer_failure):
+            failed = c.execute(gate, self.state, failed_directory, self.root)
+        self.assertEqual('FAIL', failed['status'])
+        self.assertEqual('FAIL', failed['cases']['peer-12'])
+        only_omissions = {**gate, 'checks': gate['checks'][:2]}
+        with patch.object(c, 'run_command') as launch:
+            omitted = c.execute(only_omissions, self.state, self.directory / 'only-omissions', self.root)
+            launch.assert_not_called()
+        self.assertFalse(omitted['executed'])
+        self.assertEqual(dict.fromkeys(only_omissions['checks'], False), omitted['case_complete'])
+        self.assertEqual(dict.fromkeys(only_omissions['checks'], 'UNVERIFIED'), omitted['current_execution'])
+        self.assertFalse(failed['case_complete']['agent-payment-abandonment'])
+        # A second source refresh preserves the original packet after legacy skips disappeared.
+        old = self.state['plan']; (self.root / 'code').write_text('next current source')
+        newer = copy.deepcopy(old); newer['source'] = c.source(self.root)
+        self.state.update(phase='ready', ready=True)
+        renewed = h.build(self.state, old, newer, self.root)
+        c.refresh(self.state, old, newer, self.root, historical_no_retry_proof=renewed)
+        self.assertEqual(debt, self.state['pending_post_merge'])
+        self.assertEqual(originals, self.state['failures'])
+        h.verify(self.state, self.root)
+        c.resolve_post_merge(self.state, debt[0]['id'], 'https://boxes.dev/thread/repair-fixture')
+        self.assertEqual([], self.state['pending_post_merge']); h.verify(self.state, self.root)
+
+    def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)
+        before = copy.deepcopy(self.state)
+        for change in (lambda p: p['cases'].pop(), lambda p: p.update(extra=True),
+                       lambda p: p['current_binding'].update(environment='wrong'),
+                       lambda p: p['cases'][0].update(snapshot_sha256='0' * 64)):
+            bad = copy.deepcopy(proof); change(bad)
+            with self.assertRaises(ValueError):
+                c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=bad)
+            self.assertEqual(before, self.state)
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        mutations = [lambda t: t['logs']['cloud_cleanup_evidence']['agentcard_release_stall_lifecycles'][t['agent_id']]['orgTransfer'].update(livemode=True),
+                     lambda t: t['logs']['cloud_cleanup_evidence']['agentcard_release_stall_lifecycles'][t['agent_id']]['orgTransfer'].update(releasedCents=1),
+                     lambda t: t['logs']['cloud_cleanup_evidence'].update(errors=['unknown owner'])]
+        # Even a newly hashed native snapshot cannot turn live/released/nonstalled facts into custody.
+        for change in mutations:
+            candidate = copy.deepcopy(self.state)
+            doc = json.loads(raw); change(doc['tasks'][0]); c.write(file, doc)
+            candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+            adapter = c.read(adapter_path)
+            adapter['evidence'][doc['tasks'][0]['name']] = candidate['failures'][1]['worker_evidence']
+            c.write(adapter_path, adapter)
+            with self.assertRaises(ValueError): h.build(candidate, self.plan, new, self.root)
+            adapter_path.write_bytes(adapter_raw)
+        mutations.append(lambda t: t['logs']['cloud_cleanup_evidence'].pop('agentcard_release_stall_lifecycles'))
+        for change in mutations:
+            doc = json.loads(raw); change(doc['tasks'][0]); c.write(file, doc)
+            with self.assertRaises(ValueError): h.build(self.state, self.plan, new, self.root)
+        file.write_bytes(raw)
+        missing = copy.deepcopy(self.state); missing['failures'][1]['source']['head'] = '0' * 40
+        with self.assertRaisesRegex(ValueError, 'original catalog'):
+            h.known(missing, self.root)
+        catalog = self.root / 'agents/benchmarks/tasks.json'; original = catalog.read_bytes()
+        changed = json.loads(original); changed[0]['prompt'] = 'changed assertion/task'; c.write(catalog, changed)
+        with self.assertRaises(ValueError): h.build(self.state, self.plan, new, self.root)
+        catalog.write_bytes(original)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.state.update(phase='ready', ready=True); c.write(self.directory / 'cycle.json', self.state)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        request = dict(source=new['source'], gate='api', checks=['peer-' + str(i) for i in range(13)],
+                       skips=c.reuse_qualifications(self.state, new['gates'][1], root=self.root),
+                       custody_state=str(self.directory / 'cycle.json'), custody_state_sha256=h.state_identity(self.state), custody_child_environment=h.environment_identity(os.environ), custody_runtime=h.runtime_identity(self.root))
+        h.admission(request, self.root)
+        runtime = self.root / '.env'; runtime.write_text('CUSTODY_FIXTURE=changed')
+        with self.assertRaises(ValueError): h.admission(request, self.root)
+        runtime.unlink()
+        with patch.dict(os.environ, CUSTODY_FIXTURE='changed'):
+            with self.assertRaises(ValueError): h.admission(request, self.root)
+        self.state['historical_no_retry_custody'] = []; c.write(self.directory / 'cycle.json', self.state)
+        self.assertNotEqual(0, c.verify_saved(self.directory, self.root))
+        request['custody_state_sha256'] = h.state_identity(self.state)
+        with self.assertRaises(ValueError): h.admission(request, self.root)
+        with patch.object(c, 'run_command') as launch:
+            with self.assertRaises(ValueError): c.execute(new['gates'][1], self.state, self.directory, self.root)
+            launch.assert_not_called()
+
+    def test_historical_native_audit_rejects_corrupt_tree_and_active_owner(self):
+        import deploy_test_historical_custody as h
+        import runpy
+        token = 'b' * 32
+        fleet = self.root / '.context/native/run-2147483647'
+        local = fleet / 'teardown-ownership'
+        canonical = self.root / '.git/cloudbench-fleet-audits' / token
+        local.mkdir(parents=True); canonical.mkdir(parents=True)
+        meta = ('status=provider-teardown-verified\nfleet_owner_token=' + token
+                + '\nrun_id=' + fleet.name + '\nworkspace_root=' + str(self.root) + '\n')
+        for directory in (local, canonical): (directory / 'meta').write_text(meta)
+        digest = runpy.run_path(str(ROOT / 'scripts/cloudbench-retained-successor.py'))['tree_digest']
+        def seal():
+            sha = digest(local)
+            for directory in (local, canonical):
+                (directory / 'source-audit').write_text('path=' + str(canonical) + '\nsha256=' + sha + '\n')
+            c.write(fleet / '_batch/lifecycle.json', dict(fleet_owner_token=token, status='verified',
+                hub_publication_failed=False, workspace_root=str(self.root), run_id=fleet.name, audit_sha256=sha))
+        seal()
+        native = fleet / 'task/cloudbench-run.json'
+        self.assertEqual(str(fleet), h.native_closure(native, self.root)['fleet'])
+        (canonical / 'meta').write_text(meta + 'changed=true\n')
+        with self.assertRaises(ValueError): h.native_closure(native, self.root)
+        (canonical / 'meta').write_text(meta)
+        registry = self.root / '.git/cloudbench-fleet-ownership' / token; registry.mkdir(parents=True)
+        with self.assertRaises(ValueError): h.native_closure(native, self.root)
+        registry.rmdir()
+        for directory in (local, canonical):
+            (directory / 'meta').write_text(meta + 'hub_pid=' + str(os.getpid()) + '\n')
+        seal()
+        with self.assertRaises(ValueError): h.native_closure(native, self.root)
+
     def test_refresh_unstarted_final_preserves_history_and_refuses_active_or_started_phase(self):
         state = copy.deepcopy(self.state)
         state.update(phase='final', next_after_quick='final')

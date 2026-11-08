@@ -28,6 +28,21 @@ def repo_with_worktree(tmp):
 
 
 class SharedCanaryStamp(unittest.TestCase):
+    def test_historical_custody_guard_precedes_namespace_and_provider_admission(self):
+        import deploy_test_historical_custody as custody
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            request = dict(token='a' * 32, source={'head': 'b' * 40}, gate='smoke', checks=['case'], skips={})
+            with patch.object(cloud, 'source', return_value=request['source']), \
+                    patch.object(custody, 'admission', side_effect=ValueError('historical custody missing')) as guard, \
+                    patch.object(Path, 'mkdir', side_effect=AssertionError('mkdir')) as mkdir, \
+                    patch.object(cloud, 'campaign_width', side_effect=AssertionError('capacity')) as capacity, \
+                    patch.object(cloud, 'run_command', side_effect=AssertionError('provider')) as provider:
+                with self.assertRaisesRegex(ValueError, 'historical custody'):
+                    cloud.execute(request, root)
+                guard.assert_called_once_with(request, root)
+                mkdir.assert_not_called(); capacity.assert_not_called(); provider.assert_not_called()
+
     def test_source_guard_writes_explicit_unverified_no_admission_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

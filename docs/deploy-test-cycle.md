@@ -399,3 +399,30 @@ claim: the financial state stays UNVERIFIED and the original obligation stays
 open. Original-native, unchanged-contract, producer, current-input and freshness
 guards remain mandatory; every peer executes. Partial, old, duplicate, malformed
 or mixed pages fail closed. No refund, release or PASS is inferred from absence.
+
+## Historical AgentCard no-retry custody
+
+When payment implementation changes invalidate warning renewal, a confirmed
+historical sandbox stall still must not be reissued. This is a separate typed
+`NO_RETRY_CUSTODY` omission, not a renewed provider warning. It preserves the
+original native FAIL/SKIPPED, source, financial snapshot and pending auth repair
+packet. Current execution and financial state remain **UNVERIFIED**; omitted
+cases have `case_complete=false` and receive no execution or financial credit.
+Every other selected current-source check runs normally.
+
+After the parent freezes the new source and writes the ordinary new plan, run:
+
+```sh
+python3 scripts/deploy_test_cycle.py prepare-historical-no-retry --input .context/deploy-pipeline/previous-plan.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline > .context/deploy-pipeline/historical-no-retry.json
+python3 scripts/deploy_test_cycle.py refresh --input .context/deploy-pipeline/previous-plan.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline --historical-no-retry-proof .context/deploy-pipeline/historical-no-retry.json
+python3 scripts/deploy_test_cycle.py run --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+```
+
+Preparation reads existing evidence only: exact native bytes, task catalog,
+sealed fleet audits and absent owner registries. It does not read the provider,
+retimestamp old observations, assert unchanged payment code, or resolve a repair.
+A changed task, corrupt evidence, live/unknown owner, missing projection or mixed
+waiver refuses refresh/admission/verification. Repeated source changes require
+another exact binding. Pending post-merge debt survives until the existing
+`resolve` action records the actual repair link. Legacy warning renewal and
+compute-quota revocation keep their existing requirements.

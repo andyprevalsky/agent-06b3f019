@@ -129,3 +129,18 @@ Only the original already-stalled case is excluded; every peer executes. The
 original FAIL/SKIPPED and last-confirmed $43.96 sandbox obligation remain open,
 with current financial state UNVERIFIED and no PASS, refund or release credit.
 No card, transfer, reclaim or credential is created or changed.
+
+## Changed payment implementation recurrence
+
+The later main integration changed payment implementation, correctly invalidating
+legacy warning renewal. A second original native FAILED auth/timeout task also
+had a confirmed sandbox release stall. Neither event permits minting another
+card for those exact tasks. Historical no-retry custody now preserves both
+native outcomes, their original financial snapshots and the independent pending
+auth repair packet while binding two explicit omissions to the new source.
+Current behavior and financial state remain UNVERIFIED. The unchanged catalog
+is required; payment/assertion equivalence is not claimed. Remaining checks run
+normally, and missing custody blocks before cloud admission. The regression
+`Cycle.test_historical_stall_cannot_refresh_into_new_card_request_without_proof`
+fails on the old refresh (no refusal), then passes with the typed guard. The
+provider release stall and auth failure retain their own RCA status.

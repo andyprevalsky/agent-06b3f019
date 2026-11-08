@@ -214,6 +214,8 @@ def execute(request, root):
         if directory.exists() or directory.is_symlink():
             raise ValueError('cloud source differs with an existing request namespace')
         raise SourceRefusal('cloud source differs from the requested freeze')
+    from deploy_test_historical_custody import admission
+    admission(request, root)
     runs = directory / 'runs'
     runs.mkdir(parents=True, exist_ok=False)
     width = campaign_width(checks)
