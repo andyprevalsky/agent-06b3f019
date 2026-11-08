@@ -71,13 +71,24 @@ for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
+# GitHub Releases has returned 502s and 504s for minutes at a time, so back off past such a window.
+with_release_backoff() {
+  local attempt
+  for attempt in 1 2 3 4 5 6; do
+    "$@" && return 0
+    echo "$1 attempt $attempt failed" >&2
+    [ "$attempt" -lt 6 ] && sleep $((attempt * 15))
+  done
+  return 1
+}
+
+install_flyctl() {
+  command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] && return 0
+  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null
+}
+
 step "flyctl"
-# GitHub Releases has returned 504s for minutes at a time, so back off past such a window.
-for attempt in 1 2 3 4 5 6; do
-  command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] && break
-  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || { echo "flyctl install attempt $attempt failed" >&2; sleep $((attempt * 15)); }
-done
-[ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
+with_release_backoff install_flyctl || { echo "flyctl unavailable" >&2; exit 1; }
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "tunnel tools"
@@ -86,7 +97,7 @@ step "tunnel tools"
 sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
 if ! command -v cloudflared >/dev/null; then
   tmp="$(mktemp)"
-  curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+  with_release_backoff curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
   sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared && rm -f "$tmp"
 fi
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
