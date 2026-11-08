@@ -67,6 +67,7 @@ import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCreden
 import { claudeTaskIntegrationId } from '../../providers/claudeCodeSandboxAuth';
 import { localDeviceSandboxId } from '../../providers/localDevices/hub';
 import { buildLocalSessionEnvs } from '../../providers/localDevices/session';
+import { isolateFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 config();
 
@@ -94,6 +95,7 @@ const original = {
   connect: Sandbox.connect,
 };
 const createdIntegrations: string[] = [];
+let restoreCooldowns: (() => Promise<void>) | undefined;
 
 async function poolToken(name: 'claude_code' | 'gpt_code'): Promise<string> {
   const row = await prisma.integration.create({
@@ -138,6 +140,9 @@ async function otherLeasable(name: string): Promise<number> {
 }
 
 before(async () => {
+  // Funded-key cases run in-process with fake keys; HTTP cases use real,
+  // fixture-owned subscription rows, which this isolation leaves untouched.
+  restoreCooldowns = await isolateFundedKeyCooldowns();
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = join(fixtureDir, 'storage');
   // Shared funded keys (and the gateways a Claude Code sandbox would use)
@@ -172,13 +177,13 @@ after(async () => {
     else process.env[key] = value;
   }
   Object.assign(Sandbox, original);
-  await __resetCodexFundedCooldown();
   await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
   await prisma.codeSession.deleteMany({ where: { userId } });
   await prisma.integration.deleteMany({ where: { id: { in: createdIntegrations } } });
   await prisma.agent.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
   rmSync(fixtureDir, { recursive: true, force: true });
+  await restoreCooldowns?.();
   await prisma.$disconnect();
 });
 

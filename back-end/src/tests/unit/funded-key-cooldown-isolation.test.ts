@@ -8,6 +8,11 @@ import {
 } from '../../providers/computeCredentials';
 import { prisma } from '../../providers/database';
 import {
+  __resetCodexFundedCooldown,
+  codexFundedCooldownUntil,
+  markCodexFundedCooldown,
+} from '../../providers/codeSessions/usageLimit';
+import {
   __clearGptApiKeyCooldownCache,
   __resetGptApiKeyCooldown,
   isGptApiKeyOnCooldown,
@@ -73,6 +78,7 @@ async function testIsolatedCasesNeitherInheritNorClearSharedCooldowns(): Promise
         false,
         'a live shared Anthropic mark leaked in'
       );
+      assert.equal(await codexFundedCooldownUntil(), null, 'a live shared Codex mark leaked in');
 
       await markGptApiKeyOnCooldown('insufficient_quota');
       __clearGptApiKeyCooldownCache();
@@ -85,6 +91,12 @@ async function testIsolatedCasesNeitherInheritNorClearSharedCooldowns(): Promise
       await __resetAnthropicApiKeyCooldown();
       assert.equal(await isAnthropicApiKeyOnCooldown(), false);
 
+      const reset = new Date(Date.now() + 60_000);
+      await markCodexFundedCooldown(reset);
+      assert.deepEqual(await codexFundedCooldownUntil(), reset, 'a private Codex mark persists');
+      await __resetCodexFundedCooldown();
+      assert.equal(await codexFundedCooldownUntil(), null, 'a private Codex reset clears');
+
       await prisma.integration.findUnique({ where: { id: 'unrelated-integration' } });
     });
 
@@ -93,6 +105,14 @@ async function testIsolatedCasesNeitherInheritNorClearSharedCooldowns(): Promise
     assert.equal(integration.findUnique, sharedFindUnique, 'the delegate was not restored');
     __clearGptApiKeyCooldownCache();
     assert.equal(await isGptApiKeyOnCooldown(), true, 'the shared GPT mark must survive');
+    assert.ok(await codexFundedCooldownUntil(), 'the shared Codex mark must survive');
+    await assert.rejects(
+      withIsolatedFundedKeyCooldowns(async () => {
+        throw new Error('fixture failure');
+      }),
+      /fixture failure/
+    );
+    assert.equal(integration.findUnique, sharedFindUnique, 'a failed scope restores the delegate');
   });
 }
 

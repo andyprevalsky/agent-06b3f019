@@ -10,6 +10,7 @@ first_bad_boundary: rose-stream-abort.test.ts, llm-stream-contract.blackbox.ts a
 symptoms:
   - "Error: Rose shared-openai-priority route is on GPT_API_KEY cooldown (rose-stream-abort.test.ts)"
   - "llm-stream-contract: openai_apikey.skipped_cooldown, then RoseAllFailed: All 2 waterfall models failed for pool rose-1-ultra"
+  - "C15: a Claude usage limit backs that credential off and the inspection answers on Codex: actual usage_limited, expected answered"
 tags:
   - test-isolation
   - funded-key-cooldown
@@ -17,6 +18,8 @@ tags:
   - deploy-gate
 sources:
   - PR #1341
+  - PR #1770 backend repair handoff, failed source b544c29434ccbb5075952850b7701ffec14545c9
+  - commit b544c29434ccbb5075952850b7701ffec14545c9, GitHub Actions run 42411735536
 repro: seed live gpt_api_key_cooldown + anthropic_api_key_cooldown rows into a throwaway database and run rose-stream-abort.test.ts, llm-stream-contract.blackbox.ts and rose.blackbox.ts against it (first two fail and rose deletes both rows before the fix; all pass and both rows survive after); unit `funded-key-cooldown-isolation.test.ts`
 status: fixed
 ---
@@ -98,6 +101,108 @@ stay.
 ## Human feedback
 
 None recorded.
+
+## Recurrence — 2026-11-08: code-session inspection and usage-limit fixtures
+
+### Evidence and attribution
+
+`Gate: NOT_INTRODUCED` for originating PR #1770. Its independent report
+compared base `20f6e41`, failed `b544c294` and pre-sync parent `c8c25622`:
+the complete backend tree was `50619c376dab9adab948ae3efa3c8479967e8d5c`.
+Repair base `5066feea73da4a966aa7655ccbc40ea8c26529a8` contains the originating
+merge and retains the exact inspector, credential-order, inspection service
+and usage-limit service blobs. Later backend integration changes do not repair
+this boundary. Attribution does not release this assigned repair.
+
+The original command, from `back-end`, was `npm run test:coverage:sharded`:
+two isolated shard databases, domain concurrency 4, case concurrency 30 and
+900000 ms domain deadline. Native exit was **1**, with 247 domains completed,
+246 PASS / 1 FAIL, no missing/aborted domains; units (368 files), FPS probe,
+merged coverage threshold and separately run teardown passed. Its trailing
+`&&` teardown did not run after the coverage failure. Those ancillary passes
+do not convert the native gate failure to PASS.
+
+The verified private backend packet SHA-256 is
+`70ef72f6feb229b350452d97587f2f667ae83048feaf69355ea541203abfb547`.
+It restored on the independent Bugs devbox without depending on the originating
+machine. Its inspect log shows C15 returning `usage_limited` instead of
+`answered` at original line 596. The usage-limit domain writes
+`codex_funded_cooldown` at `20:35:58.178Z`; inspector availability resolves at
+`.199–.205Z`; the writer deletes at `.210Z`. These logs do not record the row
+value itself. The controlled replay below supplies that missing causal proof.
+
+### First bad boundary and why the prior fix missed it
+
+The credential-order case intentionally backs off funded Azure after exhausting
+subscriptions. That row is global across users in its shard database.
+`inspectCodeSession -> codeCredentialTiers -> usableCodexAzureFunding ->
+codexFundedCooldownUntil` reads it and snapshots a Claude-only provider list.
+The fake Claude CLI then reports its scripted limit, leaving no Codex attempt.
+Later row cleanup cannot alter the snapshotted list.
+
+This repeats the original case's private-fixture adoption gap: newer inspector
+and usage-limit suites never adopted the existing isolation helper. The
+inspector additionally saved/deleted/recreated the real Anthropic singleton,
+which could destroy a sibling's mark. Startup database cleanup cannot isolate
+rows written during a parallel sweep. Problem class remains
+`fixture-environment-data-mismatch`; there is no live provider failure or
+model-intelligence attribution, and no Rose agent self-report applies to this
+hermetic backend test.
+
+Archive searches were `usage_limited answered code-session-inspect` and
+`parallel fixture cooldown credential shared isolation`. This case is a
+recurrence; the stale-stack cooldown case is related.
+
+### Repair and executed causal proof
+
+The existing helper now exposes a lifecycle installer/restorer shared with its
+callback API. Inspector and usage-limit hooks keep private GPT, Anthropic and
+Codex cooldown rows for their complete in-process fixture lifetime. The
+inspector's real-row save/delete/recreate logic is removed. User and pool
+integration rows, HTTP subscription-marking cases, checkpoint storage and all
+production selection logic still use their original paths. Matching is limited
+to the three fixed singleton names, leaving unrelated sentinel state alone.
+The callback helper restores delegates even if scope cleanup throws.
+
+The permanent `code-session-inspect-isolation.blackbox.ts` replays a competing
+Codex row through the real Prisma read boundary in a child process, then runs
+the existing C15 test unchanged. The replay never writes a competing global
+Codex fixture. Its owning fixture is
+`code-session-inspect-cooldown.fixture.ts`. From `back-end`, the identical
+pre/post command was:
+
+```
+BLACKBOX_TEST_CONCURRENCY=4 BLACKBOX_TEST_CASE_CONCURRENCY=30 npm run test:blackbox -- code-session-inspect-isolation
+```
+
+Before: exit 1; original C15 failed at line 596, actual `usage_limited`, expected
+`answered` (568.97 ms C15 body; 1537.02 ms enclosing regression). After:
+exit 0; the discovered regression passed (2326 ms domain). The assertions
+still require Claude then Codex, correct Azure credentials, model, effort,
+priority, catalog and teardown. The unit owner additionally checks private
+Codex mark/read/reset, survival of shared marks and delegate restoration on
+callback failure. The normal parallel inspector/usage-limit/replay sweep
+also passed all three domains; the original complete sharded command remains
+a separate required deployment gate, never inferred from these focused runs.
+
+Delete/unify/guard choice: delete duplicated real-row restoration, unify on
+the existing private-state helper, and constrain its singleton matching.
+Serializing domains would remove the required overlap and leave other shared
+writers exposed. Altering production cooldown selection would change correct
+behavior to compensate for test data. No production code changes; at 10k
+agents this adds no queries, subscriptions, shared locks or runtime cost.
+
+Golden reference: not applicable (no approval-gated hunk).
+
+### Recurrence acceptance and custody
+
+The assigned repair retains responsibility for the original full sharded
+coverage command, merge, production verification, cleanup and deploy scorecard.
+Focused proof above is causal evidence only; native gate and deploy receipts
+provide outcome proof. The two historical AgentCard cases remain no-retry
+obligations with current financial state UNVERIFIED; this test repair grants
+no authority to mint, reclaim, retry, release or reissue them. Freedom and
+protected instructions are preserved.
 
 ## Reusable lesson
 

@@ -47,6 +47,7 @@ import {
   setCodeInspectSandboxFactoryForTests,
 } from '../../providers/codeSessions/inspect';
 import { fakeInspectCli } from './code-session-inspect.fake-cli';
+import { isolateFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 config();
 
@@ -90,27 +91,7 @@ const savedEnv = new Map<string, string | undefined>(
 );
 const originalConnect = Sandbox.connect.bind(Sandbox);
 let liveConnects = 0;
-/** The shared Anthropic-key cooldown row (shared test DB): cleared for this suite, then restored. */
-const COOLDOWN_KEY = {
-  userId: '00000000-0000-0000-0000-000000000000',
-  name: 'anthropic_api_key_cooldown',
-  accountId: '',
-};
-let priorCooldown: Awaited<ReturnType<typeof prisma.integration.findUnique>> = null;
-
-async function restoreCooldownRow(): Promise<void> {
-  await __resetAnthropicApiKeyCooldown();
-  if (priorCooldown === null) return;
-  await prisma.integration.create({
-    data: {
-      ...COOLDOWN_KEY,
-      type: priorCooldown.type,
-      status: priorCooldown.status,
-      rateLimitedUntil: priorCooldown.rateLimitedUntil,
-      failureReason: priorCooldown.failureReason,
-    },
-  });
-}
+let restoreCooldowns: (() => Promise<void>) | undefined;
 
 const FAKE_CLI = fakeInspectCli({ cliLog, modeFile, realGit });
 
@@ -263,6 +244,9 @@ async function http(method: string, path: string, userId: string, body?: unknown
 }
 
 before(async () => {
+  // These in-process inspections use fake funded keys. Give every provider's
+  // cooldown a private lifetime; sibling domains own the real singleton rows.
+  restoreCooldowns = await isolateFundedKeyCooldowns();
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = storageDir;
   // Fake funded keys; no decryption key, so no stored credential is ever decrypted.
@@ -298,10 +282,6 @@ before(async () => {
     throw new Error('the live sandbox must not be connected');
   };
   installFakeFactory();
-  priorCooldown = await prisma.integration.findUnique({
-    where: { userId_name_accountId: COOLDOWN_KEY },
-  });
-  await __resetAnthropicApiKeyCooldown();
   await prisma.user.create({ data: { userId: userA, name: 'Inspect A' } });
   await prisma.user.create({ data: { userId: userB, name: 'Inspect B' } });
   await prisma.agent.create({ data: { id: agentA, userId: userA, goal: 'Build the feature' } });
@@ -310,7 +290,7 @@ before(async () => {
 
 after(async () => {
   setCodeInspectSandboxFactoryForTests(null);
-  await restoreCooldownRow();
+  await restoreCooldowns?.();
   (Sandbox as unknown as { connect: typeof originalConnect }).connect = originalConnect;
   for (const [key, value] of savedEnv) {
     if (value === undefined) delete process.env[key];
