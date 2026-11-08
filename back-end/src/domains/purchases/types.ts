@@ -11,8 +11,10 @@ export interface PurchaseLineItem {
   name: string;
   imageUrl?: string | null;
   productUrl: string;
-  rating: string;
-  reviewCount: string;
+  /** Optional: shown only when the page shows a rating (any scale, as written). */
+  rating?: string;
+  /** Optional: shown only when the page shows a review count. */
+  reviewCount?: string;
   unitPriceCents: number;
   quantity: number;
   lineTotalCents: number;

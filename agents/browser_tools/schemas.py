@@ -570,18 +570,20 @@ class PaymentLineItem(BaseModel):
         ),
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
-    rating: str = Field(
+    rating: Optional[str] = Field(
+        default=None,
         description=(
             "Product rating shown on the product page, such as '4.8 stars'. If the page "
-            "genuinely shows no rating (e.g. a service, ticket, or event booking), pass "
-            "'0 stars', never 'N/A', 'none', 'unknown', or a made-up number."
-        )
+            "genuinely shows no rating (e.g. a service, ticket, or event booking), omit it; "
+            "never pass 'N/A', 'none', 'unknown', or a made-up number."
+        ),
     )
-    review_count: str = Field(
+    review_count: Optional[str] = Field(
+        default=None,
         description=(
             "Product review count shown on the product page, preserving visible formatting. "
             "If the page genuinely shows no reviews (e.g. a service, ticket, or event "
-            "booking), pass '0 reviews', never 'N/A', 'none', 'unknown', or a made-up number."
+            "booking), omit it; never pass 'N/A', 'none', 'unknown', or a made-up number."
         ),
         validation_alias=AliasChoices("review_count", "reviewCount"),
     )
@@ -604,12 +606,12 @@ class PaymentLineItem(BaseModel):
 
     @field_validator("rating")
     @classmethod
-    def require_product_rating(cls, value: str) -> str:
+    def require_product_rating(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_rating(value)
 
     @field_validator("review_count")
     @classmethod
-    def require_product_review_count(cls, value: str) -> str:
+    def require_product_review_count(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_review_count(value)
 
 
@@ -631,8 +633,9 @@ class RequestPaymentCardBrowserTool(BaseModel):
     currency: Literal["USD"] = Field(default="USD", description="Purchase currency; currently only USD")
     line_items: List[PaymentLineItem] = Field(
         description=(
-            "Full itemized receipt. Every item must include its canonical product-detail URL, rating, "
-            "review count, image URL if visible, quantity, unit price, and line total."
+            "Full itemized receipt. Every item must include its canonical product-detail URL, image URL "
+            "if visible, quantity, unit price, and line total, and its rating and review count when the "
+            "page shows them."
         ),
         min_length=1,
         validation_alias=AliasChoices("line_items", "lineItems"),
@@ -723,11 +726,14 @@ class WriteLockPurchaseItem(BaseModel):
         default=None,
         description="Short visible item description or variant details. Keep under 80 characters.",
     )
-    rating: str = Field(description="Required numeric product rating, such as '4.6 stars'.")
-    review_count: str = Field(
+    rating: Optional[str] = Field(
+        default=None, description="Numeric product rating, such as '4.6 stars', when the page shows one."
+    )
+    review_count: Optional[str] = Field(
+        default=None,
         description=(
-            "Required numeric review count followed by 'reviews' or 'ratings', "
-            "for example '312 reviews'."
+            "Numeric review count followed by 'reviews' or 'ratings', "
+            "for example '312 reviews', when the page shows one."
         ),
         validation_alias=AliasChoices("review_count", "reviewCount", "reviews"),
     )
@@ -758,12 +764,12 @@ class WriteLockPurchaseItem(BaseModel):
 
     @field_validator("rating")
     @classmethod
-    def require_product_rating(cls, value: str) -> str:
+    def require_product_rating(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_rating(value)
 
     @field_validator("review_count")
     @classmethod
-    def require_product_review_count(cls, value: str) -> str:
+    def require_product_review_count(cls, value: Optional[str]) -> Optional[str]:
         return validate_product_review_count(value)
 
     @field_validator("product_url")

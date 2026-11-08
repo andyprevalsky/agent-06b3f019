@@ -4690,9 +4690,10 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         },
         (
             "Every visible item; one media image (or rendered_summary for multi-item). "
-            "Per item require title, numeric rating, review count, and a canonical "
+            "Per item require title and a canonical "
             "product-detail URL already in the trajectory — never cart/checkout/order/return URLs. "
-            "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
+            "Include price, qty, description (<80 chars), rating, review count, seller, shipping, totals, payment, "
+            "address when visible."
         ),
     ),
     (
@@ -9217,8 +9218,9 @@ async def _spawn_browser_agent_activity_v3_real(
             _user_context_sections.append(
                 "## Purchase Approval Context\n"
                 "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
-                "canonical product-detail URL, numeric rating, and numeric review count. Never use a cart or "
-                "checkout URL as the product link. A purchase approval is blocked if any item lacks these fields."
+                "canonical product-detail URL, and its rating and review count when the page shows them. Never "
+                "use a cart or checkout URL as the product link. A purchase approval is blocked if any item lacks "
+                "that URL."
             )
             _record_timing("parallel.data.user_profile", t)
 

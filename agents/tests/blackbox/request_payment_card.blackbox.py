@@ -162,7 +162,8 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         else:
             raise AssertionError(f"PaymentLineItem accepted non-positive {field_name}")
 
-    for required_field in ("product_url", "rating", "review_count"):
+    # Rating and review count are optional (owner decision 2026-11-08); the product URL is not.
+    for required_field in ("product_url",):
         invalid_item = {**valid_item}
         invalid_item.pop(required_field)
         try:
@@ -261,14 +262,13 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
 
 
 def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
-    """H-01: a review-less service/ticket page must be satisfiable with '0'.
+    """H-01: a review-less service/ticket page must be satisfiable.
 
-    The validators already accept '0 stars'/'0 reviews' — the failure mode was the
-    agent emitting 'N/A' (rejected) because nothing told it the canonical zero
-    value. This cements the zero case AND that every LLM-facing surface (tool
-    schema + Pydantic descriptions + retry error) teaches it, so the model stops
-    hallucinating or hunting a rating that a booking page never shows. Placeholder
-    rejection stays intact (asserted above), so this is guidance, not relaxation.
+    The failure mode was the agent emitting 'N/A' (rejected) because nothing told it
+    what to do on a page without reviews. Rating and review count are now optional
+    (owner decision 2026-11-08): every LLM-facing surface (tool schema + Pydantic
+    descriptions + retry error) teaches omitting them, '0 stars'/'0 reviews' still
+    validate, and placeholder rejection stays intact (asserted above).
     """
     from browser_tools.schemas import PaymentLineItem
 
@@ -280,7 +280,12 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     assert zeroed.rating == "0 stars"
     assert zeroed.review_count == "0 reviews"
 
-    # 1) Rose browser-use tool schema teaches the zero case for both fields.
+    omitted = PaymentLineItem.model_validate(
+        {key: value for key, value in valid_item.items() if key not in ("rating", "review_count")}
+    )
+    assert omitted.rating is None and omitted.review_count is None
+
+    # 1) Rose browser-use tool schema teaches omitting both fields.
     from providers.rose.browser_use import BROWSER_USE_TOOLS
 
     props = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"][
@@ -288,21 +293,21 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     ]
     for field in ("rating", "review_count"):
         desc = props[field]["description"].lower()
-        assert "0 stars" in desc or "0 reviews" in desc
+        assert "omit it" in desc
         assert "made-up" in desc  # forbids hallucinated / placeholder values
 
     # 2) Pydantic field descriptions carry the same guidance.
     fields = PaymentLineItem.model_fields
-    assert "0 stars" in (fields["rating"].description or "")
-    assert "0 reviews" in (fields["review_count"].description or "")
+    assert "omit it" in (fields["rating"].description or "")
+    assert "omit it" in (fields["review_count"].description or "")
 
-    # 3) The retry error tells the agent to pass 0 (self-correction), not to keep hunting.
+    # 3) The retry error tells the agent to omit them (self-correction), not to keep hunting.
     import inspect
 
     from domains.spawn_browser_agent_v3 import service_actions
 
     action_src = inspect.getsource(service_actions)
-    assert "0 stars" in action_src and "0 reviews" in action_src
+    assert "omit rating and review_count" in action_src
     assert "do not keep searching" in action_src
 
 
@@ -399,8 +404,9 @@ def test_rating_keeps_the_merchant_scale_shown_on_the_page():
         "250 guests · 4.5 stars": "4.5 stars",
         "#1 of 25": "1 stars",
     }
-    other_scales_kept_as_written = ("9.2 out of 10", "9.2/10 Wonderful", "Rated 8.7 of 10")
-    still_rejected = ("250 guests", "N/A", "312 reviews")
+    # Owner decision 2026-11-08: no fixed-scale limit, so any other scale is kept as written.
+    other_scales_kept_as_written = ("9.2 out of 10", "9.2/10 Wonderful", "Rated 8.7 of 10", "94%", "250 guests")
+    still_rejected = ("N/A", "312 reviews")
     for model in (PaymentLineItem, WriteLockPurchaseItem):
         # 3) 5-point outputs are identical to the pre-fix validator.
         for submitted, normalized in unchanged_five_point.items():
@@ -418,6 +424,84 @@ def test_rating_keeps_the_merchant_scale_shown_on_the_page():
             except ValueError:
                 continue
             raise AssertionError(f"{model.__name__} accepted {submitted!r} as {parsed_item.rating!r}")
+
+
+def test_card_request_without_rating_or_reviews_is_accepted():
+    """Owner decision (2026-11-08): rating and review count are optional per line item.
+
+    A booking or service page often shows neither. The card request, the approval the
+    user sees and the write-lock purchase item must accept an item without them, with
+    no invented "0 stars" and no "None" in the approval text. Product URL, name,
+    prices, quantity and totals stay required.
+    """
+    from browser_tools.schemas import WriteLockPurchaseItem, validate_browser_tool_args
+    from domains.request_payment_card.service import build_payment_question, normalize_payment_payload
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    request = _sample_tool_call()
+    for item in request["line_items"]:
+        item.pop("rating")
+        item.pop("review_count")
+
+    parsed = validate_browser_tool_args("request_payment_card", request)
+    assert parsed["line_items"][0].get("rating") is None, parsed["line_items"][0]
+    assert parsed["line_items"][0].get("review_count") is None, parsed["line_items"][0]
+
+    payload = normalize_payment_payload(request, "user-123")
+    item = payload["lineItems"][0]
+    assert "rating" not in item and "reviewCount" not in item, item
+    assert item["productUrl"] == "https://example.com/products/desk-lamp"
+    question = build_payment_question(payload)
+    assert "Reviews:" not in question and "None" not in question, question
+    assert "Product: <https://example.com/products/desk-lamp>" in question, question
+
+    write_lock_item = WriteLockPurchaseItem.model_validate(
+        {"title": "Desk Lamp", "product_url": "https://example.com/products/desk-lamp"}
+    )
+    assert write_lock_item.rating is None and write_lock_item.review_count is None
+
+    line_item_schema = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"]
+    assert "rating" not in line_item_schema["required"], line_item_schema["required"]
+    assert "review_count" not in line_item_schema["required"], line_item_schema["required"]
+    assert "product_url" in line_item_schema["required"], line_item_schema["required"]
+
+    # The product URL is still required.
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import PaymentLineItem
+
+    without_url = {**request["line_items"][0]}
+    without_url.pop("product_url")
+    try:
+        PaymentLineItem.model_validate(without_url)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("PaymentLineItem accepted an item without product_url")
+
+
+def test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected():
+    """Owner decision (2026-11-08): no 0-5 or fixed-scale limit on a given rating.
+
+    "9.2 out of 10" and "94%" are kept exactly as the page shows them. A review
+    count passed as the rating and placeholders are still rejected.
+    """
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import PaymentLineItem, WriteLockPurchaseItem
+
+    valid_item = _sample_tool_call()["line_items"][0]
+    for model in (PaymentLineItem, WriteLockPurchaseItem):
+        base = {**valid_item, "title": valid_item["name"]}
+        for shown in ("9.2 out of 10", "94%", "Rated 8.7 of 10"):
+            assert model.model_validate({**base, "rating": shown}).rating == shown, (model.__name__, shown)
+        assert model.model_validate({**base, "rating": "4.8 stars"}).rating == "4.8 stars"
+        for nonsense in ("312 reviews", "1,284 ratings", "N/A", "unknown"):
+            try:
+                parsed = model.model_validate({**base, "rating": nonsense})
+            except ValidationError:
+                continue
+            raise AssertionError(f"{model.__name__} accepted {nonsense!r} as rating {parsed.rating!r}")
 
 
 def test_payment_tool_accepts_flexible_merchant_labels():
@@ -1212,6 +1296,14 @@ async def run_all_tests():
     result.record(
         "rating_keeps_merchant_scale",
         test_rating_keeps_the_merchant_scale_shown_on_the_page,
+    )
+    result.record(
+        "card_request_without_rating_or_reviews",
+        test_card_request_without_rating_or_reviews_is_accepted,
+    )
+    result.record(
+        "rating_any_scale_kept_nonsense_rejected",
+        test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected,
     )
     result.record(
         "flexible_merchant_labels",

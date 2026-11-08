@@ -4,6 +4,7 @@
  *   structured payment receipt
  *       -> render merchant + total
  *       -> render zero or more line items
+ *            (rating and review count are optional; the reviews line shows whichever is present)
  *       -> render zero or more fees
  *       -> render saved-card charge disclosure
  *
@@ -14,6 +15,11 @@ import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 
 function formatCents(cents = 0): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+function reviewsLabel(rating?: string, reviewCount?: string): string | null {
+  const parts = [rating, reviewCount].filter((part): part is string => Boolean(part?.trim()));
+  return parts.length > 0 ? `Reviews: ${parts.join(' · ')}` : null;
 }
 
 export function ApprovalPaymentReceipt({ receipt }: { receipt: RequestPaymentCardPayload }) {
@@ -34,13 +40,9 @@ export function ApprovalPaymentReceipt({ receipt }: { receipt: RequestPaymentCar
               <div className="text-xs text-muted-foreground">
                 Qty {item.quantity || 1} · {formatCents(item.unitPriceCents)}
               </div>
-              {item.rating && item.reviewCount ? (
-                <div className="text-xs text-muted-foreground">
-                  Reviews: {item.rating} · {item.reviewCount}
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground">Review details unavailable</div>
-              )}
+              <div className="text-xs text-muted-foreground">
+                {reviewsLabel(item.rating, item.reviewCount) ?? 'Review details unavailable'}
+              </div>
               {item.productUrl ? (
                 <a
                   href={item.productUrl}

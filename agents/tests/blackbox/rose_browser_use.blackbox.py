@@ -596,11 +596,10 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert "told you not to use a saved payment method" in payment["description"]
     assert "valid saved payment method is already selected" in payment["description"]
     line_items = payment["input_schema"]["properties"]["line_items"]
+    # Rating and review count are optional per line item (owner decision 2026-11-08).
     assert line_items["items"]["required"] == [
         "name",
         "product_url",
-        "rating",
-        "review_count",
         "unit_price_cents",
         "quantity",
         "line_total_cents",
@@ -609,7 +608,7 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
 
     write_lock = tools[4]
     purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
-    assert purchase_item["required"] == ["title", "rating", "review_count", "product_url"]
+    assert purchase_item["required"] == ["title", "product_url"]
     review_count_description = purchase_item["properties"]["review_count"]["description"]
     assert "followed by 'reviews' or 'ratings'" in review_count_description
     assert "312 reviews" in review_count_description
@@ -863,11 +862,12 @@ def test_write_lock_purchase_schema_rejects_missing_product_context():
         )
     except ValidationError as error:
         message = str(error)
-        assert "rating" in message
-        assert "review_count" in message
         assert "product_url" in message
+        # Rating and review count are optional (owner decision 2026-11-08).
+        assert "rating" not in message
+        assert "review_count" not in message
     else:
-        raise AssertionError("purchase approval accepted an item without reviews and a product URL")
+        raise AssertionError("purchase approval accepted an item without a product URL")
 
 
 def test_write_lock_purchase_schema_accepts_current_page_as_product_link():
@@ -3124,10 +3124,14 @@ def test_phone_off_matches_prephone_bytes():
     recover_from_challenge description now says "Recovery replaces this browser's machine
     in place: you stay the same browser agent on the same task, with no new browser agent
     and no second session." Only the recovery-enabled ('0') tools hash changed.
+    Re-pinned for optional rating and review count (owner decision, 2026-11-08): the
+    request_payment_card and write-lock purchase item schemas no longer require them and
+    their descriptions say to include them when the page shows them. Only the tools
+    hashes changed in both modes.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('7094c75916d9e157c3aa1d60f23d0a202a8392782de99648d1f0322eba0caa99', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('0c887ab8bc94d9b802719e69fd413fef69125ca60fd8567ef7612cb258f8dedf', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
+    expected = {'0': ('f07204c15469d8817c645ca6e92051ff5ca09df632bd0f274bad5aeff2a063c6', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('b889a56b4ebbbcf0f5e9754693a225c939708d779dd312b4c78eefe4a1f87a1f', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

@@ -61,18 +61,21 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
         product_url = validate_product_detail_url(item.get("product_url") or item.get("productUrl"))
         rating = validate_product_rating(item.get("rating"))
         review_count = validate_product_review_count(item.get("review_count") or item.get("reviewCount"))
-        line_items.append(
-            {
-                "name": str(item.get("name") or "").strip(),
-                "imageUrl": _canonicalize_image_url(item.get("image_url") or item.get("imageUrl")),
-                "productUrl": product_url,
-                "rating": rating,
-                "reviewCount": review_count,
-                "unitPriceCents": _to_int(item.get("unit_price_cents") or item.get("unitPriceCents")),
-                "quantity": _to_int(item.get("quantity")) or 1,
-                "lineTotalCents": _to_int(item.get("line_total_cents") or item.get("lineTotalCents")),
-            }
-        )
+        line_item = {
+            "name": str(item.get("name") or "").strip(),
+            "imageUrl": _canonicalize_image_url(item.get("image_url") or item.get("imageUrl")),
+            "productUrl": product_url,
+            "rating": rating,
+            "reviewCount": review_count,
+            "unitPriceCents": _to_int(item.get("unit_price_cents") or item.get("unitPriceCents")),
+            "quantity": _to_int(item.get("quantity")) or 1,
+            "lineTotalCents": _to_int(item.get("line_total_cents") or item.get("lineTotalCents")),
+        }
+        # Rating and review count are optional; an absent one is omitted, never null.
+        for optional_key in ("rating", "reviewCount"):
+            if line_item[optional_key] is None:
+                del line_item[optional_key]
+        line_items.append(line_item)
 
     fees = []
     for fee in _to_list(tool_call.get("fees")):
@@ -264,9 +267,11 @@ def build_payment_question(payload: Dict[str, Any]) -> str:
         line_total = (item.get("lineTotalCents") or 0) / 100
         lines.append(f"- {name} x{qty}: ${line_total:.2f}")
         lines.append(f"  Product: <{item.get('productUrl')}>")
-        lines.append(
-            f"  Reviews: {_approval_plain_text(item.get('rating'))} ({_approval_plain_text(item.get('reviewCount'))})"
-        )
+        rating, review_count = item.get("rating"), item.get("reviewCount")
+        if rating and review_count:
+            lines.append(f"  Reviews: {_approval_plain_text(rating)} ({_approval_plain_text(review_count)})")
+        elif rating or review_count:
+            lines.append(f"  Reviews: {_approval_plain_text(rating or review_count)}")
     for fee in payload.get("fees") or []:
         label = _approval_plain_text(fee.get("label") or "Fee")
         amount = (fee.get("amountCents") or 0) / 100

@@ -25,8 +25,8 @@ sources:
   - fleet run 20261106-133017-1022145 (campaign-20261106-125707-4128298 job r001-j0020, source a17dbe5aec)
   - task browser-hotel-booking
   - commit d1cdf63c0f (introduced the 0-5 rule, 2026-07-10)
-repro: agents/tests/blackbox/request_payment_card.blackbox.py::test_rating_keeps_the_merchant_scale_shown_on_the_page
-status: open
+repro: agents/tests/blackbox/request_payment_card.blackbox.py::test_card_request_without_rating_or_reviews_is_accepted
+status: fixed
 ---
 
 ## Problem
@@ -97,9 +97,32 @@ keeping the page's text instead of rescaling it. Error feedback paths are unchan
 (claude-code-src/src/services/tools/toolExecution.ts:615-675; codex/codex-rs/core/src/
 tools/handlers/mod.rs:86-92).
 
+### Superseded by owner decision (2026-11-08)
+
+Andy replaced the candidate above: a payment approval / one-time card request must not
+require a rating or a review count at all. Both are optional per line item in
+`PaymentLineItem`, `WriteLockPurchaseItem` and the provider tool schemas
+(`request_payment_card` line items and the write-lock purchase item). When a rating is given there is no 0-5 or
+fixed-scale limit: a first single-digit score of 5 or less still normalizes to
+`"<score> stars"` (unchanged fingerprints), and any other scale is kept as written
+(`"9.2 out of 10"`, `"94%"`, `"Rated 8.7 of 10"`). A review count given as the rating and
+placeholders (`N/A`, `unknown`) are still rejected; a given review count must still be a
+count followed by reviews or ratings. Product URL, name, prices, quantity and totals stay
+required. An absent rating or review count is omitted from the approval payload (never
+null), so Python and backend fingerprints agree; the approval question shows a Reviews
+line only for the fields present, and the approval card shows whichever is present
+(or "Review details unavailable" when neither is). Model-visible text changed only where it
+mandated rating/review: it now asks for them "when the page shows them" and says to omit
+them instead of passing "0 stars"/"0 reviews". Regressions:
+`test_card_request_without_rating_or_reviews_is_accepted`,
+`test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected` (agents
+request-payment-card domain), `testReviewlessItemParity` (backend purchases-fingerprint
+blackbox) and the approval-card render test in `low-cov-chips.blackbox.tsx`.
+
 ## Human feedback
 
-None recorded.
+Andy (2026-11-08): rating and review count must not be required for a payment approval;
+when a rating is present, keep it exactly as the page shows it, on any scale.
 
 ## Reusable lesson
 

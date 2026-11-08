@@ -335,6 +335,49 @@ describe('ApprovalChip', () => {
     ).toBeInTheDocument();
   });
 
+  // Owner decision 2026-11-08: rating and review count are optional per line item.
+  it('renders a payment-card receipt cleanly without rating or review count', () => {
+    const { container } = renderWithProviders(
+      <ApprovalChip
+        pendingApproval={{
+          attentionRequestId: 'req-pay-no-reviews',
+          question: 'Approve purchase?',
+          requestPaymentCard: {
+            merchant: 'Hotel Example',
+            currency: 'USD',
+            lineItems: [
+              {
+                name: 'King room, 1 night',
+                productUrl: 'https://example.com/hotels/king-room',
+                unitPriceCents: 30800,
+                quantity: 1,
+                lineTotalCents: 30800,
+              },
+              {
+                name: 'Late checkout',
+                productUrl: 'https://example.com/hotels/late-checkout',
+                rating: '9.2 out of 10',
+                unitPriceCents: 2000,
+                quantity: 1,
+                lineTotalCents: 2000,
+              },
+            ],
+            fees: [],
+            subtotalCents: 32800,
+            totalCents: 32800,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('King room, 1 night')).toBeInTheDocument();
+    expect(screen.getByText('Reviews: 9.2 out of 10')).toBeInTheDocument();
+    expect(screen.getAllByText(/^Reviews:/)).toHaveLength(1);
+    expect(screen.getAllByText('Review details unavailable')).toHaveLength(1);
+    expect(container.textContent).not.toMatch(/undefined|null/);
+    expect(screen.getAllByRole('link', { name: 'View product' })).toHaveLength(2);
+  });
+
   // RCA (agent 90ac106a): on a phone the card's title ("Approve a $22.81
   // purchase from …") rendered half-clipped under the header and the
   // Approve/Reject buttons sat below the fold. Two causes: the question had its

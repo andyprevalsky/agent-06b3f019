@@ -926,7 +926,7 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
         if any(term in str(error).lower() for term in ("rating", "review")):
             hint = (
                 " If this page genuinely has no rating/reviews (e.g. a service, ticket, "
-                "or event booking), pass rating '0 stars' and review_count '0 reviews', "
+                "or event booking), omit rating and review_count, "
                 "do not use 'N/A', 'none', or a made-up number, and do not keep searching "
                 "for a rating that is not shown."
             )

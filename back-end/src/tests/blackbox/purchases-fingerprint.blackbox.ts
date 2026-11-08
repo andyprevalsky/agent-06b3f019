@@ -371,6 +371,35 @@ async function testUnicodeParity(): Promise<void> {
   );
 }
 
+/** Owner decision 2026-11-08: rating and review count are optional; an absent one is omitted. */
+async function testReviewlessItemParity(): Promise<void> {
+  const receipt = {
+    currency: 'USD',
+    lineItems: [
+      {
+        name: 'King room, 1 night',
+        imageUrl: 'https://example.test/room.png',
+        productUrl: 'https://example.test/hotels/king-room',
+        unitPriceCents: 30800,
+        quantity: 1,
+        lineTotalCents: 30800,
+      },
+    ],
+    fees: [],
+    subtotalCents: 30800,
+    totalCents: 30800,
+  };
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Hotel Example',
+      lineItemsJson: receipt,
+      totalCents: 30800,
+    }) === '489240d7ed3996a8db136ab77034810ec1652fa8349c05f9a91759e5a896d65c',
+    'a line item without rating or review count must fingerprint exactly like Python normalize_payment_payload'
+  );
+}
+
 async function testBackfillBeyondTwenty(): Promise<void> {
   const userId = await createUser('over-twenty');
   const baseTime = new Date('2026-07-19T12:00:00.000Z');
@@ -572,6 +601,7 @@ async function main(): Promise<void> {
     await testProductDescriptionNameParity();
     await testActiveCardSurvivesCanonicalizationUpgrade();
     await testUnicodeParity();
+    await testReviewlessItemParity();
     await testBackfillBeyondTwenty();
     await testChargingMintGuard();
     console.log('PASS purchase fingerprint parity and legacy indexed backfill');

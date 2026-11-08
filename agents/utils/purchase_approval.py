@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 _PLACEHOLDER_RE = re.compile(
@@ -195,21 +195,25 @@ def validate_image_url_for_page(value: Any, page_image_urls: Iterable[Any], page
     return value
 
 
-def validate_product_rating(value: Any) -> str:
+def validate_product_rating(value: Any) -> Optional[str]:
+    """Optional rating; when given, keep any scale the page shows ("9.2 out of 10", "94%")."""
+    if value is None or not str(value).strip():
+        return None
     text = _validated_review_text(value)
     if re.search(r"\breviews?\b|\bratings\b", text, re.IGNORECASE):
         raise ValueError("rating must be a product score, not a review count")
+    if not re.search(r"\d", text):
+        raise ValueError("rating must include the numeric score the page shows")
     match = _RATING_RE.search(text)
-    if not match:
-        raise ValueError("rating must include a numeric product score from 0 to 5")
-    if float(match.group(1)) > 5:
-        # Not a 5-star score: merchants rate on other scales (hotels.com shows
-        # "9.2 out of 10"). Keep the page's text rather than rescale or reject it.
-        return text
-    return f"{match.group(1)} stars"
+    if match and float(match.group(1)) <= 5:
+        return f"{match.group(1)} stars"
+    return text
 
 
-def validate_product_review_count(value: Any) -> str:
+def validate_product_review_count(value: Any) -> Optional[str]:
+    """Optional review count; when given, it must be a count followed by reviews or ratings."""
+    if value is None or not str(value).strip():
+        return None
     text = _validated_review_text(value)
     match = _REVIEW_COUNT_RE.search(text)
     if not match:

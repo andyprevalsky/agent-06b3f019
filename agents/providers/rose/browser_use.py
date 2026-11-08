@@ -312,8 +312,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "required, do not call this tool; continue with that saved method. Before typing any new card details, "
             "first read the full itemized receipt off "
             "the page and visit each product page as needed. Every item MUST include its canonical product-detail "
-            "URL (never the cart or checkout URL), numeric rating, and numeric review count, plus its name, image "
-            "URL if visible, unit price in cents, quantity, and line total in cents. Include every fee, the "
+            "URL (never the cart or checkout URL), plus its name, image URL if visible, unit price in cents, "
+            "quantity, and line total in cents, and its rating and review count when the page shows them. "
+            "Include every fee, the "
             "subtotal, and the final total. After the user approves, the card is "
             "minted on demand and the one-time card refs are returned for you to type into the payment fields. "
             "Never ask the user to enter a card and never type stored card details."
@@ -328,7 +329,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "line_items": {
                 "type": "array",
                 "description": (
-                    "Full itemized receipt. Reviews and canonical product links are required for every item."
+                    "Full itemized receipt. Canonical product links are required for every item."
                 ),
                 "required": True,
                 "items": {
@@ -359,7 +360,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                             "description": (
                                 "Numeric rating shown on the product page, such as '4.8 stars'. "
                                 "If the page genuinely shows no rating (e.g. a service, ticket, or "
-                                "event booking), pass '0 stars', never 'N/A', 'none', 'unknown', or a "
+                                "event booking), omit it; never pass 'N/A', 'none', 'unknown', or a "
                                 "made-up number."
                             ),
                         },
@@ -368,7 +369,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                             "description": (
                                 "Numeric review count shown on the product page, such as '312 reviews'. "
                                 "If the page genuinely shows no reviews (e.g. a service, ticket, or "
-                                "event booking), pass '0 reviews', never 'N/A', 'none', 'unknown', or a "
+                                "event booking), omit it; never pass 'N/A', 'none', 'unknown', or a "
                                 "made-up number."
                             ),
                         },
@@ -379,8 +380,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     "required": [
                         "name",
                         "product_url",
-                        "rating",
-                        "review_count",
                         "unit_price_cents",
                         "quantity",
                         "line_total_cents",
@@ -437,8 +436,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "purchase": {
                 "type": "object",
                 "description": (
-                    "Required when trigger_type is purchase. Every item MUST include a real numeric rating, "
-                    "numeric review count, and canonical product-detail URL. Never use the current cart or checkout URL."
+                    "Required when trigger_type is purchase. Every item MUST include a canonical product-detail URL, "
+                    "and its rating and review count when the page shows them. Never use the current cart or "
+                    "checkout URL."
                 ),
                 "properties": {
                     "items": {
@@ -467,12 +467,12 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                         "date-specific purchase when they are not already in the title."
                                     ),
                                 },
-                                "rating": {"type": "string", "description": "Required numeric rating"},
+                                "rating": {"type": "string", "description": "Numeric rating, when the page shows one"},
                                 "review_count": {
                                     "type": "string",
                                     "description": (
-                                        "Required numeric review count followed by 'reviews' or 'ratings', "
-                                        "for example '312 reviews'"
+                                        "Numeric review count followed by 'reviews' or 'ratings', "
+                                        "for example '312 reviews', when the page shows one"
                                     ),
                                 },
                                 "image_url": {"type": "string", "description": "Best visible product image URL"},
@@ -483,7 +483,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                 "seller": {"type": "string", "description": "Visible seller"},
                                 "shipping": {"type": "string", "description": "Visible delivery details"},
                             },
-                            "required": ["title", "rating", "review_count", "product_url"],
+                            "required": ["title", "product_url"],
                             "additionalProperties": False,
                         },
                     },
