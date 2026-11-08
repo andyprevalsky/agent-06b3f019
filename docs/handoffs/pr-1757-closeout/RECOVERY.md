@@ -30,6 +30,11 @@ Archives:
   - final and archived cycle state
   - INFRA-stopped and final smoke campaigns
   - production receipts and logs
+- `owner-recovery`: the 2026-11-08 Machine recovery:
+  - recovery logs
+  - exact-owner ownership and audit records
+  - native Machine list
+  - evidence recaptured from the guests of campaign 714d48a0
 
 The original failing run is archived separately (owner: the PR1752 closeout). Its key is
 `devbox-closeout-private/pr1752-818f3669/mass-agent-spawn-agent-error-run.tar.gz.aesgcm`.
