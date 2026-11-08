@@ -688,6 +688,80 @@ def preflight_refusal_campaign(root, runs, campaign, request, receipt, adapter, 
     return refused
 
 
+def dispatch_refusal(root, runs, campaign, request, receipt, adapter, confirmed, document, bound):
+    """Retire only the audited source-refusal path before any fleet admission.
+
+    This grants launch eligibility, never task or financial cleanup credit.
+    Unknown historical producers still require their own custody proof.
+    """
+    policies = {
+        'scripts/run-bench': 'd6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e',
+        'scripts/run-bench-fleet': '7552a933e8510bfb3b2b03787cd102d7f144cb25039ea4a9e883d29a48c57451',
+        'scripts/lib/cloudbench-env.sh': '166f249b055d9b5ebf6d28cb54c7f522e4ad0ab5652cfe670ecc58388a947e2d',
+        'scripts/run-bench-campaign.py': '57196da49e7dd07eb696e85ee8b6394d61237ad339579093d12c5645f298691f',
+    }
+    for name, expected in policies.items():
+        original = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                            receipt['source']['head'] + ':' + name])
+        need(hashlib.sha256(original).hexdigest() == expected, 'unaudited dispatch refusal producer: ' + name)
+    checks = request['checks']
+    skips = request.get('skips', {})
+    from deploy_test_historical_custody import KIND as CUSTODY_KIND
+    need(checks and len(set(checks)) == len(checks) and not set(checks).intersection(skips)
+         and all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
+                 and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
+                 and v.get('current_binding', {}).get('source') == receipt['source']
+                 and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
+                 and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
+                 for v in skips.values()), 'dispatch refusal exclusion inventory')
+    expected = {**dict.fromkeys(checks, 'UNVERIFIED'), **dict.fromkeys(skips, 'SKIP')}
+    need(receipt['cases'] == expected and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
+         and adapter.get('complete') is False and adapter.get('cleanup_complete') is False
+         and adapter.get('reused') is False and adapter.get('native_exit') == 1,
+         'dispatch refusal original outcomes')
+    need(runs.is_dir() and not runs.is_symlink() and not any(runs.iterdir()), 'dispatch refusal has native participants')
+    summary = document(campaign / 'summary.json')
+    jobs = summary['jobs']
+    need(summary['campaign_id'] == campaign.name and summary['runs'] == 1 and summary['retry_infra'] == 0
+         and summary['status'] == 'failed' and summary['task_count'] == summary['total_jobs'] == len(jobs) == len(checks)
+         and len({j['job_id'] for j in jobs}) == len(jobs) and {j['task'] for j in jobs} == set(checks)
+         and not any(summary.get(k) for k in ('startup_cohorts', 'cleanup_ticket_failure',
+                                             'shared_inventory_failed', 'shared_transport_cleanup_pending')),
+         'dispatch refusal campaign inventory')
+    from datetime import datetime
+    start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
+    need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
+         <= receipt['finished_at'] <= confirmed, 'dispatch refusal clocks')
+    message = ('FATAL: requested benchmark commit ' + receipt['source']['head']
+               + ' is not fetchable from origin and local patch shipping is disabled')
+    pids = []
+    for job in jobs:
+        need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']) and job['run'] == job['attempt'] == 1
+             and job['attempts'] == [] and job['status'] == 'failed' and type(job['controller_exit_code']) is int
+             and job['controller_exit_code'] == 1 and type(job['controller_pid']) is int
+             and job['controller_pid'] > 1 and start <= datetime.fromisoformat(job['started_at']).timestamp()
+             <= datetime.fromisoformat(job['finished_at']).timestamp() <= finish
+             and job['controller_command'] == ['bash', str(root / 'scripts/run-bench'), job['task'],
+                                               '--ref', receipt['source']['head'], '--foreground'],
+             'dispatch refusal child identity')
+        log = campaign / (job['job_id'] + '.log')
+        need(job['log'] == str(log), 'dispatch refusal log binding')
+        lines = bound(log).decode().splitlines()
+        need(lines and lines[-1] == message and lines.count(message) == 1
+             and not any(str(root / 'scripts/run-bench') + ' monitor ' in line for line in lines),
+             'dispatch refusal exact boundary')
+        need(not Path('/proc', str(job['controller_pid'])).exists(), 'dispatch refusal child remains')
+        pids.append(job['controller_pid'])
+    need(len(set(pids)) == len(pids), 'dispatch refusal aliased children')
+    supervisor = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
+    need(supervisor['orphaned_children'] is False and supervisor['term_sent'] == [], 'dispatch refusal supervision')
+    from deploy_test_cloud import campaign_published
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):
+        document(campaign / name)
+    need(campaign_published(summary, campaign, adapter['started_at'], native), 'dispatch refusal publication closure')
+
+
 def validate(receipt, owner, proof):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -747,6 +821,18 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-dispatch-refusal-v1':
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
+             and proof.get('purpose') is None and not proof.get('recovered_runtime')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text, 'dispatch refusal root binding')
+        dispatch_refusal(root, runs, campaign, request, receipt, adapter, confirmed, document, bound)
+        need(used == set(bindings), 'dispatch refusal proof file closure')
+        return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+                'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
+                'participants': [], 'native_audit_seals': {}, 'retained_services': [],
+                'credit_granted': False, 'financial_cleanup_credit': False}
     if layout == 'campaign-startup-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')

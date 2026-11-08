@@ -2661,6 +2661,8 @@ def _production_payment_identity_gap(usage: dict) -> Optional[str]:
     remaining = usage.get("remaining")
     if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
         return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
+    if usage.get("stripeLivemode") is not True:
+        return f"Stripe billing mode must be live (stripeLivemode={usage.get('stripeLivemode')!r})"
     return None
 
 
@@ -2668,18 +2670,17 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     """Fail fast when the production payment identity was never provisioned.
 
     Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
-    A non-200 is only a warning: a transient backend blip must not abort the gate on its own.
+    Admission requires an authoritative live billing mode before any allocation or fixture write.
     """
     user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
     if response.status_code != 200:
-        print(
-            f"    ⚠ Could not verify production payment identity {user_id} "
+        raise RuntimeError(
+            f"Could not verify production payment identity {user_id} "
             f"({response.status_code}): {response.text[:200]}"
         )
-        return
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
         return

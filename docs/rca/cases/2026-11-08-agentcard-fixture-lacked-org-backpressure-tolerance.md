@@ -69,10 +69,12 @@ moved to the next candidate, which is the sibling defect above occurring live.
 
 Evidence gaps, stated plainly:
 
-- What consumed the org budget at 03:55Z is unattributed. The failing guests' driver logs hold only 13 org tool-call
-  lines in that window, though each failing read can cost up to 6 HTTP requests, so about 70 requests at most. Other guests
-  logged no org calls there, which points away from this campaign's own fixture burst. Traffic from other lanes sharing
-  the credentials was not measured.
+- What consumed the org budget at 03:55Z is only partly attributed. The failing guests' driver logs hold 13 org tool-call
+  lines in that window, at most about 70 HTTP requests. The Benchmark Hub shows another deploy's campaign, `deploy-7cafb99e`,
+  launched five AgentCard payment tasks at 03:49:03Z; its `agent-payment-abandonment` lifecycle ran until about 03:58:24Z,
+  across the whole failure window. So contention crossed deploys on the shared org credentials. Its request count was not
+  measured, 13 payment-class Hub rows in the scan have no duration, and non-Hub callers were not measured, so exhaustion
+  itself is still unquantified.
 - Whether throttling causes the 401s is unproven. They interleave, but #1796 also saw 401s on a healthy secret.
 - The exact benchmark cannot be made to fail on demand on the buggy revision, because it depends on provider state. The
   causal proof is the replayed provider errors at the owning boundaries; the outcome proof is the deploy smoke campaign.
@@ -90,11 +92,16 @@ candidate, and the readiness wrapper keeps the error type.
 The same typed-401 tolerance now covers `configure_benchmark_agentcard_setup` and the abandon POST in
 `agents/benchmarks/run_benchmark.py`, using the existing delay and attempt bounds; untyped 401s stay terminal.
 
-No fleet-wide admission was built. The evidence does not show this campaign's guests exhausted the budget, so a
-cross-machine lease would be speculative and would not cover other lanes sharing the org.
+No fleet-wide admission was built. The evidence does not show this campaign's guests exhausted the budget, and the Hub
+overlap shows contention from another deploy, so a per-campaign lease would not have covered this incident. An
+org-wide lease across deploys remains the open design question.
 
 Fixture-only change: 10k-agent behaviour is unaffected, and at most 4 passes of 5-6 reads per guest are
 spent, 30 s apart.
+
+Outcome: deploy smoke campaign `deploy-60fcfad4` on the fixed source passed 14 of 15 jobs, including every payment fixture
+guest and `agent-payment-setup-resume`; the remaining job (`agent-payment-abandonment`) is the standing AgentCard release
+stall, recorded as a skip and never a pass. Status stays `mitigated`: the provider 401/throttle's origin is unexplained.
 
 Golden reference: not applicable (no approval-gated hunk).
 
