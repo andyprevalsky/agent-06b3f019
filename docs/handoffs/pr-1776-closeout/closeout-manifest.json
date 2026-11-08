@@ -20,7 +20,8 @@
  "gates": {
   "result": "DEPLOY_GATES PASS head=002e9277d86f gates=14 (verify bound-staged)",
   "resource_warnings": [
-   "smoke/agent-payment-abandonment: exact AgentCard release stall (card CLOSED balance 0, transfer owt_866fb49949f77a36490032bf consumed releasedCents=0, purchase HELD) - native SKIPPED, resource_skip agentcard_release_stall, never PASS"
+   "smoke/agent-payment-abandonment: exact AgentCard release stall (card CLOSED balance 0, transfer owt_866fb49949f77a36490032bf consumed releasedCents=0, purchase HELD) - native SKIPPED, resource_skip agentcard_release_stall, never PASS",
+   "PR #1787 rounds: two more agent-payment-abandonment release stalls (owt_a7da4d75a3f7bda6b9a80953, owt_cf012cf79d92809aa0aa0c1b), 4396 cents each unreleased"
   ],
   "omitted": [
    "backend-coverage-blackbox",
@@ -180,7 +181,7 @@
    "3ae0ac255cf3",
    "441dcb32194b"
   ],
-  "rounds": "attempt1 smoke INFRA stop (transient AgentCard 401); attempt2 stale (managed-env sync) with structural flakes; attempt3 agents-coverage live-model flake -> assigned rerun PASS; final sweep smoke idempotent-abandonment timeout -> pending post-merge packet; DEPLOY_GATES PASS head=441dcb32194b gates=14; CodeRabbit cycle 1 findings fixed, cycle 2 clean",
+  "rounds": "attempt1 smoke INFRA stop (transient AgentCard 401); attempt2 stale (managed-env sync) with structural flakes; attempt3 initial: agents-coverage live-model flake -> assigned rerun PASS, smoke AgentCard release stall -> resource_skip warning; final sweep smoke idempotent-abandonment timeout -> pending post-merge packet; DEPLOY_GATES PASS head=441dcb32194b gates=14; CodeRabbit cycle 1 findings fixed, cycle 2 clean",
   "timing_outcome": "blocked (not shipped)",
   "flakes": "see evidence/followups.txt item 6"
  }
