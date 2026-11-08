@@ -6,7 +6,8 @@
   "core": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm",
   "cloud": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm",
   "rca": "devbox-closeout-private/pr1781-49c2c60c/rca.tar.gz.aesgcm",
-  "extra": "devbox-closeout-private/pr1781-49c2c60c/extra.tar.gz.aesgcm"
+  "extra": "devbox-closeout-private/pr1781-49c2c60c/extra.tar.gz.aesgcm",
+  "refs": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm"
  },
  "assignment": {
   "test": "backend-coverage-blackbox / blackbox:integration-accounts \"LinkedIn upload: a corrupt archive ends the run sync_failed\"",

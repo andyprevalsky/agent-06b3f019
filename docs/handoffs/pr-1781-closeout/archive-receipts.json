@@ -307,6 +307,100 @@
    "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
    "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
    "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf"
+  },
+  "refs": {
+   "name": "refs",
+   "format": "PR1781-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0000",
+     "sha256": "8fbb54e3a8a4d5f488c587c88ae0a703910cc88c6c83a76308e01669612bb79c",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0001",
+     "sha256": "c02a5c77738cf31f3a63786b34f6d127f63da135647180bee7453153459db1db",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0002",
+     "sha256": "2755d1f919a1c11c8d4908223dde4b30d94f05761b3b33963e962e6f165b235d",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0003",
+     "sha256": "7a1aadf631d284d26aabac7cbdf3fbc829b9d8f5de26b3aa7105cb25797e5d5d",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0004",
+     "sha256": "4a99d6e31caf1be3e51d7184d6bbc6786808bbcfeb916ae8c53085e9caeb1a06",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0005",
+     "sha256": "abbc0c53f66662090d601930dbb7ec565d6830836370b5b328814a8ccac77dde",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0006",
+     "sha256": "25200af0b654c368a8b646fed95f4a91bad1bc948fe6692f172aded5b451b238",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0007",
+     "sha256": "6661d440cfcdb0061b753746a972de148ed9a6689774838e7076a0d7ce476933",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0008",
+     "sha256": "25a7e7905997e4d3ebc34b367f95f4dad6b614ce5208a6e13ab964ccad66cfaf",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0009",
+     "sha256": "f420fcbeb332e64d83a73f73f74746f21de1d3120baf3815371f756c699f1ddd",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0010",
+     "sha256": "8a380639fe38e010ea1e91062a3136df52b9cfcda19c7c681e75208a8526c606",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0011",
+     "sha256": "765f99d28a19ff1d98b3f815324901b4bc5c4b7ccbf998ad6775270db176b325",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0012",
+     "sha256": "a1aa3ee0cfd383744cbd32d585d89bf0b6e5079b6128b100defc4185cbd57862",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0013",
+     "sha256": "6f244aa40b63b8346e241355629787cb50d3338df5a5468b0bb26ced51c738c5",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm.part0014",
+     "sha256": "b4eb68933a80e4d8d7eae5bbe13ef23a0978086a2c777ff443d4e3ad5eb4b4b7",
+     "plain_bytes": 45680758
+    }
+   ],
+   "frame_bytes": 67108864,
+   "files": 1,
+   "paths": [
+    ".context/rca-shard2-records/refs"
+   ],
+   "gzip_sha256": "4b898206851d1711c06ba683f2be152d83e954b501bb9c65396866b64c56a3a5",
+   "gzip_bytes": 985204854,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf"
   }
  }
 }
