@@ -3092,15 +3092,14 @@ def test_phone_off_matches_prephone_bytes():
     browser-pointer-move-intent-had-no-tool): the hover action plus truthful
     click/click_coordinates/drag/evaluate descriptions changed only the tools hash
     in both modes; system/messages hashes are unchanged.
-    Re-pinned for H-38 (rca/h-38-20261106, pending approval): the request_payment_card and
-    write-lock purchase product_url descriptions (and the request_payment_card line_items
-    summary) now state the shared PRODUCT_URL_GUIDANCE contract. Only the tools hash
-    changed in both modes; HEAD 3271548804 reproduces the previous tools hash exactly;
-    system/messages are unchanged.
     Re-pinned for H-49 (rca/h-49-20261107): the request_payment_card description now
     states the user one-time-card exception before the saved-method default. Only the
     tools hash changed in both modes; 7555a20d05 reproduces the previous tools hash
     exactly; system/messages are unchanged.
+    Re-pinned after H-38 was dropped (owner review, 2026-11-08): the request_payment_card,
+    line_items and write-lock purchase product_url descriptions are main's text again, with
+    H-49's one-time-card opening kept. Only the tools hashes changed in both modes;
+    system/messages are unchanged.
     Re-pinned for H-57 (rca/h-57-20261107): the static Browser Rules line "Browser
     cookies have been injected - assume the user is logged in until proven otherwise."
     was deleted because it was emitted for sessions with no cookies; the per-realm
@@ -3121,7 +3120,7 @@ def test_phone_off_matches_prephone_bytes():
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('90483bb1d90dbd8371f4a44b63ab720ae21a0a0a65a38a2e016a2e1eb00d5735', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
+    expected = {'0': ('6a18701dd89abac7e771cead9969ee579a6d89ad9731fa6b87a0b8d724c2a3f7', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('0c887ab8bc94d9b802719e69fd413fef69125ca60fd8567ef7612cb258f8dedf', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

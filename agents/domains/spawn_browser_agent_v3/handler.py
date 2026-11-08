@@ -95,7 +95,6 @@ from utils.payment_card import (
     reuse_payment_approval,
 )
 from utils.prompts import build_verifier_prompt
-from utils.purchase_approval import PRODUCT_URL_GUIDANCE
 
 from .activity_heartbeat import (
     browser_activity_checkpoint,
@@ -4642,13 +4641,6 @@ async def _run_browser_supervisor_recovery(
 # validation/tool error in context before falling back to the deterministic question.
 _WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS = 3
 
-PURCHASE_APPROVAL_CONTEXT = (
-    "## Purchase Approval Context\n"
-    "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
-    f"product URL, numeric rating, and numeric review count. {PRODUCT_URL_GUIDANCE} "
-    "A purchase approval is blocked if any item lacks these fields."
-)
-
 # Worked examples for the notification fork — payloads mirror the fields our
 # renderer (_render_write_lock_notification_question / _append_*_notification)
 # and schema already prescribe. Shown to the model as format targets, not as
@@ -4698,8 +4690,8 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         },
         (
             "Every visible item; one media image (or rendered_summary for multi-item). "
-            "Per item require title, numeric rating, review count, and a product URL already in the "
-            f"trajectory, never an order-confirmation or return URL. {PRODUCT_URL_GUIDANCE} "
+            "Per item require title, numeric rating, review count, and a canonical "
+            "product-detail URL already in the trajectory — never cart/checkout/order/return URLs. "
             "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
         ),
     ),
@@ -9222,7 +9214,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     "receipt and include it when calling request_payment_card. "
                     "Never ask the user to type a payment card into chat."
                 )
-            _user_context_sections.append(PURCHASE_APPROVAL_CONTEXT)
+            _user_context_sections.append(
+                "## Purchase Approval Context\n"
+                "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
+                "canonical product-detail URL, numeric rating, and numeric review count. Never use a cart or "
+                "checkout URL as the product link. A purchase approval is blocked if any item lacks these fields."
+            )
             _record_timing("parallel.data.user_profile", t)
 
             t = time.monotonic()
