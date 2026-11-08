@@ -258,12 +258,14 @@
   },
   "readiness_classifier_repair": {
     "bugs_folder_verified": true,
+    "current_status_record": "progress-publication.json",
     "independent_devbox": "7a41cd23-5268-42c1-a5c8-85858fddf58b",
-    "native_goal_tools": "Unavailable in owner Claude harness; explicit autonomous repair-through-deploy accepted and running",
+    "native_goal_tools": "Unavailable in owner Claude harness; autonomous repair accepted; latest owner report holds on unresolved smoke custody, not a claimed native goal status",
     "owner": "ph75q9cp0yak89wec46tpnjcvd8hr80e",
     "pr": 1821,
     "root_guard_waived": false,
-    "status": "in qualification; current root native check still NOT_READY"
+    "source": "d140cadb93380026759ea81c044a39f3bf923053",
+    "status": "BLOCKED qualification; PR1821 unmerged, no active gate run; current root native check NOT_READY"
   },
   "records_publication": "This records-only follow-up; native readiness requires committed exact receipt and merged publication.",
   "recovery_tools": {
@@ -304,7 +306,7 @@
     },
     "supplement_verified": true
   },
-  "status": "PRIVATE_PRESERVATION_VERIFIED_NATIVE_READINESS_PENDING",
+  "status": "PRIVATE_PRESERVATION_VERIFIED_NATIVE_READINESS_BLOCKED",
   "validated_source": "63f16ee80fd8511c7d35e2525daf375060b71d20",
   "worker_deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71"
 }
