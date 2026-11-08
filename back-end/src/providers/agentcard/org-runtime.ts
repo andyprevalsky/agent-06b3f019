@@ -37,8 +37,8 @@ const RATE_LIMIT_RETRY_ATTEMPTS = 3;
 /**
  * A throttle that advertises no `retryAfter` spends only 3 s of the budget under the cap above.
  * A read cannot change provider state, so a throttled read backs off a little longer (1+2+4+8 s,
- * still capped by the caller's deadline). 15 s of waiting stays under the 30 s callers of the
- * unscoped purchase lookup. Mutations and non-throttle transient failures keep the smaller cap.
+ * still capped by the caller's deadline). Mutations and non-throttle transient failures keep the
+ * smaller cap.
  */
 const READ_RATE_LIMIT_RETRY_ATTEMPTS = 5;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
@@ -72,7 +72,7 @@ export function orgRetryDeadlineAtMs(): number {
 }
 
 type FetchLike = typeof fetch;
-/** Time source for the read auth-flap backoff; injectable so tests do not wait in real time. */
+/** Time source for the retry backoff; injectable so tests do not wait in real time. */
 export type AgentCardOrgRuntimeClock = {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
@@ -576,7 +576,7 @@ export class AgentCardOrgRuntime {
   async callTool(
     toolName: string,
     args: Record<string, unknown>,
-    deadlineAtMs: number = orgRetryDeadlineAtMs()
+    deadlineAtMs: number = this.clock.now() + RATE_LIMIT_TOTAL_DELAY_BUDGET_MS
   ): Promise<unknown> {
     if (!IDEMPOTENT_READ_TOOLS.has(toolName))
       return this.callToolWithRateLimitRetry(toolName, args, deadlineAtMs);

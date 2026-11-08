@@ -298,6 +298,60 @@ async function main(): Promise<void> {
       'a sustained read throttle must fail inside the 30 s budget'
     );
 
+    // The cap follows the current failure, so a read cannot carry the throttle allowance over to a
+    // 503, and an earlier 503 cannot shorten a later throttle's allowance.
+    const unavailable = (): Response =>
+      new Response(
+        JSON.stringify({
+          result: {
+            structuredContent: {
+              status: 'error',
+              message: 'get_card_details failed: Service temporarily unavailable',
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    let throttleThenUnavailableRequests = 0;
+    const throttleThenUnavailableRuntime = new AgentCardOrgRuntime(
+      undefined,
+      async () => {
+        throttleThenUnavailableRequests += 1;
+        return throttleThenUnavailableRequests <= 3 ? structuredThrottle() : unavailable();
+      },
+      fakeClock()
+    );
+    await assert.rejects(
+      () => throttleThenUnavailableRuntime.callTool('get_card_details', { card_id: 'card-1' }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 503 &&
+        /after 4 attempts/.test(error.message)
+    );
+    assert.equal(throttleThenUnavailableRequests, 4, 'a 503 keeps the three-attempt cap');
+
+    let unavailableThenThrottleRequests = 0;
+    const unavailableThenThrottleRuntime = new AgentCardOrgRuntime(
+      undefined,
+      async () => {
+        unavailableThenThrottleRequests += 1;
+        if (unavailableThenThrottleRequests <= 2) return unavailable();
+        if (unavailableThenThrottleRequests === 3) return structuredThrottle();
+        return liveCardResponse();
+      },
+      fakeClock()
+    );
+    assert.deepEqual(
+      await unavailableThenThrottleRuntime.callTool('get_card_details', { card_id: 'card-1' }),
+      liveCard,
+      'a throttle after 503s must still get the read allowance'
+    );
+    assert.equal(
+      unavailableThenThrottleRequests,
+      4,
+      'the read must recover on the first clear try'
+    );
+
     // A mutation keeps its three attempts: it must not be replayed for the whole budget.
     const mutationThrottleClock = fakeClock();
     let mutationThrottleRequests = 0;
