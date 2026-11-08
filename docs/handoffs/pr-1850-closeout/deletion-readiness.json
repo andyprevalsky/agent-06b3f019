@@ -517,14 +517,12 @@
   "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr1850-closeout",
+      "branch": "refs/heads/records/pr1850-readiness",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1850-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
