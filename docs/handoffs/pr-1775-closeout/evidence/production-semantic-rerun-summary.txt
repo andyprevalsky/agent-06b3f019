@@ -1,0 +1,4 @@
+DEPLOY_PRODUCTION START sha=79a43f600a31 changed=11 lanes=semantic
+[semantic] PIPELINE_SEMANTIC resume run=42462705568 status=in_progress source_sha=79a43f600a3162ff9a8aeb7783e1e1fa82c6671e: watching the recorded run instead of dispatching again
+[semantic] PIPELINE_SEMANTIC status=passed exit=0 run=42462705568 attempt=1 source_sha=79a43f600a3162ff9a8aeb7783e1e1fa82c6671e head_sha=79a43f600a3162ff9a8aeb7783e1e1fa82c6671e url=https://github.com/Rose-Ai-Labs/rose/actions/runs/42462705568 jobs: Chat full-lifecycle latency ratchet (web_search)=success Chat full-lifecycle latency ratchet (direct_answer)=success Chat full-lifecycle latency ratchet (agent_execute)=success Semantic frontend flows=success Chat full-lifecycle latency ratchet (agent_plan)=success
+DEPLOY_PRODUCTION FAIL sha=79a43f600a31 failed=- not-run=agentcard lanes=agentcard:NOT-SELECTED,semantic:PASS report=/home/boxes/rose/.context/deploy-pipeline/production-lanes.json
