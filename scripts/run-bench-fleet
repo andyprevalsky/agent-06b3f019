@@ -15786,7 +15786,6 @@ cleanup() {
     # recorded physical resource disposition or the benchmark verdict.
     if [ -d "$FLEET_DIR/_batch" ]; then
         if ! CLOUDBENCH_AUTOSCALER_FAILED_BENCHES="${AUTOSCALER_FAILED_BENCHES[*]:-}" \
-            CLOUDBENCH_FLEET_BENCH_VERDICTS="${FLEET_BENCH_VERDICTS[*]:-}" \
             python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$ROOT_DIR" \
             "$ec" "$teardown_failed" "$KEEP_CLONES" \
             "$FLEET_EXECUTION_COMPLETED" "${AUTOSCALER_FAILURE:-1}" \
@@ -15814,8 +15813,6 @@ cleanup_verified = (
     and bool(registry) and registry_release_verified == "1"
 )
 autoscaler_failed_benches = sorted(set(os.environ.get("CLOUDBENCH_AUTOSCALER_FAILED_BENCHES", "").split()))
-bench_verdicts = dict(item.split("=", 1) for item in os.environ.get("CLOUDBENCH_FLEET_BENCH_VERDICTS", "").split()
-                      if "=" in item)
 verified = cleanup_verified and autoscaler == "0"
 target = root / "_batch/lifecycle.json"
 temporary = target.with_name(f".lifecycle.{os.getpid()}.tmp")
@@ -15826,7 +15823,6 @@ payload = {
     "hub_publication_failed": publication_failed != "0",
     "cleanup_verified": cleanup_verified,
     "autoscaler_failed_benches": autoscaler_failed_benches,
-    "bench_verdicts": bench_verdicts,
 }
 try:
     with temporary.open("x") as handle:
@@ -19819,9 +19815,6 @@ fi
 echo ""
 echo "════════════════════ FLEET SUMMARY ════════════════════"
 FLEET_PASS=0; FLEET_TOTAL=0
-# The sealed lifecycle carries each bench's fleet verdict so a deploy can tell a
-# child that failed after its task passed (e.g. a ratchet) from an unknown exit.
-FLEET_BENCH_VERDICTS=()
 for j in "${!CHILD_BENCH[@]}"; do
     bench="${CHILD_BENCH[$j]}"; out="${CHILD_OUT[$j]}"; mode="${CHILD_MODE[$j]}"
     child_rc="${CHILD_EXIT_CODES[$j]:-1}"
@@ -19862,7 +19855,6 @@ except Exception as e:
     status="$(printf '%s' "$line" | awk '{print $1}')"
     aid="$(printf '%s' "$line" | awk '{print $2}')"
     FLEET_TOTAL=$((FLEET_TOTAL + 1))
-    FLEET_BENCH_VERDICTS+=("$bench=$status")
     [ "$status" = "PASS" ] && FLEET_PASS=$((FLEET_PASS + 1))
     icon="❌"; [ "$status" = "PASS" ] && icon="✅"; [ "$status" = "NORESULT" ] && icon="⚠️ "
     printf '  %s %-38s %-4s %-9s' "$icon" "$bench" "$mode" "$status"

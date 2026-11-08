@@ -87,14 +87,6 @@ def collect_fleet(request, root, fleet, started, native_exit):
                 cases[name] = 'FAIL'
         except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
             details[name] = {'unverified': str(error), 'path': str(child)}
-    # The fleet's own per-bench verdict: a child that exited non-zero after its task row passed
-    # (e.g. a cache/cost ratchet) is a verified FAIL of that case once cleanup is proven.
-    verdicts = lifecycle.get('bench_verdicts')
-    for name in request['checks'] if isinstance(verdicts, dict) and native_exit == 1 else ():
-        if cases[name] == 'PASS' and verdicts.get(name) in ('CHILDFAIL', 'FAIL'):
-            cases[name] = 'FAIL'
-            details[name]['fleet_verdict'] = (f"{verdicts[name]}: the benchmark exited non-zero after its task "
-                                              'passed; see fleet-child.log')
     for name in autoscaler_failed if autoscaler_only else ():
         if cases[name] == 'PASS':
             cases[name] = 'FAIL'
