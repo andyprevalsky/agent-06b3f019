@@ -17,26 +17,6 @@ export const OUTBOUND_PHONE_NUMBER_POOL: OutboundPhoneNumber[] = [
   { id: '2fe93786-c619-4a57-8a74-710f87b7b13b', number: '+14159416744' },
 ];
 
-/**
- * Vapi phone-number ids reserved for inbound benchmark callee personas
- * (`BENCHMARK_CALLEE_PHONE_NUMBER_IDS` = `task=id,...`, or the single
- * `BENCHMARK_CALLEE_PHONE_NUMBER_ID`; see agents/benchmarks/phone_callee.py).
- * A persona assistant answers these numbers, so they are never a caller ID.
- */
-export function reservedCalleePhoneNumberIds(env: NodeJS.ProcessEnv = process.env): Set<string> {
-  const entries = [
-    env.BENCHMARK_CALLEE_PHONE_NUMBER_ID ?? '',
-    ...(env.BENCHMARK_CALLEE_PHONE_NUMBER_IDS ?? '').split(','),
-  ];
-  const ids = new Set<string>();
-  for (const entry of entries) {
-    // Keep the id of a malformed `task=` entry too: over-reserving is safe.
-    const id = entry.slice(entry.indexOf('=') + 1).trim();
-    if (id !== '') ids.add(id);
-  }
-  return ids;
-}
-
 // Default ElevenLabs voice ID for outbound calls — "Rose", the first preset
 // in mac-app/ui/features/onboarding/components/VoiceSelector.tsx
 // (PRESET_VOICES[0]). Used when the user has not selected a custom voice.

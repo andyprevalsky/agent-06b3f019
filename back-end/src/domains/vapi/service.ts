@@ -4,7 +4,6 @@ import {
   BASE_SYSTEM_PROMPT,
   buildCallAssistantConfig,
   isIvrNavigationPrompt,
-  reservedCalleePhoneNumberIds,
   resolveHoldRuntimeConfig,
   type HoldRuntimeConfig,
   type OutboundPhoneNumber,
@@ -68,23 +67,9 @@ function getStoredCallStatus(response: unknown): string {
   return typeof status === 'string' && status !== '' ? status : 'queued';
 }
 
-/**
- * Random caller ID from the pool, excluding numbers reserved for inbound
- * benchmark callees and the destination itself (a call must never dial itself).
- */
-function selectOutboundPhoneNumber(to: string): OutboundPhoneNumber {
+function getRandomPhoneNumber(): OutboundPhoneNumber {
   if (OUTBOUND_PHONE_NUMBER_POOL.length === 0) throw new VapiNotConfiguredError();
-  const reserved = reservedCalleePhoneNumberIds();
-  const eligible = OUTBOUND_PHONE_NUMBER_POOL.filter(
-    (phone) => !reserved.has(phone.id) && phone.number !== to
-  );
-  if (eligible.length === 0) {
-    throw new VapiApiError(
-      409,
-      `No eligible outbound caller number for ${to.substring(0, 4)}****: every pool number is a reserved benchmark callee or the destination itself. Refusing to place the call.`
-    );
-  }
-  return eligible[Math.floor(Math.random() * eligible.length)];
+  return OUTBOUND_PHONE_NUMBER_POOL[Math.floor(Math.random() * OUTBOUND_PHONE_NUMBER_POOL.length)];
 }
 
 async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
@@ -97,13 +82,12 @@ async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
   const { systemName, voiceId } = await lookupUserVoiceAndName(user_id);
   const identityPrefix = `You are ${systemName}.\n\n`;
   getVapiPrivateKey();
-  const normalizedPhone = normalizePhoneNumber(to);
 
   return {
-    phone: selectOutboundPhoneNumber(normalizedPhone),
+    phone: getRandomPhoneNumber(),
     fullSystemPrompt: identityPrefix + BASE_SYSTEM_PROMPT + system_prompt,
     userSystemPrompt: system_prompt,
-    normalizedPhone,
+    normalizedPhone: normalizePhoneNumber(to),
     normalizedSchema: normalizeJsonSchema(output_schema),
     operationKey,
     userId: typeof user_id === 'string' && user_id !== '' ? user_id : undefined,
