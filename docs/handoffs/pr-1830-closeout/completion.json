@@ -1,0 +1,80 @@
+{
+  "format": "PR1830-DEPLOY-CLOSEOUT-V1",
+  "source_pr": 1830,
+  "merge_sha": "4ce770943a236bbfdd524359125f8d425beb1d79",
+  "reviewed_head": "e1a86c239a453ef7442e72a35c5d496f9b0f9925",
+  "originating_merge": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+  "native_original_failure": {
+    "run": 42471940816,
+    "exit": 141,
+    "historical_exact_command": "UNPROVED",
+    "original_blob": "98626334ed87634e501ab831e46fabbfc28fe43d"
+  },
+  "unchanged_blackbox": {
+    "sha256": "2f89b98e8cd79f2eed5ab13d5910f5e238d19a33b6cb2fdf44c3af6b7bb6498c",
+    "before": "native141 at both20k selection boundaries",
+    "after": "8PASS",
+    "postmerge_native_run": 42482876147,
+    "postmerge": "8PASS native0 exactmerge"
+  },
+  "selected_gates": {
+    "count": 16,
+    "source": "e1a86c239a453ef7442e72a35c5d496f9b0f9925",
+    "status": "SATISFIED",
+    "smoke_current_passes": 11,
+    "historical_no_retry_cases": 2,
+    "historical_execution_credit": false
+  },
+  "production": {
+    "status": "PASS",
+    "sha": "4ce770943a236bbfdd524359125f8d425beb1d79",
+    "semantic_run": 42482869307,
+    "mac_release": "NOT_SELECTED no-shipped-change",
+    "auto_tag_runs": [
+      42482735710,
+      42482736174
+    ],
+    "original_tag": "v1.1.296 unchanged at originating merge"
+  },
+  "release": {
+    "native_normal_collector_cleanup": true,
+    "source_bound_audits": 12,
+    "exact_machines": 14,
+    "exact_volumes": 14,
+    "all_original_claims_absent": true,
+    "terminal_state": "destroyed-provider-retained",
+    "cli_audit_index": "0/11 reporting coverage limitation retained; native collector independently verifies release"
+  },
+  "exceptions": [
+    "CodeRabbit review SKIPPED usagecap; source merged unreviewed",
+    "Anthropic HTTP400 exhaustedcredit nativeWARN",
+    "OpenAI Responses credentialroute exhaustedcredit recoveredWARN",
+    "Earlier cloudflared download503 setupFAIL and unexecuted original gates retained; finalsource gatesPASS",
+    "Mac-only Linux checks UNVERIFIED"
+  ],
+  "historical_financial_duties": [
+    {
+      "scope": "sandbox abandonment",
+      "last_observed_unreleased_cents": 4396,
+      "current_financial_state": "UNVERIFIED",
+      "allocation": "NO_REMINT_RECLAIM_REISSUE"
+    },
+    {
+      "scope": "sandbox idempotent abandonment",
+      "last_observed_unreleased_cents": 4396,
+      "current_financial_state": "UNVERIFIED",
+      "native_auth_and_timeout": "FAIL retained, no standing-stall PASS/SKIP",
+      "allocation": "NO_REMINT_RECLAIM_REISSUE"
+    },
+    {
+      "scope": "production mixedmode ERROR",
+      "last_observed_unreleased_cents": 100,
+      "current_financial_state": "UNVERIFIED",
+      "allocation": "NO_REMINT_RECLAIM_REISSUE"
+    }
+  ],
+  "freedom_and_protected_instructions": "PRESERVED",
+  "local_and_remote_branches": "RETAINED",
+  "preservation": "Receipts adjacent; final evidence receipt added after full readback; review metadata archive receipt in records PR discussion",
+  "records_pr": null
+}
