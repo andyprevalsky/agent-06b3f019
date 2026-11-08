@@ -1,0 +1,30 @@
+{
+  "failures": [
+    {
+      "id": "cd443e9102094aada50743ac36fda3cd",
+      "check": "smoke/agent-payment-abandonment",
+      "command": [
+        "/home/boxes/rose/agents/venv/bin/python3",
+        "/home/boxes/rose/scripts/deploy_test_cloud.py"
+      ],
+      "source": {
+        "head": "34fd7d036b165e235a02a05197a4ddc00f6bc46e",
+        "digest": "d38b15bd0ce25305d2c0f04036e4184967a5f9c2623cc226f8b8d32b1649e781"
+      },
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "description": "agent-payment-abandonment smoke task: AgentCard never released the closed card org transfer (consumed, releasedCents=0); native SKIPPED under the standing AgentCard release-stall policy. PR #1786 is test-only (backend blackbox browser-session fixtures) and never runs on the guest.",
+      "evidence": "Native row failure_reason: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before | run .context/deploy-cloud/69dfce30f8fe.../runs/20261108-042846-2061301/agent-payment-abandonment/run.json, agent f3443f55-4620-4d0f-b25f-4eabb00eb97d; docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md",
+      "resource_skip": {
+        "reason_code": "agentcard_release_stall",
+        "receipt_sha256": "a4633c4ed7fe631c3d770661be3135b01610148e0b3b7ad267f8326fc846aa16",
+        "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_acdac468cc71018c51cf6e7e\", \"cardId\": \"card_8932f6e55492621ea014298f\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py f3443f55-4620-4d0f-b25f-4eabb00eb97d | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+        "resource_scope": "third_party",
+        "exclusive_cause": true,
+        "provider": "AgentCard",
+        "evidence": "Exact standing release stall proven by the native row (closed card, transfer consumed, releasedCents=0; purchase HELD vs expected VOIDED); same task passed in prior campaigns; no code path of PR #1786 involved.",
+        "confirmed_at": 1794113715.0044382
+      }
+    }
+  ]
+}

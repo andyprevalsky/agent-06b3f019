@@ -1,0 +1,21 @@
+{
+ "name": "pr1786-fdf1accd94-extra",
+ "key_prefix": "devbox-closeout-private/pr1786-fdf1accd94-extra/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "28d59a55e08ab246b34943afbbe23cb228abcb78bf289f6289e0c97688bb2a48",
+ "archive_size_bytes": 11717811,
+ "parts": 1,
+ "chunk_size": 67108864,
+ "members": [
+  "/home/boxes/rose/.llm-dumps",
+  "/home/boxes/rose/agents/.context",
+  "/home/boxes/rose/agents/providers/fast_cache",
+  "/home/boxes/rose/back-end/.context",
+  "/home/boxes/rose/package-lock.json"
+ ],
+ "files": 1028,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}

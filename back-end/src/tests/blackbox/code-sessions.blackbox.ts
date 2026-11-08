@@ -61,6 +61,9 @@ import { registerCodeSessionLiveResumeCases } from './code-sessions-live-resume.
 import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
 import { registerCheckpointDeletionCases } from './code-sessions-checkpoint-deletion.cases';
 import { registerCheckpointSizeCases } from './code-sessions-checkpoint-size.cases';
+import { registerCloseBoundCases } from './code-sessions-close-bounds.cases';
+import { registerCloseConfirmationCases } from './code-sessions-close-confirmation.cases';
+import { registerCloseReviewCases } from './code-sessions-close-review.cases';
 
 config();
 
@@ -623,8 +626,24 @@ registerCodeSessionLiveResumeCases({
 });
 registerSandboxAttributionCases(userA);
 registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });
-registerCheckpointSizeCases({
+registerCheckpointSizeCases({ fixtureDir });
+registerCloseBoundCases({ fixtureDir, patchConnect, originalConnect });
+registerCloseConfirmationCases({
+  userA,
+  rootAgentId,
   fixtureDir,
+  seedWorkspace,
+  fakeSandbox,
+  patchConnect,
+  restoreConnect: () => patchConnect(originalConnect),
+});
+
+registerCloseReviewCases({
+  userA,
+  rootAgentId,
+  fixtureDir,
+  seedWorkspace,
+  fakeSandbox,
   patchConnect,
   restoreConnect: () => patchConnect(originalConnect),
 });

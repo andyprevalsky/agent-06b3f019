@@ -2436,7 +2436,20 @@ def _bind_task_root_custody(result: TaskResult, custody: dict) -> TaskResult:
             root["logs"] = result.logs if isinstance(result.logs, dict) else {}
     result.owned_roots = custody["roots"]
     result.graded_root_creation_outcome = custody["graded_creation"]
+    result.root_creation_attempted = custody.get("root_creation_attempted")
     return result
+
+
+def _mark_task_root_creation_attempted() -> None:
+    """Record that this task may own a root before any creation request is sent.
+
+    Composite runners (minted accounts) run stages through nested run_single_task calls; the
+    mark reaches every enclosing task so a lost stage create keeps the composite fail-closed.
+    """
+    custody = _task_root_custody.get()
+    while custody is not None:
+        custody["root_creation_attempted"] = True
+        custody = custody.get("parent")
 
 
 def _current_benchmark_user_id() -> str:
@@ -3118,6 +3131,9 @@ async def create_agent(
     task: BenchmarkTask,
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
+    # A lost create response can still have allocated a root, so custody must stop
+    # proving zero allocation before the POST is issued.
+    _mark_task_root_creation_attempted()
     # Flag the created root agent as a benchmark run so admin-health metrics strip it
     # out. Benchmarks run under a real operator account (e.g. Andy) via JWT or API key;
     # echoing the internal backend key here proves the marker came from a benchmark
@@ -3667,6 +3683,11 @@ async def _wait_for_expected_payment_lifecycle(
                         candidate_error = _validate_payment_lifecycle(
                             task, {"_benchmark": {"payment_lifecycle": candidate}}
                         )
+                        # This successful read supersedes any earlier failed one: a deadline
+                        # during the recovery POST below classifies this fresh snapshot.
+                        lifecycle, consecutive_fetch_errors, last_fetch_error = candidate, 0, None
+                        if candidate_error is not None:
+                            error = candidate_error
                         candidate_purchase = candidate.get("purchase") if isinstance(candidate, dict) else None
                         candidate_funding = candidate.get("walletFunding") if isinstance(candidate, dict) else None
                         candidate_status = (
@@ -3830,9 +3851,33 @@ async def _start_payment_abandonment_with_recovery(
 
 
 # The setup fixture resolves the cardholder through the AgentCard org MCP, which
-# intermittently rejects a healthy secret for a couple of seconds. Both actions are
-# idempotent, so a 5xx is retried; 4xx (bad input, cardholder not ready) is not.
+# intermittently rejects a healthy secret for a couple of seconds. Every action is
+# idempotent (reset/complete rewrite the user's setup row; prepare-residual reruns
+# the cardholder-scoped recover_funds, which converges on nothing_to_recover), so a
+# 5xx is retried; 4xx (bad input, cardholder not ready) is not — except the
+# backend's structured org-wide MCP throttle below.
 AGENTCARD_SETUP_RETRY_DELAYS_SECONDS = (2, 4, 8)
+AGENTCARD_ORG_RATE_LIMIT_CODE = "agentcard_org_mcp_rate_limited"
+
+
+def _agentcard_setup_rate_limit_delay(resp: httpx.Response) -> Optional[float]:
+    """Wait for the backend's structured AgentCard org throttle, else None.
+
+    Only the exact structured code qualifies: the backend emits it after the
+    upstream refused the call (classifyLifecycleError), so the window must pass.
+    """
+    if resp.status_code != 429:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("code") != AGENTCARD_ORG_RATE_LIMIT_CODE:
+        return None
+    retry_after = body.get("retryAfterSeconds")
+    if type(retry_after) in {int, float} and retry_after > 0:
+        return min(float(retry_after), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    return ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3
 
 
 async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dict:
@@ -3850,7 +3895,10 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
         if resp.status_code == 200:
             return resp.json()
         failure = f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}"
-        if resp.status_code < 500 or retry_delay is None:
+        rate_limit_delay = _agentcard_setup_rate_limit_delay(resp)
+        if rate_limit_delay is not None and retry_delay is not None:
+            retry_delay = rate_limit_delay
+        elif resp.status_code < 500 or retry_delay is None:
             raise RuntimeError(failure)
         print(f"    ⚠ AgentCard setup attempt {attempt} failed; retrying in {retry_delay}s ({failure})")
         await asyncio.sleep(retry_delay)
@@ -7185,15 +7233,24 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and isinstance(meta := getattr(r, "stop_metadata", None), dict)
         and meta == {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": meta.get("occurrence_index")}
         and type(meta.get("occurrence_index")) is int and meta["occurrence_index"] >= 0]
+    # A task that failed before issuing any root-creation request (e.g. a setup
+    # fixture refused before create_agent) keeps its ordinary verdict. Only the
+    # runner's own custody can prove that: no root, no live id, never attempted.
+    rootless_setup = [r for r in results if not any(r is proof for proof in never_admitted_results)
+        and not r.agent_id and not getattr(r, "owned_roots", None) and not live_ids.get(r.name)
+        and r.status != "SKIPPED" and r.passed is False
+        and getattr(r, "graded_root_creation_outcome", None) == "not_started"
+        and getattr(r, "root_creation_attempted", None) is False]
     if len(rootless_queued) + len(rootless_credentials) != len(never_admitted_results):
         failures.append("invalid coordinator nonadmission proof")
     if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and not any(r is proof for proof in rootless_queued)
+           and not any(r is proof for proof in rootless_setup)
            and not (getattr(r, "graded_root_creation_outcome", None) == "not_started"
                     and getattr(r, "owned_roots", None)) for r in results) or any(
                         getattr(r, "graded_root_creation_outcome", None) == "unknown" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials]
+        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials, *rootless_setup]
         if failures or not rootless or any(not any(r is proof for proof in rootless) for r in results):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
@@ -9830,6 +9887,7 @@ async def _run_auth_test_site_first_run(
         enforce_declared_evaluators=False,
         evaluators=[],
     )
+    _mark_task_root_creation_attempted()
     first_agent_id = await create_agent(base_url, first_task)
     owned = _register_task_root(task.name, first_agent_id, "fixture_first_run")
     manifest["firstRunAgentId"] = first_agent_id
@@ -15125,7 +15183,8 @@ async def run_single_task(
             raise RuntimeError(f"Claude Code credentials unavailable at task dispatch: {task.name}")
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
-    custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started"}
+    custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started",
+               "root_creation_attempted": False, "parent": _task_root_custody.get()}
     token = _task_root_custody.set(custody)
     async def evaluated_with_custody(result):
         _bind_task_root_custody(result, custody)
@@ -15468,6 +15527,8 @@ async def _run_single_task_as_run_user(
 
             fast_mode_cache = _resolved_fast_mode_cache(task)
             benchmark_goal = _benchmark_goal_for_task(task, base_url)
+            # The Codex runner posts its own root outside create_agent.
+            _mark_task_root_creation_attempted()
             return await run_codex_task(
                 base_url,
                 task,
@@ -15479,6 +15540,7 @@ async def _run_single_task_as_run_user(
         custody = _task_root_custody.get()
         if custody is not None:
             custody["graded_creation"] = "unknown"
+        _mark_task_root_creation_attempted()
         prompt_cache_warmup = await _warm_cache_gated_root(base_url, task)
         agent_id = await create_agent(base_url, task)
         _register_task_root(task.name, agent_id, "graded")

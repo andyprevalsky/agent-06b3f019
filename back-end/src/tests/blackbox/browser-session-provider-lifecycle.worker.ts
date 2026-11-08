@@ -58,9 +58,14 @@ Module._load = function (id, parent, isMain) {
     return { connectValidatedBrowser: chromium.connectOverCDP.bind(chromium) };
   return original.call(this, id, parent, isMain);
 };
+// Load the import graph before the parent's fixed lifecycle window starts.
+const { resumeBrowserSession } = local('../../providers/browserSessionResume');
+local('../../providers/steel/lifecycleClaim');
 (async () => {
   try {
-    const result = await local('../../providers/browserSessionResume').resumeBrowserSession(taskId);
+    await prisma.$connect();
+    process.send?.({ type: 'ready' });
+    const result = await resumeBrowserSession(taskId);
     process.send?.({ type: 'result', ok: true, sessionId: result.session_id });
   } catch (error) {
     process.send?.({ type: 'result', ok: false, error: String(error) });

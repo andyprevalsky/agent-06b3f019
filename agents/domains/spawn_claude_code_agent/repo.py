@@ -448,7 +448,8 @@ async def close_e2b_session(
     A persistent code session is checkpointed and paused (never killed);
     ``reason`` (close | failure | cancel | idle | drain) is recorded on the
     checkpoint. Returns dict with output_files, usage and ``code_session``
-    facts (branch, merge facts, checkpoint), or empty dict on failure.
+    facts (branch, merge facts, checkpoint). A lost response retries this same
+    task's idempotent close; it never restarts the code agent.
     """
     config = load_config()
     payload: dict[str, Any] = {"task_id": task_id}
@@ -461,31 +462,47 @@ async def close_e2b_session(
     if additional_paths:
         payload["additional_paths"] = additional_paths
 
-    try:
-        # Checkpoint upload + pause + GitHub merge facts: a control-plane bound.
+    async def reconcile_close() -> dict[str, Any]:
+        last_error = "close was not confirmed"
+        # Each request retains the existing transport bound. The backend may
+        # still be closing after a lost response; its task receipt makes the
+        # next request join that operation or replay its completed result.
         async with httpx.AsyncClient(timeout=180.0) as client:
-            close_response = await client.post(
-                f"{config.backend.api_url}{_session_base_path(code_provider)}/close",
-                headers={"x-api-key": config.backend.api_key or ""},
-                json=payload,
-            )
-            if close_response.status_code == 200:
-                return close_response.json()
-            logger.warning(
-                "[ClaudeCode] Close session returned non-200",
-                task_id=task_id,
-                status_code=close_response.status_code,
-            )
-            return {}
-    except WorkflowGenerationSealed:
-        raise  # a replaced generation must stop, never be swallowed
-    except Exception as e:
-        logger.warning(
-            "[ClaudeCode] Failed to close session",
-            task_id=task_id,
-            error=extract_error_message(e),
+            for attempt in range(3):
+                try:
+                    response = await client.post(
+                        f"{config.backend.api_url}{_session_base_path(code_provider)}/close",
+                        headers={"x-api-key": config.backend.api_key or ""},
+                        json=payload,
+                    )
+                    raise_if_generation_sealed(response.status_code, "spawn_claude_code_agent")
+                    if response.status_code == 200:
+                        result = response.json()
+                        if not isinstance(result, dict) or not isinstance(result.get("output_files"), list):
+                            raise ValueError("close response has no output_files result")
+                        return result
+                    last_error = f"HTTP {response.status_code}"
+                    if response.status_code not in (408, 429, 500, 502, 503, 504):
+                        break
+                except (httpx.TransportError, ValueError) as error:
+                    last_error = extract_error_message(error) or type(error).__name__
+                logger.warning(
+                    "[ClaudeCode] Close unconfirmed; reconciling the same task",
+                    task_id=task_id,
+                    attempt=attempt + 1,
+                    error=last_error,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(0.25 * (attempt + 1))
+        # Generic activity retry reattaches to the CLI. This failure belongs
+        # only to close, so it must not trigger that path or report empty output.
+        raise ApplicationError(
+            f"Code session close remains unconfirmed for task {task_id}: {last_error}",
+            type="CodeSessionCloseUnconfirmed",
+            non_retryable=True,
         )
-        return {}
+
+    return await _post_with_heartbeats(reconcile_close(), "Closing the code-agent session")
 
 
 async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> Optional[dict[str, Any]]:

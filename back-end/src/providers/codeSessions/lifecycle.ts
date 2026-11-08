@@ -26,7 +26,6 @@ import {
   type CheckpointRepo,
   type VerifiedCheckpoint,
 } from './checkpoint';
-import { deleteCloseRecords } from './closeRecord';
 import { indexCodeEvents } from './codeEvents';
 import { type CodeSessionFs, e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
@@ -112,10 +111,14 @@ export async function checkpointCodeSession(params: {
   fs: CodeSessionFs;
   reason: string;
   agentId: string;
-  /** Epoch ms the checkpoint must finish by (see CreateCheckpointParams.deadlineAt). */
+  /** Epoch ms the checkpoint must finish by; default: now + CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS (75 s). */
   deadlineAt?: number;
 }): Promise<CheckpointResult | null> {
-  const { session, fs, reason, agentId, deadlineAt } = params;
+  const { session, fs, reason, agentId } = params;
+  // Every checkpoint is bounded well inside the worker's 180 s close call: an
+  // unbounded tarball download held the lease and lost the handoff (2026-11-08).
+  const budget = Number(process.env.CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS);
+  const deadlineAt = params.deadlineAt ?? Date.now() + (budget > 0 ? budget : 75_000);
   try {
     const seq = await allocateCheckpointSeq(session.id);
     const manifest = await createCheckpoint({
@@ -126,7 +129,7 @@ export async function checkpointCodeSession(params: {
       reason,
       codeProvider: session.codeProvider,
       diffBase: session.mergeTarget,
-      ...(deadlineAt !== undefined ? { deadlineAt } : {}),
+      deadlineAt,
     });
     const repo = primaryRepoFacts(manifest);
     await commitCheckpoint(session.id, seq, {
@@ -329,7 +332,6 @@ export async function retireCodeSession(session: CodeSessionRow): Promise<void> 
     rmSync(resolve(session.homeDir, '..'), { recursive: true, force: true });
   }
   await deleteCheckpoints(session);
-  await deleteCloseRecords(session);
   await markRetired(session.id);
   log.info('Code session retired', { codeSessionId: session.id });
 }

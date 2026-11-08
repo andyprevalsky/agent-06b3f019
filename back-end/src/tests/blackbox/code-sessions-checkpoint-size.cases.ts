@@ -12,22 +12,14 @@
  * alone are >1 GB uncompressed), so `Checkpoint worktree is 210456698 bytes
  * (cap 209715200); refusing to store` failed every close. The cap stays; the
  * fixture here scales it down (1 MiB cap, 3 MiB of incompressible tracked data).
- *
- * Close is bounded too (prod 2026-11-08, code session 2256e1eb): a 366 MB archive
- * was downloaded before the cap check, the read aborted at the SDK's 60 s default
- * after ~206 s of close, and the worker's 180 s close call timed out with no
- * handoff while the lease stayed held. Here the fake E2B sandbox downloads
- * worktree.tar.gz like the SDK: aborting at its request timeout.
  */
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import type { Sandbox } from 'e2b';
 import { prisma } from '../../providers/database';
-import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import {
   type CheckpointRepo,
   loadVerifiedCheckpoint,
@@ -37,103 +29,13 @@ import {
   restoreLatestCheckpoint,
 } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
-import { deleteCloseRecords } from '../../providers/codeSessions/closeRecord';
 
 export interface CheckpointSizeContext {
   fixtureDir: string;
-  patchConnect: (impl: (id: string) => Promise<Sandbox>) => void;
-  restoreConnect: () => void;
 }
 
 const MIB = 1024 * 1024;
 const CAP_ENV = 'CODE_SESSION_CHECKPOINT_MAX_ARTIFACT_BYTES';
-const CLOSE_BUDGET_ENV = 'CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS';
-
-async function withEnv<T>(name: string, value: string, fn: () => Promise<T>): Promise<T> {
-  const saved = process.env[name];
-  process.env[name] = value;
-  try {
-    return await fn();
-  } finally {
-    if (saved === undefined) delete process.env[name];
-    else process.env[name] = saved;
-  }
-}
-
-/**
- * E2B stand-in over a local HOME (/home/user -> home). Reading worktree.tar.gz
- * records the request timeout it was given; with `stallArchive` the download
- * never completes and aborts like the SDK at that timeout (default 60 s).
- */
-function closeFakeSandbox(home: string, sandboxId: string, stallArchive: boolean) {
-  const map = (value: string) => value.split('/home/user').join(home);
-  const calls = { connects: 0, paused: 0, killed: 0, archiveReadTimeouts: [] as number[] };
-  const sandbox = {
-    sandboxId,
-    commands: {
-      run: async (cmd: string, opts?: { cwd?: string; timeoutMs?: number }) => {
-        const result = spawnSync('bash', ['-c', map(cmd)], {
-          cwd: map(opts?.cwd ?? '/home/user'),
-          encoding: 'utf8',
-          env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, GIT_TERMINAL_PROMPT: '0' },
-          maxBuffer: 64 * MIB,
-          ...(opts?.timeoutMs !== undefined ? { timeout: opts.timeoutMs } : {}),
-        });
-        return { exitCode: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
-      },
-    },
-    files: {
-      exists: async (path: string) => existsSync(map(path)),
-      remove: async (path: string) => rmSync(map(path), { force: true }),
-      read: async (path: string, opts?: { format?: string; requestTimeoutMs?: number }) => {
-        if (path.endsWith('/worktree.tar.gz')) {
-          const timeoutMs = opts?.requestTimeoutMs ?? 60_000;
-          calls.archiveReadTimeouts.push(timeoutMs);
-          if (stallArchive) {
-            await new Promise((_resolve, reject) =>
-              setTimeout(
-                () => reject(new Error('The operation was aborted due to timeout')),
-                timeoutMs
-              )
-            );
-          }
-        }
-        const data = readFileSync(map(path));
-        return opts?.format === 'text' ? data.toString('utf8') : new Uint8Array(data);
-      },
-      write: async (path: string, data: ArrayBuffer | string) => {
-        mkdirSync(dirname(map(path)), { recursive: true });
-        writeFileSync(
-          map(path),
-          typeof data === 'string' ? Buffer.from(data) : Buffer.from(new Uint8Array(data))
-        );
-      },
-    },
-    pause: async () => {
-      calls.paused += 1;
-      return true;
-    },
-    kill: async () => {
-      calls.killed += 1;
-    },
-  };
-  return { sandbox: sandbox as unknown as Sandbox, calls };
-}
-
-/** Rejects when `promise` has not settled within `ms`; never leaves the timer running. */
-async function within<T>(ms: number, what: string, promise: Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${what} did not return within ${ms} ms`)), ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -144,7 +46,7 @@ function sha(path: string): string {
 }
 
 /** A pushed clone with tracked data of `bigBytes`, then local edits on top. */
-function seedRepo(
+export function seedRepo(
   fixtureDir: string,
   home: string,
   bigBytes: number
@@ -266,6 +168,184 @@ export function registerCheckpointSizeCases(ctx: CheckpointSizeContext): void {
     });
   });
 
+  for (const legacy of [false, true]) {
+    test(`managed reference sources (${legacy ? 'legacy metadata repair' : 'fresh clone'}) checkpoint below the cap and restore the exact pin and edits`, async () => {
+      await withSession(async (session) => {
+        const home = join(ctx.fixtureDir, `home-reference-${randomUUID()}`);
+        const { workspace } = seedRepo(ctx.fixtureDir, home, 0);
+        const sourceHome = join(ctx.fixtureDir, `source-reference-${randomUUID()}`);
+        const { workspace: source, bigSha } = seedRepo(ctx.fixtureDir, sourceHome, 3 * MIB);
+        const origin = git(source, 'remote', 'get-url', 'origin');
+        const pinned = git(source, 'rev-parse', 'HEAD');
+        const names = ['openclaw', 'hermes-agent', 'codex', 'prime-agent', 'kimi-code'];
+        const urls = [
+          'openclaw/openclaw',
+          'nousresearch/hermes-agent',
+          'openai/codex',
+          'PrimeIntellect-ai/prime-agent',
+          'MoonshotAI/kimi-code',
+        ];
+        const config = join(ctx.fixtureDir, `reference-git-${randomUUID()}.config`);
+        writeFileSync(
+          config,
+          `[url "file://${origin}"]\n${urls.map((url) => `  insteadOf = https://github.com/${url}.git\n`).join('')}`
+        );
+        mkdirSync(join(workspace, 'scripts'));
+        mkdirSync(join(workspace, 'prompt-review'));
+        copyFileSync(
+          new URL('../../../../scripts/sync-reference-repos.sh', import.meta.url),
+          join(workspace, 'scripts/sync-reference-repos.sh')
+        );
+        writeFileSync(join(workspace, '.gitignore'), `local.env\n${names.join('/\n')}/\n`);
+        git(workspace, 'add', '-A');
+        git(workspace, 'commit', '-q', '-m', 'reference setup');
+        git(workspace, 'push', '-q', 'origin', 'main');
+        // Model an interrupted mv across the temporary/workspace filesystem boundary.
+        // Linux uses real tmpfs; other hosts simulate that boundary at the same path.
+        const tempBase = existsSync('/dev/shm') ? '/dev/shm' : ctx.fixtureDir;
+        const moveBin = join(ctx.fixtureDir, `reference-mv-${randomUUID()}`);
+        mkdirSync(moveBin);
+        const realMv = execFileSync('bash', ['-c', 'command -v mv'], {
+          encoding: 'utf8',
+        }).trim();
+        writeFileSync(
+          join(moveBin, 'mv'),
+          [
+            '#!/usr/bin/env node',
+            "const fs = require('node:fs');",
+            "const { dirname } = require('node:path');",
+            "const { spawnSync } = require('node:child_process');",
+            'const [source, destination] = process.argv.slice(2);',
+            `const externalTemp = ${JSON.stringify(tempBase + '/rose-reference.')};`,
+            'if (source.startsWith(externalTemp) || fs.statSync(source).dev !== fs.statSync(dirname(destination)).dev) {',
+            '  fs.mkdirSync(destination, { recursive: true });',
+            "  fs.writeFileSync(destination + '/HEAD', 'partial metadata copy\\n');",
+            "  process.stderr.write('simulated interrupted cross-filesystem metadata move\\n');",
+            '  process.exit(1);',
+            '}',
+            `process.exit(spawnSync(${JSON.stringify(realMv)}, process.argv.slice(2), { stdio: 'inherit' }).status ?? 1);`,
+          ].join('\n') + '\n',
+          { mode: 0o755 }
+        );
+        const sync = (...args: string[]): void => {
+          execFileSync('bash', ['scripts/sync-reference-repos.sh', ...args], {
+            cwd: workspace,
+            env: {
+              ...process.env,
+              GIT_CONFIG_GLOBAL: config,
+              GIT_CONFIG_NOSYSTEM: '1',
+              ...(legacy
+                ? {
+                    TMPDIR: tempBase,
+                    PATH: `${moveBin}:${process.env.PATH ?? ''}`,
+                  }
+                : {}),
+            },
+            stdio: 'pipe',
+          });
+        };
+        sync();
+        const reference = join(workspace, 'openclaw');
+        writeFileSync(join(reference, 'keep.txt'), 'local reference edit\n');
+        rmSync(join(reference, 'delete-me.txt'));
+        writeFileSync(join(reference, 'scratch.txt'), 'untracked reference\n');
+        writeFileSync(join(reference, 'local.env'), 'IGNORED=reference\n');
+        if (legacy) {
+          for (const name of names)
+            rmSync(join(workspace, name, '.git'), { recursive: true, force: true });
+          // Older directories can recover their missing pin from the saved tip record.
+          rmSync(join(workspace, 'hermes-agent', '.ref-sha'));
+          // The recorded pin must win over a subsequently advanced remote tip.
+          writeFileSync(join(source, 'new-tip.txt'), 'new upstream version\n');
+          git(source, 'add', '-A');
+          git(source, 'commit', '-q', '-m', 'advance upstream');
+          git(source, 'push', '-q', 'origin', 'main');
+        }
+        const before = porcelain(workspace);
+        sync();
+        assert.deepEqual(
+          porcelain(workspace),
+          before,
+          'nested repo metadata must not change parent status'
+        );
+        assert.equal(sha(join(reference, 'data.bin')), bigSha, 'sync preserves reference contents');
+        assert.equal(readFileSync(join(reference, '.ref-sha'), 'utf8').trim(), pinned);
+        // Keep checkpoint IO entirely local after proving the real setup script.
+        for (const name of names) {
+          if (existsSync(join(workspace, name, '.git')))
+            git(join(workspace, name), 'remote', 'set-url', 'origin', origin);
+        }
+        const stored = await withCap(1 * MIB, () =>
+          checkpointCodeSession({
+            session,
+            fs: localSandboxFs(home),
+            reason: 'close',
+            agentId: session.rootAgentId,
+          })
+        );
+        assert.ok(
+          stored,
+          'managed reference data must be reproducible rather than exceed the checkpoint cap'
+        );
+        const { manifest } = await loadVerifiedCheckpoint(session.userId, session.id, stored.seq);
+        assert.ok(manifest.artifacts['worktree.tar.gz'].size < 256 * 1024);
+        for (const name of names) {
+          const repo = manifest.repos.find((candidate) => candidate.path === `workspace/${name}`);
+          assert.equal(repo?.head, pinned);
+          assert.equal(repo?.worktreeFromGit, true);
+          assert.equal(
+            repo?.bundle,
+            null,
+            'a shallow pinned remote needs no full repository bundle'
+          );
+        }
+        const restoredHome = join(ctx.fixtureDir, `home-reference-restored-${randomUUID()}`);
+        mkdirSync(restoredHome);
+        const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
+        assert.ok(await restoreLatestCheckpoint(row, localSandboxFs(restoredHome)));
+        const restored = join(restoredHome, 'workspace', 'openclaw');
+        assert.equal(git(restored, 'rev-parse', 'HEAD'), pinned);
+        assert.equal(sha(join(restored, 'data.bin')), bigSha);
+        assert.equal(readFileSync(join(restored, 'keep.txt'), 'utf8'), 'local reference edit\n');
+        assert.equal(existsSync(join(restored, 'delete-me.txt')), false);
+        assert.equal(readFileSync(join(restored, 'scratch.txt'), 'utf8'), 'untracked reference\n');
+        assert.equal(readFileSync(join(restored, 'local.env'), 'utf8'), 'IGNORED=reference\n');
+        assert.equal(
+          existsSync(join(restored, 'new-tip.txt')),
+          false,
+          'restore stays on the old pin'
+        );
+        assert.deepEqual(porcelain(join(restoredHome, 'workspace')), before);
+
+        if (legacy) {
+          const record = readFileSync(join(workspace, 'prompt-review/REF_SHAS.txt'), 'utf8');
+          rmSync(join(reference, '.git'), { recursive: true });
+          writeFileSync(join(reference, '.ref-sha'), 'invalid-revision\n');
+          assert.throws(() => sync(), /invalid saved revision/, 'an unknown pin fails closed');
+          assert.equal(existsSync(join(reference, '.git')), false);
+          assert.equal(readFileSync(join(reference, 'keep.txt'), 'utf8'), 'local reference edit\n');
+          assert.equal(readFileSync(join(workspace, 'prompt-review/REF_SHAS.txt'), 'utf8'), record);
+          writeFileSync(join(reference, '.ref-sha'), `${pinned}\n`);
+        }
+        sync('--force');
+        const latest = git(source, 'rev-parse', 'HEAD');
+        const record = readFileSync(join(workspace, 'prompt-review/REF_SHAS.txt'), 'utf8');
+        for (const name of names) {
+          assert.equal(git(join(workspace, name), 'rev-parse', 'HEAD'), latest);
+          assert.equal(readFileSync(join(workspace, name, '.ref-sha'), 'utf8').trim(), latest);
+          assert.ok(record.includes(`${name} ${latest}\n`));
+        }
+        assert.equal(
+          readFileSync(join(reference, 'keep.txt'), 'utf8'),
+          'tracked, will be edited\n'
+        );
+        assert.equal(existsSync(join(reference, 'delete-me.txt')), true);
+        assert.equal(existsSync(join(reference, 'scratch.txt')), false);
+        assert.deepEqual(porcelain(workspace), before, 'force refresh also keeps parent status');
+      });
+    });
+  }
+
   test('a skip-worktree (sparse) file is never resurrected by restore', async () => {
     await withSession(async (session) => {
       const home = join(ctx.fixtureDir, `home-size-sparse-${randomUUID()}`);
@@ -381,152 +461,6 @@ export function registerCheckpointSizeCases(ctx: CheckpointSizeContext): void {
       assert.equal(sha(join(restoredHome, 'data.bin')), bigSha);
       assert.equal(readFileSync(join(restoredHome, 'keep.txt'), 'utf8'), 'edited\n');
       assert.deepEqual(porcelain(restoredHome), [' M keep.txt']);
-    });
-  });
-
-  /** A leased E2B code session with a task, a handoff file and a pushed repo in HOME. */
-  async function withE2bClose(
-    label: string,
-    stallArchive: boolean,
-    fn: (setup: {
-      task: { id: string };
-      codeSessionId: string;
-      home: string;
-      workspace: string;
-      handoff: string;
-      fake: ReturnType<typeof closeFakeSandbox>;
-    }) => Promise<void>
-  ): Promise<void> {
-    const userId = `code-session-close-${randomUUID()}`;
-    await prisma.user.create({ data: { userId, name: 'Code Session Close' } });
-    const agentId = randomUUID();
-    const sandboxId = `sb-${randomUUID()}`;
-    const home = join(ctx.fixtureDir, `home-close-${label}-${randomUUID()}`);
-    const { workspace } = seedRepo(ctx.fixtureDir, home, 0);
-    const handoff = JSON.stringify({ sentinel: `HANDOFF_${label}`, summary: 'done' });
-    mkdirSync(join(home, '.rose'), { recursive: true });
-    writeFileSync(join(home, '.rose', 'handoff.json'), handoff);
-    const codeSession = await prisma.codeSession.create({
-      data: {
-        userId,
-        rootAgentId: agentId,
-        ownerAgentId: agentId,
-        repoKey: `e2b-${randomUUID()}`,
-        branch: 'main',
-        mergeTarget: 'main',
-        sandboxKind: 'e2b',
-        sandboxId,
-        leaseOwner: `tool:${agentId}:1`,
-        leaseExpiresAt: new Date(Date.now() + 10 * 60_000),
-      },
-    });
-    const task = await prisma.claudeCodeSession.create({
-      data: { agentId, sandboxId, goal: 'g', codeSessionId: codeSession.id },
-    });
-    const fake = closeFakeSandbox(home, sandboxId, stallArchive);
-    ctx.patchConnect(async () => {
-      fake.calls.connects += 1;
-      return fake.sandbox;
-    });
-    try {
-      await fn({ task, codeSessionId: codeSession.id, home, workspace, handoff, fake });
-    } finally {
-      ctx.restoreConnect();
-      await prisma.claudeCodeSession.deleteMany({ where: { id: task.id } });
-      await prisma.codeSession.deleteMany({ where: { userId } });
-      await prisma.user.deleteMany({ where: { userId } });
-    }
-  }
-
-  async function assertReleased(codeSessionId: string, fake: ReturnType<typeof closeFakeSandbox>) {
-    assert.equal(fake.calls.paused, 1, 'close pauses the sandbox even when its checkpoint fails');
-    assert.equal(fake.calls.killed, 0, 'a persistent session is never killed by close');
-    const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSessionId } });
-    assert.equal(row.state, 'PAUSED');
-    assert.equal(row.leaseOwner, null, 'the lease is released for the next spawn');
-    assert.equal(row.latestCheckpointSeq, 0, 'no partial checkpoint is committed');
-  }
-
-  test('close bounds a stalled worktree download: it returns the handoff and releases the lease within its checkpoint budget', async () => {
-    await withE2bClose('stall', true, async ({ task, codeSessionId, handoff, fake }) => {
-      const budgetMs = 3_000;
-      const started = Date.now();
-      const closed = await withEnv(CLOSE_BUDGET_ENV, String(budgetMs), () =>
-        within(
-          budgetMs + 7_000,
-          'close with a stalled worktree download',
-          closeClaudeCodeSession(task.id, undefined, undefined, [], { reason: 'close' })
-        )
-      );
-      const elapsed = Date.now() - started;
-      assert.ok(elapsed < budgetMs + 7_000, `close took ${elapsed} ms`);
-      assert.equal(fake.calls.archiveReadTimeouts.length, 1, 'the archive download was attempted');
-      assert.ok(
-        fake.calls.archiveReadTimeouts[0] <= budgetMs,
-        `the archive download gets the remaining budget as its timeout, got ${fake.calls.archiveReadTimeouts[0]} ms`
-      );
-      assert.deepEqual(closed.handoff, { status: 'present', content: handoff });
-      assert.equal(closed.codeSession?.state, 'PAUSED');
-      await assertReleased(codeSessionId, fake);
-
-      const retried = await closeClaudeCodeSession(task.id, undefined, undefined, [], {
-        reason: 'close',
-      });
-      assert.deepEqual(retried.handoff, closed.handoff, 'a retried close returns the same handoff');
-      assert.deepEqual(retried.outputFiles, closed.outputFiles);
-      assert.equal(fake.calls.connects, 1, 'a retried close never reconnects the paused sandbox');
-    });
-  });
-
-  test('close refuses an over-cap worktree archive before downloading it, and a retried close returns the same handoff', async () => {
-    await withE2bClose(
-      'overcap',
-      false,
-      async ({ task, codeSessionId, workspace, handoff, fake }) => {
-        // Untracked and incompressible: it belongs in the archive, which outgrows the cap.
-        writeFileSync(join(workspace, 'scratch.bin'), randomBytes(3 * MIB));
-        const closed = await withCap(1 * MIB, () =>
-          within(
-            30_000,
-            'close with an over-cap archive',
-            closeClaudeCodeSession(task.id, undefined, undefined, [], { reason: 'close' })
-          )
-        );
-        assert.deepEqual(
-          fake.calls.archiveReadTimeouts,
-          [],
-          'an archive over the cap is never downloaded'
-        );
-        assert.deepEqual(closed.handoff, { status: 'present', content: handoff });
-        await assertReleased(codeSessionId, fake);
-
-        const retried = await closeClaudeCodeSession(task.id, undefined, undefined, [], {
-          reason: 'close',
-        });
-        assert.deepEqual(retried.handoff, { status: 'present', content: handoff });
-        assert.deepEqual(retried.outputFiles, closed.outputFiles);
-        assert.equal(retried.codeSession?.state, 'PAUSED');
-        assert.equal(fake.calls.connects, 1, 'a retried close never reconnects the paused sandbox');
-      }
-    );
-  });
-
-  // CodeRabbit PR #1803: a retried close with no saved result must fail loudly,
-  // never return an empty successful close that hides the lost handoff.
-  test('a retried close without a saved close result fails instead of returning an empty success', async () => {
-    await withE2bClose('norecord', false, async ({ task, codeSessionId, fake }) => {
-      await within(
-        30_000,
-        'first close',
-        closeClaudeCodeSession(task.id, undefined, undefined, [], { reason: 'close' })
-      );
-      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSessionId } });
-      await deleteCloseRecords({ id: row.id, userId: row.userId });
-      await assert.rejects(
-        closeClaudeCodeSession(task.id, undefined, undefined, [], { reason: 'close' }),
-        /already closed and its close result is unavailable/
-      );
-      assert.equal(fake.calls.connects, 1, 'a retried close never reconnects the paused sandbox');
     });
   });
 }

@@ -4,9 +4,9 @@ date: 2026-10-16
 title: Fleet proof signal fixture exited with parser errors before exact recovery
 surface: harness
 component: fleet-stability-cleanup
-classification: undetermined
-problem_class: observability-trace-capture-gap
-first_bad_boundary: The retained signal fixture observed its proof shell exit before the exact recovery command was called; the original first-signal delivery and parser state were not captured
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: scripts/run-fleet-infra-stability-proof recover_proof_slice parses a command substitution in the cancellation waiter while TERM can re-enter that parser
 symptoms:
   - "failed proof abandoned exact cleanup obligation"
   - "unexpected EOF while looking for matching"
@@ -16,11 +16,13 @@ tags:
   - signal
   - cleanup
 sources:
+  - PR #1770
+  - commit b544c29434ccbb5075952850b7701ffec14545c9
   - commit b5d81c3e240c1349439c99dab00c3ea77631e76c
   - task .context/deploy-runs/main705-b5d81c3e2-qualification-20261016/A-FAILURE-RECEIPT.json
   - task .context/test-runs/fleet-proof-test_signal_waits_for_owned_producer_before_recovery-97jeu3ju/fixture/output.log
 repro: python3 scripts/tests/fleet-stability-cleanup.test.py FleetFailureCleanup.test_signal_waits_for_owned_producer_before_recovery
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -36,6 +38,8 @@ The stage exited one; later native commands did not run. Earlier source-bound
 passing stages do not discharge this failure.
 
 ## Diagnosis
+
+### Original investigation — October 16, 2026
 
 The actual path is fixture readiness publication, SIGTERM to its unreaped proof
 Popen, outer forward_proof_cancellation, exact active waiter, tracked detached
@@ -67,7 +71,40 @@ matching cause and no bound is changed. Process feedback was read before any
 repair proposal. A causal recurrence is not established, so this open observation
 does not overwrite those earlier diagnoses.
 
+### Recurrence and causal capture — November 7, 2026
+
+PR #1770's isolated Blacksmith structural run 42411735341 reproduced the
+unchanged permanent FleetFailureCleanup.test_signal_waits_for_owned_producer_before_recovery:
+expected one recovery, received zero, with trap line 2 / process substitution
+line 548 reporting the same unexpected EOF. The owning scripts tree is
+identical between base 20f6e41f2 and failed b544c2943, establishing
+Gate: NOT_INTRODUCED for the duration repair; the incomplete aggregate remained
+blocking and was repaired in this deploy.
+
+An independent investigator reduced the failure to the actual
+recover_proof_slice body on Bash 5.2.21. A controlled native schedule delivered
+one TERM to the recovery waiter at expansion of its canonical
+cloudbench_process_group_state probe. Original code: trigger true,
+probe_in_waiter true, exit 2, exact unexpected EOF and no recovery. With the
+one-line pipeline candidate, the identical canonical-probe schedule still
+triggers and targets that same waiter; expansion occurs in the pipeline child,
+and recovery completes with exit 0. These observations close the earlier
+first-delivery/parser-boundary gap. They do not establish that every historical
+failure had the same receipt order.
+
+The optional full-native-fixture harness itself reported ChildProcessError on
+residual child accounting in both modes. It is NOT cited as a clean whole-test
+pass. A later instrumentation attempt was stopped by automatic security review;
+no further native instrumentation was performed. The ordinary unchanged full
+33-test fleet-stability-cleanup suite passes on the applied production fix
+(32.316 seconds). The original CI failure, focused causal fail/pass and ordinary
+whole-suite outcome are separate evidence. The existing permanent test already
+owns this exact cancellation/recovery boundary; its assertions and deadlines
+are unchanged and the deploy structural runner continues to execute it.
+
 ## Solution
+
+### Original investigation — October 16, 2026 (superseded below)
 
 No runtime or fixture repair is proposed. The RCA remains open. Preserve the
 original private fixture tree, output, calls, owner records, source hashes and
@@ -94,10 +131,29 @@ failure evidence; it denotes no live provider resource. The exact offline status
 container and both seed measurement databases were also absent. No broad cleanup,
 provider calls, environment writes or production actions occurred.
 
+### Implemented recurrence fix — November 7, 2026
+
+Replace the command-substitution string comparison in recover_proof_slice with
+`! cloudbench_process_group_state "$slice_pid" | grep -qx absent`.
+The canonical tri-state producer remains authoritative and pipefail remains
+active: only a successful `absent` observation authorizes recovery. This moves
+parsing of the probe out of the cancellation waiter's parser context without
+changing traps, child signal dispositions, cleanup counts, ownership checks,
+or deadlines. It removes a failure surface instead of adding retries or
+recovery state.
+
+The independent ordinary candidate suite passed all 33 tests (32.597 seconds),
+and the parent reran the unchanged complete suite on the applied source:
+`python3 scripts/tests/fleet-stability-cleanup.test.py`, all 33 PASS in
+32.316 seconds. Negative controls preserve failed_retained for live, unknown,
+empty observations and a producer that emits absent but exits nonzero; only
+absent with exit zero recovers. Golden reference: not applicable (ordinary
+operational cleanup code, no approval-gated hunk).
+
 ## Human feedback
 
 None recorded.
 
 ## Reusable lesson
 
-Capture first-signal delivery and the exact shell execution boundary before attributing a cancellation cleanup failure to parser timing or declaring it fixed.
+Keep cancellation waiters out of nested command-substitution parsing while retaining fail-closed canonical process-state checks.

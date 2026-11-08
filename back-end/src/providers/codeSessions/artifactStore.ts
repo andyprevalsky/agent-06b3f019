@@ -2,7 +2,6 @@
  * Object store for code-session checkpoints.
  *
  * Keys: user/<userId>/code-sessions/<codeSessionId>/<seq>/<artifact>
- *       user/<userId>/code-sessions/<codeSessionId>/close/<taskId>.json (close result)
  * Prod uses Supabase Storage via providers/storage. Hermetic tests set
  * CODE_SESSION_STORAGE_BACKEND=local (+ CODE_SESSION_STORAGE_LOCAL_DIR).
  */
@@ -29,16 +28,6 @@ export function checkpointKey(
   }
   if (!Number.isInteger(seq) || seq < 1) throw new Error(`Invalid checkpoint seq ${seq}`);
   return `user/${userId}/code-sessions/${codeSessionId}/${seq}/${artifact}`;
-}
-
-/** One task's close result (handoff + output files), returned again on a retried close. */
-export function closeRecordKey(userId: string, codeSessionId: string, taskId: string): string {
-  for (const segment of [userId, codeSessionId, taskId]) {
-    if (!SAFE_SEGMENT.test(segment) || segment === '.' || segment === '..') {
-      throw new Error(`Unsafe code-session storage segment: ${JSON.stringify(segment)}`);
-    }
-  }
-  return `user/${userId}/code-sessions/${codeSessionId}/close/${taskId}.json`;
 }
 
 function localPath(key: string): string {
