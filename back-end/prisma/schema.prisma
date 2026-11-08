@@ -685,6 +685,9 @@ model ClaudeCodeSession {
   sandboxId                String
   streamUrl                String?
   goal                     String
+  /// The spawn's task_name (spawn_agent type=code); the agents list shows it as
+  /// the code agent's title. Null for legacy rows and internal callers.
+  taskName                 String?
   status                   ClaudeCodeSessionStatus @default(ACTIVE)
   output                   String?
   createdAt                DateTime                @default(now())

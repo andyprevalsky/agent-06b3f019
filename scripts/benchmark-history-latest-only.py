@@ -33,6 +33,14 @@ ledgers byte-for-byte, replays the parked span rows through the normal
 segmented span append, marks the parked files applied, and runs the
 latest-only filter over the result. Rows an interrupted publish already
 appended are skipped, so replaying the same park twice is a no-op.
+
+Attempt and duration rows land in this branch's shard of each ledger
+(`task_attempts.<YYYYMMDD>.<branch>.jsonl`, see
+agents/benchmarks/history_ledger.py), never in the shared base files: GitHub's
+mergeability check ignores merge=union, so two PRs appending to one shared file
+conflict and force a main sync plus a full gate rerun. `--write` also moves any
+branch row found in a shared base file into the shard (restoring the base file
+to its base-ref rows), and `--check` fails while one remains.
 """
 from __future__ import annotations
 
@@ -55,6 +63,7 @@ SPANS = f"{SPAN_PREFIX}.jsonl"
 PARK_DIR = ".context/deploy-ledger-park"
 PARK_DIR_ENV = "BENCHMARK_HISTORY_PARK_DIR"
 SPAN_HISTORY_MODULE = Path("agents/benchmarks/span_history.py")
+HISTORY_LEDGER_MODULE = Path("agents/benchmarks/history_ledger.py")
 # Span rows of the kept run can be stamped slightly before its attempt start.
 SPAN_SLACK = timedelta(seconds=60)
 
@@ -229,6 +238,29 @@ def select_dependents(
             ledger.keep[index] = False
 
 
+def _load_history_ledger(repo: Path):
+    """The ledger shard helper of ``repo`` (this script's copy when absent, as for spans)."""
+    source = repo / HISTORY_LEDGER_MODULE
+    if not source.is_file():
+        source = Path(__file__).resolve().parents[1] / HISTORY_LEDGER_MODULE
+    spec = importlib.util.spec_from_file_location("benchmark_history_ledger", source)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _shard_rel(repo: Path, name: str) -> str:
+    """This branch's shard of the canonical ledger ``name``, relative to ``repo``."""
+    shard = _load_history_ledger(repo).shard_path(str(repo / HISTORY_DIR / name))
+    return str(Path(shard).relative_to(repo))
+
+
+def _ledger_name(repo: Path, rel: str) -> str | None:
+    """ATTEMPTS / DURATIONS for a base file or one of its shards, else None."""
+    return _load_history_ledger(repo).ledger_of(Path(rel).name)
+
+
 def _load_span_history(repo: Path):
     """The span ledger writer, bound to ``repo``'s tracked history directory.
 
@@ -272,7 +304,7 @@ def _published_rows(repo: Path, base: str) -> set[bytes]:
     published: set[bytes] = set()
     for rel in _changed_ledgers(repo, base):
         name = Path(rel).name
-        if name in (ATTEMPTS, DURATIONS) or name.startswith(SPAN_PREFIX):
+        if _ledger_name(repo, rel) or name.startswith(SPAN_PREFIX):
             published.update(line for line in (repo / rel).read_bytes().splitlines() if line.strip())
     return published
 
@@ -305,42 +337,113 @@ def apply_parked(repo: Path, park: Path, base: str) -> dict[str, int]:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for name, lines in parked.items():
         fresh = [line for line in lines if line not in published]
+        target = f"{HISTORY_DIR}/{name}"
         if name == SPANS:
             rows = [_row(line) for line in fresh]
             written = _load_span_history(repo).record_span_observations(rows) if rows else 0
             if written != len(rows):
                 raise RuntimeError(f"{park / name}: applied {written} of {len(rows)} parked span rows")
-        elif fresh:
-            with (history / name).open("ab") as handle:
-                handle.write(b"".join(line + b"\n" for line in fresh))
+        else:
+            # Attempts/durations go to this branch's own shard, never the shared base file.
+            target = _shard_rel(repo, name)
+            if fresh:
+                with (repo / target).open("ab") as handle:
+                    handle.write(b"".join(line + b"\n" for line in fresh))
         applied[name] = len(fresh)
         (park / name).rename(park / f"{name}.applied-{stamp}")
         skipped = len(lines) - len(fresh)
         note = f" ({skipped} already applied by an interrupted publish)" if skipped else ""
-        print(f"{HISTORY_DIR}/{name}: applied {len(fresh)} parked row(s) from {park}{note}")
+        print(f"{target}: applied {len(fresh)} parked row(s) from {park}{note}")
     return applied
 
 
+def _combined(ledgers: list[Ledger]) -> Ledger:
+    """One ledger's base file and shards as a single sequence (a lone file is used as is)."""
+    if len(ledgers) == 1:
+        return ledgers[0]
+    return Ledger(Path(), [line for ledger in ledgers for line in ledger.lines],
+                  [flag for ledger in ledgers for flag in ledger.branch])
+
+
+def _split_keep(combined: Ledger, ledgers: list[Ledger]) -> None:
+    """Hand the combined keep flags back to the base file and each shard."""
+    if len(ledgers) == 1:
+        return
+    offset = 0
+    for ledger in ledgers:
+        ledger.keep = combined.keep[offset:offset + len(ledger.lines)]
+        offset += len(ledger.lines)
+
+
+def _move_to_shards(repo: Path, ledgers: dict[str, Ledger], write: bool) -> int:
+    """Move kept branch rows out of the shared base files into this branch's shards.
+
+    The base file returns to exactly its base-ref rows, so the PR does not
+    modify a path main also appends to. Rows are moved byte-for-byte; a row an
+    interrupted move already wrote to the shard is not written twice."""
+    moved_total = 0
+    for name in (ATTEMPTS, DURATIONS):
+        rel = f"{HISTORY_DIR}/{name}"
+        ledger = ledgers.get(rel)
+        if ledger is None:
+            continue
+        moving = [line for line, keep, branch in zip(ledger.lines, ledger.keep, ledger.branch) if keep and branch]
+        if not moving:
+            continue
+        moved_total += len(moving)
+        shard_rel = _shard_rel(repo, name)
+        print(f"{rel}: move {len(moving)} branch row(s) to {shard_rel}")
+        if not write:
+            continue
+        shard_path = repo / shard_rel
+        shard = ledgers.get(shard_rel)
+        existing = ([line for line, keep in zip(shard.lines, shard.keep) if keep] if shard is not None
+                    else shard_path.read_bytes().splitlines() if shard_path.is_file() else [])
+        present = set(existing)
+        lines = existing + [line for line in moving if line not in present]
+        shard_path.write_bytes(b"".join(line + b"\n" for line in lines))
+        if shard is not None:
+            shard.lines, shard.keep = lines, [True] * len(lines)
+            shard.branch = [True] * len(lines)
+        else:
+            ledgers[shard_rel] = Ledger(shard_path, lines, [True] * len(lines))
+        ledger.keep = [keep and not branch for keep, branch in zip(ledger.keep, ledger.branch)]
+        ledger.path.write_bytes(b"".join(line + b"\n" for line, keep in zip(ledger.lines, ledger.keep) if keep))
+        ledger.lines = [line for line, keep in zip(ledger.lines, ledger.keep) if keep]
+        ledger.branch = [False] * len(ledger.lines)
+        ledger.keep = [True] * len(ledger.lines)
+    return moved_total
+
+
 def run(repo: Path, base: str, write: bool, qualify: dict[str, int] | None = None) -> tuple[int, list[str]]:
-    """(superseded rows found, unmet qualifications). Nothing is written while one is unmet."""
+    """(superseded rows found plus branch rows still in a shared base file, unmet qualifications).
+
+    The attempts ledger is its base file plus per-writer shards, filtered as one
+    sequence. Nothing is written while a qualification is unmet."""
     rels = _changed_ledgers(repo, base)
     ledgers = {rel: _load(repo, base, rel) for rel in rels}
-    attempts = ledgers.get(f"{HISTORY_DIR}/{ATTEMPTS}")
-    if attempts is None:
-        print(f"no branch rows in {HISTORY_DIR}/{ATTEMPTS} relative to {base}")
-        return 0, [f"{task}: no branch rows, qualification needs {n}" for task, n in (qualify or {}).items()]
-    protected, problems = qualified_attempts(attempts, qualify or {})
-    for problem in problems:
-        print(f"qualification not met: {problem}")
-    if problems:
-        write = False
-    kept_ids, dropped_ids, kept_start = select_attempts(attempts, protected)
-    for rel, ledger in ledgers.items():
-        name = Path(rel).name
-        if name == DURATIONS:
-            select_dependents(ledger, "task", kept_ids, dropped_ids, kept_start, timedelta(0))
-        elif name.startswith(SPAN_PREFIX):
-            select_dependents(ledger, "benchmark", kept_ids, dropped_ids, kept_start, SPAN_SLACK)
+    attempts = [ledger for rel, ledger in ledgers.items() if _ledger_name(repo, rel) == ATTEMPTS]
+    if attempts:
+        combined = _combined(attempts)
+        protected, problems = qualified_attempts(combined, qualify or {})
+        for problem in problems:
+            print(f"qualification not met: {problem}")
+        if problems:
+            write = False
+        kept_ids, dropped_ids, kept_start = select_attempts(combined, protected)
+        _split_keep(combined, attempts)
+        for rel, ledger in ledgers.items():
+            name = Path(rel).name
+            if _ledger_name(repo, rel) == DURATIONS:
+                select_dependents(ledger, "task", kept_ids, dropped_ids, kept_start, timedelta(0))
+            elif name.startswith(SPAN_PREFIX):
+                select_dependents(ledger, "benchmark", kept_ids, dropped_ids, kept_start, SPAN_SLACK)
+    else:
+        print(f"no branch rows in {HISTORY_DIR}/{ATTEMPTS} or its shards relative to {base}")
+        problems = [f"{task}: no branch rows, qualification needs {n}" for task, n in (qualify or {}).items()]
+        if problems:
+            return 0, problems
+        # Nothing to filter; a duration row left in the shared base file still moves to the shard.
     dropped_total = 0
     for rel, ledger in ledgers.items():
         dropped = ledger.keep.count(False)
@@ -356,11 +459,14 @@ def run(repo: Path, base: str, write: bool, qualify: dict[str, int] | None = Non
                 ledger.path.unlink()
             else:
                 ledger.path.write_bytes(b"".join(line + b"\n" for line in kept))
-    if dropped_total == 0:
-        print(f"benchmark history holds only each task's most recent branch run (base {base})")
+            ledger.lines, ledger.branch = kept, [b for b, k in zip(ledger.branch, ledger.keep) if k]
+            ledger.keep = [True] * len(kept)
+    moved = _move_to_shards(repo, ledgers, write)
+    if dropped_total == 0 and moved == 0:
+        print(f"benchmark history holds only each task's most recent branch run, in branch shards (base {base})")
     elif write:
-        print(f"removed {dropped_total} superseded branch rows")
-    return dropped_total, problems
+        print(f"removed {dropped_total} superseded branch rows; moved {moved} to branch shards")
+    return dropped_total + moved, problems
 
 
 def main(argv: list[str] | None = None) -> int:

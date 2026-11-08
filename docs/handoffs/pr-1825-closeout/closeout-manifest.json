@@ -1,0 +1,33 @@
+{
+ "format": "PR-CLOSEOUT-V1",
+ "pr": 1825,
+ "merged_sha": "43834c974dc87f909af93e00a3c41b3e29707dd5",
+ "gated_source": "4da368676f8fd98cbed14bfb082538792ddb1914",
+ "source_digest": "99b6eb4e532ab5f959b2bfdba92a36b2e6cb89706c53606a789951b8912ff589",
+ "purpose": "repair of smoke/agent-payment-idempotent-abandonment (PR #1775 deploy, agent 2c6b3ffd): a throttled-then-token-rejected AgentCard card read killed the second browser task",
+ "assigned_test": "smoke/agent-payment-idempotent-abandonment PASS on the final source in two real cloud campaigns (deploy-0b7dac74, deploy-bb319fda)",
+ "outcome": "completed with recorded production deviation: Render cancelled the exact-SHA deploy of 43834c974 when PR #1813 merged 3 minutes later; d9bf32b32 went live containing it, so the exact-SHA Render lane stays FAIL. AgentCard production lane: recorded external-provider exception (credential or billing change only the user can make)",
+ "gates": "16/16 PASS on 4da368676 after runner setup failures from a GitHub release-download outage; smoke 12/12 PASS final, with agent-payment-abandonment release-stall resource_skip and test-mass-agent-run-0 + background-agent-message-smoke NOT_INTRODUCED post-merge handoffs",
+ "review": "CodeRabbit usage cap refused every head (skip --reason usage-cap on 4da368676; merged unreviewed by CodeRabbit); two independent adversarial reviews by fresh agents, findings applied",
+ "production": {
+  "render_exact_sha": "FAIL: deploy dep-dbo6pccs728c739rnsqg canceled at 12:39:22Z, superseded by dep-dbo6qum8bjmc73ase7fg (d9bf32b32, live 12:47:17Z). 43834c974 is an ancestor of d9bf32b32 and org-runtime.ts is byte-identical. d9bf32b32 changed other backend files, so the source-equivalence gate correctly refuses it",
+  "backend_probes_on_live_d9bf32b32": "PASS, run directly by this deploy at 12:47Z: health 200, /api/agents 200, 15/15 prod-endpoint checks, 0 error matches in 100 Render log lines",
+  "semantic_on_d9bf32b32": "PASS, Actions run 42481877234, source_sha=d9bf32b32, run by the PR #1813 deploy; conclusion verified here via the GitHub API",
+  "render_on_d9bf32b32": "PASS, reported by the PR #1813 deploy; Render API confirms live",
+  "agentcard_production": "FAIL, external exception: run 25ab0ebd on d9bf32b32, payment_lifecycle.stripeHold.livemode must be true for a production lifecycle; prod payer fixture is Stripe test mode; agent b52e6f50-8ef1-48ee-baf8-218ebf1ad75a; live org transfer owt_8c2ddb2e54e7320b62722728 100 cents transferred, 0 released"
+ },
+ "delegated": {
+  "smoke/test-mass-agent-run-0": "https://boxes.dev/thread/thr_746a0f79bb51457c9c2f10703aa4df1a",
+  "smoke/background-agent-message-smoke": "https://boxes.dev/thread/thr_9cb17085b5a54c84b56e86b6ba1e1892"
+ },
+ "followups": [
+  "Render lane has no supported path when a later merge cancels the exact-SHA deploy and changes other backend files; the deploy tool correctly reports FAIL and it needs a defined rule",
+  "Blacksmith gate setup downloads flyctl, cloudflared and setup-uv from GitHub releases on every run with short retries; a roughly 60-minute GitHub release-download outage (10:08Z to at least 11:08Z) failed three gate rounds plus three jobs of a fourth in runner setup",
+  "AgentCard production lifecycle needs a KYC-passed live cardholder payer fixture from the user; open live org transfer owt_8c2ddb2e54e7320b62722728 (100 cents transferred, 0 released)",
+  "AgentCard sandbox release stall recurring on smoke agent-payment-abandonment (4396 cents transferred, 0 released)"
+ ],
+ "evidence": {
+  "archives": "archive-receipts.json (core and cloud) under devbox-closeout-private/pr1825-43834c97/",
+  "restore": "agents/venv/bin/python docs/handoffs/pr-1825-closeout/closeout_archive.py --env back-end/.env restore --receipt <receipt> --destination <dir>"
+ }
+}

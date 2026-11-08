@@ -136,3 +136,24 @@ html.dark .rose-dark-glass .liquid-white-icon {
   fill: #fbfbf9 !important;
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
 }
+
+/* Code-agent view: the awake container's dot fades slowly (CodeContainerStatus). */
+@keyframes code-container-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.code-container-blink {
+  animation: code-container-blink 3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-container-blink {
+    animation: none;
+  }
+}

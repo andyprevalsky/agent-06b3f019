@@ -38,7 +38,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Prisma } from '@prisma/client';
 import ts from 'typescript';
-import { syncUserRecord } from '../../../scripts/seed-local-helpers';
+import { connectThenOpen, syncUserRecord } from '../../../scripts/seed-local-helpers';
 import {
   CREDENTIAL_TABLE_SYNC_ATTEMPTS,
   syncRequiredCredentialTable,
@@ -151,9 +151,9 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
   const functions = ast.statements.filter(
     (node) =>
       ts.isFunctionDeclaration(node) &&
-      ['ensureSeedUserExists', 'sync'].includes(node.name?.text ?? '')
+      ['openLocalClient', 'ensureSeedUserExists', 'sync'].includes(node.name?.text ?? '')
   );
-  if (functions.length !== 2) throw new Error('seed orchestration functions not found');
+  if (functions.length !== 3) throw new Error('seed orchestration functions not found');
   const executable = ts.transpileModule(functions.map((node) => node.getText(ast)).join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText;
@@ -196,6 +196,22 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
         throw new Prisma.PrismaClientInitializationError('Authentication failed', '5.20.0');
       }
     };
+    const localClient = {
+      user: {
+        upsert: async ({
+          where,
+          create,
+          update,
+        }: {
+          where: { userId: string };
+          create: { id: string; userId: string };
+          update: { userId: string };
+        }) => {
+          if (where.userId !== userId) throw new Error('foreign local identity write');
+          users.set(userId, { ...(users.get(userId) ?? create), ...update });
+        },
+      },
+    };
     const bindings = {
       console: { log: () => {} },
       process: { env: { DATABASE_URL: 'postgresql://localhost/seed-fixture' } },
@@ -207,6 +223,8 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
       CREDENTIALS_ONLY: true,
       EMAIL_CREDENTIALS_ONLY: false,
       remote: {
+        // Admission is exercised by the identity read below; connecting adds no request.
+        $connect: async () => {},
         $queryRaw: admit,
         user: {
           findUnique: async ({ where }: { where: { userId: string } }) => {
@@ -219,22 +237,14 @@ async function case5InitialAdmissionHasAnOwner(): Promise<void> {
           },
         },
       },
-      local: {
-        user: {
-          upsert: async ({
-            where,
-            create,
-            update,
-          }: {
-            where: { userId: string };
-            create: { id: string; userId: string };
-            update: { userId: string };
-          }) => {
-            if (where.userId !== userId) throw new Error('foreign local identity write');
-            users.set(userId, { ...(users.get(userId) ?? create), ...update });
-          },
-        },
+      LOCAL_URL: 'postgresql://localhost/seed-fixture',
+      localOpened: false,
+      local: undefined as unknown,
+      // The real openLocalClient: connectThenOpen(remote, () => new PrismaClient(...)).
+      PrismaClient: function PrismaClient() {
+        return localClient;
       },
+      connectThenOpen,
       syncUserRecord,
       syncRequiredCredentialTable: <T>(name: string, operation: () => Promise<T>) =>
         syncRequiredCredentialTable(name, operation, { sleep: noSleep }),

@@ -30,6 +30,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+try:
+    from benchmarks import history_ledger
+except ImportError:  # loaded by file path: run as a script, or through importlib by a tool
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "benchmark_history_ledger", Path(__file__).resolve().with_name("history_ledger.py")
+    )
+    assert _spec and _spec.loader
+    history_ledger = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(history_ledger)
+
 DEFAULT_CAP = 20
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "tasks.json"
 DEFAULT_ATTEMPTS = Path(__file__).resolve().parent / "history" / "task_attempts.jsonl"
@@ -415,32 +427,30 @@ def counts_for_deploy_eligibility(entry: dict[str, Any]) -> bool:
 def load_attempt_passes(attempts_file: Path) -> dict[str, list[bool]]:
     """Return chronological pass/fail lists keyed by task name.
 
-    Reads `history/task_attempts.jsonl` (append-only). Entries are ordered by
-    file order, then by timestamp when present so out-of-order appends still
-    yield a stable recent window. Rows that do not count for deploy eligibility
-    (predeploy / active-worktree) are omitted.
+    Reads `history/task_attempts.jsonl` plus its per-writer shards (append-only,
+    see history_ledger.py). Entries are ordered by reader order, then by
+    timestamp when present so out-of-order appends still yield a stable recent
+    window. Rows that do not count for deploy eligibility (predeploy /
+    active-worktree) are omitted.
     """
-    if not attempts_file.exists():
-        return {}
     rows: list[tuple[str, bool, str]] = []
-    with attempts_file.open() as handle:
-        for index, raw_line in enumerate(handle):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not counts_for_deploy_eligibility(entry):
-                continue
-            task = entry.get("task")
-            if not isinstance(task, str) or not task:
-                continue
-            passed = bool(entry.get("passed"))
-            timestamp = str(entry.get("timestamp") or "")
-            # Stable tie-break on file order when timestamps collide/missing.
-            rows.append((task, passed, f"{timestamp}:{index:08d}"))
+    for index, raw_line in enumerate(history_ledger.read_lines(attempts_file)):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not counts_for_deploy_eligibility(entry):
+            continue
+        task = entry.get("task")
+        if not isinstance(task, str) or not task:
+            continue
+        passed = bool(entry.get("passed"))
+        timestamp = str(entry.get("timestamp") or "")
+        # Stable tie-break on reader order when timestamps collide/missing.
+        rows.append((task, passed, f"{timestamp}:{index:08d}"))
     rows.sort(key=lambda row: (row[0], row[2]))
     passes: dict[str, list[bool]] = {}
     for task, passed, _timestamp in rows:

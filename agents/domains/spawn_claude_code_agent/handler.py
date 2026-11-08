@@ -363,6 +363,13 @@ def _user_pause_message(metadata: Dict[str, Any]) -> str:
     )
 
 
+def _note_code_provider(workflow_instance: Any, tool_call_id: str, code_provider: Any) -> None:
+    """Keep the CLI on the spawn's background record (wait_for names it 'code:<provider>')."""
+    note = getattr(workflow_instance, "_note_background_code_provider", None)
+    if callable(note):
+        note(tool_call_id, code_provider)
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -410,12 +417,23 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         if tool_call.get("_fresh_conversation") is True:
             # continue_conversation=false resume: same session and sandbox, new CLI conversation.
             code_session_request = {**(code_session_request or {}), "fresh_conversation": True}
+        task_name = tool_call.get("task_name")
+        if isinstance(task_name, str) and task_name:
+            # Rides in the request dict so the activity's positional arguments are unchanged.
+            code_session_request = {**(code_session_request or {}), "task_name": task_name}
+        resume_cli_settings = tool_call.get("_resume_cli_settings")
+        if isinstance(resume_cli_settings, dict) and resume_cli_settings:
+            # The model / effort / speed the person picked on the turn that resumes it.
+            code_session_request = {**(code_session_request or {}), "cli_settings": dict(resume_cli_settings)}
         requested_target = normalize_code_target(tool_call.get("target"))
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
         # Resolve requested attachments from workflow context
         attachments = _resolve_attachments(workflow_instance, requested_attachments, agent_id)
+        # Files the owner attached to the typed turn that resumes this code agent
+        # (backend directChatResume.ts; set only by a user resume, never by the model).
+        attachments += [item for item in tool_call.get("_user_attachments") or [] if isinstance(item, dict)]
 
         # A previous generation parked this exact tool call across a deploy
         # (continue_as_new) while its sandbox kept running. The chip is still
@@ -488,6 +506,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 )
                 return
 
+        if isinstance(task_name, str) and task_name:
+            # metadata.code_agent.title: the code-agent view's header when opened without one.
+            target_info["title"] = task_name
         if code_session is None:
             local_device_name = target_info.get("device_name")
             yield ToolEvent(
@@ -542,7 +563,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if code_session is not None and code_session.get("code_provider"):
                 code_provider = code_session["code_provider"]
             else:
-                default_code_provider = _select_code_provider(workflow_instance, gpt_token)
+                # A user resume keeps the stopped session's CLI so its conversation continues.
+                resume_provider = tool_call.get("_resume_code_provider")
+                default_code_provider = (
+                    resume_provider
+                    if resume_provider in ("claude", "codex")
+                    else _select_code_provider(workflow_instance, gpt_token)
+                )
                 code_provider = await workflow.execute_activity(
                     resolve_code_agent_provider_activity,
                     args=[default_code_provider],
@@ -555,6 +582,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 code_provider=code_provider,
                 compute_token_provider=getattr(workflow_instance, "compute_token_provider", None),
             )
+            _note_code_provider(workflow_instance, tool_call_id, code_provider)
 
             async with span(
                 "claude_code_activity_wait",
@@ -777,6 +805,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             tool_usage = _workflow_tool_usage(result)
 
             code_provider = result.get("code_provider") or code_provider
+            # A usage-limit provider switch inside the activity updates the record.
+            _note_code_provider(workflow_instance, tool_call_id, code_provider)
             success = result.get("success") is True
             output_files = result.get("output_files", [])
             paused = result.get("status") == CODE_AGENT_PAUSED_STATUS

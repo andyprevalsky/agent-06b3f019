@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 import uuid as uuid_module
 from typing import Any, Optional
 
@@ -14,6 +16,9 @@ from config import load_config
 from domains.spawn_claude_code_agent.config import (
     CODE_SESSION_CREATE_HEARTBEAT_S,
     CODE_SESSION_CREATE_TIMEOUT_S,
+    CODE_SESSION_HELD_BACKOFF_S,
+    CODE_SESSION_HELD_CODE,
+    CODE_SESSION_HELD_WAIT_S,
     CODE_SESSION_RESIZE_ATTEMPTS,
     CODE_SESSION_RESIZE_RETRY_BACKOFF_S,
     CODE_SESSION_RESIZE_TIMEOUT_S,
@@ -269,6 +274,50 @@ async def _post_with_heartbeats(request: Any, message: str) -> httpx.Response:
             pending.cancel()
 
 
+def _is_held_response(response: httpx.Response) -> bool:
+    return response.status_code == 409 and _json_or_empty(response).get("code") == CODE_SESSION_HELD_CODE
+
+
+async def _create_waiting_out_direct_hold(post: Any, agent_id: str) -> httpx.Response:
+    """POST the create; while the backend answers CODE_SESSION_HELD, wait for the hand back and repost.
+
+    The live CLI's user is chatting with it directly and its ws-server cannot hold an attaching spawn, so
+    the backend refuses without touching that CLI. No task row or session is created (the backend releases
+    the lease), so a repost is the same create and the tool call's lease keeps it one spawn; each attempt
+    only re-stages the sandbox's files idempotently. The wait heartbeats and backs off (capped, with
+    +/-20% jitter so spawns held at the same moment don't repost in lockstep) for up to
+    CODE_SESSION_HELD_WAIT_S, which covers the ws-server's 10-minute idle release; past it the spawn fails
+    non-retryably with the true reason.
+    """
+    started = time.monotonic()
+    delay, max_delay = CODE_SESSION_HELD_BACKOFF_S
+    response = await post()
+    while _is_held_response(response):
+        waited = time.monotonic() - started
+        if waited >= CODE_SESSION_HELD_WAIT_S:
+            raise ApplicationError(
+                "The code agent's session is still held: the user is still chatting with it directly; "
+                "spawn it again after they hand it back.",
+                type=CODE_SESSION_HELD_CODE,
+                non_retryable=True,
+            )
+        logger.info(
+            "[ClaudeCode] Code session held by the user's direct chat; waiting for the hand back",
+            agent_id=agent_id,
+            waited_s=round(waited, 1),
+            retry_in_s=delay,
+        )
+        remaining = delay * random.uniform(0.8, 1.2)
+        while remaining > 0:
+            safe_heartbeat("Waiting for the user to hand the code agent back")
+            step = min(remaining, 5.0)
+            await asyncio.sleep(step)
+            remaining -= step
+        delay = min(delay * 2, max_delay)
+        response = await post()
+    return response
+
+
 async def create_e2b_session(
     agent_id: str,
     goal: str,
@@ -282,6 +331,8 @@ async def create_e2b_session(
     target: str = "cloud",
     local_device_id: Optional[str] = None,
     fresh_conversation: bool = False,
+    task_name: Optional[str] = None,
+    cli_settings: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
@@ -307,6 +358,12 @@ async def create_e2b_session(
     }
     if attachments:
         create_payload["attachments"] = attachments
+    if task_name:
+        # The agents list shows the spawn's task_name as the code agent's title.
+        create_payload["task_name"] = task_name[:200]
+    if cli_settings:
+        # A resuming turn's model / effort / speed (backend cliSettingsEnvOverrides).
+        create_payload["cli_settings"] = cli_settings
     if github_repo_url and target != "local":
         create_payload["github_repo_url"] = github_repo_url
     if target == "local":
@@ -323,17 +380,21 @@ async def create_e2b_session(
             create_payload["fresh_conversation"] = True
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(CODE_SESSION_CREATE_TIMEOUT_S, connect=10.0)) as client:
-        response = await _post_with_heartbeats(
-            client.post(
-                f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
-                headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                },
-                json=create_payload,
-            ),
-            "Starting the code-agent sandbox",
-        )
+
+        async def post_create() -> httpx.Response:
+            return await _post_with_heartbeats(
+                client.post(
+                    f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
+                    headers={
+                        "x-api-key": config.backend.api_key or "",
+                        "Content-Type": "application/json",
+                    },
+                    json=create_payload,
+                ),
+                "Starting the code-agent sandbox",
+            )
+
+        response = await _create_waiting_out_direct_hold(post_create, agent_id)
 
         if response.status_code == 409 and target == "local":
             body = _json_or_empty(response)
@@ -367,10 +428,7 @@ async def create_e2b_session(
                 response_text=response_text,
             )
             detail = f": {response_text}" if response_text else ""
-            message = (
-                f"Failed to create code session (provider={code_provider}): "
-                f"HTTP {response.status_code}{detail}"
-            )
+            message = f"Failed to create code session (provider={code_provider}): HTTP {response.status_code}{detail}"
             upper = f"{message} {response_text}".upper()
             billing_markers = (
                 "MISSING PAYMENT METHOD",
@@ -396,6 +454,39 @@ async def create_e2b_session(
             raise Exception(message)
 
         return response.json()
+
+
+async def report_undelivered_code_turns(agent_id: str, task_id: str, turn_ids: list[str], reason: str) -> None:
+    """Tell the senders of agent turns this code session accepted but lost (``user_turn_undelivered``).
+
+    The backend notifies each sending Rose agent once per turn (idempotent on the original message key),
+    so a retry or a replayed event is safe. Best effort: a failure is logged, never raised into the monitor.
+    """
+    if not turn_ids:
+        return
+    config = load_config()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/code-turns-undelivered",
+                headers={"x-api-key": config.backend.api_key or ""},
+                json={"session_id": task_id, "turn_ids": turn_ids[:50], "reason": (reason or "rejected")[:100]},
+            )
+            response.raise_for_status()
+        logger.info(
+            "[ClaudeCode] Reported undelivered agent turns",
+            agent_id=agent_id,
+            task_id=task_id,
+            turns=len(turn_ids),
+            notified=_json_or_empty(response).get("notified"),
+        )
+    except Exception as e:
+        logger.warning(
+            "[ClaudeCode] Could not report undelivered agent turns",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=extract_error_message(e),
+        )
 
 
 async def persist_terminal_output(

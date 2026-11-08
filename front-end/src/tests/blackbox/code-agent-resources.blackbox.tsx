@@ -185,7 +185,7 @@ describe('code-agent sandbox resources', () => {
     }
   });
 
-  it('code-agent view top strip: the same bars and popover lines', () => {
+  it('code-agent view query box corner: the same bars and popover lines', () => {
     deliver(sample());
     renderWithProviders(
       createElement(
@@ -199,13 +199,16 @@ describe('code-agent sandbox resources', () => {
             title: '3-state speed button',
             status: 'ACTIVE',
           },
-          readOnlyMessage: 'read only',
+          readOnlyMessage: null,
         }),
       ),
       { roseDesktop: true },
     );
-    // The view has no header: the devbox usage sits in its top-right strip.
-    const header = screen.getByTestId('code-agent-view');
+    // The devbox usage sits at the query box's top-right corner, not over the transcript.
+    expect(
+      within(screen.getByTestId('code-agent-view')).queryByTestId('code-resources'),
+    ).toBeNull();
+    const header = screen.getByTestId('query-input-corner-status');
     expect(bars(header)).toEqual([
       ['cpu', '36', 'false'],
       ['memory', '69', 'false'],

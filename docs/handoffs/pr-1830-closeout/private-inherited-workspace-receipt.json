@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1830/inherited-workspace-state-v1.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "ae6bee1ba3db7b7fae57fca6754f8290b7899f90769a27a33517a1398fbe3e3b",
+  "gzip_sha256": "96fb46740551d245c9a9d647f0bbf6bf69df978a4fac8bc7e6f9f4d5c78af3c1",
+  "stored_bytes": 355026687,
+  "frames": 43,
+  "files": 85471,
+  "original_bytes": 1041169327,
+  "manifest_sha256": "7666299a9f0dce3d7671eb3c69debc7f98ef4b0a6a0a95e1ec7536027e76dc65",
+  "full_readback_verified": true
+}

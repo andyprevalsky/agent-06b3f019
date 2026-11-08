@@ -3011,10 +3011,14 @@ fi
 # Print the snapshot a peer published while this refresh request waited for the
 # app environment lock, when its proof covers the exact expected manifests and
 # passes the same complete-snapshot/epoch check the fleet applies afterwards.
-peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-epoch>
+# <request-mtime-ns> is a marker file's mtime taken when the request started, on
+# the state file's own filesystem: both times come from the same kernel clock.
+# (Comparing an mtime with `date +%s` let a peer's write just after a second
+# boundary read as one second older than the request, so it was not reused.)
+peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-mtime-ns>
     local since="$1" s_node="" s_py="" s_epoch="" s_snap="" written="" vol=""
     [ -f "$WARM_DEPS_STATE_FILE" ] || return 1
-    written="$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
+    written="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
     [ "${written:-0}" -ge "$since" ] || return 1
     read -r s_node s_py s_epoch s_snap < "$WARM_DEPS_STATE_FILE" || return 1
     [ "$s_node" = "$EXPECTED_NODE_FP" ] && [ "$s_py" = "$EXPECTED_PY_FP" ] && [ -n "$s_snap" ] || return 1
@@ -3050,6 +3054,62 @@ raise SystemExit(0 if any(proven(s) for s in records) else 1)
 }
 
 if [ "$MODE" = "refresh-deps" ]; then
+    # Per-dependency-set warm sources (`cloudbench-warm-<set>`, selected by the
+    # fleet with CLOUDBENCH_WARM_SOURCE_PER_DEPS=1) are shared by every devbox, and
+    # the per-host app-environment lock cannot see another devbox's refresh. Hold
+    # the set's Fly-native claim (scripts/cloudbench-warm-source.py: a lease-guarded
+    # compare-and-set on the base donor's metadata, renewed while this process
+    # lives, released on exit) for the whole maintenance transaction. Other sets
+    # use other claims, so they never wait on this one.
+    WARM_SOURCE_CLAIM_PID=""
+    acquire_warm_source_claim() {  # <set>
+        local set="$1" ready helper="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-warm-source.py"
+        ready="$(mktemp "${TMPDIR:-/tmp}/cloudbench-warm-claim.XXXXXX")" || return 1
+        rm -f "$ready"
+        python3 "$helper" --app "$APP" claim hold --set "$set" --owner "refresh-$(hostname | tr -c 'A-Za-z0-9.-' '-')-$$" \
+            --parent-pid "$$" --ready "$ready" --wait "${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-3600}" &
+        WARM_SOURCE_CLAIM_PID=$!
+        while [ ! -s "$ready" ]; do
+            if ! kill -0 "$WARM_SOURCE_CLAIM_PID" 2>/dev/null; then
+                wait "$WARM_SOURCE_CLAIM_PID" 2>/dev/null || true
+                WARM_SOURCE_CLAIM_PID=""
+                echo "❌ could not claim maintenance of warm source set $set across devboxes" >&2
+                return 1
+            fi
+            sleep 1
+        done
+        rm -f "$ready"
+        echo "🔒 holding the cross-devbox maintenance claim for warm source set $set"
+    }
+    release_warm_source_claim() {
+        [ -n "$WARM_SOURCE_CLAIM_PID" ] || return 0
+        kill -TERM "$WARM_SOURCE_CLAIM_PID" 2>/dev/null || true
+        wait "$WARM_SOURCE_CLAIM_PID" 2>/dev/null || true
+        WARM_SOURCE_CLAIM_PID=""
+    }
+    # Print the snapshot another devbox proved for these exact manifests on this
+    # set's warm source while this request waited, and record it as this checkout's
+    # receipt. The proof check is the fleet's own (cloudbench_warm_deps_state_from_inventory).
+    peer_devbox_proven_snapshot() {
+        local machines snapshots pair mid vol state temporary
+        [ -z "${REFRESH_PATCH_FILE:-}" ] || return 1  # a patched request refreshes its own tree
+        machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+        pair="$(printf '%s' "$machines" | MN="$MACHINE_NAME" python3 -c '
+import json, os, sys
+rows = [m for m in json.load(sys.stdin) or [] if m.get("name") == os.environ["MN"]]
+mounts = (rows[0].get("config") or {}).get("mounts") or [] if len(rows) == 1 else []
+if len(mounts) == 1 and rows[0].get("id"): print(rows[0]["id"], mounts[0].get("volume", ""))
+' 2>/dev/null)" || return 1
+        read -r mid vol <<< "$pair"
+        [ -n "$mid" ] && [ -n "$vol" ] || return 1
+        snapshots="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null)" || return 1
+        state="$(printf '{"machines":%s,"snapshots":%s}' "$machines" "$snapshots" \
+            | cloudbench_warm_deps_state_from_inventory "$APP" "$mid" "$vol" "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP")" || return 1
+        temporary="$WARM_DEPS_STATE_FILE.tmp.$$"
+        printf '%s\n' "$state" > "$temporary" && mv "$temporary" "$WARM_DEPS_STATE_FILE" || { rm -f "$temporary"; return 1; }
+        printf '%s\n' "${state##* }"
+    }
+
     if ! EXPECTED_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
         echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
         exit 1
@@ -3062,6 +3122,9 @@ if [ "$MODE" = "refresh-deps" ]; then
             park_warm_source "${mid:-$maintenance_mid}" || true
         fi
         release_app_environment_lock
+        # Released only after the donor is parked: the next devbox's
+        # maintenance must find it stopped.
+        release_warm_source_claim
         [ -z "$REFRESH_OWNED_PATCH" ] || rm -f "$REFRESH_OWNED_PATCH"
     }
     trap cleanup_refresh_deps EXIT
@@ -3100,7 +3163,13 @@ if [ "$MODE" = "refresh-deps" ]; then
     }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
-    REFRESH_REQUESTED_EPOCH="$(date +%s)"
+    # The request's start as a fresh marker's mtime (ns) beside the state file,
+    # so peer_refreshed_snapshot compares two times from the same kernel clock.
+    mkdir -p "$(dirname "$WARM_DEPS_STATE_FILE")"
+    REFRESH_REQUEST_MARKER="$(mktemp "$(dirname "$WARM_DEPS_STATE_FILE")/.refresh-request.XXXXXX")"
+    REFRESH_REQUESTED_EPOCH="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$REFRESH_REQUEST_MARKER")"
+    rm -f "$REFRESH_REQUEST_MARKER"
+    [ -n "$REFRESH_REQUESTED_EPOCH" ] || { echo "❌ could not stamp the refresh request" >&2; exit 1; }
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     acquire_app_environment_lock || exit 1
     # Concurrent controllers queue here for the same refresh. Once one finishes,
@@ -3108,6 +3177,13 @@ if [ "$MODE" = "refresh-deps" ]; then
     if PEER_SNAP="$(peer_refreshed_snapshot "$REFRESH_REQUESTED_EPOCH")"; then
         echo "✅ a peer refreshed these exact manifests while this request waited; reusing snapshot $PEER_SNAP"
         exit 0
+    fi
+    if [[ "$MACHINE_NAME" =~ ^cloudbench-warm-[0-9a-f]{12}$ ]]; then
+        acquire_warm_source_claim "${MACHINE_NAME#cloudbench-warm-}" || exit 1
+        if PEER_SNAP="$(peer_devbox_proven_snapshot)"; then
+            echo "✅ another devbox refreshed these exact manifests while this request waited; reusing snapshot $PEER_SNAP"
+            exit 0
+        fi
     fi
 
     mid="$(resolve_machine_id)"
@@ -4667,9 +4743,22 @@ confirm_guest_shutdown() {
     trap 'deferred_signal="${deferred_signal:-HUP}"' HUP
     trap 'deferred_signal="${deferred_signal:-INT}"' INT
     trap 'deferred_signal="${deferred_signal:-TERM}"' TERM
-    status_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
-        -X POST -H "Authorization: Bearer ${CLOUDBENCH_BARRIER_TOKEN:-}" \
-        "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
+    # A transport error (no HTTP answer through the shared relay) retries within the deadline: the
+    # relay itself allows 10 s to connect to the guest (cloudbench-shared-relay.py), so one 3 s try
+    # expired against a healthy guest and turned PR1784's passing agent-payment-test-shop into exit
+    # 125 (2026-11-08). /shutdown records one run-scoped request, so a repeat is idempotent; any HTTP
+    # answer ends the retries and keeps the 202/204/409 handling below unchanged.
+    local shutdown_attempt=0
+    while :; do
+        shutdown_attempt=$((shutdown_attempt + 1))
+        status_code="$(curl --noproxy '*' -sS --max-time "${CLOUDBENCH_GUEST_SHUTDOWN_REQUEST_SECONDS:-12}" \
+            -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${CLOUDBENCH_BARRIER_TOKEN:-}" \
+            "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
+        case "$status_code" in ''|000) ;; *) break ;; esac
+        [ "$shutdown_attempt" -lt 3 ] && [ "$SECONDS" -lt "$deadline" ] || break
+        echo "⚠️  guest shutdown request got no HTTP answer (attempt $shutdown_attempt/3); retrying" >&2
+        sleep 1
+    done
     case "$status_code" in
         # Only 202/204 mean the guest recorded the request and is stopping its
         # benchmark. Its status server also answers 409 when nothing was

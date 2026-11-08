@@ -195,7 +195,12 @@ async def send_message_to_agent(
         if not wake.get("woke"):
             result["wake_error"] = wake.get("reason")
     text = f"Message sent to {to}."
-    if result.get("queued") is True:
+    if result.get("queued") is True and result.get("queued_reason") == "direct_hold":
+        text = (
+            f"Message queued for {to}: the user is chatting with its code agent directly. It will receive "
+            "this as its next turn as soon as they hand it back, in the order you sent it; do not send it again."
+        )
+    elif result.get("queued") is True:
         text = (
             f"Message queued for {to}: its code agent is still starting. It will receive this as its next "
             "turn as soon as its CLI runs, in the order you sent it; do not send it again."

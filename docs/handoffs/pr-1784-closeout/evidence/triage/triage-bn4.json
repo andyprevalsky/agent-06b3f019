@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "f6887fd00dc24ac09c18c4c015d49a0b",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "60c129a2fce88eb2edd0881e5785ab0f51d76154",
+    "digest": "df6c0dba72ac72823b1f320e1da842c956b3cfe5223d4171cf84dcc2f86e04db"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "standing AgentCard sandbox release stall (closed card org transfer consumed, releasedCents=0); native row SKIPPED",
+   "evidence": "/var/tmp/rose-base-measure/.context/deploy-cloud/2a619ce4141407b082627f897ff30bc1f86b5114737a4719a7cd2aceee3def92/runs/20261108-053705-436908/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "b8da460760b8dae5aa99b523c482ea9f909f826f0b13d963ed1a803fa3191d4e",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_630ed6799696f9d997490484\", \"cardId\": \"card_61ab4de12f46df6ac19c4c49\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 4e2ad1e0-1452-44f3-9de9-e1611136fb80 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard sandbox (org transfer release)",
+    "evidence": "/var/tmp/rose-base-measure/.context/deploy-cloud/2a619ce4141407b082627f897ff30bc1f86b5114737a4719a7cd2aceee3def92/runs/20261108-053705-436908/agent-payment-abandonment/cloudbench-run.json",
+    "confirmed_at": 1794117946.8367734
+   }
+  }
+ ]
+}

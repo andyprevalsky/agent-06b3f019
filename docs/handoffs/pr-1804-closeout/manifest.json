@@ -1,6 +1,15 @@
 {
  ".cloud-env": "regenerated per instance by scripts/cloud-build.sh (ports, boot id); not portable, not a record",
  ".context/": {
+  "also_in": [
+   {
+    "archive": "devbox-closeout-private/pr1804-closeout-addendum/",
+    "archive_sha256": "c3b8ac9112d99d253ac16dd74be230cd76892bf95d4614904a0a5920f192acc4",
+    "label": "addendum",
+    "note": "files written after the core archive by the 3 local full-registry reliability runs (campaign-grouping-control-3681053/-3919652/-4158374 fixture outputs, deploy-durations, deploy-structural, sharded-runs) plus /var/tmp/rca-foreign-uid/rel (standalone Blacksmith reliability run requests, results and job logs)",
+    "sha256": "711091da7f2cf04c1bbf86050ec7904186b5b3f8dfbfd2244155b6ae0633eaa6"
+   }
+  ],
   "archive": "devbox-closeout-private/pr1804-closeout-final-core/",
   "archive_sha256": "5d31e0f602c5862b2a9914e844d3604d69ba9dd076d642ea26ae0d7475cc0f3c",
   "disposition": "archived",

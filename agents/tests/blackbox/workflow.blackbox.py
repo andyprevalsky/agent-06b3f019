@@ -4365,18 +4365,26 @@ class _FakeWorkflowModule:
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
-    """Swap workflows.agent_workflow.workflow with a fake; returns original."""
+    """Swap the ``workflow`` module AgentWorkflow's code uses with a fake; returns original.
+
+    Its billing path lives in workflows.usage_tracking (UsageTrackingMixin), so that
+    module's ``workflow`` is swapped with agent_workflow's.
+    """
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     original = m.workflow
     m.workflow = fake
+    usage.workflow = fake
     return original
 
 
 def _restore_workflow(original):
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     m.workflow = original
+    usage.workflow = original
 
 
 async def test_pause_episode_preserves_user_intent_across_automatic_signals():

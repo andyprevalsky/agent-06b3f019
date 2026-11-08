@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "sha": "617bb467fd75e3770d686e17aab9e519bded0f37",
+  "pr": 1784,
+  "status": "FAIL",
+  "started_at": "2026-11-08T20:42:30Z",
+  "finished_at": "2026-11-08T21:02:21Z",
+  "changed_files": 69,
+  "selected": [
+    "render",
+    "fly",
+    "vercel",
+    "mac-release",
+    "wmh",
+    "backend-probes",
+    "workflow-migration",
+    "agentcard",
+    "semantic"
+  ],
+  "lanes": {
+    "render": {
+      "status": "PASS",
+      "reason": "Render serves the merged backend (live)",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T20:42:30Z",
+      "finished_at": "2026-11-08T20:49:55Z",
+      "exit_code": 0,
+      "command": "/var/tmp/rose-base-measure/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-render --merged-sha 617bb467fd75e3770d686e17aab9e519bded0f37 --state-dir /var/tmp/rose-base-measure/.context/deploy-pipeline",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/render.log"
+    },
+    "fly": {
+      "status": "PASS",
+      "reason": "deploy-agents run 42521463072 attempt 1 job 603a1c0f03279af17b62549222dcfb5fa1cf6384131e624158bc5f7707b22a5b SUCCEEDED + monitor --verify",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T20:42:30Z",
+      "finished_at": "2026-11-08T20:54:22Z",
+      "exit_code": 0,
+      "command": "/var/tmp/rose-base-measure/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha 617bb467fd75e3770d686e17aab9e519bded0f37 --state-dir /var/tmp/rose-base-measure/.context/deploy-pipeline",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/fly.log"
+    },
+    "vercel": {
+      "status": "PASS",
+      "reason": "Vercel deployment 7641597415 success",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T20:42:30Z",
+      "finished_at": "2026-11-08T20:47:18Z",
+      "exit_code": 0,
+      "command": "/opt/devbox-tools/gh/current/bin/gh api repos/{owner}/{repo}/deployments?sha=617bb467fd75e3770d686e17aab9e519bded0f37 (vercel[bot]) + statuses",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/vercel.log"
+    },
+    "mac-release": {
+      "status": "PASS",
+      "reason": "release-mac-app run 42521496492 success",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T20:42:30Z",
+      "finished_at": "2026-11-08T20:50:01Z",
+      "exit_code": 0,
+      "command": "/opt/devbox-tools/gh/current/bin/gh run list --workflow release-mac-app.yml --limit 30 (headSha=617bb467fd75e3770d686e17aab9e519bded0f37, created>=2026-11-08T20:42:08Z) && /opt/devbox-tools/gh/current/bin/gh run watch 42521496492 --exit-status",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/mac-release.log"
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "backend-probes": {
+      "status": "PASS",
+      "reason": "/health + /api/agents 200, endpoint smoke passed, Render log clean",
+      "applicable": true,
+      "depends_on": [
+        "render"
+      ],
+      "started_at": "2026-11-08T20:49:55Z",
+      "finished_at": "2026-11-08T20:50:13Z",
+      "exit_code": 0,
+      "command": "GET https://navi-j9a9.onrender.com/health && GET https://navi-j9a9.onrender.com/api/agents (X-API-Key=$BACKEND_API_KEY, X-User-Id=1f85ff25-6e29-4c1b-8739-f917bd101a30) && cd back-end && env -u SMOKE_BASE_URL -u SMOKE_HEALTH_URL -u SMOKE_FRONTEND_URL npx tsx scripts/prod-endpoint-smoke.ts && GET https://api.render.com/v1/logs?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=100&direction=backward",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/backend-probes.log"
+    },
+    "workflow-migration": {
+      "status": "PASS",
+      "reason": "every migration row PASS",
+      "applicable": true,
+      "depends_on": [
+        "fly"
+      ],
+      "started_at": "2026-11-08T20:54:22Z",
+      "finished_at": "2026-11-08T20:59:43Z",
+      "exit_code": 0,
+      "command": "cd back-end && PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 TEMPORAL_TASK_QUEUE=navi-agent-tasks TEMPORAL_WORKER_BUILD_ID=617bb467fd75e3770d686e17aab9e519bded0f37 TEMPORAL_WORKER_DEPLOYMENT_TOKEN=42521463072-1 npx tsx scripts/validate-prod-workflow-migration.ts --execute",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/workflow-migration.log"
+    },
+    "agentcard": {
+      "status": "FAIL",
+      "reason": "run-bench agent-payment-production-abandonment exited 1; AgentCard release stall not qualified: no run record path was printed by this execution",
+      "applicable": true,
+      "depends_on": [
+        "render",
+        "vercel"
+      ],
+      "started_at": "2026-11-08T20:49:55Z",
+      "finished_at": "2026-11-08T20:50:10Z",
+      "exit_code": 1,
+      "command": "PATH=/var/tmp/rose-base-measure/agents/venv/bin:$PATH VIRTUAL_ENV=/var/tmp/rose-base-measure/agents/venv scripts/run-bench agent-payment-production-abandonment",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/agentcard.log"
+    },
+    "semantic": {
+      "status": "PASS",
+      "reason": "chat-lifecycle-ratchet run 42522470865 success",
+      "applicable": true,
+      "depends_on": [
+        "render",
+        "vercel",
+        "fly"
+      ],
+      "started_at": "2026-11-08T20:54:22Z",
+      "finished_at": "2026-11-08T21:02:21Z",
+      "exit_code": 0,
+      "command": "/var/tmp/rose-base-measure/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 617bb467fd75e3770d686e17aab9e519bded0f37 --state-dir /var/tmp/rose-base-measure/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline/production-logs/semantic.log"
+    }
+  }
+}

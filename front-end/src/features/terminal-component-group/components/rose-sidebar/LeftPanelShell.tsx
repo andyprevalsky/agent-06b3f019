@@ -3,7 +3,8 @@
  *
  *   [CLOSED] not rendered
  *   [OPEN]   flush against the bar: full height, no gap, margin or floating card;
- *            left = 64px (collapsed bar) or 236px while the bar hover-expands,
+ *            left = 64px (collapsed bar) or the bar's expanded width (236px
+ *            default, wider once dragged) while it is expanded,
  *            so the bar never covers it (left transitions with the bar width);
  *            width = min(640px, room left of the top-right app icons), so on
  *            narrow windows it never slides under the icon row
@@ -38,16 +39,19 @@ export default function LeftPanelShell({
   label,
   testId,
   barExpanded,
+  barExpandedWidth = ROSE_BAR_EXPANDED_WIDTH,
   onClose,
   children,
 }: {
   label: string;
   testId: string;
   barExpanded: boolean;
+  /** The bar's current expanded width (useSidebarExpansion); defaults to 236px. */
+  barExpandedWidth?: number;
   onClose: () => void;
   children: ReactNode;
 }) {
-  const left = barExpanded ? ROSE_BAR_EXPANDED_WIDTH : ROSE_BAR_WIDTH;
+  const left = barExpanded ? barExpandedWidth : ROSE_BAR_WIDTH;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();

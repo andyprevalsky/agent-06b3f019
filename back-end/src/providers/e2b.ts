@@ -84,7 +84,7 @@ export {
 } from './claudeCodeSandboxAuth';
 import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from './claudeCodeTemplate';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from './codexTemplate';
-import { codeAgentCliEnvs } from './codeAgentModels';
+import { codeAgentCliEnvs, type CodeCliSettingsOverride } from './codeAgentModels';
 
 const log = createLogger('E2B');
 
@@ -113,6 +113,9 @@ export interface ClaudeCodeSessionOptions {
   codeSession?: CodeSessionRow | null;
   /** Keep the session's sandbox and files but start a new CLI conversation. */
   freshConversation?: boolean;
+  /** The spawn's task_name, stored on the task row (the agents list title). */
+  taskName?: string | null;
+  cliSettings?: CodeCliSettingsOverride | null; // a resuming turn's model / effort / speed
 }
 
 export async function createClaudeCodeSession(
@@ -170,7 +173,7 @@ async function createClaudeCodeSessionUnlocked(
     log.info('OpenRouter configured — skipping Fast Mode tee-proxy/flags for Claude Code session');
   }
   // The spawning agent's tier and Fast Mode button pick model, effort and speed.
-  const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId);
+  const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId, options.cliSettings);
   const model = cliSettings.CLAUDE_CODE_MODEL;
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const templateId = DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
@@ -376,6 +379,7 @@ async function createClaudeCodeSessionUnlocked(
       projectWorkspace,
       claudeTokenSource,
       claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
+      taskName: options.taskName ?? null,
     });
     if (local) return local;
     throw err;
@@ -400,6 +404,7 @@ async function createClaudeCodeSessionUnlocked(
     sandboxId: sandbox.sandboxId,
     streamUrl: wsUrl,
     goal,
+    taskName: options.taskName ?? null,
     status: 'ACTIVE' as const,
     claudeTokenSource,
     claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
@@ -517,6 +522,9 @@ export async function createCodexCodeSession(
     freshConversation?: boolean;
     /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
     projectWorkspace?: ProjectWorkspace | null;
+    /** The spawn's task_name, stored on the task row (the agents list title). */
+    taskName?: string | null;
+    cliSettings?: CodeCliSettingsOverride | null; // a resuming turn's model / effort / speed
   },
   codeSession: CodeSessionRow | null = null
 ): Promise<CodeAgentSessionResult> {
@@ -532,7 +540,7 @@ export async function createCodexCodeSession(
 
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
-  const { settings: agentSettings, envs: cliSettings } = await codeAgentCliEnvs('codex', agentId);
+  const cli = await codeAgentCliEnvs('codex', agentId, harnessOptions?.cliSettings);
   const harnessMode = harnessOptions?.harnessMode ?? 'code';
   const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
   const workDir = workDirForGithubRepo(githubRepoUrl);
@@ -559,12 +567,12 @@ export async function createCodexCodeSession(
     azureFunding,
     envs: authEnvs,
     servedBy,
-  } = await resolveCodexSpawnAuth(userId, new Date(), agentSettings.tier);
+  } = await resolveCodexSpawnAuth(userId, new Date(), cli.settings.tier);
 
   const envs: Record<string, string> = {
     CODEX_GOAL: goal,
     ...authEnvs,
-    ...cliSettings,
+    ...cli.envs,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
     ...codeSessionBranchEnvs(codeSession),
@@ -597,8 +605,10 @@ export async function createCodexCodeSession(
 
   // Codex talks to its provider directly (never a Rose proxy or the DEMO cache);
   // the Fast Mode button only selects its native service tier.
-  envs.CODEX_SPEED = codexSpeed;
-  log.info('Codex code-agent speed', { agentId, taskId, codexSpeed });
+  // A person's resuming turn may pick its speed (cli_settings): it wins over the
+  // agent's stored speed, as its model and effort overrides already do.
+  envs.CODEX_SPEED = cli.speedOverride ?? codexSpeed;
+  log.info('Codex code-agent speed', { agentId, taskId, codexSpeed: envs.CODEX_SPEED });
 
   if (githubRepoUrl) {
     if (!process.env.GITHUB_TOKEN) {
@@ -639,6 +649,7 @@ export async function createCodexCodeSession(
     sandboxId: sandbox.sandboxId,
     streamUrl: wsUrl,
     goal,
+    taskName: harnessOptions?.taskName ?? null,
     status: 'ACTIVE' as const,
     // What serves the run: 'user' | 'pool' login, or 'azure' (the funded deployment alone).
     claudeTokenSource: servedBy,
