@@ -467,6 +467,8 @@ class Cloud(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
+        # This standalone fixture owns its request, not the invoking gate's custody.
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
@@ -3033,6 +3035,8 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
                         patch('time.sleep',side_effect=self.sleep)):
             patcher.start();self.addCleanup(patcher.stop)
+        # Test the account ceiling independently of the invoking deploy's width.
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
 
     def sleep(self, seconds):
         self.sleeps.append(seconds);self.now[0]+=seconds
@@ -3106,6 +3110,32 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         with self.assertRaises(headroom.HeadroomUnavailable):
             headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
                                           opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FixtureEnvironmentIsolation(unittest.TestCase):
+    def test_cloud_request_custody_is_local_and_parent_environment_is_restored(self):
+        parent = '/tmp/fixture-parent/attempts/34/phase/gate/request.json'
+        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': parent, 'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            Cloud('test_cloud_cli_gets_only_active_cases_and_frozen_ref').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual(parent, os.environ['DEPLOY_GATE_REQUEST'])
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+
+    def test_headroom_fixture_preserves_parent_width_and_explicit_limits(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            CloudSharedProviderHeadroom('test_live_account_sessions_narrow_the_smoke_width').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+            fixture = CloudSharedProviderHeadroom()
+            fixture.setUp()
+            try:
+                with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+                    self.assertEqual(4, fixture.width(FakeTilionListing(5))[0])
+            finally:
+                fixture.doCleanups()
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
 
 
 class FakeCerebrasProbe:

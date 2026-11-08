@@ -1107,6 +1107,170 @@ def override_cycle(
         path, receipts_path, state, cycle, pr=pr, disposition="overridden", report_row=report_row, fields=fields
     )
 
+def retarget_unexecuted(path, *, head, approved_head, approval, prior_ledger_sha256,
+                        pr, request_comment_id, repo, github_repo=None, evidence_path=None):
+    """Retarget one never-executed fifth slot; preserve the original entry atomically."""
+    from copy import deepcopy
+    def refuse(message):
+        raise ReviewCycleError('retarget-unexecuted: ' + message)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != prior_ledger_sha256:
+        refuse('prior ledger SHA-256 mismatch')
+    state = read_state(path)
+    entries = state['cycles']
+    if (type(state.get('schema_version')) is not int or state['schema_version'] != 1 or len(entries) != 19
+            or any(not isinstance(e, dict) for e in entries)):
+        refuse('requires intact 19-entry ledger')
+    cycle, prefix = entries[-1], entries[:-1]
+    marker = cycle.get('post_findings_review_approval')
+    if (cycle.get('number') != 5 or cycle.get('kind') != 'verification'
+            or cycle.get('status') != 'open' or 'result' in cycle or 'unexecuted_retargets' in cycle
+            or not isinstance(marker, dict) or marker.get('approval_id') != approval or not approval
+            or marker.get('approved_head') != cycle.get('head') or marker.get('prior_entries') != 18
+            or marker.get('review_position') != 5
+            or not re.fullmatch('[0-9a-f]{64}', str(marker.get('prior_ledger_sha256', '')))
+            or any(e.get('status') != 'completed' or 'post_findings_review_approval' in e for e in prefix)
+            or [(e.get('number'), e.get('kind')) for e in budget_cycles(prefix)] !=
+               [(1, 'initial'), (2, 'incremental'), (3, 'verification'), (4, 'verification')]
+            or prefix[-1].get('result') != 'findings'
+            or any(type(e.get('number')) is not int for e in budget_cycles(prefix))):
+        refuse('slot is not the original unretargeted open fifth approval')
+    old = cycle.get('head')
+    if (not isinstance(old, str) or not re.fullmatch('[0-9a-f]{40}', old)):
+        refuse('malformed original slot HEAD')
+    if (not re.fullmatch('[0-9a-f]{40}', head or '') or approved_head != head or old == head
+            or any(e.get('head') == head for e in entries)
+            or git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()
+            or not is_ancestor(repo, old, head)):
+        refuse('requires new clean exact approved descendant HEAD')
+    capture_start = now()
+    slug = github_repo
+    if evidence_path is None:
+        if not slug:
+            info = _gh_json(['repo', 'view', '--json', 'nameWithOwner'])
+            slug = info.get('nameWithOwner') if isinstance(info, dict) else None
+        if not isinstance(slug, str) or not re.fullmatch(r'[\w.-]+/[\w.-]+', slug):
+            refuse('invalid repository')
+        data = {'issue_comments': _gh_pages(f'repos/{slug}/issues/{pr}/comments'),
+                'reviews': _gh_pages(f'repos/{slug}/pulls/{pr}/reviews'),
+                'review_comments': _gh_pages(f'repos/{slug}/pulls/{pr}/comments'),
+                'check_runs': _gh_check_runs(slug, old),
+                'pull_request': _gh_json(['api', f'repos/{slug}/pulls/{pr}']),
+                'capture_started_at': capture_start, 'captured_at': now(), 'complete': True}
+    else:
+        # Same explicit trusted-operator evidence-file boundary as skip/override.
+        try:
+            data = json.loads(evidence_path.read_text())
+        except (OSError, ValueError) as error:
+            raise ReviewCycleError('retarget-unexecuted: invalid evidence JSON') from error
+    if (not isinstance(data, dict) or data.get('complete') is not True
+            or any(not isinstance(data.get(k), list) or any(not isinstance(x, dict) for x in data[k])
+                   for k in ('issue_comments', 'reviews', 'review_comments', 'check_runs'))):
+        refuse('incomplete or malformed evidence')
+    for key in ('issue_comments', 'reviews', 'review_comments', 'check_runs'):
+        rows = data[key]
+        if (any(type(x.get('id')) is not int or x['id'] <= 0 for x in rows)
+                or len({x['id'] for x in rows}) != len(rows)
+                or any(not isinstance(x.get('app' if key == 'check_runs' else 'user'), dict)
+                       for x in rows)
+                or key == 'check_runs' and any(not isinstance(x.get('output'), dict) for x in rows)):
+            refuse('malformed or duplicate native evidence identities')
+    begun = _publication_time(data.get('capture_started_at'))
+    captured = _publication_time(data.get('captured_at'))
+    current = _publication_time(now())
+    opened = _publication_time(cycle.get('started_at'))
+    if (None in (begun, captured, current, opened) or not opened <= begun <= captured <= current
+            or (current - begun).total_seconds() > 120):
+        refuse('evidence is stale or capture exceeded 120 seconds')
+    live = data.get('pull_request')
+    if (not isinstance(live, dict) or live.get('number') != int(pr) or live.get('state') != 'open'
+            or not isinstance(live.get('head'), dict) or live['head'].get('sha') != old
+            or not isinstance(live.get('base'), dict) or not isinstance(live['base'].get('repo'), dict)
+            or not isinstance(live.get('user'), dict)):
+        refuse('current PR does not match old slot HEAD')
+    slug = live['base']['repo'].get('full_name')
+    if (not isinstance(slug, str) or not re.fullmatch(r'[\w.-]+/[\w.-]+', slug)
+            or (github_repo is not None and github_repo != slug)):
+        refuse('PR repository mismatch')
+    evidence = normalize_evidence(data, source=f'gh:{slug}' if evidence_path is None else str(evidence_path))
+    issue_url = f'https://api.github.com/repos/{slug}/issues/{pr}'
+    comments = evidence['issue_comments']
+    commands = [c for c in comments if re.search(r'@coderabbitai\s+(?:full\s+)?review\b', _body(c), re.I)
+                and (stamp := _publication_time(c.get('created_at'))) is not None and stamp >= opened]
+    if len(commands) != 1:
+        refuse('ambiguous or intervening review request')
+    request = commands[0]
+    requested = _publication_time(request.get('created_at'))
+    if (request.get('id') != request_comment_id or _body(request).strip() != '@coderabbitai review'
+            or request.get('created_at') != request.get('updated_at') or request.get('issue_url') != issue_url
+            or request.get('author_association') not in {'OWNER', 'MEMBER', 'COLLABORATOR'}
+            or request.get('user', {}).get('type') != 'User'
+            or request.get('user', {}).get('login') != live.get('user', {}).get('login')
+            or requested is None or not opened <= requested <= captured):
+        refuse('request identity or actor mismatch')
+    replies = [c for c in comments if _is_bot(c)
+               and (stamp := _publication_time(c.get('created_at'))) is not None and stamp >= requested]
+    if len(replies) != 1:
+        refuse('ambiguous bot feedback after request')
+    reply = replies[0]
+    created, updated = (_publication_time(reply.get(k)) for k in ('created_at', 'updated_at'))
+    if (reply.get('issue_url') != issue_url or reply.get('user', {}).get('type') != 'Bot'
+            or not isinstance(reply.get('performed_via_github_app'), dict)
+            or reply['performed_via_github_app'].get('slug') != 'coderabbitai'
+            or len(COMMAND_INVOCATION.findall(_body(reply))) != 1
+            or '<summary>Action not completed</summary>' not in _body(reply)
+            or 'Review rate limited.' not in _body(reply)
+            or _contradicts_review_head(_body(reply), old, slug)
+            or created is None or updated is None or not requested <= created <= updated <= captured):
+        refuse('missing authoritative not-executed reply')
+    if (substantive_reviews(evidence['reviews'], old, evidence)
+            or any(_is_bot(r) and r.get('commit_id') == old for r in evidence['reviews'])
+            or any(_is_bot(c) and old in (c.get('commit_id'), c.get('original_commit_id'))
+                   for c in evidence['review_comments'])):
+        refuse('review or inline feedback already exists')
+    runs = coderabbit_check_runs(evidence['check_runs'], old)
+    relevant = []
+    for run in runs:
+        started, completed = (_publication_time(run.get(k)) for k in ('started_at', 'completed_at'))
+        if run.get('head_sha') != old or started is None or completed is None:
+            refuse('malformed check identity or timing')
+        if run.get('status') != 'completed' or run.get('conclusion') == 'success':
+            refuse('queued, active or successful CodeRabbit check')
+        summary = str(run.get('output', {}).get('summary') or '')
+        phases = ('Prepare review scope', 'Prepare repository workspace', 'Run analysis checks',
+                  'Generate review feedback', 'Publish review results')
+        if (run.get('conclusion') not in {'neutral', 'skipped'}
+                or run.get('app', {}).get('slug') != 'coderabbitai'
+                or any([value.strip() for value in re.findall(
+                    r'\|\s*' + phase + r'\s*\|([^|]+)\|', summary)] != ['Skipped'] for phase in phases)
+                or not started <= completed <= captured):
+            refuse('analysis/publication not proven skipped')
+        relevant.append(run)
+    if not relevant:
+        refuse('no authoritative skipped check')
+    check = relevant[-1]
+    if (_check_title(check) != 'Review rate limited'
+            or not requested <= created <= _publication_time(check['completed_at']) <= updated):
+        refuse('check is not bound to not-executed request reply')
+    if hashlib.sha256(path.read_bytes()).hexdigest() != prior_ledger_sha256:
+        refuse('ledger changed during evidence capture')
+    if (git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()
+            or (_publication_time(now()) - begun).total_seconds() > 120):
+        refuse('source or evidence changed before commit')
+    original = deepcopy(cycle)
+    cycle['unexecuted_retargets'] = [{'kind': 'unexecuted-fifth-retarget-v1', 'at': now(),
+        'original_entry': original, 'prior_ledger_sha256': prior_ledger_sha256,
+        'prefix18_sha256': hashlib.sha256(json.dumps(prefix, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+        'approval_id': approval, 'new_head': head, 'request_comment_id': request_comment_id,
+        'check_run_id': check.get('id'), 'reply_comment_id': reply.get('id'), 'evidence': data}]
+    cycle['head'] = head
+    cycle['post_findings_review_approval']['approved_head'] = head
+    write_state(path, state)
+    return cycle
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, default=default_state_path())
@@ -1157,6 +1321,17 @@ def parse_args() -> argparse.Namespace:
     merge = subparsers.add_parser("require-mergeable")
     merge.add_argument("--head", required=True)
 
+    retarget = subparsers.add_parser('retarget-unexecuted', help='Retarget the same never-executed fifth slot once')
+    retarget.add_argument('--head', required=True)
+    retarget.add_argument('--approved-head', required=True)
+    retarget.add_argument('--approval', required=True)
+    retarget.add_argument('--prior-ledger-sha256', required=True)
+    retarget.add_argument('--pr', required=True, type=int)
+    retarget.add_argument('--request-comment-id', required=True, type=int)
+    retarget.add_argument('--repo', type=Path, default=Path.cwd())
+    retarget.add_argument('--github-repo')
+    retarget.add_argument('--evidence-json', type=Path)
+
     subparsers.add_parser("next", help="the cycle the ledger accepts next")
     subparsers.add_parser("status")
     return parser.parse_args()
@@ -1174,6 +1349,11 @@ def main() -> int:
                 post_findings_review_approval=args.post_findings_review_approval,
                 prior_ledger_sha256=args.prior_ledger_sha256,
             )
+        elif args.command == 'retarget-unexecuted':
+            payload = retarget_unexecuted(args.state, head=args.head, approved_head=args.approved_head,
+                approval=args.approval, prior_ledger_sha256=args.prior_ledger_sha256,
+                pr=args.pr, request_comment_id=args.request_comment_id, repo=args.repo,
+                github_repo=args.github_repo, evidence_path=args.evidence_json)
         elif args.command == "finish":
             payload = finish_cycle(args.state, head=args.head, result=args.result)
         elif args.command in {"skip", "override"}:

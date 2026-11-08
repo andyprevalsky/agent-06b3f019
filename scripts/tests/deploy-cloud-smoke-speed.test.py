@@ -33,10 +33,47 @@ def repo_with_worktree(tmp):
 
 class SharedCanaryStamp(unittest.TestCase):
     def setUp(self):
+        # This disposable fixture owns its request; the parent deploy owns its own.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         # Offline: fixture refs count as pushed unless a test exercises the real preflight.
         pushed = patch.object(cloud, 'origin_fetchable', return_value=True)
         pushed.start()
         self.addCleanup(pushed.stop)
+
+    def test_outer_request_does_not_rebind_fixture_custody(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            request.parent.mkdir(parents=True)
+            request.write_text('{}')
+            env = dict(os.environ, DEPLOY_GATE_REQUEST=str(request))
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
+                'SharedCanaryStamp.test_the_smoke_launch_passes_the_shared_stamp_to_the_fleet'], env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Ran 1 test', result.stdout)
+
+    def test_fixture_restores_request_and_native_owner_guard(self):
+        import deploy_test_historical_custody as custody
+        before = dict(os.environ)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(request)}):
+                fixture = type(self)('test_the_smoke_launch_passes_the_shared_stamp_to_the_fleet')
+                try:
+                    fixture.setUp()
+                    self.assertFalse('DEPLOY_GATE_REQUEST' in os.environ)
+                finally:
+                    fixture.doCleanups()
+                self.assertEqual(os.environ['DEPLOY_GATE_REQUEST'], str(request))
+                for value in ({}, {'custody_state': str(root / '.context/foreign/cycle.json')}):
+                    with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                        custody.admission(value, root)
+        self.assertEqual(dict(os.environ), before)
+
     def test_historical_custody_guard_precedes_namespace_and_provider_admission(self):
         import deploy_test_historical_custody as custody
         with tempfile.TemporaryDirectory() as tmp:

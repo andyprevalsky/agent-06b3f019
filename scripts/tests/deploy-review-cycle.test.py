@@ -1631,5 +1631,171 @@ class ModernQuotaTest(unittest.TestCase):
             self.skip()
         self.assertFalse(self.receipts.exists())
 
+class RetargetUnexecutedTest(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        self.hashlib = hashlib
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.path, self.evidence = root/'ledger.json', root/'evidence.json'
+        self.old, self.new = '7'*40, '8'*40
+        self.clock = '2026-11-08T21:42:00+00:00'
+        entries = [dict(number=i, kind=k, head=str(i)*40, status='completed', result='clean')
+                   for i,k in enumerate(('initial','incremental','verification'),1)]
+        entries += [dict(number=i, kind='sync-inherited', head='a'*40, status='completed',result='clean') for i in range(4,18)]
+        entries.append(dict(number=4,kind='verification',head='4'*40,status='completed',result='findings',one_final_review_approval={'approval_id':'old-fourth'}))
+        entries.append(dict(number=5,kind='verification',head=self.old,status='open',started_at='2026-11-08T21:40:46+00:00',post_findings_review_approval=dict(approval_id='same-approved-slot',approved_head=self.old,prior_entries=18,review_position=5,prior_ledger_sha256='a'*64)))
+        self.state={'schema_version':1,'cycles':entries}
+        issue='https://api.github.com/repos/Rose-Ai-Labs/rose/issues/1708'
+        self.data={'complete':True,'capture_started_at':'2026-11-08T21:41:50+00:00','captured_at':'2026-11-08T21:41:59+00:00',
+          'pull_request':{'number':1708,'state':'open','head':{'sha':self.old},'base':{'repo':{'full_name':'Rose-Ai-Labs/rose'}},'user':{'login':'owner'}},
+          'reviews':[],'review_comments':[],
+          'issue_comments':[
+           {'id':30,'issue_url':issue,'user':{'type':'User','login':'owner'},'author_association':'MEMBER','body':'@coderabbitai review','created_at':'2026-11-08T21:40:52Z','updated_at':'2026-11-08T21:40:52Z'},
+           {'id':31,'issue_url':issue,'user':{'type':'Bot','login':MODULE.REVIEW_BOT},'performed_via_github_app':{'slug':'coderabbitai'},'body':'<!-- CodeRabbit review command invocation: v2:'+'a'*64+' -->\n<summary>Action not completed</summary>\nReview rate limited.','created_at':'2026-11-08T21:41:13Z','updated_at':'2026-11-08T21:41:21Z'}],
+          'check_runs':[{'id':32,'name':'CodeRabbit','head_sha':self.old,'app':{'slug':'coderabbitai'},'status':'completed','conclusion':'neutral','started_at':'2026-11-08T21:41:20Z','completed_at':'2026-11-08T21:41:20Z','output':{'title':'Review rate limited','summary':'\n'.join('| '+phase+' | Skipped | 0s |' for phase in ('Prepare review scope','Prepare repository workspace','Run analysis checks','Generate review feedback','Publish review results'))}}]}
+        self.save()
+
+    def tearDown(self): self.temp.cleanup()
+    def save(self):
+        self.path.write_text(json.dumps(self.state,indent=2)+'\n');self.before=self.path.read_bytes()
+        self.digest=self.hashlib.sha256(self.before).hexdigest();self.evidence.write_text(json.dumps(self.data))
+
+    def run_native(self, **changes):
+        options=dict(head=self.new,approved_head=self.new,approval='same-approved-slot',prior_ledger_sha256=self.digest,pr='1708',request_comment_id='30',repo=str(self.path.parent),github_repo='Rose-Ai-Labs/rose',evidence_json=str(self.evidence))
+        options.update(changes);argv=['deploy_review_cycle.py','--state',str(self.path),'retarget-unexecuted']
+        for k,v in options.items():
+            if v is not None:argv.extend(['--'+k.replace('_','-'),v])
+        def git(repo,*args):return self.new if args[:2]==('rev-parse','HEAD') else getattr(self,'dirty','')
+        out=io.StringIO()
+        with patch.object(sys,'argv',argv),patch.object(MODULE,'now',return_value=self.clock),patch.object(MODULE,'git',side_effect=git),patch.object(MODULE,'is_ancestor',return_value=getattr(self,'ancestor',True)),patch.object(MODULE.subprocess,'run',side_effect=AssertionError('unmocked external call')),contextlib.redirect_stdout(out),contextlib.redirect_stderr(out):
+            try:return MODULE.main(),out.getvalue()
+            except SystemExit as e:return (e.code if isinstance(e.code,int) else 1),str(e)
+
+    def test_native_success_keeps_slot_and_complete_history(self):
+        code,out=self.run_native();self.assertEqual(code,0,out)
+        state=json.loads(self.path.read_text());self.assertEqual(state['cycles'][:18],self.state['cycles'][:18]);self.assertEqual(len(state['cycles']),19)
+        last=state['cycles'][-1];self.assertEqual((last['number'],last['status'],last['head']),(5,'open',self.new))
+        history=last['unexecuted_retargets'][0];self.assertEqual(history['original_entry'],self.state['cycles'][-1]);self.assertEqual(history['prior_ledger_sha256'],self.digest)
+        self.assertEqual(history['evidence'],self.data);self.assertEqual(last['started_at'],self.state['cycles'][-1]['started_at'])
+        self.before=self.path.read_bytes();self.digest=self.hashlib.sha256(self.before).hexdigest()
+        code,out=self.run_native();self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.require_mergeable(self.path,head=self.new)
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.next_cycle(state['cycles'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.finish_cycle(self.path,head=self.new,result='unavailable')
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.start_cycle(self.path,head='9'*40,kind='verification',post_findings_review_approval='new',approved_head='9'*40,prior_ledger_sha256=self.digest)
+
+    def test_refuses_all_invalid_bindings_without_writes(self):
+        for change in [dict(approval='wrong'),dict(approved_head='9'*40),dict(prior_ledger_sha256='b'*64),dict(request_comment_id='99'),dict(head='short'),dict(pr='2')]:
+            with self.subTest(change=change):
+                code,out=self.run_native(**change);self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+        self.dirty='?? uncommitted';self.assertNotEqual(self.run_native()[0],0);self.assertEqual(self.before,self.path.read_bytes())
+        self.dirty='';self.ancestor=False;self.assertNotEqual(self.run_native()[0],0);self.assertEqual(self.before,self.path.read_bytes())
+
+    def test_refuses_execution_and_incomplete_or_stale_evidence(self):
+        original=deepcopy(self.data)
+        for case in ('stale','incomplete','wrong-pr-head','wrong-actor','edited-request','full-request','wrong-reply','review','inline','queued','success','analysis','duplicate-analysis','wrong-check-head','malformed'):
+            self.data=deepcopy(original)
+            if case=='stale':self.data['capture_started_at']='2026-11-08T21:39:00Z'
+            elif case=='incomplete':self.data['complete']=False
+            elif case=='wrong-pr-head':self.data['pull_request']['head']['sha']='f'*40
+            elif case=='wrong-actor':self.data['issue_comments'][0]['user']['login']='other'
+            elif case=='edited-request':self.data['issue_comments'][0]['updated_at']='2026-11-08T21:41:00Z'
+            elif case=='full-request':self.data['issue_comments'].append(dict(self.data['issue_comments'][0],id=99,body='@coderabbitai full review'))
+            elif case=='wrong-reply':self.data['issue_comments'][1]['body']='<summary>Action not completed</summary>'
+            elif case=='review':self.data['reviews']=[{'id':5,'user':{'login':MODULE.REVIEW_BOT},'commit_id':self.old,'body':'Reviewed'}]
+            elif case=='inline':self.data['review_comments']=[{'id':6,'user':{'login':MODULE.REVIEW_BOT},'original_commit_id':self.old}]
+            elif case=='queued':self.data['check_runs'][0]['status']='in_progress'
+            elif case=='success':self.data['check_runs'][0]['conclusion']='success'
+            elif case=='analysis':self.data['check_runs'][0]['output']['summary']=self.data['check_runs'][0]['output']['summary'].replace('Run analysis checks | Skipped','Run analysis checks | Success')
+            elif case=='duplicate-analysis':self.data['check_runs'][0]['output']['summary']+='\n| Run analysis checks | Success | 1s |'
+            elif case=='wrong-check-head':self.data['check_runs'][0]['head_sha']='f'*40
+            else:self.data['reviews']=[None]
+            self.evidence.write_text(json.dumps(self.data))
+            with self.subTest(case=case):
+                code,out=self.run_native();self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+
+    def test_refuses_finished_slots_and_malformed_history(self):
+        original=deepcopy(self.state)
+        for case in ('clean','findings','unavailable','missing-prefix','malformed','wrong-marker'):
+            self.state=deepcopy(original)
+            if case in ('clean','findings','unavailable'):self.state['cycles'][-1].update(status='completed',result=case)
+            elif case=='missing-prefix':self.state['cycles'].pop(0)
+            elif case=='malformed':self.state['cycles'][1]=None
+            else:self.state['cycles'][-1]['post_findings_review_approval']['prior_entries']=17
+            self.save()
+            with self.subTest(case=case):
+                code,out=self.run_native();self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+
+    def test_native_capture_uses_complete_helpers_and_current_pr(self):
+        with patch.object(MODULE,'_gh_pages',side_effect=lambda e:self.data['issue_comments'] if '/issues/' in e else self.data['reviews'] if e.endswith('/reviews') else self.data['review_comments']) as pages,patch.object(MODULE,'_gh_check_runs',return_value=self.data['check_runs']) as checks,patch.object(MODULE,'_gh_json',return_value=self.data['pull_request']) as api:
+            code,out=self.run_native(evidence_json=None)
+        self.assertEqual(code,0,out);self.assertEqual(pages.call_count,3);checks.assert_called_once_with('Rose-Ai-Labs/rose',self.old)
+        api.assert_called_once_with(['api','repos/Rose-Ai-Labs/rose/pulls/1708'])
+
+
+
+    def test_ledger_or_source_change_during_capture_cannot_commit_retarget(self):
+        def change_ledger(endpoint):
+            self.path.write_bytes(self.before + b' ')
+            return self.data['pull_request']
+        with patch.object(MODULE,'_gh_pages',side_effect=lambda e:self.data['issue_comments'] if '/issues/' in e else []),patch.object(MODULE,'_gh_check_runs',return_value=self.data['check_runs']),patch.object(MODULE,'_gh_json',side_effect=change_ledger),patch.object(MODULE,'write_state',side_effect=AssertionError('no retarget write')):
+            code,out=self.run_native(evidence_json=None)
+        self.assertNotEqual(code,0,out);self.assertEqual(self.path.read_bytes(),self.before+b' ')
+
+
+class RetargetPriorAnalysisTest(unittest.TestCase):
+    """Exact independent-review counterexamples; all files copied into temporary state."""
+    fixtures = Path(__file__).parent / 'fixtures/pending-fifth-retarget'
+
+    def invoke_case(self, data, reject):
+        import hashlib
+        original = (self.fixtures / 'original-ledger19.json').read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'ledger.json'
+            proof = Path(directory) / 'evidence.json'
+            path.write_bytes(original)
+            proof.write_text(json.dumps(data))
+            args = ['deploy_review_cycle.py', '--state', str(path), 'retarget-unexecuted',
+                    '--head', '8'*40, '--approved-head', '8'*40,
+                    '--approval', 'pr1708-extra-review-88942d6',
+                    '--prior-ledger-sha256', hashlib.sha256(original).hexdigest(),
+                    '--pr', '1708', '--request-comment-id', '6727500308',
+                    '--repo', directory, '--github-repo', 'Rose-Ai-Labs/rose', '--evidence-json', str(proof)]
+            with patch.object(sys, 'argv', args), patch.object(MODULE, 'now', return_value='2026-11-08T21:46:32Z'), \
+                    patch.object(MODULE, 'git', side_effect=lambda repo,*a:'8'*40 if a[0]=='rev-parse' else ''), \
+                    patch.object(MODULE, 'is_ancestor', return_value=True), \
+                    patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('external call forbidden')), \
+                    patch.object(MODULE, 'write_state', wraps=MODULE.write_state) as write, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                if reject:
+                    with self.assertRaisesRegex(SystemExit, 'analysis/publication not proven skipped'):
+                        MODULE.main()
+                    write.assert_not_called()
+                    self.assertEqual(original, path.read_bytes())
+                else:
+                    self.assertEqual(MODULE.main(), 0)
+                    state = json.loads(path.read_text())
+                    self.assertEqual(state['cycles'][:18], json.loads(original)['cycles'][:18])
+                    self.assertEqual(len(state['cycles']), 19)
+                    self.assertEqual(state['cycles'][-1]['unexecuted_retargets'][0]['check_run_id'], 128871013210)
+
+    def test_exact_reviewer_neutral_analysis_before_open_refused(self):
+        self.invoke_case(json.loads((self.fixtures / 'prior_analysis_before_slot_opened.input.json').read_text()), True)
+
+    def test_exact_reviewer_failed_analysis_before_open_refused(self):
+        self.invoke_case(json.loads((self.fixtures / 'failed_prior_analysis_before_slot_opened.input.json').read_text()), True)
+
+    def test_older_fully_skipped_check_allowed_in_both_orders(self):
+        data = json.loads((self.fixtures / 'prior_analysis_before_slot_opened.input.json').read_text())
+        older = data['check_runs'][-1]
+        self.assertEqual(older['id'], 123456789)
+        older['output']['summary'] = older['output']['summary'].replace('Run analysis checks | Success', 'Run analysis checks | Skipped')
+        for reverse in (False, True):
+            control = deepcopy(data)
+            if reverse: control['check_runs'].reverse()
+            with self.subTest(reverse=reverse): self.invoke_case(control, False)
+
+
 if __name__ == "__main__":
     unittest.main()

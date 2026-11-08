@@ -247,7 +247,7 @@ def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=
         if not stat.S_ISREG(before.st_mode):
             raise ValueError('native artifact: regular fd required')
         if not 0 < before.st_size <= raw_limit:
-            raise ValueError('native artifact: raw file byte bound exceeded')
+            raise ValueError('native artifact: raw file byte bound exceeded (proof file too large)')
         if raw_remaining is not None:
             if (not isinstance(raw_remaining, list) or len(raw_remaining) != 1
                     or type(raw_remaining[0]) is not int

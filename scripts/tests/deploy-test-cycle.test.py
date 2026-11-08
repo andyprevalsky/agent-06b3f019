@@ -64,9 +64,58 @@ def own_process_entries():
 
 
 def setUpModule():
+    # Disposable fixtures own their custody; an enclosing deploy request belongs
+    # to the runner. Tests for request ownership install their own explicit path.
+    environment = patch.dict(os.environ)
+    environment.start()
+    unittest.addModuleCleanup(environment.stop)
+    os.environ.pop('DEPLOY_GATE_REQUEST', None)
     hermetic = patch.object(deploy_test_process, 'process_entries', own_process_entries)
     hermetic.start()
     unittest.addModuleCleanup(hermetic.stop)
+
+
+class FixtureEnvironment(unittest.TestCase):
+    def test_outer_request_does_not_rebind_disposable_fixture_custody(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            request.parent.mkdir(parents=True)
+            request.write_text('{}')
+            env = dict(os.environ, DEPLOY_GATE_REQUEST=str(request))
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
+                'Cycle.test_historical_custody_rejects_tampering_and_missing_admission_proof',
+                'Cycle.test_historical_import_cli_and_admission_keep_current_inventory',
+                'RelayStartupEvidence.test_native_adapter_requests_owned_supervision'],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Ran 3 tests', result.stdout)
+
+    def test_explicit_request_owner_still_requires_matching_custody(self):
+        import deploy_test_historical_custody as h
+        before = dict(os.environ)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(request)}):
+                for candidate in ({}, {'custody_state': str(root / '.context/foreign/cycle.json')}):
+                    with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                        h.admission(candidate, root)
+        self.assertEqual(dict(os.environ), before)
+
+
+    def test_module_cleanup_restores_enclosing_environment(self):
+        program = (
+            "import os,runpy,unittest; "
+            "module=runpy.run_path(__import__('sys').argv[1]); "
+            "before=dict(os.environ); module['setUpModule'](); "
+            "assert 'DEPLOY_GATE_REQUEST' not in os.environ; "
+            "assert dict(os.environ)=={k:v for k,v in before.items() if k!='DEPLOY_GATE_REQUEST'}; "
+            "unittest.doModuleCleanups(); assert dict(os.environ)==before"
+        )
+        env = dict(os.environ, DEPLOY_GATE_REQUEST='/enclosing/request.json')
+        result = subprocess.run([sys.executable, '-B', '-c', program, str(Path(__file__).resolve())],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 class Cycle(unittest.TestCase):
@@ -3686,7 +3735,8 @@ class Cycle(unittest.TestCase):
                   + [paths['receipt'].stat().st_size, paths['adapter'].stat().st_size])
         for record in records:
             value = json.loads(record.read_text())
-            value['padding'] = 'x' * (cap + 1)
+            # Native run size comes from per-task log arrays, not retained metadata.
+            value['tasks'] = [dict(logs={'worker_logs': ['x' * 512] * (cap // 512 + 1)})]
             record.write_text(json.dumps(value))
             proof['files'][str(record)] = hashlib.sha256(record.read_bytes()).hexdigest()
         with patch.object(c, 'MAX_RECEIPT_BYTES', cap):

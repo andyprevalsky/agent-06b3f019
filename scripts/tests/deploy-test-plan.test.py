@@ -1178,6 +1178,21 @@ class NativeRunArtifact(unittest.TestCase):
  def test_large_forensics_preserve_all_control_fields_and_raw_bytes(self):
   value={'run_id':'original','status':'failed','controller_exit_code':1,'tasks':[{'name':'original','passed':True,'logs':{'messages':['a'*600 for _ in range(40)]},'owned_roots':[{'root_agent_id':'root','logs':{'messages':['b'*600 for _ in range(40)]}}]}]};raw=json.dumps(value).encode();v=self.read(raw)
   self.assertEqual(self.p.read_bytes(),raw);self.assertEqual(v['status'],'failed');self.assertEqual(v['controller_exit_code'],1);self.assertTrue(v['tasks'][0]['passed']);self.assertIsInstance(v['tasks'][0]['logs'],ForensicValue);self.assertEqual(v['tasks'][0]['owned_roots'][0]['root_agent_id'],'root')
+ def test_raw_cap_keeps_size_refusal_and_unknown_metadata_remains_bounded(self):
+     # Native results serialize task logs as dictionaries of arrays; only these paths are opaque.
+     raw=json.dumps({'tasks':[{'logs':{'worker_logs':['x'*128]*40}}]}).encode()
+     self.p.write_bytes(raw);digest=hashlib.sha256(raw).hexdigest()
+     with self.assertRaisesRegex(ValueError,'proof file too large'):
+         read_run_artifact(self.p,digest,4096,raw_limit=len(raw)-1)
+     self.assertEqual(raw,self.p.read_bytes())
+     value=read_run_artifact(self.p,digest,4096,raw_limit=len(raw))
+     self.assertIsInstance(value['tasks'][0]['logs'],ForensicValue)
+     metadata=json.dumps({'padding':'x'*4097}).encode()
+     self.p.write_bytes(metadata)
+     with self.assertRaisesRegex(ValueError,'metadata document byte bound'):
+         read_run_artifact(self.p,hashlib.sha256(metadata).hexdigest(),4096,raw_limit=len(metadata))
+     self.assertEqual(metadata,self.p.read_bytes())
+
  def test_big_nonforensic_metadata_refused(self):
   with self.assertRaisesRegex(ValueError,'bound'):self.read(json.dumps({'tasks':[{'unknown':['x'*600 for _ in range(40)]}]}).encode())
  def test_wrong_hash_including_opaque_bytes_refused(self):
