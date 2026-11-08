@@ -1456,6 +1456,104 @@ class Cycle(unittest.TestCase):
         self.assertEqual(('triage', False), (after['phase'], after['ready']))
         self.assertEqual(1, c.verify_saved(self.directory, self.root))
 
+    def stale_quick_runtime_fixture(self):
+        with (self.root / '.git/info/exclude').open('a') as stream:
+            stream.write('agents/.env\n')
+        self.failure()
+        self.state.update(phase='quick', next_after_quick='triage')
+        original_execute = c.execute
+        changed = threading.Event()
+
+        def execute(*args, **kwargs):
+            result = original_execute(*args, **kwargs)
+            if not changed.is_set():
+                changed.set()
+                (self.root / 'agents').mkdir(exist_ok=True)
+                (self.root / 'agents/.env').write_text('BROWSER_PROVIDER=fixture\n')
+            return result
+
+        with patch.object(c, 'execute', side_effect=execute):
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertEqual('stale', self.state['phase'])
+        return copy.deepcopy(self.state)
+
+    def test_runtime_change_during_quick_can_refresh_without_losing_pending_failure(self):
+        self.stale_quick_runtime_fixture()
+        before = copy.deepcopy(self.state)
+        c.write(self.directory / 'cycle.json', self.state)
+        c.refresh(self.state, self.plan, copy.deepcopy(self.plan), self.root,
+                  directory=self.directory)
+        self.assertEqual('quick', self.state['phase'])
+        self.assertEqual(before['pending'], self.state['pending'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertFalse(self.state['ready'])
+
+    def test_stale_quick_refresh_rejects_incomplete_or_mismatched_receipts(self):
+        baseline = self.stale_quick_runtime_fixture()
+        changes = [('status', 'FAIL'), ('complete', False), ('executed', False),
+                   ('native_exit', False), ('command', ['false']), ('cases', {}),
+                   ('timed_out', True), ('cancelled', True), ('lingering_group', True),
+                   ('cleanup_owner', {'pending': True}), ('source', {})]
+        for key, value in changes:
+            with self.subTest(key=key):
+                state = copy.deepcopy(baseline)
+                state['attempts'][-1]['results'][0][key] = value
+                before = copy.deepcopy(state)
+                c.write(self.directory / 'cycle.json', state)
+                with self.assertRaises(ValueError):
+                    c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                              directory=self.directory)
+                self.assertEqual(before, state)
+
+    def test_stale_quick_refresh_requires_saved_state_and_idle_workers(self):
+        baseline = self.stale_quick_runtime_fixture()
+        c.write(self.directory / 'cycle.json', baseline)
+        for mode in ('unsaved', 'wrong-phase', 'partial', 'busy'):
+            with self.subTest(mode=mode):
+                state = copy.deepcopy(baseline)
+                if mode == 'unsaved':
+                    state['ready'] = True
+                elif mode == 'wrong-phase':
+                    state['attempts'][-1]['phase'] = 'final'
+                elif mode == 'partial':
+                    state['attempts'][-1]['results'].pop()
+                if mode != 'unsaved':
+                    c.write(self.directory / 'cycle.json', state)
+                before = copy.deepcopy(state)
+                with patch.object(c, '_prepared_workers_idle', side_effect=ValueError('busy')):
+                    with self.assertRaises(ValueError):
+                        c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                                  directory=self.directory)
+                self.assertEqual(before, state)
+
+    def test_stale_quick_refresh_rejects_saved_results_with_changed_native_provenance(self):
+        baseline = self.stale_quick_runtime_fixture()
+        for field in ('token', 'binding', 'request', 'receipt'):
+            with self.subTest(field=field):
+                state = copy.deepcopy(baseline)
+                result = state['attempts'][-1]['results'][0]
+                folder = Path(result['log']).parent
+                request = c.read(folder / 'request.json')
+                receipt = c.read(folder / 'receipt.json')
+                if field == 'token':
+                    result['token'] = 'invented-token'
+                elif field == 'binding':
+                    result['execution_binding']['input_fingerprint'] = 'invented-input'
+                    c.write(folder / 'receipt.json', result)
+                elif field == 'request':
+                    c.write(folder / 'request.json', {**request, 'checks': ['invented-check']})
+                else:
+                    c.write(folder / 'receipt.json', {**receipt, 'native_exit': 1})
+                c.write(self.directory / 'cycle.json', state)
+                before = copy.deepcopy(state)
+                with self.assertRaises(ValueError):
+                    c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                              directory=self.directory)
+                self.assertEqual(before, state)
+                c.write(folder / 'request.json', request)
+                c.write(folder / 'receipt.json', receipt)
+
     def test_old_source_disposition_requires_current_renewal_without_exempting_new_inputs(self):
         failure = self.failure()
         old_native = copy.deepcopy(failure)

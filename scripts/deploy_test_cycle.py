@@ -2053,7 +2053,45 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | 
         if state.get('pending'):
             raise ValueError('interrupted pending triage must resume before refresh')
     pending_refresh = bool(state.get('pending'))
-    if pending_refresh and (state.get('phase') != 'triage' or CANCEL.is_set()
+    stale_quick = pending_refresh and state.get('phase') == 'stale'
+    if stale_quick:
+        # Runtime inputs may change while quick checks finish. Keep their stale
+        # receipts and every pending failure, but permit a fresh input binding.
+        attempt = state.get('attempts', [{}])[-1]
+        quick = {g['name']: g for g in old['gates'] if g.get('quick')}
+        results = attempt.get('results', [])
+        if (directory is None or read(directory / 'cycle.json') != state
+                or attempt.get('phase') != 'quick' or attempt.get('stale') is not True
+                or attempt.get('interrupted') or len(results) != len(quick)
+                or {r.get('gate') for r in results} != set(quick)
+                or any(r.get('status') != 'PASS' or r.get('complete') is not True
+                       or r.get('executed') is not True or type(r.get('native_exit')) is not int
+                       or r['native_exit'] != 0 or r.get('source') != state['source']
+                       or r.get('command') != quick[r['gate']]['command']
+                       or r.get('cases') != {case: 'PASS' for case in quick[r['gate']]['checks']}
+                       or r.get('timed_out') or r.get('cancelled') or r.get('lingering_group')
+                       or r.get('cleanup_owner')
+                       for r in results)
+                or retained_owners(state, [g['name'] for g in old['gates']])):
+            raise ValueError('stale quick refresh requires complete quiescent native receipts')
+        for result in results:
+            gate = quick[result['gate']]
+            folder = Path(result['log']).parent
+            receipt = bounded_read(folder / 'receipt.json', 'stale quick receipt')
+            request = bounded_read(folder / 'request.json', 'stale quick request')
+            if (receipt != result
+                    or any(request.get(k) != result.get(k) for k in ('token', 'source', 'gate'))
+                    or request.get('phase') != 'quick' or request.get('checks') != gate['checks']
+                    or request.get('skips') != {}
+                    or result.get('execution_binding') != {
+                        'input_fingerprint': state['input_fingerprints'].get(gate['name']),
+                        'contract_digest': digest(gate), 'environment': state['environment']}):
+                raise ValueError('stale quick native provenance differs')
+        workers = [Path(g['worker_root'] if g.get('worker_root') else g['cwd'])
+                   for g in old['gates'] if g.get('worker_transport') == 'local-isolated']
+        if workers:
+            _prepared_workers_idle(workers, birth_guard=True)
+    if pending_refresh and (state.get('phase') != 'triage' and not stale_quick or CANCEL.is_set()
             or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
         raise ValueError("adjudicate pending occurrences or reach quiescent triage before binding a changed source")
     final_refresh = state.get('phase') == 'final'
