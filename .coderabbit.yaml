@@ -64,8 +64,11 @@ reviews:
     # 3) Prompt strings (no logic)
     - "!agents/tools/prompts/**"
     # 4) Docs, markdown, harness config
-    - "!docs/**"
-    - "!**/*.md"
+    # Keep this recovery utility and its records in review scope.
+    - "!docs/!(handoffs)/**"
+    - "!docs/handoffs/!(pr-1831-closeout)/**"
+    - "!*.md"
+    - "!**/!(pr-1831-closeout)/*.md"
     - "!.claude/**"
     - "!.coderabbit.yaml"
     - "!.gitignore"
@@ -86,9 +89,6 @@ reviews:
     - "!back-end/scripts/e2e-credential-backprop-state.ts"
     - "!back-end/scripts/run-coverage.sh"
     - "!back-end/scripts/sync-codex-token.ts"
-
-    # Review the PR1831 recovery utility and closeout records explicitly.
-    - "docs/handoffs/pr-1831-closeout/**"
 
   path_instructions:
     - path: "agents/**"
