@@ -75,7 +75,7 @@ blackbox database and with `SSL_CERT_FILE`/`SSL_CERT_DIR` removed.
 - `connectThenOpen` constructs the second client only after the write.
 - `seed-local.ts` uses `connectThenOpen(remote, ...)` as the first step of its first read.
 
-Red on the pre-fix `seed-local.ts`, green after. Outcome evidence: the fixed seed ran the same 4-lane `--compute-tokens-only` stress
+Red on the pre-fix `seed-local.ts`, green after. `seed-credential-retry` case 5, which runs the real `ensureSeedUserExists`/`sync` in a sandbox, now also extracts `openLocalClient` and binds the real `connectThenOpen` with a no-op `remote.$connect`. Its admission counts and assertions are unchanged; the first gate run on the fix failed it with `ReferenceError: openLocalClient is not defined` until the binding existed. Outcome evidence: the fixed seed ran the same 4-lane `--compute-tokens-only` stress
 2,000 times (see the stress receipt in the PR), and the unchanged `seed-memory-ratchet` gate is rerun by the deploy.
 
 Sibling exposure, not changed here: any other Node process that constructs a second PrismaClient while a first is connecting
