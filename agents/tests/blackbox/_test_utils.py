@@ -191,6 +191,34 @@ def _start_case() -> None:
     clear_mock_handler()
 
 
+# Case filter for the new-test stability check (scripts/select_affected_tests.py --stability):
+# a comma list of test function __name__s. Unset (the normal gate) runs every case. When set,
+# every other registered case is OMITTED — never run and never counted as a pass — and each
+# selected case that ran appends its function name to CASE_RECEIPT_ENV so the caller can
+# prove the cases it asked for actually executed.
+CASE_FILTER_ENV = "BLACKBOX_CASE_FUNCTIONS"
+CASE_RECEIPT_ENV = "BLACKBOX_CASE_RECEIPT"
+
+
+def case_filter() -> frozenset[str] | None:
+    raw = os.environ.get(CASE_FILTER_ENV)
+    if raw is None:
+        return None
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
+
+def case_selected(fn: Callable) -> bool:
+    names = case_filter()
+    return names is None or getattr(fn, "__name__", "") in names
+
+
+def _record_case_receipt(fn: Callable) -> None:
+    path = os.environ.get(CASE_RECEIPT_ENV)
+    if path and case_filter() is not None:
+        with open(path, "a") as handle:
+            handle.write(getattr(fn, "__name__", "") + "\n")
+
+
 class BlackboxResult:
     """Accumulates pass/fail results for the test runner."""
 
@@ -198,6 +226,21 @@ class BlackboxResult:
         self.passed = 0
         self.failed = 0
         self.errors: list[str] = []
+        self.omitted: list[str] = []
+
+    def omit(self, name: str) -> None:
+        """A case the case filter excluded: not run, not a pass."""
+        self.omitted.append(name)
+
+    def select(self, cases: list[tuple[str, Callable]]) -> list[tuple[str, Callable]]:
+        """The (name, fn) cases the case filter keeps; the rest are recorded as omitted."""
+        kept = []
+        for name, fn in cases:
+            if case_selected(fn):
+                kept.append((name, fn))
+            else:
+                self.omit(name)
+        return kept
 
     def record(self, name: str, fn: Callable) -> None:
         """Run a sync test function, record the result.
@@ -206,6 +249,10 @@ class BlackboxResult:
         builds a coroutine, never runs a single assertion, and raises nothing —
         so a completely dead test reported ✅. Detect that and fail loudly.
         """
+        if not case_selected(fn):
+            self.omit(name)
+            return
+        _record_case_receipt(fn)
         _start_case()
         try:
             returned = fn()
@@ -221,6 +268,10 @@ class BlackboxResult:
 
     async def record_async(self, name: str, fn: Callable) -> None:
         """Run an async test function, record the result."""
+        if not case_selected(fn):
+            self.omit(name)
+            return
+        _record_case_receipt(fn)
         _start_case()
         try:
             await fn()
@@ -243,11 +294,15 @@ class BlackboxResult:
         traceback.print_exception(type(error), error, error.__traceback__)
 
     def summary(self) -> dict[str, Any]:
-        return {
+        summary: dict[str, Any] = {
             "passed": self.passed,
             "failed": self.failed,
             "total": self.passed + self.failed,
         }
+        if self.omitted:
+            # A filtered run is partial: the omitted cases are reported, never folded into a pass.
+            summary["omitted"] = len(self.omitted)
+        return summary
 
     @property
     def all_passed(self) -> bool:

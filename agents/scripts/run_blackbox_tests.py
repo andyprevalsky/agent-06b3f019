@@ -150,14 +150,20 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
             return (domain, False, "No run_all_tests() function found")
 
         result = await module.run_all_tests()
+        if os.environ.get("BLACKBOX_CASE_FUNCTIONS") is not None:
+            # Never let a case-filtered domain read like a full pass, whatever run_all_tests returns.
+            passed = result is True or result is None or (isinstance(result, dict) and not result.get("failed"))
+            return (domain, passed, "case-filtered partial run (BLACKBOX_CASE_FUNCTIONS)")
         if result is True or result is None:
             return (domain, True, "")
         elif isinstance(result, dict):
             passed = result.get("passed", 0)
             failed = result.get("failed", 0)
+            # A case-filtered run (BLACKBOX_CASE_FUNCTIONS) is partial; say so in every result line.
+            omitted = f", {result['omitted']} omitted by the case filter" if result.get("omitted") else ""
             if failed > 0:
-                return (domain, False, f"{passed} passed, {failed} failed")
-            return (domain, True, f"{passed} passed")
+                return (domain, False, f"{passed} passed, {failed} failed{omitted}")
+            return (domain, True, f"{passed} passed{omitted}")
         else:
             return (domain, bool(result), "")
 
@@ -224,6 +230,9 @@ async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 
             if tf:
                 test_pairs.append((tf, d))
 
+    case_filter = os.environ.get("BLACKBOX_CASE_FUNCTIONS")
+    if case_filter is not None:
+        print(f"CASE FILTER:  BLACKBOX_CASE_FUNCTIONS={case_filter} (partial run, not a full domain pass)")
     print(f"Run ID:       {run_id}")
     print(f"Artifact dir: {artifact_dir}")
     print(f"Domains:      {len(test_pairs)}")
@@ -262,6 +271,8 @@ async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 
         "elapsed_seconds": round(elapsed, 1),
         "details": [{"domain": d, "passed": s, "message": m} for d, s, m in results],
     }
+    if case_filter is not None:
+        result_data["case_filter"] = case_filter
     (artifact_dir / "results.json").write_text(json.dumps(result_data, indent=2))
 
     return 0 if failed == 0 else 1

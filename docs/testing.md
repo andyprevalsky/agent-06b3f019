@@ -265,10 +265,26 @@ simulates slow work, rather than synchronizing, uses a named constant saying why
 after `python3 scripts/select_affected_tests.py --stability` passes (activate
 `agents/venv`; default base `origin/main` plus the worktree, or repeat
 `--changed-file`). It selects every lane unit whose own test file was added or
-changed and runs each five consecutive times while it holds `nproc` busy CPU
-workers (`stress-ng` when installed, else Python loops), started and reaped by
-their exact PIDs. A failed or timed-out run fails the check; a dead load worker
-or test bytes that change during the runs make it UNVERIFIED. Deploy
+changed and runs it five consecutive times. Where the runner takes case ids
+(unittest scripts ending in plain `unittest.main()`, pytest, and agents
+blackbox domains whose `run_all_tests()` registers a `test_*` function directly
+with `BlackboxResult.record`/`record_async`), only the cases whose lines the
+diff against the merge base touched rerun. Blackbox domains get them through
+`BLACKBOX_CASE_FUNCTIONS` (a comma list of function names): other cases are
+omitted, never run or counted as a pass, the runner labels the domain a partial
+run, and each selected case must appear in its `BLACKBOX_CASE_RECEIPT` or the
+run fails. The normal gate never sets the filter, and whole-unit reruns scrub
+it. A change inside a test class but outside its test methods reruns that
+class, and any other
+non-blank, non-comment change (module level, a new file, an explicit
+`--changed-file` list without `--base`) reruns the whole unit. Different units
+run concurrently (up to `nproc`, `--stability-lanes` lowers it; `Gate.exclusive`
+groups never overlap); each unit's own runs stay consecutive. Every one of the
+`nproc` load slots is held either by a running unit or by a busy CPU worker
+(`stress-ng --cpu 1` when installed, else a Python loop), started and reaped by
+its exact PID. The report lists each unit's rerun cases, runs and wall time,
+and the total wall time. A failed or timed-out run fails the check; an empty
+load slot or test bytes that change during the runs make it UNVERIFIED. Deploy
 structural gates, cloudbench-controller commands, agents pytest/blackbox and
 frontend vitest units run through their owning runners; backend and mac-app
 units are reported UNSUPPORTED (exit 2), never PASS. Idle-host 5/5 is not

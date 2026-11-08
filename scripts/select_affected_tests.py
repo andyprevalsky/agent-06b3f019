@@ -26,7 +26,7 @@ Usage:
   scripts/select_affected_tests.py --base A --head B     # a commit range
   scripts/select_affected_tests.py --changed-file path   # explicit list
   scripts/select_affected_tests.py --check               # mapping self-check
-  scripts/select_affected_tests.py --stability           # new/changed tests: 5 consecutive runs under CPU load
+  scripts/select_affected_tests.py --stability           # new/changed test cases: 5 consecutive runs under CPU load
   ... --format json|report|lane:<name>
 """
 
@@ -43,10 +43,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 EDGES_FILE = ROOT / "scripts" / "test-map" / "edges.json"
@@ -1008,9 +1010,20 @@ class Selector:
 # CLAUDE.md: "New tests must pass five consecutive runs with unchanged test code
 # before being finalized." An idle devbox hides load-sensitive flakes (CPU steal,
 # delayed /proc readability, background Git maintenance on Blacksmith runners),
-# so every run executes while this process holds nproc busy CPU workers that it
-# starts and reaps by their exact PIDs. The digest of every unit root must be
-# identical before and after the runs; any change makes the result UNVERIFIED.
+# so every run executes while every CPU is occupied: nproc load slots, each one
+# either a concurrently running stability unit or an owned busy CPU worker that
+# this process starts and reaps by its exact PID. The digest of every unit root
+# must be identical before and after the runs; any change makes the result
+# UNVERIFIED.
+#
+# Granularity: where the lane's runner can name single cases (Python unittest
+# scripts, pytest), only the added/changed test cases are rerun. A case is
+# changed when an added line falls inside it or a removed line came from it; a
+# change inside a test class outside its test methods (setUp, helpers, class
+# attributes) reruns that class when nothing else subclasses or names it. Any
+# other non-blank, non-comment change (module level, a new file, no diff
+# information) reruns the whole unit: over-include, never under-include. Each unit's own runs stay consecutive; different units
+# run concurrently.
 
 STABILITY_RUNS = 5
 STABILITY_RUN_TIMEOUT_SECONDS = 1200
@@ -1025,6 +1038,7 @@ STABILITY_LOAD_LOOP = (
 # mac-app needs Darwin. Those units are reported UNSUPPORTED, never PASS.
 STABILITY_LANES = ("deploy-structural-gates", "cloudbench-controller", "agents-pytest", "agents-blackbox",
                    "frontend-vitest")
+WHOLE_UNIT = "<whole unit>"
 
 
 def new_test_units(changed: list[str], lanes: dict[str, Lane] | None = None) -> list[Unit]:
@@ -1037,6 +1051,245 @@ def new_test_units(changed: list[str], lanes: dict[str, Lane] | None = None) -> 
             if tests & set(unit.roots):
                 units.append(unit)
     return units
+
+
+@dataclass
+class LineChanges:
+    """A file's diff against the comparison base, in both coordinate systems."""
+    added: set[int]          # 1-based line numbers in the new (run) source
+    removed: set[int]        # 1-based line numbers in the old (base) source
+    old_source: str | None   # None: the file is new
+    new_source: str
+
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.M)
+
+
+def parse_unified_zero(diff: str) -> tuple[set[int], set[int]]:
+    """(added new-side lines, removed old-side lines) from `git diff -U0` output."""
+    added: set[int] = set()
+    removed: set[int] = set()
+    for match in _HUNK_RE.finditer(diff):
+        old_start, old_count = int(match[1]), int(match[2] if match[2] is not None else 1)
+        new_start, new_count = int(match[3]), int(match[4] if match[4] is not None else 1)
+        removed.update(range(old_start, old_start + old_count))
+        added.update(range(new_start, new_start + new_count))
+    return added, removed
+
+
+def _git_text(*args: str) -> str | None:
+    proc = subprocess.run(["git", *args], cwd=ROOT, capture_output=True)
+    return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
+
+
+def line_changes(path: str, base: str | None, head: str | None) -> LineChanges | None:
+    """The test file's changed lines vs the merge base, for the bytes that will run.
+
+    None means no trustworthy line information (the caller reruns the whole unit).
+    """
+    try:
+        current = (ROOT / path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if head:
+        start = _git_text("merge-base", base, head) if base else _git_text("rev-parse", f"{head}^")
+        new = _git_text("show", f"{head}:{path}")
+        if start is None or new is None or new != current:
+            return None  # the worktree is not the revision that was diffed
+        start = start.strip()
+        diff = _git_text("diff", "-U0", "--no-renames", start, head, "--", path)
+    else:
+        start = _git_text("merge-base", base or "origin/main", "HEAD")
+        if start is None:
+            return None
+        start = start.strip()
+        new = current
+        diff = _git_text("diff", "-U0", "--no-renames", start, "--", path)
+    if diff is None:
+        return None
+    old = _git_text("show", f"{start}:{path}")
+    added, removed = parse_unified_zero(diff)
+    if old is None and new:
+        added = set(range(1, new.count("\n") + 2))
+    return LineChanges(added, removed, old, new)
+
+
+def _main_block_runs_unittest(tree: ast.Module) -> bool:
+    """True when `__main__` hands argv to a plain unittest.main() (ids are honored)."""
+    for node in tree.body:
+        if not (isinstance(node, ast.If) and "__name__" in ast.unparse(node.test) and "__main__" in ast.unparse(node.test)):
+            continue
+        calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)]
+        mains = [c for c in calls if ast.unparse(c.func) == "unittest.main"]
+        if len(mains) == 1 and not any(k.arg in ("argv", "defaultTest", "module") for k in mains[0].keywords) \
+                and not mains[0].args:
+            return True
+    return False
+
+
+@dataclass
+class TestCases:
+    """Addressable cases of one test file: methods/functions, and their enclosing classes."""
+    cases: list[tuple[str, int, int]]                      # (id, first line, last line)
+    classes: list[tuple[str, int, int, list[str]]]         # (class id, first, last, its case ids)
+
+
+def python_test_cases(source: str, style: str, rel: str = "") -> TestCases | None:
+    """The cases the runner can select by id, or None (the whole unit reruns).
+
+    style "unittest": `Class.test_method` / `Class` for a script whose __main__ runs unittest.main().
+    style "pytest": `rel::Class::test_x` / `rel::Class` / `rel::test_x` node ids.
+    A class is addressable only when it is not subclassed and its name is not used
+    outside its own body: then a change to its setUp/helpers/attributes reaches only it.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    if style == "unittest" and not _main_block_runs_unittest(tree):
+        return None
+    if style == "unittest":
+        # argv consumed anywhere outside the __main__ block could reinterpret appended ids.
+        guarded = {id(n) for g in tree.body if isinstance(g, ast.If) and "__main__" in ast.unparse(g.test)
+                   for n in ast.walk(g)}
+        if any(isinstance(n, ast.Attribute) and ast.unparse(n) == "sys.argv" and id(n) not in guarded
+               for n in ast.walk(tree)):
+            return None
+
+    def span(node: ast.AST) -> tuple[int, int]:
+        first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+        return first, node.end_lineno or node.lineno
+
+    top_classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+    subclassed = {ast.unparse(base) for node in ast.walk(tree) if isinstance(node, ast.ClassDef) for base in node.bases}
+    cases: list[tuple[str, int, int]] = []
+    classes: list[tuple[str, int, int, list[str]]] = []
+    class_names = {cls.name for cls in top_classes}
+    name_uses: dict[str, list[int]] = defaultdict(list)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in class_names:
+            name_uses[node.id].append(node.lineno)
+    for cls in top_classes:
+        if cls.name in subclassed or (style == "unittest" and not cls.bases):
+            continue  # an inherited test runs under other ids; a base-less class is no TestCase
+        if style == "pytest" and not cls.name.startswith("Test"):
+            continue
+        first, last = span(cls)
+        used_elsewhere = any(not first <= line <= last for line in name_uses[cls.name])
+        own = []
+        for item in cls.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test"):
+                case = f"{cls.name}.{item.name}" if style == "unittest" else f"{rel}::{cls.name}::{item.name}"
+                cases.append((case, *span(item)))
+                own.append(case)
+        if own and not used_elsewhere:
+            classes.append((cls.name if style == "unittest" else f"{rel}::{cls.name}", first, last, own))
+    if style == "pytest":
+        for item in tree.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test"):
+                cases.append((f"{rel}::{item.name}", *span(item)))
+    return TestCases(cases, classes)
+
+
+def _inert_lines(source: str) -> set[int]:
+    """Lines that are blank once comments and bare strings are masked (raw source if uncertain)."""
+    masked = _mask_python(source)
+    return {number for number, line in enumerate(masked.split("\n"), 1) if not line.strip()}
+
+
+def changed_cases(new: TestCases | None, old: TestCases | None, changes: LineChanges | None) -> list[str] | None:
+    """The case/class ids touched by `changes`, or None to rerun the whole unit.
+
+    A line inside a test method selects that method; a line elsewhere inside an
+    addressable class selects the whole class; a removed line of a case or class
+    that no longer exists is a deleted test (nothing to rerun). Any other
+    non-inert line (module level, an unaddressable class) selects the whole unit.
+    """
+    if new is None or old is None or changes is None or changes.old_source is None:
+        return None
+    present = {case for case, _, _ in new.cases} | {cls for cls, _, _, _ in new.classes}
+    picked: set[str] = set()
+    for lines, side, inert in ((changes.added, new, _inert_lines(changes.new_source)),
+                               (changes.removed, old, _inert_lines(changes.old_source))):
+        for line in lines:
+            owner = next((case for case, first, last in side.cases if first <= line <= last), None)
+            if owner is None and line in inert:
+                continue  # a blank/comment line between definitions changes no behavior
+            if owner is None:
+                owner = next((cls for cls, first, last, _ in side.classes if first <= line <= last), None)
+            if owner is None:
+                return None  # a module-level, fixture or unaddressable-class change reaches every case
+            if owner in present:
+                picked.add(owner)
+    if not picked:
+        return None  # only inert edits: still rerun the unit rather than certify nothing
+    # A selected class already runs its methods; do not run them twice.
+    covered = {case for cls, _, _, own in new.classes if cls in picked for case in own}
+    picked -= covered
+    order = {ident: first for ident, first, _ in new.cases} | {cls: first for cls, first, _, _ in new.classes}
+    return sorted(picked, key=lambda ident: order[ident])
+
+
+BLACKBOX_CASE_FILTER_ENV = "BLACKBOX_CASE_FUNCTIONS"  # agents/tests/blackbox/_test_utils.py
+BLACKBOX_CASE_RECEIPT_ENV = "BLACKBOX_CASE_RECEIPT"
+
+
+def blackbox_test_cases(source: str) -> TestCases | None:
+    """Agents blackbox test functions the BlackboxResult case filter can select.
+
+    A module-level `test_*` function is addressable when run_all_tests() registers it
+    directly (`r.record("name", fn)` / `await r.record_async("name", fn)`) and no other
+    code names it. Its def and its registration statements are its line spans. None when
+    run_all_tests() does not use BlackboxResult (the filter would be ignored).
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    defs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    run_all = defs.get("run_all_tests")
+    if run_all is None or not any(isinstance(n, ast.Name) and n.id == "BlackboxResult" for n in ast.walk(run_all)):
+        return None
+    registrations: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    registration_names: set[int] = set()
+    for stmt in ast.walk(run_all):
+        if not isinstance(stmt, ast.Expr):
+            continue
+        call = stmt.value.value if isinstance(stmt.value, ast.Await) else stmt.value
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and call.func.attr in ("record", "record_async") and len(call.args) >= 2
+                and isinstance(call.args[1], ast.Name)):
+            continue
+        name = call.args[1].id
+        if name.startswith("test") and name in defs:
+            registrations[name].append((stmt.lineno, stmt.end_lineno or stmt.lineno))
+            registration_names.add(id(call.args[1]))
+    uses: dict[str, list[ast.Name]] = defaultdict(list)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in registrations and id(node) not in registration_names:
+            uses[node.id].append(node)
+    cases: list[tuple[str, int, int]] = []
+    for name, spans in registrations.items():
+        node = defs[name]
+        first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+        last = node.end_lineno or node.lineno
+        elsewhere = any(not first <= use.lineno <= last for use in uses[name])
+        if elsewhere:
+            continue  # another case calls it: a change reaches that case too
+        cases.append((name, first, last))
+        cases.extend((name, a, b) for a, b in spans)
+    return TestCases(cases, [])
+
+
+def _structural_gate_options() -> dict[str, dict[str, str]]:
+    """Keyword options of each structural Gate (the `exclusive` group, verbatim)."""
+    tree = ast.parse(src().read("scripts/run-deploy-structural-gates.py"))
+    options: dict[str, dict[str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Gate" and node.args \
+                and isinstance(node.args[0], ast.Constant):
+            options[node.args[0].value] = {k.arg: ast.unparse(k.value) for k in node.keywords if k.arg}
+    return options
 
 
 def stability_command(unit: Unit) -> tuple[list[str], Path] | None:
@@ -1058,6 +1311,76 @@ def stability_command(unit: Unit) -> tuple[list[str], Path] | None:
     return None
 
 
+@dataclass
+class StabilityPlan:
+    key: str
+    command: list[str]
+    cwd: Path
+    cases: list[str]   # [WHOLE_UNIT] or the selected case ids
+    reason: str
+    exclusive: str = ""
+    env: dict[str, str] = field(default_factory=dict)
+    receipt: bool = False  # every selected case must report that it ran (blackbox case filter)
+
+
+def _is_python(executable: str) -> bool:
+    return re.fullmatch(r"python(3(\.\d+)?)?", PurePosixPath(executable).name) is not None
+
+
+def plan_unit(unit: Unit, changed: list[str], diff: Callable[[str], LineChanges | None] | None) -> StabilityPlan | None:
+    """The command for `unit`, narrowed to its changed cases when the lane can name them."""
+    planned = stability_command(unit) if unit.lane in STABILITY_LANES else None
+    if planned is None:
+        return None
+    command, cwd = planned
+    key = f"{unit.lane}:{unit.name}"
+    exclusive = _structural_gate_options().get(unit.name, {}).get("exclusive", "") \
+        if unit.lane == "deploy-structural-gates" else ""
+
+    def whole(reason: str) -> StabilityPlan:
+        return StabilityPlan(key, command, cwd, [WHOLE_UNIT], reason, exclusive)
+
+    tests = sorted({path for path in changed if is_test_file(path) and path in unit.roots and (ROOT / path).is_file()})
+    if diff is None:
+        return whole("no diff base: changed lines unknown")
+    if len(tests) != 1:
+        return whole(f"{len(tests)} changed test files in the unit")
+    test = tests[0]
+    if unit.lane == "agents-pytest":
+        style, rel = "pytest", str(PurePosixPath(test).relative_to("agents"))
+        if command[-1] != rel:
+            return whole("pytest target is not the changed file")
+    elif unit.lane == "agents-blackbox":
+        changes = diff(test)
+        if changes is None or changes.old_source is None:
+            return whole("new file or no line information")
+        new_cases = blackbox_test_cases(changes.new_source)
+        if new_cases is None or not new_cases.cases:
+            return whole("run_all_tests() does not register cases through BlackboxResult")
+        picked = changed_cases(new_cases, blackbox_test_cases(changes.old_source), changes)
+        if picked is None:
+            return whole("a change outside any single test case")
+        return StabilityPlan(key, command, cwd, picked, "changed cases", exclusive,
+                             env={BLACKBOX_CASE_FILTER_ENV: ",".join(picked)}, receipt=True)
+    elif unit.lane in ("deploy-structural-gates", "cloudbench-controller") and test.endswith(".py") \
+            and len(command) == 2 and _is_python(command[0]) and os.path.normpath(command[1]) == test:
+        style, rel = "unittest", test
+    else:
+        return whole(f"lane {unit.lane} runner cannot select single cases here")
+    changes = diff(test)
+    if changes is None or changes.old_source is None:
+        return whole("new file or no line information")
+    new_cases = python_test_cases(changes.new_source, style, rel)
+    if new_cases is None or not new_cases.cases:
+        return whole("runner does not accept case ids")
+    picked = changed_cases(new_cases, python_test_cases(changes.old_source, style, rel), changes)
+    if picked is None:
+        return whole("a change outside any single test case")
+    if style == "pytest":
+        return StabilityPlan(key, command[:-1] + picked, cwd, picked, "changed cases", exclusive)
+    return StabilityPlan(key, command + picked, cwd, picked, "changed cases", exclusive)
+
+
 def _roots_digest(units: list[Unit]) -> str:
     digest = hashlib.sha256()
     for root in sorted({r for unit in units for r in unit.roots}):
@@ -1071,8 +1394,11 @@ def _roots_digest(units: list[Unit]) -> str:
 
 
 class CpuLoad:
-    """Busy CPU workers owned by exact PID: started on enter, reaped on exit.
+    """`workers` load slots, each a running stability lane or an owned busy CPU worker.
 
+    Workers are started on enter and reaped by exact PID; `take()` hands one
+    slot to a starting lane (stopping one worker) and `give()` returns it
+    (starting a replacement), so lanes + live workers always fill every slot.
     stress-ng (bounded by --timeout) is used when installed; otherwise Python
     busy loops that also exit by themselves if this process dies.
     """
@@ -1081,45 +1407,71 @@ class CpuLoad:
         self.workers = workers
         self.bound_seconds = bound_seconds
         self.procs: list[subprocess.Popen] = []
+        self.started: list[int] = []
+        self.lanes = 0
         self.tool = ""
+        self._lock = threading.RLock()
 
-    def __enter__(self) -> "CpuLoad":
-        if self.workers <= 0:
-            return self
+    def _spawn(self) -> None:
         quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         stress = shutil.which("stress-ng")
+        if stress:
+            self.tool = "stress-ng"
+            proc = subprocess.Popen([stress, "--cpu", "1", "--timeout", f"{self.bound_seconds}s", "--quiet"], **quiet)
+        else:
+            self.tool = "python-busy-loop"
+            proc = subprocess.Popen([sys.executable, "-c", STABILITY_LOAD_LOOP, str(os.getpid())], **quiet)
+        self.procs.append(proc)
+        self.started.append(proc.pid)
+
+    @staticmethod
+    def _reap(proc: subprocess.Popen) -> None:
+        if proc.poll() is None:
+            proc.terminate()
         try:
-            if stress:
-                self.tool = "stress-ng"
-                self.procs.append(subprocess.Popen(
-                    [stress, "--cpu", str(self.workers), "--timeout", f"{self.bound_seconds}s", "--quiet"], **quiet))
-            else:
-                self.tool = "python-busy-loop"
-                for _ in range(self.workers):
-                    self.procs.append(subprocess.Popen(
-                        [sys.executable, "-c", STABILITY_LOAD_LOOP, str(os.getpid())], **quiet))
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    def __enter__(self) -> "CpuLoad":
+        try:
+            with self._lock:
+                for _ in range(max(self.workers, 0)):
+                    self._spawn()
         except BaseException:
             self.__exit__(None, None, None)
             raise
         return self
 
+    def take(self) -> None:
+        with self._lock:
+            self.lanes += 1
+            if self.procs and len(self.procs) + self.lanes > self.workers:
+                self._reap(self.procs.pop())
+
+    def give(self) -> None:
+        with self._lock:
+            self.lanes -= 1
+            while len(self.procs) + self.lanes < self.workers:
+                self._spawn()
+
     @property
     def pids(self) -> list[int]:
-        return [proc.pid for proc in self.procs]
+        return list(self.started)
 
     def alive(self) -> bool:
-        return self.workers <= 0 or (bool(self.procs) and all(proc.poll() is None for proc in self.procs))
+        with self._lock:
+            live = all(proc.poll() is None for proc in self.procs)
+            return self.workers <= 0 or (live and len(self.procs) + self.lanes >= self.workers)
 
     def __exit__(self, *_exc: object) -> None:
-        for proc in self.procs:
-            if proc.poll() is None:
-                proc.terminate()
-        for proc in self.procs:
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+        with self._lock:
+            for proc in self.procs:
+                if proc.poll() is None:
+                    proc.terminate()
+            for proc in self.procs:
+                self._reap(proc)
 
 
 # The gate's own per-test channel (scripts/deploy_gate_progress.py). A rerun test must not inherit it:
@@ -1130,15 +1482,28 @@ GATE_CHANNEL_ENV = ("DEPLOY_GATE_PROGRESS", "DEPLOY_GATE_CASE", "DEPLOY_GATE_QUA
                     "DEPLOY_GATE_QUARANTINE_UNIT_PREFIX")
 
 
+# A whole-unit rerun must never inherit a case filter; only its own plan may set one.
+CASE_FILTER_ENV = (BLACKBOX_CASE_FILTER_ENV, BLACKBOX_CASE_RECEIPT_ENV)
+
+
 def stability_environment(env: dict[str, str] | None = None) -> dict[str, str]:
-    return {k: v for k, v in (os.environ if env is None else env).items() if k not in GATE_CHANNEL_ENV}
+    return {k: v for k, v in (os.environ if env is None else env).items()
+            if k not in GATE_CHANNEL_ENV and k not in CASE_FILTER_ENV}
 
 
-def _run_once(command: list[str], cwd: Path, log: Path, timeout: float) -> tuple[int | None, float]:
+_RUNNING: dict[int, subprocess.Popen] = {}
+_RUNNING_LOCK = threading.Lock()
+
+
+def _run_once(command: list[str], cwd: Path, log: Path, timeout: float,
+              extra_env: dict[str, str] | None = None) -> tuple[int | None, float]:
     started = time.monotonic()
     with log.open("wb") as handle:
         proc = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=handle,
-                                stderr=subprocess.STDOUT, start_new_session=True, env=stability_environment())
+                                stderr=subprocess.STDOUT, start_new_session=True,
+                                env={**stability_environment(), **(extra_env or {})})
+        with _RUNNING_LOCK:
+            _RUNNING[proc.pid] = proc
         try:
             code: int | None = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -1150,54 +1515,137 @@ def _run_once(command: list[str], cwd: Path, log: Path, timeout: float) -> tuple
             except (ProcessLookupError, PermissionError):
                 pass
             proc.wait()
+            with _RUNNING_LOCK:
+                _RUNNING.pop(proc.pid, None)
     return code, round(time.monotonic() - started, 2)
 
 
+def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_root: Path, load: CpuLoad) -> dict:
+    attempts = []
+    status = "PASS"
+    started = time.monotonic()
+    load.take()
+    try:
+        for run in range(1, runs + 1):
+            log = log_root / f"{index:03d}-run{run}.log"
+            env = dict(plan.env)
+            receipt = log_root / f"{index:03d}-run{run}.cases"
+            if plan.receipt:
+                env[BLACKBOX_CASE_RECEIPT_ENV] = str(receipt)
+            code, seconds = _run_once(plan.command, plan.cwd, log, timeout, env)
+            loaded = load.alive()
+            attempt = {"run": run, "exit": code, "seconds": seconds, "log": str(log), "loaded": loaded}
+            if plan.receipt and code == 0:
+                ran = set(receipt.read_text().split()) if receipt.exists() else set()
+                missing = sorted(set(plan.cases) - ran)
+                if missing:
+                    # A filtered run that skipped a selected case proves nothing about it.
+                    attempt["exit"] = code = -1
+                    attempt["missing_cases"] = missing
+            attempts.append(attempt)
+            if not loaded:
+                status = "UNVERIFIED"
+                break
+            if code != 0:
+                status = "FAIL"
+                break
+    finally:
+        load.give()
+    row = {"status": status, "command": plan.command, "cwd": str(plan.cwd), "cases": plan.cases,
+           "selection": plan.reason, "attempts": attempts,
+           "consecutive_passes": sum(1 for a in attempts if a["exit"] == 0),
+           "wall_seconds": round(time.monotonic() - started, 2)}
+    if status == "UNVERIFIED":
+        row["reason"] = "a load slot was empty during the run"
+    elif attempts and attempts[-1].get("missing_cases"):
+        row["reason"] = f"selected case(s) did not run: {', '.join(attempts[-1]['missing_cases'])}"
+    if plan.env:
+        row["env"] = plan.env
+    return row
+
+
 def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: int | None = None,
-                  timeout: float = STABILITY_RUN_TIMEOUT_SECONDS, log_root: Path | None = None) -> dict:
+                  timeout: float = STABILITY_RUN_TIMEOUT_SECONDS, log_root: Path | None = None,
+                  changed: list[str] | None = None, diff: Callable[[str], LineChanges | None] | None = None,
+                  lanes: int | None = None) -> dict:
+    """Run each unit `runs` consecutive times; units run concurrently, every CPU slot loaded.
+
+    `load_workers` is the number of load slots (default nproc); `lanes` caps concurrent
+    units (default: one per slot). `diff` maps a changed test file to its LineChanges.
+    """
     if runs < STABILITY_RUNS:
         raise ValueError(f"the new-test rule requires at least {STABILITY_RUNS} consecutive runs")
     workers = (os.cpu_count() or 1) if load_workers is None else load_workers
+    lanes = max(1, min(workers, lanes if lanes is not None else workers))
     log_root = log_root or ROOT / ".context" / "new-test-stability" / time.strftime("%Y%m%dT%H%M%S")
     log_root.mkdir(parents=True, exist_ok=True)
     before = _roots_digest(units)
+    began = time.monotonic()
     results: dict[str, dict] = {}
-    runnable = []
+    pending: list[tuple[int, StabilityPlan]] = []
     for unit in units:
-        key = f"{unit.lane}:{unit.name}"
-        planned = stability_command(unit) if unit.lane in STABILITY_LANES else None
-        if planned is None:
-            results[key] = {"status": "UNSUPPORTED", "reason": f"lane {unit.lane} has no stability runner here"}
+        plan = plan_unit(unit, changed if changed is not None else list(unit.roots), diff)
+        if plan is None:
+            results[f"{unit.lane}:{unit.name}"] = {
+                "status": "UNSUPPORTED", "reason": f"lane {unit.lane} has no stability runner here"}
         else:
-            runnable.append((key, *planned))
-    bound = int(timeout * runs * max(1, len(runnable)) + 60)
+            pending.append((len(pending), plan))
+    # Whole units first: they are the long poles of the wall clock.
+    pending.sort(key=lambda item: (item[1].cases != [WHOLE_UNIT], item[0]))
+    bound = int(timeout * runs * max(1, len(pending)) + 60)
+    done = threading.Condition()
+    running: dict[str, str] = {}  # key -> exclusive group
+    threads: list[threading.Thread] = []
     with CpuLoad(workers, bound) as load:
-        for index, (key, command, cwd) in enumerate(runnable):
-            attempts = []
-            status = "PASS"
-            for run in range(1, runs + 1):
-                log = log_root / f"{index:03d}-run{run}.log"
-                code, seconds = _run_once(command, cwd, log, timeout)
-                loaded = load.alive()
-                attempts.append({"run": run, "exit": code, "seconds": seconds, "log": str(log), "loaded": loaded})
-                if not loaded:
-                    status = "UNVERIFIED"
-                    break
-                if code != 0:
-                    status = "FAIL"
-                    break
-            results[key] = {"status": status, "command": command, "cwd": str(cwd), "attempts": attempts,
-                            "consecutive_passes": sum(1 for a in attempts if a["exit"] == 0)}
-        load_record = {"workers": workers, "tool": load.tool, "pids": load.pids}
+        try:
+            while pending or running:
+                with done:
+                    held = {group for group in running.values() if group}
+                    launch = next((item for item in pending if not item[1].exclusive or item[1].exclusive not in held),
+                                  None) if len(running) < lanes else None
+                    if launch is None:
+                        done.wait(timeout=1.0)
+                        continue
+                    pending.remove(launch)
+                    index, plan = launch
+                    running[plan.key] = plan.exclusive
+
+                def work(index: int = index, plan: StabilityPlan = plan) -> None:
+                    try:
+                        row = _run_plan(index, plan, runs, timeout, log_root, load)
+                    except BaseException as exc:  # recorded, never a silent PASS
+                        row = {"status": "FAIL", "reason": f"stability runner error: {exc!r}", "cases": plan.cases,
+                               "attempts": [], "consecutive_passes": 0}
+                    with done:
+                        results[plan.key] = row
+                        running.pop(plan.key, None)
+                        done.notify_all()
+
+                thread = threading.Thread(target=work, name=f"stability-{index}", daemon=True)
+                threads.append(thread)
+                thread.start()
+        finally:
+            if pending or running:
+                with _RUNNING_LOCK:
+                    for proc in list(_RUNNING.values()):
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+            for thread in threads:
+                thread.join()
+        load_record = {"workers": workers, "lanes": lanes, "tool": load.tool, "pids": load.pids}
     after = _roots_digest(units)
     if before != after:
         for row in results.values():
             if row["status"] == "PASS":
                 row.update(status="UNVERIFIED", reason="test code changed during the stability runs")
-    statuses = {row["status"] for row in results.values()}
+    ordered = {f"{u.lane}:{u.name}": results[f"{u.lane}:{u.name}"] for u in units if f"{u.lane}:{u.name}" in results}
+    statuses = {row["status"] for row in ordered.values()}
     overall = "FAIL" if "FAIL" in statuses else ("UNVERIFIED" if statuses - {"PASS"} else "PASS")
     return {"status": overall, "runs": runs, "load": load_record, "digest_before": before,
-            "digest_after": after, "units": results, "logs": str(log_root)}
+            "digest_after": after, "units": ordered, "logs": str(log_root),
+            "wall_seconds": round(time.monotonic() - began, 2)}
 
 
 # ------------------------------------------------------------------- cli ---
@@ -1242,6 +1690,10 @@ def self_check(selector: Selector) -> list[str]:
     return problems
 
 
+def _terminate(_signum: int, _frame: object) -> None:
+    raise SystemExit(143)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base")
@@ -1252,9 +1704,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--rev", help="map the tree of this revision instead of the worktree (history replay)")
     parser.add_argument("--stability", action="store_true",
-                        help="run every added/changed test unit --stability-runs consecutive times under CPU load")
+                        help="run every added/changed test case (or its whole unit) --stability-runs consecutive times under CPU load")
     parser.add_argument("--stability-runs", type=int, default=STABILITY_RUNS)
-    parser.add_argument("--load-workers", type=int, help="busy CPU workers during the runs (default: nproc)")
+    parser.add_argument("--load-workers", type=int,
+                        help="load slots kept busy during the runs: concurrent units plus busy CPU workers (default: nproc)")
+    parser.add_argument("--stability-lanes", type=int,
+                        help="units run concurrently (default and maximum: the load slots)")
     parser.add_argument("--stability-timeout", type=float, default=STABILITY_RUN_TIMEOUT_SECONDS,
                         help="per-run seconds (the suite's own deadline still applies inside)")
     args = parser.parse_args(argv)
@@ -1263,6 +1718,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--stability-runs must be at least {STABILITY_RUNS}")
         if args.load_workers is not None and args.load_workers < 1:
             parser.error("--load-workers must be positive; the check always runs under load")
+        if args.stability_lanes is not None and args.stability_lanes < 1:
+            parser.error("--stability-lanes must be positive")
         changed = list(args.changed_file)
         if args.changed_files_from:
             changed += [line.strip() for line in Path(args.changed_files_from).read_text().splitlines() if line.strip()]
@@ -1272,16 +1729,31 @@ def main(argv: list[str] | None = None) -> int:
         if not units:
             print("new-test stability: no added or changed test units")
             return 0
-        report = run_stability(units, args.stability_runs, args.load_workers, args.stability_timeout)
+        # A TERM (gate timeout/cancel) unwinds run_stability so every running unit's own
+        # session and every owned load worker is reaped instead of being orphaned.
+        signal.signal(signal.SIGTERM, _terminate)
+        # Case narrowing needs the diff; an explicit file list without --base reruns whole units.
+        explicit = bool(args.changed_file or args.changed_files_from)
+        diff = None if explicit and not args.base else (lambda path: line_changes(path, args.base, args.head))
+        report = run_stability(units, args.stability_runs, args.load_workers, args.stability_timeout,
+                               changed=changed, diff=diff, lanes=args.stability_lanes)
         if args.format == "json":
             print(json.dumps(report, indent=2))
         else:
             load = report["load"]
-            print(f"new-test stability: {report['status']} ({report['runs']} consecutive runs, "
-                  f"{load['workers']} {load['tool']} load workers, logs {report['logs']})")
+            print(f"new-test stability: {report['status']} ({report['runs']} consecutive runs per unit, "
+                  f"{load['lanes']} concurrent lanes, {load['workers']} load slots topped up with "
+                  f"{load['tool'] or 'no'} workers, wall {report['wall_seconds']:.0f}s, logs {report['logs']})")
             for key, row in report["units"].items():
                 passes = row.get("consecutive_passes", 0)
-                print(f"  {row['status']:11s} {key} {passes}/{report['runs']} {row.get('reason', '')}".rstrip())
+                cases = row.get("cases") or []
+                scope = "whole unit" if cases == [WHOLE_UNIT] else f"{len(cases)} case(s)"
+                wall = f" {row['wall_seconds']:.0f}s" if "wall_seconds" in row else ""
+                print(f"  {row['status']:11s} {key} {passes}/{report['runs']}{wall} [{scope}] "
+                      f"{row.get('reason', '')}".rstrip())
+                if cases and cases != [WHOLE_UNIT]:
+                    for case in cases:
+                        print(f"      {case}")
         return {"PASS": 0, "FAIL": 1}.get(report["status"], 2)
     if args.rev:
         global SRC
