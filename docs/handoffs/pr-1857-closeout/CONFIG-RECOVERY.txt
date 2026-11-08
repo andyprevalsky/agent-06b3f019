@@ -1,0 +1,29 @@
+# PR1857 exact configuration recovery
+
+The deployment closeout assignment authorized the exact nine-file private configuration archive. Its source files were never modified. `config-archive-receipt.json` pins the existing private trace-archive object; it contains no secret value and may be included in the reviewed sanitized records follow-up. All plaintext configuration and restored copies remain private.
+
+Verified at 2026-11-08T22:20:48Z: a targeted read-only paginated GET of the existing Render service `srv-d3jga77diees73cgrvk0` found `TRACE_ARCHIVE_ENCRYPTION_KEY_B64` and all four required R2 connection fields. They matched the active archive configuration in memory. The decoded 32-byte key SHA256 is `e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730`, the same fingerprint documented in the previous independently delivered escrow recovery. No raw provider response, key value or unrelated service variable was saved or printed; no provider setting was changed.
+
+`restore_from_render.py` was then executed with a fresh empty destination. It fetches only those five fields from Render, checks service/bucket/key identity, adapts configuration loading and calls the unchanged native `private_archive.py` restoration implementation. It obtains no bootstrap secret from the encrypted archive. `config-render-restore-proof.sanitized.json` records this independent bootstrap. `config-restore-hash-modes.sanitized.json` verifies all nine file contents/sizes and original0600 modes for both the ordinary and Render-bootstrapped restores, and confirms the source files stayed unchanged.
+
+Run the command from the repository root so the native helper import resolves.
+
+Recover from a fresh authorized environment with Render account/API access. Supply only RENDER_API_KEY and RENDER_SERVICE_ID in an external private bootstrap dotenv file (or process environment); do not place either value in command arguments or public records. With the saved sanitized receipt and versioned native helper available:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 agents/venv/bin/python docs/handoffs/pr-1857-closeout/restore_from_render.py \
+  --bootstrap-config /private/render-bootstrap.env \
+  --receipt /private/config-archive-receipt.json \
+  --destination /private/new-empty-config-restore \
+  --proof /private/render-restore-proof.json
+```
+
+The adapter source must be preserved with the parent's records or private control archive. `private-config-expected-metadata.json` binds exact paths/modes/size/SHA256. Native restore validates encrypted frames, compressed-stream and manifest hashes plus every file hash before success. Copy no restored file over live configuration without checking that it is the intended environment; historical workspace/machine identifiers are not startup instructions.
+
+Files: five application .env files, root .env.npm, agents/.env.benchmark-temporal, the recovery-key escrow, and staged ngrok.yml. The last file's token fields match NGROK_AUTHTOKEN and NGROK_API_KEY in the application environment. The archive also contains the decryption-key copy, but that copy is explicitly not used as its own escrow. Independent Render access and the prior managed escrow source resolve the bootstrap problem; future access to that owner-controlled account must be retained.
+
+Terminal deploy-record capture and authenticated restoration are verified in the
+terminal receipts. Later publication/readiness controls must be retained in the
+reviewed records or permanent GitHub/boxes.dev publications. Platform session
+identity follows the explicit regeneration disposition in deletion-manifest.json.
+No configuration, source branch, user services or Freedom were changed by recovery.

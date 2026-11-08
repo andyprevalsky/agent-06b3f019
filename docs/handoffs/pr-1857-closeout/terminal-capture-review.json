@@ -1,0 +1,602 @@
+{
+  "reviewed_at": "2026-11-08T23:24:52.030187+00:00",
+  "verdict": "PASS_NARROW_QUALIFICATION_FOR_PRIVATE_CONFIDENTIAL_ARCHIVE",
+  "original_manifest_sha256": "582516472c38e93e7e1e242efb06436c16c7eb7269408253840183d4739ad42e",
+  "original_flags_retained": [
+    ".context/deploy-pipeline/attempts/2/initial/cloudbench-controller/remote-artifact/files/.context/cloudbench-controller-tests/native-sewozai4/scripts/tests/github-token-pool.test.py"
+  ],
+  "original_skipped_retained": [
+    {
+      "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/current",
+      "reason": "symlink directory not followed"
+    }
+  ],
+  "qualification_sha256": "ddd13bd328578077b18ca0955f3574ac9b873c2e9ffd772c00897b9efd769b3d",
+  "fixture": {
+    "path": ".context/rca-784d/closeout-prep/terminal-20261108T232200Z/snapshot/.context/deploy-pipeline/attempts/2/initial/cloudbench-controller/remote-artifact/files/.context/cloudbench-controller-tests/native-sewozai4/scripts/tests/github-token-pool.test.py",
+    "canonical": "scripts/tests/github-token-pool.test.py",
+    "sha256": "61da40dac8cf1d17632c5b63cfd35419057141bf77d52dd84267e8b75481cd0d",
+    "byte_equal": true,
+    "reason": "Canonical source fixture uses explicit synthetic ghp_secret/gho_secret strings against a local fake GitHub; RSA keys are generated only at test runtime, no embedded production credential."
+  },
+  "symlink": {
+    "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/current",
+    "literal_target": ".generation-nbnordqx",
+    "metadata_matches": true,
+    "target_inside_inventory": true,
+    "captured_target_file_count": 93,
+    "files": [
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/health",
+        "sha256": "15ec0ebfc77b6063695e81cc38a8832fc3a0d3f94c0865b2c2431fb6d43c77fd",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/published_at",
+        "sha256": "c172f6c8b2c6ba5686ac8ce622c4f49d89944cea7cd6bee9a1830c1ccdd47ccd",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/admission-machines.json",
+        "sha256": "104af52f2ad4705ecc16ce1d4e9b349b85780b93082d4b5fc1328f9d58ee4451",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/862ee7ce413508",
+        "sha256": "131466260ff35241e98a357eafb120125cd2f3ccd24b0bc2929280fae2cefa3a",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8ed9102b224418",
+        "sha256": "727da09d687388ecd26e672100a9de80ac54018531bae310f22af94a8c0d8466",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8111936b9ded38",
+        "sha256": "f1782ddb5dc5d9d28fddddfdc2f2fa48ab62781ed2b1cfbce3cc7629e3b5a1c2",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/d8911375c29d98",
+        "sha256": "f9781130893ccac042f7ef59fbb21a4a674497b24fd41c42ca76d87ea1614a6c",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8744500a324978",
+        "sha256": "aceb9b0292779c8e4da3b237b2fc1419f3d964c81d158e588784f5908d73f0ce",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8dd716ce9ed078",
+        "sha256": "8c724c08c724386e38aad1ad125a783ad18f1dcc190c41fddac201fab49b243e",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/836edec76927d8",
+        "sha256": "11dd5b6903d807a696686394e43513fd644eed56b9ececba8504d3252e2e8e5d",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/832717a71940d8",
+        "sha256": "90a88b540ad3706d0d900bcc6111a04b9254a581e02fb1c61e30c7dea3bbecb1",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/185770edc1ed68",
+        "sha256": "862ca4524c1edd2fe146ee0d3ea44ef9a134dcf0bcb0c3f8bc436d927502b3db",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/86e343ce97e278",
+        "sha256": "7418fe5176b364dfc9fe50e84e2152f9bea230873fb8efec4ba54e78138f0446",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/80eeeddc052dd8",
+        "sha256": "dc3fd5a464d72c8a40dffe17e447c4eda75d8175862aeaec1621430cfc138112",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8de396be2ded18",
+        "sha256": "84ee7df92dff75a07fd30c18de50c06cfe8bfd23eb8c444d089bd28fd0a7ca6e",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/80ee505c6e3e78",
+        "sha256": "ecc91c1024ca5ce2c082891259d1f74245e958c2cc27bff8c8d3241cc8c897b2",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/80e965dfe32d08",
+        "sha256": "b2cfe66410df801495742dad1860eab25dc5a012825477c26c66792beef6bf3a",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8d96719f3690e8",
+        "sha256": "1ebca56f491729c321e42fd320a683eb70ca1b7f4bc3368f4e03488f9bf837e3",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/080d476c705638",
+        "sha256": "3581d24ea440dcbc3a49e90f28ffcb2c49a2ee9376aa74e09db71ff99ca787f2",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/84ee60dc2dd628",
+        "sha256": "508c63324a93295ba68c62bd8a5286569aba71e7267cb31bb779e128e0444908",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/865993a7226dd8",
+        "sha256": "c95c7edc97e86ae7a5e35301fe61398b78c439a49d10687ca417fa4b33c32ea6",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/683dd700a72568",
+        "sha256": "42607e95d41c0c4c0a0d49047ccaeeb27acc96679e69e513d3f04137cb6f4ba4",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/83dd960fd47398",
+        "sha256": "9e4785677f8d28cb6b3452f7a58c8374fa0927440be471705bb5b6f5ba7e3b6c",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/18577912a04658",
+        "sha256": "537241ca5f1b913522f22d8826d480f95b3b927ae9ada1f9afb90d6bbe8ae744",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/080ee33ef20208",
+        "sha256": "4affd5da864d314a0ceddce6cc9a4204cfed0b407450799384a34cbea92dfd39",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/683e590a475d68",
+        "sha256": "aa2604c5808560ae06482fe503380992110036c3accd9e908f1b2abb26d65414",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/83e207c74469e8",
+        "sha256": "20adc4f199df645746cd28724a025cefe80bbe751d050e5ec64a505a0e6bccd0",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8744e50a060158",
+        "sha256": "a27c6d2f5cc334473728c8e5db446325a0dc2ee4e05bb5bd91f85ba5386f509f",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/843205c264d228",
+        "sha256": "deda81d952537a13007e376f0d48ddd65ffb93f153fc3cbbd2b96a23874aa419",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8744115a3e6498",
+        "sha256": "6adab63b97fcd8951b4c403d9045b1147a547c68b725c73dd1d75bd531eb8833",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/82dd310c797ed8",
+        "sha256": "eb935366ef08abad9f9a29c2e465d4fea6d2770a174a390476aa0728a8b80be2",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8747590c1dd998",
+        "sha256": "76dd3b84df4d4aa510da6d2a420a3323861d208ddebdb18ce41ddefb62a57128",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/80ee426b657978",
+        "sha256": "024950f525d493b718ab263f8e0b9790e48cd076a6bdc31ae9ebbb1b26d1c5d7",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8d1d6dae931938",
+        "sha256": "3e11d959b5542d9050b7113d16a8d1a600033fdafd21260979d9e68342628b73",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8d967d7c523028",
+        "sha256": "0e50f9083aedc5f0e42dcc5133af711b092181caaee6eb89b42d315ffd1cb664",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8744e10c01e458",
+        "sha256": "38d9a125f18394488657565c03300b2512769365d8cf53b2536ad6ba3cb643ac",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/830393f7424778",
+        "sha256": "350222ea9b8c450b000bde306fc22e0d63280b4354299aa3551d6c3219a97ef9",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8ee321b7edeed8",
+        "sha256": "287d3326bb5cf1c9715e78ce8751a2a76a55b7450d237bca6229c7ce6a8202a6",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/840490b2676778",
+        "sha256": "6a4786c076cbc5a3b83ab7e3d750ec2dd93b698fdd6b3c7cbfbdc6cdef77165d",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/826060a7300648",
+        "sha256": "17e57c642a9e5b58399a54c9a4a545bfa06cc4f8ecc6e06665c19d288b27a2cc",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8045e7b6001978",
+        "sha256": "a51c23de79be92ebb9097755815784f52cdce5cb4dff23a652e487ace8d95b18",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/820224f7e069e8",
+        "sha256": "7b8faf2a58a5be64df4c78135606ab356e5a2c0e63b77a1e6836834b7de475ea",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/781e041f397178",
+        "sha256": "7e8e0a2b6be538ed5705767427c1a19e97842cf18b7ee4a6692a0da93d4421d9",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8ed9104c039658",
+        "sha256": "d0cee6550918ad70c999d8f4fd5068a9b5c4b0a9760a8aa334f7335c30d9acb3",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8d991d6ae13378",
+        "sha256": "d3953a6ab552e74d7a8209b9f40677d5ebcb739b44b21a57bba6f601df99aac1",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/683e47df5094d8",
+        "sha256": "911e1fc3e901c79eb4fda2b60243d6d1f93bd7f2a3cb3b47f23c0414e1ce0d90",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/89639da66e9468",
+        "sha256": "307e2ae5615bf5751f8a20601564fae45e9c00b49cd0a40b062c97c6a72b9585",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/machines/8ed16dc75ee958",
+        "sha256": "ffa2ea79251602fbb410fb09a5ccf0146cc4af5855e046fc6ad0e53256fce3cf",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-af92c08cd3b647b99b51d608",
+        "sha256": "e24b57cb8b40afafdbb29de70d8ad9f0d66f3b3df8273d8ff33d5b292662fe18",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-warm-t10-ord-85a7e2c",
+        "sha256": "ba380d4908a191746f50d7f2ac9e55add1d920539d96602431199cd23588eeac",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/deploy-warm-pool-7d466db0eb3b",
+        "sha256": "4add688747950693526299a173e7edeb7d73d4f5e7f20942ef43e02d769be177",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-9fbd9beb11d143da9c48a0c7",
+        "sha256": "b75afe95233c27906a7ebc49a6d864d90f30df6d3b2ade3b7d877899fe08b558",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-28afb407ddb042fc9f1497f3",
+        "sha256": "00e149f9cb61748d94358c59e3d5c3503944415404b352a248ed8a9660e69c5e",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-db863cefbe544176a11e1c17",
+        "sha256": "e9c76dfc4e72216b9446c8933a38b151c57abdf1511c6674bb6b40ef850b45fe",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-gate-9c87e2b1-20261022-000726-s01",
+        "sha256": "297bd89dc8dfa81d0bd12d1fa5cf8c3dfc5914c31c0376868a83ae510c06523b",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-source-a67a0f74e9f12f9b8ab68f7f2544975c",
+        "sha256": "2ad2746c0275b7c6b9bb0d75d745f4ae19b5b5146cc42470bb4ea53b6f12586b",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-a823d60038a94138b0df6dfa",
+        "sha256": "bcd9a50c2d83b70c9a5af405635318be2dce9965062dccfded0f5d01b93ba9a9",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-bd52b1884d614d70b660ec1e",
+        "sha256": "7ce9682ae5a6c5556b02c1199bcfed2ee036b17509a2df6ddb956100188d9162",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/whm-deploy-g4-fb24dd03-20261015",
+        "sha256": "aa8e49206de62e193a9079559b3fcfccc9855ae15d2b724654e8d0d53663ec9d",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-34f2a785c0ba42859beabcf9",
+        "sha256": "2aa680352d32d1a4e47fc1e03c802e0ab36cd0e7c2a895bd57b3c2547e6b6e82",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/deploy-warm-pool-3b6ff5f96c6b",
+        "sha256": "241df6ae44d8f7cd22124b3d0edd15baedb5aea4f5eb4098aa7b807b3817f06f",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-3e8d4fc358d14e2195857b09",
+        "sha256": "0062aaa33b694be278daceadad59784daee14cf95f5fa2bca698ba4628e6c62d",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-1bf7ceb10dd14b978fee818d",
+        "sha256": "b9070a6c6869820184a434ceaa986d579047093b43df0c067fdb5433d107e42b",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-a31ae0f9916a4ccabde93b16",
+        "sha256": "0b85b27f325abe9702df8d647c8c33817e1403a2ea09db0d43bd5acd6e576d11",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/deploy-warm-pool-3cc7f9c2420b",
+        "sha256": "afaef04370c9225eac3cd5e53b588b5c36d360be3fba6edcc6bdf5ff896f5f31",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-237fed7fcb514c58b10a15c0",
+        "sha256": "17e23a8e272fd31f3116cc97053b75f4246621434754a68f85e06c095daa67d5",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-3dd75a7af91848f5a3078f93",
+        "sha256": "ae83c7b77c9165834c07c422198656ade7a62d5516f57bf70385c832b6d86848",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-ebb5ff1a48964f099ba9e9ce",
+        "sha256": "ad1c191a5e65c6367904820370ab127adebd0c53c94b44bdc67ff18514036a8d",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-3ffc7107136a4bdc9280399d",
+        "sha256": "d13310c577e217fdc24abd3cf2d82eb26e3f71b02494859750f2e337243c6241",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-be5dd4bc12e6484495f3d98a",
+        "sha256": "1b167fdf3e5667811042cc80b0d5683ed89a5e4d049d6d43182c5e45b1bf6083",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-d7a698414cd44f5f83b437ae",
+        "sha256": "af23709a46fbeb3ed0b2ccaf89bb9a0fdf2413093967a57dab0c5590a9134197",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-f4d1d3dc1dee412e982a6e9b",
+        "sha256": "d7addad2749f41a5f7e01e988952227cfa096035e1b60a1c893ea51aafd9da43",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-d6e2192571534e19bb6d08d9",
+        "sha256": "90aaef62b6b657e773390e785d45dd3ca4d60e2d844c30a7b1b9d9b1608dd097",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-63739b5e46bf4e9a83715112",
+        "sha256": "c6c559fd380efa715624ead01f4b07be74deef3e35760174c355566b6710d7fe",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/deploy-warm-pool-12d851a9bc88",
+        "sha256": "baf09545e0d5a58d1b83cc00a5ee4bef29caaccb3f9bdb6fe2239ee188c3e467",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-db2abcce9d26438188a694be",
+        "sha256": "71481895095e8739061edcbc80d560e00910ae55f81be60fc63e0c95fb08802b",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-d8d366d5e9634582b502e9f5",
+        "sha256": "274a6d6b1258c9bc187dbee8d74b908fde996b2976ce023d2565e7e798f8f337",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-df4806b683c844309d5b4f04",
+        "sha256": "5fc05f64d2f1c218c049e812fb63107e0c3d8a1df462fffe9b50ef76c981188d",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-695c141d5997470392b448fa",
+        "sha256": "5e1ab70ec02d3b1e4a067677cbe1632be8d0e506cf22e00aa333c75fcc255f2e",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-warm",
+        "sha256": "abeaab072cf636362f574a0c0ad8d0b03255f47e43fedcf47c6d9537e6f3bc4a",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-9384f0867369400486b10730",
+        "sha256": "940927593975066f9580d7e4528543a475d243a4fd12e88c9820a10e22a6c46c",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-f2646669674342a9bc3d562c",
+        "sha256": "e9fe8f800d6395f07cef8412daffcff5c4207983ad2d66cf9c7b595a2126f704",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-gate-9c87e2b1-20261022-000725-s00",
+        "sha256": "87954ddf72f3e7931d53371725650eee6acaa0e30a1ac3d6413f164ebcd82cdc",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-3737eb3afd6347a2b3f07eb1",
+        "sha256": "a9c6cac8353475d0954d2d72ba170809e1d6035708a46aa4e263ecc23be52d46",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-14c8d5740fd84b479783bb93",
+        "sha256": "2d10b45d9a0c4fab3ef2193de226253af85936dd1ad24c9629ef12bb0fafdd00",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-901a3b1724104d899220225a",
+        "sha256": "5940832b777abbadcc7ac71cde2ae39ed6ceee5a6325efa2caa17da3ec165f73",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-8df6612b1a794ea3b0ace4f7",
+        "sha256": "c1c6fa13b8cb215c0fb01d37b6bb7edaf68b30fc0540a9b112d8be5bebf83553",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-bf4b6442378b4b7298117d64",
+        "sha256": "aefe173996c88d79d1c346476cc612d8aab91172468abe75fcdf3de1f65ca57c",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-58acede3072e4953882f37da",
+        "sha256": "5c3606315a9fb3ab6a002586822d1c1db37b50bab36e722de92d6ffccf2af5f4",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-d376527a256d4d48bc8ef629",
+        "sha256": "eb310f8ee535a64e2efc3e16c4fc8dcc2b93b928862e6d423784d1856e68061e",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-4881d18134184a47b25d86fa",
+        "sha256": "fd9384172eb383a0e512f97a02d8aa6e5c9dabe71cf5b9df1a1f7fa7ba15e140",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/polar-controller-300-ae1d4a66df94",
+        "sha256": "ee686bd026dd37d11dbfab104bbaad5cce1898143d84eda6a9f4e79ac1bc9e9c",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      },
+      {
+        "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/.generation-nbnordqx/names/cloudbench-b073a78a5e2f4bc5bae7a13d",
+        "sha256": "affcf0c4f4e7cc471216e78fe9d66b7e8ec2b544fedd0bc81fbc757f358b744f",
+        "matches_live_target": true,
+        "matches_snapshot": true
+      }
+    ]
+  },
+  "archive_filelist": {
+    "original_files_json_sha256": "9a42edca84e86fc840829508bc0c5628d53f7cd6280da034f859003238164a3b",
+    "qualification_in_original_files_json": false,
+    "required_addition": "/home/boxes/rose/.context/rca-784d/closeout-prep/terminal-20261108T232200Z/capture-qualification.json",
+    "method": "Parent may use a separate explicit qualified file list consisting of unchanged original files.json entries plus capture-qualification.json (and this review if desired) with the unchanged native private archive helper. Preserve original files.json, manifest flags and convenience wrapper refusal unchanged."
+  },
+  "scope_limits": [
+    "Qualifies exactly the named fixture bytes and literal owned symlink target metadata, not arbitrary secret-signature matches or symlinks.",
+    "Archive stays in the existing private AES-GCM target; no public payload upload. Native readback/authenticated restore and all-member hash verification remain required.",
+    "Restore literal relative symlink only into a separate fresh restored tree after validating the captured target exists; do not replace or follow a live source link.",
+    "No whole-.context deletion readiness or provider/production completion is implied.",
+    "No source/link/filelist mutation, provider access, helper execution or tests performed by reviewer."
+  ]
+}
