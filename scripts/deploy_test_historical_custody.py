@@ -33,12 +33,14 @@ class AdmissionRefusal(ValueError):
     """A custody locator refusal raised by admission() before any allocation."""
 
     def __init__(self, code, detail=None):
+        """Carry the stable reason code; the message is the exact registered refusal text."""
         super().__init__(ADMISSION_REFUSALS[code])
         self.reason_code = code
         self.detail = detail
 
 
 def refuse(ok, code):
+    """Raise the typed pre-allocation refusal for ``code`` unless ``ok``."""
     if not ok:
         raise AdmissionRefusal(code)
 
@@ -535,8 +537,18 @@ def canonical_override(state, default, root):
              and c.digest(canonical['plan']) == canonical.get('plan_digest'), 'malformed canonical cycle')
         verify_import_origin(canonical, root)
         found = known(canonical, root)
-        active = {r['original_failure']['id'] for r in canonical.get('historical_no_retry_custody', [])}
-        need(active <= found.keys(), 'canonical custody record lacks its original failure')
+        history = canonical.get('historical_custody_history', [])
+        # Re-derive every saved record from its exact native bytes, as donor import does; a stale
+        # source is fine, but changed credit, provenance or native history is not coverage.
+        for saved in history:
+            need(historical(canonical, found[saved['original_failure']['id']], root) == saved,
+                 'canonical custody history changed')
+        for record in canonical.get('historical_no_retry_custody', []):
+            native = historical(canonical, found[record['original_failure']['id']], root)
+            exact = dict(kind=KIND, disposition=DISPOSITION, **native, current_binding=record.get('current_binding'),
+                         current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+                         credit={'test_execution': False, 'assertions': False, 'financial_release': False})
+            need(record == exact and native in history, 'canonical custody record changed')
         running = any(canonical.get(k) for k in ('running', 'live_failures', 'resume_phase'))
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
         raise AdmissionRefusal('canonical-custody-unverifiable', f'{type(error).__name__}: {error}') from error
@@ -551,6 +563,7 @@ def canonical_override(state, default, root):
 
 
 def admission(request, root):
+    """Bind a gate child's request to its custody ledger before the cloud namespace is created."""
     import deploy_test_cycle as c
     default = root / '.context/deploy-pipeline/cycle.json'
     locator = request.get('custody_state')

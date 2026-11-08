@@ -28,6 +28,7 @@ class SourceRefusal(ValueError):
     """The source or custody-locator guard refused before this request could admit any resources."""
 
     def __init__(self, message, reason_code=None):
+        """Source refusals carry no reason code; custody locator refusals carry theirs."""
         super().__init__(message)
         self.reason_code = reason_code
 

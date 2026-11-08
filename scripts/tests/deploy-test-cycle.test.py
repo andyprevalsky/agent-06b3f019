@@ -345,6 +345,13 @@ class Cycle(unittest.TestCase):
         orphan = copy.deepcopy(canonical); orphan['historical_no_retry_custody'][0]['original_failure']['id'] = 'orphan'
         c.write(default, orphan)
         refused('canonical-custody-unverifiable')
+        # Changed credit, provenance or native history in a canonical record is never coverage.
+        for change in (lambda s: s['historical_no_retry_custody'][0]['credit'].update(test_execution=True),
+                       lambda s: s['historical_no_retry_custody'][0].update(current_execution='PASS'),
+                       lambda s: s['historical_no_retry_custody'][0].update(snapshot_sha256='0' * 64),
+                       lambda s: s['historical_custody_history'][0].update(adapter_sha256='0' * 64)):
+            tampered = copy.deepcopy(canonical); change(tampered); c.write(default, tampered)
+            refused('canonical-custody-unverifiable')
         # An active or same-source canonical coordinator keeps ownership even without custody debt.
         self.state = c.initialize(new, self.root)
         self.stale_canonical_default(running=['smoke'])
@@ -365,6 +372,18 @@ class Cycle(unittest.TestCase):
         gate = fresh['plan']['gates'][1]
         self.directory = self.root / '.context/deploy-pipeline-alt'
         self.request_owned_admission(fresh, gate)
+        # A covered but tampered canonical record (older source, so ownership cannot refuse it) fails closed.
+        donor_state = c.read(donor)
+        tampered = copy.deepcopy(donor_state)
+        tampered['source'] = {'head': '5' * 40, 'digest': '6' * 64}
+        c.write(default, tampered)
+        self.request_owned_admission(fresh, gate)
+        tampered['historical_no_retry_custody'][0]['credit']['financial_release'] = True
+        c.write(default, tampered)
+        with self.assertRaises(h.AdmissionRefusal) as caught:
+            self.request_owned_admission(fresh, gate)
+        self.assertEqual('canonical-custody-unverifiable', caught.exception.reason_code)
+        c.write(default, donor_state)
         # Dropping one imported obligation from the alternate ledger is a canonical-debt bypass.
         partial = copy.deepcopy(fresh)
         partial['failures'] = partial['failures'][1:]
