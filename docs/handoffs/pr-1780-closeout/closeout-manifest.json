@@ -13,6 +13,43 @@
   },
   "proof": {
    "deploy_command_structural_blacksmith": "PASS (original600-portable-operator suite PASS) attempt 2/initial on bad9cf510a17",
+   "deploy_command_structural_blacksmith_runs": [
+    {
+     "deploy": "PR #1780 cycle 2",
+     "gate": "PASS",
+     "original600-portable-operator": "PASS",
+     "source": "bad9cf510a",
+     "suites": 99
+    },
+    {
+     "deploy": "PR #1790 cycle 1",
+     "gate": "PASS",
+     "original600-portable-operator": "PASS",
+     "source": "a808cc0253",
+     "suites": 100
+    },
+    {
+     "deploy": "PR #1790 cycle 2",
+     "gate": "PASS",
+     "original600-portable-operator": "PASS",
+     "source": "ad966fa525",
+     "suites": 100
+    },
+    {
+     "deploy": "PR #1790 cycle 3",
+     "gate": "PASS",
+     "original600-portable-operator": "PASS",
+     "source": "ad966fa525",
+     "suites": 100
+    },
+    {
+     "deploy": "PR #1790 cycle 4",
+     "gate": "PASS",
+     "original600-portable-operator": "PASS",
+     "source": "8524038a40",
+     "suites": 100
+    }
+   ],
    "natural_repro_git_2_55": "old fixture 2/25 fail, fixed 25/25 pass",
    "regression": "trace2 no maintenance child: fails old (git 2.43, 2.55), passes fixed",
    "suite_5x_final_code_git_2_55": "5/5 OK (226,280,179,216,192 s)",
@@ -22,15 +59,14 @@
   "repair_devbox": "d0298795-b355-425c-a129-067332652c5c",
   "repair_thread": "https://boxes.dev/thread/thr_6298dce767764c43b8344c82c23dd467",
   "root_cause": "Git >=2.47 detached auto-maintenance (geometric repack, 2+ loose objects in .git/objects/17) started by the fixture commit outlived the waited command and recreated .git/objects/info/packs during shutil.rmtree",
-  "test": "scripts/tests/original600-portable-operator.test.py RunBenchShardedRouting.test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once"
+  "test": "scripts/tests/original600-portable-operator.test.py RunBenchShardedRouting.test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once",
+  "writer_ownership": "The writer that outlived the test body is git's auto-maintenance: `git commit` starts `git maintenance run --auto --detach`, which calls setsid, so the repack is neither a child of the test nor of the waited command and cannot be joined. The fixture owns it by construction: maintenance.auto=false and gc.auto=0 in the fixture repository config, so no git process in the fixture repo can start a writer outside the command the test waits on. The regression test_fixture_repository_is_built_independently_of_the_hosts_git_configuration records GIT_TRACE2_EVENT across setup and a later commit and asserts no maintenance/gc child starts."
  },
  "deletion_readiness": {
-  "evidence": "ppid 4173640 = /home/boxes/.devbox/daemon/bundle/sprite-daemon.mjs (boxes.dev daemon); started 2026-11-08T00:43:22Z at devbox boot; the only thread on devbox d0298795 is this Claude thread ph7en6ghgt50j82tf2hz08akgd8hv6mb, so no Codex session uses it; platform infrastructure, not signalled",
-  "open": 1,
-  "open_item": "live process 4177674: /opt/devbox-tools/codex/.../codex app-server, cwd /home/boxes/rose",
-  "owned_cleanup": "complete: all deploy lanes, monitors and services owned by this thread ended; local-only branch and stash archived in core; every ignored path has a disposition",
+  "history": "NOT_READY at first closeout (sole item: boxes.dev daemon idle Codex app-server pid 4177674); READY after the deletion-check fix #1792 landed, receipt committed in #1801 (5551503f9e)",
+  "open": 0,
   "receipt": "docs/handoffs/pr-1780-closeout/deletion-readiness.json",
-  "status": "NOT_READY"
+  "status": "READY"
  },
  "followups": [
   "AgentCard sandbox release stall: card_6b5c4eb9c6b6b0528efe33ff closed, org transfer owt_776cb83d5cc4af7a253ba97e consumed, 4396 cents transferred, 0 released (agent 40c3f460-71c2-4eb5-b162-db63f24a191c)",
@@ -175,6 +211,20 @@
   "task_durations_rows": 3
  },
  "merged_sha": "a252579c3a5f7bc3f78478db5dec231e857a05fd",
+ "outcome": {
+  "factory_outcome": "completed (timing run 20261108-010956-197155)",
+  "scorecards": {
+   "final": {
+    "status": "SHIPPED (deletion readiness READY via #1801)",
+    "url": "https://boxes.dev/visuals/vis_6f37c7011abc5728d8147bb65588ac62"
+   },
+   "superseded": {
+    "status": "NOT SHIPPED (deletion readiness pending the daemon Codex app-server item); historical",
+    "url": "https://boxes.dev/visuals/vis_e8eb57d3859d569d75d33687e12d3442"
+   }
+  },
+  "status": "SHIPPED"
+ },
  "pr": 1780,
  "production": {
   "changed_files": 3,
