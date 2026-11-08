@@ -72,9 +72,10 @@ sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
 step "flyctl"
-for attempt in 1 2 3; do
+# GitHub Releases has returned 504s for minutes at a time, so back off past such a window.
+for attempt in 1 2 3 4 5 6; do
   command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] && break
-  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || { echo "flyctl install attempt $attempt failed" >&2; sleep 5; }
+  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || { echo "flyctl install attempt $attempt failed" >&2; sleep $((attempt * 15)); }
 done
 [ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
