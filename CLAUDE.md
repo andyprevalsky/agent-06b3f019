@@ -1473,6 +1473,7 @@ if it regresses. Keep secret values out of logs, chat and Git.**
 - **Vercel frontend:** read `cd front-end && vercel env ls production`; set `cd front-end && vercel env add KEY production`; env key management is autonomous under the rule above.
 - **Supabase functions:** read `cd agents && source .env && supabase secrets list --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; set `cd agents && source .env && supabase secrets set KEY=VALUE --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; env key management is autonomous under the rule above.
 - **boxes.dev Template box:** whenever you set an env var, also set it in the project's managed env so the Template box and future devboxes get it: `printf %s "$VALUE" | dvb-onbox env set --file <agents/.env|back-end/.env> --name KEY --value-stdin` (needs the `edit-project-settings` permission).
+- **Rose project env files:** we are migrating from boxes.dev to Rose, so also set every env var in the Rose app's project env file: `PUT https://api.roselabs.ai/api/projects/1ec468d5-95dc-4754-a385-1c9abe784cd4/env-files/<fileId>` with body `{"variables":[{"name":"KEY","value":"VALUE"}]}` and the headers `X-API-Key: $BACKEND_API_KEY` and `X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30`. `GET .../env-files` lists each file's id and variable names; values are never returned. Send values from a script, never in shell argv or output.
 
 ## Autonomous Agent Testing
 
