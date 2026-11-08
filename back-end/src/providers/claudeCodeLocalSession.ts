@@ -645,11 +645,11 @@ export async function createLocalClaudeCodeSession(params: {
 async function runLocalClaudeCodeClose(
   taskId: string,
   userId?: string,
-  additionalPaths?: string[]
+  additionalPaths?: string[],
+  beforeFinalize?: (result: LocalCloseResult) => Promise<void>
 ): Promise<LocalCloseResult> {
   const live = localSessions.get(taskId);
   const ownership = live ?? readOwnership(taskId);
-  let outputFiles = ownership?.outputFiles ?? [];
 
   if (ownership && ownership.handoff === undefined) {
     ownership.handoff = await readLocalCodeAgentHandoff(ownership.homeDir ?? ownership.workDir);
@@ -658,8 +658,7 @@ async function runLocalClaudeCodeClose(
   }
 
   if (ownership && ownership.outputFiles === undefined && userId) {
-    outputFiles = await extractLocalFiles(ownership, userId, additionalPaths);
-    ownership.outputFiles = outputFiles;
+    ownership.outputFiles = await extractLocalFiles(ownership, userId, additionalPaths);
     // Upload results are part of close ownership state. Persist them before
     // stopping the process or updating the DB so every retry is side-effect free.
     writeOwnership(ownership);
@@ -674,13 +673,20 @@ async function runLocalClaudeCodeClose(
     stopLocalCodePreview(ownership.homeDir ?? ownership.workDir);
   }
 
-  await prisma.claudeCodeSession.update({
-    where: { id: taskId },
-    data: {
-      status: 'CLOSED',
-      closedAt: new Date(),
-    },
-  });
+  const result = {
+    outputFiles: ownership?.outputFiles ?? [],
+    ...(ownership?.handoff !== undefined ? { handoff: ownership.handoff } : {}),
+  };
+  await beforeFinalize?.(result);
+
+  // The common close wrapper owns terminal state when it persists the result.
+  // Direct local callers keep the original standalone finalization behavior.
+  if (beforeFinalize === undefined) {
+    await prisma.claudeCodeSession.update({
+      where: { id: taskId },
+      data: { status: 'CLOSED', closedAt: new Date() },
+    });
+  }
 
   unregisterWorkspaceExecutor(taskId);
   if (ownership?.outputFiles !== undefined) {
@@ -693,21 +699,19 @@ async function runLocalClaudeCodeClose(
     localSessions.set(taskId, { ...ownership, process: null });
   }
 
-  return {
-    outputFiles,
-    ...(ownership?.handoff !== undefined ? { handoff: ownership.handoff } : {}),
-  };
+  return result;
 }
 
 export function closeLocalClaudeCodeSession(
   taskId: string,
   userId?: string,
-  additionalPaths?: string[]
+  additionalPaths?: string[],
+  beforeFinalize?: (result: LocalCloseResult) => Promise<void>
 ): Promise<LocalCloseResult> {
   const inFlight = closeOperations.get(taskId);
   if (inFlight) return inFlight;
 
-  const operation = runLocalClaudeCodeClose(taskId, userId, additionalPaths);
+  const operation = runLocalClaudeCodeClose(taskId, userId, additionalPaths, beforeFinalize);
   closeOperations.set(taskId, operation);
   void operation.then(
     () => {
