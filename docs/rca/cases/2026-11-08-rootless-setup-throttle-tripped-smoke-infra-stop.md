@@ -91,6 +91,17 @@ waits at most three bounded windows rather than adding load.
 
 Golden reference: not applicable (harness-only; no approval-gated hunk).
 
+## Review follow-up (PR #1775)
+
+An adversarial review found one fail-open in the first version: the minted-account composite runs its stages
+through nested `run_single_task` calls, each with its own custody, so a stage whose create response was lost marked
+only the discarded inner custody and the composite row looked rootless. Nested custody now links to its parent and
+`_mark_task_root_creation_attempted` marks every enclosing task. Regression
+`test_composite_stage_with_lost_create_keeps_the_outer_task_unknown` drives the real runner with a nested lost create
+(red: outer `root_creation_attempted` stayed False; green: the composite stays "unknown root creation outcome"). The
+new setup-retry blackbox test is now registered in `run_all_tests()` (the agents structural registration gate had
+flagged it as never run).
+
 ## Human feedback
 
 None recorded.

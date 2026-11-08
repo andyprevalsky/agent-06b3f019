@@ -2441,10 +2441,15 @@ def _bind_task_root_custody(result: TaskResult, custody: dict) -> TaskResult:
 
 
 def _mark_task_root_creation_attempted() -> None:
-    """Record that this task may own a root before any creation request is sent."""
+    """Record that this task may own a root before any creation request is sent.
+
+    Composite runners (minted accounts) run stages through nested run_single_task calls; the
+    mark reaches every enclosing task so a lost stage create keeps the composite fail-closed.
+    """
     custody = _task_root_custody.get()
-    if custody is not None:
+    while custody is not None:
         custody["root_creation_attempted"] = True
+        custody = custody.get("parent")
 
 
 def _current_benchmark_user_id() -> str:
@@ -15174,7 +15179,7 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started",
-               "root_creation_attempted": False}
+               "root_creation_attempted": False, "parent": _task_root_custody.get()}
     token = _task_root_custody.set(custody)
     async def evaluated_with_custody(result):
         _bind_task_root_custody(result, custody)

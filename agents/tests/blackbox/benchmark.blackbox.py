@@ -27953,6 +27953,10 @@ async def run_all_tests():
         "agentcard_setup_retries_transient_upstream_failure",
         test_agentcard_setup_retries_transient_upstream_failure,
     )
+    await r.record_async(
+        "agentcard_setup_retries_only_the_structured_org_rate_limit",
+        test_agentcard_setup_retries_only_the_structured_org_rate_limit,
+    )
     r.record(
         "agentcard_setup_attention_failure_fails_task",
         test_agentcard_setup_attention_failure_fails_the_task_with_its_cause,
