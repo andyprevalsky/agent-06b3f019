@@ -150,7 +150,7 @@ find . -maxdepth 2 -name '.env' -o -name '.env.*' 2>/dev/null | grep -v node_mod
 
 For any content in an instruction file that exceeds a few lines of detail (tables, multi-step procedures, curl examples), extract it to a standalone doc and leave a one-line pointer.
 
-**Already extracted** (keep the pointers; never inline these back): `docs/internal/llm-call-map.md` (LLM call map), `docs/internal/prod-logs.md` (prod logs), `docs/internal/rose-completions.md`, `docs/internal/prod-env-vars.md`, `docs/internal/planner-memory.md`, `docs/setup-mac.md`, `docs/testing.md`; agent testing lives in `/loop`, PR review in `/deploy`, benchmarks in `/benchmark`.
+**Already extracted** (keep the pointers; never inline these back): `docs/internal/llm-call-map.md` (LLM call map), `docs/internal/prod-logs.md` (prod logs), `docs/internal/rose-completions.md`, `docs/internal/prod-env-vars.md`, `docs/internal/planner-memory.md`, `docs/setup-mac.md`, `docs/testing.md`; PR review lives in `/deploy`, benchmarks in `/benchmark`.
 
 **Package detail** (commands, layer rules, test and coverage commands for one service) goes to that package's CLAUDE.md, not to `docs/internal/`.
 
@@ -164,7 +164,7 @@ For any content in an instruction file that exceeds a few lines of detail (table
 **Dedup against skills — CRITICAL:**
 Before creating a `docs/internal/` file for any topic, check if a skill (`.claude/commands/*.md`) already covers that content. To check:
 1. Read the skill descriptions gathered in Step 1b
-2. If a skill's description matches the topic (e.g., `/loop` covers agent testing, `/deploy` covers PR review, `/benchmark` covers benchmark instructions), **do NOT create an extracted doc for that topic**
+2. If a skill's description matches the topic (e.g., `/deploy` covers PR review, `/benchmark` covers benchmark instructions), **do NOT create an extracted doc for that topic**
 3. At most keep a one-line pointer to the skill (root CLAUDE.md "Where else to look" lists the main ones)
 4. Otherwise omit that topic from CLAUDE.md. The content lives in the skill, the agent will find it when it needs it.
 
