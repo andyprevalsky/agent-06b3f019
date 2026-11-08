@@ -71,11 +71,37 @@ for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
+# Release binaries (flyctl, cloudflared) are cached on the dependency disk and otherwise fetched
+# through the GitHub API with the job token. 2026-11-08 (PR #1826): GitHub's unauthenticated release
+# downloads answered 504 for 15+ minutes ("timeouts for some unauthenticated users"), and the old
+# unauthenticated `--retry 3` installs failed every Blacksmith gate in "Prepare runner".
+TOOLS="$DEPS/tools"
+sudo install -d -o "$(id -u)" -g "$(id -g)" "$TOOLS"
+fetch_retry=(--retry 12 --retry-delay 5 --retry-max-time 180 --retry-all-errors)
+release_binary() {  # release_binary <owner/repo> <asset-name-regex> <out>
+  local auth=() api asset
+  [ -n "${FETCH_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $FETCH_TOKEN")
+  api="$(curl -fsSL "${fetch_retry[@]}" "${auth[@]}" "https://api.github.com/repos/$1/releases/latest")"
+  asset="$(printf %s "$api" | python3 -c 'import json, sys
+import re
+print(next(a["url"] for a in json.load(sys.stdin)["assets"] if re.fullmatch(sys.argv[1], a["name"])))' "$2")"
+  curl -fsSL "${fetch_retry[@]}" "${auth[@]}" -H 'Accept: application/octet-stream' -o "$3" "$asset"
+}
+cached_tool() {  # cached_tool <name> <owner/repo> <asset-name-regex> [tar-member]
+  if [ ! -x "$TOOLS/$1" ]; then
+    local tmp
+    tmp="$(mktemp -d)"
+    release_binary "$2" "$3" "$tmp/asset"
+    if [ -n "${4:-}" ]; then tar -xzf "$tmp/asset" -C "$tmp" "$4" && mv "$tmp/$4" "$tmp/asset"; fi
+    install -m 0755 "$tmp/asset" "$TOOLS/$1" && rm -rf "$tmp"
+  fi
+}
+
 step "flyctl"
-for attempt in 1 2 3; do
-  command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] && break
-  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || { echo "flyctl install attempt $attempt failed" >&2; sleep 5; }
-done
+if ! command -v flyctl >/dev/null && [ ! -x "$HOME/.fly/bin/flyctl" ]; then
+  cached_tool flyctl superfly/flyctl 'flyctl_[0-9.]+_Linux_x86_64\.tar\.gz' flyctl
+  install -D -m 0755 "$TOOLS/flyctl" "$HOME/.fly/bin/flyctl"
+fi
 [ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
@@ -84,9 +110,8 @@ step "tunnel tools"
 # the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
 sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
 if ! command -v cloudflared >/dev/null; then
-  tmp="$(mktemp)"
-  curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-  sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared && rm -f "$tmp"
+  cached_tool cloudflared cloudflare/cloudflared 'cloudflared-linux-amd64'
+  sudo install -m 0755 "$TOOLS/cloudflared" /usr/local/bin/cloudflared
 fi
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
 

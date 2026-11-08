@@ -30,7 +30,7 @@ import statistics
 import time
 from pathlib import Path
 from typing import Any, Optional
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import BlackboxResult, teardown_mock
 
@@ -651,6 +651,32 @@ async def test_spawn_create_waits_out_a_direct_hold_then_attaches():
     assert waits and max(waits) <= 5.0, waits
 
 
+async def test_held_spawn_backoff_is_jittered():
+    """Spawns held by the same direct chat must not repost in lockstep: each backoff is jittered
+    (+/-20% around the capped exponential delay), as the reference retry loops do."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+    from domains.spawn_claude_code_agent.config import CODE_SESSION_HELD_BACKOFF_S
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    created = httpx.Response(201, json={"task_id": "task-2"})
+    base, _ = CODE_SESSION_HELD_BACKOFF_S
+    for factor in (0.8, 1.2):
+        post = AsyncMock(side_effect=[held, created])
+        sleep = AsyncMock()
+        uniform = MagicMock(return_value=factor)
+        with (
+            patch.object(repo.asyncio, "sleep", sleep),
+            patch.object(repo, "safe_heartbeat"),
+            patch.object(repo.random, "uniform", uniform),
+        ):
+            await repo._create_waiting_out_direct_hold(post, "agent-1")
+        uniform.assert_called_once_with(0.8, 1.2)
+        waited = sum(call.args[0] for call in sleep.await_args_list)
+        assert abs(waited - base * factor) < 1e-9, (factor, waited)
+
+
 async def test_spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait():
     """Past the wait (which covers the ws-server's 10-minute idle release) the spawn fails non-retryably
     with the true reason, instead of retrying a few times and claiming it would attach later."""
@@ -1099,6 +1125,7 @@ async def run_all_tests():
         "spawn_create_waits_out_a_direct_hold_then_attaches",
         test_spawn_create_waits_out_a_direct_hold_then_attaches,
     )
+    await r.record_async("held_spawn_backoff_is_jittered", test_held_spawn_backoff_is_jittered)
     await r.record_async(
         "spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait",
         test_spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait,

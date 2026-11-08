@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 import uuid as uuid_module
 from typing import Any, Optional
@@ -281,8 +282,10 @@ async def _create_waiting_out_direct_hold(post: Any, agent_id: str) -> httpx.Res
     """POST the create; while the backend answers CODE_SESSION_HELD, wait for the hand back and repost.
 
     The live CLI's user is chatting with it directly and its ws-server cannot hold an attaching spawn, so
-    the backend refuses without touching that CLI (nothing was created: a repost is the same create, and
-    the tool call's lease keeps it one spawn). The wait heartbeats and backs off (capped) for up to
+    the backend refuses without touching that CLI. No task row or session is created (the backend releases
+    the lease), so a repost is the same create and the tool call's lease keeps it one spawn; each attempt
+    only re-stages the sandbox's files idempotently. The wait heartbeats and backs off (capped, with
+    +/-20% jitter so spawns held at the same moment don't repost in lockstep) for up to
     CODE_SESSION_HELD_WAIT_S, which covers the ws-server's 10-minute idle release; past it the spawn fails
     non-retryably with the true reason.
     """
@@ -304,7 +307,7 @@ async def _create_waiting_out_direct_hold(post: Any, agent_id: str) -> httpx.Res
             waited_s=round(waited, 1),
             retry_in_s=delay,
         )
-        remaining = delay
+        remaining = delay * random.uniform(0.8, 1.2)
         while remaining > 0:
             safe_heartbeat("Waiting for the user to hand the code agent back")
             step = min(remaining, 5.0)
@@ -425,10 +428,7 @@ async def create_e2b_session(
                 response_text=response_text,
             )
             detail = f": {response_text}" if response_text else ""
-            message = (
-                f"Failed to create code session (provider={code_provider}): "
-                f"HTTP {response.status_code}{detail}"
-            )
+            message = f"Failed to create code session (provider={code_provider}): HTTP {response.status_code}{detail}"
             upper = f"{message} {response_text}".upper()
             billing_markers = (
                 "MISSING PAYMENT METHOD",
