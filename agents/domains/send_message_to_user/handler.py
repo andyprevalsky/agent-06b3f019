@@ -14,7 +14,7 @@ When is_question=True:
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import structlog
@@ -32,6 +32,8 @@ from domains.send_message_to_user.types import build_attention_metadata
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
+    park_pending_tool,
+    take_tool_resume,
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
@@ -81,26 +83,32 @@ class SendMessageToUserManager(ToolManager):
         message: str = result["message"]
         is_question: bool = result["is_question"]
 
-        # ── 0b. Optional inline view, pinned to the user's ACTIVE published UI ──
-        inline_view, inline_error = await _resolve_inline_view(workflow_instance, tool_call.get("inline_view"))
-        if inline_error is not None:
+        resume = take_tool_resume(workflow_instance, tool_call_id)
+        if resume is not None:
+            inline_view = resume["inline_view"]
+            fallback_deadline = datetime.fromisoformat(resume["fallback_deadline"])
+        else:
+            fallback_deadline = workflow.now() + timedelta(minutes=SMS_FALLBACK_TIMEOUT_MINUTES)
+            # ── 0b. Optional inline view, pinned to the user's ACTIVE published UI ──
+            inline_view, inline_error = await _resolve_inline_view(workflow_instance, tool_call.get("inline_view"))
+            if inline_error is not None:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Invalid inline view",
+                    message=inline_error,
+                    status=MessageStatus.ERROR,
+                )
+                return
+
+            # ── 1. Emit attention / info event ──
+            initial_status = MessageStatus.IN_PROGRESS if is_question else MessageStatus.FINISHED
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="❌ Invalid inline view",
-                message=inline_error,
-                status=MessageStatus.ERROR,
+                title="Attn: User" if is_question else "FYI for User",
+                message=message,
+                status=initial_status,
+                metadata=build_attention_metadata(message, is_question, is_waiting=is_question, inline_view=inline_view),
             )
-            return
-
-        # ── 1. Emit attention / info event ──
-        initial_status = MessageStatus.IN_PROGRESS if is_question else MessageStatus.FINISHED
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Attn: User" if is_question else "FYI for User",
-            message=message,
-            status=initial_status,
-            metadata=build_attention_metadata(message, is_question, is_waiting=is_question, inline_view=inline_view),
-        )
 
         if not is_question:
             return
@@ -122,70 +130,25 @@ class SendMessageToUserManager(ToolManager):
             )
             return
 
-        # ── 3. Get agent source ──
-        agent_source = await workflow.execute_activity(
-            get_agent_source,
-            args=[workflow_instance.agent_id],
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=3),
-        )
-
-        sms_sent = False
-
-        # ── 4. SMS notification ──
-        if agent_source == "SMS":
-            logger.info(
-                "SMS-initiated goal, sending SMS question immediately",
-                agent_id=workflow_instance.agent_id,
-            )
-            try:
-                notification_args = [
-                    workflow_instance.user_id,
-                    "planner_message",
-                    workflow_instance.agent_id,
-                    {"message": message, "is_question": True},
-                ]
-                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                if world_model_mode != "real":
-                    notification_args.append(world_model_mode)
-                await workflow.execute_activity(
-                    notify_sms_event_activity,
-                    args=notification_args,
-                    **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                sms_sent = True
-            except Exception as e:
-                logger.error("Failed to send SMS question: %s", e)
+        # Already-published questions resume the same call before another LLM turn.
+        # Carry notification state and its absolute deadline, not a fresh send.
+        if resume is not None:
+            agent_source = resume["agent_source"]
+            sms_sent = resume["sms_sent"]
         else:
-            logger.info(
-                "Non-SMS goal, waiting for response with SMS fallback timeout",
-                agent_id=workflow_instance.agent_id,
-                timeout_minutes=SMS_FALLBACK_TIMEOUT_MINUTES,
+            agent_source = await workflow.execute_activity(
+                get_agent_source,
+                args=[workflow_instance.agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
-            try:
-                await wait_condition_or_generation_handoff(
-                    lambda: workflow_instance._has_new_messages,
-                    workflow_instance,
-                    timeout=timedelta(minutes=SMS_FALLBACK_TIMEOUT_MINUTES),
-                    workflow_mod=workflow,
-                )
+            sms_sent = False
+
+        try:
+            # ── 4. SMS notification ──
+            if agent_source == "SMS" and not sms_sent:
                 logger.info(
-                    "User responded within timeout, no SMS needed",
-                    agent_id=workflow_instance.agent_id,
-                )
-            except GenerationHandoffRequested:
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="Waiting for reply",
-                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-                    status=MessageStatus.FINISHED,
-                    metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
-                )
-                raise
-            except (TimeoutError, TemporalTimeoutError):
-                logger.info(
-                    "No response within timeout, sending SMS",
+                    "SMS-initiated goal, sending SMS question immediately",
                     agent_id=workflow_instance.agent_id,
                 )
                 try:
@@ -206,35 +169,86 @@ class SendMessageToUserManager(ToolManager):
                     )
                     sms_sent = True
                 except Exception as e:
-                    logger.error("Failed to send SMS fallback: %s", e)
+                    logger.error("Failed to send SMS question: %s", e)
+            elif agent_source != "SMS" and not sms_sent:
+                logger.info(
+                    "Non-SMS goal, waiting for response with SMS fallback timeout",
+                    agent_id=workflow_instance.agent_id,
+                    timeout_minutes=SMS_FALLBACK_TIMEOUT_MINUTES,
+                )
+                try:
+                    await wait_condition_or_generation_handoff(
+                        lambda: workflow_instance._has_new_messages,
+                        workflow_instance,
+                        timeout=max(timedelta(0), fallback_deadline - workflow.now()),
+                        workflow_mod=workflow,
+                    )
+                    logger.info(
+                        "User responded within timeout, no SMS needed",
+                        agent_id=workflow_instance.agent_id,
+                    )
+                except (TimeoutError, TemporalTimeoutError):
+                    logger.info(
+                        "No response within timeout, sending SMS",
+                        agent_id=workflow_instance.agent_id,
+                    )
+                    try:
+                        notification_args = [
+                            workflow_instance.user_id,
+                            "planner_message",
+                            workflow_instance.agent_id,
+                            {"message": message, "is_question": True},
+                        ]
+                        world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                        if world_model_mode != "real":
+                            notification_args.append(world_model_mode)
+                        await workflow.execute_activity(
+                            notify_sms_event_activity,
+                            args=notification_args,
+                            **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)),
+                            retry_policy=RetryPolicy(maximum_attempts=3),
+                        )
+                        sms_sent = True
+                    except Exception as e:
+                        logger.error("Failed to send SMS fallback: %s", e)
 
-        # ── 5. Wait for user response ──
-        if not workflow_instance._has_new_messages:
-            try:
-                await wait_condition_or_generation_handoff(
-                    lambda: workflow_instance._has_new_messages,
-                    workflow_instance,
-                    workflow_mod=workflow,
-                )
-            except GenerationHandoffRequested:
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="Waiting for reply",
-                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-                    status=MessageStatus.FINISHED,
-                    metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
-                )
-                raise
-            except Exception as e:
-                logger.error("Error waiting for user response: %s", e)
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="❌ Error waiting for response",
-                    message=str(e),
-                    status=MessageStatus.ERROR,
-                    metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
-                )
-                return
+            # ── 5. Wait for user response ──
+            if not workflow_instance._has_new_messages:
+                try:
+                    await wait_condition_or_generation_handoff(
+                        lambda: workflow_instance._has_new_messages,
+                        workflow_instance,
+                        workflow_mod=workflow,
+                    )
+                except GenerationHandoffRequested:
+                    raise
+                except Exception as e:
+                    logger.error("Error waiting for user response: %s", e)
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="❌ Error waiting for response",
+                        message=str(e),
+                        status=MessageStatus.ERROR,
+                        metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
+                    )
+                    return
+
+        except GenerationHandoffRequested as exc:
+            if park_pending_tool(workflow_instance, tool_call_id, {
+                "inline_view": inline_view,
+                "agent_source": agent_source,
+                "sms_sent": sms_sent,
+                "fallback_deadline": fallback_deadline.isoformat(),
+            }):
+                raise GenerationHandoffRequested(exc.task_queue, parked=True) from exc
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Waiting for reply",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
+            )
+            raise
 
         workflow_instance._has_new_messages = False
 

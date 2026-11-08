@@ -715,6 +715,113 @@ async def test_inline_view_ignored_for_stock_account():
     assert "inlineView" not in (events[0].metadata or {})
 
 
+async def test_question_cutover_resumes_original_wait_without_republishing():
+    """A live question keeps one chip, SMS and fallback deadline across two deploys."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from tools.base import MessageStatus
+
+    # Same boundary as prod 6f2f4117: WEB question -> cutover at +111s ->
+    # next generation. Also exercise SMS and the post-fallback unbounded wait.
+    for source, fallback_sent, reply_on_resume in [
+        ("WEB", False, False),
+        ("SMS", False, False),
+        ("WEB", True, False),
+        ("WEB", False, True),
+    ]:
+        wf = _FakeWorkflow(user_id=ROSE_DESKTOP_USER, has_new_messages=False)
+        saved = {}
+        hints = {}
+        events = []
+        waits = []
+        calls = []
+        started = datetime(2026, 11, 8, 22, 29, 13, tzinfo=timezone.utc)
+
+        def park(call_id, resume):
+            assert call_id == "original-question"
+            saved[call_id] = json.loads(json.dumps(resume))
+            return True
+
+        wf._park_pending_tool = park
+        wf._take_tool_resume = lambda call_id: hints.pop(call_id, None)
+        fake = _FakeWorkflowModule(activity_results={
+            "get_agent_source": source,
+            "notify_sms_event_activity": None,
+            "resolve_user_ui_inline_view_activity": {"ok": True, "version_id": "original-version"},
+        })
+        fake._now = started
+        fake.now = lambda: fake._now
+        execute_activity = fake.execute_activity
+
+        async def record_activity(fn, args=None, **kwargs):
+            calls.append(getattr(fn, "__name__", "?"))
+            return await execute_activity(fn, args=args, **kwargs)
+
+        fake.execute_activity = record_activity
+        phase = 0
+        timed_out = False
+
+        async def controlled_wait(predicate, workflow_instance, timeout=None, **kwargs):
+            nonlocal timed_out
+            waits.append(timeout)
+            if predicate():
+                return
+            if fallback_sent and not timed_out:
+                timed_out = True
+                fake._now = started + timedelta(minutes=15)
+                raise TimeoutError("fallback deadline")
+            if phase < 2:
+                fake._now += timedelta(seconds=111 if phase == 0 else 60)
+                raise GenerationHandoffRequested(f"generation-{phase + 1}")
+            wf._has_new_messages = True
+
+        restore = _patch_handler_workflow(fake)
+        try:
+            with patch("domains.send_message_to_user.handler.wait_condition_or_generation_handoff", controlled_wait):
+                tool_call = {"message": "What budget should I use?", "is_question": True,
+                             "inline_view": {"view": "gift-plan"}}
+                for phase in range(3):
+                    raised = None
+                    try:
+                        async for event in SendMessageToUserManager().execute_tool(
+                            wf, tool_call, "original-question"
+                        ):
+                            events.append(event)
+                    except GenerationHandoffRequested as exc:
+                        raised = exc
+                    if phase < 2 and not (reply_on_resume and phase == 1):
+                        assert raised is not None and raised.parked, (
+                            "deploy completed an unanswered question instead of parking the original call"
+                        )
+                        assert "original-question" in saved, "cutover lost the original wait state"
+                        hints.update(saved)
+                        saved.clear()
+                        if reply_on_resume:
+                            wf._has_new_messages = True
+                    else:
+                        assert raised is None
+                        break
+        finally:
+            restore()
+
+        assert [e.status for e in events] == [MessageStatus.IN_PROGRESS, MessageStatus.FINISHED], (
+            "a deployment must not publish or finish the question again", events
+        )
+        assert all(e.metadata["inlineView"]["versionId"] == "original-version" for e in events)
+        assert events[-1].metadata["sendMessageToUser"]["isWaitingForUser"] is False
+        assert calls.count("resolve_user_ui_inline_view_activity") == 1, "resume changed the pinned view"
+        assert calls.count("get_agent_source") == 1
+        assert calls.count("notify_sms_event_activity") == int(source == "SMS" or fallback_sent)
+        if source == "WEB" and not fallback_sent and not reply_on_resume:
+            assert waits == [timedelta(seconds=900), timedelta(seconds=789), timedelta(seconds=729)], (
+                "deploy reset the original SMS fallback deadline", waits
+            )
+        assert not wf._has_new_messages, "the real reply was not consumed"
+
+
 async def run_all_tests():
     print("send-message-to-user blackbox tests:")
     r = BlackboxResult()
@@ -750,6 +857,7 @@ async def run_all_tests():
     await r.record_async("inline_view_activity_backend", test_resolve_inline_view_activity_against_backend)
     r.record("inline_view_tool_schema", test_tool_schemas_expose_inline_view)
     await r.record_async("inline_view_ignored_for_stock_account", test_inline_view_ignored_for_stock_account)
+    await r.record_async("question_cutover_resumes_original_wait", test_question_cutover_resumes_original_wait_without_republishing)
     teardown_mock()
     return r.all_passed
 
