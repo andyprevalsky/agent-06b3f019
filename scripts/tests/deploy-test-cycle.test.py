@@ -15,6 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
+import deploy_gate_progress as progress
 
 class Cycle(unittest.TestCase):
     def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
@@ -2346,6 +2347,63 @@ class Cycle(unittest.TestCase):
         hub.write_text(hub.read_text().replace('pid=1234', 'pid=9999'))
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
+    def test_native_cloud_cleanup_finds_fleet_audits_in_a_linked_worktrees_common_git_dir(self):
+        """2026-11-07: a deploy worktree's .git is a file; the fleet keeps audits and ownership registries
+        under the git common dir."""
+        import deploy_test_native_cleanup as n
+        main = self.root / 'main-checkout'
+        main.mkdir()
+        git = lambda *a: subprocess.run(['git', '-C', str(main), *a], check=True, capture_output=True)
+        git('init', '-q')
+        git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'base')
+        linked = self.root / 'linked-worktree'
+        git('worktree', 'add', '-q', '--detach', str(linked))
+        common = (main / '.git').resolve() / 'cloudbench-fleet-audits'
+        self.assertTrue((linked / '.git').is_file())
+        self.assertEqual(common, n.fleet_audit_root(linked.resolve()))
+        self.assertEqual(common, n.fleet_audit_root(main.resolve()))
+        # The retained-registry refusal must look where the fleet writes it, or it passes vacuously.
+        registries = common.parent / 'cloudbench-fleet-ownership'
+        self.assertEqual(registries, n.fleet_ownership_root(linked.resolve()))
+        self.assertEqual(registries, n.fleet_ownership_root(main.resolve()))
+        for module in ('deploy_test_native_cleanup.py', 'deploy_test_interrupted_cleanup.py'):
+            self.assertNotIn("'.git/cloudbench-fleet-", (ROOT / 'scripts' / module).read_text(), module)
+
+    def test_native_cloud_cleanup_refuses_a_retained_fleet_registry_in_the_common_git_dir(self):
+        """Negative control: a fleet ownership registry still present where run-bench-fleet keeps it
+        (GIT_COMMON_DIR/cloudbench-fleet-ownership) refuses reconciliation; it is never vacuously absent."""
+        import deploy_test_native_cleanup as n
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        lives = [Path(p) for p in proof['files'] if p.endswith('/_batch/lifecycle.json')]
+        token = json.loads(lives[0].read_text())['fleet_owner_token']
+        registry = n.fleet_ownership_root(self.root) / token
+        registry.mkdir(parents=True)
+        (registry / 'meta').write_text('fleet_owner_token=' + token + '\n')
+        with self.assertRaisesRegex(ValueError, 'registry still retained'):
+            c.reconcile(copy.deepcopy(state), occurrence['id'], proof)
+
+    def test_native_cloud_cleanup_binds_a_fleet_run_record_beyond_the_receipt_cap(self):
+        """2026-11-07: a mass-agent _batch/run.json (98 MB) exceeded the 64 MiB receipt cap, so a verified
+        fleet cleanup could never be reconciled and every later smoke launch was refused."""
+        import hashlib
+        import deploy_test_native_cleanup as n
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        records = [Path(p) for p in proof['files'] if p.endswith('/_batch/run.json')]
+        self.assertTrue(records)
+        cap = max([Path(p).stat().st_size for p in proof['files'] if not p.endswith('/_batch/run.json')]
+                  + [paths['receipt'].stat().st_size, paths['adapter'].stat().st_size])
+        for record in records:
+            value = json.loads(record.read_text())
+            value['padding'] = 'x' * (cap + 1)
+            record.write_text(json.dumps(value))
+            proof['files'][str(record)] = hashlib.sha256(record.read_bytes()).hexdigest()
+        with patch.object(c, 'MAX_RECEIPT_BYTES', cap):
+            reconciled = copy.deepcopy(state)
+            c.reconcile(reconciled, occurrence['id'], proof)
+            self.assertEqual([], c.retained_owners(reconciled, [occurrence['gate']]))
+            with patch.object(n, 'RUN_RECORD_MAX_BYTES', cap), self.assertRaisesRegex(ValueError, 'proof file too large'):
+                c.reconcile(copy.deepcopy(state), occurrence['id'], proof)
+
     def campaign_recon_state(self):
         import hashlib
         import shutil
@@ -3175,6 +3233,105 @@ assert len(list(p.iterdir()))==2
         rows=self.state['attempts'][-1]['results']
         self.assertEqual('PASS',next(r['status'] for r in rows if r['gate']=='ui'))
         self.assertEqual(2,len(list((self.directory/'rca').glob('*.launch.json'))))
+
+    def early_failure_fixture(self, final_case_a, launcher_exit=None):
+        """api reports check a FAIL while still running, then blocks (5 s at most) until its early
+        occurrence exists: the RCA request file without a launcher (the /deploy flow), or the
+        cycle's own launch with one."""
+        import contextlib, io
+        signal_file = self.root / '.context' / 'rca-started'
+        rca_dir = self.directory / 'rca'
+        ready = ('any(pathlib.Path(%r).glob("*.json"))' % str(rca_dir) if launcher_exit is None
+                 else 'pathlib.Path(%r).exists()' % str(signal_file))
+        gate = ("import os,json,pathlib,sys,time; sys.path.insert(0,%r); import deploy_gate_progress as p\n"
+                "p.report('a','FAIL',scope='test',case='a',detail='AssertionError: early')\n"
+                "p.report('a','FAIL',scope='case',case='a')\n"  # a second row for the same check
+                "e=time.monotonic()+5\n"
+                "while not (%s) and time.monotonic()<e: time.sleep(.02)\n"
+                "q=json.load(open(os.environ['DEPLOY_GATE_REQUEST']))\n"
+                "json.dump({**q,'complete':True,'cleanup_complete':True,"
+                "'cases':{'a':%r,'b':'PASS'},'rca_started_before_exit':bool(%s)},open(os.environ['DEPLOY_GATE_RESULT'],'w'))\n"
+                "sys.exit(0 if %r=='PASS' else 1)") % (str(Path(c.__file__).resolve().parent), ready, final_case_a,
+                                                       ready, final_case_a)
+        self.plan['gates'][1].update(command=[sys.executable, '-c', gate], case_protocol=True)
+        launcher = None if launcher_exit is None else [
+            sys.executable, '-c', "import pathlib,json,sys; sys.exit(%d) if %d else None; "
+            "pathlib.Path(%r).touch(); print(json.dumps({'ok':True,'status':'delivered'}))"
+            % (launcher_exit, launcher_exit, str(signal_file))]
+        self.state = c.initialize(self.plan, self.root); self.state['phase'] = 'initial'
+        out = io.StringIO()
+        with patch.object(c, 'EARLY_POLL_SECONDS', 0.05, create=True), contextlib.redirect_stdout(out):
+            c.run_phase(self.plan, self.state, self.directory, self.root, launcher)
+        worker = json.loads((self.directory / 'attempts' / '1' / 'initial' / 'api' / 'result.json').read_text())
+        notices = [l for l in out.getvalue().splitlines() if l.startswith('DEPLOY_GATE_EARLY_FAILURE')]
+        return out.getvalue(), notices, worker
+
+    def test_failing_test_in_a_running_gate_starts_rca_before_the_gate_ends(self):
+        printed, notices, worker = self.early_failure_fixture('FAIL')
+        self.assertTrue(worker['rca_started_before_exit'], 'the RCA request must exist while the gate runs')
+        self.assertEqual(1, len(notices), notices)  # one notice per failing check, not per row
+        early = self.state['early_failures']
+        request = self.directory / 'rca' / (early[0]['id'] + '.json')
+        self.assertEqual('DEPLOY_GATE_EARLY_FAILURE gate=api test=a status=FAIL check=api/a '
+                         f"id={early[0]['id']} rca={request} (start /RCA on this request now)", notices[0])
+        # The rca= token, split on whitespace, is the request path itself (2026-11-07: a trailing ':' was not).
+        self.assertTrue(Path(notices[0].split('rca=', 1)[1].split()[0]).is_file())
+        self.assertTrue(request.is_file())
+        self.assertEqual([('api/a', 'reused by final FAIL')], [(f['check'], f['settled']) for f in early])
+        failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')
+        self.assertEqual(early[0]['id'], failure['id'])  # the final failure keeps the early occurrence
+        self.assertEqual([], list((self.directory / 'rca').glob('*.launch.json')))  # the agent owns it
+        self.assertEqual('triage', self.state['phase'])
+
+    def test_with_a_cycle_launcher_the_early_rca_launches_without_an_agent_notice(self):
+        printed, notices, worker = self.early_failure_fixture('FAIL', launcher_exit=0)
+        self.assertTrue(worker['rca_started_before_exit'], 'the cycle must launch the RCA while the gate runs')
+        self.assertEqual([], notices)  # the cycle owns this RCA; nothing asks the agent to start one
+        self.assertEqual(1, len(list((self.directory / 'rca').glob('*.launch.json'))))  # one RCA, not two
+        failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')
+        self.assertEqual(self.state['early_failures'][0]['id'], failure['id'])
+
+    def test_with_a_cycle_launcher_a_passing_check_prints_no_stop_request(self):
+        printed, notices, worker = self.early_failure_fixture('PASS', launcher_exit=0)
+        self.assertEqual('superseded: final PASS', self.state['early_failures'][0]['settled'])
+        self.assertNotIn('DEPLOY_GATE_EARLY_SUPERSEDED', printed)  # the agent started nothing to stop
+
+    def test_early_occurrences_per_gate_are_capped_and_the_rest_wait_for_the_result(self):
+        gate = {'name': 'backend', 'checks': [f'blackbox:d{i}' for i in range(15)]}
+        self.state['round'] = 1
+        rows = [progress.row(f'd{i}', 'FAIL', scope='domain') for i in range(12)]
+        opened = c.early_failures(self.state, gate, rows, self.directory)
+        self.assertEqual(c.EARLY_LIMIT, len(opened))
+        self.assertEqual([f'backend/blackbox:d{i}' for i in range(c.EARLY_LIMIT)], [o['check'] for o, _p, _r in opened])
+        self.assertEqual([], c.early_failures(self.state, gate, [progress.row('d14', 'FAIL', scope='domain')],
+                                              self.directory))
+
+    def test_a_failed_cycle_launch_is_kept_with_the_other_launch_errors(self):
+        printed, notices, worker = self.early_failure_fixture('FAIL', launcher_exit=3)
+        self.assertEqual([], notices)
+        self.assertTrue(any('CalledProcessError' in e or 'exit status 3' in e
+                            for e in self.state.get('rca_launch_errors', [])), self.state.get('rca_launch_errors'))
+
+    def test_a_progress_row_naming_no_gate_check_opens_nothing(self):
+        gate = {'name': 'api', 'checks': ['a', 'b']}
+        self.state['round'] = 1
+        row = progress.row('zzz', 'FAIL', case='zzz')
+        self.assertEqual([], c.early_failures(self.state, gate, [row], self.directory))
+        self.assertNotIn('early_failures', self.state)
+        single = {'name': 'ui', 'checks': ['c']}
+        [(occurrence, path, _row)] = c.early_failures(self.state, single, [row], self.directory)
+        self.assertEqual('ui/c', occurrence['check'])  # a single-check gate owns every row
+        self.assertTrue(path.is_file())
+
+    def test_early_failure_whose_gate_then_passes_is_superseded_not_a_failure(self):
+        printed, notices, worker = self.early_failure_fixture('PASS')
+        self.assertEqual(1, len(notices))
+        occurrence = self.state['early_failures'][0]
+        self.assertEqual('superseded: final PASS', occurrence['settled'])
+        self.assertIn(f"DEPLOY_GATE_EARLY_SUPERSEDED gate=api check=api/a id={occurrence['id']} "
+                      'superseded: final PASS', printed)
+        self.assertEqual([], [f for f in self.state['failures'] if f['gate'] == 'api'])
+        self.assertTrue(self.state['ready'])
 
     def test_final_phase_rejects_pass_cache_configuration(self):
         self.plan['gates'][1]['command']=['run-deploy-stage','api','--reuse-passed']
@@ -4700,6 +4857,53 @@ class LocalCleanupQuietScan(unittest.TestCase):
                         local.quiet(root)
                 finally:
                     child.kill(); child.wait(); child.stdout.close()
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc credential semantics')
+    def test_setuid_process_first_seen_as_ours_is_skipped_not_refused(self):
+        # The Blacksmith failure (PR #1760): a sibling suite's `sudo -n` was first seen while its euid
+        # was still ours (pre-exec), then its cwd turned unreadable while its real uid stayed ours, and
+        # quiet() refused it after the grace window. A real sudo is the fixture; only the first look at
+        # /proc/<pid> is pinned to that pre-exec owner.
+        import time
+        import deploy_test_local_cleanup as local
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / '.context').mkdir()
+            (root / '.context/native-worker-admission.lock').write_text('')
+            child = subprocess.Popen(['sudo', '-n', 'sleep', '60'], cwd=root)
+            proc_dir = Path(f'/proc/{child.pid}')
+
+            def steady():
+                # sudo runs the command: its real uid is ours and its euid root, with a root child.
+                uids = (proc_dir / 'status').read_text().split('Uid:')[1].split()[:2]
+                children = (proc_dir / 'task' / str(child.pid) / 'children').read_text().split()
+                return uids == [str(os.getuid()), '0'] and bool(children)
+            try:
+                deadline = time.monotonic() + 10
+                while not steady():
+                    self.assertLess(time.monotonic(), deadline, 'sudo never ran its command as root')
+                    time.sleep(0.05)
+                with self.assertRaises(PermissionError):
+                    (proc_dir / 'cwd').resolve(strict=True)
+                real_stat, seen = Path.stat, []
+
+                def first_look_ours(path, *args, **kwargs):
+                    result = real_stat(path, *args, **kwargs)
+                    if path != proc_dir or seen:
+                        return result
+                    seen.append(path)
+                    return os.stat_result((result.st_mode, *result[1:4], os.geteuid(), *result[5:]))
+                with patch.object(Path, 'stat', first_look_ours):
+                    local.quiet(root)
+                self.assertEqual(seen, [proc_dir])
+            finally:
+                deadline = time.monotonic() + 10
+                while child.poll() is None:
+                    try:
+                        child.terminate()  # refused only while sudo briefly holds a root real uid
+                    except PermissionError:
+                        self.assertLess(time.monotonic(), deadline, 'sudo fixture could not be stopped')
+                    time.sleep(0.05)
 
 
 if __name__ == '__main__': unittest.main()
