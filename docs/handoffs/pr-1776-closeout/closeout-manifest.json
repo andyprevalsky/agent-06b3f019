@@ -1,0 +1,166 @@
+{
+ "schema_version": 1,
+ "pr": 1776,
+ "merge_commit": "d6c7debbcd6a4e9b2ca6738e7d7e3197a73a3c66",
+ "gated_source": "002e9277d86f636c0bca582f305f354de8bc617b",
+ "source_digest": "c2f3ebfa63763ba677dc1d13dfbcacd48b9667efc041dec63b68e8a153709db7",
+ "outcome": "completed",
+ "assignment": "test repair /goal: deploy-test-cycle StructuralSupervisorCleanup x2 failing in deploy-command-structural beside the foreign-uid sudo fixture (PR #1760 Blacksmith attempt, head ddfe9f2881ce)",
+ "devbox": {
+  "id": "7317fb9e-69ae-4b7f-8852-f400bf0a8af8",
+  "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+  "originating_devbox": "aa460e55-b828-4b5f-b63d-4d582a3e308b"
+ },
+ "root_cause": "scan_same_user_processes re-checked only the real uid once a process turned unreadable; a sudo (real uid ours, euid root) first seen pre-exec was refused after the grace window instead of skipped like every post-exec observation",
+ "repro": {
+  "before": "13/1103 stressed runs failed with the exact error",
+  "after": "0/1517",
+  "regression": "LocalCleanupQuietScan.test_setuid_process_first_seen_as_ours_is_skipped_not_refused (fails on old scanner; 60/60 consecutive passes)"
+ },
+ "gates": {
+  "result": "DEPLOY_GATES PASS head=002e9277d86f gates=14 (verify bound-staged)",
+  "resource_warnings": [
+   "smoke/agent-payment-abandonment: exact AgentCard release stall (card CLOSED balance 0, transfer owt_866fb49949f77a36490032bf consumed releasedCents=0, purchase HELD) - native SKIPPED, resource_skip agentcard_release_stall, never PASS"
+  ],
+  "omitted": [
+   "backend-coverage-blackbox",
+   "frontend-coverage-blackbox",
+   "mac-app-coverage-blackbox",
+   "mac-app-static"
+  ]
+ },
+ "review": {
+  "cycles": 1,
+  "cycle1": "clean (one unverified CodeRabbit finding answered [IGNORED] with evidence: issuecomment-6715208990)"
+ },
+ "production": {
+  "schema_version": 1,
+  "sha": "d6c7debbcd6a4e9b2ca6738e7d7e3197a73a3c66",
+  "pr": 1776,
+  "status": "PASS",
+  "started_at": "2026-11-08T01:32:15Z",
+  "finished_at": "2026-11-08T01:39:45Z",
+  "changed_files": 2,
+  "selected": [
+   "render",
+   "fly",
+   "vercel",
+   "mac-release",
+   "wmh",
+   "backend-probes",
+   "workflow-migration",
+   "agentcard",
+   "semantic"
+  ],
+  "lanes": {
+   "render": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "fly": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no agent runtime or deploy-agents.yml change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "vercel": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no front-end/ change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "mac-release": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #1776 without MAC-APP-RELEASE)",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "wmh": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no WMH path change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "backend-probes": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no back-end change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "workflow-migration": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no agent cutover",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "agentcard": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "semantic": {
+    "status": "PASS",
+    "reason": "chat-lifecycle-ratchet run 42434672920 success",
+    "applicable": true,
+    "depends_on": [],
+    "started_at": "2026-11-08T01:32:15Z",
+    "finished_at": "2026-11-08T01:39:45Z",
+    "exit_code": 0,
+    "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha d6c7debbcd6a4e9b2ca6738e7d7e3197a73a3c66 --state-dir /home/boxes/rose/.context/deploy-pipeline && /home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha d6c7debbcd6a4e9b2ca6738e7d7e3197a73a3c66 --state-dir /home/boxes/rose/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+    "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/semantic.log"
+   }
+  }
+ },
+ "ledger": "13 cloud smoke attempt rows + 12 pass duration rows of merged code (group deploy-619ada95...) via hub_ledger_row, this PR",
+ "archives": [
+  {
+   "name": "pr1776-002e9277d8-core",
+   "key_prefix": "devbox-closeout-private/pr1776-002e9277d8-core/",
+   "archive_sha256": "6535d2a433db37be4d82de4d08fbdd18cdf48cf3ccf076a8d6a0273c3c961e2d",
+   "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches"
+  }
+ ]
+}
