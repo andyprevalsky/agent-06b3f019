@@ -55,7 +55,8 @@ The investigator independently replayed Git 2.43.0: 227 tags / 1,914 bytes
 passed 20/20; 317 captured names / 2,713 bytes passed 50/50; both 20,000-tag
 cases failed 3/3. In the 317-name syscall trace Git emitted a single 2,713-byte
 write, so those bytes alone do not establish buffer pressure. Full native
-checkout logs identify the actual runner as Git 2.55.0, not the local 2.43.0.
+checkout logs identify checkout Git as 2.55.0, not the local 2.43.0; the later
+run shell did not separately emit its resolved Git path/version.
 The vanilla 2.55.0 build likewise passed 12 tags 20/20, 227 tags 20/20 and
 317 names 50/50, while both 20,000-tag cases failed 3/3 with native 141.
 Version alone therefore does not explain the historical small replay. The
