@@ -161,6 +161,27 @@
    "key_prefix": "devbox-closeout-private/pr1776-002e9277d8-core/",
    "archive_sha256": "6535d2a433db37be4d82de4d08fbdd18cdf48cf3ccf076a8d6a0273c3c961e2d",
    "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches"
+  },
+  {
+   "name": "pr1776-closeout-final-core",
+   "key_prefix": "devbox-closeout-private/pr1776-closeout-final-core/",
+   "archive_sha256": "6fa6c2776c5c4970bbf48b4183dcd68009da7f865a61eef6953ba4af0a55051d",
+   "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
+   "supersedes": "pr1776-002e9277d8-core"
   }
- ]
+ ],
+ "deletion_readiness": {
+  "result": "READY on main after #1792 (658922b99c)",
+  "history": "the first PR #1776 receipt was NOT_READY on the daemon's idle codex app-server; the scorecard published then was premature. Follow-up PR #1787 implemented the same exemption but was closed as superseded when main merged the equivalent #1792 during its gate rounds."
+ },
+ "followup_pr_1787": {
+  "status": "closed unmerged (superseded by #1792)",
+  "heads": [
+   "3ae0ac255cf3",
+   "441dcb32194b"
+  ],
+  "rounds": "attempt1 smoke INFRA stop (transient AgentCard 401); attempt2 stale (managed-env sync) with structural flakes; attempt3 agents-coverage live-model flake -> assigned rerun PASS; final sweep smoke idempotent-abandonment timeout -> pending post-merge packet; DEPLOY_GATES PASS head=441dcb32194b gates=14; CodeRabbit cycle 1 findings fixed, cycle 2 clean",
+  "timing_outcome": "blocked (not shipped)",
+  "flakes": "see evidence/followups.txt item 6"
+ }
 }
