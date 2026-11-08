@@ -29,11 +29,17 @@ import {
 } from '../../providers/roseSkills/skills';
 
 const savedGithubApi = process.env.GITHUB_API_BASE_URL;
+const savedDispatch = process.env.GITHUB_DISPATCH_TOKEN;
+// One identity: a .env GITHUB_DISPATCH_TOKEN would be a second token-pool member, and the
+// rate-limit cases count requests against a single limited identity.
+process.env.GITHUB_DISPATCH_TOKEN = '';
 
 after(() => {
   resetGithubRateLimitStateForTests();
   if (savedGithubApi === undefined) delete process.env.GITHUB_API_BASE_URL;
   else process.env.GITHUB_API_BASE_URL = savedGithubApi;
+  if (savedDispatch === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
+  else process.env.GITHUB_DISPATCH_TOKEN = savedDispatch;
 });
 
 test('merged is reported only when GitHub confirms the merge and the target contains head', async () => {

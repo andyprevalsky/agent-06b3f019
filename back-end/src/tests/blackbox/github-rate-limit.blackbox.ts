@@ -31,8 +31,12 @@ const TOKEN = 'ghp_ratelimit_test_token_must_never_appear_in_output_0123456789';
 const savedEnv = {
   api: process.env.GITHUB_API_BASE_URL,
   token: process.env.GITHUB_TOKEN,
+  dispatch: process.env.GITHUB_DISPATCH_TOKEN,
 };
 process.env.GITHUB_TOKEN = TOKEN;
+// One identity: a .env GITHUB_DISPATCH_TOKEN would be a second token-pool member, and these
+// cases count requests against a single limited identity.
+process.env.GITHUB_DISPATCH_TOKEN = '';
 const fixtureDir = mkdtempSync(join(tmpdir(), 'github-rate-limit-'));
 
 after(() => {
@@ -41,6 +45,8 @@ after(() => {
   else process.env.GITHUB_API_BASE_URL = savedEnv.api;
   if (savedEnv.token === undefined) delete process.env.GITHUB_TOKEN;
   else process.env.GITHUB_TOKEN = savedEnv.token;
+  if (savedEnv.dispatch === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
+  else process.env.GITHUB_DISPATCH_TOKEN = savedEnv.dispatch;
   rmSync(fixtureDir, { recursive: true, force: true });
 });
 
