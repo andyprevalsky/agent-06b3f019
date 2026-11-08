@@ -37,7 +37,7 @@
   "config_recovery": "config-render-restore-proof.sanitized.json",
   "inherited_refs": "inherited-restored-refs-verification.json",
   "post_cutoff_controls": "GitHub review and boxes visual publication are separately durable; generated copies do not replace unique runtime records",
-  "protected": "Freedom and protected instructions unchanged; no branch/devbox deletion",
+  "protected": "Freedom and protected agent files unchanged; no branch/devbox deletion",
   "post_cutoff_archive": {
     "format": "ROSE-PRIVATE-TAR-GCM-V1",
     "bucket": "trace-archive",
