@@ -36,6 +36,9 @@ export async function resolveAndIssuePurchaseCard(
     purchase.userId === BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID &&
     purchase.stripeLivemode !== true
   ) {
+    if (resumedPurchase === null && purchase.status === PurchaseSpendStatus.PENDING_APPROVAL) {
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
+    }
     throw new PurchaseError(
       'Production payment requires a live Stripe billing snapshot',
       402,

@@ -175,6 +175,7 @@ async function main() {
   const { authorizeStripeHold } = await import('../../domains/purchases/chargeAuthorize');
   const { getTestPaymentLifecycle } = await import('../../domains/test-payment/lifecycle');
   const { resolveAndIssuePurchaseCard } = await import('../../domains/purchases/issueCard');
+  const { mintPurchaseCard } = await import('../../domains/purchases/service');
   const { reverseStalePurchasePayment } = await import('../../providers/purchaseStaleReversal');
   const { reconcileAbandonedPurchaseFunding } =
     await import('../../providers/purchaseFundingCompensation');
@@ -477,7 +478,17 @@ async function main() {
         subtotalCents: 100,
         fingerprint: `production-mode-${mode}`,
         currency: 'usd',
-        lineItems: [],
+        lineItems: [
+          {
+            name: 'Local fixture',
+            productUrl: 'https://fixture.invalid/item',
+            rating: '',
+            reviewCount: '',
+            unitPriceCents: 100,
+            quantity: 1,
+            lineTotalCents: 100,
+          },
+        ],
         fees: [],
       };
       const { purchase } = await createPendingPurchaseWithLock({
@@ -499,6 +510,18 @@ async function main() {
           );
           assert.equal(calls.length, cursor, 'test-mode purchase reached Stripe');
           assert.equal(card.mintCalls, 0, 'test-mode purchase reached live AgentCard');
+          assert.equal(
+            (await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: purchase.id } })).status,
+            'FAILED',
+            'fresh admission rejection must not strand a pending purchase'
+          );
+          await prisma.subscription.update({
+            where: { userId: productionUser },
+            data: { stripeLivemode: true, stripeCustomerId: 'cus_live' },
+          });
+          const retried = await mintPurchaseCard(input, card, wallet);
+          assert.equal(retried.cardId, card.cardId);
+          assert.equal(card.mintCalls, 1, 'valid retry must be admissible');
         } else {
           // A later subscription switch cannot change the immutable live snapshot.
           await prisma.subscription.update({

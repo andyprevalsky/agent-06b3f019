@@ -115,6 +115,12 @@ the all-live control issues exactly one fake card and every captured Stripe
 request uses the live fixture account. No added query or lock is needed. Existing
 financial cleanup paths and known allocations were not executed or changed.
 
+A follow-up review found a fresh rejected purchase was left PENDING_APPROVAL.
+The unchanged owning test reproduced that state leak, then passed after fresh
+pre-provider rejection marks the row FAILED. The same receipt can subsequently
+mint through the public service with valid local live billing; resumed financial
+work preserves its existing state. This adds no provider operation.
+
 Changes before snapshot creation are rejected; changes afterward cannot alter
 immutable purchase ownership. This does not assert an incident race, identify
 the historical writer or claim production recovery. Credits GET can grant its
