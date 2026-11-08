@@ -1346,7 +1346,20 @@ def run_fake_driver(mdir):
         # terminal evidence is captured and its exact provider machine is gone.
         # Keep queued work active through that boundary, then permit a healthy
         # retry. No transient failure marker or fixture deadline is the fault.
-        deadline = time.time() + 30
+        # The controller acts on its 10 s autoscale poll: the reaped worker
+        # leaves tracking after readiness timeout, capture and destroy; the next
+        # poll retries; a later poll reconciles the healthy worker's readiness.
+        # When cleanup ends just after a poll, that path spans the readiness
+        # timeout plus two more polls (32 s measured), so a fixed 30 s window
+        # failed on a loaded host while the controller was correct (RCA I-37).
+        # Bound the wait by the task's own staged execution budget, which is
+        # how long genuinely queued work stays pending.
+        execution_budget_s = rb_export(rb_text, "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS")
+        if not execution_budget_s.isdigit() or int(execution_budget_s) <= 0:
+            log("FATAL: staged driver carries no positive benchmark execution budget")
+            exit_code = 1
+        retry_started = time.time()
+        deadline = retry_started + (int(execution_budget_s) if exit_code == 0 else 0)
         failed_worker = None
         while time.time() < deadline:
             output = current_task_output()
@@ -1379,11 +1392,14 @@ def run_fake_driver(mdir):
                 except OSError:
                     ready = []
                 if ready and failed_worker not in ready:
-                    Path(MARKERS, "worker-readiness-retry-proven").write_text(json.dumps({"run_token": token, "failed_worker": failed_worker, "ready_workers": ready}))
+                    elapsed = round(time.time() - retry_started, 1)
+                    Path(MARKERS, "worker-readiness-retry-proven").write_text(json.dumps({"run_token": token, "failed_worker": failed_worker, "ready_workers": ready, "elapsed_s": elapsed}))
+                    log(f"readiness retry proven {elapsed}s after the failing worker launched (budget {execution_budget_s}s)")
                     break
                 time.sleep(0.1)
-        if not Path(MARKERS, "worker-readiness-retry-proven").is_file():
-            log("FATAL: readiness failure never crossed captured cleanup and healthy retry")
+        if exit_code == 0 and not Path(MARKERS, "worker-readiness-retry-proven").is_file():
+            log("FATAL: readiness failure never crossed captured cleanup and healthy retry "
+                f"within the {execution_budget_s}s benchmark execution budget")
             exit_code = 1
     # Keep the lower-target regression alive after the in-flight worker reaches
     # its own terminal cleanup boundary. Staging remains committed while it is
