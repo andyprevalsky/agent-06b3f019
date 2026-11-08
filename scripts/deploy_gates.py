@@ -51,9 +51,17 @@ PARK_DIR = '.context/deploy-ledger-park'  # published by `scripts/deploy finish`
 # into this directory instead of their own files (and queued fixture rows for publication).
 PARK_GATES = frozenset({'smoke', 'agentcard-lifecycle'})
 LEDGER_KEEP = '.context/deploy-worker-ledgers'  # retire preserves pre-park worker ledger edits here
-# No standard gate declares its own deadline. Local transports need a finite one, so every
-# slot carries the existing backend handoff deadline (deploy_test_backend.handoff_recipe).
+# Local transports need a finite deadline, so every slot carries the existing backend handoff
+# deadline (deploy_test_backend.handoff_recipe) unless its gate has a measured one below.
 GATE_DEADLINE_SECONDS = 14400
+# Measured per-gate deadlines. semantic-stack: 72 passing runs (2026-10-29..11-06) had p50 13.7 min,
+# p99 23.1 min, max 25.1 min (Blacksmith passes 17-21 min); a run blocked for its runner's own
+# hour-long waits held PR1784's whole round for 70+ min under the 4 h default (2026-11-08).
+GATE_DEADLINES = {'semantic-stack': 1800}
+
+
+def gate_deadline(gate: str) -> int:
+    return GATE_DEADLINES.get(gate, GATE_DEADLINE_SECONDS)
 PREPARE_TIMEOUT_SECONDS = 3600
 PROVISION_JOBS = 4
 BACKEND_GATE = 'backend-coverage-blackbox'
@@ -242,7 +250,7 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
         env['BACKEND_COVERAGE_DATABASE_URL'] = ('postgresql://postgres:postgres@localhost:5432/'
                                                 + marker.read_text().strip())
     slot = {'id': f'{gate}-local', 'transport': 'local-isolated', 'worker_root': str(path), 'cwd': str(path),
-            'env': env, 'timeout_seconds': GATE_DEADLINE_SECONDS}
+            'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
     return slot
@@ -253,7 +261,7 @@ def remote_slot(root: Path, gate: str) -> dict:
     env = {'CONDUCTOR_WORKSPACE_NAME': f'deploy-{gate}', 'CONDUCTOR_PORT': REMOTE_PORT}
     slot = {'id': f'{gate}-blacksmith', 'transport': GITHUB_TRANSPORT,
             'runner': BLACKSMITH_RUNNERS.get(gate, DEFAULT_BLACKSMITH_RUNNER),
-            'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': GATE_DEADLINE_SECONDS}
+            'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
     return slot
