@@ -17,6 +17,32 @@ def need(ok, message):
         raise ValueError('historical custody: ' + message)
 
 
+# Locator decisions made before the cloud request namespace exists. Each has a stable reason
+# code so deploy_test_cloud can publish a typed no-admission receipt; any other error stays generic.
+ADMISSION_REFUSALS = {
+    'request-locator-mismatch': 'historical custody: missing request-owned custody locator',
+    'canonical-locator-missing': 'historical custody: missing canonical custody locator',
+    'canonical-custody-unverifiable': 'historical custody: canonical custody history cannot be verified',
+    'canonical-custody-uncovered': 'historical custody: canonical custody obligations are not covered by the request-owned ledger',
+    'canonical-cycle-active': 'historical custody: canonical cycle is still active',
+    'canonical-cycle-owns-source': 'historical custody: canonical cycle owns the requested source',
+}
+
+
+class AdmissionRefusal(ValueError):
+    """A custody locator refusal raised by admission() before any allocation."""
+
+    def __init__(self, code, detail=None):
+        super().__init__(ADMISSION_REFUSALS[code])
+        self.reason_code = code
+        self.detail = detail
+
+
+def refuse(ok, code):
+    if not ok:
+        raise AdmissionRefusal(code)
+
+
 def task_contract(root, head, name):
     need(bool(re.fullmatch('[0-9a-f]{40}', head)), 'invalid original commit')
     result = subprocess.run(['git', 'show', head + ':agents/benchmarks/tasks.json'], cwd=root, capture_output=True)
@@ -490,17 +516,57 @@ def state_identity(state):
                     'historical_custody_import', 'historical_custody_transfers')})
 
 
+def debt_key(failure):
+    """The identity of one no-remint obligation: original failure, source and native bytes."""
+    import deploy_test_cycle as c
+    return c.digest({**{k: failure.get(k) for k in ('id', 'gate', 'check', 'source')},
+                     'native_sha256': (failure.get('worker_evidence') or {}).get('sha256')})
+
+
+def canonical_override(state, default, root):
+    """Admit a request-owned alternate ledger beside the canonical default only when the default's
+    authoritative custody history is validated and either empty or covered by that ledger."""
+    import deploy_test_cycle as c
+    try:
+        need(default.is_file() and not default.is_symlink(), 'canonical custody state is not a regular file')
+        canonical = c.read(default)
+        need(isinstance(canonical, dict) and isinstance(canonical.get('failures'), list)
+             and isinstance(canonical.get('source'), dict) and isinstance(canonical.get('plan'), dict)
+             and c.digest(canonical['plan']) == canonical.get('plan_digest'), 'malformed canonical cycle')
+        verify_import_origin(canonical, root)
+        found = known(canonical, root)
+        active = {r['original_failure']['id'] for r in canonical.get('historical_no_retry_custody', [])}
+        need(active <= found.keys(), 'canonical custody record lacks its original failure')
+        running = any(canonical.get(k) for k in ('running', 'live_failures', 'resume_phase'))
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
+        raise AdmissionRefusal('canonical-custody-unverifiable', f'{type(error).__name__}: {error}') from error
+    refuse(not running, 'canonical-cycle-active')
+    covered = known(state, root)
+    refuse(all(key in covered and debt_key(covered[key]) == debt_key(f) for key, f in found.items()),
+           'canonical-custody-uncovered')
+    identity = c.digest(canonical)
+    derived = ((state.get('historical_custody_import') or {}).get('donor', {}).get('state_digest') == identity
+               or any(t.get('donor_state_sha256') == identity for t in state.get('historical_custody_transfers', [])))
+    refuse(canonical['source'] != state['source'] or derived, 'canonical-cycle-owns-source')
+
+
 def admission(request, root):
     import deploy_test_cycle as c
     default = root / '.context/deploy-pipeline/cycle.json'
     locator = request.get('custody_state')
     request_path = Path(os.environ.get('DEPLOY_GATE_REQUEST', ''))
+    owner_state = None
     if (request_path.name == 'request.json' and len(request_path.parents) > 4
             and request_path.parents[3].name == 'attempts'):
         owner_state = request_path.parents[4] / 'cycle.json'
-        need(locator is not None and Path(locator).resolve() == owner_state.resolve(), 'missing request-owned custody locator')
-    if default.exists():
-        need(locator is not None and Path(locator).resolve() == default.resolve(), 'missing canonical custody locator')
+        refuse(locator is not None and Path(locator).resolve() == owner_state.resolve(), 'request-locator-mismatch')
+    override = False
+    if default.exists() or default.is_symlink():
+        # A supported non-default state directory owns its request; the canonical default must
+        # still be proven free of (or covered for) known no-remint obligations below.
+        override = owner_state is not None and owner_state.resolve() != default.resolve()
+        refuse(override or (locator is not None and Path(locator).resolve() == default.resolve()),
+               'canonical-locator-missing')
     if locator is None:
         return  # standalone disposable requests with no canonical cycle have no recorded obligations
     path = Path(locator)
@@ -509,6 +575,8 @@ def admission(request, root):
     state = c.read(path)
     need(request.get('custody_child_environment') == environment_identity(os.environ), 'admission environment changed')
     need(state_identity(state) == request.get('custody_state_sha256') and state['source'] == request['source'], 'custody state changed')
+    if override:
+        canonical_override(state, default, root)
     gate = next(g for g in state['plan']['gates'] if g['name'] == request['gate'])
     need(c.source(root) == state['source'] and c.digest(state['plan']) == state['plan_digest'], 'admission source/plan changed')
     need(request.get('custody_runtime') == runtime_identity(root), 'admission runtime files changed')

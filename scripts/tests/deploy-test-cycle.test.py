@@ -264,6 +264,117 @@ class Cycle(unittest.TestCase):
         with self.assertRaises(ValueError): h.verify(changed, self.root)
         self.assertNotEqual(h.state_identity(state), h.state_identity(changed))
 
+    def request_owned_admission(self, state, gate, *, checks=None, skips=None):
+        """Admit a request exactly as a supported non-default DEPLOY_TEST_CYCLE_STATE_DIR child sees it."""
+        import deploy_test_historical_custody as h
+        state_file = self.directory / 'cycle.json'; c.write(state_file, state)
+        folder = self.directory / 'attempts/1/initial' / gate['name']; folder.mkdir(parents=True, exist_ok=True)
+        expected = c.reuse_qualifications(state, gate, root=self.root) if skips is None else skips
+        request = dict(token='a' * 32, source=state['source'], gate=gate['name'], phase='initial',
+                       checks=[x for x in gate['checks'] if x not in expected] if checks is None else checks,
+                       skips=expected, custody_state=str(state_file.resolve()),
+                       custody_state_sha256=h.state_identity(state), custody_runtime=h.runtime_identity(self.root))
+        with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(folder / 'request.json')):
+            request['custody_child_environment'] = h.environment_identity(os.environ)
+            c.write(folder / 'request.json', request)
+            h.admission(request, self.root)
+
+    def stale_canonical_default(self, source=None, **changes):
+        """A finished older cycle left in the canonical default directory (PR1767: phase triage, no custody)."""
+        stale = copy.deepcopy(self.state)
+        stale.update(source=source or {'head': '1' * 40, 'digest': '2' * 64}, phase='triage', pending=['old-smoke'],
+                     failures=[{'id': 'old-smoke', 'check': 'smoke/agent-x', 'gate': 'smoke', 'native_result': 'UNVERIFIED',
+                                'complete': False, 'source': source or {'head': '1' * 40, 'digest': '2' * 64}}], **changes)
+        default = self.root / '.context/deploy-pipeline/cycle.json'; c.write(default, stale)
+        return default
+
+    def test_request_owned_override_admits_stale_canonical_default_without_custody_debt(self):
+        # PR #1784 cycle bn6: a supported .context/deploy-pipeline-bn6 cycle was refused before allocation
+        # because a stale PR1767 default cycle.json existed, though it carried no custody obligations.
+        import deploy_test_historical_custody as h
+        gate = self.plan['gates'][1]
+        self.stale_canonical_default()
+        self.directory = self.root / '.context/deploy-pipeline-bn6'
+        self.request_owned_admission(self.state, gate)
+        # A request that is not request-owned still cannot pick an alternate ledger beside the canonical one.
+        request = dict(source=self.state['source'], gate=gate['name'], checks=gate['checks'], skips={},
+                       custody_state=str((self.directory / 'cycle.json').resolve()))
+        with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(self.root / 'loose/request.json')):
+            with self.assertRaises(h.AdmissionRefusal) as refused:
+                h.admission(request, self.root)
+        self.assertEqual('canonical-locator-missing', refused.exception.reason_code)
+        self.assertEqual('historical custody: missing canonical custody locator', str(refused.exception))
+        # The request-owned locator itself remains mandatory.
+        folder = self.directory / 'attempts/1/initial/api'
+        with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(folder / 'request.json')):
+            with self.assertRaises(h.AdmissionRefusal) as refused:
+                h.admission({**request, 'custody_state': str(self.root / '.context/deploy-pipeline/cycle.json')}, self.root)
+        self.assertEqual('request-locator-mismatch', refused.exception.reason_code)
+
+    def test_request_owned_override_never_escapes_canonical_custody_debt(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.state.update(phase='ready', ready=True)
+        canonical = copy.deepcopy(self.state)
+        default = self.root / '.context/deploy-pipeline/cycle.json'
+        fresh = c.initialize(new, self.root)
+        gate = fresh['plan']['gates'][1]
+        self.directory = self.root / '.context/deploy-pipeline-alt'
+        def refused(code):
+            with self.assertRaises(h.AdmissionRefusal) as caught:
+                self.request_owned_admission(fresh, gate, skips={})
+            self.assertEqual(code, caught.exception.reason_code)
+        # Known no-remint obligations in the canonical default: a fresh alternate ledger cannot escape them,
+        # whether the canonical cycle is bound to this source or to an older one.
+        c.write(default, canonical)
+        refused('canonical-custody-uncovered')
+        c.write(default, {**canonical, 'source': {'head': '3' * 40, 'digest': '4' * 64}})
+        refused('canonical-custody-uncovered')
+        # Corrupt, malformed or unverifiable canonical history fails closed.
+        default.write_text('{not json')
+        refused('canonical-custody-unverifiable')
+        for malformed in ({}, [], {**canonical, 'plan_digest': 'tampered'}, {**canonical, 'failures': None},
+                          {**canonical, 'historical_custody_import': {'kind': 'wrong'}}):
+            c.write(default, malformed)
+            refused('canonical-custody-unverifiable')
+        native = Path(canonical['failures'][1]['worker_evidence']['path']); raw = native.read_bytes()
+        native.unlink(); c.write(default, canonical)
+        refused('canonical-custody-unverifiable')
+        native.write_bytes(raw)
+        orphan = copy.deepcopy(canonical); orphan['historical_no_retry_custody'][0]['original_failure']['id'] = 'orphan'
+        c.write(default, orphan)
+        refused('canonical-custody-unverifiable')
+        # An active or same-source canonical coordinator keeps ownership even without custody debt.
+        self.state = c.initialize(new, self.root)
+        self.stale_canonical_default(running=['smoke'])
+        refused('canonical-cycle-active')
+        self.stale_canonical_default(source=fresh['source'])
+        refused('canonical-cycle-owns-source')
+        self.stale_canonical_default()
+        self.request_owned_admission(fresh, gate, skips={})
+
+    def test_request_owned_override_admits_imported_canonical_custody(self):
+        # PR1770: the canonical ledger's obligations were imported into an alternate fresh ledger.
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        default = self.root / '.context/deploy-pipeline/cycle.json'
+        default.parent.mkdir(parents=True, exist_ok=True); default.write_bytes(donor.read_bytes())
+        proof = h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        gate = fresh['plan']['gates'][1]
+        self.directory = self.root / '.context/deploy-pipeline-alt'
+        self.request_owned_admission(fresh, gate)
+        # Dropping one imported obligation from the alternate ledger is a canonical-debt bypass.
+        partial = copy.deepcopy(fresh)
+        partial['failures'] = partial['failures'][1:]
+        for key in ('historical_no_retry_custody', 'historical_custody_history'):
+            partial[key] = [r for r in partial[key] if r['original_failure']['id'] != fresh['failures'][0]['id']]
+        partial.pop('historical_custody_import')
+        with self.assertRaises(h.AdmissionRefusal) as caught:
+            self.request_owned_admission(partial, gate, checks=gate['checks'], skips={})
+        self.assertEqual('canonical-custody-uncovered', caught.exception.reason_code)
+
     def test_historical_import_retained_provenance_blocks_dropped_collections(self):
         import deploy_test_historical_custody as h
         fresh, donor, index = self.transfer_fixture()
@@ -992,6 +1103,46 @@ class Cycle(unittest.TestCase):
         for reason in (refusal.unpushed_reason('f' * 40), 'push before gates', None):
             self.assertFalse(refusal.refused_before_admission({**result, 'reason': reason}, request, gate,
                                                               self.root, 2, invalid_process=False))
+
+    def test_custody_locator_refusal_has_no_owner_and_binds_its_reason_code(self):
+        # PR #1784 cycle bn6: a pre-allocation custody refusal must not retain a smoke cleanup owner.
+        import deploy_test_cloud_refusal as refusal
+        import deploy_test_historical_custody as h
+        gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+                'worker_transport': 'benchmark-cloud-cli', 'cwd': str(self.root),
+                'command': [sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')],
+                'case_protocol': True, 'checks': ['one', 'two']}
+        state = copy.deepcopy(self.state)
+        state['input_fingerprints']['smoke'] = 'fixture'
+        def native(argv, **kwargs):
+            request = c.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+            result = {k: request[k] for k in ('token', 'source', 'gate')}
+            result.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                          cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                          native_command=[], fleet_directory=None,
+                          reason=h.ADMISSION_REFUSALS['canonical-custody-uncovered'],
+                          reason_code='canonical-custody-uncovered',
+                          admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+            c.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), result)
+            return 2, False, False, False
+        with patch.object(c, 'run_command', side_effect=native):
+            receipt = c._execute(gate, state, self.directory, self.root)
+        self.assertEqual((receipt['complete'], receipt['status'], receipt['lingering_group']), (False, 'FAIL', False))
+        self.assertEqual(receipt['cases'], dict.fromkeys(gate['checks'], 'UNVERIFIED'))
+        self.assertEqual(receipt['case_complete'], dict.fromkeys(gate['checks'], False))
+        self.assertIsNone(c.receipt_owner('smoke', receipt))
+        self.assertNotIn('cleanup_owner', receipt)
+        request = c.read(Path(receipt['log']).parent / 'request.json')
+        result = c.read(Path(receipt['worker_result']))
+        self.assertTrue(refusal.refused_before_admission(result, request, gate, self.root, 2, invalid_process=False))
+        for changed in ({**result, 'reason_code': 'canonical-locator-missing'}, {**result, 'reason_code': None},
+                        {**result, 'reason': 'historical custody: admission input fingerprint changed'},
+                        {**result, 'reason': refusal.SOURCE_DIFFERS},
+                        {**result, 'cleanup_owner': {'request_token': result['token']}}):
+            self.assertFalse(refusal.refused_before_admission(changed, request, gate, self.root, 2, invalid_process=False))
+        source = {**result, 'reason': refusal.SOURCE_DIFFERS}; source.pop('reason_code')
+        self.assertTrue(refusal.refused_before_admission(source, request, gate, self.root, 2, invalid_process=False))
+        self.assertFalse(refusal.refused_before_admission(result, request, gate, self.root, 2, invalid_process=True))
 
     def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
         plan = copy.deepcopy(self.plan)

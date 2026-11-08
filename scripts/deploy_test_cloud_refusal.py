@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from deploy_test_historical_custody import ADMISSION_REFUSALS
 from deploy_test_interrupted_cleanup import Evidence, no_holders, namespace_quiet
 
 KIND = 'cloud-source-refusal-cleanup-v1'
@@ -25,8 +26,10 @@ def unpushed_reason(head):
 
 
 def refusal_reasons(request):
-    """The only typed pre-admission refusals; any other error keeps fail-closed native custody."""
-    return {SOURCE_DIFFERS, unpushed_reason(request['source']['head'])}
+    """The only typed pre-admission refusals and their reason codes; any other error keeps
+    fail-closed native custody. Source refusals predate reason codes and carry none."""
+    return {SOURCE_DIFFERS: None, unpushed_reason(request['source']['head']): None,
+            **{message: code for code, message in ADMISSION_REFUSALS.items()}}
 
 
 def refused_before_admission(result, request, gate, root, code, *, invalid_process):
@@ -44,6 +47,7 @@ def refused_before_admission(result, request, gate, root, code, *, invalid_proce
             and result.get('native_command') == [] and result.get('fleet_directory') is None
             and result.get('evidence') == {} and not result.get('cleanup_owner')
             and result.get('reason') in refusal_reasons(request)
+            and result.get('reason_code') == refusal_reasons(request)[result['reason']]
             and namespace.resolve() == namespace and not any(p.is_symlink() for p in (root / '.context', namespace.parent, namespace))
             and not namespace.exists())
 
