@@ -200,6 +200,104 @@ async function main(): Promise<void> {
     assert.deepEqual(mutationClock.sleeps, [], 'a mutation must never enter the read flap window');
 
     console.log('PASS AgentCard org reads ride out a bounded provider auth flap');
+
+    // Regression (smoke agent-payment-idempotent-abandonment, PR #1775 deploy, agent 2c6b3ffd,
+    // 2026-11-08 02:08:26-31Z): the second browser's reuse lookup read get_card_details while the
+    // shared org window was saturated. Two HTTP-200 structured throttles carrying no retryAfter
+    // were followed by "Invalid or expired organization token" on attempt 3 with 24.3 s of the
+    // 30 s budget unspent, POST /api/purchases/lookup answered 502 and the browser task died. The
+    // three-attempt cap, not the budget, ended the read.
+    const structuredThrottle = (): Response =>
+      new Response(
+        JSON.stringify({
+          result: {
+            structuredContent: {
+              status: 'error',
+              message: 'get_card_details failed: Too many requests, please try again later',
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    const liveCard = { structuredContent: { card: { id: 'card-1', status: 'OPEN' } } };
+    const liveCardResponse = (): Response =>
+      new Response(JSON.stringify({ result: liveCard }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const replayClock = fakeClock();
+    const replayStartedAtMs = replayClock.now();
+    let replayRequests = 0;
+    const replayRuntime = new AgentCardOrgRuntime(
+      undefined,
+      async () => {
+        replayRequests += 1;
+        if (replayRequests <= 2) return structuredThrottle();
+        // The six immediate attempts of the auth-rejected third read.
+        if (replayRequests <= 8) return providerUnauthorized();
+        // The window is still saturated when the rejection clears.
+        if (replayRequests <= 10) return structuredThrottle();
+        return liveCardResponse();
+      },
+      replayClock
+    );
+    assert.deepEqual(
+      await replayRuntime.callTool('get_card_details', { card_id: 'card-1' }),
+      liveCard,
+      'a read throttled then auth-rejected must keep retrying while its budget remains'
+    );
+    assert.equal(replayRequests, 11, 'the replayed read must recover on the first clear window');
+    assert.ok(
+      replayClock.now() - replayStartedAtMs <= 30_000,
+      'the replayed read must stay inside the one 30 s rate-limit budget'
+    );
+
+    // Reads are bounded by the budget, so a throttle that never clears still surrenders typed.
+    const sustainedClock = fakeClock();
+    const sustainedStartedAtMs = sustainedClock.now();
+    let sustainedRequests = 0;
+    const sustainedRuntime = new AgentCardOrgRuntime(
+      undefined,
+      async () => {
+        sustainedRequests += 1;
+        return structuredThrottle();
+      },
+      sustainedClock
+    );
+    await assert.rejects(
+      () => sustainedRuntime.callTool('get_card_details', { card_id: 'card-1' }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 429 &&
+        error.code === 'agentcard_org_mcp_rate_limited' &&
+        /Too many requests/.test(error.message)
+    );
+    assert.equal(sustainedRequests, 6, 'a sustained read throttle must stay request-bounded');
+    assert.ok(
+      sustainedClock.now() - sustainedStartedAtMs <= 30_000,
+      'a sustained read throttle must fail inside the 30 s budget'
+    );
+
+    // A mutation keeps its three attempts: it must not be replayed for the whole budget.
+    const mutationThrottleClock = fakeClock();
+    let mutationThrottleRequests = 0;
+    const mutationThrottleRuntime = new AgentCardOrgRuntime(
+      undefined,
+      async () => {
+        mutationThrottleRequests += 1;
+        return structuredThrottle();
+      },
+      mutationThrottleClock
+    );
+    await assert.rejects(
+      () => mutationThrottleRuntime.callTool('close_card', { card_id: 'card-1' }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
+    );
+    assert.equal(mutationThrottleRequests, 3, 'a mutation must keep its three throttle attempts');
+
+    console.log('PASS AgentCard org reads spend the rate-limit budget before surrendering');
   } finally {
     for (const name of CREDENTIAL_ENV) {
       const value = original[name];

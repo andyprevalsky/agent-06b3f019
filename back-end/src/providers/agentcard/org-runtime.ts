@@ -34,6 +34,14 @@ const log = createLogger('AgentCardOrgRuntime');
  * request behind a throttle that deep.
  */
 const RATE_LIMIT_RETRY_ATTEMPTS = 3;
+/**
+ * The attempt cap above spends only 3 s of the 30 s budget when the provider advertises no
+ * `retryAfter`, so it, not the budget, ended a saturated read (idempotent-abandonment 2026-11-08:
+ * throttle, throttle, auth rejection with 24.3 s unspent killed the second browser's reuse lookup).
+ * A read cannot change provider state, so 1+2+4+8+15 s of backoff lets it spend the whole budget;
+ * mutations keep the smaller cap.
+ */
+const READ_RATE_LIMIT_RETRY_ATTEMPTS = 6;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
 const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
 const ORG_MCP_TOOL_TIMEOUT_MS = 30_000;
@@ -294,13 +302,14 @@ function mcpToolResultRateLimitMessage(result: unknown): string | undefined {
 function rateLimitDelayMs(
   error: unknown,
   attempt: number,
-  remainingBudgetMs: number
+  remainingBudgetMs: number,
+  nowMs: number
 ): number | null {
   if (remainingBudgetMs <= 0) return null;
   const match = /"retryAfter"\s*:\s*(\d+)/.exec(errorMessage(error));
   if (match !== null) {
     // Clear the window boundary rather than racing it.
-    const waitMs = Number(match[1]) - Date.now() + 250;
+    const waitMs = Number(match[1]) - nowMs + 250;
     if (Number.isFinite(waitMs) && waitMs > 0) {
       return waitMs <= remainingBudgetMs ? waitMs : null;
     }
@@ -587,8 +596,11 @@ export class AgentCardOrgRuntime {
     args: Record<string, unknown>,
     deadlineAtMs: number
   ): Promise<unknown> {
+    const maxAttempts = IDEMPOTENT_READ_TOOLS.has(toolName)
+      ? READ_RATE_LIMIT_RETRY_ATTEMPTS
+      : RATE_LIMIT_RETRY_ATTEMPTS;
     let lastRetryError: unknown;
-    for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const startedAtMs = Date.now();
       try {
         const result = await this.callToolOnce(toolName, args, deadlineAtMs);
@@ -619,23 +631,25 @@ export class AgentCardOrgRuntime {
         // itself counts against the budget too, and a shared deadline already reflects every wait
         // the caller's earlier calls consumed.
         const waitMs =
-          retryable && attempt < RATE_LIMIT_RETRY_ATTEMPTS
-            ? rateLimitDelayMs(error, attempt, deadlineAtMs - Date.now())
+          retryable && attempt < maxAttempts
+            ? rateLimitDelayMs(error, attempt, deadlineAtMs - this.clock.now(), this.clock.now())
             : null;
         log.warn('Organization MCP tool call failed', {
           tool: toolName,
           attempt,
           duration_ms: Date.now() - startedAtMs,
           error: errorMessage(error),
+          status: error instanceof AgentCardOrgRuntimeError ? error.status : undefined,
+          code: error instanceof AgentCardOrgRuntimeError ? error.code : undefined,
           retryable,
           retry_after_advertised: /"retryAfter"\s*:\s*\d+/.test(errorMessage(error)),
           retry_wait_ms: waitMs,
-          retry_budget_remaining_ms: Math.max(0, deadlineAtMs - Date.now()),
+          retry_budget_remaining_ms: Math.max(0, deadlineAtMs - this.clock.now()),
         });
         if (!retryable) throw error;
         lastRetryError = error;
         if (waitMs === null) break;
-        await delay(waitMs);
+        await this.clock.sleep(waitMs);
       }
     }
     if (
@@ -644,7 +658,7 @@ export class AgentCardOrgRuntime {
     ) {
       throw new AgentCardOrgRuntimeError(
         `AgentCard Organization MCP ${toolName} is temporarily unavailable ` +
-          `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+          `after ${maxAttempts} attempts; upstream: ${errorMessage(lastRetryError)}`,
         503,
         'agentcard_org_mcp_unavailable',
         { tool: toolName, error: errorMessage(lastRetryError) }
@@ -659,7 +673,7 @@ export class AgentCardOrgRuntime {
     // to characterise.
     throw new AgentCardOrgRuntimeError(
       `AgentCard Organization MCP rate limit exhausted for ${toolName} ` +
-        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+        `after ${maxAttempts} attempts; upstream: ${errorMessage(lastRetryError)}`,
       429,
       'agentcard_org_mcp_rate_limited',
       { tool: toolName, error: errorMessage(lastRetryError) }

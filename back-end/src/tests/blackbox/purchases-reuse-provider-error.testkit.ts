@@ -78,10 +78,20 @@ export async function testReuseMintProviderFailureIsTyped(): Promise<void> {
       },
     });
     const calls: string[] = [];
-    const runtime = new AgentCardOrgRuntime(async (_token, toolName) => {
-      calls.push(toolName);
-      return TEXT_ONLY_THROTTLE;
-    });
+    let virtualNowMs = Date.now();
+    const runtime = new AgentCardOrgRuntime(
+      async (_token, toolName) => {
+        calls.push(toolName);
+        return TEXT_ONLY_THROTTLE;
+      },
+      fetch,
+      {
+        now: () => virtualNowMs,
+        sleep: async (ms) => {
+          virtualNowMs += ms;
+        },
+      }
+    );
     const provider = new AgentCardOrgMcpProvider(
       'fixture-cardholder',
       (toolName, args, deadlineAtMs) => runtime.callTool(toolName, args, deadlineAtMs),
@@ -124,7 +134,7 @@ export async function testReuseMintProviderFailureIsTyped(): Promise<void> {
       `expected 429 agentcard_org_mcp_rate_limited, got ${typed.statusCode} ${typed.code}`
     );
     assert(
-      calls.length === 3 && calls.every((tool) => tool === 'get_card_details'),
+      calls.length === 6 && calls.every((tool) => tool === 'get_card_details'),
       `the existing bounded throttle retry must own the read, got ${calls.join(',')}`
     );
     const row = await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: held.id } });
