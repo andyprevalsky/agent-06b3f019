@@ -480,10 +480,67 @@ def is_harness_process(exe: str | None, argv: str = '') -> bool:
     return under(exe, '/opt/devbox-runtime') and f'{DAEMON_DIR}/' in argv
 
 
+CODEX_SERVER_PREFIX = '/opt/devbox-tools/codex/'
+CODEX_SESSIONS = Path.home() / '.codex' / 'sessions'
+
+
+def stat_fields(proc: Path, pid: int) -> list[str] | None:
+    """/proc/<pid>/stat fields after the parenthesised comm: [0] state, [1] ppid, [19] starttime."""
+    try:
+        return (proc / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+    except (OSError, IndexError):
+        return None
+
+
+def parent_map(proc: Path) -> dict[int, int]:
+    """pid -> ppid for every readable process."""
+    parents = {}
+    for entry in proc.iterdir():
+        if entry.name.isdigit() and (row := stat_fields(proc, int(entry.name))):
+            parents[int(entry.name)] = int(row[1])
+    return parents
+
+
+def idle_daemon_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc'),
+                             sessions: Path = CODEX_SESSIONS, parents: dict[int, int] | None = None) -> bool:
+    """The devbox daemon's shared `codex app-server`, started in the agent's cwd, serving no Codex session.
+
+    It is held ready for Codex threads and holds no workspace state while idle. It stays live work, and keeps
+    blocking deletion, the moment it runs anything (any child process) or a Codex session has written a
+    rollout since it started. A codex binary not parented by the daemon is never exempt.
+    """
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or 'app-server' not in argv.split():
+        return False
+    fields = stat_fields(proc, pid)
+    if not fields or len(fields) < 20:
+        return False
+    try:
+        daemon = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+    except OSError:
+        return False
+    if f'{DAEMON_DIR}/' not in daemon:
+        return False
+    if pid in (parent_map(proc) if parents is None else parents).values():
+        return False
+    try:
+        btime = next(int(line.split()[1]) for line in (proc / 'stat').read_text().splitlines() if line.startswith('btime '))
+        started = btime + int(fields[19]) / os.sysconf('SC_CLK_TCK')
+    except (OSError, StopIteration, ValueError):
+        return False
+    if sessions.is_dir():
+        try:
+            if any(path.is_file() and path.stat().st_mtime >= started for path in sessions.rglob('*')):
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def live_processes(root: Path) -> list[dict]:
     found, mine, proc = [], own_pids(), Path('/proc')
     if not proc.is_dir():
         return [{'pid': None, 'reason': '/proc unavailable; process ownership unverified'}]
+    parents = parent_map(proc)
     for entry in proc.iterdir():
         if not entry.name.isdigit() or int(entry.name) in mine:
             continue
@@ -494,7 +551,9 @@ def live_processes(root: Path) -> list[dict]:
             continue
         if cwd == root or root in cwd.parents:
             try:
-                if is_harness_process(os.readlink(entry / 'exe'), argv):
+                exe = os.readlink(entry / 'exe')
+                if is_harness_process(exe, argv) or idle_daemon_codex_server(int(entry.name), exe, argv, proc,
+                                                                             parents=parents):
                     continue
             except OSError:
                 pass
