@@ -38,7 +38,7 @@ import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
 import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
-import { waitForSandboxWsServer } from './e2bWsReady';
+import { waitForSandboxWsServer, wsReadinessOutcome, wsStartupBudgetMs } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
 import { prepareCodeSessionWorkspace, promptFlagsForUser } from './codeSessionWorkspace';
@@ -97,7 +97,6 @@ const WS_PORT = 3000;
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
-
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
  *
@@ -470,12 +469,12 @@ async function createClaudeCodeSessionUnlocked(
     port: WS_PORT,
     timeoutMs: WS_READY_TIMEOUT_MS,
     pollMs: WS_READY_POLL_INTERVAL_MS,
+    startupBudgetMs: wsStartupBudgetMs(),
   });
-  if (ws.ready) log.info(`WebSocket server ready in ${ws.elapsedMs}ms`);
-  else {
-    log.warn(`WebSocket server readiness check timed out after ${ws.elapsedMs}ms`);
+  const wsFailure = wsReadinessOutcome(log, 'claude', ws);
+  if (wsFailure !== null) {
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
-    throw new Error('Claude Code WebSocket server failed to become ready');
+    throw wsFailure;
   }
   // Rose-in-Rose (A1): a dev Rose-repo session serves its front-end with HMR.
   await autostartRosePreview(sandbox, {
@@ -500,6 +499,7 @@ async function createClaudeCodeSessionUnlocked(
     projectRestore: project.report,
     previewUrl,
     sandboxSize: acquired.size,
+    startup: { wsReadyMs: ws.elapsedMs, cloneMs: ws.cloneMs },
   };
 }
 
@@ -677,12 +677,12 @@ export async function createCodexCodeSession(
     port: WS_PORT,
     timeoutMs: CODEX_WS_READY_TIMEOUT_MS,
     pollMs: WS_READY_POLL_INTERVAL_MS,
+    startupBudgetMs: wsStartupBudgetMs(),
   });
-  if (ws.ready) log.info(`Codex WebSocket server ready in ${ws.elapsedMs}ms`);
-  else {
-    log.warn(`Codex WebSocket server readiness check timed out after ${ws.elapsedMs}ms`);
+  const wsFailure = wsReadinessOutcome(log, 'codex', ws);
+  if (wsFailure !== null) {
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
-    throw new Error('Codex WebSocket server failed to become ready');
+    throw wsFailure;
   }
   await autostartRosePreview(sandbox, {
     envs: sessionEnvs,
@@ -705,5 +705,6 @@ export async function createCodexCodeSession(
     projectRestore: project.report,
     previewUrl,
     sandboxSize: acquired.size,
+    startup: { wsReadyMs: ws.elapsedMs, cloneMs: ws.cloneMs },
   };
 }

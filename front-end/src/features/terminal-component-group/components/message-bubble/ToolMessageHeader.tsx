@@ -2,7 +2,8 @@
  * STATE MACHINE: ToolMessageHeader
  *
  * [STATIC]
- *   - shows icon + title
+ *   - shows icon + title; a thought appends its recorded generation
+ *     (duration · ↓ tokens · tok/s) when its producer recorded one
  *
  * [TOGGLEABLE] (hasMessage && isExpandable)
  *   - header receives click handler
@@ -12,6 +13,7 @@
 import { cn } from '@/lib/utils';
 import { ChevronRight, Maximize2 } from 'lucide-react';
 import { ToolMessageIcon } from './ToolMessageIcon';
+import { ThoughtGenerationMetric } from '../ThoughtGenerationMetric';
 import type { ToolMessageData } from './types';
 
 interface ToolMessageHeaderProps {
@@ -70,6 +72,7 @@ export function ToolMessageHeader({
       <span className={cn('min-w-0 break-words', titleClassName)}>
         {isThought ? (data.status === 'IN_PROGRESS' ? 'Thinking' : 'Thought') : titleText}
       </span>
+      {isThought && data.generation && <ThoughtGenerationMetric generation={data.generation} />}
       {authTaskId && data.status === 'IN_PROGRESS' && (
         <button
           type="button"

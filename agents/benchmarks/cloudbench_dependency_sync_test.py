@@ -7226,6 +7226,56 @@ confirm_guest_shutdown
     assert not list(tmp_path.glob("*.tmp*")), "a temporary receipt leaked"
 
 
+@pytest.mark.parametrize("case", ["second-try-answers", "never-answers"])
+def test_guest_shutdown_request_retries_a_relay_transport_error_within_the_deadline(
+    tmp_path: Path, case: str
+) -> None:
+    """2026-11-08 (PR1784): one 3 s POST through the shared relay (10 s connect budget) got HTTP 000
+    from a healthy guest and turned a passing task into exit 125. A transport error retries, bounded."""
+    source = CLOUD_SCRIPT.read_text()
+    functions = [_extract_fleet_function(source, "confirm_guest_shutdown() {")]
+    if "publish_guest_shutdown_delivery_receipt() {" in source:
+        functions.append(_extract_fleet_function(source, "publish_guest_shutdown_delivery_receipt() {"))
+    posts = tmp_path / "posts"
+    answer = "204" if case == "second-try-answers" else "000"
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+OUT_DIR={shlex.quote(str(tmp_path))}
+FLEET_MACHINE_ID={_NATIVE_STOP_MACHINE}
+RUN_LOG_TOKEN={_NATIVE_STOP_OWNER}-3
+CLOUDBENCH_FLEET_RUN_ID=20261108-042041-2844772
+TASKS_CSV=bench-owned
+CLOUDBENCH_INFRA_PROBE=0
+FINISHED=0
+LOCAL_STATUS_PORT=61001
+STATUS_PROXY_PID=$$
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+CLOUDBENCH_CHILD_TERM_SECONDS=20
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+sleep() {{ :; }}
+curl() {{
+  case " $* " in
+    *" POST "*) echo x >> {shlex.quote(str(posts))}
+      if [ "$(wc -l < {shlex.quote(str(posts))})" -ge 2 ]; then printf {answer}; else printf 000; fi ;;
+    *) printf 204 ;;
+  esac
+}}
+{chr(10).join(functions)}
+confirm_guest_shutdown
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    attempts = len(posts.read_text().splitlines())
+    if case == "second-try-answers":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert attempts == 2
+        assert (tmp_path / "guest-shutdown.confirmed").read_text().strip() == "20261108-042041-2844772"
+    else:
+        assert result.returncode != 0
+        assert attempts == 3, "transport-error retries must stay bounded"
+        assert "guest cleanup request failed (HTTP 000)" in result.stderr
+        assert not (tmp_path / "guest-shutdown.confirmed").exists()
+
+
 @pytest.mark.parametrize("phase", ["during-post", "during-health-poll"])
 def test_guest_shutdown_child_confirmation_receipt_survives_term_during_delivery(
     tmp_path: Path,
@@ -20491,9 +20541,9 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
                 }
             )
     (history_dir / "task_attempts.jsonl").write_text("\n".join(json.dumps(row) for row in attempt_rows) + "\n")
-    (fixture / "agents" / "benchmarks" / "select_predeploy_benches.py").write_text(
-        (ROOT / "agents" / "benchmarks" / "select_predeploy_benches.py").read_text()
-    )
+    # The selector reads the attempts ledger through its per-writer shard helper.
+    for module in ("select_predeploy_benches.py", "history_ledger.py"):
+        (fixture / "agents" / "benchmarks" / module).write_text((ROOT / "agents" / "benchmarks" / module).read_text())
     capture = fixture / "capture"
     (fixture / "scripts" / "run-bench").write_text(
         '#!/usr/bin/env bash\nprintf "%s\\n" "${BENCHMARK_SKIP_WMH_BUILD:-unset}" "$*" > "$CAPTURE"\n'
@@ -28833,6 +28883,7 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
             "warm_deps_preflight() {",
             "hydrate_warm_deps_state() {",
             "warm_deps_recorded_state() {",
+            "list_donor_snapshots() {",
         )
     )
     script = f"""set -uo pipefail
@@ -34294,10 +34345,63 @@ def test_fleet_publishes_evaluation_before_teardown_preserves_markerless_stage(
     assert wire["tasks"][0]["lifecycle_stage"] == expected_stage
     assert wire["tasks"][0]["passed"] == passed
 
+@pytest.mark.parametrize("case", ["healthy", "recovers", "expired", "foreign", "dead", "malformed", "wrong_attachment"])
+def test_campaign_inventory_warm_volume_caller_uses_owned_snapshot(tmp_path: Path, case: str) -> None:
+    fleet = fleet_source_text()
+    start = fleet.index('# Cloned volumes can retain the donor name.')
+    caller = fleet[start:fleet.index('# CLOUDBENCH_SNAPSHOT_ID', start)]
+    capture = '\n'.join(_extract_fleet_function(fleet, name + '() {') for name in
+                        ('campaign_inventory_wait', 'campaign_inventory_capture_once', 'campaign_inventory_capture'))
+    volumes = tmp_path / 'volumes.json'
+    volumes.write_text(json.dumps([dict(id='vol_fixture', name='warm-fixture', attached_machine_id='warm_fixture')]))
+    if case == 'malformed': volumes.write_text('{broken')
+    if case == 'wrong_attachment':
+        volumes.write_text(json.dumps([dict(id='vol_fixture', name='warm-fixture', attached_machine_id='foreign')]))
+    script = r'''set -uo pipefail
+FLEET_DIR="$ROOT"
+source "$ENV_HELPER"
+source "$INVENTORY_HELPER"
+command sleep 30 & publisher=$!
+trap 'kill "$publisher" 2>/dev/null || true; wait "$publisher" 2>/dev/null || true' EXIT
+APP=fixture; VOLUME_NAME=warm-fixture; WARM_VOLUME_ID=vol_fixture; WARM_ID=warm_fixture
+INVENTORY_HOME="$ROOT/shared"; INVENTORY_INDEX="$INVENTORY_HOME/index"
+mkdir -p "$INVENTORY_INDEX/current"
+INVENTORY_CLOCK_EPOCH=$(date +%s); INVENTORY_CLOCK_SECONDS=$SECONDS
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="$INVENTORY_HOME"
+publisher_birth=$(cloudbench_pid_start_time "$publisher"); parent_birth=$(cloudbench_pid_start_time "$$")
+printf 'app=%s\npid=%s\npid_start=%s\ntoken=owned-token\nparent_pid=%s\nparent_start=%s\n' "$APP" "$publisher" "$publisher_birth" "$$" "$parent_birth" > "$INVENTORY_HOME/owner"
+healthy(){ printf 'publisher_token=owned-token\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health"; }
+stale(){ printf 'publisher_token=owned-token\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH-1))" > "$INVENTORY_INDEX/current/health"; }
+healthy
+start_machines_snapshot_loop || exit 91
+VOLUMES_SNAPSHOT="$ROOT/volumes.json"
+CAPACITY_ADMISSION_DEADLINE=$((SECONDS+3)); original=$CAPACITY_ADMISSION_DEADLINE
+CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1
+FLY(){ printf 'FORBIDDEN_PROVIDER_READ\n' >&2; : > "$ROOT/fly-called"; return 99; }
+case "$CASE" in
+ recovers) stale; sleep(){ healthy; SECONDS=$((SECONDS+$1)); } ;;
+ expired) stale; CAPACITY_ADMISSION_DEADLINE=$SECONDS; original=$CAPACITY_ADMISSION_DEADLINE ;;
+ foreign) printf 'publisher_token=foreign\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health" ;;
+ dead) kill "$publisher"; wait "$publisher" 2>/dev/null || true ;;
+esac
+''' + capture + '\n' + caller + r'''
+[ "$CAPACITY_ADMISSION_DEADLINE" = "$original" ] || exit 92
+printf 'SELECTED=%s\n' "$VOL_ID"
+'''
+    result = subprocess.run(['bash', '-c', script], env={**os.environ, 'ROOT': str(tmp_path), 'CASE': case,
+        'ENV_HELPER': str(ENV_HELPER_SCRIPT), 'INVENTORY_HELPER': str(ROOT / 'scripts/lib/cloudbench-inventory.sh')},
+        text=True, capture_output=True, timeout=8)
+    assert not (tmp_path / 'fly-called').exists(), result.stderr
+    if case in ('healthy', 'recovers'):
+        assert result.returncode == 0 and 'SELECTED=vol_fixture' in result.stdout, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("case", ["duplicate_name", "reordered", "foreign_attachment", "missing_attachment", "wrong_name", "unknown_id", "duplicate_id", "invalid_type"])
 def test_warm_volume_selection_binds_exact_mounted_donor(tmp_path: Path, case: str) -> None:
     source = CLOUD_SCRIPT.parent.joinpath("run-bench-fleet").read_text()
-    start = source.index('VOL_ID="$(FLY volumes list -a "$APP" --json')
+    start = source.index('campaign_inventory_capture warm_volumes_json fleet_volumes_json || exit $?')
     end = source.index('\n[ -n "$VOL_ID" ]', start)
     block = source[start:end]
     warm = {"id": "vol_40ojpdjwx6xdp1k4", "name": "cloudbench_t10_ord_85a7e2c", "attached_machine_id": "8ed16dc75ee958", "size_gb": 40}
@@ -34313,7 +34417,7 @@ def test_warm_volume_selection_binds_exact_mounted_donor(tmp_path: Path, case: s
     if case == "duplicate_id": volumes.append(dict(warm)); expected = ""
     fixture = tmp_path / "volumes.json"; fixture.write_text(json.dumps(volumes))
     env = {**os.environ, "APP": "navi-whisper-lux-bench", "VOLUME_NAME": "cloudbench_t10_ord_85a7e2c", "WARM_VOLUME_ID": warm["id"], "WARM_ID": "8ed16dc75ee958", "VOLUME_FIXTURE": str(fixture)}
-    result = subprocess.run(["bash", "-c", 'FLY() { cat "$VOLUME_FIXTURE"; };\n' + block + '\nprintf "%s\\n" "$VOL_ID"'], env=env, text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["bash", "-c", 'campaign_inventory_capture() { printf -v "$1" "%s" "$(cat "$VOLUME_FIXTURE")"; };\n' + block + '\nprintf "%s\\n" "$VOL_ID"'], env=env, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == expected
 

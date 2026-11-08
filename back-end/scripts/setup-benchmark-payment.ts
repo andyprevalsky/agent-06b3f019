@@ -12,11 +12,7 @@ import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/bench
 import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
 import { loadDotenvWithCallerOverrides } from '../src/providers/loadDotenvWithCallerOverrides';
 import { isAdminUser } from '../src/utils/adminAccess';
-import {
-  ensureAgentCardSandboxFloat,
-  ensureBenchmarkOrgCardholder,
-  resolveBenchmarkCardholderId,
-} from '../src/providers/agentcard/benchmark-float';
+import { verifyBenchmarkOrgFixture } from '../src/providers/agentcard/benchmark-float';
 import { getOrgCardholderVerificationStatus } from '../src/providers/agentcard/org-onboarding';
 import {
   callOrgTool as defaultCallOrgTool,
@@ -448,24 +444,20 @@ async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise
     where: { userId, merchant: 'Rose Labs Test Payment' },
   });
 
-  // Verify cardholder against list_cardholders so a stale BENCHMARK_* override cannot
-  // seed Integration with an id the org MCP will reject as "Cardholder not found".
-  const cardholderId = await resolveBenchmarkCardholderId();
+  // Verify cardholder against list_cardholders so a stale BENCHMARK_* override cannot seed
+  // Integration with an id the org MCP will reject as "Cardholder not found". A funded pool still
+  // cannot mint if the cardholder itself is not KYC-ready, and that failure only surfaces
+  // mid-benchmark as a mint error, so assert both here. The org identity now travels in the
+  // client-credential token itself (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET).
+  const { cardholderId, sandboxFloat, cardholderVerificationStatus } =
+    await verifyBenchmarkOrgFixture();
   await seedAgentCardConnection(prisma, userId, cardholderId);
-
-  // The org identity now travels in the client-credential token itself
-  // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
-  const sandboxFloat = await ensureAgentCardSandboxFloat();
   console.log(
     `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
       `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
   );
-
-  // A funded pool still cannot mint if the cardholder itself is not KYC-ready, and that failure
-  // only surfaces mid-benchmark as a mint error. Assert it here instead.
-  const cardholder = await ensureBenchmarkOrgCardholder(cardholderId);
   console.log(
-    `AgentCard benchmark cardholder ${cardholderId} is KYC-ready (${cardholder.verificationStatus})`
+    `AgentCard benchmark cardholder ${cardholderId} is KYC-ready (${cardholderVerificationStatus})`
   );
 
   console.log(

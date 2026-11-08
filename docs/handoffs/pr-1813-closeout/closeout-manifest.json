@@ -1,0 +1,48 @@
+{
+ "schema_version": 1,
+ "pr": 1813,
+ "merge_commit": "d9bf32b320b0305ec3696b861e5dd89f41d2a9ba",
+ "gated_source": "91f11305b50fc6ed9891cbbe08be061a892c739c",
+ "source_digest": "a766911c51758dacdfa5176714179d832a4dc741d5f0b3c49d1e484b43408b14",
+ "outcome": "completed (AgentCard production lane: recorded external-provider exception, credential or billing change only the user can make)",
+ "purpose": "Repair the deploy smoke AgentCard payment-fixture infra failure from PR #1786 deploy attempt 4 (campaign deploy-cloud/604a576a...), assigned /goal.",
+ "fixes": [
+  "waitOutBenchmarkOrgBackpressure around read-only benchmark org verification (typed 429, provider 401, 503; 30 s apart, 1+3 attempts, 180 s cap)",
+  "resolveBenchmarkCardholderId rethrows org backpressure instead of treating a KYC read as not-ready",
+  "run_benchmark setup and abandon POST retry the typed provider 401 with the existing delay and attempt bounds; untyped 401s stay terminal"
+ ],
+ "repro": "agentcard-benchmark-float unit regression and benchmark blackbox regressions failed on the buggy behaviour with the exact production errors and passed after the fix, 5 consecutive runs each",
+ "gates": {
+  "result": "DEPLOY_GATES ready on 91f11305b: 14 of 16 selected gates PASS outright; backend-coverage-blackbox and smoke pass except standing skips",
+  "smoke": "deploy-60fcfad4: 14/15 PASS; agent-payment-abandonment SKIPPED, exact standing AgentCard release stall",
+  "treasury": "blackbox:treasury-rails FAIL, standing treasury skip (org rate limit); no treasury record changed",
+  "earlier_rounds": "attempt1 stale docs/rca/INDEX.md on main; attempts 2-3 GitHub web 504s during runner setup (09:10-10:44Z); attempt4 smoke c014b69b INFRA STOP from a typed 401 on prepare-residual, repaired in this PR; preserved in the archive"
+ },
+ "review": "CodeRabbit usage cap on the exact head, recorded with deploy_review_cycle.py skip --reason usage-cap; merged unreviewed by CodeRabbit. Independent adversarial review ran before freeze and its gaps were addressed.",
+ "production": {
+  "render": "PASS",
+  "backend_probes": "PASS",
+  "semantic": "PASS (chat-lifecycle-ratchet run 42481877234)",
+  "agentcard": "FAIL, external provider exception",
+  "fly": "not applicable",
+  "vercel": "not applicable"
+ },
+ "external_provider_exceptions": [
+  {
+   "lane": "agentcard",
+   "provider": "AgentCard/Stripe",
+   "reason": "credential or billing change",
+   "evidence": "agent-payment-production-abandonment: 'payment_lifecycle.stripeHold.livemode must be true for a production lifecycle'; the prod payer fixture is Stripe test mode and needs a KYC-passed live AgentCard cardholder only the user can provide. FE https://www.roselabs.ai/?agent-id=b52e6f50-8ef1-48ee-baf8-218ebf1ad75a. Live org transfer owt_8c2ddb2e54e7320b62722728 consumed 100 cents, released 0 (open liability).",
+   "native_result": "FAIL (never PASS)"
+  }
+ ],
+ "ledger": "15 cloud smoke rows and 14 duration rows from the Hub group deploy-60fcfad4 via hub_ledger_row (the Hub carries no code identity for them, so the backfill tool left them unbound), plus the production AgentCard attempt row written by the lane",
+ "followups": [
+  "Stopped guest Machines 8d1d6dae931938 and 8ed9102b224418 (campaign c014b69b, owners 1e0cdb35203f498eaf9976d5180840ba and 6d29bc6a21b74c968f7a7d121b89cca7) and their volumes are retained; exact-owner recovery requires an original-volume capture or recaptured runtime evidence",
+  "Unreleased AgentCard funds: production transfer owt_8c2ddb2e54e7320b62722728 (100 cents, 0 released) and the sandbox abandonment release stall on smoke",
+  "What consumed the org budget at 03:55Z is unattributed; fleet-wide admission was not built because the evidence does not show this campaign exhausted the budget",
+  "AgentCardOrgRuntime stops a text-only throttle after 3 attempts inside its 30 s budget; treasury-rails hit this in this deploy",
+  "CI runner setup downloads flyctl, uv and cloudflared from github.com with short retries; a partial GitHub outage from 09:10 to 10:44Z took down three gate rounds",
+  "PR #1825 AgentCard production proof on d9bf32b32 is the same FAIL; outcome sent to its owner"
+ ]
+}

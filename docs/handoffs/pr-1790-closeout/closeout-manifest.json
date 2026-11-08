@@ -1,0 +1,31 @@
+{
+ "archives": {
+  "cloud": "devbox-closeout-private/pr1790-34c48f60/20261108-cloud.tar.gz.aesgcm",
+  "core": "devbox-closeout-private/pr1790-34c48f60/20261108-core.tar.gz.aesgcm"
+ },
+ "followups": [
+  "AgentCard sandbox release stall repeated on every smoke (agent-payment-abandonment, 4396 cents transferred, 0 released per run)",
+  "AgentCard org MCP intermittent 401 on list_transfers during payment cleanup (cycle 2); credential verified healthy afterwards",
+  "deploy tooling: no reconcile proof for a timed-out quick gate or a pre-merge UNVERIFIED smoke; each forced a fresh full gate cycle",
+  "GitHub API quota for the shared user token exhausted by external consumers (06:08Z, reset 06:36Z) delayed production verification"
+ ],
+ "format": "PR-CLOSEOUT-V1",
+ "gate_cycles": {
+  "cycle1 a808cc0": "superseded after review found codex-sessions/ is not a managed-thread record (smoke UNVERIFIED: source changed); Fly guests destroyed",
+  "cycle2 ad966fa": "smoke INFRA stop: AgentCard org MCP list_transfers 401 (Invalid or expired organization token) during agent-payment-abandonment cleanup; credential healthy afterwards (3/3 read-only list_transfers via production client); machines destroyed, volumes pending_destroy",
+  "cycle3 ad966fa": "14/14 PASS; smoke agent-payment-abandonment release stall resource_skip",
+  "cycle4 8524038 (docs-only after sync)": "7/7 PASS"
+ },
+ "ledger": {
+  "excluded": "infra-probe batch 20261108-051529-3321674 (infra_probe=true)",
+  "source": "BenchmarkRun._record_history over cycle3 smoke batches (latest run per task, ad966fa merged via the PR)",
+  "task_attempts_rows": 12,
+  "task_durations_rows": 3
+ },
+ "merged_sha": "34c48f601f6aeb54c1fb80ceca023fe644b81912",
+ "outcome": "code fix landed concurrently as PR #1792 (cee8855e67); this PR synced main, kept #1792 implementation and tests, and ships the RCA case plus the PR1780 closeout correction",
+ "pr": 1790,
+ "purpose": "follow-up of PR #1780 deploy: deletion-check counted the daemon idle Codex app-server as live work, keeping the #1760/#1780 closeouts NOT_READY",
+ "review": "a808cc0/ad966fa: CodeRabbit usage-cap skips recorded with evidence; independent reviewer FAIL (codex-sessions gap) then PASS after fix; 8524038: CodeRabbit path-filtered docs, closed clean",
+ "reviewed_head": "8524038a4016bb5d07918ada41476b0fc8911b31"
+}

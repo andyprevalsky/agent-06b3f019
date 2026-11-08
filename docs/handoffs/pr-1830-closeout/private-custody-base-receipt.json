@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1770/historical-custody-native-recovery-v1.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "fb0bc5d5623b2fa854900064f5d5868c4659c282728b6a18c2da2940fdfddf8d",
+  "gzip_sha256": "192896c5c700f10d39b1af31308b1940609162937f6cad36b8241b01ca05fe6a",
+  "stored_bytes": 180809384,
+  "frames": 22,
+  "files": 1869,
+  "original_bytes": 795413168,
+  "manifest_sha256": "3b84a29c2cb594a7003bbdbf9e17813587fdc7d3ec540bf4c25f81b4ef7dbc7a",
+  "full_readback_verified": true
+}

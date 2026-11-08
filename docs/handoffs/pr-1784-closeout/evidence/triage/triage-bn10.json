@@ -1,0 +1,50 @@
+{
+ "failures": [
+  {
+   "id": "4e68437ef5a749e29a3442b6779a229c",
+   "check": "backend-coverage-blackbox/blackbox:benchmark-share",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-16vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_backend.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "8edce49e3b4ab656967e9b31fdbd62046b6a9aae",
+    "digest": "b9d8e2ea3915accc33b8c70eed057a25c189398a7a9b826911810ecb4414f097"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "benchmark-share fixture cleanup DELETE 404 after a 201 upload: latent race between the two backend-coverage shards, which share one local Hub folder (<repo>/.context/benchmark-hub) while withIndexLock is a per-database Postgres advisory lock; shard 2 benchmarks-hub-pipeline poller rewrote index.json at the same ms and dropped shard 1 run. Passed at d940210a92; no Hub, runner or test change between heads. Local repro 214/935 deletes 404 vs 0/1885 with per-shard dirs.",
+   "evidence": "/var/tmp/rose-base-measure/.context/deploy-pipeline/attempts/4/final/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/blackbox-run-shard1/benchmark-share.log",
+   "post_merge": {
+    "test": "backend-coverage-blackbox/blackbox:benchmark-share",
+    "command": [
+     "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+     "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+     "--runner",
+     "blacksmith-16vcpu-ubuntu-2404",
+     "--worker-script",
+     "deploy_test_backend.py",
+     "--worker-root",
+     "/home/runner/_work/rose/rose",
+     "--deadline-seconds",
+     "14400"
+    ],
+    "source": {
+     "head": "8edce49e3b4ab656967e9b31fdbd62046b6a9aae",
+     "digest": "b9d8e2ea3915accc33b8c70eed057a25c189398a7a9b826911810ecb4414f097"
+    },
+    "scope": "give each coverage shard its own local Hub root: BENCHMARK_HUB_LOCAL_DIR read by back-end/src/providers/benchmarkHubStorage.ts and exported with $SHARD_SUFFIX by back-end/scripts/run-coverage.sh; regressions in coverage-script.test.ts and benchmark-hub-storage-isolated.test.ts; repro script /var/tmp/rca-bshare-repro/run.sh",
+    "error": "benchmark-share blackbox: scoped anonymous transcript visible\nfixture cleanup failed: 404",
+    "evidence": "/var/tmp/rose-base-measure/.context/deploy-pipeline/attempts/4/final/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/blackbox-run-shard1/benchmark-share.log"
+   }
+  }
+ ]
+}

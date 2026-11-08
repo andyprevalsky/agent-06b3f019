@@ -26,6 +26,7 @@ import {
   syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
 import {
+  connectThenOpen,
   runSyncStep,
   syncRowsWithConcurrency,
   syncUserRecord,
@@ -173,7 +174,18 @@ const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 // at query time fails under --compute-tokens-only when Prisma re-validates
 // schema env("DATABASE_URL") and the engine no longer sees the parent-injected
 // value (AgentCard lifecycle: "Environment variable not found: DATABASE_URL").
-const local = new PrismaClient({ datasources: { db: { url: LOCAL_URL } } });
+// Opened by openLocalClient() only after remote has connected (see connectThenOpen).
+let local!: PrismaClient;
+let localOpened = false;
+
+async function openLocalClient(): Promise<void> {
+  if (localOpened) return;
+  local = await connectThenOpen(
+    remote,
+    () => new PrismaClient({ datasources: { db: { url: LOCAL_URL } } })
+  );
+  localOpened = true;
+}
 /**
  * Deterministic ordering is what makes `skip`/`take` paging safe — without it
  * Postgres may return overlapping or missing rows across pages.
@@ -1252,6 +1264,7 @@ function throwBrowserAuthSyncFailures(failures: Error[]): void {
  * for the passkey rows, or later at `POST /api/browser-session/init`.
  */
 async function ensureSeedUserExists(): Promise<void> {
+  await openLocalClient();
   const synced = await syncUserRecord(
     remote.user,
     local.user,
@@ -1565,5 +1578,5 @@ sync()
     // could not say which table produced it.
     writeRssReport();
     await remote.$disconnect();
-    await local.$disconnect();
+    if (localOpened) await local.$disconnect();
   });

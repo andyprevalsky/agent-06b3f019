@@ -11,6 +11,8 @@ import subprocess
 import time
 from datetime import datetime
 
+from deploy_test_native_cleanup import fleet_audit_root, fleet_ownership_root
+
 KIND = 'interrupted-preallocation-cleanup-v1'
 RENEWAL_KIND = 'interrupted-policy-witness-renewal-v1'
 POLICIES = {'scripts/run-bench-fleet', 'scripts/lib/cloudbench-env.sh',
@@ -249,7 +251,7 @@ def cloud(root, gate, receipt, folder, proof, evidence):
                             'runtime_evidence_missing': False, 'successful_runtime_inferred': False}
              and all(disposable[k] is False for k in ('guest_cleanup_missing', 'runtime_evidence_missing', 'successful_runtime_inferred')),
              'original disposable facts changed')
-        local, audit = fleet / 'teardown-ownership', root / '.git/cloudbench-fleet-audits' / token
+        local, audit = fleet / 'teardown-ownership', fleet_audit_root(root) / token
         seal = evidence.tree(local)
         need(seal == evidence.tree(audit) == life['audit_sha256']
              and evidence.fields(local / 'source-audit') == {'path': str(audit), 'sha256': seal}, 'native audit seals differ')
@@ -259,7 +261,7 @@ def cloud(root, gate, receipt, folder, proof, evidence):
              and meta.get('workspace_root') == str(root) and meta.get('status') == 'provider-teardown-verified', 'canonical zero-resource release required')
         epoch = float(evidence.raw(audit / 'provider-teardown-verified.epoch'))
         need(math.isfinite(epoch) and stamp(job['started_at']) <= epoch <= proof['confirmed_at'], 'native release clock')
-        registry = root / '.git/cloudbench-fleet-ownership' / token
+        registry = fleet_ownership_root(root) / token
         need(not registry.exists() and not registry.is_symlink(), 'native ownership registry remains')
         for name in ('owned-clones.ids', 'owned-clones.names'):
             need(evidence.raw(audit / name) == b'', 'a provider allocation was recorded')

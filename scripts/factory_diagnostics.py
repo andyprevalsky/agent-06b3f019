@@ -31,6 +31,19 @@ PAIRED_EVENTS = {
 }
 
 
+def _history_ledger():
+    """agents/benchmarks/history_ledger.py: a ledger is its base file plus per-writer shards."""
+    import importlib.util
+
+    source = Path(__file__).resolve().parents[1] / "agents" / "benchmarks" / "history_ledger.py"
+    spec = importlib.util.spec_from_file_location("benchmark_history_ledger", source)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+
 def valid_ledger_row(row: dict[str, Any]) -> bool:
     if not isinstance(row, dict):
         return False
@@ -245,11 +258,7 @@ def rca_diagnostics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def benchmark_diagnostics(attempts_path: Path, limit: int = TOP) -> dict[str, Any]:
     runs: dict[str, list[dict[str, Any]]] = defaultdict(list)
     without_run = 0
-    try:
-        lines = attempts_path.read_text().splitlines()
-    except OSError:
-        lines = []
-    for line in lines:
+    for line in _history_ledger().read_lines(attempts_path):  # base file + per-writer shards
         try:
             row = json.loads(line)
         except json.JSONDecodeError:

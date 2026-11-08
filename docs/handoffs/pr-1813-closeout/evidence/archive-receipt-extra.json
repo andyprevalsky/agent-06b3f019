@@ -1,0 +1,24 @@
+{
+ "name": "pr1813-d9bf32b320-extra",
+ "key_prefix": "devbox-closeout-private/pr1813-d9bf32b320-extra/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "15e36b760101548febef37f781094ae9a8abafed0002169394c4226ebff95bc8",
+ "archive_size_bytes": 6417176,
+ "parts": 1,
+ "chunk_size": 67108864,
+ "members": [
+  "/home/boxes/rose/agents/benchmarks/runs",
+  "/home/boxes/rose/agents/navi-worker-log.txt",
+  "/home/boxes/rose/back-end/backend-logs.log",
+  "/home/boxes/rose/front-end/frontend-logs.log",
+  "/home/boxes/rose/hub-poller-logs.log",
+  "/home/boxes/rose/package-lock.json",
+  "/home/boxes/rose/agents/providers/fast_cache",
+  "/var/tmp/rca-agentcard-records/local-refs.bundle"
+ ],
+ "files": 14,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}

@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1757-89906b0f3/owner-recovery-evidence.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "c44f7105327808245e434aed1b9250a65aadb1573b7dcc662244eb3a47843d26",
+  "gzip_sha256": "eaed364276724b2a06a238fc5c8d793ae2a3dc6320d8fd0e43eaf390223e8b64",
+  "stored_bytes": 186755251,
+  "frames": 23,
+  "files": 322,
+  "original_bytes": 568759451,
+  "manifest_sha256": "15742141af044e3b0e3040cdceb6afe8a443b8e4574dbeaf22be91fb3fe6c450",
+  "full_readback_verified": true
+}

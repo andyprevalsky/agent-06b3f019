@@ -96,6 +96,48 @@ async def test_claude_code_session_create_mock():
     )
 
 
+async def test_session_create_outwaits_a_slow_backend_and_heartbeats():
+    """A create the backend needs minutes for completes in one attempt (RCA
+    2026-11-06-code-spawn-create-retry-duplicated-sessions): its 60 s read timed
+    out at 150 s, the activity retried, and the retries started 3 tasks.
+
+    The client read outlasts the backend's own create budget (the shared E2B
+    create slot waits up to 15 min, plus the start itself) and the activity
+    heartbeats while it waits, so the heartbeat timeout never starts a second
+    attempt beside it.
+    """
+    import httpx
+
+    import domains.spawn_claude_code_agent.repo as repo
+
+    seen: dict = {}
+
+    async def slow_backend(request):
+        seen["timeout"] = request.extensions.get("timeout")
+        await asyncio.sleep(0.35)
+        return httpx.Response(
+            200,
+            json={"success": True, "task_id": "task-slow", "sandbox_id": "sb-slow", "ws_url": "wss://x"},
+        )
+
+    setup_mock_fn(slow_backend)
+    beats: list = []
+    try:
+        with (
+            patch.object(repo, "CODE_SESSION_CREATE_HEARTBEAT_S", 0.05),
+            patch.object(repo, "safe_heartbeat", lambda message, *details: beats.append(message)),
+        ):
+            data = await repo.create_e2b_session(agent_id="agent-slow", goal="status", user_id="u-1")
+    finally:
+        teardown_mock()
+    assert data["task_id"] == "task-slow"
+    read_timeout = (seen["timeout"] or {}).get("read")
+    # Backend bound: 15 min create-slot wait + the 150 s start observed in prod.
+    assert read_timeout is not None and read_timeout >= 15 * 60 + 150, seen["timeout"]
+    assert len(beats) >= 3, beats
+    assert set(beats) == {"Starting the code-agent sandbox"}, beats
+
+
 async def test_claude_code_session_health_mock():
     """Mock verifies Claude Code session health endpoint."""
     _setup()
@@ -1081,15 +1123,85 @@ async def test_repo_close_e2b_session_happy():
     assert body["additional_paths"] == ["/foo"]
 
 
-async def test_repo_close_e2b_session_non_200_returns_empty():
-    """close_e2b_session returns {} on non-200."""
+async def test_repo_close_e2b_session_non_200_is_unconfirmed():
+    """An unconfirmed close cannot masquerade as an empty completed result."""
     setup_mock({
         "/api/claude-code-session/close": {"status": 500, "json": {"error": "x"}},
     })
     from domains.spawn_claude_code_agent.repo import close_e2b_session
 
-    data = await close_e2b_session(task_id="t")
-    assert data == {}
+    from temporalio.exceptions import ApplicationError
+
+    try:
+        await close_e2b_session(task_id="t")
+    except ApplicationError as error:
+        assert error.type == "CodeSessionCloseUnconfirmed"
+        assert error.non_retryable is True, "generic activity retry would rerun the CLI"
+    else:
+        raise AssertionError("unconfirmed close returned as a completed result")
+
+
+async def test_close_timeout_reconciles_same_task_before_activity_completion():
+    """Replay the production ReadTimeout while the backend still holds the old lease."""
+    import httpx
+    from domains.spawn_claude_code_agent import repo, service
+
+    backend_done = asyncio.Event()
+    request_lost = asyncio.Event()
+    close_requests = []
+    beats = []
+    handoff = _collatz_handoff()
+    receipt = {"output_files": [], "handoff": {"status": "present", "content": json.dumps(handoff)},
+               "code_session": {"code_session_id": "session-close", "state": "PAUSED"}}
+
+    async def backend(request):
+        if request.url.path.endswith("/close"):
+            close_requests.append(json.loads(request.content))
+            assert request.extensions["timeout"]["read"] == 180.0
+            if len(close_requests) == 1:
+                request_lost.set()
+                raise httpx.ReadTimeout("production close response lost while lease held", request=request)
+            await backend_done.wait()
+            return httpx.Response(200, json=receipt)
+        return httpx.Response(200, json={"saved": True})
+
+    setup_mock_fn(backend)
+    create = AsyncMock(return_value={"task_id": "task-close", "sandbox_id": "sb-close",
+                                    "ws_url": "wss://fixture", "uploaded_files": []})
+    loop = AsyncMock(return_value=(0, True, [], 0, 0, _collatz_stream_events()))
+    activity_task = None
+    try:
+        with (
+            patch.dict("os.environ", {"ROSE_ENABLE_CODE_AGENT_VERIFIER": ""}),
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: AsyncMock()),
+            patch.object(service, "create_e2b_session", create),
+            patch.object(service, "_run_agentic_loop", loop),
+            patch.object(service, "persist_terminal_output", AsyncMock(return_value=None)),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value="fixture")),
+            patch("helpers.model_pricing.get_model_pricing_with_fallback",
+                  AsyncMock(return_value={"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.2})),
+            patch("temporalio.activity.heartbeat"),
+            patch.object(repo, "CODE_SESSION_CREATE_HEARTBEAT_S", 0.01),
+            patch.object(repo, "safe_heartbeat", lambda *args: beats.append(args)),
+        ):
+            activity_task = asyncio.create_task(service.spawn_claude_code_activity(
+                user_id="u", agent_id="a", goal="Compute Collatz from 27.",
+                tool_call_id="tc-close", output_schema=COLLATZ_OUTPUT_SCHEMA, model="rose-labs/rose-1-flash"))
+            await asyncio.wait_for(request_lost.wait(), 5)
+            await asyncio.sleep(0.05)
+            assert not activity_task.done(), "activity completed before the backend released its lease"
+            backend_done.set()
+            result = await asyncio.wait_for(activity_task, 5)
+            assert result["success"] is True, result["message"]
+            assert result["structured_response"] == handoff
+            assert create.await_count == 1 and loop.await_count == 1, "close retry must not re-enter the CLI"
+            assert len(close_requests) == 2 and close_requests[0] == close_requests[1]
+            assert beats, "a closing activity keeps heartbeating while its backend finishes"
+    finally:
+        backend_done.set()
+        if activity_task is not None:
+            await asyncio.gather(activity_task, return_exceptions=True)
+        teardown_mock()
 
 
 async def test_repo_check_sandbox_health_happy():
@@ -3805,6 +3917,10 @@ async def _run_all_tests():
     print("spawn-claude-code-agent blackbox tests:")
     r = BlackboxResult()
     await r.record_async("session_create_mock", test_claude_code_session_create_mock)
+    await r.record_async(
+        "session_create_outwaits_slow_backend_and_heartbeats",
+        test_session_create_outwaits_a_slow_backend_and_heartbeats,
+    )
     await r.record_async("session_health_mock", test_claude_code_session_health_mock)
     # pure helpers
     r.record("terminal_fatal_ignores_banner_text", test_terminal_fatal_ignores_banner_text)
@@ -3886,7 +4002,8 @@ async def _run_all_tests():
         test_format_code_events_transcript_reports_project_startup,
     )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
-    await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
+    await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_is_unconfirmed)
+    await r.record_async("close_timeout_reconciles_same_task", test_close_timeout_reconciles_same_task_before_activity_completion)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
     await r.record_async("repo_health_non200", test_repo_check_sandbox_health_non_200_returns_none)
     await r.record_async("repo_health_exception", test_repo_check_sandbox_health_http_exception_returns_none)

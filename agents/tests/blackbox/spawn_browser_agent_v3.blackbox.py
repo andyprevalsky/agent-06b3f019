@@ -13586,6 +13586,67 @@ async def test_execute_action_request_payment_card_accepts_image_urls_rendered_o
     assert private_out["payment_request"]["line_items"][2]["image_url"].endswith("Canvas+Tote")
 
 
+async def test_verifier_history_keeps_card_receipt_image_urls_after_private_entry():
+    """Agent ce9d2ae6: the second browser task requested its card (with the three
+    rendered image URLs), then typed the card. Every later history read re-applied
+    the private-entry media policy and stripped `image_url` from that earlier typed
+    receipt, so the verifier never saw the image URLs the request carried and
+    rejected each completion at 50% until the 900s task timeout."""
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
+
+    card_number = "4000056655669176"
+    images = [_TEST_SHOP_PAGE_IMAGES[i] for i in (0, 2, 3)]
+    receipt = _test_shop_receipt(images)
+    dom = DOMService("ws://offline-verifier-receipt-control")
+    dom.register_secret_refs({"card_number": card_number})
+    history = ActionHistory()
+    history.bind_dom_service(dom)
+    history.restore_entries(
+        [
+            {
+                "step": 1,
+                "action": "request_payment_card",
+                "params": receipt,
+                "result": {
+                    "success": True,
+                    "status": "approved",
+                    "card_last4": "9176",
+                    "payment_request": receipt,
+                    "media": [{"kind": "product", "url": images[0]}],
+                },
+            },
+            {"step": 2, "action": "input_text", "index": 7, "params": {"text": card_number}},
+        ]
+    )
+    dom.mark_secret_used()
+
+    final_state = {"url": f"{_TEST_SHOP_ORIGIN}/test_payment", "dom_tree": "Payment confirmed tp_fixture"}
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Request the card with every visible descriptor, then pay",
+            current_url=final_state["url"],
+            browser_state=final_state,
+            action_history=history,
+            config=SimpleNamespace(),
+            session_id="sess",
+        )
+    context = _model_visible_browser_verifier_context(context, dom, final_state)
+    wire = json.dumps(context)
+    step = wire.split("Step 1: request_payment_card", 1)[1].split("Step 2:", 1)[0]
+    params, result = step.split("Result:", 1)
+    for image in images:
+        assert image in params, f"verifier lost request image_url {image}"
+        assert image in result, f"verifier lost receipt image_url {image}"
+    assert "'media'" not in step, "private-entry media policy no longer withholds arbitrary media"
+    assert card_number not in wire, "card number reached the verifier"
+    # The browser model's own action history uses the same receipt projection.
+    entry = history.get_entries()[0]
+    assert [item["image_url"] for item in entry["result"]["payment_request"]["line_items"]] == images
+    assert [item["image_url"] for item in entry["params"]["line_items"]] == images
+
+
 async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -36681,6 +36742,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_request_payment_card_accepts_rendered_image_urls",
         test_execute_action_request_payment_card_accepts_image_urls_rendered_on_page,
+    )
+    await r.record_async(
+        "verifier_history_keeps_card_receipt_image_urls_after_private_entry",
+        test_verifier_history_keeps_card_receipt_image_urls_after_private_entry,
     )
     await r.record_async(
         "execute_action_request_payment_card_no_image_urls_skips_page_read",

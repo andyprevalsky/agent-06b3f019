@@ -5,6 +5,7 @@ import {
   getClaudeCodeSession,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
+import { GithubRateLimitedError } from '../../providers/githubRateLimit';
 import { createLogger } from '../../providers/logger';
 import { codexSpeedFor } from '../../providers/codexSpeed';
 import { resolveSessionProject } from '../../providers/projects/session';
@@ -115,6 +116,8 @@ export async function createSession(params: CreateSessionParams) {
   let normalizedRepoUrl: string | undefined;
   if (effectiveGithubRepoUrl !== undefined && effectiveGithubRepoUrl !== '') {
     const accessCheck = await checkGithubRepoAccess(effectiveUserId, effectiveGithubRepoUrl);
+    if (accessCheck.rateLimit !== undefined)
+      throw new GithubRateLimitedError(accessCheck.rateLimit);
     if (!accessCheck.allowed) {
       log.info(`GitHub access denied for user ${effectiveUserId}: ${accessCheck.error ?? ''}`);
       throw new GitHubAccessDeniedError(accessCheck.error!);

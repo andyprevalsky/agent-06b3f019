@@ -542,3 +542,30 @@ describe('extractRecord', () => {
     expect(errSpy).toHaveBeenCalled();
   });
 });
+
+describe('database broadcast timestamps use the same UTC contract as the API', () => {
+  it.each([
+    ['2026-11-07T20:20:51.226', '2026-11-07T20:20:51.226Z'],
+    ['2026-11-07T20:20:51.226Z', '2026-11-07T20:20:51.226Z'],
+    ['2026-11-07T12:20:51.226-08:00', '2026-11-07T20:20:51.226Z'],
+  ])('normalizes the native Agent row %s without mutating the frame', (updatedAt, expected) => {
+    const record = { id: 'agent-a', updatedAt, status: 'PAUSED' };
+    const out = extractUpdatePayload({ payload: { schema: 'public', table: 'Agent', record } });
+    expect(out).toMatchObject({ agentId: 'agent-a', updatedAt: expected, status: 'PAUSED' });
+    expect(record.updatedAt).toBe(updatedAt);
+    expect(record).not.toHaveProperty('agentId');
+  });
+  it('normalizes raw Message starts before they can win INSERT deduplication', () => {
+    const record = {
+      id: 'message-a',
+      agentId: 'agent-a',
+      role: 'USER',
+      text: 'Start',
+      timestamp: '2026-11-07T18:58:57.979',
+    };
+    expect(
+      extractInsertPayload({ payload: { schema: 'public', table: 'Message', record } }),
+    ).toMatchObject({ timestamp: '2026-11-07T18:58:57.979Z' });
+    expect(record.timestamp).toBe('2026-11-07T18:58:57.979');
+  });
+});

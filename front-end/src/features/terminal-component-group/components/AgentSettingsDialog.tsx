@@ -92,6 +92,7 @@ export default function AgentSettingsDialog({
   onUpdate,
   onDelete,
   variant = 'icon',
+  contextWindow,
 }: AgentSettingsDialogProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -140,7 +141,11 @@ export default function AgentSettingsDialog({
             </div>
           ) : (
             <div className="space-y-6">
-              <MetricsSection agent={agent} priceLimitEdit={priceLimitEdit} />
+              <MetricsSection
+                agent={agent}
+                priceLimitEdit={priceLimitEdit}
+                contextWindow={contextWindow}
+              />
               <ResponseSchemaSection agent={agent} />
               {variant === 'nub' ? null : <DeleteSection flow={deleteFlow} />}
             </div>

@@ -74,7 +74,7 @@ _SECRET_FIELDS = {
 _REQUEST_PARTITION_HEADERS = {"authorization", "cookie", "proxy-authorization", "x-api-key"}
 _SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n"
 _USER_CONTEXT_PREFIX = "# User Context"
-# summarize_web_fetch prompts carry a PAGE METADATA block (title and date)
+# summarize_web_fetch prompts carry a PAGE METADATA block (publication date)
 # derived from the same replayed web_fetch row as their PAGE CONTENT. It is
 # excluded from the key so rows recorded before the block existed still hit.
 # Bound to helpers/summarize.py by the summarize blackbox key-parity test.

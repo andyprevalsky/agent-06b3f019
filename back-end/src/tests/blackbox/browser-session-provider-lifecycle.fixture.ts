@@ -487,11 +487,11 @@ Module._load = function (id, parent, isMain) {
           enteredAllocation = resolve;
         });
         const firstWorker = worker(row.id, origin);
-        await within(entered);
+        await firstWorker.ready.then(() => within(entered));
         const countBeforeJoin = creates;
         const secondWorker = worker(row.id, origin, release);
-        const [firstId, secondId] = await within(
-          Promise.all([firstWorker.result, secondWorker.result])
+        const [firstId, secondId] = await secondWorker.ready.then(() =>
+          within(Promise.all([firstWorker.result, secondWorker.result]))
         );
         await Promise.all([firstWorker.closed, secondWorker.closed]);
         assert.equal(firstId, secondId, 'separate processes must join one native restoration');

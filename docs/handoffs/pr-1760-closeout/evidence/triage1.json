@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "bde21e156c0a49e1b39a162b5946cb6a",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/rdw/deploy-command-structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/rdw/deploy-command-structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "8cc6df20b5033bc8d9ad83592c3bf2885cf283f8",
+    "digest": "66b9b679770c7a593247fbce28d326e0099461d5da4293d98f9e30b40b74f01a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-command-structural: deploy-test-cycle InterruptedLocalRecovery (5 cases) raised 'ValueError: local cleanup: interrupted root listener remains' because its fixed CONDUCTOR_PORT 15000 footprint (Hub range 20764-21264) contained 127.0.0.1:21136/21137 held by the concurrent cloudbench-controller gate's multi-workstream fixture.",
+   "evidence": "Worker log /var/tmp/rdw/deploy-command-structural/.context/deploy-worker/0097c3a53ff039103e22894af2cdb7320c92a491a51ea37f4dfebf73d4e3174f/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log (sha256 577841815f40f30055277f8b06e361b673f3c32ec0a10793f9290579833d5909); ss showed python pids 542359/541105 (cwd /var/tmp/rdw/cloudbench-controller) listening on 21136/21137; netns A/B on 8cc6df20b: empty namespace OK, one listener on 21136 FAILED (errors=5). PR diff touches only back-end/ and docs/.",
+   "assigned_repair": true,
+   "assigned_reason": "The aggregate gate result is UNVERIFIED and cannot be waived before merge; the deploy owner repairs the fixture in this PR (reserve the listener footprint) and reruns the bound gate.",
+   "assigned_evidence": "/var/tmp/rdwplan/netns-ab.sh and /var/tmp/rdwplan/netns-ab2.sh A/B runs; fix verified 179/179 deploy-test-cycle tests on the live host"
+  }
+ ]
+}

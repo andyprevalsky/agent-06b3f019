@@ -1,0 +1,78 @@
+{
+ "schema_version": 1,
+ "pr": 1783,
+ "merge_commit": "4c67384926326c3a43d8a1eb371871973038aca0",
+ "gated_source": "fc64c417b9d516a17e04d2f12a4f34cfbab60c68",
+ "assigned_repair": {
+  "test": "deploy-command-structural / scripts/tests/deploy-test-cycle.test.py InterruptedLocalRecovery.test_incomplete_foreign_changed_or_live_evidence_refuses_atomically",
+  "originating": "PR #1762 deploy cycle 5 (ac0421d93c), merged 4a0e080d71",
+  "result": "PASS: Blacksmith deploy-command-structural passed on every PR #1783 head that reached it (ef32d1e0, 3cc97653, 0e692c7e, ce58f373, ac7f40b2, fc64c417); local `python3 scripts/run-deploy-structural-gates.py --max-workers 4` rc=0; deploy-test-cycle 5/5 consecutive full runs with an unrelated unreadable process alive"
+ },
+ "outcome": "completed",
+ "gates": "DEPLOY_GATES PASS head=fc64c417 gates=16 (format, eslint, typescript, backend-structural, deploy-command-structural, seed-cache-decision, canonical-seed-whatsapp-content, backend-coverage-blackbox, agents-coverage-blackbox, frontend-coverage-blackbox, live-probes, semantic-stack, e2b-smoke, cloudbench-controller, seed-memory-ratchet, smoke)",
+ "review": "CodeRabbit usage cap ('Your organization has reached its usage spending cap') on every head; recorded deploy_review_cycle.py skip --reason usage-cap; merged unreviewed",
+ "production": {
+  "render": "PASS: Render serves the merged backend (live)",
+  "backend-probes": "PASS: /health + /api/agents 200, endpoint smoke passed, Render log clean",
+  "semantic": "PASS: chat-lifecycle-ratchet run 42485188122 success (first lane attempt lost its poll to a GitHub REST 403 rate limit; the same run was adopted)",
+  "fly": "SKIPPED-not-applicable",
+  "vercel": "SKIPPED-not-applicable",
+  "agentcard": "SKIPPED-not-applicable",
+  "mac-release": "SKIPPED-not-applicable",
+  "wmh": "SKIPPED-not-applicable",
+  "workflow-migration": "SKIPPED-not-applicable"
+ },
+ "delegated": [
+  {
+   "failure": "backend-coverage-blackbox/blackbox:browser-provider 'live Tilion provider parity': page.goto net::ERR_NAME_NOT_RESOLVED at https://example.com/ (fc64c417)",
+   "repair_agent": "https://boxes.dev/thread/thr_10086bf9946b45a4af98f1b802ad116a",
+   "devbox": "bcaccf29-b605-489e-a16d-06c004bc30b4",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)"
+  },
+  {
+   "failure": "smoke/background-agent-message-smoke evaluator smoke_rfc_semantics: titles 'RFC 9110: HTTP Semantics'/'RFC 9111: HTTP Caching' instead of 'HTTP Semantics'/'HTTP Caching' (fc64c417)",
+   "repair_agent": "https://boxes.dev/thread/thr_e3d80aae3557490f8a240d7fb2a91422",
+   "devbox": "99d8c5d6-cb2e-4271-bce9-230037fb2202",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+   "note": "three earlier Claude starts of this handoff failed agent_start_failed (thr_548ed9ed\u2026, thr_3666782e\u2026, thr_d18b8255\u2026); a trimmed ASCII packet started"
+  }
+ ],
+ "warnings": [
+  {
+   "check": "smoke/agent-payment-abandonment",
+   "disposition": "SKIPPED_WITH_WARNING (resource_skip agentcard_release_stall; never PASS)",
+   "unreleased": "sandbox org transfer consumed, releasedCents=0 (4396c, test mode) on each smoke wave"
+  }
+ ],
+ "external_incidents": [
+  "AgentCard Organization MCP 401 'Invalid or expired organization token' windows (~03:48-04:53Z and ~10:55Z) and a 429 rate limit (07:26Z) infra-stopped smoke waves",
+  "GitHub release CDN 502/504 for astral-sh/uv and superfly/flyctl downloads (09:20-11:03Z) failed Blacksmith gate setup",
+  "GitHub REST core quota (5000/h, shared) exhausted repeatedly"
+ ],
+ "retained_resources": [
+  {
+   "machine": "8744500a324978",
+   "volume": "vol_4oj88kon8wj237or",
+   "app": "navi-whisper-lux-bench",
+   "state": "stopped",
+   "owner": "9b25216a329a42b38c6337a89c353e12",
+   "reason": "recover-stale-owner requires an original-volume runtime archive; cloudbench-original-volume-capture.py refuses (services set / forensic archive already exists)",
+   "next": "fix capture vs forensic-archive precedence, then scripts/run-bench --recover-stale-owner 9b25216a329a42b38c6337a89c353e12"
+  },
+  {
+   "machine": "8744e10c01e458",
+   "app": "navi-whisper-lux-bench",
+   "state": "stopped",
+   "owner": "c2aa6dde68c44cac9100f903186635e9",
+   "reason": "same original-volume runtime archive deadlock",
+   "next": "same as above with owner c2aa6dde68c44cac9100f903186635e9"
+  }
+ ],
+ "records_moved_from_code_pr": [
+  "docs/rca/cases/2026-11-07-structural-suites-park-and-scan-unreadable-processes-concurrently.md (recurrence)",
+  "docs/rca/cases/2026-11-08-relay-startup-fixture-pid-replace-broke-frame-length.md",
+  "docs/rca/cases/2026-11-08-prisma-engine-tls-probe-setenv-raced-second-client-getenv.md",
+  "docs/rca/cases/2026-11-08-devbox-teardown-test-read-host-cloud-env.md"
+ ],
+ "benchmark_history": "13 final cloud smoke rows of merged source fc64c417 to task_attempts.jsonl (11 passes to task_durations.jsonl), built with benchmark-history-backfill.hub_ledger_row from the final campaign deploy-faea4e1d run records"
+}

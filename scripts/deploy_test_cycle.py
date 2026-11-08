@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 
+import deploy_gate_progress as progress
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
 from deploy_test_isolation import validate as validate_isolation
@@ -144,7 +145,7 @@ def runtime_config_sha256(path: Path) -> str:
     return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
 
 
-def input_fingerprints(plan: dict, root: Path) -> dict:
+def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None) -> dict:
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
     links = index_gitlinks(root)
@@ -175,7 +176,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
                             "runtime_config": runtime_config,
                             "command": g["command"], "env": g.get("env", {}),
                             "worker": g.get("worker"), "checks": g["checks"],
-                            "environment": environment_digest()}) for g in plan["gates"]}
+                            "environment": environment_digest() if environment is None else environment}) for g in plan["gates"]}
 
 
 def command(value: object) -> list[str]:
@@ -254,7 +255,7 @@ def initialize(plan: dict, root: Path) -> dict:
             "input_fingerprints": input_fingerprints(plan, root)}
 
 
-def reuse_qualifications(state: dict, gate: dict) -> dict:
+def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=ROOT, custody_refresh=False) -> dict:
     """Replay existing dispositions; projected source fields never replace native proof."""
     from deploy_failure_report import decision
     revalidate_standing_skips(state)
@@ -280,19 +281,34 @@ def reuse_qualifications(state: dict, gate: dict) -> dict:
                 or warning['receipt_sha256'] != evidence['sha256']
                 or sha_file(evidence['path']) != evidence['sha256'] or case in expected):
             raise ValueError('reuse resource qualification changed')
+        if 'renewal' in warning:
+            from deploy_test_agentcard_renewal import validate_active
+            validate_active(state, warning)
         expected[case] = {'disposition': RESOURCE_SKIP, **warning}
+    if include_custody:
+        from deploy_test_historical_custody import guard, identical_inputs_binding
+        current = (identical_inputs_binding(state, root)
+                   if custody_refresh and state.get('historical_no_retry_custody') else None)
+        expected.update(guard(state, gate, root, expected, current=current))
     if not set(expected) <= set(gate['checks']):
         raise ValueError('reuse qualification outside full inventory')
     return expected
 
 
 def qualification_identity(skips: dict) -> dict:
-    # refresh changes ONLY these outer projection fields; nested native/RCA bytes stay bound.
-    return {key: {k: v for k, v in value.items() if k not in {'source', 'original_source'}}
-            for key, value in skips.items()}
+    # Only projection source/plan may change during an identical-input refresh.
+    # Native source, task, financial facts, environment and fingerprints remain bound.
+    result = copy.deepcopy(skips)
+    for value in result.values():
+        for field in ('source', 'original_source'):
+            value.pop(field, None)
+        if value.get('disposition') == 'NO_RETRY_CUSTODY':
+            for field in ('source', 'plan_digest'):
+                value['current_binding'].pop(field, None)
+    return result
 
 
-def full_pass_binding(state: dict, gate: dict) -> dict | None:
+def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> dict | None:
     """Latest FULL execution: native PASS subset plus exact existing qualified exclusions."""
     latest = latest_receipts(state).get(gate['name'])
     if not latest or gate.get('quick'):
@@ -302,7 +318,7 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     if receipt.get('kind') == 'recovered-native-execution-v1':
         return None
     try:
-        skips = reuse_qualifications(state, gate)
+        skips = reuse_qualifications(state, gate, root=root, custody_refresh=custody_refresh)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         return None
     active = [case for case in gate['checks'] if case not in skips]
@@ -331,6 +347,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
                 or request.get('checks') != active
                 or qualification_identity(request.get('skips', {})) != qualification_identity(skips)
                 or any(v.get('source') != receipt['source'] for v in request.get('skips', {}).values())
+                or any(receipt.get('case_complete', {}).get(k) is not False
+                       or receipt.get('current_execution', {}).get(k) != 'UNVERIFIED'
+                       for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY')
                 or request.get('worker_recipe') != gate.get('worker_recipe')):
             return None
         worker = receipt.get('worker_result')
@@ -349,14 +368,14 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
         return None
 
 
-def carried_pass(state: dict, gate: dict) -> bool:
+def carried_pass(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> bool:
     entry = state.get('carried_passes', {}).get(gate['name'])
     if not entry:
         return False
     return (entry.get('validated_source') == state['source']
             and entry.get('input_fingerprint') == state['input_fingerprints'].get(gate['name'])
             and entry.get('contract_digest') == digest(gate)
-            and full_pass_binding(state, gate) == entry.get('native_binding'))
+            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh) == entry.get('native_binding'))
 
 
 def reusable_full_pass(state: dict, gate: dict) -> bool:
@@ -471,9 +490,18 @@ def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, roo
 
 
 def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+    """Admit one source-bound gate, run it, and retain its native cleanup receipt."""
     from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
+    if any(w.get('gate') == name and 'renewal' in w for w in state.get('resource_warnings', [])):
+        reuse_qualifications(state, gate)
+    from deploy_test_historical_custody import guard, state_identity, known
+    custody = {}
+    if ('historical_custody_import' in state or known(state, root)
+            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
+        legacy = reuse_qualifications(state, gate, include_custody=False, root=root)
+        custody = guard(state, gate, root, legacy)
     token = uuid.uuid4().hex
     case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
                   if key.startswith(name + "/") and value["source"] == state["source"]}
@@ -483,19 +511,23 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                  for w in state.get("resource_warnings", [])
                  if w["gate"] == name and w["source"] == state["source"]
                  and w.get("input_fingerprint") == state["input_fingerprints"].get(name)}
-    active = [c for c in gate["checks"] if c not in case_skips and c not in qualified]
+    active = [c for c in gate["checks"] if c not in case_skips and c not in qualified and c not in custody]
     if not active:
         return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
-                "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified}
+                "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified,
+                "custody_skips": custody, "case_complete": {c: False for c in custody},
+                "current_execution": {c: "UNVERIFIED" for c in custody}}
     # A worker must explicitly consume the case inventory, including exclusions.
     # Without a case-aware worker mixed skip/run would either rerun skipped tests
     # or silently omit checks, so reject it before launch.
-    if (case_skips or qualified) and not gate.get("case_protocol"):
+    if (case_skips or qualified or custody) and not gate.get("case_protocol"):
         raise ValueError(f"{name}: mixed skips require the worker's case protocol")
     folder = directory / "attempts" / str(state["round"]) / phase / name
     folder.mkdir(parents=True, exist_ok=False)
     request = {"token": token, "source": state["source"], "gate": name,
-               "checks": active, "skips": {**case_skips, **qualified}, "phase": phase}
+               "checks": active, "skips": {**case_skips, **qualified, **custody}, "phase": phase}
+    if custody or (directory / 'cycle.json').exists():
+        request.update(custody_state=str((directory / 'cycle.json').resolve()), custody_state_sha256=state_identity(state))
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
         request['worker_root'] = gate.get('worker_root', str((root / gate.get('cwd', '.')).resolve()))
@@ -503,9 +535,16 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
            "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
+           # Workers (and a remote gate's launcher mirror) append per-test rows as they finish.
+           progress.ENV: str(folder / "progress.jsonl"),
            "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1",
            # Teardown ownership of every process the gate starts (benchmark_teardown).
            LANE_TOKEN_ENV: token}
+    if 'custody_state' in request:
+        from deploy_test_historical_custody import environment_identity, runtime_identity
+        request['custody_runtime'] = runtime_identity(root)
+        request['custody_child_environment'] = environment_identity(env)
+        write(folder / 'request.json', request)
     admission = isolated_request(state, gate, request, root, env)
     if admission:
         request['isolated_validation'] = admission
@@ -516,6 +555,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     native_producer = gate.get("native_cloud") is True
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
+    preallocation_refused = False
     worker_cleanup_owner = None
     host_admission = {} if host_admission is None else host_admission
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
@@ -537,7 +577,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         except OSError as error:
             output.write(str(error).encode())
             code = 127
-    cases = {c: "SKIP" for c in [*case_skips, *qualified]}
+    cases = {c: "SKIP" for c in [*case_skips, *qualified, *custody]}
     valid = False
     complete = False
     reason = None
@@ -567,8 +607,14 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                 }
             if isinstance(result.get('evidence'), dict):
                 worker_evidence = result['evidence']
-            raw_cases, complete = validate_result(result, request, code,
-                invalid_process=timed_out or cancelled or lingering)
+            from deploy_test_cloud_refusal import refused_before_admission
+            preallocation_refused = refused_before_admission(
+                result, request, gate, root, code, invalid_process=timed_out or cancelled or lingering)
+            if preallocation_refused:
+                raw_cases, complete = result['cases'], False
+            else:
+                raw_cases, complete = validate_result(result, request, code,
+                    invalid_process=timed_out or cancelled or lingering)
             cases.update(raw_cases)
             valid = True
         except (KeyError, TypeError, ValueError) as error:
@@ -597,7 +643,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         valid = False
         complete = False
         reason = reason or 'worker reported a retained remote cleanup owner'
-    if native_producer and host_admission.get('started') is not False and (not valid or not complete):
+    if native_producer and host_admission.get('started') is not False and not preallocation_refused and (not valid or not complete):
         # Native producers can intentionally retain recovery resources. Unknown
         # native cleanup must be reconciled before another attempt can resume.
         lingering = True
@@ -609,7 +655,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
               "executed": host_admission.get('started', True), "complete": valid and complete,
               "reason": host_admission.get('reason', reason), "timed_out": timed_out,
-              "case_complete": {c: valid and v != 'UNVERIFIED' for c, v in cases.items()},
+              "case_complete": {c: valid and v != 'UNVERIFIED' and c not in custody for c, v in cases.items()},
+              "current_execution": {c: "UNVERIFIED" for c in custody}, "custody_skips": custody,
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
@@ -712,16 +759,33 @@ AGENTCARD_RELEASE_STALL_REASON = ("AgentCard never released the closed card's or
                                   "releasedCents=0); skipped under the standing user-approved warning policy")
 
 
+@contextmanager
+def source_module(path: Path):
+    """Fresh source with an owned module identity, without process-global argv changes."""
+    import importlib.util
+    module_name = '_deploy_source_' + uuid.uuid4().hex
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        # Bypass timestamp/size based .pyc reuse, including same-size source edits.
+        exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
+        yield module
+    finally:
+        if sys.modules.get(module_name) is module:
+            del sys.modules[module_name]
+
+
 def agentcard_release_stall_task(name: object, root: Path = ROOT, production: bool = False) -> bool:
     """The same literal catalog predicate the selector prints for this standing warning. Staged smoke qualifies
     sandbox rows only (the default: production tasks never run there); scripts/deploy_prod.py's production
     lane asks for the production task with production=True."""
-    import runpy
-    selector = runpy.run_path(str(root / 'agents/benchmarks/select_predeploy_benches.py'))
-    tasks = [task for task in selector['load_tasks'](root / 'agents/benchmarks/tasks.json')
-             if task.name == name and bool(task.production_only) is production]
-    rules = selector['standing_skip_eligibility'](tasks, [name]).get(name, []) if tasks else []
-    return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+    with source_module(root / 'agents/benchmarks/select_predeploy_benches.py') as selector:
+        tasks = [task for task in selector.load_tasks(root / 'agents/benchmarks/tasks.json')
+                 if task.name == name and bool(task.production_only) is production]
+        rules = selector.standing_skip_eligibility(tasks, [name]).get(name, []) if tasks else []
+        return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+
 
 
 def unreleased_amount_text(transfer: object) -> str:
@@ -1075,6 +1139,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
+            from deploy_test_cloud_refusal import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
             from deploy_test_interrupted_cleanup import still_bound
             return still_bound(state, receipt, entry)
@@ -1154,6 +1221,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'cloud-source-refusal-cleanup-v1':
+        from deploy_test_cloud_refusal import reconcile as reconcile_refusal
+        reconcile_refusal(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
         from deploy_test_interrupted_cleanup import renew_policy_witness
         renew_policy_witness(state, occurrence_id, proof)
@@ -1368,18 +1439,89 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
     state["phase"] = "focused"
 
 
+RCA_INSTRUCTION = ("/RCA: diagnose this occurrence; return the evidence-backed "
+                   "INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. "
+                   "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
+                   "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently.")
+EARLY_POLL_SECONDS = 10.0
+EARLY_LIMIT = 10  # early occurrences per gate per round; later failures arrive with the gate's result
+
+
+def rca_request(directory: Path, failure: dict) -> Path:
+    path = directory / "rca" / (failure["id"] + ".json")
+    write(path, {**failure, "instruction": RCA_INSTRUCTION})
+    return path
+
+
 def rca_requests(state: dict, directory: Path) -> list[Path]:
     paths = []
     for failure in [*state["failures"], *state.get("live_failures", [])]:
         if failure["id"] not in [*state.get("pending", []), *[f["id"] for f in state.get("live_failures", [])]]:
             continue
-        path = directory / "rca" / (failure["id"] + ".json")
-        write(path, {**failure, "instruction": "/RCA: diagnose this occurrence; return the evidence-backed "
-                    "INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. "
-                    "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
-                    "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently."})
-        paths.append(path)
+        paths.append(rca_request(directory, failure))
     return paths
+
+
+def early_check(gate: dict, row: dict) -> str | None:
+    """The gate check a progress row belongs to, so its early occurrence and the final failure match.
+
+    None for a row naming no check of this gate: an early occurrence exists only for a check the
+    final result can fail. The final result reuses it, or supersedes it when that check passes.
+    """
+    for candidate in (row["unit"], "blackbox:" + row["unit"], row.get("case") or ""):
+        if candidate in gate["checks"]:
+            return candidate
+    return gate["checks"][0] if len(gate["checks"]) == 1 else None
+
+
+def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path,
+                   limit: int | None = None) -> list[tuple[dict, Path, dict]]:
+    """Open one occurrence (and RCA request) per newly failing check of a still-running gate.
+
+    Progress rows are advisory: they open an occurrence early, the gate's final result decides it
+    (a final failure of the same check reuses this id; a final PASS or an omitted check supersedes it).
+    Later rows for an already-open check open nothing and print nothing.
+    """
+    seen = {(f["gate"], f["check"]) for f in state.get("early_failures", []) if f.get("round") == state["round"]}
+    limit = EARLY_LIMIT if limit is None else limit
+    opened = []
+    for row in progress.failures(rows):
+        if len(seen) >= limit:
+            break  # bounded like a notice budget: the gate's final result reports the rest
+        mapped = early_check(gate, row)
+        if mapped is None:
+            continue
+        check = gate["name"] + "/" + mapped
+        if (gate["name"], check) in seen:
+            continue
+        seen.add((gate["name"], check))
+        occurrence = {"id": uuid.uuid4().hex, "check": check, "gate": gate["name"], "early": True,
+                      "native_result": row["status"], "scope": row["scope"], "unit": row["unit"],
+                      "detail": row.get("detail", ""), "evidence": row.get("log") or None,
+                      "source": state["source"], "phase": state["phase"], "round": state["round"],
+                      "complete": False, "detected_at": time.time(), "unit_finished_at": row["at"]}
+        state.setdefault("early_failures", []).append(occurrence)
+        opened.append((occurrence, rca_request(directory, occurrence), row))
+    return opened
+
+
+def settle_early(state: dict, result: dict, fresh: list[dict]) -> list[dict]:
+    """Bind a gate's final failures to its early occurrences: same id (one RCA), or superseded on PASS.
+
+    Returns the superseded occurrences, whose RCA (if one was started) should stop.
+    """
+    early = {f["check"]: f for f in state.get("early_failures", [])
+             if f["gate"] == result["gate"] and f.get("round") == state["round"] and "settled" not in f}
+    for failure in fresh:
+        match = early.pop(failure["check"], None)
+        if match is not None:
+            failure.update(id=match["id"], early_detected_at=match["detected_at"], early_unit=match["unit"])
+            match["settled"] = "reused by final " + failure["native_result"]
+    for match in early.values():
+        verdict = result["cases"].get(match["check"].split("/", 1)[1])
+        match["settled"] = (f"superseded: final {verdict}" if verdict
+                            else "superseded: final result omitted this check")
+    return list(early.values())
 
 
 def launch_rca(path: Path, launcher: list[str]) -> None:
@@ -1510,6 +1652,10 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             def record(result):
                 results.append(result)
                 fresh = failed_cases(state, [result])
+                for match in settle_early(state, result, fresh):
+                    if not launcher:  # only the agent started an RCA it must stop
+                        print(f"DEPLOY_GATE_EARLY_SUPERSEDED gate={match['gate']} check={match['check']} "
+                              f"id={match['id']} {match['settled']}: stop its /RCA", flush=True)
                 state["live_failures"].extend(fresh)
                 write(directory / "cycle.json", state)
                 # Publish and dispatch each failure while healthy siblings run.
@@ -1519,10 +1665,35 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                             and path.stem in {f["id"] for f in fresh}):
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
 
+            offsets = {}
+            def scan(running):
+                # A still-running gate's first failing test opens its occurrence and RCA now.
+                for gate in running:
+                    path = (directory / "attempts" / str(state["round"]) / state["phase"] / gate["name"]
+                            / "progress.jsonl")
+                    rows, offsets[gate["name"]] = progress.read_new(path, offsets.get(gate["name"], 0))
+                    opened = early_failures(state, gate, rows, directory)
+                    if opened:
+                        write(directory / "cycle.json", state)
+                    for occurrence, path, row in opened:
+                        if launcher:
+                            # The cycle owns this RCA: launch it now; the deploy agent is not asked to.
+                            if not CANCEL.is_set():
+                                launched.append(rc_pool.submit(launch_rca, path, launcher))
+                        else:
+                            print(progress.describe(gate["name"], row, check=occurrence["check"],
+                                                    occurrence=occurrence["id"], request=str(path))
+                                  + " (start /RCA on this request now)", flush=True)
+                    if not launcher and opened and len([f for f in state.get("early_failures", [])
+                                                        if f["gate"] == gate["name"] and f.get("round") == state["round"]]) >= EARLY_LIMIT:
+                        print(f"DEPLOY_GATE_EARLY_LIMIT gate={gate['name']} limit={EARLY_LIMIT}: "
+                              "further failures of this gate arrive with its result", flush=True)
+
             futures = {submit(gate): gate for gate in selected if gate is not held}
             pending = set(futures)
             while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                done, pending = wait(pending, timeout=EARLY_POLL_SECONDS, return_when=FIRST_COMPLETED)
+                scan([futures[f] for f in pending])
                 for future in done:
                     gate = futures[future]
                     try:
@@ -1751,7 +1922,43 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
-def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None) -> None:
+def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None,
+            historical_no_retry_proof: dict | None = None) -> None:
+    from deploy_test_historical_custody import known, prepare, apply, verify
+    if historical_no_retry_proof is not None and election_proof is not None:
+        raise ValueError('historical custody cannot mix election flags')
+    if historical_no_retry_proof is not None:
+        if digest(historical_no_retry_proof) in state.get('historical_custody_refreshes', []):
+            from deploy_test_historical_custody import binding, verify
+            if (state['plan'] != new or historical_no_retry_proof['current_binding'] != binding(new, root)):
+                raise ValueError('historical custody replay differs from current binding')
+            verify(state, root)
+            return
+        rows = prepare(state, old, new, historical_no_retry_proof, root)
+        candidate = copy.deepcopy(state)
+        pending = copy.deepcopy(state.get('pending_post_merge', []))
+        _refresh(candidate, old, new, root)
+        protected = {r['original_failure']['id'] for r in rows}
+        candidate['pending_post_merge'] = [p for p in candidate.get('pending_post_merge', []) if p['id'] not in protected] + [p for p in pending if p['id'] in protected]
+        candidate['superseded_pending_post_merge'] = [p for p in candidate.get('superseded_pending_post_merge', [])
+                                                       if p['id'] not in protected]
+        for r in rows:
+            candidate['skips'].pop(r['original_failure']['check'], None)
+        candidate['resource_warnings'] = [w for w in candidate.get('resource_warnings', []) if w['id'] not in protected]
+        apply(candidate, rows, root)
+        candidate.setdefault('historical_custody_refreshes', []).append(digest(historical_no_retry_proof))
+        verify(candidate, root)  # Re-read native/current bindings before the one atomic publication.
+        state.clear(); state.update(candidate)
+        return
+    if known(state, root):
+        # Preserve ordinary same-input carry; changed inputs require explicit custody.
+        same = input_fingerprints(new, root) == state['input_fingerprints']
+        if not same or state.get('historical_no_retry_custody'):
+            raise ValueError('historical custody proof required before source refresh')
+    _refresh(state, old, new, root, election_proof=election_proof)
+
+
+def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=None) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -1767,7 +1974,12 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
     unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
-    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not interrupted_refresh:
+    unstarted_final = (state['phase'] == 'final' and not state.get('pending')
+                       and 'live_failures' not in state and not state.get('resume_phase')
+                       and not state.get('running')
+                       and not any(a.get('phase') == 'final' and a.get('source') == state['source']
+                                   and not a.get('stale') for a in state.get('attempts', [])))
+    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not unstarted_final and not interrupted_refresh:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")
@@ -1797,8 +2009,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
         for name, gate in old_gates.items():
             if name in removed:
                 continue
-            binding = full_pass_binding(state, gate)
-            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
+            binding = full_pass_binding(state, gate, root=root, custody_refresh=True)
+            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate, root=root, custody_refresh=True))
                     and digest(gate) == digest(new_gates[name])):
                 # Retire historical repair routing using the OLD validated FULL
                 # receipt. This grants no new-source credit: changed inputs
@@ -1933,6 +2145,8 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
         revalidate_standing_skips(state)
+        from deploy_test_historical_custody import verify as verify_custody
+        verify_custody(state, root)
         from deploy_test_election import verify as verify_elections
         verify_elections(state)
         for gate in plan['gates']:
@@ -1947,10 +2161,17 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry"])
+    parser.add_argument('--donor-state', type=Path,
+                        help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
+    parser.add_argument('--donor-index', type=Path)
+    parser.add_argument('--donor-sha256')
+    parser.add_argument('--donor-index-sha256')
+    parser.add_argument("--historical-no-retry-proof", type=Path)
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -1999,11 +2220,54 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "triage-quick":
                 with cancellation_handlers():
                     triage_quick(plan, state, directory, args.root)
+            elif args.action == 'prepare-agentcard-renewal':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import binding
+                if not args.occurrence:
+                    raise ValueError('--occurrence original warning id required')
+                print(json.dumps({**binding(state, args.occurrence, args.root), 'prepared_at': time.time()}))
+                return 0
+            elif args.action == 'renew-agentcard-warning':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import renew
+                if args.proof is None:
+                    raise ValueError('--proof read-only provider confirmation required')
+                renew(state, bounded_read(args.proof, 'AgentCard renewal'), args.root)
+            elif args.action in {'prepare-historical-import', 'import-historical-custody'}:
+                from deploy_test_historical_custody import import_proof, import_history
+                if (args.donor_state is None or args.donor_index is None
+                        or not args.donor_sha256 or not args.donor_index_sha256
+                        or plan != state['plan'] or args.historical_no_retry_proof is not None):
+                    raise ValueError('custody import requires explicit pinned donor, index and exact current plan')
+                donor_args = (args.donor_state.absolute(), args.donor_index.absolute(),
+                              args.donor_sha256, args.donor_index_sha256)
+                if args.action == 'prepare-historical-import':
+                    print(json.dumps(import_proof(state, *donor_args, args.root)))
+                    return 0
+                if args.proof is None:
+                    raise ValueError('custody import requires exact prepared --proof')
+                import_history(state, *donor_args, read(args.proof), args.root)
+            elif args.action == 'prepare-historical-no-retry':
+                if args.input is None:
+                    raise ValueError('--input previous plan required')
+                from deploy_test_historical_custody import build
+                print(json.dumps(build(state, read(args.input), plan, args.root)))
+                return 0
+            elif args.action == 'import-historical-no-retry':
+                if args.input is None or args.donor_state is None or args.historical_no_retry_proof is None:
+                    raise ValueError('--input donor plan, --donor-state and --historical-no-retry-proof required')
+                if plan != state['plan']:
+                    raise ValueError('custody transfer plan differs from fresh selection')
+                from deploy_test_historical_custody import adopt
+                adopt(state, read(args.donor_state), read(args.input), read(args.historical_no_retry_proof), args.root)
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
                 refresh(state, read(args.input), plan, args.root,
-                        election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None)
+                        election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None,
+                        historical_no_retry_proof=read(args.historical_no_retry_proof) if args.historical_no_retry_proof else None)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
@@ -2040,6 +2304,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"DEPLOY_CYCLE INCOMPLETE: {blocked}", file=sys.stderr)
                     return 1
             elif args.action == "verify":
+                from deploy_test_historical_custody import verify as verify_custody
+                verify_custody(state, args.root)
                 from deploy_test_election import verify as verify_elections
                 verify_elections(state)
                 if args.require_resolved and pending_completion_block(state):
@@ -2050,6 +2316,8 @@ def main(argv: list[str] | None = None) -> int:
                         or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
                     raise ValueError("cycle not complete on exact current source and plan")
             elif args.action == "report":
+                from deploy_test_historical_custody import verify as verify_custody
+                verify_custody(state, args.root)
                 from deploy_failure_report import render
                 failures = [{**f["rca"], "disposition": f["disposition"]}
                             for f in state["failures"] if "rca" in f]
@@ -2063,6 +2331,11 @@ def main(argv: list[str] | None = None) -> int:
                     text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
                              + election['reason'] + '\nNative: ' + election['native_result']
                              + '\nOriginal financial/custody obligations remain recorded.\n')
+                for row in state.get('historical_no_retry_custody', []):
+                    f = row['original_failure']
+                    text += (f"\n{f['check']}: SKIPPED — historical no-retry custody; current-source behavior "
+                             f"and financial state UNVERIFIED. Original native {f['worker_evidence']['native_task']['benchmark_status']}; "
+                             f"historical unreleased {row['original_amount_cents']} cents. No execution or financial credit.\n")
                 warnings = state.get("resource_warnings", [])
                 if warnings:
                     text += "\nRESOURCE WARNINGS (third-party resource skipped with warning; no pass credit)\n"
@@ -2073,6 +2346,10 @@ def main(argv: list[str] | None = None) -> int:
                                  f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}")
                         if proof['reason_code'] == AGENTCARD_RELEASE_STALL_CODE:
                             text += f" · {agentcard_unreleased_text(state, w)} (followup: unreleased funds stay open)"
+                        if 'renewal' in w:
+                            renewal = w['renewal']
+                            text += (f" · Current-input exclusion renewed at: {renewal['finished_at']}"
+                                     f" · No new execution or financial cleanup credit")
                         text += "\n"
                 (directory / "report.md").write_text(text)
                 print(text, end="")

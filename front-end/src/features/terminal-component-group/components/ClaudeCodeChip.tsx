@@ -17,10 +17,10 @@
  * spinning_up -> live -> (verifying) -> (completed | failed)
  *
  * ROSE DESKTOP (flag on AND a `metadata.code_agent` snapshot for this task):
- * [DESKTOP] <-- DesktopCodeAgentChip (target label, timer, transcript (no
- *               terminal view), steer input, commit summary, paused state; see
- *               codeAgentChip.desktop.tsx). Maximize opens the code-agent view; no
- *               terminal and no saved-output read.
+ * [DESKTOP] <-- DesktopCodeAgentChip: one row folded into the root's "Worked for …"
+ *               history like any tool (title · state, devbox usage bars while
+ *               running, elapsed; see codeAgentChip.desktop.tsx). A click opens the
+ *               code-agent view; no terminal and no saved-output read.
  * [DESKTOP, no snapshot] (older sessions) → status-only CollapsedChip: no terminal,
  *               no Maximize / fullscreen, no saved-output read; an ended simulated
  *               (WMH) session expands to its recorded result.

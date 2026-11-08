@@ -1,0 +1,536 @@
+"""Historical sandbox no-remint custody. Never current execution or financial credit."""
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+import re
+import subprocess
+import os
+
+KIND = 'historical-agentcard-no-retry-v1'
+DISPOSITION = 'NO_RETRY_CUSTODY'
+
+
+def need(ok, message):
+    if not ok:
+        raise ValueError('historical custody: ' + message)
+
+
+def task_contract(root, head, name):
+    need(bool(re.fullmatch('[0-9a-f]{40}', head)), 'invalid original commit')
+    result = subprocess.run(['git', 'show', head + ':agents/benchmarks/tasks.json'], cwd=root, capture_output=True)
+    need(result.returncode == 0, 'original catalog unavailable')
+    raw = result.stdout
+    old = [t for t in json.loads(raw) if t['name'] == name]
+    current = [t for t in json.loads((root / 'agents/benchmarks/tasks.json').read_bytes()) if t['name'] == name]
+    need(len(old) == len(current) == 1 and old == current, 'catalog task changed')
+    need(old[0].get('production_only', False) is False
+         and 'agentcard-lifecycle-sandbox' in old[0].get('tags', []), 'not a sandbox catalog task')
+    return old[0]
+
+
+def known(state, root=None):
+    """Discover obligations from immutable failures, even after active exclusions disappear."""
+    import deploy_test_cycle as c
+    root = c.ROOT if root is None else root
+    found = {}
+    catalogs = {}
+    counts = {}
+    indexed = {r['original_failure']['id'] for r in state.get('historical_custody_history', [])}
+    for transfer in state.get('historical_custody_transfers', []):
+        ids = transfer['protected_failure_ids']
+        need(isinstance(ids, list) and ids and all(isinstance(value, str) and value for value in ids)
+             and len(set(ids)) == len(ids), 'invalid transferred failure identities')
+        indexed.update(ids)
+    for f in state.get('failures', []):
+        if 'id' in f:
+            counts[f['id']] = counts.get(f['id'], 0) + 1
+        row = (f.get('worker_evidence') or {}).get('native_task') or {}
+        if f.get('check', '').split('/', 1)[-1] != row.get('name'):
+            continue
+        path = (f.get('worker_evidence') or {}).get('path')
+        resource = (f.get('rca') or {}).get('resource_skip')
+        if resource and resource.get('reason_code') != c.AGENTCARD_RELEASE_STALL_CODE:
+            continue  # Compute-quota semantics are not part of this custody protocol.
+        confirmed = (f.get('rca') or {}).get('resource_skip', {}).get('reason_code') == c.AGENTCARD_RELEASE_STALL_CODE
+        if not confirmed and f['id'] not in indexed and (path and Path(path).is_file() or c.agentcard_release_stall_task(row.get('name'))):
+            head = (f.get('source') or {}).get('head', '')
+            need(bool(re.fullmatch('[0-9a-f]{40}', head)), 'invalid original catalog source')
+            if head not in catalogs:
+                result = subprocess.run(['git', 'show', head + ':agents/benchmarks/tasks.json'], cwd=root, capture_output=True)
+                need(result.returncode == 0, 'original catalog unavailable during discovery')
+                catalogs[head] = json.loads(result.stdout)
+            candidate = any(t.get('name') == row.get('name') and 'agentcard-lifecycle-sandbox' in t.get('tags', [])
+                            for t in catalogs[head])
+            if candidate:
+                need(path and Path(path).is_file() and c.sha_file(path) == f['worker_evidence'].get('sha256'),
+                     'original sandbox native bytes missing or changed')
+            if path and Path(path).is_file():
+                doc = c.read(Path(path))
+                tasks = [t for t in doc.get('tasks', []) if t.get('name') == row.get('name')]
+                confirmed = any(t.get('logs', {}).get('cloud_cleanup_evidence', {}).get(
+                    'agentcard_release_stall_lifecycles') for t in tasks)
+        if not confirmed and c.agentcard_release_stall_task(row.get('name')) and not Path(path or '').is_file():
+            raise ValueError('historical custody: sandbox native evidence missing')
+        if confirmed or f['id'] in indexed:
+            need(f['id'] not in found, 'duplicate historical failure')
+            found[f['id']] = f
+    need(indexed <= found.keys(), 'historical failure removed')
+    need(all(counts[key] == 1 for key in found), 'duplicate historical failure identity')
+    return found
+
+
+def native_closure(path, root):
+    """Replay the existing native audit format; never contact the provider."""
+    import deploy_test_cycle as c
+    from deploy_test_native_cleanup import fleet_audit_root, fleet_ownership_root, fields
+    fleet = path.parent.parent
+    life = c.read(fleet / '_batch/lifecycle.json')
+    token = life['fleet_owner_token']
+    need(re.fullmatch('[0-9a-f]{32}', token) and life['status'] == 'verified'
+         and life['hub_publication_failed'] is False and life['workspace_root'] == str(root)
+         and life['run_id'] == fleet.name, 'native fleet not terminal')
+    local, canonical = fleet / 'teardown-ownership', fleet_audit_root(root) / token
+    with c.source_module(Path(__file__).with_name('cloudbench-retained-successor.py')) as library:
+        digest = library.tree_digest(local)
+        need(library.tree_digest(canonical) == digest == life['audit_sha256']
+             and fields((local / 'source-audit').read_bytes()) == {'path': str(canonical), 'sha256': digest}, 'native audit changed')
+    meta = fields((local / 'meta').read_bytes())
+    need(meta.get('status') == 'provider-teardown-verified' and meta.get('fleet_owner_token') == token
+         and meta.get('run_id') == fleet.name and meta.get('workspace_root') == str(root), 'native owner mismatch')
+    owner = fleet_ownership_root(root) / token
+    need(not owner.exists() and not owner.is_symlink(), 'native owner still registered')
+    for pid in [fleet.name.rsplit('-', 1)[-1], meta.get('hub_pid')]:
+        if pid:
+            need(str(pid).isdigit() and int(pid) > 1 and not Path('/proc', str(pid)).exists(), 'native owner active or unknown')
+    return {'fleet': str(fleet), 'audit_sha256': digest, 'lifecycle_sha256': c.sha_file(fleet / '_batch/lifecycle.json')}
+
+
+# Provider-wide observations inside a stall snapshot. They count every same-amount card/transfer for the
+# shared benchmark cardholder created since the purchase, so the concurrent identical lifecycles of one smoke
+# (seven payment tasks, plus other devboxes' fleets) change them between the end-of-task and cleanup
+# snapshots (PR #1784 cycle bn8: 7 vs 12). Every identity, status and lifecycle-scoped count must still agree.
+PROVIDER_WIDE_COUNTERS = ('agentCardProviderCardCount', 'agentCardProviderTransferCount',
+                          'agentCardProviderUnlinkedTransferCount')
+
+
+def lifecycle_view(snapshot):
+    """A stall snapshot without its provider-wide counters; everything else is compared exactly."""
+    view = copy.deepcopy(snapshot)
+    integrity = view.get('integrity') if isinstance(view, dict) else None
+    if isinstance(integrity, dict):
+        for key in PROVIDER_WIDE_COUNTERS:
+            integrity.pop(key, None)
+    return view
+
+
+def historical(state, failure, root):
+    """Re-read exact native bytes and join their resource/cleanup identities."""
+    import deploy_test_cycle as c
+    from deploy_failure_report import decision
+    f = copy.deepcopy(failure)
+    saved = [r for r in state.get('historical_custody_history', [])
+             if r['original_failure']['id'] == f['id']]
+    if saved:
+        original = saved[0]['original_failure']
+        if f != original:
+            resolved = copy.deepcopy(original)
+            entry = {k: v for k, v in original['rca'].items() if k != 'post_merge'}
+            entry['repair_agent'] = (f.get('rca') or {}).get('repair_agent')
+            resolved.update(rca={**entry, 'resolved_post_merge': original['rca'].get('post_merge')},
+                            disposition=decision(entry))
+            need(f == resolved and resolved['disposition'] == 'delegated / waived', 'original failure changed')
+        f = copy.deepcopy(original)
+    need(f.get('native_result') == 'FAIL' and f.get('complete') is True, 'incomplete original failure')
+    e, rca = f['worker_evidence'], f['rca']
+    for key in ('id', 'source', 'check', 'command', 'native_result'):
+        need(rca.get(key) == f.get(key), 'RCA binding changed: ' + key)
+    path = Path(e['path'])
+    need(path.is_absolute() and path.resolve() == path and path.is_file() and not path.is_symlink(), 'invalid native path')
+    need(c.sha_file(path) == e['sha256'], 'native bytes changed')
+    doc = c.read(path)
+    rows = [t for t in doc['tasks'] if t.get('name') == f['check'].split('/', 1)[1]]
+    need(len(rows) == 1, 'ambiguous native task')
+    t = rows[0]
+    need(all(t.get(k) == v for k, v in e['native_task'].items()), 'native row changed')
+    need(t.get('execution_provenance', {}).get('base_sha') == f['source']['head'], 'native source changed')
+    need(t.get('passed') is False and t.get('cleanup_failure', 'missing') is None
+         and t.get('context_violations') == [], 'native task/cleanup unknown')
+    task = task_contract(root, f['source']['head'], t['name'])
+    cleanup = t['logs']['cloud_cleanup_evidence']
+    snap = cleanup['agentcard_release_stall_lifecycles'][t['agent_id']]
+    need(cleanup.get('errors') == [] and cleanup.get('root_agent_id') == t['agent_id'] == snap['agentId'], 'cleanup/root mismatch')
+    if 'agentcard_release_stall_lifecycle' in t['logs']:
+        need(lifecycle_view(t['logs']['agentcard_release_stall_lifecycle']) == lifecycle_view(snap),
+             'two native snapshots disagree')
+    final = cleanup['final']
+    need(final.get('root_deleted') is True and final.get('unsealed_tree_agent_ids') == []
+         and t['agent_id'] in final.get('tree_agent_ids', []), 'native root not sealed')
+    for session in final['browser_sessions']:
+        need(any(r.get('provider') == session.get('provider') and r.get('session_id') == session.get('session_id')
+                 and r.get('status') in (200, 204, 404, 410) for r in cleanup.get('provider_receipts', [])), 'browser cleanup unknown')
+    card, transfer, purchase, funding = (snap[k] for k in ('agentCard', 'orgTransfer', 'purchase', 'walletFunding'))
+    amount = transfer['amountCents']
+    need(all(isinstance(v, str) and v for v in (t['agent_id'], card.get('id'), transfer.get('id'), purchase.get('id'))),
+         'missing resource identity')
+    need(type(amount) is int and amount > 0 and type(transfer['transferredCents']) is int
+         and transfer['transferredCents'] == amount and type(transfer['releasedCents']) is int
+         and transfer['releasedCents'] == 0 and transfer['livemode'] is False
+         and transfer['status'] == 'consumed' and card['status'] == 'CLOSED'
+         and type(card['balanceCents']) is int and card['balanceCents'] == 0
+         and ('livemode' not in card or card['livemode'] is False)
+         and purchase['status'] == 'HELD' and funding['status'] == 'RECLAIMING'
+         and transfer['cardId'] == purchase['cardId'] == card['id']
+         and funding['providerTransferId'] == transfer['id']
+         and snap['stripeHold']['livemode'] is False and snap['stripeRefund'] is None, 'not a confirmed sandbox release stall')
+    matches = [p for p in final['purchase_cleanup'] if p.get('purchase_id') == purchase['id']]
+    need(len(matches) == 1, 'missing/ambiguous final purchase')
+    p = matches[0]
+    need(all(p.get(k) == v for k, v in {'agent_id': t['agent_id'], 'card_id': card['id'],
+         'provider_transfer_id': transfer['id'], 'total_cents': amount, 'status': 'HELD',
+         'funding_status': 'RECLAIMING'}.items()), 'final purchase join changed')
+    # Revalidate the original recorded adapter closure, independently of financial state.
+    adapter = c.read(Path(f['worker_result']))
+    need(adapter.get('source') == f['source'] and adapter.get('gate') == f['gate']
+         and adapter.get('cleanup_complete') is True and adapter.get('complete') is True
+         and adapter.get('evidence', {}).get(t['name']) == e, 'original adapter closure/evidence changed')
+    if f['disposition'] == c.RESOURCE_SKIP:
+        c.validate_resource_skip(rca, f)
+        warnings = [w for w in [*state.get('resource_warnings', []), *state.get('superseded_resource_warnings', [])]
+                    if w['id'] == f['id']]
+        if saved:
+            warnings.append(saved[0]['authority']['original_warning'])
+        need(warnings and all(w['native_row'] == e['native_task'] and w['confirmation'] == rca['resource_skip']
+                             and w['receipt_sha256'] == e['sha256'] for w in warnings), 'original warning changed')
+        original_warning = (saved[0]['authority']['original_warning'] if saved else
+                            next((w for w in warnings if w['source'] == f['source']), warnings[0]))
+        authority = {'kind': 'original_resource_warning', 'confirmation': rca['resource_skip'],
+                     'original_warning': copy.deepcopy(original_warning)}
+    else:
+        need(t['benchmark_status'] == 'FAILED' and decision(rca) == 'pending post-merge'
+             and f['disposition'] == 'pending post-merge' and not rca.get('resource_skip'), 'independent failure lacks canonical pending repair')
+        pending = [p for p in state.get('pending_post_merge', []) if p['id'] == f['id']]
+        resolved = failure != f
+        need(resolved or len(pending) == 1 and pending[0]['packet'] == rca['post_merge'], 'pending repair lost')
+        authority = {'kind': 'canonical_pending_repair', 'packet': rca['post_merge']}
+    return {'original_failure': f, 'native_sha256': e['sha256'], 'native_row_sha256': c.digest(t),
+            'adapter_sha256': c.sha_file(f['worker_result']), 'snapshot_sha256': c.digest(snap),
+            'task_sha256': c.digest(task), 'root_id': t['agent_id'], 'purchase_id': purchase['id'],
+            'card_id': card['id'], 'transfer_id': transfer['id'], 'original_amount_cents': amount,
+            'authority': authority, 'native_closure': native_closure(path, root)}
+
+
+def binding(plan, root):
+    import deploy_test_cycle as c
+    need(plan['source'] == c.source(root), 'current source not frozen')
+    c.validate_plan(plan, root)
+    return {'source': plan['source'], 'plan_digest': c.digest(plan), 'environment': c.environment_digest(),
+            'input_fingerprints': c.input_fingerprints(plan, root)}
+
+
+def build(state, old, new, root):
+    import deploy_test_cycle as c
+    need(c.digest(old) == state['plan_digest'], 'old plan mismatch')
+    need(not c.CANCEL.is_set() and not c.retained_owners(state, [g['name'] for g in old['gates']])
+         and not any(state.get(k) for k in ('running', 'live_failures', 'resume_phase', 'pending')), 'active/unknown coordinator')
+    rows = [historical(state, f, root) for f in known(state, root).values()]
+    need(rows, 'no historical stalls')
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({r[key] for r in rows}) == len(rows), 'borrowed resource identity')
+    gates = {g['name']: g for g in new['gates']}
+    for r in rows:
+        f = r['original_failure']
+        need(f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'protected task removed')
+    return {'kind': KIND, 'before_state_sha256': c.digest(state), 'old_plan_digest': c.digest(old),
+            'current_binding': binding(new, root), 'cases': rows}
+
+
+def prepare(state, old, new, proof, root):
+    import deploy_test_cycle as c
+    expected = build(state, old, new, root)
+    need(c.digest(proof) == c.digest(expected), 'proof differs from exact native/current binding')
+    return copy.deepcopy(proof['cases'])
+
+
+def apply(state, rows, root):
+    current = binding(state['plan'], root)
+    state['historical_no_retry_custody'] = [dict(kind=KIND, disposition=DISPOSITION, **r,
+        current_binding=current, current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+        credit={'test_execution': False, 'assertions': False, 'financial_release': False}) for r in rows]
+    history = state.setdefault('historical_custody_history', [])
+    for r in rows:
+        if r not in history:
+            history.append(copy.deepcopy(r))
+
+
+IMPORT_KIND = 'historical-agentcard-custody-import-v1'
+
+
+def donor_rows(donor_path, index_path, donor_sha256, index_sha256, root):
+    """Validate an explicit pinned archive's complete index, never its execution ledger."""
+    import deploy_test_cycle as c
+    for path, expected in ((donor_path, donor_sha256), (index_path, index_sha256)):
+        need(path.is_file() and not path.is_symlink() and path.resolve() == path
+             and re.fullmatch('[0-9a-f]{64}', expected or '')
+             and c.sha_file(path) == expected, 'donor provenance changed')
+    donor, index = c.read(donor_path), c.read(index_path)
+    need(index.get('format') == 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1'
+         and index.get('files', {}).get(str(root / '.context/deploy-pipeline/cycle.json')) == donor_sha256,
+         'donor snapshot not in pinned contents manifest')
+    history, active = donor.get('historical_custody_history', []), donor.get('historical_no_retry_custody', [])
+    need(history and active, 'empty donor custody index')
+    ids = [r['original_failure']['id'] for r in history]
+    active_ids = [r['original_failure']['id'] for r in active]
+    need(len(set(ids)) == len(ids) == len(active_ids) == len(set(active_ids))
+         and set(ids) == set(active_ids), 'partial or duplicate donor custody index')
+    # Validate donor discovery unchanged, including negative observations. Only
+    # the indexed obligations are admitted; the entire donor stays evidence.
+    need(not any(donor.get(k) for k in ('pending', 'running', 'live_failures', 'resume_phase')),
+         'active or pending donor snapshot')
+    found = known(donor, root)
+    need(set(found) == set(ids), 'partial donor custody discovery')
+    need(len([f for f in donor['failures'] if f['id'] in ids]) == len(ids),
+         'duplicate donor indexed failure')
+    need(donor['source'] == donor['plan']['source']
+         and c.digest(donor['plan']) == donor['plan_digest'], 'donor plan changed')
+    old_binding = {k: donor[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+    pending_ids = [p['id'] for p in donor.get('pending_post_merge', []) if p['id'] in ids]
+    need(len(pending_ids) == len(set(pending_ids)), 'duplicate donor pending authority')
+    rows = []
+    for saved in history:
+        row = historical(donor, found[saved['original_failure']['id']], root)
+        need(row == saved, 'donor indexed native record changed')
+        matches = [r for r in active if r['original_failure']['id'] == saved['original_failure']['id']]
+        expected = dict(kind=KIND, disposition=DISPOSITION, **row, current_binding=old_binding,
+                        current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+                        credit={'test_execution': False, 'assertions': False, 'financial_release': False})
+        need(matches == [expected], 'donor active custody record changed')
+        rows.append(row)
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({r[key] for r in rows}) == len(rows), 'borrowed donor resource identity')
+    return donor, found, rows
+
+
+def import_proof(state, donor_path, index_path, donor_sha256, index_sha256, root):
+    """Read-only proposal for a pristine, frozen full current cycle."""
+    import deploy_test_cycle as c
+    need(state == c.initialize(state['plan'], root), 'custody import requires pristine fresh state')
+    donor, found, rows = donor_rows(donor_path, index_path, donor_sha256, index_sha256, root)
+    gates = {g['name']: g for g in state['plan']['gates']}
+    for row in rows:
+        f = row['original_failure']
+        need(f['gate'] in gates and gates[f['gate']].get('case_protocol') is True
+             and f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'protected donor task removed')
+    return {'kind': IMPORT_KIND, 'before_state_sha256': c.digest(state),
+            'current_binding': binding(state['plan'], root),
+            'donor': {'state_path': str(donor_path), 'state_sha256': donor_sha256,
+                      'index_path': str(index_path), 'index_sha256': index_sha256,
+                      'state_digest': c.digest(donor)},
+            'cases': rows, 'failures': [copy.deepcopy(found[r['original_failure']['id']]) for r in rows],
+            'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', [])
+                                   if p['id'] in found]}
+
+
+def import_history(state, donor_path, index_path, donor_sha256, index_sha256, proof, root):
+    """Atomic in-memory history-only admission; caller publishes one ordinary state write."""
+    import deploy_test_cycle as c
+    provenance = state.get('historical_custody_import')
+    if provenance is not None:
+        # Rebuild from the pristine current baseline, never from donor READY.
+        baseline = c.initialize(state['plan'], root)
+    else:
+        baseline = state
+    expected = import_proof(baseline, donor_path, index_path, donor_sha256, index_sha256, root)
+    need(proof == expected, 'custody import proof differs from exact donor/current binding')
+    candidate = copy.deepcopy(baseline)
+    candidate['failures'] = copy.deepcopy(proof['failures'])
+    candidate['pending_post_merge'] = copy.deepcopy(proof['pending_post_merge'])
+    apply(candidate, proof['cases'], root)
+    candidate['historical_custody_import'] = copy.deepcopy(proof)
+    verify(candidate, root)
+    if provenance is not None:
+        need(state == candidate, 'custody import replay requires exact pristine imported state')
+        return
+    state.clear(); state.update(candidate)
+
+
+def adopt(state, donor, old, proof, root):
+    """Transfer verified no-remint facts into a fresh independent deploy.
+
+    Unlike a same-deploy refresh, this carries no execution or waiver state.
+    The donor's complete ledger remains bound by its digest in the receipt.
+    """
+    import deploy_test_cycle as c
+    rows = prepare(donor, old, state['plan'], proof, root)
+    current = binding(state['plan'], root)
+    need(all(state.get(key) == value for key, value in current.items()),
+         'ledger differs from fresh current binding')
+    receipt = {'donor_state_sha256': c.digest(donor), 'donor_source': donor['source'],
+               'donor_plan_digest': c.digest(old), 'proof_sha256': c.digest(proof),
+               'current_binding': current,
+               'protected_failure_ids': [r['original_failure']['id'] for r in rows]}
+    if receipt in state.get('historical_custody_transfers', []):
+        protected = set(receipt['protected_failure_ids'])
+        need(protected <= {r['original_failure']['id'] for r in state.get('historical_no_retry_custody', [])}
+             and all(r in state.get('historical_custody_history', []) for r in rows),
+             'transfer receipt lost original custody')
+        verify(state, root)
+        return
+    need(state == c.initialize(state['plan'], root), 'transfer requires a fresh current ledger')
+    candidate = copy.deepcopy(state)
+    found = known(donor, root)
+    # Preserve the donor's actual resolution and independent auth-failure debt;
+    # apply() retains the original native failure and financial snapshot too.
+    candidate['failures'] = [copy.deepcopy(found[key]) for key in receipt['protected_failure_ids']]
+    candidate['pending_post_merge'] = []
+    for key in receipt['protected_failure_ids']:
+        f = found[key]
+        pending = ([{k: copy.deepcopy(f[k]) for k in ('id', 'check', 'gate', 'native_result')}
+                    | {'packet': copy.deepcopy(f['rca']['post_merge'])}]
+                   if f['disposition'] == 'pending post-merge' else [])
+        need([p for p in donor.get('pending_post_merge', []) if p['id'] == key] == pending,
+             'pending repair wrapper changed')
+        candidate['pending_post_merge'].extend(pending)
+    apply(candidate, rows, root)
+    candidate['historical_custody_transfers'] = [receipt]
+    verify(candidate, root)
+    state.clear(); state.update(candidate)
+
+
+def identical_inputs_binding(state, root):
+    """Validate an old FULL receipt during refresh, without rebinding its native source."""
+    import deploy_test_cycle as c
+    c.validate_plan(state['plan'], root)
+    need(state['plan']['source'] == state['source'] and c.digest(state['plan']) == state['plan_digest']
+         and c.environment_digest() == state['environment']
+         and c.input_fingerprints(state['plan'], root) == state['input_fingerprints'],
+         'old FULL receipt inputs changed')
+    return {k: state[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+
+
+def qualifications(state, gate, root, *, current=None):
+    import deploy_test_cycle as c
+    found = known(state, root)
+    records = state.get('historical_no_retry_custody', [])
+    expected = {}
+    current_binding = None
+    for r in records:
+        f = r['original_failure']
+        if f['gate'] != gate['name']:
+            continue
+        if current_binding is None:
+            current_binding = binding(state['plan'], root) if current is None else current
+        need(f['id'] in found, 'custody lacks original failure')
+        native = historical(state, found[f['id']], root)
+        exact = dict(kind=KIND, disposition=DISPOSITION, **native, current_binding=current_binding,
+                     current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+                     credit={'test_execution': False, 'assertions': False, 'financial_release': False})
+        need(c.digest(r) == c.digest(exact) and native in state.get('historical_custody_history', []), 'custody proof/history changed')
+        if f['gate'] == gate['name']:
+            check = f['check'].split('/', 1)[1]
+            need(check in gate['checks'] and check not in expected, 'duplicate/removed custody check')
+            expected[check] = {**r, 'source': state['source']}
+    return expected
+
+
+def guard(state, gate, root, legacy=None, *, current=None):
+    """No fallback allocation when a known historical obligation loses its proof."""
+    verify_import_origin(state, root)
+    legacy = {} if legacy is None else legacy
+    custody = qualifications(state, gate, root, current=current)
+    for f in known(state, root).values():
+        if f['gate'] != gate['name']:
+            continue
+        case = f['check'].split('/', 1)[1]
+        need(case in gate['checks'], 'protected task removed')
+        need(case in custody or case in legacy, 'known stall has no current no-retry qualification: ' + case)
+    need(not set(custody) & set(legacy), 'mixed waiver and custody')
+    return custody
+
+
+def verify(state, root):
+    """Validate retained provenance and every protected obligation against the current plan."""
+    import deploy_test_cycle as c
+    verify_import_origin(state, root)
+    if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
+        return
+    gates = {g['name']: g for g in state['plan']['gates']}
+    for f in known(state, root).values():
+        need(f['gate'] in gates and f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'known historical task removed from plan')
+    for gate in state['plan']['gates']:
+        # Caller supplies legacy qualifications without recursively entering custody.
+        guard(state, gate, root, c.reuse_qualifications(state, gate, include_custody=False, root=root))
+
+
+def verify_import_origin(state, root):
+    """Keep the explicit donor provenance bound during normal verification/admission."""
+    if 'historical_custody_import' not in state:
+        return
+    proof = state['historical_custody_import']
+    need(isinstance(proof, dict) and proof.get('kind') == IMPORT_KIND, 'malformed retained import provenance')
+    origin = proof.get('donor')
+    need(isinstance(origin, dict), 'malformed retained donor provenance')
+    donor, found, rows = donor_rows(Path(origin['state_path']), Path(origin['index_path']),
+                                   origin['state_sha256'], origin['index_sha256'], root)
+    import deploy_test_cycle as c
+    need(proof['kind'] == IMPORT_KIND and origin['state_digest'] == c.digest(donor)
+         and proof['cases'] == rows
+         and proof['failures'] == [found[r['original_failure']['id']] for r in rows]
+         and proof['pending_post_merge'] == [p for p in donor.get('pending_post_merge', []) if p['id'] in found]
+         and all(r in state.get('historical_custody_history', []) for r in rows),
+         'custody import provenance/index changed')
+
+
+def state_identity(state):
+    """Bind admission to current inputs and the complete retained custody provenance."""
+    import deploy_test_cycle as c
+    return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
+                    'historical_no_retry_custody', 'historical_custody_history',
+                    'historical_custody_import', 'historical_custody_transfers')})
+
+
+def admission(request, root):
+    import deploy_test_cycle as c
+    default = root / '.context/deploy-pipeline/cycle.json'
+    locator = request.get('custody_state')
+    request_path = Path(os.environ.get('DEPLOY_GATE_REQUEST', ''))
+    if (request_path.name == 'request.json' and len(request_path.parents) > 4
+            and request_path.parents[3].name == 'attempts'):
+        owner_state = request_path.parents[4] / 'cycle.json'
+        need(locator is not None and Path(locator).resolve() == owner_state.resolve(), 'missing request-owned custody locator')
+    if default.exists():
+        need(locator is not None and Path(locator).resolve() == default.resolve(), 'missing canonical custody locator')
+    if locator is None:
+        return  # standalone disposable requests with no canonical cycle have no recorded obligations
+    path = Path(locator)
+    need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+         and path.name == 'cycle.json' and not path.is_symlink(), 'invalid custody state locator')
+    state = c.read(path)
+    need(request.get('custody_child_environment') == environment_identity(os.environ), 'admission environment changed')
+    need(state_identity(state) == request.get('custody_state_sha256') and state['source'] == request['source'], 'custody state changed')
+    gate = next(g for g in state['plan']['gates'] if g['name'] == request['gate'])
+    need(c.source(root) == state['source'] and c.digest(state['plan']) == state['plan_digest'], 'admission source/plan changed')
+    need(request.get('custody_runtime') == runtime_identity(root), 'admission runtime files changed')
+    c.validate_plan(state['plan'], root)
+    # The child has explicit DEPLOY_* additions. Validate those against its launch hash,
+    # then replay parent fingerprints using the bound parent environment digest.
+    need(c.input_fingerprints(state['plan'], root, environment=state['environment']) == state['input_fingerprints'],
+         'admission input fingerprint changed')
+    expected = c.reuse_qualifications(state, gate, root=root, include_custody=False)
+    current = {k: state[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+    expected.update(guard(state, gate, root, expected, current=current))
+    need(request['skips'] == expected and request['checks'] == [x for x in gate['checks'] if x not in expected], 'admission inventory/qualification changed')
+
+
+def environment_identity(environ):
+    import deploy_test_cycle as c
+    transient = {'_', 'PWD', 'OLDPWD', 'SHLVL', 'INVOCATION_ID', 'JOURNAL_STREAM', 'SYSTEMD_EXEC_PID', 'CODEX_TOOL_CALL_ID'}
+    return c.digest({k: v for k, v in environ.items() if k not in transient})
+
+
+def runtime_identity(root):
+    import deploy_test_cycle as c
+    return {name: c.runtime_config_sha256(root / name) for name in
+            ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
+             'front-end/.env', 'front-end/.env.local') if (root / name).is_file()}

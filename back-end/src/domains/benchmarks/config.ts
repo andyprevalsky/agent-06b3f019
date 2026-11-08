@@ -112,46 +112,102 @@ export interface TaskAttempt {
   agent_id: string | null;
 }
 
-let attemptsCache: { mtimeMs: number; attempts: TaskAttempt[] } | null = null;
+let attemptsCache: { key: string; attempts: TaskAttempt[] } | null = null;
 
 /**
- * Parses the attempts ledger (one JSON object per line), cached by mtime.
- * Malformed lines are skipped — the ledger is append-only; a torn write must
- * not take the catalog stats down.
+ * The attempts ledger is its base file plus per-writer shards
+ * `task_attempts.<YYYYMMDD>.<branch>.jsonl` in the same directory
+ * (agents/benchmarks/history_ledger.py): each branch appends only to its own
+ * shard, so concurrent PRs never edit one shared file. Shards sort by name.
  */
-export function readTaskAttempts(): TaskAttempt[] {
-  let stat: fs.Stats;
+export function taskAttemptsLedgerFiles(basePath: string = TASK_ATTEMPTS_PATH): string[] {
+  const dir = path.dirname(basePath);
+  const stem = path.basename(basePath).replace(/\.jsonl$/, '');
+  let names: string[] = [];
   try {
-    stat = fs.statSync(TASK_ATTEMPTS_PATH);
+    names = fs.readdirSync(dir);
   } catch {
-    return [];
+    return [basePath];
   }
-  if (attemptsCache && attemptsCache.mtimeMs === stat.mtimeMs) {
+  const shards = names
+    .filter(
+      (name) => name.startsWith(`${stem}.`) && name.endsWith('.jsonl') && name !== `${stem}.jsonl`
+    )
+    .sort()
+    .map((name) => path.join(dir, name));
+  return [basePath, ...shards];
+}
+
+function parseAttempt(line: string): TaskAttempt | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (typeof parsed.task !== 'string' || parsed.task === '') return null;
+    return {
+      task: parsed.task,
+      passed: parsed.passed === true,
+      status: typeof parsed.status === 'string' ? parsed.status : 'unknown',
+      duration_seconds:
+        typeof parsed.duration_seconds === 'number' ? parsed.duration_seconds : null,
+      fast_mode_cache: parsed.fast_mode_cache === true,
+      timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : '',
+      agent_id:
+        typeof parsed.agent_id === 'string' && parsed.agent_id !== '' ? parsed.agent_id : null,
+    };
+  } catch {
+    return null; // skip malformed line
+  }
+}
+
+function attemptTime(attempt: TaskAttempt): number {
+  const value = Date.parse(attempt.timestamp);
+  return Number.isNaN(value) ? Number.NEGATIVE_INFINITY : value;
+}
+
+/**
+ * Parses the attempts ledger (one JSON object per line) and its shards, cached
+ * by every file's mtime. Base rows keep file order; shard rows follow in
+ * recorded (timestamp) order, then shard name and line, matching the Python
+ * readers. Malformed lines are skipped — the ledger is append-only; a torn
+ * write must not take the catalog stats down.
+ */
+export function readTaskAttempts(basePath: string = TASK_ATTEMPTS_PATH): TaskAttempt[] {
+  const files: { file: string; mtimeMs: number }[] = [];
+  for (const file of taskAttemptsLedgerFiles(basePath)) {
+    try {
+      files.push({ file, mtimeMs: fs.statSync(file).mtimeMs });
+    } catch {
+      // absent base file (lean worktree) or a shard removed mid-read
+    }
+  }
+  if (files.length === 0) return [];
+  const key = files.map(({ file, mtimeMs }) => `${file}:${mtimeMs}`).join('\n');
+  if (attemptsCache && attemptsCache.key === key) {
     return attemptsCache.attempts;
   }
   const attempts: TaskAttempt[] = [];
-  const raw = fs.readFileSync(TASK_ATTEMPTS_PATH, 'utf-8');
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+  const shardRows: { attempt: TaskAttempt; time: number; fileIndex: number; lineIndex: number }[] =
+    [];
+  files.forEach(({ file }, fileIndex) => {
+    let raw: string;
     try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      if (typeof parsed.task !== 'string' || parsed.task === '') continue;
-      attempts.push({
-        task: parsed.task,
-        passed: parsed.passed === true,
-        status: typeof parsed.status === 'string' ? parsed.status : 'unknown',
-        duration_seconds:
-          typeof parsed.duration_seconds === 'number' ? parsed.duration_seconds : null,
-        fast_mode_cache: parsed.fast_mode_cache === true,
-        timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : '',
-        agent_id:
-          typeof parsed.agent_id === 'string' && parsed.agent_id !== '' ? parsed.agent_id : null,
-      });
+      raw = fs.readFileSync(file, 'utf-8');
     } catch {
-      // skip malformed line
+      return;
     }
-  }
-  attemptsCache = { mtimeMs: stat.mtimeMs, attempts };
+    const isBase = file === basePath;
+    raw.split('\n').forEach((line, lineIndex) => {
+      const attempt = parseAttempt(line);
+      if (!attempt) return;
+      if (isBase) attempts.push(attempt);
+      else shardRows.push({ attempt, time: attemptTime(attempt), fileIndex, lineIndex });
+    });
+  });
+  shardRows.sort(
+    (a, b) => a.time - b.time || a.fileIndex - b.fileIndex || a.lineIndex - b.lineIndex
+  );
+  for (const row of shardRows) attempts.push(row.attempt);
+  attemptsCache = { key, attempts };
   return attempts;
 }

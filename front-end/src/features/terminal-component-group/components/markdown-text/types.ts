@@ -1,29 +1,6 @@
 /**
- * Types and animation constants for the MarkdownText render pipeline.
+ * Animation constants for FadeInMarkdown's word-by-word fade.
  */
-
-export type BlockType = 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'li' | 'blockquote' | 'pre';
-
-export type ListType = 'ul' | 'ol';
-
-export interface WordItem {
-  word: string;
-  isWord: boolean;
-  isBold?: boolean;
-  isItalic?: boolean;
-  isLink?: boolean;
-  href?: string;
-  isCode?: boolean;
-  isImage?: boolean;
-  src?: string;
-  alt?: string;
-  /** Block element this word belongs to. */
-  blockType?: BlockType;
-  /** Unique index for each block element instance. */
-  blockIndex?: number;
-  /** Parent list type for li elements. */
-  listType?: ListType;
-}
 
 /** Total animation budget (seconds) from first word to last. */
 export const MAX_ANIMATION_SECONDS = 3.0;

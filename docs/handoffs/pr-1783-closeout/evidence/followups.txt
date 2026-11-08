@@ -1,0 +1,6 @@
+PR #1783 follow-ups (2026-11-08)
+1. Retire stopped Machines 8744500a324978 (+vol_4oj88kon8wj237or, owner 9b25216a...) and 8744e10c01e458 (owner c2aa6dde...) on navi-whisper-lux-bench: recover-stale-owner demands an original-volume runtime archive that cloudbench-original-volume-capture.py refuses ("services is set", then "a forensic archive already exists for this run"). Fix the precedence, then rerun exact-owner recovery. Never destroy by hand.
+2. Infra stops from a single setup/evidence error cancel whole 13-job smoke waves: AgentCard org MCP 401/429 at payment-fixture setup (3 quick retries, ~4 s, retryAfter null) and guest runtime-evidence relay timeouts were classified INFRA_ERROR. Consider a longer bounded retry budget for AgentCard org-MCP 429 at setup.
+3. Blacksmith gate setup downloads uv and flyctl from GitHub releases on every run; 502/504 outages failed every remote gate (09:20-11:03Z). Cache both on the sticky rose-deps disk.
+4. Sibling of the seed rc 139 race: the backend's own startup constructs a second PrismaClient (DEMO cache) while the first may be connecting; apply connectThenOpen if a startup rc 139 is seen.
+5. AgentCard sandbox abandonment release stall: the 4396c test-mode org transfer stays consumed with releasedCents=0 on each smoke wave (standing warning).

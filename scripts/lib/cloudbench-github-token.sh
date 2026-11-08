@@ -88,5 +88,14 @@ cloudbench_resolve_github_token() {
       return 0
     fi
   done
+  # Last resort: the token pool (adds the org GitHub App when every user-token
+  # candidate above shares one drained quota). Request-scoped use only.
+  if [ -f "$root/scripts/github_token_pool.py" ]; then
+    candidate="$(cd "$root" && python3 scripts/github_token_pool.py pick 2>/dev/null || true)"
+    if [ -n "$candidate" ] && cloudbench_github_token_can_read_repo "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
   return 1
 }

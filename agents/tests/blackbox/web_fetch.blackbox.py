@@ -1061,11 +1061,9 @@ async def test_handler_forwards_page_declared_metadata_to_summarizer():
     )
 
     summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
-    # Only the allowlisted, bounded subset crosses the activity boundary.
-    assert summary_call["args"][-1] == {
-        "title": "RFC 9110: HTTP Semantics | RFC Editor",
-        "citation_publication_date": "2022/06/06",
-    }
+    # Only the allowlisted, bounded subset crosses the activity boundary; the
+    # HTML <title> stays out (RCA 2026-11-07).
+    assert summary_call["args"][-1] == {"citation_publication_date": "2022/06/06"}
     assert out["result"]["content"].startswith("RFC 9110, published June 2022.")
 
 
@@ -1073,7 +1071,7 @@ async def test_handler_passes_no_parallel_extract_ids_to_summarizer():
     """Review finding 2026-10-26: Parallel Extract fallback IDs stay out of the summarizer.
 
     ``extract_parallel`` returns extract_id, session_id, warnings and errors
-    beside the page's title and publish_date; only those page facts may reach
+    beside the page's title and publish_date; only the publish_date may reach
     the summarize activity's arguments.
     """
     from domains.web_fetch.handler import WebFetchManager
@@ -1111,7 +1109,7 @@ async def test_handler_passes_no_parallel_extract_ids_to_summarizer():
     )
 
     summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
-    assert summary_call["args"][-1] == {"title": "RFC 9110: HTTP Semantics", "publish_date": "2022-06-06"}
+    assert summary_call["args"][-1] == {"publish_date": "2022-06-06"}
     assert "extract_8c1f2b" not in repr(summary_call["args"])
     assert "session_93ad7e" not in repr(summary_call["args"])
 

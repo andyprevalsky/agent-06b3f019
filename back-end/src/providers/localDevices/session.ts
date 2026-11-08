@@ -334,17 +334,19 @@ export async function createLocalCodeSessionResponse(params: {
 export async function closeLocalDeviceCodeSession(
   taskId: string,
   sandboxId: string,
-  hub: LocalDeviceHub = localDeviceHub()
+  hub: LocalDeviceHub = localDeviceHub(),
+  options?: { propagateStopFailure?: boolean }
 ): Promise<{ outputFiles: [] }> {
   // Best-effort: the session row is marked CLOSED even when the Mac is unreachable.
   await hub
     .stopSession(taskId, parseLocalDeviceSandboxId(sandboxId)?.deviceId ?? null)
-    .catch((error: unknown) =>
+    .catch((error: unknown) => {
+      if (options?.propagateStopFailure) throw error;
       log.warn('Local session stop failed; marking it closed', {
         task_id: taskId,
         error: error instanceof Error ? error.message : String(error),
-      })
-    );
+      });
+    });
   await prisma.claudeCodeSession.updateMany({
     where: { id: taskId, status: 'ACTIVE' },
     data: { status: 'CLOSED', closedAt: new Date() },
