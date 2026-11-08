@@ -22,7 +22,7 @@
  },
  "followups": [
   "Render lane has no supported path when a later merge cancels the exact-SHA deploy and changes other backend files; the deploy tool correctly reports FAIL and it needs a defined rule",
-  "Blacksmith gate setup downloads flyctl, cloudflared and setup-uv from GitHub releases on every run with short retries; a 54-minute GitHub release-download outage failed three gate rounds in runner setup",
+  "Blacksmith gate setup downloads flyctl, cloudflared and setup-uv from GitHub releases on every run with short retries; a roughly 60-minute GitHub release-download outage (10:08Z to at least 11:08Z) failed three gate rounds plus three jobs of a fourth in runner setup",
   "AgentCard production lifecycle needs a KYC-passed live cardholder payer fixture from the user; open live org transfer owt_8c2ddb2e54e7320b62722728 (100 cents transferred, 0 released)",
   "AgentCard sandbox release stall recurring on smoke agent-payment-abandonment (4396 cents transferred, 0 released)"
  ],
