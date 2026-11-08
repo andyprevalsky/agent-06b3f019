@@ -115,7 +115,6 @@
   ],
   "manifest": "/var/tmp/rca-codeagent/closeout/manifest.json",
   "open_items": [
-    "uncommitted changes in /var/tmp/pr1723-records: docs/handoffs/pr-1723-closeout/CLOSEOUT.md, docs/handoffs/pr-1723-closeout/closeout-manifest.json, docs/handoffs/pr-1723-closeout/evidence/benchmark-history-backfill-dry.json, docs/handoffs/pr-1723-closeout/evidence/cycle-restart-notes.txt, docs/handoffs/pr-1723-closeout/evidence/production-lanes.json",
     "live process 435224 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794102219392-xfktty.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
     "live process 435228 in this checkout: tail -3",
     "live process 435229 in this checkout: cut -c1-200",
@@ -155,25 +154,9 @@
       "branch": "refs/heads/records/pr1723-closeout",
       "current": false,
       "locked": false,
-      "needs_integration": true,
+      "needs_integration": false,
       "path": "/var/tmp/pr1723-records",
-      "uncommitted": [
-        "docs/handoffs/pr-1723-closeout/CLOSEOUT.md",
-        "docs/handoffs/pr-1723-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-1723-closeout/evidence/benchmark-history-backfill-dry.json",
-        "docs/handoffs/pr-1723-closeout/evidence/cycle-restart-notes.txt",
-        "docs/handoffs/pr-1723-closeout/evidence/production-lanes.json",
-        "docs/handoffs/pr-1723-closeout/evidence/review-dispositions.jsonl",
-        "docs/handoffs/pr-1723-closeout/evidence/review-ledger.json",
-        "docs/handoffs/pr-1723-closeout/evidence/triage/triage-233012993.json",
-        "docs/handoffs/pr-1723-closeout/evidence/triage/triage-55524eb88-clean.json",
-        "docs/handoffs/pr-1723-closeout/evidence/triage/triage-6c91048a7.json",
-        "docs/handoffs/pr-1723-closeout/evidence/triage/triage-7b243b4ec-agentcard.json",
-        "docs/handoffs/pr-1723-closeout/evidence/triage/triage-a48ed602f.json",
-        "docs/handoffs/pr-1723-closeout/evidence/triage/triage-aa01493d1.json",
-        "docs/handoffs/pr-1723-closeout/evidence/triage/triage-sweep3.json",
-        "docs/handoffs/pr-1723-closeout/manifest.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
