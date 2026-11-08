@@ -20491,9 +20491,9 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
                 }
             )
     (history_dir / "task_attempts.jsonl").write_text("\n".join(json.dumps(row) for row in attempt_rows) + "\n")
-    (fixture / "agents" / "benchmarks" / "select_predeploy_benches.py").write_text(
-        (ROOT / "agents" / "benchmarks" / "select_predeploy_benches.py").read_text()
-    )
+    # The selector reads the attempts ledger through its per-writer shard helper.
+    for module in ("select_predeploy_benches.py", "history_ledger.py"):
+        (fixture / "agents" / "benchmarks" / module).write_text((ROOT / "agents" / "benchmarks" / module).read_text())
     capture = fixture / "capture"
     (fixture / "scripts" / "run-bench").write_text(
         '#!/usr/bin/env bash\nprintf "%s\\n" "${BENCHMARK_SKIP_WMH_BUILD:-unset}" "$*" > "$CAPTURE"\n'
