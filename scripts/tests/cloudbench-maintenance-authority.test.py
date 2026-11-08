@@ -501,6 +501,52 @@ def get(app,resource):
         recipe=self.root/'Dockerfile.cloudbench-warm';recipe.write_text(recipe.read_text()+'\nRUN unknown-build-input\n')
         with self.assertRaises(ValueError):m.image_inputs(self.root,original,current)
 
+    def current_recipe_fixture(self):
+        recipe = self.root/'Dockerfile.cloudbench-warm'
+        recipe.write_text(recipe.read_text().replace('FROM node:20-bookworm AS native-base',
+                                                    'FROM node:22.23.4-bookworm AS native-base'))
+        self.assertEqual(hashlib.sha256(recipe.read_bytes()).hexdigest(), m.IMAGE_RECIPE_V2)
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=fixture','-c','user.email=fixture@example.com','commit','-qm','current recipe'],check=True)
+        self.build.update(source_sha=m.git(self.root,'rev-parse','HEAD'),dockerfile_sha256=m.IMAGE_RECIPE_V2)
+        c.write(self.context/'build.json',self.build)
+        return self.build['source_sha']
+
+    def test_current_recipe_receipt_keeps_original_build_source(self):
+        original=self.current_recipe_fixture()
+        (self.root/'harness-only').write_text('new harness')
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=fixture','-c','user.email=fixture@example.com','commit','-qm','later harness'],check=True)
+        current=m.git(self.root,'rev-parse','HEAD')
+        self.assertNotEqual(original,current)
+        result=m.image_build(self.context/'build.json',self.image,self.root,{'head':current})
+        self.assertEqual(result,self.build)
+        self.assertEqual(m.image_inputs(self.root,original,current)['paths'],list(m.IMAGE_INPUTS))
+
+    def test_current_recipe_rejects_forgery_changed_inputs_and_unknown_recipe(self):
+        original=self.current_recipe_fixture()
+        self.build['dockerfile_sha256']=m.IMAGE_RECIPE_V1
+        c.write(self.context/'build.json',self.build)
+        with self.assertRaisesRegex(ValueError,'original image recipe/config receipt'):
+            m.image_build(self.context/'build.json',self.image,self.root,{'head':original})
+        self.build['dockerfile_sha256']=m.IMAGE_RECIPE_V2
+        c.write(self.context/'build.json',self.build)
+        (self.root/'package.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError,'uncommitted image'):
+            m.image_build(self.context/'build.json',self.image,self.root,{'head':original})
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=fixture','-c','user.email=fixture@example.com','commit','-qm','changed dependency'],check=True)
+        with self.assertRaisesRegex(ValueError,'image dependency/recipe inputs changed'):
+            m.image_build(self.context/'build.json',self.image,self.root,{'head':m.git(self.root,'rev-parse','HEAD')})
+        recipe=self.root/'Dockerfile.cloudbench-warm'
+        recipe.write_text(recipe.read_text()+'\nRUN unknown-build-input\n')
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=fixture','-c','user.email=fixture@example.com','commit','-qm','unknown recipe'],check=True)
+        self.build.update(source_sha=m.git(self.root,'rev-parse','HEAD'),dockerfile_sha256=hashlib.sha256(recipe.read_bytes()).hexdigest())
+        c.write(self.context/'build.json',self.build)
+        with self.assertRaisesRegex(ValueError,'unknown image recipe inputs'):
+            m.image_build(self.context/'build.json',self.image,self.root,{'head':self.build['source_sha']})
+
     def test_orphan_registry_cannot_supply_authority(self):
         result=self.run_native();self.assertEqual(result.returncode,0,result.stderr)
         state=c.read(self.context/'cycle.json');state.pop('native_maintenance')

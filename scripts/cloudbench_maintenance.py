@@ -28,6 +28,9 @@ IMAGE_INPUTS = ('Dockerfile.cloudbench-warm', 'fly.cloudbench-warm.toml', '.dock
                 'scripts/cloudbench-install-ngrok.sh', 'scripts/cloudbench-install-pgvector.sh')
 # Unknown recipe semantics cannot inherit a known closure merely by matching HEAD.
 IMAGE_RECIPE_V1 = 'cfd577f370e9f22c1b4263853cecdc50372483e8ab573ad958ae45eac97522a3'
+# V2 changes only the base image to Node 22.23.4; COPY/RUN inputs are identical.
+IMAGE_RECIPE_V2 = 'd8f238df1258345e9fa52146b7598c52e73c71d38b82eb0c20448ebfe04cf819'
+IMAGE_RECIPE_INPUTS = {IMAGE_RECIPE_V1: IMAGE_INPUTS, IMAGE_RECIPE_V2: IMAGE_INPUTS}
 
 SCRIPTS = ('scripts/cloudbench_maintenance.py', 'scripts/run-bench-cloud',
            'scripts/run-bench', 'scripts/lib/cloudbench-app-env-lock.sh')
@@ -299,16 +302,17 @@ def anchor_for(entries):
 
 def image_inputs(root, build_source, current_source):
     recipe = subprocess.check_output(['git', '-C', str(root), 'show', build_source+':Dockerfile.cloudbench-warm'])
-    need(hashlib.sha256(recipe).hexdigest() == IMAGE_RECIPE_V1, 'unknown image recipe inputs')
+    paths = IMAGE_RECIPE_INPUTS.get(hashlib.sha256(recipe).hexdigest())
+    need(paths is not None, 'unknown image recipe inputs')
     def inventory(head):
-        return subprocess.check_output(['git','-C',str(root),'ls-tree','-r','-z',head,'--',*IMAGE_INPUTS])
+        return subprocess.check_output(['git','-C',str(root),'ls-tree','-r','-z',head,'--',*paths])
     original = inventory(build_source)
     need(original == inventory(current_source), 'image dependency/recipe inputs changed')
-    need(not subprocess.check_output(['git','-C',str(root),'diff','HEAD','--',*IMAGE_INPUTS])
-         and not subprocess.check_output(['git','-C',str(root),'ls-files','--others','--exclude-standard','--',*IMAGE_INPUTS]),
+    need(not subprocess.check_output(['git','-C',str(root),'diff','HEAD','--',*paths])
+         and not subprocess.check_output(['git','-C',str(root),'ls-files','--others','--exclude-standard','--',*paths]),
          'uncommitted image dependency inputs')
     return {'schema':'cloudbench-image-input-equivalence-v1','build_source':build_source,
-            'current_source':current_source,'paths':list(IMAGE_INPUTS),
+            'current_source':current_source,'paths':list(paths),
             'tree_inventory_sha256':hashlib.sha256(original).hexdigest(),
             'recipe_sha256':hashlib.sha256(recipe).hexdigest()}
 
@@ -324,11 +328,11 @@ def image_build(path, image, root, source):
          'exact immutable published image required')
     subprocess.run(['git', '-C', str(root), 'merge-base', '--is-ancestor', value['source_sha'], source['head']],
                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    need(value['dockerfile_sha256'] == IMAGE_RECIPE_V1
+    inputs = image_inputs(root,value['source_sha'],source['head'])
+    need(value['dockerfile_sha256'] == inputs['recipe_sha256']
          and value['config_sha256'] == hashlib.sha256(subprocess.check_output(
              ['git','-C',str(root),'show',value['source_sha']+':fly.cloudbench-warm.toml'])).hexdigest(),
          'original image recipe/config receipt')
-    image_inputs(root,value['source_sha'],source['head'])
     return value
 
 
