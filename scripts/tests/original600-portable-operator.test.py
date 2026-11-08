@@ -995,6 +995,7 @@ class Portable(unittest.TestCase):
             script = root / 'scripts/cloudbench-original600-supervisor.py'
             script.write_text("import json,os,sys\nfrom pathlib import Path\np=Path(os.environ['REVIEWED_OPERATOR_IDENTITY_PATH'])\n(p.parent/'handoff.json').write_text(json.dumps(dict(policy=os.environ['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP'],identity=json.loads(p.read_bytes()),argv=sys.argv[1:])))\n")
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            disable_auto_maintenance(root)
             subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'supervisor handoff fixture'], check=True)
             ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
@@ -2034,6 +2035,7 @@ class Portable(unittest.TestCase):
                 (root/member).parent.mkdir(parents=True, exist_ok=True)
                 (root/member).write_bytes((ROOT/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            disable_auto_maintenance(root)
             # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
             common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
             (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
@@ -3503,6 +3505,16 @@ HOST_GIT_SETTINGS = ('gc.auto', 'gc.autodetach', 'maintenance.auto', 'maintenanc
                      'core.hookspath', 'init.templatedir', 'feature.manyfiles', 'core.untrackedcache')
 
 
+def disable_auto_maintenance(root, env=None):
+    """Keep every Git write in a fixture repository inside the command that made it.
+
+    Auto-maintenance is Git's built-in default, not host configuration: from Git 2.47 a commit starts it detached
+    (setsid), and its geometric repack (about 2+ loose objects in .git/objects/17) outlives the waited command and
+    recreates .git/objects/info/packs while fixture cleanup removes the directory."""
+    for key, value in (('maintenance.auto', 'false'), ('gc.auto', '0')):
+        subprocess.run(['git', '-C', str(root), 'config', key, value], check=True, env=env)
+
+
 def hermetic_git_env():
     """Host-independent Git whose automatic maintenance stays with its fixture owner."""
     env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
@@ -3626,6 +3638,7 @@ class RunBenchShardedRouting(unittest.TestCase):
                 private(root/env_file, 'FIXTURE=1\nBROWSER_PROVIDER=kernel\n')
             (root/'.gitignore').write_text('.env\n.context/\n__pycache__/\n')
             subprocess.run(git[:3] + ['init', '-q'], check=True, env=git_env)
+            disable_auto_maintenance(root, git_env)
             subprocess.run(git + ['add', '-A'], check=True, env=git_env)
             subprocess.run(git + ['commit', '-qm', 'fixture'], check=True, env=git_env)
             head = subprocess.check_output(git + ['rev-parse', 'HEAD'], text=True, env=git_env).strip()
@@ -4035,7 +4048,8 @@ class RunBenchShardedRouting(unittest.TestCase):
             hook.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\n')
             hook.chmod(0o755)
             (folder/'gitconfig').write_text(f'[core]\n\thooksPath = {folder/"hooks"}\n')
-            with patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(folder/'gitconfig')):
+            events = folder/'trace2.jsonl'
+            with patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(folder/'gitconfig'), GIT_TRACE2_EVENT=str(events)):
                 with self.checkout() as fx:
                     configured = subprocess.run(fx.git + ['config', '--get', 'core.hookspath'], capture_output=True, env=fx.git_env)
                     self.assertEqual(configured.returncode, 1, configured.stdout)
@@ -4043,6 +4057,12 @@ class RunBenchShardedRouting(unittest.TestCase):
                     subprocess.run(fx.git + ['add', 'later.txt'], check=True, env=fx.git_env)
                     subprocess.run(fx.git + ['commit', '-qm', 'later'], check=True, env=fx.git_env)
             self.assertFalse(marker.exists(), 'a host Git hook ran inside the fixture repository')
+            # Git's own auto-maintenance (detached since Git 2.47) is the writer that outlived the fixture's commands
+            # and recreated .git/objects/info/packs during cleanup; no fixture commit may start it on any Git version.
+            started = [json.loads(line) for line in events.read_text().splitlines()]
+            self.assertTrue(any(event.get('event') == 'cmd_name' and event.get('name') == 'commit' for event in started))
+            children = [event['argv'] for event in started if event.get('event') == 'child_start']
+            self.assertEqual([argv for argv in children if {'maintenance', 'gc'} & set(argv)], [])
 
     def test_a_failed_fixture_removal_names_the_blocking_entry_and_its_writer(self):
         # The reported failure was only "OSError: [Errno 39] Directory not empty: '.git'" from fixture cleanup, with

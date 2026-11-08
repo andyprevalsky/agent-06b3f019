@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 
+import deploy_gate_progress as progress
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
 from deploy_test_isolation import validate as validate_isolation
@@ -508,6 +509,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
            "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
+           # Workers (and a remote gate's launcher mirror) append per-test rows as they finish.
+           progress.ENV: str(folder / "progress.jsonl"),
            "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1",
            # Teardown ownership of every process the gate starts (benchmark_teardown).
            LANE_TOKEN_ENV: token}
@@ -1387,18 +1390,89 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
     state["phase"] = "focused"
 
 
+RCA_INSTRUCTION = ("/RCA: diagnose this occurrence; return the evidence-backed "
+                   "INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. "
+                   "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
+                   "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently.")
+EARLY_POLL_SECONDS = 10.0
+EARLY_LIMIT = 10  # early occurrences per gate per round; later failures arrive with the gate's result
+
+
+def rca_request(directory: Path, failure: dict) -> Path:
+    path = directory / "rca" / (failure["id"] + ".json")
+    write(path, {**failure, "instruction": RCA_INSTRUCTION})
+    return path
+
+
 def rca_requests(state: dict, directory: Path) -> list[Path]:
     paths = []
     for failure in [*state["failures"], *state.get("live_failures", [])]:
         if failure["id"] not in [*state.get("pending", []), *[f["id"] for f in state.get("live_failures", [])]]:
             continue
-        path = directory / "rca" / (failure["id"] + ".json")
-        write(path, {**failure, "instruction": "/RCA: diagnose this occurrence; return the evidence-backed "
-                    "INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. "
-                    "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
-                    "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently."})
-        paths.append(path)
+        paths.append(rca_request(directory, failure))
     return paths
+
+
+def early_check(gate: dict, row: dict) -> str | None:
+    """The gate check a progress row belongs to, so its early occurrence and the final failure match.
+
+    None for a row naming no check of this gate: an early occurrence exists only for a check the
+    final result can fail. The final result reuses it, or supersedes it when that check passes.
+    """
+    for candidate in (row["unit"], "blackbox:" + row["unit"], row.get("case") or ""):
+        if candidate in gate["checks"]:
+            return candidate
+    return gate["checks"][0] if len(gate["checks"]) == 1 else None
+
+
+def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path,
+                   limit: int | None = None) -> list[tuple[dict, Path, dict]]:
+    """Open one occurrence (and RCA request) per newly failing check of a still-running gate.
+
+    Progress rows are advisory: they open an occurrence early, the gate's final result decides it
+    (a final failure of the same check reuses this id; a final PASS or an omitted check supersedes it).
+    Later rows for an already-open check open nothing and print nothing.
+    """
+    seen = {(f["gate"], f["check"]) for f in state.get("early_failures", []) if f.get("round") == state["round"]}
+    limit = EARLY_LIMIT if limit is None else limit
+    opened = []
+    for row in progress.failures(rows):
+        if len(seen) >= limit:
+            break  # bounded like a notice budget: the gate's final result reports the rest
+        mapped = early_check(gate, row)
+        if mapped is None:
+            continue
+        check = gate["name"] + "/" + mapped
+        if (gate["name"], check) in seen:
+            continue
+        seen.add((gate["name"], check))
+        occurrence = {"id": uuid.uuid4().hex, "check": check, "gate": gate["name"], "early": True,
+                      "native_result": row["status"], "scope": row["scope"], "unit": row["unit"],
+                      "detail": row.get("detail", ""), "evidence": row.get("log") or None,
+                      "source": state["source"], "phase": state["phase"], "round": state["round"],
+                      "complete": False, "detected_at": time.time(), "unit_finished_at": row["at"]}
+        state.setdefault("early_failures", []).append(occurrence)
+        opened.append((occurrence, rca_request(directory, occurrence), row))
+    return opened
+
+
+def settle_early(state: dict, result: dict, fresh: list[dict]) -> list[dict]:
+    """Bind a gate's final failures to its early occurrences: same id (one RCA), or superseded on PASS.
+
+    Returns the superseded occurrences, whose RCA (if one was started) should stop.
+    """
+    early = {f["check"]: f for f in state.get("early_failures", [])
+             if f["gate"] == result["gate"] and f.get("round") == state["round"] and "settled" not in f}
+    for failure in fresh:
+        match = early.pop(failure["check"], None)
+        if match is not None:
+            failure.update(id=match["id"], early_detected_at=match["detected_at"], early_unit=match["unit"])
+            match["settled"] = "reused by final " + failure["native_result"]
+    for match in early.values():
+        verdict = result["cases"].get(match["check"].split("/", 1)[1])
+        match["settled"] = (f"superseded: final {verdict}" if verdict
+                            else "superseded: final result omitted this check")
+    return list(early.values())
 
 
 def launch_rca(path: Path, launcher: list[str]) -> None:
@@ -1529,6 +1603,10 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             def record(result):
                 results.append(result)
                 fresh = failed_cases(state, [result])
+                for match in settle_early(state, result, fresh):
+                    if not launcher:  # only the agent started an RCA it must stop
+                        print(f"DEPLOY_GATE_EARLY_SUPERSEDED gate={match['gate']} check={match['check']} "
+                              f"id={match['id']} {match['settled']}: stop its /RCA", flush=True)
                 state["live_failures"].extend(fresh)
                 write(directory / "cycle.json", state)
                 # Publish and dispatch each failure while healthy siblings run.
@@ -1538,10 +1616,35 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                             and path.stem in {f["id"] for f in fresh}):
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
 
+            offsets = {}
+            def scan(running):
+                # A still-running gate's first failing test opens its occurrence and RCA now.
+                for gate in running:
+                    path = (directory / "attempts" / str(state["round"]) / state["phase"] / gate["name"]
+                            / "progress.jsonl")
+                    rows, offsets[gate["name"]] = progress.read_new(path, offsets.get(gate["name"], 0))
+                    opened = early_failures(state, gate, rows, directory)
+                    if opened:
+                        write(directory / "cycle.json", state)
+                    for occurrence, path, row in opened:
+                        if launcher:
+                            # The cycle owns this RCA: launch it now; the deploy agent is not asked to.
+                            if not CANCEL.is_set():
+                                launched.append(rc_pool.submit(launch_rca, path, launcher))
+                        else:
+                            print(progress.describe(gate["name"], row, check=occurrence["check"],
+                                                    occurrence=occurrence["id"], request=str(path))
+                                  + " (start /RCA on this request now)", flush=True)
+                    if not launcher and opened and len([f for f in state.get("early_failures", [])
+                                                        if f["gate"] == gate["name"] and f.get("round") == state["round"]]) >= EARLY_LIMIT:
+                        print(f"DEPLOY_GATE_EARLY_LIMIT gate={gate['name']} limit={EARLY_LIMIT}: "
+                              "further failures of this gate arrive with its result", flush=True)
+
             futures = {submit(gate): gate for gate in selected if gate is not held}
             pending = set(futures)
             while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                done, pending = wait(pending, timeout=EARLY_POLL_SECONDS, return_when=FIRST_COMPLETED)
+                scan([futures[f] for f in pending])
                 for future in done:
                     gate = futures[future]
                     try:

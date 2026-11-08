@@ -1,0 +1,100 @@
+{
+ "failures": [
+  {
+   "id": "1c81a048dad44bc08ac9be3ac090e7ec",
+   "native_result": "FAIL",
+   "check": "backend-coverage-blackbox/blackbox:report-bug",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-16vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_backend.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "233012993bee46eb48c9f5aafbb9c34ce2ac8579",
+    "digest": "fcef82746b3671a2de03f1c3dea9d357ae310522f6741dc0706ea883b6cd3671"
+   },
+   "attribution": "NOT_INTRODUCED",
+   "description": "blackbox:report-bug: POST /report-bug/screenshots -- signed URL serves the image: fetch failed (Blacksmith runner)",
+   "evidence": "Gate: NOT_INTRODUCED. PR #1723 changes no report-bug file (branch diff vs origin/main: GitHub token pool, cloudbench token resolvers, docs). The same domain passes locally on the exact source 233012993 (bash scripts/run-blackbox-tests.sh report-bug -> PASS report-bug 5.4s); the failure is a network fetch of the signed storage URL on the runner. Native log: /home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/blackbox-run-shard2/report-bug.log",
+   "post_merge": {
+    "test": "backend-coverage-blackbox/blackbox:report-bug",
+    "command": [
+     "/home/boxes/rose/agents/venv/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_github.py",
+     "--runner",
+     "blacksmith-16vcpu-ubuntu-2404",
+     "--worker-script",
+     "deploy_test_backend.py",
+     "--worker-root",
+     "/home/runner/_work/rose/rose",
+     "--deadline-seconds",
+     "14400"
+    ],
+    "scope": "back-end/src/tests/blackbox/report-bug.blackbox.ts screenshot upload signed-URL fetch on Blacksmith deploy runners",
+    "error": "FAIL POST /report-bug/screenshots -- signed URL serves the image: fetch failed",
+    "source": "233012993bee46eb48c9f5aafbb9c34ce2ac8579",
+    "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/backend-coverage-blackbox/remote-artifact/files/back-end/coverage/blackbox-run-shard2/report-bug.log"
+   }
+  },
+  {
+   "id": "e1e4a84784fc4e4192b3dc3af8a842ad",
+   "native_result": "FAIL",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "233012993bee46eb48c9f5aafbb9c34ce2ac8579",
+    "digest": "fcef82746b3671a2de03f1c3dea9d357ae310522f6741dc0706ea883b6cd3671"
+   },
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/test-mass-agent-run-0: evaluator t7-schema-task-complete FAILED (Task Complete card with empty required outputs)",
+   "evidence": "Gate: NOT_INTRODUCED. The mass-agent task runs the agents harness fully demo-cached; PR #1723 changes no agents runtime, prompt or harness file (its branch diff is the backend GitHub token pool, scripts/github_token_pool.py, cloudbench token resolvers and docs). The same task passed on 7b243b4ec (same branch delta) in the previous sweep; source between the two runs differs only by main merges. Agent aa599db4-7f18-4632-b1bb-94182d8e5d99. Native receipt: /home/boxes/rose/.context/deploy-cloud/2a9b1212f6cda8df3659a7d01a493ff30a2d20ff5b10f355c23feaa49c766d26/runs/20261107-214410-2456332/test-mass-agent-run-0/cloudbench-run.json",
+   "post_merge": {
+    "test": "smoke/test-mass-agent-run-0",
+    "command": [
+     "/home/boxes/rose/agents/venv/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "agents mass-agent smoke task test-mass-agent-run-0, evaluator t7-schema-task-complete",
+    "error": "Declared evaluator t7-schema-task-complete failed: FAIL T7: messages[1846] is a FINISHED first-level GP Task Complete card with required opportunities_for_aman and engagement_approach outputs set to empty strings. Its typed output count of 14 does not establish populated values. Verdict saved and validated at /home/user/output/judgment.json; handoff written to /home/user/.rose/handoff.json.",
+    "source": "233012993bee46eb48c9f5aafbb9c34ce2ac8579",
+    "evidence": "/home/boxes/rose/.context/deploy-cloud/2a9b1212f6cda8df3659a7d01a493ff30a2d20ff5b10f355c23feaa49c766d26/runs/20261107-214410-2456332/test-mass-agent-run-0/cloudbench-run.json"
+   }
+  },
+  {
+   "id": "ccdbfe7842494724b73d3fc815557992",
+   "native_result": "FAIL",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "233012993bee46eb48c9f5aafbb9c34ce2ac8579",
+    "digest": "fcef82746b3671a2de03f1c3dea9d357ae310522f6741dc0706ea883b6cd3671"
+   },
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); native row SKIPPED under the standing release-stall policy",
+   "evidence": "Gate: NOT_INTRODUCED. Exact standing AgentCard release stall: purchase HELD, walletFunding RECLAIMING, card card_a88f8b5cfe4eb903708bbb80 CLOSED balance 0, org transfer owt_4eddd3bb49daee1a1c3feb42 consumed transferredCents=4396 releasedCents=0. This PR does not touch payments. Unreleased 4396 cents stays a followup. Native receipt: /home/boxes/rose/.context/deploy-cloud/2a9b1212f6cda8df3659a7d01a493ff30a2d20ff5b10f355c23feaa49c766d26/runs/20261107-214410-2456367/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "f9f617f3ddf86d6530eb278a7d1ee0376f35d1fc8ac903bda176c561f66b564f",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_4eddd3bb49daee1a1c3feb42\", \"cardId\": \"card_a88f8b5cfe4eb903708bbb80\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py d1c1940d-e76f-4992-86d3-f66c95b80e45 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "evidence": "native SKIPPED row agent-payment-abandonment, transfer owt_4eddd3bb49daee1a1c3feb42 consumed releasedCents=0",
+    "confirmed_at": 1794089517.2939525
+   }
+  }
+ ]
+}

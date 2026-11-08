@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "7b243b4ec680bad960deca3e8dcf091cab3cc2e5",
+      "status": "completed",
+      "started_at": "2026-11-07T17:58:03.890815+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-07T17:58:49.904225+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6678287915 updated 2026-11-07T17:58:16Z naming commit 7b243b4ec; check run 128482205520 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-07T17:58:49.898731+00:00",
+        "issue_comment_id": 6678287915,
+        "issue_comment_updated_at": "2026-11-07T17:58:16Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 128482205520,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    },
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "233012993bee46eb48c9f5aafbb9c34ce2ac8579",
+      "status": "completed",
+      "started_at": "2026-11-07T21:24:52.710408+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-07T21:25:17.740612+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6678287915 updated 2026-11-07T21:25:05Z naming commit 233012993; check run 128533371393 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-07T21:25:17.739392+00:00",
+        "issue_comment_id": 6678287915,
+        "issue_comment_updated_at": "2026-11-07T21:25:05Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 128533371393,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    },
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "55524eb889cbb86f1ee351c336d324d46132ee44",
+      "status": "completed",
+      "started_at": "2026-11-07T22:57:34.451844+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-07T23:29:16.245375+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6678287915 updated 2026-11-07T22:58:00Z naming commit 55524eb88; check run 128555374477 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-07T23:29:16.244128+00:00",
+        "issue_comment_id": 6678287915,
+        "issue_comment_updated_at": "2026-11-07T22:58:00Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 128555374477,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    },
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "a48ed602ffa33b395a78f134350d779ba70446b6",
+      "status": "completed",
+      "started_at": "2026-11-08T01:46:22.524025+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-08T01:48:14.614880+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6678287915 updated 2026-11-08T01:46:52Z naming commit a48ed602f; check run 128594001966 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-08T01:48:14.612993+00:00",
+        "issue_comment_id": 6678287915,
+        "issue_comment_updated_at": "2026-11-08T01:46:52Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 128594001966,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    }
+  ]
+}

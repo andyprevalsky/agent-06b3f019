@@ -87,6 +87,18 @@ workspace_system_db_name() {
   printf 'victoria_%s\n' "$hint"
 }
 
+# The database an already-running stack's backend reads, from its run.sh
+# manifest (.database.name; run.sh writes LOCAL_DB_NAME, default `victoria`).
+# A runner that adopts that stack must seed fixtures there: a Prisma-seeded row
+# in any other database is invisible to the backend under test.
+stack_manifest_db_name() {
+  local manifest="${1:-}" name
+  [[ -f "$manifest" ]] || return 1
+  name="$(jq -r '.database.name // "victoria"' "$manifest" 2>/dev/null)" || return 1
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$ ]] || return 1
+  printf '%s\n' "$name"
+}
+
 # Create the workspace database on system Postgres when it is missing.
 # Idempotent and race-safe: a concurrent creator winning is success.
 ensure_workspace_system_db() {

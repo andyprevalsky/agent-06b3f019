@@ -1,0 +1,326 @@
+{
+ "failures": [
+  {
+   "id": "3e9af176162944e99e8a8dbc4b54c53e",
+   "check": "frontend-coverage-blackbox/frontend-coverage-blackbox",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-4vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "front-end/src/tests/gate-progress/vitestReporter.ts imported types from 'vitest/node' inside tsconfig.app.json, changing jest-dom matcher resolution: tsc TS2322 at terminal-components.blackbox.tsx:2677/2683/2689, so test:coverage exited 2 before tests ran",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/frontend-coverage-blackbox remote-artifact log; bisect: tsc clean without gate-progress files, 3 TS2322 with only vitestReporter.ts; fix 93c17041f1 tsc clean, 14/14 reporter tests"
+  },
+  {
+   "id": "abe7d35ca1e140988d9b61f57a498f8f",
+   "check": "semantic-stack/semantic-stack",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "the deploy coordinator owns every gate failure on its path and the user asked to remove cross-deploy bottlenecks; fixed in this deploy (2c36501e57)",
+   "assigned_evidence": ".context/deploy-pipeline/attempts/2/initial/semantic-stack/remote-artifact/files/.context/deploy-smoke.log: ERR_NGROK_334 rose-rose.ngrok.app online elsewhere, 3 trycloudflare tunnels never routed; run 42407943006",
+   "description": "every deploy's gate VM derives the same reserved ngrok domain rose-rose.ngrok.app; another session held it and the cloudflared fallback never routed, so the stack exited before readiness (pre-existing on main)",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/semantic-stack/remote-artifact/files/.context/ngrok.log ERR_NGROK_334; deploy-smoke.log 'No public tunnel provider could serve :12001'"
+  },
+  {
+   "id": "3548fc99c4564deea8f8afed5544b2bc",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "backend-coverage-sharded fixture copied blackbox/run.ts without the ../helpers/gateProgress module this branch made it import (MODULE_NOT_FOUND); reported early 22 s after the suite ended",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/deploy-command-structural/progress.jsonl suite=backend-coverage-sharded FAIL; local repro scripts/tests/backend-coverage-sharded.test.sh rc=1 on 18248b41, rc=0 x5 with fix 1a8acac1da"
+  },
+  {
+   "id": "7bcb62d7470d421d85f63ecb75ed2c20",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "mass-agent's mandatory autoscaler was denied a worker clone by the stale 56-Machine default (task itself REAL PASS), so the controller exited 1",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[test-mass-agent-run-0]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "be4af276c06d4bf4822e84952925e3b4",
+   "check": "smoke/chat-mode",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[chat-mode]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "bf4267eac96449c49b30867238d1b201",
+   "check": "smoke/spawn-sub-agents",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[spawn-sub-agents]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "820147c9160f403c9a6c83d48bfbe445",
+   "check": "smoke/parallel-tool-calls",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[parallel-tool-calls]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "f5ec5893dff64cd2ba24a5ad9cfb8fe8",
+   "check": "smoke/background-agent-message-smoke",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[background-agent-message-smoke]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "a596977bf44a4976bf032c19d5f9a0cf",
+   "check": "smoke/claude-code-agent",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[claude-code-agent]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "533e59fe31da4f5d9da0691b1773ec55",
+   "check": "smoke/browser-smoke",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[browser-smoke]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "9642b113798e47c4b73d0028f50427c8",
+   "check": "smoke/agent-payment-test-shop",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[agent-payment-test-shop]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "03f999c2ac4342c68ea4df6a0c196944",
+   "check": "smoke/agent-payment-setup-resume",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[agent-payment-setup-resume]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "8dc3e130dfd944f692a1e53f65feccdd",
+   "check": "smoke/agent-payment-idempotent-abandonment",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[agent-payment-idempotent-abandonment]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "a5b695d0dfe54221870ba0029e71aa08",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[agent-payment-abandonment]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "c4751615cb0a45ada702627b433507d7",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[browser-biometrics-webdecoy]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  },
+  {
+   "id": "7e8810969ecf41dd81e44376c3691ab9",
+   "check": "smoke/agent-payment-new-user-journey",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "18248b411e2e5e4fc23f516b54dc10cf61cc3291",
+    "digest": "0f41f02e8ea78388df681fc316bc4d6da6b83e00fd24baf96e1e6e9d69b90e00"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "assigned_reason": "fixed in this deploy: reserve_worker_machine_slot still defaulted CLOUDBENCH_APP_MACHINE_CEILING to 56 after 331fab7412 (PR #1751) raised the startup guard to 300",
+   "assigned_evidence": ".context/deploy-cloud/86621f834e796ce0c50383d1b7f13396b8d3923bc4f1ccb4ce660110e793928d/runs/20261107-200732-608830/test-mass-agent-run-0/autoscaler.log: 'dynamic worker capacity denied: 66 app Machines + 0 reserved + 1 requested > ceiling 56'",
+   "description": "UNVERIFIED because the smoke gate was incomplete after test-mass-agent-run-0's controller exited 1 (stale autoscaler ceiling); this task's native row is in the gate evidence",
+   "evidence": ".context/deploy-pipeline/attempts/2/initial/smoke/result.json evidence[agent-payment-new-user-journey]; owned clones verified destroyed (0 of 15 present in navi-whisper-lux-bench at 20:40Z)"
+  }
+ ]
+}
