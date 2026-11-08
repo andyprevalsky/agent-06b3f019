@@ -1,0 +1,6 @@
+DEPLOY_PRODUCTION START sha=79a43f600a31 changed=11 lanes=agentcard,semantic
+[agentcard]     🔥 INFRA ERRORS (2 total across tree):
+[agentcard]     🔥 INFRA ERRORS (10 total across tree):
+[agentcard]     🔥 INFRA ERRORS (20 total across tree):
+[agentcard]     🔥 INFRA ERRORS (20 total across tree):
+[agentcard]     ❌ agent-payment-production-abandonment: ERROR - RuntimeError: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.stripeHold.livemode must be true for a production lifecycle; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={"status": "CLOSED", "balanceCents": 0}, orgTransfer={"id": "owt_c2b13f07dbdf80924a592e78", "cardId": "card_0c3718a71719dbbedc9f8b00", "status": "consumed", "transferredCents": 100, "releasedCents": 0}
