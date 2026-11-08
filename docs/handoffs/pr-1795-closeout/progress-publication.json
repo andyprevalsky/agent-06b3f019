@@ -1,15 +1,15 @@
 {
   "primary_merge": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
   "status": "NOT_SHIPPED",
-  "as_of": 1794139176.0378907,
+  "as_of": 1794139905.2704346,
   "visual": {
     "schemaVersion": 1,
     "ok": true,
-    "artifactId": "vis_12ff6514eb32ee68442bf471da67763e",
+    "artifactId": "vis_9de047c546e8fc937ed752fdd999af37",
     "title": "Code-session deploy progress",
-    "url": "https://boxes.dev/visuals/vis_12ff6514eb32ee68442bf471da67763e",
-    "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_12ff6514eb32ee68442bf471da67763e)",
-    "sizeBytes": 59636
+    "url": "https://boxes.dev/visuals/vis_9de047c546e8fc937ed752fdd999af37",
+    "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_9de047c546e8fc937ed752fdd999af37)",
+    "sizeBytes": 60057
   },
   "native_ready": false,
   "records_pr": 1822,
@@ -28,15 +28,16 @@
     "override_granted": false,
     "owner_disposition": "holding for user direction; no further actions reported",
     "root_resolution": "existing scope clarified for bounded reads; no duplicate lookup, payment action, synthetic ACK, or guard bypass",
-    "next_action": "single12:10 recovery-decision check; finish only on actual canonical merge plus nativeREADY and reviewed records merge"
+    "next_action": "await material owner recovery or canonical merge notification; no further timer or duplicate run"
   },
-  "scheduled_resume": {
-    "complete": false,
-    "native_readiness": "NOT_READY",
-    "reason": "canonical checker fix remains unmerged; independent smoke custody unresolved",
-    "scheduled_check_id": "wd8ex1zp6hevx2a23df2eggwqd8hvqtq",
-    "scheduled_at": "2026-11-08T12:10:00Z",
-    "monitoring_limit": "one recovery-decision check; no repeating poll while owner awaits user direction"
-  },
-  "terminal_publication_metadata": true
+  "terminal_publication_metadata": true,
+  "goal_status": "blocked",
+  "last_recovery_check": {
+    "check_id": "wd8ex1zp6hevx2a23df2eggwqd8hvqtq",
+    "checked_at": "2026-11-08T12:10:20Z",
+    "result": "BLOCKED_UNCHANGED",
+    "canonical_pr": "OPEN, d140cadb, unmerged",
+    "owner_status": "idle awaiting direction",
+    "rescheduled": false
+  }
 }
