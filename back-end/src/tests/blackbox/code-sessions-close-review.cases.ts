@@ -12,6 +12,56 @@ import { CodeSessionBusyError, resolveSpawnCodeSession } from '../../providers/c
 import { barrier, fixture, type Context } from './code-sessions-close-confirmation.cases';
 
 export function registerCloseReviewCases(ctx: Context): void {
+  test('close confirmation wrapper: retries transaction admission without replaying pause', async (t) => {
+    const f = await fixture(ctx);
+    const transaction = prisma.$transaction.bind(prisma);
+    let attempts = 0;
+    t.mock.method(prisma, '$transaction', async (...args: Parameters<typeof transaction>) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('Unable to start a transaction in the given time');
+      assert.equal(args[1]?.timeout, attempts === 2 ? 65_000 : 10_000);
+      return transaction(...args);
+    });
+    try {
+      const result = await closeClaudeCodeSession(f.task.id);
+      assert.equal(result.codeSession?.state, 'PAUSED');
+      assert.equal(attempts, 3, 'retry admission once, then finalize once');
+      assert.equal(f.fake.calls.paused, 1);
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
+  test('close confirmation wrapper: retryable-looking failure after dispatch is never replayed', async (t) => {
+    const f = await fixture(ctx);
+    const transaction = prisma.$transaction.bind(prisma);
+    let attempts = 0;
+    t.mock.method(prisma, '$transaction', async (...args: Parameters<typeof transaction>) => {
+      attempts += 1;
+      return transaction(...args);
+    });
+    f.fake.sandbox.pause = async (options) => {
+      f.fake.calls.paused += 1;
+      assert.equal(options?.requestTimeoutMs, 60_000);
+      throw Object.assign(new Error('fixture connection lost after pause dispatch'), {
+        code: 'P2024',
+      });
+    };
+    t.mock.method(Sandbox, 'getInfo', async () => ({ state: 'running' }));
+    try {
+      await assert.rejects(
+        closeClaudeCodeSession(f.task.id),
+        /connection lost after pause dispatch/
+      );
+      assert.equal(attempts, 1, 'an entered transaction must never replay');
+      assert.equal(f.fake.calls.paused, 1);
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /unconfirmed/);
+      assert.equal(f.fake.calls.paused, 1, 'reconciliation only observes the uncertain pause');
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
   test('close confirmation review: transaction admission failure before pause dispatch can retry', async (t) => {
     const f = await fixture(ctx);
     const transaction = prisma.$transaction.bind(prisma);

@@ -5,7 +5,7 @@ import mime from 'mime-types';
 import { CODE_AGENT_HANDOFF_PATH, CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
 import { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
 import { randomUUID } from './crypto';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
 
 export { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
@@ -222,7 +222,7 @@ async function runClaudeCodeClose(
     // Return the same JSON value the receipt stores, including on the first call.
     receipt.result = JSON.parse(JSON.stringify(result)) as CloseResult;
     receipt.complete = true;
-    await prisma.$transaction(async (tx) => {
+    await runTransactionWithRetry(async (tx) => {
       await writeReceipt(tx, true);
       if (paused !== undefined) {
         const released = await tx.codeSession.updateMany({
@@ -266,7 +266,7 @@ async function runClaudeCodeClose(
     owned: CodeSessionRow,
     confirm: () => Promise<boolean>
   ): Promise<void> => {
-    await prisma.$transaction(
+    await runTransactionWithRetry(
       async (tx) => {
         await tx.$queryRaw`SELECT key FROM "SharedEphemeralState"
         WHERE namespace = 'serialized-lock' AND key = ${`code-session-close:${taskId}`}

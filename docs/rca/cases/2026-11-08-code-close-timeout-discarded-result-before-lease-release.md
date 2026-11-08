@@ -159,6 +159,19 @@ missing result rather than inventing one. Native CLI request dumps are not
 captured by Rose's dump pipeline; native transcript events and the last retained
 root execute_loop dump are preserved as distinct evidence.
 
+Deploy integration verification found an introduced structural failure on
+02fb9a4993d3: the two new raw interactive transactions bypassed the canonical
+runTransactionWithRetry policy. Native layer-deps output was 2140 passing / 1
+failing check, naming finish and confirmPause. Both now use that existing helper,
+which retries only transaction-start failures before callback entry and never
+replays an entered callback. The explicit 65-second transition bound remains.
+The original 15 close tests plus two wrapper regressions pass five unchanged
+runs (17/17 each); the canonical full structural command, local-close 10/10 and
+transaction policy 16/16 pass. Refreshed independent review
+rca-0874662a-close-wrapper is GROUNDED with Code PASS; complete mandatory runtime
+diff SHA256 97304e646824a7f4c5661fca65b5aaae8894d29f8a1b23bf68f6cf73cde3a077.
+No structural exemption or guard suppression was added.
+
 ## Human feedback
 
 The user required reading other active bug threads, including Bugs and Bug Report
