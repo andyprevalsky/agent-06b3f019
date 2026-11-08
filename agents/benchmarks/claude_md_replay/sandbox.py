@@ -28,6 +28,9 @@ HONEYPOT_HOST = "127.0.0.77"
 SHIM_PYTHON = "/usr/bin/python3"
 LOCKFILES = {"agents/venv": "agents/requirements.txt"}
 SECRET_KEY_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PRIVATE", "AUTH")
+# Read at import time but absent from .env.example (back-end/src/providers/openrouter.ts); without
+# them the backend, and so every backend blackbox, cannot boot in the sandbox.
+REQUIRED_DUMMY_KEYS = {"back-end": ("OPENAI_API_KEY",)}
 GIT_USER = ("Replay Agent", "replay-agent@example.invalid")
 
 
@@ -266,6 +269,8 @@ def write_dummy_envs(repo: Path, honeypot_url: str, canary: str) -> dict[str, li
         example = pkg / ".env.example"
         rows = _env_keys(example) if example.is_file() else []
         values = {key: dummy_value(key, value, canary) for key, value in rows}
+        for key in REQUIRED_DUMMY_KEYS.get(package, ()):
+            values.setdefault(key, dummy_value(key, "", canary))
         if package in ("back-end", "agents"):
             values["DATABASE_URL"] = honeypot_url
             values["DIRECT_URL"] = honeypot_url
@@ -327,6 +332,10 @@ def snapshot_tree(repo: Path, exclude: tuple[str, ...] = ()) -> str:
     """Tree id of the working tree (tracked + untracked, not ignored) without touching the real index."""
     index = repo / ".git" / f"replay-snapshot-{os.getpid()}-{time.monotonic_ns()}.index"
     env = {"GIT_INDEX_FILE": str(index)}
+    # git 2.43 exits 1 when an exclude pathspec names an ignored path; ignored paths stay out anyway.
+    exclude = tuple(
+        p for p in exclude if subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--no-index", "--", p], capture_output=True).returncode != 0
+    )
     try:
         git(repo, "read-tree", "HEAD", env=env)
         git(repo, "add", "-A", "--", ".", *[f":(exclude){p}" for p in exclude], env=env)

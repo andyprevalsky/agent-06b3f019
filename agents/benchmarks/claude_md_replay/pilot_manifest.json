@@ -35,7 +35,7 @@
       "prompt": "Bug in the backend grep API (the `/grep` route in back-end/src/domains/data). Unknown filter keys are normally rejected with 400 INVALID_GREP_PARAM, but a filters object parsed from JSON with a `__proto__` key is accepted with 200. Worse, `{\"__proto__\": {\"path\": \"calendar/a@example.com/2026-11-02\"}}` makes the search behave as if a calendar path filter had been passed. Fix it.",
       "test_files": ["back-end/src/tests/blackbox/data-grep-contract.cases.ts"],
       "test_commands": ["cd back-end && bash scripts/run-blackbox-tests.sh data-grep"],
-      "test_env": {"CONDUCTOR_WORKSPACE_NAME": "replay-pr-1700", "CONDUCTOR_PORT": "4710"},
+      "test_env": {"CONDUCTOR_WORKSPACE_NAME": "replay-pr-1700", "CONDUCTOR_PORT": "4710", "BACKEND_CODEX_TOKEN_SYNC_SKIP": "1"},
       "test_timeout_seconds": 1200,
       "deps_link": ["node_modules", "back-end/node_modules"],
       "rubric": [

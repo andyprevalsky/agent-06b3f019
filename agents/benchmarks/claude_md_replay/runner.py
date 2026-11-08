@@ -8,6 +8,7 @@ Differences from the parity raw leg, on purpose: the default toolset is allowed 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import time
@@ -22,6 +23,33 @@ DEFAULT_MODEL = parity.DEFAULT_MODELS["claude"]
 CREDENTIAL_MODES = ("env", "lease", "openrouter")
 INIT_KEYS = ("cwd", "model", "tools", "permissionMode", "claude_code_version", "memory_paths", "slash_commands", "agents", "skills", "output_style")
 
+
+
+USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def cumulative_usage(summary: dict[str, Any], transcript: str) -> dict[str, Any]:
+    """Sum turns and tokens over every `result` event.
+
+    A session that resumes after a background-task notification emits one result per resume; the shared
+    parity summary keeps only the last one, which undercounts usage. Cost is already cumulative.
+    """
+    results = []
+    for line in transcript.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            results.append(event)
+    if len(results) < 2:
+        return summary
+    merged = dict(summary)
+    merged["num_turns"] = sum(int(e.get("num_turns") or 0) for e in results)
+    for key in USAGE_KEYS:
+        merged[key] = sum(int((e.get("usage") or {}).get(key) or 0) for e in results)
+    merged["result_events"] = len(results)
+    return merged
 
 def claude_argv(cli_bin: str, model: str, effort: str, repo: Path, prompt: str, max_budget_usd: Optional[float]) -> parity.CliCommand:
     command = parity.cli_command("claude", model, repo, prompt, cli_bin=cli_bin, effort=effort)
@@ -107,7 +135,7 @@ async def run_claude(
     )
     duration = round(time.monotonic() - started, 1)
     (paths.root / "trace.jsonl").write_text(transcript)
-    summary = parity.summarize_transcript("claude", transcript)
+    summary = cumulative_usage(parity.summarize_transcript("claude", transcript), transcript)
     return {
         "argv": [a if a != prompt else "<prompt>" for a in command.argv],
         "cli_bin": resolved,

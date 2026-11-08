@@ -11,10 +11,12 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 ## Priorities
 
 - Stay on the assigned goal and its validation criteria, and don't go down rabbit holes.
+- Make the smallest change that meets the goal: no speculative abstractions, compatibility shims, unrelated refactors or extra files.
 - When an error appears, triage it the way `/deploy` does (`.claude/shared/deploy-failure-policy.md`): fix what your change introduced or your goal targets, hand off an evidenced not-introduced failure as a repair `/goal`, and treat an unattributed one as blocking; "pre-existing", "flaky" and "infrastructure" are never evidence (rules 16, 24).
 - Treat each new user message as added acceptance criteria unless it cancels one, and before claiming done validate against the latest combined set, reporting anything unmet or unverified.
 - Own "make X work in prod" end to end: check `git log --all` and open PRs for an in-flight fix, then reproduce, fix the root cause and rerun the real gate until it is green (rule 0a).
-- Build approval-gated changes now and queue their approvals for the start of `/deploy`; a pending approval blocks only its own action, and infra fixes need none (rule 5).
+- Build approval-gated changes (prompts, Zod schemas, harness behavior) now and queue their approvals for the start of `/deploy`; a pending approval blocks only its own action, and infra fixes need none (rule 5).
+- A benchmark definition, pass-criteria or timeout change is never built while it waits for approval: propose it, leave it undone and list it at the end (rule 25).
 - Leave a destructive or irreversible action, or spend beyond what was authorized, undone and list it for the user at the end instead of asking mid-run.
 - Never stop early because you think you are out of context; the conversation is summarized automatically (rule 0).
 - No milestone gain is a signal: if the same blocker survives a checkpoint with no new evidence, change the approach.
@@ -43,7 +45,8 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Never rename a benchmark task `name`; it keys every history ledger.
 - Never inject synthetic user or tool messages or recovery nudges into the planner trajectory, and never add string-matching classifiers to the harness (rules 25a, 25b).
 - Never print or commit a secret, and never rotate or revoke a credential without Andy's explicit OK.
-- Never delete lockfiles or change dependency ranges to make an install work (fallback: `npm ci --workspaces=false` in `back-end/` and `front-end/`).
+- Never delete lockfiles or change dependency ranges to make an install work, and never reinstall dependencies into a `node_modules` or venv linked from another checkout.
+- Never set a Bash tool timeout above 5 minutes; run anything longer in the background and watch it (rule 12).
 - Never treat a user pause as a bug's cause; users pause after noticing a problem (rule 11).
 
 ## Delegation and waiting
@@ -53,7 +56,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - If a parent setting cannot be verified, fall back to medium effort and the fastest speed (`ultrafast` on boxes.dev); never claim a setting the platform did not confirm.
 - Every agent-created thread title starts with `--ai--`; the child sets and verifies it at start.
 - Deploy test-repair handoffs follow `.claude/shared/deploy-failure-policy.md` (other devbox, Bugs folder, high effort, standard speed).
-- Every background task has an owner who watches it until exit and cleanup: poll every 10 s for the first 60 s (log growth and `ps -p`), then every 60 s, stopping at completion; keep bash timeouts at 5 minutes or less (rules 1, 12, 19).
+- Every background task has an owner who watches it until exit and cleanup: poll every 10 s for the first 60 s (log growth and `ps -p`), then every 60 s, stopping at completion (rules 1, 19).
 - A coordinating parent never sleeps more than 15 minutes, wakes on worker results, sends the user the current scorecard every 15 minutes, and does not repeat a verified owner's polling, unchanged reports or nudges.
 - User questions and parent discussion never pause workers; stop one only on a user cancel, its own safety boundary or a coordinated reassignment.
 - Sub-agents batch routine status and notify the parent only on an actionable milestone, failure or blocker; compute refs and hashes before sending a handoff, never placeholders.
@@ -74,7 +77,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Write the assertion first: designing the test is the main work, untested behavior is assumed broken, and a demo or eyeballing is not proof (rule 2).
 - Work is incomplete until a test in a consistently run `/deploy` path asserts the behavior; every bug fix lands its reproduction test there (rule 1).
 - Register each regression in its existing owning suite and verify it runs; a new verification suite needs human approval.
-- Before finalizing a new test, run it five consecutive times with unchanged test code.
+- Before finalizing a new test, run that test (not its whole suite) five consecutive times with unchanged test code.
 - Follow `/RCA` (`docs/root-cause-analysis.md`) for every bug: no root cause without a local repro that failed and now passes; a benchmark failure needs `scripts/run-bench --local <task>` to fail before and pass after, except that `/descend`'s post-approval cloud reruns are its outcome proof (rules 6, 17).
 - Validate credentials and integrations with the existing blackbox test (for example `testSmoke_claudeCodeAnswersQuestion`), extending it if needed, never with ad-hoc curl or scripts (rule 18).
 - When testing a new integration, add no fallback paths; they hide whether the primary path works (rule 8).

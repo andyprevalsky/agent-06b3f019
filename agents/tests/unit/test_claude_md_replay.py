@@ -176,6 +176,21 @@ def test_link_deps_requires_matching_lockfile(source, tmp_path):
     assert sandbox.lockfile_for("front-end/node_modules") == "front-end/package-lock.json"
 
 
+def test_snapshot_tree_skips_linked_deps_that_gitignore_covers(source, tmp_path):
+    deps = tmp_path / "deps"
+    (deps / "node_modules" / "pkg").mkdir(parents=True)
+    paths = RunPaths(tmp_path / "run")
+    driver.prepare(_task(source), paths, _opts(source, tmp_path))
+    (deps / "package.json").write_text("{}\n")
+    (paths.repo / "package.json").write_text("{}\n")
+    sandbox.link_deps(paths.repo, deps, ("node_modules",))
+    (paths.repo / "app" / "extra.py").write_text("x = 1\n")
+    tree = sandbox.snapshot_tree(paths.repo, ("node_modules",))
+    listed = _git(paths.repo, "ls-tree", "-r", "--name-only", tree).split()
+    assert "app/extra.py" in listed and "package.json" in listed
+    assert not any(p.startswith("node_modules") for p in listed)
+
+
 # ---------------------------------------------------------------------------
 # Mocks
 # ---------------------------------------------------------------------------
@@ -208,7 +223,8 @@ def test_dummy_envs_point_databases_at_the_honeypot(source, tmp_path):
     assert backend["ANTHROPIC_API_KEY"].startswith("rcanaryABC") and agents["BACKEND_API_KEY"].startswith("rcanaryABC")
     assert agents["LOCAL_DB"] == "postgresql://localhost:5432/x"
     assert agents["BACKEND_API_URL"].startswith("http://127.0.0.1:9/")
-    assert prepared["dummy_envs"]["back-end"] == ["ANTHROPIC_API_KEY", "DATABASE_URL", "DIRECT_URL", "PORT"]
+    assert backend["OPENAI_API_KEY"].startswith("rcanaryABC")
+    assert prepared["dummy_envs"]["back-end"] == ["ANTHROPIC_API_KEY", "DATABASE_URL", "DIRECT_URL", "OPENAI_API_KEY", "PORT"]
     assert _git(paths.repo, "status", "--porcelain").strip() == ""
 
 
@@ -425,3 +441,19 @@ def test_calibrate_fails_at_base_and_passes_at_merge(source, tmp_path):
     assert receipt["ok"] is True
     assert receipt["base"]["passed"] is False and receipt["merge"]["passed"] is True
     assert not (tmp_path / "cal" / "pr-1" / "calibrate-base").exists()
+
+
+def test_usage_sums_every_result_event_of_a_resumed_session():
+    from benchmarks.claude_md_replay import runner
+
+    events = [
+        {"type": "result", "num_turns": 5, "usage": {"input_tokens": 10, "output_tokens": 20, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 1}},
+        {"type": "assistant"},
+        {"type": "result", "num_turns": 7, "usage": {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4}},
+    ]
+    transcript = "\n".join(json.dumps(e) for e in events)
+    merged = runner.cumulative_usage({"num_turns": 7, "input_tokens": 1}, transcript)
+    assert merged["num_turns"] == 12
+    assert merged["input_tokens"] == 11 and merged["output_tokens"] == 22
+    assert merged["cache_read_input_tokens"] == 103 and merged["cache_creation_input_tokens"] == 5
+    assert runner.cumulative_usage({"num_turns": 3}, json.dumps(events[0])) == {"num_turns": 3}
