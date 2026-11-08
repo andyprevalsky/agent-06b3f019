@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import deploy_gates as g
+UNPUSHED_SMOKE_REFUSAL = g.unpushed_smoke_refusal  # the real check; Run patches g's copy
 from deploy_test_cycle import digest
 
 PORTS = {'backend-coverage-blackbox': 20000, 'frontend-coverage-blackbox': 20510,
@@ -353,7 +354,9 @@ class Run(Fixture):
         self.codes, self.streamed, self.plan = {}, [], {'gates': [{'name': 'format'}], 'source': {'head': self.head}}
         self.state = self.root / '.context/deploy-pipeline'
         self.selected_with, self.watchers = [], []
-        for name, fake in (('list_selected', self.fake_list_selected), ('stream', self.fake_stream)):
+        self.pushed = []
+        for name, fake in (('list_selected', self.fake_list_selected), ('stream', self.fake_stream),
+                           ('unpushed_smoke_refusal', lambda root, head: self.pushed.append(head))):
             patcher = patch.object(g, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -475,6 +478,39 @@ class Run(Fixture):
         self.assertEqual(0, code)
         self.assertEqual({'current': str(self.root / '.context/deploy-runs/current'), 'active': False},
                          json.loads('\n'.join(out.strip().splitlines()[:-1]))['timing_run'])
+
+    def test_unpushed_head_with_smoke_is_refused_before_workers_plan_or_cycle(self):
+        refusal = f'HEAD {self.head} is not fetchable from origin and cloud smoke is selected; push it first'
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run), patch.object(g, 'unpushed_smoke_refusal', return_value=refusal) as check:
+                code, out = self.go(dry_run=dry_run)
+                self.assertEqual(2, code)
+                self.assertEqual(f'DEPLOY_GATES BLOCKED head={self.head[:12]} stage=source exit=2: {refusal}',
+                                 out.strip().splitlines()[-1])
+                check.assert_called_once_with(self.root.resolve(), self.head)
+                self.assertEqual([], self.streamed + self.calls)
+                self.assertFalse(self.path('live-probes').exists())
+                for name in ('inventory.json', 'inventory.candidate.json', 'plan.json', 'cycle.json'):
+                    self.assertFalse((self.state / name).exists(), name)
+
+    def test_pushed_check_runs_only_when_smoke_is_selected(self):
+        code, _ = self.go()
+        self.assertEqual((0, [self.head]), (code, self.pushed))
+        self.selection = {'selected': ['format', 'live-probes'], 'quick': ['format'],
+                          'needs_worker': ['live-probes'], 'omitted': []}
+        shutil.rmtree(self.state, ignore_errors=True)
+        self.streamed = []
+        with patch.object(g, 'unpushed_smoke_refusal', side_effect=AssertionError('smoke is not selected')):
+            code, out = self.go()
+        self.assertEqual(0, code, out)
+
+    def test_unpushed_smoke_refusal_reuses_the_adapter_fleet_preflight(self):
+        import deploy_test_cloud
+        with patch.object(deploy_test_cloud, 'origin_fetchable', return_value=True) as fetchable:
+            self.assertIsNone(UNPUSHED_SMOKE_REFUSAL(self.root, self.head))
+        fetchable.assert_called_once_with(self.root, self.head)
+        with patch.object(deploy_test_cloud, 'origin_fetchable', return_value=False):
+            self.assertIn('push it first', UNPUSHED_SMOKE_REFUSAL(self.root, self.head))
 
     def test_overlapping_port_claims_block_before_planning(self):
         self.selection['needs_worker'] = ['live-probes', 'agents-coverage-blackbox']

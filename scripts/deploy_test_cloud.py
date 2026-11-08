@@ -19,6 +19,7 @@ import time
 import cloudbench_provider_headroom as provider_headroom
 from cloudbench_execution_provenance import load_provenance, verify_code_binding
 from cloudbench_result import validate_run_document, validate_run_file
+from deploy_test_cloud_refusal import SOURCE_DIFFERS, unpushed_reason
 from deploy_test_cycle import NAME, ROOT, read, source, write
 from deploy_test_process import cancellation_handlers, run_command
 
@@ -212,6 +213,29 @@ def shared_canary_env(root, environ=os.environ):
                               ('FLEET_INFRA_CANARY_LOCK', 'transaction.lock'))}
 
 
+def origin_fetchable(root, head, environ=None):
+    """Run the exact run-bench-fleet preflight (cloudbench_fetchable_ref, local patch shipping disabled).
+
+    Guests fetch only origin/main ancestors or live origin branch/tag tips. PR #1767 dispatched a
+    merge commit that was not yet pushed: all 13 campaign jobs died in ~4 s at this same check and
+    the coordinator retained an unreconcilable cleanup owner. Same helper, same env, same answer.
+    The helper bounds its own ls-remote; stdout goes to a file so a lingering grandchild cannot
+    hold a pipe open past the timeout.
+    """
+    import tempfile
+    argv = ['bash', '-c', 'source "$1"; cloudbench_fetchable_ref "$2" "$3" 0', 'deploy-fetchable-ref',
+            str(Path(root) / 'scripts/lib/cloudbench-env.sh'), str(root), head]
+    with tempfile.TemporaryFile() as output:
+        try:
+            code = subprocess.run(argv, cwd=root, env=os.environ if environ is None else environ,
+                                  stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                                  timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            return False
+        output.seek(0)
+        return code == 0 and output.read(4096).decode(errors='replace').strip() == head
+
+
 def capacity_admission_env(now, environ=os.environ):
     """Pass this gate's deadline to native Fly capacity admission as an explicit input.
 
@@ -237,7 +261,11 @@ def execute(request, root):
     if source(root) != request['source']:
         if directory.exists() or directory.is_symlink():
             raise ValueError('cloud source differs with an existing request namespace')
-        raise SourceRefusal('cloud source differs from the requested freeze')
+        raise SourceRefusal(SOURCE_DIFFERS)
+    if not origin_fetchable(root, request['source']['head']):
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('unpushed cloud source with an existing request namespace')
+        raise SourceRefusal(unpushed_reason(request['source']['head']))
     runs = directory / 'runs'
     runs.mkdir(parents=True, exist_ok=False)
     width = campaign_width(checks)

@@ -152,6 +152,38 @@ class Cycle(unittest.TestCase):
             self.assertFalse(refusal.refused_before_admission(changed, request, gate, self.root, 2, invalid_process=False))
         self.assertFalse(refusal.refused_before_admission(result, request, gate, self.root, 2, invalid_process=True))
 
+    def test_unpushed_source_refusal_has_no_owner_and_binds_the_requested_head(self):
+        # PR #1767: an unpushed head must end as a typed refusal, never a retained smoke cleanup owner.
+        import deploy_test_cloud_refusal as refusal
+        gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+                'worker_transport': 'benchmark-cloud-cli', 'cwd': str(self.root),
+                'command': [sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')],
+                'case_protocol': True, 'checks': ['one', 'two']}
+        state = copy.deepcopy(self.state)
+        state['input_fingerprints']['smoke'] = 'fixture'
+        def native(argv, **kwargs):
+            request = c.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+            result = {k: request[k] for k in ('token', 'source', 'gate')}
+            result.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                          cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                          native_command=[], fleet_directory=None,
+                          reason=refusal.unpushed_reason(request['source']['head']),
+                          admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+            c.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), result)
+            return 2, False, False, False
+        with patch.object(c, 'run_command', side_effect=native):
+            receipt = c._execute(gate, state, self.directory, self.root)
+        self.assertEqual((receipt['complete'], receipt['status'], receipt['lingering_group']), (False, 'FAIL', False))
+        self.assertEqual(receipt['cases'], dict.fromkeys(gate['checks'], 'UNVERIFIED'))
+        self.assertIsNone(c.receipt_owner('smoke', receipt))
+        self.assertNotIn('cleanup_owner', receipt)
+        request = c.read(Path(receipt['log']).parent / 'request.json')
+        result = c.read(Path(receipt['worker_result']))
+        self.assertTrue(refusal.refused_before_admission(result, request, gate, self.root, 2, invalid_process=False))
+        for reason in (refusal.unpushed_reason('f' * 40), 'push before gates', None):
+            self.assertFalse(refusal.refused_before_admission({**result, 'reason': reason}, request, gate,
+                                                              self.root, 2, invalid_process=False))
+
     def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
         plan = copy.deepcopy(self.plan)
         plan['gates'][1].update(native_cloud=True, case_protocol=True,
@@ -4512,6 +4544,7 @@ class RelayStartupEvidence(unittest.TestCase):
         function=next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='execute')
         calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
         namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
+                       origin_fetchable=lambda _r,_h:True,
                        campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
                        cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
                        capacity_admission_env=lambda _now:{'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH':'fixture'},

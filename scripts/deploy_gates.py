@@ -452,6 +452,20 @@ def list_selected(root: Path, base: str, template: Path) -> dict:
     return selection
 
 
+def unpushed_smoke_refusal(root: Path, head: str) -> str | None:
+    """Cloud smoke guests fetch only pushed commits. Refuse before any worker, plan or cycle starts.
+
+    PR #1767 ran gates on an unpushed `scripts/deploy sync` merge: every smoke job died at run-bench
+    preflight and the cycle kept an unreconcilable cleanup owner, costing a fresh cycle and ~1 h of
+    reruns. Same check as the adapter and run-bench-fleet (deploy_test_cloud.origin_fetchable).
+    """
+    from deploy_test_cloud import origin_fetchable
+    if origin_fetchable(root, head):
+        return None
+    return (f'HEAD {head} is not fetchable from origin and cloud smoke is selected; push it first '
+            f'(git push origin HEAD), then rerun scripts/deploy gates')
+
+
 def factory_event(root: Path, *event: str) -> None:
     """Factory timing boundaries are a hard collection gate: a failed write stops the run."""
     code = subprocess.run([sys.executable, str(root / 'scripts/record_factory_event.py'), 'deploy', *event],
@@ -724,6 +738,10 @@ def run(args, root: Path) -> int:
                 sampler = MemorySampler(target.resolve(), {'coordinator': root}, args.abort_below_mb)
                 sampler.begin()
             selection = list_selected(root, args.base, candidate_template)
+        if CLOUD_GATE in selection['selected']:
+            refusal = unpushed_smoke_refusal(root, head)
+            if refusal:
+                raise Blocked('source', refusal)
         workers = layout(root, head, selection['needs_worker'], args.executor)
         capacity = check_capacity(root, [w for w in workers if w['mode'] != 'remote'])  # remote VMs use no host room
         if not args.dry_run:
