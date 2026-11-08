@@ -74,8 +74,8 @@ resolves only after the engine's write on Linux and pins connect-first order in 
 PrismaClient; `unit-test-child-exit.test.ts` checks real signalled and non-zero children; `coverage-script.test.ts`
 pins the runner wiring.
 
-Evidence after the fix: the two-client repro with connect-first order had 0 SIGSEGV in 9,999 completed runs (a
-tenth-thousandth run was excluded: it failed with `PrismaClient is not a constructor` as `prisma generate` rewrote
+Evidence after the fix: the two-client repro with connect-first order had 0 SIGSEGV in 9,999 completed runs (one
+further run was excluded: it failed with `PrismaClient is not a constructor` as `prisma generate` rewrote
 the client), and the exact test had 0 failures in 1,500 runs. At a 1-in-1,500 rate those 1,500 clean runs alone are
 weak evidence, and they ran at 5 workers where the baseline used 7; the repro and the deterministic probe carry the
 proof. The Blacksmith gate passed on both tested heads once GitHub downloads worked (a first attempt on the earlier
