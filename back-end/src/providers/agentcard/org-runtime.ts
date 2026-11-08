@@ -39,6 +39,18 @@ const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
 const ORG_MCP_TOOL_TIMEOUT_MS = 30_000;
 const ORG_MCP_AUTH_RETRY_ATTEMPTS = 3;
 const ORG_MCP_AUTH_RETRY_DELAY_MS = 250;
+/**
+ * AgentCard intermittently rejects the healthy static client secret with HTTP 401 "Invalid or
+ * expired organization token". The smoke abandonment flap on 2026-11-08 spanned at least ~5.2 s
+ * (04:23:05.7Z to 04:23:10.9Z, interleaved with successes) while the mint before it and the same
+ * abandon 47 s later succeeded on the same credential; the ~1 s auth retry above gave up inside it.
+ * After that unchanged retry, an idempotent read that still gets the provider's HTTP 401 backs off
+ * (1, 2, 4, 8 s, one request each) for up to ~3x that span, also capped by the caller's shared
+ * deadline, before surfacing the 401 — so a sustained outage (2026-10-27) still fails within the
+ * window, at most 4 requests above the previous 6. Mutations never enter this window.
+ */
+const ORG_MCP_READ_AUTH_FLAP_WINDOW_MS = 15_000;
+const ORG_MCP_READ_AUTH_FLAP_BASE_DELAY_MS = 1_000;
 
 /**
  * One rate-limit retry budget, anchored now.
@@ -53,10 +65,17 @@ export function orgRetryDeadlineAtMs(): number {
 }
 
 type FetchLike = typeof fetch;
+/** Time source for the read auth-flap backoff; injectable so tests do not wait in real time. */
+export type AgentCardOrgRuntimeClock = {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+};
 type TokenMcpToolCaller = (
   accessToken: string,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  /** HTTP 401/403 attempts inside one call; defaults to ORG_MCP_AUTH_RETRY_ATTEMPTS. */
+  authRetryAttempts?: number
 ) => Promise<unknown>;
 
 export type AgentCardOrgToolCaller = (
@@ -104,6 +123,15 @@ function looksLikeAuthError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /\b401\b|\b403\b|unauthorized|forbidden|invalid[_ ]token|expired organization token/i.test(
     message
+  );
+}
+
+/** The provider's own HTTP 401 on tools/call, as typed by {@link callOrgMcpTool}. */
+function isProviderUnauthorized(error: unknown): boolean {
+  return (
+    error instanceof AgentCardOrgRuntimeError &&
+    error.code === 'agentcard_org_mcp_unauthorized' &&
+    error.status === 401
   );
 }
 
@@ -326,10 +354,11 @@ async function callOrgMcpTool(
   accessToken: string,
   toolName: string,
   args: Record<string, unknown>,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  authRetryAttempts: number = ORG_MCP_AUTH_RETRY_ATTEMPTS
 ): Promise<unknown> {
   let lastError: AgentCardOrgRuntimeError | undefined;
-  for (let attempt = 1; attempt <= ORG_MCP_AUTH_RETRY_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= authRetryAttempts; attempt += 1) {
     let response: Response;
     try {
       response = await fetchImpl(AGENTCARD_MCP_RESOURCE, {
@@ -432,10 +461,7 @@ async function callOrgMcpTool(
           : 'agentcard_org_mcp_unavailable',
         { status: response.status, error: rpcError, message: parsed.message }
       );
-      if (
-        attempt === ORG_MCP_AUTH_RETRY_ATTEMPTS ||
-        (response.status !== 401 && response.status !== 403)
-      ) {
+      if (attempt === authRetryAttempts || (response.status !== 401 && response.status !== 403)) {
         throw lastError;
       }
       await delay(ORG_MCP_AUTH_RETRY_DELAY_MS);
@@ -508,18 +534,25 @@ export class AgentCardOrgRuntime {
   private readonly inFlightReads = new Map<string, Promise<unknown>>();
   private readonly toolCaller: TokenMcpToolCaller;
   private readonly fetchImpl: FetchLike;
+  private readonly clock: AgentCardOrgRuntimeClock;
 
-  constructor(toolCaller?: TokenMcpToolCaller, fetchImpl: FetchLike = fetch) {
+  constructor(
+    toolCaller?: TokenMcpToolCaller,
+    fetchImpl: FetchLike = fetch,
+    clock: AgentCardOrgRuntimeClock = { now: () => Date.now(), sleep: delay }
+  ) {
     this.fetchImpl = fetchImpl;
+    this.clock = clock;
     this.toolCaller =
       toolCaller ??
-      ((accessToken, toolName, args) =>
-        callOrgMcpTool(accessToken, toolName, args, this.fetchImpl));
+      ((accessToken, toolName, args, authRetryAttempts) =>
+        callOrgMcpTool(accessToken, toolName, args, this.fetchImpl, authRetryAttempts));
   }
 
   /**
    * Calls an organization MCP tool, transparently recovering from the failure modes that are
-   * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once), a throttled
+   * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (a mutation retries once;
+   * an idempotent read backs off within a bounded auth-flap window), a throttled
    * request window (wait for the window to refill, bounded), a structured `{status:"error"}`
    * tools/call result (HTTP 200) reporting a sandbox outage or rate limit, and a read whose
    * text-only `isError` result reports an upstream API-key throttle (retried exactly like a
@@ -558,7 +591,7 @@ export class AgentCardOrgRuntime {
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
       const startedAtMs = Date.now();
       try {
-        const result = await this.callToolOnce(toolName, args);
+        const result = await this.callToolOnce(toolName, args, deadlineAtMs);
         const retryableError = mcpStructuredResultRetryableError(result, toolName);
         if (retryableError !== undefined) throw retryableError;
         // A text-only throttle carries no structured status, so only reads are replayed: it can
@@ -633,13 +666,66 @@ export class AgentCardOrgRuntime {
     );
   }
 
-  private async callToolOnce(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  private async callToolOnce(
+    toolName: string,
+    args: Record<string, unknown>,
+    deadlineAtMs: number
+  ): Promise<unknown> {
+    try {
+      return await this.callToolWithImmediateAuthRetry(toolName, args);
+    } catch (error) {
+      if (!IDEMPOTENT_READ_TOOLS.has(toolName) || !isProviderUnauthorized(error)) throw error;
+      return this.rideOutReadAuthFlap(toolName, args, deadlineAtMs, error);
+    }
+  }
+
+  private async callToolWithImmediateAuthRetry(
+    toolName: string,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
     const accessToken = this.getAccessToken();
     try {
       return await this.toolCaller(accessToken, toolName, args);
     } catch (error) {
       if (!hasClientCredentials() || !looksLikeAuthError(error)) throw error;
       return this.toolCaller(this.getAccessToken(), toolName, args);
+    }
+  }
+
+  /**
+   * Replays an idempotent read through a transient provider HTTP 401, one request per backoff step,
+   * bounded by {@link ORG_MCP_READ_AUTH_FLAP_WINDOW_MS} and by the caller's shared retry deadline so
+   * a looping caller still adds at most one budget. The final rejection propagates untouched.
+   */
+  private async rideOutReadAuthFlap(
+    toolName: string,
+    args: Record<string, unknown>,
+    deadlineAtMs: number,
+    firstError: unknown
+  ): Promise<unknown> {
+    const startedAtMs = this.clock.now();
+    let lastError = firstError;
+    for (let step = 0; ; step += 1) {
+      const waitMs = ORG_MCP_READ_AUTH_FLAP_BASE_DELAY_MS * 2 ** step;
+      const nowMs = this.clock.now();
+      const fits =
+        nowMs - startedAtMs + waitMs <= ORG_MCP_READ_AUTH_FLAP_WINDOW_MS &&
+        nowMs + waitMs <= deadlineAtMs;
+      log.warn('Organization MCP read auth rejected', {
+        tool: toolName,
+        flap_step: step,
+        error: errorMessage(lastError),
+        auth_flap_elapsed_ms: nowMs - startedAtMs,
+        retry_wait_ms: fits ? waitMs : null,
+      });
+      if (!fits) throw lastError;
+      await this.clock.sleep(waitMs);
+      try {
+        return await this.toolCaller(this.getAccessToken(), toolName, args, 1);
+      } catch (error) {
+        if (!isProviderUnauthorized(error)) throw error;
+        lastError = error;
+      }
     }
   }
 
