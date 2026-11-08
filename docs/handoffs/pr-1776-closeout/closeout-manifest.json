@@ -184,5 +184,15 @@
   "rounds": "attempt1 smoke INFRA stop (transient AgentCard 401); attempt2 stale (managed-env sync) with structural flakes; attempt3 initial: agents-coverage live-model flake -> assigned rerun PASS, smoke AgentCard release stall -> resource_skip warning; final sweep smoke idempotent-abandonment timeout -> pending post-merge packet; DEPLOY_GATES PASS head=441dcb32194b gates=14; CodeRabbit cycle 1 findings fixed, cycle 2 clean",
   "timing_outcome": "blocked (not shipped)",
   "flakes": "see evidence/followups.txt item 6"
+ },
+ "outcome_record": {
+  "factory_outcome": "completed recorded 2026-11-08T01:40:01Z (step 15) before deletion readiness",
+  "deletion_ready_at": "about 2026-11-08T06:28Z on main",
+  "premature_scorecard": "vis_e322c03c9992beec805da6ee079ff55c claimed SHIPPED while deletion-check was NOT_READY"
+ },
+ "reliability_followup": {
+  "pr": 1804,
+  "merge_commit": "99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2",
+  "result": "deploy-command-structural PASS on both #1804 rounds; sibling flakes fixed"
  }
 }
