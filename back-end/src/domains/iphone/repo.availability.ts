@@ -3,7 +3,11 @@ import { runTransactionWithRetry } from '../../providers/database';
 import { accountPermitted } from './repo.account';
 import { databaseNow } from './repo.clock';
 import { getNativePhoneTarget } from '../../providers/nativePhoneAttention';
-import { setupState, configurationState, type SetupState } from '../../providers/phoneSetupState';
+import {
+  setupState,
+  configurationProvenanceBound,
+  type SetupState,
+} from '../../providers/phoneSetupState';
 import {
   bootstrapAuthorized,
   connectionDto,
@@ -47,8 +51,8 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
     },
   });
   if (active && !currentBorrower(state, active, agent, taskId)) return disabled;
-  const producerCurrent = await configurationGenerationCurrent(tx, userId, state);
-  if (connectionDto(device, state, true, false).status === 'ready' && producerCurrent)
+  const provenanceBound = configurationProvenanceBound(state);
+  if (connectionDto(device, state, true, false).status === 'ready' && provenanceBound)
     return { enabled: true, source: 'ready' } as const;
   const first = await tx.message.findFirst({
     where: { agentId: agent.id, role: 'USER' },
@@ -68,7 +72,7 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
     )
   )
     return { enabled: true, source: 'bootstrap' } as const;
-  if (state.completedConfiguration && !producerCurrent) return disabled;
+  if (state.completedConfiguration && !provenanceBound) return disabled;
   const lease = await tx.iPhoneLease.findFirst({
     where: {
       deviceId: device.id,
@@ -120,30 +124,5 @@ function currentBorrower(state: SetupState, lease: IPhoneLease, agent: Agent, ta
     attempt.agentId === agent.id &&
     attempt.workflowId === (agent.temporalWorkflowId ?? agent.id) &&
     attempt.firstExecutionRunId === agent.temporalFirstExecutionRunId
-  );
-}
-
-/** Ready configuration remains bound to the setup producer's real execution chain. */
-export async function configurationGenerationCurrent(
-  tx: Transaction,
-  userId: string,
-  state: SetupState
-) {
-  state = configurationState(state);
-  if (state.attempt?.firstExecutionRunId === undefined || state.attempt.firstExecutionRunId === '')
-    return false;
-  // Hold the producer row through admission/stop commit, including when the
-  // current lease belongs to a different agent. Generation replacement and
-  // revocation both update this row and must serialize with this decision.
-  await tx.$queryRaw`SELECT id FROM "Agent" WHERE id = ${state.attempt.agentId}
-    AND "userId" = ${userId} AND "deletedAt" IS NULL FOR SHARE`;
-  const producer = await tx.agent.findFirst({
-    where: { id: state.attempt.agentId, userId, deletedAt: null },
-    select: { temporalWorkflowId: true, temporalFirstExecutionRunId: true },
-  });
-  return (
-    producer !== null &&
-    producer.temporalWorkflowId === state.attempt.workflowId &&
-    producer.temporalFirstExecutionRunId === state.attempt.firstExecutionRunId
   );
 }

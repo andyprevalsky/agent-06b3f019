@@ -9,7 +9,6 @@ import {
   type PhoneConnectionReservation,
 } from '../../providers/phoneConnectionState';
 import * as leases from './repo';
-import { configurationGenerationCurrent } from './repo.availability';
 import { IPhoneError, type Transaction } from './types';
 
 const terminal = ['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED'];
@@ -31,19 +30,18 @@ export async function connection(userId: string) {
     if (!permitted || device?.enabled !== true)
       return connectionDto(device, null, permitted, false);
     const state = setupState(device.setupEncrypted);
-    const dto = connectionDto(
+    const dto = connectionDto(device, state, permitted, false);
+    const owner = await tx.user.findUniqueOrThrow({ where: { userId }, select: { phone: true } });
+    if (state.expectedPhone !== owner.phone) return { ...dto, status: 'not_connected' as const };
+    // A committed device attestation outlives its setup conversation. Only
+    // pending setup requires that reservation's actor to remain available.
+    if (dto.status === 'ready') return dto;
+    return connectionDto(
       device,
       state,
       permitted,
       await activeSetup(tx, userId, currentConnection(state)?.agentId)
     );
-    const owner = await tx.user.findUniqueOrThrow({ where: { userId }, select: { phone: true } });
-    if (
-      state.expectedPhone !== owner.phone ||
-      (dto.status === 'ready' && !(await configurationGenerationCurrent(tx, userId, state)))
-    )
-      return { ...dto, status: 'not_connected' as const };
-    return dto;
   });
 }
 export async function reserve(userId: string, expectedRevision: number, requestKey: string) {
@@ -56,9 +54,8 @@ export async function reserve(userId: string, expectedRevision: number, requestK
     if (state.expectedPhone !== undefined && state.expectedPhone !== owner.phone)
       throw new IPhoneError(409, 'iPhone setup account configuration changed');
     state.expectedPhone = owner.phone;
-    const active = await activeSetup(tx, userId, currentConnection(state)?.agentId);
-    const dto = connectionDto(device, state, true, active);
-    if (dto.status === 'ready' && (await configurationGenerationCurrent(tx, userId, state))) {
+    const dto = connectionDto(device, state, true, false);
+    if (dto.status === 'ready') {
       if (
         currentConnection(state)?.requestKeyHash !== connectionKey(requestKey) &&
         dto.connectionRevision !== expectedRevision
@@ -66,6 +63,7 @@ export async function reserve(userId: string, expectedRevision: number, requestK
         throw new IPhoneError(409, 'iPhone connection changed');
       return { dto, reservation: null, deviceId: device.id };
     }
+    const active = await activeSetup(tx, userId, currentConnection(state)?.agentId);
     const result = reserveConnection(
       state,
       userId,

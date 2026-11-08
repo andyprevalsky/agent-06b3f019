@@ -523,7 +523,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     host_admission = {} if host_admission is None else host_admission
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
         try:
-            if host_admission.get('deadline_monotonic') is not None:
+            if host_admission.get('started') is not False and host_admission.get('deadline_monotonic') is not None:
                 host_timeout = host_admission['deadline_monotonic'] - time.monotonic()
                 if host_timeout <= 0:
                     host_admission.update(started=False, timed_out=True,

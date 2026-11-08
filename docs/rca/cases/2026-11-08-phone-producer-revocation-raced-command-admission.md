@@ -1,7 +1,7 @@
 ---
 id: 2026-11-08-phone-producer-revocation-raced-command-admission
 date: 2026-11-08
-title: A borrowed phone could execute after its setup producer was revoked
+title: Proposed producer revocation policy conflicted with normal phone setup retirement
 surface: back-end
 component: iphone-execution-custody
 classification: our-bug
@@ -18,8 +18,35 @@ tags:
 sources:
   - agent 01a146e7-f644-7c41-a0b1-83dc6e5018b0
 repro: back-end/src/tests/blackbox/iphone-control.continuity.cases.ts
-status: fixed
+status: superseded
 ---
+
+## Policy correction after normal-retirement reproduction
+
+The original report below records the proposed v4 policy, not a confirmed
+requirement that a completed setup actor remain live forever. Its synthetic
+producer-revocation RED/GREEN evidence is preserved, but it does not establish
+unauthorized phone use after committed configuration facts outlive that actor.
+A subsequent registered owning case executes the real terminal cleanup for a
+COMPLETED setup producer. Cleanup seals its workflow and clears its first-run
+ID; v4 then incorrectly changed the connection from ready to not_connected.
+
+Committed device/account/profile configuration now retains the setup producer
+as immutable provenance. The in-progress verifier still fences its true first
+run before committing facts. Every action still checks the current borrower,
+lease, task, true first run, current phone/account, profile and privacy state.
+Explicit sign-out, profile changes and user handback invalidate configuration;
+normal producer retirement does not. No deployment-sealed ID allowlist exists.
+The special saved-credential regression now revokes the CURRENT BORROWER after
+its verifier, and requires FAILED with zero synthetic input calls. The old
+producer policy tests are transparently migrated, not unchanged-test proof.
+
+Historical evidence remains under round43-producer-owning/red-v2 and green-v2;
+normal-retirement RED and GREEN, and nine final API cases, are separately
+recorded in retirement-red, retirement-green and attestation-nine. No normal
+production acceptance or permission to reset the phone is implied.
+
+## Historical v4 report (superseded lifetime policy)
 
 ## Problem
 

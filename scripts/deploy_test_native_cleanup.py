@@ -860,7 +860,9 @@ def validate(receipt, owner, proof):
             # Native task logs can exceed the small control-receipt cap. Preserve
             # the full hash and JSON-object contract without loading those logs.
             from native_json_evidence import verify_native_object
+            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
             verify_native_object(run_path, bindings.get(str(run_path)))
+            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
             used.add(str(run_path))
             run = None
         life = document(fleet / '_batch/lifecycle.json')

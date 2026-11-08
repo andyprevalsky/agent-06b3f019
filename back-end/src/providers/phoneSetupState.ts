@@ -188,6 +188,17 @@ export function configurationState(state: SetupState): SetupState {
   const completed = state.completedConfiguration;
   return completed ? { ...state, ...completed, completedConfiguration: undefined } : state;
 }
+/** Committed configuration outlives its setup actor; this is immutable provenance, not a live grant. */
+export function configurationProvenanceBound(state: SetupState): boolean {
+  const configuration = configurationState(state);
+  if (!configuration.attempt || !configuration.verified || !configuration.verification)
+    return false;
+  return validCompletedConfiguration({
+    attempt: configuration.attempt,
+    verified: configuration.verified,
+    verification: configuration.verification,
+  });
+}
 export function setupIdentity(leaseId: string, revision: number): string {
   return phoneCommandHash('setup-attempt', { leaseId, revision }, 'agent');
 }

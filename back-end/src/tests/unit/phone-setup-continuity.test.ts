@@ -4,6 +4,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { configurationAfterConfirmedStop } from '../../domains/iphone/repo.setupContinuity';
 import {
   configurationState,
+  configurationProvenanceBound,
   sealSetup,
   setupState,
   type SetupState,
@@ -13,6 +14,7 @@ import { CONFIG_TARGETS, SETUP_REQUIREMENTS_VERSION } from '../../providers/phon
 import type { IPhoneDevice, Transaction } from '../../domains/iphone/types';
 import { writeSetupOutcome } from '../../domains/iphone/repo.setupOutcome';
 import { setupDto } from '../../domains/iphone/repo.setup';
+import { connectionDto } from '../../providers/phoneConnectionState';
 
 const previous = {
   enabled: process.env.CLOUD_IPHONE_ENABLED,
@@ -251,9 +253,7 @@ test('restarted consumer cannot inherit the old admission', async () => {
 });
 for (const kind of [
   'phone',
-  'producer',
-  'firstRun',
-  'missingProducer',
+  'missingProvenance',
   'private',
   'signedOut',
   'profile',
@@ -264,9 +264,8 @@ for (const kind of [
   test(`confirmed stop cannot promote ${kind} configuration`, async () => {
     const f = fixture();
     if (kind === 'phone') f.user.phone = '+15550000001';
-    if (kind === 'producer') f.producer.temporalWorkflowId = 'replacement';
-    if (kind === 'firstRun') f.producer.temporalFirstExecutionRunId = 'replacement';
-    if (kind === 'missingProducer') f.absent();
+    if (kind === 'missingProvenance')
+      delete f.state.completedConfiguration!.attempt.firstExecutionRunId;
     if (kind === 'private')
       f.device.privateInputEncrypted = sealPhoneValue({ version: 1, active: true, values: [] });
     if (kind === 'signedOut') f.state.attempt!.reasonCode = 'observed_signed_out';
@@ -275,6 +274,65 @@ for (const kind of [
     if (kind === 'incomplete')
       f.state.completedConfiguration!.verification.checks.imessage!.status = 'unknown';
     if (kind === 'disabled') f.device.enabled = false;
+    if (kind === 'missingProvenance') {
+      await assert.rejects(f.run, /Phone setup state is unavailable/);
+      return;
+    }
     const result = await f.run();
     assert.equal(result, f.device.setupEncrypted);
+  });
+
+// These replace the proposed v4 actor-lifetime negatives. Completed configuration
+// is device/account/profile state; producer execution identity is immutable provenance.
+for (const change of ['workflow', 'firstRun', 'removed'] as const)
+  test(`confirmed stop preserves committed configuration after producer ${change} retirement`, async () => {
+    const f = fixture();
+    const original = structuredClone(f.state.completedConfiguration!);
+    if (change === 'workflow') f.producer.temporalWorkflowId = 'retired';
+    if (change === 'firstRun') f.producer.temporalFirstExecutionRunId = 'retired';
+    if (change === 'removed') f.absent();
+    const after = setupState(await f.run());
+    assert.deepEqual(after.completedConfiguration?.attempt, original.attempt);
+    assert.deepEqual(after.completedConfiguration?.verified, original.verified);
+    assert.equal(after.completedConfiguration?.verification.checks.apple_account?.providerEpoch, 4);
+    assert.equal(
+      after.completedConfiguration?.verification.checks.apple_account?.observedProviderEpoch,
+      3
+    );
+    assert.equal(
+      after.completedConfiguration?.verification.checks.apple_account?.observedAt,
+      original.verification.checks.apple_account?.observedAt
+    );
+    assert.equal(after.readinessAdmission?.agentId, f.consumer.id);
+  });
+
+for (const field of [
+  'id',
+  'leaseId',
+  'taskId',
+  'agentId',
+  'workflowId',
+  'firstExecutionRunId',
+] as const)
+  test(`legacy ready configuration fails closed without ${field} provenance`, () => {
+    const f = fixture();
+    const legacy = configurationState(f.state);
+    assert.equal(connectionDto(f.device, legacy, true, false).status, 'ready');
+    delete (legacy.attempt as unknown as Record<string, unknown>)[field];
+    let parsed: SetupState;
+    try {
+      parsed = setupState(sealSetup(legacy));
+    } catch (error) {
+      assert.match((error as Error).message, /Phone setup state is unavailable/);
+      return;
+    }
+    assert.equal(configurationProvenanceBound(parsed), false);
+    assert.equal(connectionDto(f.device, parsed, true, false).status, 'not_connected');
+    const view = setupDto(f.device, parsed, {
+      id: 'consumer-lease',
+      browserTaskId: 'consumer-task',
+      status: 'ACTIVE',
+      releaseRequestedAt: null,
+    } as Parameters<typeof setupDto>[2]);
+    assert.equal(view.required, true);
   });

@@ -1,7 +1,11 @@
 /** Public connection state is a projection of backend setup proofs, never a grant. */
 import { createHash } from 'node:crypto';
 import { verificationDto } from './phoneSetupVerification';
-import { configurationState, type SetupState } from './phoneSetupState';
+import {
+  configurationState,
+  configurationProvenanceBound,
+  type SetupState,
+} from './phoneSetupState';
 import { PhoneInteractionError } from './phoneInteractionError';
 
 export interface PhoneConnectionReservation {
@@ -71,6 +75,7 @@ export function connectionDto(
   });
   if (
     device.setupState === 'ready' &&
+    configurationProvenanceBound(state) &&
     verification.configurationReady &&
     state.verified?.profileRevision === state.profileRevision &&
     state.expectedAppleIdentity

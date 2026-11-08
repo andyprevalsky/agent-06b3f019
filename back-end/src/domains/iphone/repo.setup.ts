@@ -6,11 +6,11 @@ import {
   setupIdentity,
   type SetupState,
   configurationState,
+  configurationProvenanceBound,
 } from '../../providers/phoneSetupState';
 import type { Transaction, IPhoneDevice, IPhoneLease } from './types';
 import { verificationDto } from '../../providers/phoneSetupVerification';
 import { databaseNow } from './repo.clock';
-import { configurationGenerationCurrent } from './repo.availability';
 
 export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneLease) {
   const configuration = configurationState(state);
@@ -46,6 +46,7 @@ export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneL
     }
   );
   const required =
+    !configurationProvenanceBound(state) ||
     !verification.configurationReady ||
     device.setupState !== 'ready' ||
     configuration.verified?.profileRevision !== state.profileRevision ||
@@ -94,7 +95,7 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
     device.setupState === 'ready' &&
     !setupDto(device, state, lease).required &&
     state.expectedPhone === expectedPhone &&
-    (await configurationGenerationCurrent(tx, device.userId, state));
+    configurationProvenanceBound(state);
   if (
     lease.status === 'ACTIVE' &&
     lease.releaseRequestedAt === null &&
@@ -178,7 +179,7 @@ async function captureReadiness(
     agent !== null &&
     agent.temporalFirstExecutionRunId !== null &&
     agent.temporalFirstExecutionRunId !== '' &&
-    (await configurationGenerationCurrent(tx, device.userId, state))
+    configurationProvenanceBound(state)
   ) {
     state.readinessAdmission = {
       leaseId: lease.id,

@@ -65,7 +65,9 @@ identity and setting proofs. Keep the active attempt bound to the actual current
 lease, task, workflow and true first execution. Project configuration and fresh
 current-borrower runtime separately. Runtime-only outcomes do not replace the
 completed configuration. Handback, profile/phone changes, semantic auth loss and
-producer or consumer generation revocation retain their independent fences.
+current-consumer generation revocation retain their independent fences. Pending
+setup verification still fences its producer execution before committing facts;
+after completion that producer identity is immutable provenance, not a live grant.
 
 Only a confirmed stop of the same outstanding control-session key can advance
 the transport binding of existing settings. Preserve original observation time,
@@ -88,8 +90,13 @@ there is no fleet-wide scan.
 The user requires normal Integrations Connect iPhone bootup, reuse after setup,
 genuine reauthentication when disconnected, and portrait lock during bootup.
 No reset or benchmark substitute is authorized. Independent review found the
-runtime snapshot deletion and required producer serialization; both findings
-were retained and addressed before release.
+runtime snapshot deletion and initially proposed producer serialization. A later
+registered case ran the real normal COMPLETED workflow cleanup, which seals the
+producer and clears its first-run ID. The permanent producer dependency then
+incorrectly returned not_connected. That proposed policy was superseded by
+independent attestation and actor lifetimes, preserving all earlier RED/GREEN
+evidence. Current-borrower true-first-run revocation after credential verification
+still fails closed, and normal producer retirement retains completed configuration.
 
 ## Reusable lesson
 

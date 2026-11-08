@@ -1,17 +1,24 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
-import { setupState, configurationState } from '../../providers/phoneSetupState';
+import {
+  setupState,
+  configurationState,
+  sealSetup,
+  type SetupState,
+} from '../../providers/phoneSetupState';
 import { fixture } from './auth-assistance.native-fixtures';
 import { phoneFixtureNumber } from './phone-fixture-users';
 import type { Harness } from './iphone-control.fixtures';
 import type { Case } from './iphone-control.cases';
-import { configurationGenerationCurrent } from '../../domains/iphone/repo.availability';
 import { useSavedPaymentFixture, encryptSavedFixture } from './iphone-control.saved-key-fixture';
-import { retryWithBackoff } from '../../providers/retry';
+import { cleanupTerminalAgentWorkflowZombies } from '../../providers/workflowTerminalCleanup';
+import { authorizeSyntheticSetup } from './iphone-control.setup-fixtures';
+import { claimCommand, beginExecution } from '../../domains/iphone/repo.operations';
 
-async function borrow(h: Harness) {
+async function borrow(h: Harness, normalConnection = false) {
   const f = await fixture(h);
+  if (normalConnection) await authorizeSyntheticSetup(f);
   const before = setupState(
     (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } })).setupEncrypted
   );
@@ -59,83 +66,217 @@ async function borrow(h: Harness) {
   return { ...f, producerId: f.agentId, agentId: consumer.id, taskId: task.id, leaseId };
 }
 
+type Borrowed = Awaited<ReturnType<typeof borrow>>;
+
+async function retireProducer(f: Borrowed, original: SetupState) {
+  await prisma.agent.update({ where: { id: f.producerId }, data: { status: 'COMPLETED' } });
+  const terminated: string[] = [];
+  const cleanup = await cleanupTerminalAgentWorkflowZombies(
+    {
+      captureInProgressTools: async () => [],
+      resolveExecution: async (workflowId) => ({
+        workflowId,
+        firstExecutionRunId: original.attempt!.firstExecutionRunId!,
+      }),
+      terminate: async (execution) => {
+        terminated.push(execution.workflowId);
+      },
+      finalizeInterruptedTools: async () => undefined,
+    },
+    { agentIds: [f.producerId], ignoreGrace: true }
+  );
+  assert.equal(
+    cleanup.sealed,
+    1,
+    'The real terminal cleanup path must seal the completed producer'
+  );
+  assert.equal(terminated.length, 1);
+  const retired = await prisma.agent.findUniqueOrThrow({ where: { id: f.producerId } });
+  assert.equal(retired.temporalFirstExecutionRunId, null);
+  assert.notEqual(retired.temporalWorkflowId, original.attempt!.workflowId);
+}
+
+async function assertArchivedConnection(h: Harness, f: Borrowed) {
+  await prisma.agent.update({ where: { id: f.producerId }, data: { deletedAt: new Date() } });
+  const archived = await h.request(f.userId, '/connection', { actor: 'user' });
+  assert.equal(archived.status, 200);
+  assert.equal(
+    archived.data.status,
+    'ready',
+    'Archived setup producer invalidated committed phone facts'
+  );
+  let launches = 0;
+  h.setupAgentLauncher = async () => {
+    launches++;
+    throw new Error('Ready connection must not launch setup');
+  };
+  const connect = await h.request(f.userId, '/connect', {
+    actor: 'user',
+    method: 'POST',
+    body: { requestKey: randomUUID(), expectedRevision: archived.data.connectionRevision },
+  });
+  assert.equal(connect.status, 200);
+  assert.equal(connect.data.status, 'ready');
+  assert.equal(launches, 0);
+}
+
 export const continuityCases: Case[] = [
   [
-    'configuration producer revocation waits for the admitting transaction to commit',
+    'an admitted context-free command cannot follow its borrower into a new first run',
     async (h) => {
       const f = await borrow(h);
-      const state = setupState(
+      assert.equal(
         (
-          await prisma.iPhoneDevice.findUniqueOrThrow({
-            where: { id: f.deviceId },
+          await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+            method: 'POST',
+            body: { operationId: randomUUID(), operation: 'screen.text', args: {} },
           })
-        ).setupEncrypted
+        ).data.operation?.status,
+        'SUCCEEDED'
       );
-      let release!: () => void, admitted!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
+      const claim = await claimCommand(
+        f.userId,
+        f.leaseId,
+        {
+          operationId: randomUUID(),
+          operation: 'screen.text',
+          args: {},
+        },
+        'agent',
+        false,
+        true
+      );
+      assert.equal(claim.execute, true);
+      assert.equal(claim.command.state, 'CONNECTING');
+      const firstRun = randomUUID();
+      await prisma.agent.update({
+        where: { id: f.agentId },
+        data: { temporalFirstExecutionRunId: firstRun },
       });
-      const entered = new Promise<void>((resolve) => {
-        admitted = resolve;
+      // Ordinary frontend polling may establish legitimate new-run custody.
+      const view = await h.request(f.userId, `/interactions/${f.taskId}`);
+      assert.equal(view.status, 200);
+      assert.equal((view.data.setup as { required: boolean }).required, false);
+      const state = setupState(
+        (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } })).setupEncrypted
+      );
+      assert.equal(state.attempt?.firstExecutionRunId, firstRun);
+      assert.equal((await h.request(f.userId, `/availability/${f.taskId}`)).data.enabled, true);
+      const calls = h.physicalOperations.length;
+      assert.equal(
+        await beginExecution(claim),
+        false,
+        'Old admission followed the refreshed borrower into its new execution chain'
+      );
+      assert.equal(
+        (await prisma.iPhoneOperation.findUniqueOrThrow({ where: { id: claim.command.id } })).state,
+        'FAILED'
+      );
+      assert.equal(
+        h.physicalOperations.length,
+        calls,
+        'Owning admission test must not execute a physical command'
+      );
+      const fresh = await claimCommand(
+        f.userId,
+        f.leaseId,
+        {
+          operationId: randomUUID(),
+          operation: 'screen.text',
+          args: {},
+        },
+        'agent',
+        false,
+        true
+      );
+      assert.equal(fresh.execute, true);
+      assert.equal(
+        await beginExecution(fresh),
+        true,
+        'New chain must receive its own legitimate admission'
+      );
+    },
+  ],
+  [
+    'legacy ready configuration without producer identity is unavailable before borrowing',
+    async (h) => {
+      const f = await fixture(h);
+      assert.equal(
+        (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
+        'ready'
+      );
+      const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
+      const legacy = setupState(device.setupEncrypted);
+      assert.equal(legacy.completedConfiguration, undefined);
+      delete (legacy.attempt as { agentId?: string }).agentId;
+      await prisma.iPhoneDevice.update({
+        where: { id: f.deviceId },
+        data: { setupEncrypted: sealSetup(legacy) },
       });
-      let holderPid = 0,
-        writerPid = 0,
-        written = false;
-      const admission = prisma.$transaction(async (tx) => {
-        holderPid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`)[0].pid;
-        assert.equal(await configurationGenerationCurrent(tx, f.userId, state), true);
-        admitted();
-        await gate;
-      });
-      let writer: Promise<unknown> | undefined;
-      try {
-        await entered;
-        writer = prisma.$transaction(async (tx) => {
-          writerPid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`)[0]
-            .pid;
-          await tx.agent.update({
-            where: { id: f.producerId },
-            data: {
-              temporalFirstExecutionRunId: randomUUID(),
-            },
-          });
-          written = true;
-        });
-        const deadline = Date.now() + 2000;
-        const blocked = await retryWithBackoff(
-          async () => {
-            if (!writerPid || Date.now() >= deadline) return false;
-            return (
-              await prisma.$queryRaw<{ blocked: boolean }[]>`
-            SELECT ${holderPid}::integer = ANY(pg_blocking_pids(${writerPid}::integer)) AS blocked
-          `
-            )[0].blocked;
-          },
-          {
-            maxRetries: 200,
-            fixedDelays: Array.from({ length: 200 }, () => 10),
-            shouldRetryResult: (blocked) => !blocked && !written && Date.now() < deadline,
-            isRetryable: () => false,
-            component: 'PhoneProducerAdmissionTest',
-          }
-        );
-        assert.equal(blocked, true, 'Producer revocation was not serialized with admission');
-        assert.equal(written, false);
-      } finally {
-        release();
-        await admission;
-        await writer;
-      }
-      assert.equal(written, true);
+      assert.equal(
+        (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
+        'not_connected'
+      );
       assert.equal((await h.request(f.userId, `/availability/${f.taskId}`)).data.enabled, false);
     },
   ],
   [
-    'borrowed saved-credential execution rejects producer revocation after its verifier',
+    'completed phone configuration survives normal producer workflow retirement',
+    async (h) => {
+      const f = await borrow(h, true);
+      const original = configurationState(
+        setupState(
+          (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } }))
+            .setupEncrypted
+        )
+      );
+      await retireProducer(f, original);
+      assert.equal(
+        (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
+        'ready'
+      );
+      await assertArchivedConnection(h, f);
+      assert.equal((await h.request(f.userId, `/availability/${f.taskId}`)).data.enabled, true);
+      assert.equal(
+        (
+          await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+            method: 'POST',
+            body: { operationId: randomUUID(), operation: 'screen.text', args: {} },
+          })
+        ).data.operation?.status,
+        'SUCCEEDED'
+      );
+      const after = configurationState(
+        setupState(
+          (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } }))
+            .setupEncrypted
+        )
+      );
+      assert.deepEqual(
+        after.attempt,
+        original.attempt,
+        'Retirement rewrote immutable setup provenance'
+      );
+      assert.deepEqual(after.verified, original.verified);
+      h.cleanupComplete = true;
+      assert.equal(
+        (await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' })).status,
+        200
+      );
+      h.cleanupComplete = false;
+      assert.equal(
+        (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
+        'ready',
+        'Normal stop after producer retirement discarded completed configuration'
+      );
+    },
+  ],
+  [
+    'borrowed saved-credential execution rejects current borrower revocation after its verifier',
     async (h) => {
       const f = await borrow(h);
       const payment = useSavedPaymentFixture();
-      const secret = `synthetic-producer-revocation-${randomUUID()}`;
+      const secret = `synthetic-borrower-revocation-${randomUUID()}`;
       const state = setupState(
         (
           await prisma.iPhoneDevice.findUniqueOrThrow({
@@ -166,7 +307,7 @@ export const continuityCases: Case[] = [
         };
         h.beforeSavedExecute = async () => {
           await prisma.agent.update({
-            where: { id: f.producerId },
+            where: { id: f.agentId },
             data: {
               temporalFirstExecutionRunId: randomUUID(),
             },
@@ -196,7 +337,7 @@ export const continuityCases: Case[] = [
       }
     },
   ],
-  ...(['producer', 'consumer', 'phone'] as const).map((change): Case => [
+  ...(['consumer', 'phone', 'profile'] as const).map((change): Case => [
     `completed setup reuse retains ${change} revocation fences`,
     async (h) => {
       const f = await borrow(h);
@@ -206,9 +347,17 @@ export const continuityCases: Case[] = [
           where: { userId: f.userId },
           data: { phone: phoneFixtureNumber() },
         });
-      else
+      else if (change === 'profile') {
+        const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
+        const state = setupState(device.setupEncrypted);
+        state.profileRevision++;
+        await prisma.iPhoneDevice.update({
+          where: { id: f.deviceId },
+          data: { setupEncrypted: sealSetup(state) },
+        });
+      } else
         await prisma.agent.update({
-          where: { id: change === 'producer' ? f.producerId : f.agentId },
+          where: { id: f.agentId },
           data: { temporalFirstExecutionRunId: randomUUID() },
         });
       const before = h.calls.length;

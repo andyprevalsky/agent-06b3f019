@@ -22,6 +22,14 @@ export async function executionCustody(
     return false;
   }
   const agent = await tx.agent.findUnique({ where: { id: lease.agentId } });
+  if (
+    claim.executionFirstExecutionRunId === undefined ||
+    claim.executionFirstExecutionRunId === '' ||
+    agent?.temporalFirstExecutionRunId !== claim.executionFirstExecutionRunId
+  ) {
+    await rejectExecutionCustody(tx, claim);
+    return false;
+  }
   const state = setupState(device.setupEncrypted);
   const intent = openPhoneValue<CommandPayload>(claim.command.requestEncrypted);
   const generation = agent?.temporalWorkflowId ?? agent?.id;

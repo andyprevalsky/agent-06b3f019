@@ -1,8 +1,12 @@
 /** Carry existing device settings across a confirmed same-device session stop, never runtime. */
-import { setupState, sealSetup, configurationState } from '../../providers/phoneSetupState';
+import {
+  configurationProvenanceBound,
+  setupState,
+  sealSetup,
+  configurationState,
+} from '../../providers/phoneSetupState';
 import { connectionDto } from '../../providers/phoneConnectionState';
 import { proofCurrent } from '../../providers/phoneSetupVerification';
-import { configurationGenerationCurrent } from './repo.availability';
 import { privacyState } from './privacy';
 import { accountPermitted } from './repo.account';
 import type { IPhoneDevice, Transaction } from './types';
@@ -21,7 +25,7 @@ export async function configurationAfterConfirmedStop(tx: Transaction, device: I
     privacyState(device.privateInputEncrypted).active ||
     state.attempt?.reasonCode === 'observed_signed_out' ||
     connectionDto(device, state, true, false).status !== 'ready' ||
-    !(await configurationGenerationCurrent(tx, device.userId, state)) ||
+    !configurationProvenanceBound(state) ||
     !configuration.verification
   )
     return device.setupEncrypted;

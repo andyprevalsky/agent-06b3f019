@@ -224,6 +224,32 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
                 launch.assert_not_called()
 
+    def test_refused_local_admission_keeps_its_reason_when_receipt_preparation_exhausts_deadline(self):
+        clock = [1000.0]
+        lock = self.root / '.context/native-worker-admission.lock'
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        def prepare(_state):
+            clock[0] += .08
+        def gate(name, timeout):
+            return dict(name=name, checks=[name], command=['must-not-launch'], case_protocol=True,
+                        category='generic', worker_transport='local-isolated', timeout_seconds=timeout)
+        with patch.object(c.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(c, 'revalidate_standing_skips', side_effect=prepare), \
+                patch.object(c, 'run_command') as launch, lock.open('a') as held:
+            c.fcntl.flock(held, c.fcntl.LOCK_EX | c.fcntl.LOCK_NB)
+            refused = c.execute(gate('refused', .05), self.state, self.directory, self.root)
+            c.fcntl.flock(held, c.fcntl.LOCK_UN)
+            admitted = c.execute(gate('admitted', .04), self.state, self.directory, self.root)
+            for name, result, timed_out in [('refused', refused, False), ('admitted', admitted, True)]:
+                with self.subTest(admission=name):
+                    self.assertEqual({name: 'UNVERIFIED'}, result['cases'])
+                    self.assertFalse(result['executed']); self.assertFalse(result['complete'])
+                    self.assertEqual(timed_out, result['timed_out']); self.assertIsNone(result['native_exit'])
+                    self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
+            self.assertEqual('isolation root already owns an active worker; refuse duplicate launch', refused['reason'])
+            self.assertEqual('existing deadline exhausted before local worker launch', admitted['reason'])
+            launch.assert_not_called()
+
     def test_local_slot_fences_queued_locals_after_unverified_cleanup_without_cancelling_cloud(self):
         # The only local native producer was the retired AgentCard lane (its tasks run in cloud smoke now);
         # an ordinary owned local gate that reports unverified cleanup still fences the queued local root.
