@@ -315,6 +315,15 @@
     "sha256": "abb95670c8478b7ffb04e9094e15a53697795700b8dd49cf1837929556e9531f",
     "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
   },
+  "branch:bottleneck/ledger-merge": {
+    "also": "bottleneck-ledger-merge.no-remote.mbox, commits-on-no-remote.txt, tip.txt in the same archive",
+    "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T013309Z-git-bn-221c8ba204f3.tar.gz.aesgcm",
+    "disposition": "archived",
+    "member": "pr1767-closeout-staging/control/bottleneck-ledger-merge.bundle",
+    "note": "bottleneck follow-up thread (/var/tmp/bn-ledger-merge), 4 commits on no remote at archive time; thin bundle whose prerequisite 675f4213d6 is on origin; the owner pushes the branch itself",
+    "sha256": "4863fe0a5be3757a7967c65bab5a8e8c732bcdff800a5696841ed556fb75790c",
+    "tip": "c51c85ca35491e23979cd87dd3a567181583ed3c"
+  },
   "branch:feat/agentcard-cloud-gate": {
     "also": "branch.feat__agentcard-cloud-gate.{vs-merge-base.diff,no-merges.mbox} in the same archive",
     "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062453Z-git-91703446f000.tar.gz.aesgcm",

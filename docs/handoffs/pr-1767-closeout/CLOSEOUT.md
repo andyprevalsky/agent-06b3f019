@@ -2,7 +2,7 @@
 
 Status: post-merge record. The committed `deletion-readiness.json` beside this file is the record of record for deletion readiness.
 
-- Deployed PR: [#1767](https://github.com/Rose-Ai-Labs/rose/pull/1767) "deploy gates: report each gate's first failing test while it runs", branch `feat/gate-early-failure`, merged 2026-11-08T00:55:40Z as `2e0403fdf940e9ea4406348929ec0a0db8957fa5` (reviewed head `059cc72d317202669290c86c1d4b1364df007caf`). Records PR: this records PR.
+- Deployed PR: [#1767](https://github.com/Rose-Ai-Labs/rose/pull/1767) "deploy gates: report each gate's first failing test while it runs", branch `feat/gate-early-failure`, merged 2026-11-08T00:55:40Z as `2e0403fdf940e9ea4406348929ec0a0db8957fa5` (reviewed head `059cc72d317202669290c86c1d4b1364df007caf`). Records PR: [PR #1782](https://github.com/Rose-Ai-Labs/rose/pull/1782).
 - Deploy worktree: `/var/tmp/rose-base-measure` (prepared deploy worktree, idle at HEAD `059cc72d31` when archived; nothing ran there during the closeout). Object prefix `devbox-closeout-private/pr1767-059cc72d/` uses that HEAD.
 - No credential, key, signed URL or secret value is in this record. Env files appear by name and variable count only.
 
@@ -50,6 +50,7 @@ Private archives are AES-256-GCM framed gzip tars (`ROSE-PRIVATE-TAR-GCM-V1`) in
 | cloud-e-05e303b3 | `20261108T012757Z-cloud-e-05e303b3-c1c021ef2447.tar.gz.aesgcm` | 1,526 | 1,014.1 MB | 283.8 MB | `44c80931a74dc90a2d07c42f6607bc4626dabb78edd71b85e0453b1dce11bb90` | stream: 1526/1526 members, 0 bad |
 | cloud-e-bcb5368c | `20261108T012342Z-cloud-e-bcb5368c-0c3a7d987cbd.tar.gz.aesgcm` | 171 | 0.7 MB | 0.2 MB | `2d3b4da900e7b42b11d03d90c6bb33436dd936e66a99c1d83174c0efe6b729a9` | restore: 171/171 members, 0 bad |
 | bn-worktrees | `20261108T012201Z-bn-worktrees-a8b29c346dbd.tar.gz.aesgcm` | 543 | 2.3 MB | 0.7 MB | `56e376b130f4c5db9e935466acfe136207c2a7ed9e4d1b0fcb5bb3a097fbf6cf` | restore: 543/543 members, 0 bad |
+| git-bn | `20261108T013309Z-git-bn-221c8ba204f3.tar.gz.aesgcm` | 4 | 0.1 MB | 0.1 MB | `4863fe0a5be3757a7967c65bab5a8e8c732bcdff800a5696841ed556fb75790c` | restore: 4/4 members, 0 bad |
 | control | `20261108T013108Z-control-6a580d1060f4.tar.gz.aesgcm` | 98 | 42.9 MB | 4.9 MB | `5cbc60177ca4e126e2c99e28c06224304f86163500dba90a5ad63c4ea6ba2c54` | restore: 98/98 members, 0 bad |
 
 Contents:
@@ -62,6 +63,7 @@ Contents:
 - `cloud-e-05e303b3`: `.context/deploy-cloud/05e303b3…`: final pre-sync sweep smoke (146110626b).
 - `cloud-e-bcb5368c`: `.context/deploy-cloud/bcb5368c…`: first-cycle smoke on 059cc72d31, every job refused at preflight.
 - `bn-worktrees`: `.context` of the bottleneck follow-up worktrees `/var/tmp/bn-review-github`, `bn-fly-bench`, `bn-prod-descendant` (other `bn-*` worktrees have none).
+- `git-bn`: a thin `git bundle` of the bottleneck follow-up thread's four commits on no remote (`bottleneck/ledger-merge` at `c51c85ca35`, prerequisite `675f4213d6` on origin) with their mbox, taken read-only so the deletion check can bind the tip; the owner pushes the branch itself (members under `control/`).
 - `control`: the closeout tools, set listings with per-member sha256, secret-scan summaries (pattern names and counts only), receipts, deletion-check rehearsals, env-name parity and `unarchived-credential-bearing.json`.
 
 The deploy worktree's files were listed in place (the worktree was idle; ~10 GB of evidence against ~12 GB free disk ruled out snapshot copies); the uploader refused any member whose size, mtime or sha256 differed from its listing.
@@ -101,21 +103,21 @@ Members are named `pr1767-closeout-staging/...`: `worktrees/<name>/` is a worktr
 ## 6. Verification performed
 
 - Every archive: full download with per-frame authentication, stream hashes and every member hash against the in-archive manifest (the recipe's own `verify`), then an encrypted receipt sidecar written and read back authenticated.
-- Independent check with the unchanged PR 1634 adapter: `fetch-receipt`, then either a full restore into an empty directory (`deploy-state`, `bn-worktrees`, `cloud-e-bcb5368c`, `control`) or, for the large smoke sets where a restore would not fit on disk, a streamed pass through the recipe's frame authentication; both compare every member's sha256 and size to the hash taken from the source before upload. 0 differences.
+- Independent check with the unchanged PR 1634 adapter: `fetch-receipt`, then either a full restore into an empty directory (`deploy-state`, `bn-worktrees`, `cloud-e-bcb5368c`, `git-bn`, `control`) or, for the large smoke sets where a restore would not fit on disk, a streamed pass through the recipe's frame authentication; both compare every member's sha256 and size to the hash taken from the source before upload. 0 differences.
 - Secret scan: the PR 1751 broadened scanner (key shapes, JWTs, bearer tokens, Fly tokens, Luhn-valid card numbers, base64-wrapped credentials, sensitive field names) ran on every staged file; `deploy-state`, `cycle-r1` and `cloud-final` were rescanned on the exact listed bytes immediately before upload; for the other sets the staging scan is bound to the uploaded bytes by the per-member sha256. Pattern based: it cannot prove the absence of every secret.
 - Not verified: bucket public-access settings, env value parity with managed env, anything created after the archive cutoffs.
 
 ## 7. Deletion readiness
 
-`deletion-check` ran from the deploy worktree with `DEPLOY_TEST_CYCLE_STATE_DIR=/var/tmp/rose-base-measure/.context/deploy-pipeline-r2`, `--manifest` this directory's `manifest.json` and `--receipt` this directory's `deletion-readiness.json` (absolute paths in the records worktree; the deploy worktree stays on `feat/gate-early-failure`, so the receipt is committed here rather than there). Verdict: **PENDING** (open items: n/a).
+`deletion-check` ran from the deploy worktree with `DEPLOY_TEST_CYCLE_STATE_DIR=/var/tmp/rose-base-measure/.context/deploy-pipeline-r2`, `--manifest` this directory's `manifest.json` and `--receipt` this directory's `deletion-readiness.json` (absolute paths in the records worktree; the deploy worktree stays on `feat/gate-early-failure`, so the receipt is committed here rather than there). Verdict: **READY** (open items: 0).
 
-[manifest.json](manifest.json) gives every ignored path of every worktree a disposition. The deploy worktree's own paths are relative globs; every other worktree is matched by absolute path. Paths of `/home/boxes/rose`, `rose-agentcard-cloud`, `rose-blacksmith`, `rose-blacksmith-int` and `rose-deploy-measure` that have not changed since the PR 1751 closeout's final archive cutoff (2026-11-07T16:24Z; no file newer) carry that closeout's dispositions and archive bindings, as do the twelve local-only branches and the stash (`branch:`/`stash:` entries bound to their unchanged tips).
+[manifest.json](manifest.json) gives every ignored path of every worktree a disposition. The deploy worktree's own paths are relative globs; every other worktree is matched by absolute path. Paths of `/home/boxes/rose`, `rose-agentcard-cloud`, `rose-blacksmith`, `rose-blacksmith-int` and `rose-deploy-measure` that have not changed since the PR 1751 closeout's final archive cutoff (2026-11-07T16:24Z; no file newer) carry that closeout's dispositions and archive bindings, as do the twelve local-only branches and the stash (`branch:`/`stash:` entries bound to their unchanged tips). The bottleneck thread's `bottleneck/ledger-merge` is bound to its tip `c51c85ca35` and the `git-bn` archive; if that thread commits again before pushing, the check reports the branch until it is pushed or re-archived.
 
 Processes: the deploy-v2 thread's Claude session pid 3007638 (cwd `/home/boxes/rose`), which blocked the PR 1751 receipt, has exited. This devbox's default `codex app-server` pid 1464599 still has cwd `/home/boxes/rose`; it is not in the deploy worktree and does not block this check.
 
 ## 8. Open follow-ups
 
-- **Bottleneck follow-up deploy**: the `bn-*` worktrees' work is pushed and combined on `bottleneck/ledger-merge` (`5f1f1f4223`); it needs its own `/deploy`.
+- **Bottleneck follow-up deploy**: the `bn-*` worktrees' work is combined on `bottleneck/ledger-merge` (pushed at `5f1f1f4223`; the thread was still committing during this closeout — four local commits at `c51c85ca35` are bundled in `git-bn`); it needs its own `/deploy`. Its local commits `9b9a4771b0` (refuse unpushed smoke sources before any cloud admission) and `c51c85ca35` (native cleanup proof for a campaign refused at preflight) address the next two items.
 - **Adapter should refuse an unpushed HEAD**: the smoke adapter launched a paid-fleet campaign for a commit origin did not have; every job was refused at preflight and the cycle could not recover. The cloud gate should check that HEAD is fetchable from origin before dispatch.
 - **Native cleanup proof layout for preflight-refused jobs**: `native-cloud-cleanup-v1` cannot reconcile dispatched jobs that never wrote a monitor line (also recorded by PR1724).
 - **In-flight fix registry across devboxes**: PR #1747 and this deploy fixed the same stale 56-Machine ceiling independently; a cross-devbox registry of in-flight fixes would have avoided the duplicate work and the sync conflict.

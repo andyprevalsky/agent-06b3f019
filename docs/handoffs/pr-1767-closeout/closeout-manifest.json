@@ -246,6 +246,33 @@
     },
     {
       "bucket": "trace-archive",
+      "ciphertext_sha256": "4863fe0a5be3757a7967c65bab5a8e8c732bcdff800a5696841ed556fb75790c",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 4,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 1,
+      "full_readback_verified": true,
+      "gzip_sha256": "c103cecb232ca6f0af0d445399074067b0be4dba6d0a6da9cc8f3412977eb7e3",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 4,
+        "members_compared": 4,
+        "mode": "restore",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1767-059cc72d/20261108T013309Z-git-bn-221c8ba204f3.tar.gz.aesgcm",
+      "label": "git-bn",
+      "manifest_sha256": "ab313c02e70d984ebb4cd870c73c8ce9b54ad083b8f133b7a368c7e535c0af5c",
+      "original_bytes": 102296,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1767-059cc72d/20261108T013309Z-git-bn-221c8ba204f3.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "efe70002bafeea384a2a8c250bc0214b77529b3272173cbe6604f69c2b475e9d",
+      "status": "current",
+      "stored_bytes": 50528,
+      "verified_at": "2026-11-08T01:33:11Z"
+    },
+    {
+      "bucket": "trace-archive",
       "ciphertext_sha256": "5cbc60177ca4e126e2c99e28c06224304f86163500dba90a5ad63c4ea6ba2c54",
       "encryption_key_id": "trace-archive-prod-2026-07-03",
       "files": 98,
@@ -310,8 +337,8 @@
   "bucket": "trace-archive",
   "deletion_check": {
     "command": "DEPLOY_TEST_CYCLE_STATE_DIR=/var/tmp/rose-base-measure/.context/deploy-pipeline-r2 /var/tmp/rose-base-measure/scripts/deploy deletion-check --manifest <records worktree>/docs/handoffs/pr-1767-closeout/manifest.json --receipt <records worktree>/docs/handoffs/pr-1767-closeout/deletion-readiness.json",
-    "open_items": null,
-    "verdict": "PENDING"
+    "open_items": 0,
+    "verdict": "READY"
   },
   "format": "PR-CLOSEOUT-MANIFEST-V1",
   "key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
@@ -319,7 +346,7 @@
   "object_prefix": "devbox-closeout-private/pr1767-059cc72d/",
   "pr": 1767,
   "recipe": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
-  "records_pr": null,
+  "records_pr": 1782,
   "reviewed_head": "059cc72d317202669290c86c1d4b1364df007caf",
   "unarchived_credential_bearing": {
     "by_set": {
