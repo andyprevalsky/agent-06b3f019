@@ -63,6 +63,6 @@ ps -o pid,ppid,command -ax 2>/dev/null | grep "flyctl proxy" | grep -F -- "-a $A
 sleep 1
 
 pgrep -f "dead.vm.$APP.internal" >/dev/null && fail "orphaned proxy was NOT reaped"
-kill -0 "$LIVE_PID" 2>/dev/null || fail "a LIVE run's proxy was wrongly reaped (rule 27 violation)"
+kill -0 "$LIVE_PID" 2>/dev/null || fail "a LIVE run's proxy was wrongly reaped (killed another run's process)"
 
 echo "PASS: orphaned data-plane proxies are reaped; live-run proxies are preserved"

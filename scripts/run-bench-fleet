@@ -7374,7 +7374,7 @@ reap_orphaned_fleet_proxies() {
     # descendants orphaned inside a cloud workspace are adopted by that runtime
     # instead of PID 1. Treat only those two known adopter boundaries as orphan
     # proof; a concurrently running fleet's proxy has a run-bench-cloud parent
-    # and is never touched (rule 27).
+    # and is never touched (never kill another session's benchmark processes).
     local pids pid ppid command parent_command
     pids="$(
         ps -o pid=,ppid=,command= -ax 2>/dev/null \

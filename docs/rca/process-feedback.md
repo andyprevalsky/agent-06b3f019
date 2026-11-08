@@ -198,12 +198,12 @@ Source: `/RCA` Step 5b, user instruction 2026-09-09.
     worktrees. A broad docker grep killed a neighbor's live benchmark DB and
     produced 394 connection errors in their backend. Scope to this workspace's
     prefix, or read the run's own `services.json`.
-    Source: `memory:feedback_never_broad_docker_bench_cleanup`, CLAUDE.md rule 27.
+    Source: `memory:feedback_never_broad_docker_bench_cleanup`, the former CLAUDE.md rule 27 (never kill another session's benchmark processes).
 
 24. **Never `git stash`.** The ref is shared across worktrees; parallel agents
     overwrite each other's work. Use
     `git diff HEAD > .git-wip.patch && git checkout -- .` and reapply.
-    Source: `memory:feedback_batch_workers_git_stash`, CLAUDE.md rule 21.
+    Source: `memory:feedback_batch_workers_git_stash`, the former CLAUDE.md rule 21 (never `git stash`; the stash is shared by every worktree).
 
 25. **Iterate locally, not by hot-deploying to prod.** The local cycle is far
     faster and cannot break prod. One agent deployed to Fly without smokes and

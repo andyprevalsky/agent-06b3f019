@@ -9,7 +9,7 @@ The one benchmark and experiment iteration loop. Read `/benchmark`, `/rca` and `
 
 ## Done
 
-Every original task passes every `-k` copy in one full-slice run; then start `/deploy`, whose first step is **Final change review**. Infra-only or consecutive-slice goals use the user's own acceptance rule; never add another gate. Start the descent with `/goal` on the slice being all green.
+Every original task passes every `-k` copy in one full-slice run; then start `/deploy`, whose approval step is the only review (**Final change review**). Infra-only or consecutive-slice goals use the user's own acceptance rule; never add another gate. Start the descent with `/goal` on the slice being all green.
 
 ## Process
 
@@ -26,7 +26,7 @@ Every original task passes every `-k` copy in one full-slice run; then start `/d
 | 9 | `ITERATION_RETRO` | Name the slowest step and apply one speedup, or record why none exists | `python3 scripts/descend_step_log.py report --slice $SLICE --task-count $N --lane main --window 5` |
 | 10 | `NEXT_BATCH_OR_ROTATION` | When fixes are applied or time-boxed, go back to 3 | — |
 | 11 | `RERUN_FULL_SLICE` | Once every task passed in its batches, run the whole slice as one launch; any failure returns to 7 | `scripts/run-bench <all tasks...> -k K --concurrency N` |
-| 12 | `FINAL_CHANGE_REVIEW` | Start `/deploy`; its first step is the review below | `/deploy` |
+| 12 | `FINAL_CHANGE_REVIEW` | Start `/deploy`; its approval step reviews the guarded changes | `/deploy` |
 | 13 | `DONE` / `BLOCKED` | Transition, then close the clock with verified counts | `python3 scripts/descend_step_log.py transition --step DONE ...` then `finish --status completed --run-terminal --detail scheduled_total=N --detail infra_failed=N` |
 
 Time every state with `python3 scripts/descend_step_log.py transition --run-id $RUN_ID --lane main --step <STATE> --epoch $EPOCH`; `RUN_ID` is the run directory name and `EPOCH` counts full passes through 3–10.
@@ -46,7 +46,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - Never split a batch across launches and never launch proof reruns; the next batch run is the outcome proof.
 - A sharded (>32-copy) run needs a clean pushed commit, its executed SHA must be verified, and fixes never move its launch ref while it runs.
 - Never build or activate images in an ordinary descent; cold-image and mass-demo runs happen only when explicitly requested.
-- Capacity and admission follow `/benchmark`'s capacity checks; speedups stay within verified provider limits.
+- Capacity and admission follow `/benchmark`'s capacity checks, and speedups respect provider rate limits: `scripts/cloudbench-provider-limits.json` (`python3 scripts/cloudbench-provider-capacity.py cap`) and Fly's `machines_per_org_limit`.
 - When superseding a live run (a verified build with fixes it lacks is ready), copy its evidence, TERM its exact owner, and wait for its resources to be released before relaunching.
 - At 5 minutes with no started task, inspect producer logs and the guest stage; a repeating wait line is not progress, and capture failure evidence before CLI cleanup.
 
@@ -81,6 +81,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - A cluster is the failed tasks whose own evidence shows the same first-bad boundary, so that one fix there is expected to flip all of them; a two-cause task joins both clusters.
 - Every inferred card is a singleton, and an unknown cause is an observability-gap singleton.
 - Never cluster on a shared symptom (failure string, evaluator, status, timeout, website or issue class).
+- Triage cards are written in parallel as failures arrive; the parent clusters them before dispatching any RCA, so one cluster gets one RCA.
 - Run a choke-point pass over every FAIL and PASS run: a mechanism common in failures and rare in passes is a cluster hypothesis; prevalence only ranks hypotheses, and each run's own observed mechanism grants membership.
 - Before blaming the agent, confirm the judge saw what the user sees and no inherited repo-default gate applies; prove evaluator clusters with judge-only replays and count the verdicts they change.
 - Every cluster names a concrete defect at a code site (does X, should do Y, observed Z); a measurement is not a cause, and timeout and provider-limit evidence follows `docs/root-cause-analysis.md`.
@@ -89,26 +90,27 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 ## Fixes
 
-- Dispatch one muted fix thread per cluster via `boxes-delegated-threads`, each with its own worktree and non-overlapping files, carrying the cluster row, cards, exemplar logs, source SHA, scope, priorities and a 60-minute fix time box.
+- Dispatch one muted fix thread per cluster via `boxes-delegated-threads`, each with its own worktree and non-overlapping files, carrying the cluster row, cards, exemplar logs, source SHA, scope, priorities and a 60-minute time box (84% of 140 recorded RCA lanes finished within 60 minutes).
+- An RCA owner first checks the live cluster ledger and `rca_archive.py search` for the same boundary and reports a duplicate instead of starting; when two RCAs prove the same boundary, the parent merges their clusters.
+- At 50 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 60 minutes take what it handed back.
 - The next batch launches once every dispatched fix is applied or its time box expires; an expired cluster keeps its evidence and rank, carries over, and never ships a guessed repair.
 - Each RCA proves its fix at the owning boundary with an isolated repro and lands that regression in the owning suite; it never uses a full end-to-end benchmark rerun as proof.
 - Never run `scripts/setup-db.sh` from a child worktree; give each its own identity, ports and Postgres so its `/sync` cannot reset the controller's or the shared `victoria` database.
 - Workers never contact the user, change the active benchmark snapshot, launch paid runs or deploy; the parent applies each fix as its own row-tagged commit on the descent branch so it can be ablated.
-- Any change may be applied; approval-scoped hunks (prompts, harness behavior, Zod schemas, task definitions) get their golden-reference verdict recorded and are approved in **Final change review** before deploying.
+- Any change may be applied; guarded hunks (prompts, agent behavior, trajectory injection, Zod schemas) and task-definition edits are approved in **Final change review** before deploying.
 - Never `/deploy` to test a change; infra blockers that production needs ship with `/push`, everything else waits for the end.
 - In the next batch run: every member passing confirms the fix; an exemplar passing while a sibling fails splits that sibling back to triage with this run as evidence; a failing exemplar returns the cluster to `/RCA` at its rank.
 
 ## Final change review
 
-- When the full slice is green, `/deploy`'s first step presents every change on the descent branch, smelliest first as ranked by an independent reviewer, in the key-strings format of `.claude/shared/approval-format.md`.
-- Each change shows its issue class and boundary, observed versus expected value, the repro now passing, its golden-reference verdict, and each member's own evidence; quarantined tasks are listed with their provider evidence.
-- The user keeps or ablates each; revert ablations, rerun their tasks and then the full slice before the deploy freeze, and repeat repair if green is lost; a task-definition edit is ablated unless the user keeps it.
-- This is the only user review.
+- Only guarded changes are reviewed: `/deploy`'s approval step covers the hunks its guards flag (a GROUNDED golden review clears them), and every task-definition edit goes to the user with its cross-review evidence.
+- A rejected change is reverted, then its tasks and the full slice are rerun before the deploy freeze; repeat repair if green is lost.
+- Quarantined tasks are listed in the same packet with their provider evidence.
 
 ## State and timing
 
 - Keep `.context/descend/<run-id>/state.json` current at every transition: original slice, task list, count and goal; current state, epoch and iteration; run start, finish and duration; latest subset; each task's latest accepted status; frozen scheduled total, terminal attempts and infra counts; every error occurrence with attempt IDs; triage cards; cluster lifecycle, rank and members; quarantines; controller PIDs, artifacts and FE links.
-- State also holds the final-review ledger: row tag to commit SHA, golden-reference verdict and reviewer, and task-edit cross-review evidence.
+- State also holds the change ledger: row tag to commit SHA, which hunks are guarded, golden-reference verdict and reviewer, and task-edit cross-review evidence.
 - After compaction reload state, never rebuild it from memory, and resume the active clock in `.context/descend/<run-id>/timing/` or close it `--status interrupted`.
 - Timing rows append to tracked `agents/benchmarks/history/descend_steps.jsonl`; never rewrite them or reset a slow clock, give each RCA lane its own `--lane rca-<ID>` pair, use `failed`, `blocked` or `interrupted` honestly, and pass only verified counts with `--detail`.
 - Commit new timing rows alone before every `/sync` and before the final response.
