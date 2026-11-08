@@ -24,6 +24,7 @@ sources:
   - fleet run 20260929-194204-11550
   - benchmark run campaign-20261107-232156-2232678 (descend I-33 r001-j0001)
   - fleet run 20261107-232223-2242918
+  - commit d73073baa1
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: open
 ---

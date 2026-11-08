@@ -28,6 +28,7 @@ sources:
   - benchmark run campaign-20261107-232156-2232678 (proof-B2 startup recovery r001-j0001)
   - fleet run 20261107-232223-2242918
   - benchmark run campaign-20261107-181733-711331 (epoch 18 r003-j0029..j0032)
+  - commit d73073baa1
 repro: scripts/tests/cloudbench-disposable-lifecycle.test.py
 status: fixed
 ---

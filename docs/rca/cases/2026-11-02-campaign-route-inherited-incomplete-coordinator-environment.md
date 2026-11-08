@@ -29,6 +29,7 @@ sources:
   - task 8d6e31666e9847cb8add0896efeafe46
   - commit b0fbd7742d (campaign parent shared relay gained bare flyctl calls)
   - fleet run campaign-20261107-225348-1436886 (descend-failed-neverrun-20261106 I-30 recurrence)
+  - commit 1259d2bdab
 repro: agents/benchmarks/cloudbench_campaign_inventory_test.py::test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay (flyctl half); hub half /var/tmp/pr1662-smoke-round16-prerequisites/hub_repro.py
 status: open
 ---

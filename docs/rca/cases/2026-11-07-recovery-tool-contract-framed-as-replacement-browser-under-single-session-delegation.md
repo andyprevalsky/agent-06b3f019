@@ -97,11 +97,13 @@ Should I avoid calling?" (20261106-140015), "It seems I'm not allowed to spawn a
 recovery myself" (20261106-181714). Across 9 challenged copies, 7 recovered and
 2 reported failure.
 
-Controlled replay (same messages, screenshots, tools, sampling params and
-`xhigh` effort; `scripts/replicate_llm_dump.py --repeat`; served by
-`openai/gpt-6.1-sol`, because the local Foundry leg returned RoseServerError,
-whereas production served `gpt-6.1-sol` on Foundry; both arms used the same
-path):
+Controlled replay (same messages, screenshots and tools, `xhigh` effort;
+`scripts/replicate_llm_dump.py --repeat`, N=8 per arm, serialized under
+`flock /var/tmp/descend-llm-replay.lock`). Disclosed differences from
+production, identical in every arm: the replay sent the dump's requested
+temperature 0.3 (production's effective temperature was null), and it was
+served by OpenRouter `openai/gpt-6.1-sol` because the local Foundry leg
+returned RoseServerError; production served `gpt-6.1-sol` on Foundry.
 
 | decision call | arm | decisions (8 replays) |
 | --- | --- | --- |
@@ -110,11 +112,21 @@ path):
 | step 5 (`e1b85de30cef`) | recorded contract | wait 7, recover_from_challenge 1 |
 | step 5 | fixed contract, delegation unchanged | recover_from_challenge 8 |
 | step 5 | recorded contract, only the delegated "If blocked ... replacement browser." sentence removed | recover_from_challenge 8 |
+| step 5 | recorded contract, delegated sentence replaced by "If a CAPTCHA or bot check blocks the site, do not try to bypass it; stop and report it to me." | attempt_completion 8 |
+| step 5 | fixed contract, same explicit no-bypass sentence | attempt_completion 8 |
+| step 6 | recorded contract, same explicit no-bypass sentence | attempt_completion 8 |
+| step 6 | fixed contract, same explicit no-bypass sentence | attempt_completion 8 |
 
 The last row shows that the trigger is the delegated failure/no-replacement
 sentence interacting with the tool contract. The fixed-contract rows show that
 stating recovery's session identity in the tool contract resolves it with the
 delegation unchanged.
+The negative control (last four rows; requested by the golden review) shows
+the fix does not override an explicit user ban on bypassing challenges: with
+"do not try to bypass it; stop and report it to me" the fixed contract
+recovers 0/8 at both steps, the same as the recorded contract. The fix removes
+the false session-count conflict and leaves a real no-bypass instruction
+decisive.
 
 Step 5a ladder: Why 1, the browser reported failure instead of recovering ->
 it read recovery as the forbidden replacement browser (replay rows above). Why
@@ -186,7 +198,9 @@ process is hosted. `claude-code-src/src/services/compact/prompt.ts:345`: after
 an internal context replacement the model is told "This session is being
 continued", so continuity is stated, not inferred. `codex/codex-rs/core/src/tools/handlers/shell_spec.rs:148`:
 "Writes characters to an existing unified exec session", which names session
-identity in the tool contract. `hermes-agent/tools/browser_tool.py:800` reports
+identity in the tool contract. `kimi-code/packages/agent-core-v2/src/agent/tools/os/bash/bash.md:10`:
+"Each call runs in a fresh shell: variables and `cd` do not persist", which
+states the session semantics the agent observes. `hermes-agent/tools/browser_tool.py:800` reports
 bot detection as an observation with options and has no in-session recovery
 tool, so it is not an analog for identity. The fix converges on the shared
 pattern: describe a tool's effect on the agent's own session in agent-observable

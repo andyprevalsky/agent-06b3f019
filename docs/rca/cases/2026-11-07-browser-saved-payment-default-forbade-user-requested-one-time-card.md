@@ -104,8 +104,12 @@ using scripts/replicate_llm_dump.py exact mode via
 .context/rca-H-49/replay_trials.py, with a gptAuth lease from the
 production backend). Pre-fix: request_payment_card in 0 of 5 trials. Four
 trials chose attempt_completion, which matches the original, and one
-fell through to the Foundry transport and chose read_browser_state. Post-fix
-result: recorded below.
+fell through to the Foundry transport and chose read_browser_state. Post-fix,
+with only the two rule texts replaced by the fixed source text: request_payment_card
+in 5 of 5 trials, all on gpt-6.1-sol-gpt. Same-transport separation: 0/4 before,
+5/5 after. A paired baseline rerun on one reused lease was blocked by
+NO_TOKENS_AVAILABLE. The stock replay leases a token per call and never
+releases it.
 
 H-38 (request_payment_card product_url/line_items contract) is not involved:
 the tool was never invoked in r1, so no receipt was validated or rejected.
