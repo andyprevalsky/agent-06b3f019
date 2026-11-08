@@ -30,3 +30,10 @@ The admission defect was NOT_INTRODUCED by PR1770 against its first parent.
 Why user107 became test-mode remains OPEN. Existing assertions, task definitions,
 timeouts, concurrency, coverage thresholds and protected instructions were not
 relaxed to obtain these results.
+
+The checked-in recovery helper independently restored the48-file terminal delta
+through its range-download transport and unchanged native crypto/file validators.
+The first closeout review attempt was path-filtered; the requested full review
+was temporarily rate-limited. Neither result is a substantive review or a quota
+exception. The exact closeout directory is explicitly included for its next
+review. The generated deletion-readiness record is committed with this packet.
