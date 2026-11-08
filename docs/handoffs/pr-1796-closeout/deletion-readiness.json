@@ -6,7 +6,6 @@
     ".context/": "archived: core devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm (deploy-pipeline final cycle plus archived cycles attempt1-structural-timeout, attempt2/attempt3-smoke-release-stall, deploy-runs failure report, deploy-collect, rca-agentcard-401 evidence, factory events) and cloud devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm (deploy-cloud smoke campaigns); tsbuildinfo cache reproducible",
     ".devbox/": "reproducible: boxes.dev daemon state recreated by the platform",
     ".env.npm": "reproducible: written by scripts/cloud-init.sh from project-managed secrets",
-    "/var/tmp/agc401/records/scripts/__pycache__/": "reproducible: Python bytecode cache",
     "agents/.context/": "archived: core devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm",
     "agents/.env": "managed: boxes.dev project-managed env (agents/.env)",
     "agents/.env.benchmark-temporal": "archived: core devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm",
@@ -594,20 +593,11 @@
   "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/fix/agentcard-org-auth-flap-retry",
+      "branch": "refs/heads/main",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [],
-      "unpushed_commits": 0
-    },
-    {
-      "branch": "refs/heads/records/pr1796-closeout",
-      "current": false,
-      "locked": false,
-      "needs_integration": false,
-      "path": "/var/tmp/agc401/records",
       "uncommitted": [],
       "unpushed_commits": 0
     }
