@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "8cc6df20b5033bc8d9ad83592c3bf2885cf283f8",
+      "status": "completed",
+      "started_at": "2026-11-07T15:00:20.485103+00:00",
+      "result": "unavailable",
+      "finished_at": "2026-11-07T15:53:29.947746+00:00"
+    },
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "7c092b6114c3f54b629d54ebd9b4395617ceb891",
+      "status": "completed",
+      "started_at": "2026-11-07T15:53:35.259662+00:00",
+      "replaces": "8cc6df20b5033bc8d9ad83592c3bf2885cf283f8",
+      "result": "clean",
+      "finished_at": "2026-11-07T16:00:43.651392+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "c9d4f587b86bf4b013b9b3e9b0e70336e26ebb2f",
+      "status": "completed",
+      "started_at": "2026-11-07T20:33:01.004148+00:00",
+      "result": "findings",
+      "finished_at": "2026-11-07T21:54:54.353470+00:00"
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "6e347fb7f9aa64c98e2c5257de93903da8b7db6e",
+      "status": "completed",
+      "started_at": "2026-11-07T21:55:36.791728+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-07T22:53:08.094036+00:00"
+    }
+  ]
+}

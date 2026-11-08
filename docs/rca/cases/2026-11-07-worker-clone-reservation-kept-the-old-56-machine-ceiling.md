@@ -56,6 +56,15 @@ passes 300 to `capacity_reserve_slots` with the variable unset and 61 Machines p
 
 Golden reference: not applicable (no approval-gated hunk).
 
+
+Recurrence (independent, same day): PR #1762's deploy smoke on 6427f84e1 (fleet run
+20261107-165840-2136305) denied test-mass-agent-run-0's worker with "60 app Machines + 0 reserved
++ 1 requested > ceiling 56". Before syncing, that PR fixed the same line in parallel (e32957dc4) and
+added `agents/benchmarks/cloudbench_campaign_inventory_test.py::test_worker_slot_admission_uses_the_startup_machine_ceiling_default`.
+That test extracts the real `capacity_reserve_slots` and `reserve_worker_machine_slot`, reproduces the
+exact denial against a 60-Machine inventory, and asserts that every ceiling default in the script
+agrees. On sync it kept this case's code and folded its own case into this one.
+
 ## Human feedback
 
 None recorded.

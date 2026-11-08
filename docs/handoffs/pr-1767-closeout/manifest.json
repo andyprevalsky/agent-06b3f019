@@ -1,0 +1,451 @@
+{
+  ".context/": {
+    "also_in": [
+      {
+        "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T011704Z-cycle-r1-b0837fe8f56b.tar.gz.aesgcm",
+        "label": "cycle-r1",
+        "sha256": "08747077914efeb3f77a47d0970af1ccbc4a299c1f7a3370ae00a3c62eba372c"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012208Z-cloud-final-f4e93003c7ab.tar.gz.aesgcm",
+        "label": "cloud-final",
+        "sha256": "bd581722e79a9a60c2e1eb0711b19dfb15850cd1657f2048f81e0bdd0f511af9"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012847Z-cloud-e-86621f83-0dc290b1adf8.tar.gz.aesgcm",
+        "label": "cloud-e-86621f83",
+        "sha256": "4cb1ed5070a5c4be5d72191c9145601676b76ec3b8ec5c0d12bd6a3bcdc74019"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012847Z-cloud-e-200d9834-118a132ae583.tar.gz.aesgcm",
+        "label": "cloud-e-200d9834",
+        "sha256": "8158bbbc6e5794e5d37a503a2142a1aebd7ebc11009bbc37b2d667343f3f80af"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012822Z-cloud-e-573a4e3e-42901fcc7039.tar.gz.aesgcm",
+        "label": "cloud-e-573a4e3e",
+        "sha256": "ba3f4423c7901675c93a6e8b0339b1d27e6e47a876e6f3283559494ec6bf6786"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012757Z-cloud-e-05e303b3-c1c021ef2447.tar.gz.aesgcm",
+        "label": "cloud-e-05e303b3",
+        "sha256": "44c80931a74dc90a2d07c42f6607bc4626dabb78edd71b85e0453b1dce11bb90"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012342Z-cloud-e-bcb5368c-0c3a7d987cbd.tar.gz.aesgcm",
+        "label": "cloud-e-bcb5368c",
+        "sha256": "2d3b4da900e7b42b11d03d90c6bb33436dd936e66a99c1d83174c0efe6b729a9"
+      }
+    ],
+    "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T011523Z-deploy-state-0e974843cbe6.tar.gz.aesgcm",
+    "disposition": "archived",
+    "member_prefix": "pr1767-closeout-staging/worktrees/rose-base-measure/.context/",
+    "note": "deploy-state = every .context entry except the four below (deploy-pipeline-r2 final READY cycle with production-lanes.json and production-logs, deploy-runs, deploy-pr/merged/collect/review-cycle/review-dispositions/approval-batch/worktree records, factory-events.jsonl, early-probe, deploy-structural, trace-archive-outbox) plus .llm-dumps and /var/tmp/deploy-early; cycle-r1 = deploy-pipeline (first cycle, stopped at triage); cloud-final = deploy-cloud/bc470be0\u2026 (final smoke); cloud-e-<prefix> = each of the other five deploy-cloud campaigns. Not archived: tsbuildinfo/ and trace-archive-locks/ and *.lock (reproducible or ephemeral), fly-ab/ (owner-declared unneeded and credential-bearing, PR 1751 closeout section 2), and files carrying credential-shaped values (names, sizes and pattern names in unarchived-credential-bearing.json of closeout-manifest.json).",
+    "sha256": "2873f4464b3f0f60a1d726cef24f034ea6dd925ff411d2ea5168f734ce1e9a62"
+  },
+  ".llm-dumps/": {
+    "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T011523Z-deploy-state-0e974843cbe6.tar.gz.aesgcm",
+    "disposition": "archived",
+    "member_prefix": "pr1767-closeout-staging/worktrees/rose-base-measure/.llm-dumps/",
+    "sha256": "2873f4464b3f0f60a1d726cef24f034ea6dd925ff411d2ea5168f734ce1e9a62"
+  },
+  "/home/boxes/rose/.cloud-env": "regenerated per instance by scripts/cloud-build.sh (ports, boot id); not portable, not a record [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/.context/": {
+    "also_in": [
+      {
+        "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T160415Z-core-delta-74280d0a58d8.tar.gz.aesgcm",
+        "label": "core-delta",
+        "sha256": "20e0f1b371546a726d7c527c56e22f9cf654e4037bb71cb1a33bd38299088366"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161443Z-cycles-a-90160e04258a.tar.gz.aesgcm",
+        "label": "cycles-a",
+        "sha256": "4c4070cbf003f426b57ca3f73f27eb48cd494bff40c2458bff48aed9ee16db20"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161348Z-cycles-b-eb02a4097c96.tar.gz.aesgcm",
+        "label": "cycles-b",
+        "sha256": "172c0c872b568c16e2aef59fa22b2923b9c3dca52109e974adbe7c7eddbbbf6d"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161411Z-cycles-c-85fa6bc82480.tar.gz.aesgcm",
+        "label": "cycles-c",
+        "sha256": "d2635a8010997df1abda47a5f3163af7a75d68bbfea0fde0dca268a7069f9465"
+      },
+      {
+        "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161952Z-cloud-final-1bb7393e544e.tar.gz.aesgcm",
+        "label": "cloud-final",
+        "sha256": "517db3b5783e51d2721930c3ed209e833d9c18f7eff99c7344afb30ce9b67424"
+      }
+    ],
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "delta_archive": "devbox-closeout-private/pr1751-9997bca3/20261107T160415Z-core-delta-74280d0a58d8.tar.gz.aesgcm",
+    "delta_sha256": "20e0f1b371546a726d7c527c56e22f9cf654e4037bb71cb1a33bd38299088366",
+    "disposition": "archived",
+    "excluded": "tsbuildinfo/ and frontend-builds/ (reproducible), trace-archive-locks/ and *.lock (empty ephemeral), pr1634-archive-recovery.env (escrow secret; recovered through managed env)",
+    "member_prefix": "pr1751-closeout-staging/root/.context/",
+    "note": "core is a point-in-time snapshot taken while the deploy was running; files created after it are in the final delta archive, if one is listed in closeout-manifest.json",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/.devbox/": "platform-managed devbox bootstrap (setup.json, desktop-init, staged-external); regenerated by boxes.dev, not a project record [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/.env.npm": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/.llm-dumps/": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/.llm-dumps/",
+    "note": "core is a point-in-time snapshot taken while the deploy was running; files created after it are in the final delta archive, if one is listed in closeout-manifest.json",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/agents/.context/": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "delta_archive": "devbox-closeout-private/pr1751-9997bca3/20261107T160415Z-core-delta-74280d0a58d8.tar.gz.aesgcm",
+    "delta_sha256": "20e0f1b371546a726d7c527c56e22f9cf654e4037bb71cb1a33bd38299088366",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/agents/.context/",
+    "note": "core is a point-in-time snapshot taken while the deploy was running; files created after it are in the final delta archive, if one is listed in closeout-manifest.json",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/agents/.env.benchmark-temporal": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/agents/.env.cloudbench-upsert.lock": "ephemeral zero-byte lock, recreated on demand [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/agents/benchmarks/runs/*.json": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T160415Z-core-delta-74280d0a58d8.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/agents/benchmarks/runs/",
+    "note": "gitignored local benchmark run records; one 24 MB production AgentCard run record",
+    "sha256": "20e0f1b371546a726d7c527c56e22f9cf654e4037bb71cb1a33bd38299088366"
+  },
+  "/home/boxes/rose/agents/navi-worker-log.txt": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/agents/navi-worker-log.txt",
+    "note": "core is a point-in-time snapshot taken while the deploy was running; files created after it are in the final delta archive, if one is listed in closeout-manifest.json",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/agents/providers/fast_cache/": "reproducible: contains only __pycache__ (verified), regenerated by Python on import [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/back-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/back-end/.env.cloudbench-upsert.lock": "ephemeral zero-byte lock, recreated on demand [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/back-end/backend-logs.log": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/back-end/backend-logs.log",
+    "note": "core is a point-in-time snapshot taken while the deploy was running; files created after it are in the final delta archive, if one is listed in closeout-manifest.json",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/front-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/front-end/frontend-logs.log": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/front-end/frontend-logs.log",
+    "note": "core is a point-in-time snapshot taken while the deploy was running; files created after it are in the final delta archive, if one is listed in closeout-manifest.json",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/hub-poller-logs.log": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/hub-poller-logs.log",
+    "note": "core is a point-in-time snapshot taken while the deploy was running; files created after it are in the final delta archive, if one is listed in closeout-manifest.json",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/mac-app/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/home/boxes/rose/package-lock.json": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062403Z-core-5578eff54006.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/root/package-lock.json",
+    "note": "gitignored root lockfile; also reproducible with npm install",
+    "sha256": "d5b3e78cc5dfaee7e6523797fc74da101fb23aff1978e932b4f78e0e1a46b448"
+  },
+  "/home/boxes/rose/research/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/*/agents/.env.cloudbench-upsert.lock": "reproducible: per-checkout advisory lock file of the cloudbench env upsert; recreated on use, no content",
+  "/var/tmp/*/back-end/.env.cloudbench-upsert.lock": "reproducible: per-checkout advisory lock file of the cloudbench env upsert; recreated on use, no content",
+  "/var/tmp/bn-fly-bench/.context/": {
+    "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012201Z-bn-worktrees-a8b29c346dbd.tar.gz.aesgcm",
+    "disposition": "archived",
+    "member_prefix": "pr1767-closeout-staging/worktrees/bn-fly-bench/.context/",
+    "note": "bottleneck follow-up thread worktree (branch pushed; bottleneck/ledger-merge carries the work); __pycache__ excluded, symlinks recorded in skipped.json",
+    "sha256": "56e376b130f4c5db9e935466acfe136207c2a7ed9e4d1b0fcb5bb3a097fbf6cf"
+  },
+  "/var/tmp/bn-fly-bench/agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (one-variable worktree stub; the name is in managed env)",
+  "/var/tmp/bn-fly-bench/back-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (one-variable worktree stub; the name is in managed env)",
+  "/var/tmp/bn-ledger-merge/docs/rca/INDEX.md": "reproducible: generated by `python3 scripts/rca_archive.py reindex` (git-ignored, refused if committed)",
+  "/var/tmp/bn-prod-descendant/.context/": {
+    "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012201Z-bn-worktrees-a8b29c346dbd.tar.gz.aesgcm",
+    "disposition": "archived",
+    "member_prefix": "pr1767-closeout-staging/worktrees/bn-prod-descendant/.context/",
+    "note": "bottleneck follow-up thread worktree (branch pushed; bottleneck/ledger-merge carries the work); __pycache__ excluded, symlinks recorded in skipped.json",
+    "sha256": "56e376b130f4c5db9e935466acfe136207c2a7ed9e4d1b0fcb5bb3a097fbf6cf"
+  },
+  "/var/tmp/bn-review-github/.context/": {
+    "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T012201Z-bn-worktrees-a8b29c346dbd.tar.gz.aesgcm",
+    "disposition": "archived",
+    "member_prefix": "pr1767-closeout-staging/worktrees/bn-review-github/.context/",
+    "note": "bottleneck follow-up thread worktree (branch pushed; bottleneck/ledger-merge carries the work); __pycache__ excluded, symlinks recorded in skipped.json",
+    "sha256": "56e376b130f4c5db9e935466acfe136207c2a7ed9e4d1b0fcb5bb3a097fbf6cf"
+  },
+  "/var/tmp/bn-review-github/agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (one-variable worktree stub; the name is in managed env)",
+  "/var/tmp/bn-review-github/back-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (one-variable worktree stub; the name is in managed env)",
+  "/var/tmp/rose-agentcard-cloud/.context/": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T064554Z-agentcard-proof2-fa57a081caaa.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/worktrees/rose-agentcard-cloud/.context/",
+    "note": "machines.json (Fly inventory) and six .upstream.json files are NOT in this archive: they carry credential values; names, sizes and sha256 are in sets/agentcard-proof2/dropped.json (control archive)",
+    "sha256": "bd718172bd5e87bc096b59795cf00af3255760c5dce419ed7eb456361940dfe4"
+  },
+  "/var/tmp/rose-agentcard-cloud/agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/.pytest_cache/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/benchmarks/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/domains/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/domains/set_plan/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/domains/spawn_browser_agent_v3/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/helpers/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/providers/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/providers/rose/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/tests/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/tests/e2e/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/tools/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/tools/prompts/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/utils/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/agents/venv": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/back-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/back-end/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/front-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/front-end/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/mac-app/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/package-lock.json": "ephemeral or reproducible (lock file; gitignored npm lockfile: npm install) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-agentcard-cloud/scripts/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith-int/.context/": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T063134Z-worktrees2-895ad1d69921.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "delta_archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161731Z-worktrees-delta-c8b7d6fc1dac.tar.gz.aesgcm",
+    "delta_sha256": "6da08f28a7118c6639e0c0a9ae960cbe712d5bef6e7aa6a3b791a5438ff3cbce",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/worktrees/rose-blacksmith-int/.context/",
+    "sha256": "543af59cc059e1897cdfd27d4a1b3d697ae95ee6b47cd7ee1bfc5ac7de7c9b2a"
+  },
+  "/var/tmp/rose-blacksmith-int/agents/venv": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith-int/back-end/node_modules": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith-int/front-end/node_modules": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith-int/node_modules": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith-int/scripts/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith-int/scripts/tests/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/.context/": {
+    "archived_subset": {
+      "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T063137Z-blacksmith-summaries-e64756b0b9bb.tar.gz.aesgcm",
+      "disposition": "archived",
+      "files": 26,
+      "member_prefix": "pr1751-closeout-staging/worktrees/rose-blacksmith/.context/",
+      "sha256": "90dacfbc68358cbd63825c44d5a634e21a83e430b2889c695b257322075ba286",
+      "what": "fly-ab master.log/inventory.jsonl/*.sh/*.py/*/cli.log, fly-rerun cli.log+rerun.sh, retained-083003-destroy/receipts.json, deploy-cloud/*/{result.json,cli.log}, fly-measure cli*.log"
+    },
+    "bytes": 4743442409,
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "disposition": "owner-declared-unneeded",
+    "files": 12034,
+    "owner": "Blacksmith/Fly-fleet thread ph7evm73qcb922emmb8de5rgb98hp5rr",
+    "reason": "owner decision 2026-11-07: runs/, campaigns/ and guest logs are not needed; the numbers are in the owner's chat and /project memory; every Machine and volume from those runs is verified released or destroyed"
+  },
+  "/var/tmp/rose-blacksmith/agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/agents/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/agents/benchmarks/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/agents/tests/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/agents/utils/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/agents/venv": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/back-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/back-end/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/back-end/scripts/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/front-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/front-end/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/mac-app/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/package-lock.json": "ephemeral or reproducible (lock file; gitignored npm lockfile: npm install) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/scripts/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-blacksmith/scripts/tests/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/.context/": {
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T063134Z-worktrees2-895ad1d69921.tar.gz.aesgcm",
+    "carried_from": "carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)",
+    "delta_archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161731Z-worktrees-delta-c8b7d6fc1dac.tar.gz.aesgcm",
+    "delta_sha256": "6da08f28a7118c6639e0c0a9ae960cbe712d5bef6e7aa6a3b791a5438ff3cbce",
+    "disposition": "archived",
+    "member_prefix": "pr1751-closeout-staging/worktrees/rose-deploy-measure/.context/",
+    "sha256": "543af59cc059e1897cdfd27d4a1b3d697ae95ee6b47cd7ee1bfc5ac7de7c9b2a"
+  },
+  "/var/tmp/rose-deploy-measure/agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/agents/venv": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/back-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/back-end/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/front-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/front-end/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/mac-app/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (worktree copies are symlinks to the root file or a GITHUB_TOKEN-only stub) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/node_modules/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/package-lock.json": "ephemeral or reproducible (lock file; gitignored npm lockfile: npm install) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "/var/tmp/rose-deploy-measure/scripts/__pycache__/": "reproducible: regenerated by the documented setup (npm / venv / reference-repo sync) [carried from docs/handoffs/pr-1751-closeout/manifest.json (no file under this path changed after that closeout's final archive cutoff 2026-11-07T16:24Z)]",
+  "agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (symlink to the canonical checkout's file; variable-name parity checked 2026-11-08)",
+  "back-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (symlink to the canonical checkout's file; variable-name parity checked 2026-11-08)",
+  "branch:backup/cancel-fix-wip-20261106": {
+    "also": "branch.backup__cancel-fix-wip-20261106.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062453Z-git-91703446f000.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 1,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed.bundle",
+    "member_sha256": "65842353766e561a6f276e5371f076b94fe6d6ea82821f83e27ea157ee3857de",
+    "sha256": "abb95670c8478b7ffb04e9094e15a53697795700b8dd49cf1837929556e9531f",
+    "tip": "d47774795572b94fb5fd7de138aba90d7d34bfb5"
+  },
+  "branch:backup/cerebras-chat-quota-prepush-20261002": {
+    "also": "branch.backup__cerebras-chat-quota-prepush-20261002.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062453Z-git-91703446f000.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 14,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed.bundle",
+    "member_sha256": "65842353766e561a6f276e5371f076b94fe6d6ea82821f83e27ea157ee3857de",
+    "sha256": "abb95670c8478b7ffb04e9094e15a53697795700b8dd49cf1837929556e9531f",
+    "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+  },
+  "branch:bottleneck/ledger-merge": {
+    "also": "bottleneck-ledger-merge.no-remote.mbox, commits-on-no-remote.txt, tip.txt in the same archive",
+    "archive": "devbox-closeout-private/pr1767-059cc72d/20261108T013309Z-git-bn-221c8ba204f3.tar.gz.aesgcm",
+    "disposition": "archived",
+    "member": "pr1767-closeout-staging/control/bottleneck-ledger-merge.bundle",
+    "note": "bottleneck follow-up thread (/var/tmp/bn-ledger-merge), 4 commits on no remote at archive time; thin bundle whose prerequisite 675f4213d6 is on origin; the owner pushes the branch itself",
+    "sha256": "4863fe0a5be3757a7967c65bab5a8e8c732bcdff800a5696841ed556fb75790c",
+    "tip": "c51c85ca35491e23979cd87dd3a567181583ed3c"
+  },
+  "branch:feat/agentcard-cloud-gate": {
+    "also": "branch.feat__agentcard-cloud-gate.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062453Z-git-91703446f000.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 3,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed.bundle",
+    "member_sha256": "65842353766e561a6f276e5371f076b94fe6d6ea82821f83e27ea157ee3857de",
+    "sha256": "abb95670c8478b7ffb04e9094e15a53697795700b8dd49cf1837929556e9531f",
+    "tip": "eee87a81a6560e44c2bc4409a96a463776ca6595"
+  },
+  "branch:measure/deploy-v2-gates": {
+    "also": "branch.measure__deploy-v2-gates.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062453Z-git-91703446f000.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 2,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed.bundle",
+    "member_sha256": "65842353766e561a6f276e5371f076b94fe6d6ea82821f83e27ea157ee3857de",
+    "sha256": "abb95670c8478b7ffb04e9094e15a53697795700b8dd49cf1837929556e9531f",
+    "tip": "a5256cb42252f58e90668e15b4d49cd55bbce376"
+  },
+  "branch:rca/agents-code-session-fixture": {
+    "also": "branch.rca__agents-code-session-fixture.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 2,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "10fa4d45390cf1fc23aed141edec8cf4017ba16b"
+  },
+  "branch:rca/archive-manifest-lock-observer": {
+    "also": "branch.rca__archive-manifest-lock-observer.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 3,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "426ad14377c46219a40723eedd4ecbfa236fc9d3"
+  },
+  "branch:rca/cloudbench-controller-hang": {
+    "also": "branch.rca__cloudbench-controller-hang.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 1,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "69ab326136c5a25dfb1b521d6d29060c228ca992"
+  },
+  "branch:rca/interrupted-custody-proc-eacces": {
+    "also": "branch.rca__interrupted-custody-proc-eacces.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 3,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "1df6407f7b4dc0b0366687da12d85b1827e27207"
+  },
+  "branch:rca/local-cleanup-quiet-eacces": {
+    "also": "branch.rca__local-cleanup-quiet-eacces.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 2,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "b8afdc0d9b63d8bbab78cf7f803b2f631d1bbf3a"
+  },
+  "branch:rca/mass-agent-attempt-completion-error": {
+    "also": "branch.rca__mass-agent-attempt-completion-error.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 1,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "2c57c70131c508b367589f6b465fafc6816a7594"
+  },
+  "branch:rca/payment-abandonment-no-card-request": {
+    "also": "branch.rca__payment-abandonment-no-card-request.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 1,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "839281e798d6383875ad84e2155e093bba6fe21c"
+  },
+  "branch:rca/sharded-routing-fixture-git-cleanup": {
+    "also": "branch.rca__sharded-routing-fixture-git-cleanup.{vs-merge-base.diff,no-merges.mbox} in the same archive",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T161255Z-git-delta-6285442e414f.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "commits_on_no_remote": 1,
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed-git-final.bundle",
+    "member_sha256": "c7497d2ec34617808a5238f5dc3e26dad402d7e29145c289a9121c794cb64898",
+    "sha256": "8435a79e3cc200d7baa0cc904eb1dd5b3ad6e24b0a0991549d350ea7bbc34cc0",
+    "tip": "65969566529555e2d0cd6db1bfe799386ba26639"
+  },
+  "front-end/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (symlink to the canonical checkout's file; variable-name parity checked 2026-11-08)",
+  "mac-app/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file (hasValue=true); a new devbox receives it by managed env delivery. Values are never archived. (symlink to the canonical checkout's file; variable-name parity checked 2026-11-08)",
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "also": "stash.0.show-p-include-untracked.patch, stash.0.tracked.diff, stash.0.untracked.diff, stash.0.commit.txt, stash.0.parents.txt",
+    "archive": "devbox-closeout-private/pr1751-9997bca3/20261107T062453Z-git-91703446f000.tar.gz.aesgcm",
+    "carried_from": "docs/handoffs/pr-1751-closeout/manifest.json",
+    "disposition": "archived",
+    "member": "pr1751-closeout-staging/control/pr1751-unpushed.bundle",
+    "member_sha256": "65842353766e561a6f276e5371f076b94fe6d6ea82821f83e27ea157ee3857de",
+    "message": "On andyprevalsky/rose-run-copy: pre-sync deploy retry and explore recovery work",
+    "not_ours": "stash from andyprevalsky/rose-run-copy (2026-10-01); preserved verbatim, not judged",
+    "sha256": "abb95670c8478b7ffb04e9094e15a53697795700b8dd49cf1837929556e9531f",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+  }
+}
