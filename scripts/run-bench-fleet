@@ -15795,7 +15795,8 @@ cleanup() {
     # required terminal publication. A publication failure does not change the
     # recorded physical resource disposition or the benchmark verdict.
     if [ -d "$FLEET_DIR/_batch" ]; then
-        if ! python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$ROOT_DIR" \
+        if ! CLOUDBENCH_AUTOSCALER_FAILED_BENCHES="${AUTOSCALER_FAILED_BENCHES[*]:-}" \
+            python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$ROOT_DIR" \
             "$ec" "$teardown_failed" "$KEEP_CLONES" \
             "$FLEET_EXECUTION_COMPLETED" "${AUTOSCALER_FAILURE:-1}" \
             "$FLEET_REGISTRY_DIR" "$publication_failed" "$registry_release_verified" <<'PY'
@@ -15812,12 +15813,17 @@ try:
     audit_digest = binding["sha256"]
 except (OSError, ValueError, KeyError):
     pass
-verified = (
+# Execution completed and every owned resource was released and audited. A
+# mandatory-autoscaler failure is a run verdict, not a cleanup verdict: record
+# it by bench beside this so consumers can keep verified cleanup separate.
+cleanup_verified = (
     teardown == "0" and retained != "1" and completed == "1"
-    and autoscaler == "0" and len(audit_digest) == 64
+    and len(audit_digest) == 64
     and publication_failed == "0" and exit_code in ("0", "1")
     and bool(registry) and registry_release_verified == "1"
 )
+autoscaler_failed_benches = sorted(set(os.environ.get("CLOUDBENCH_AUTOSCALER_FAILED_BENCHES", "").split()))
+verified = cleanup_verified and autoscaler == "0"
 target = root / "_batch/lifecycle.json"
 temporary = target.with_name(f".lifecycle.{os.getpid()}.tmp")
 payload = {
@@ -15825,6 +15831,8 @@ payload = {
     "workspace_root": workspace, "status": "verified" if verified else "failed",
     "controller_exit_code": int(exit_code), "audit_sha256": audit_digest,
     "hub_publication_failed": publication_failed != "0",
+    "cleanup_verified": cleanup_verified,
+    "autoscaler_failed_benches": autoscaler_failed_benches,
 }
 try:
     with temporary.open("x") as handle:
@@ -16194,7 +16202,8 @@ fi
 # exclude the zero-byte `running` placeholder exposed while upload is in flight.
 # Cloned volumes can retain the donor name. Bind the exact mount resolved
 # from the named warm Machine; a same-name volume is not source authority.
-VOL_ID="$(FLY volumes list -a "$APP" --json 2>/dev/null | VN="$VOLUME_NAME" WV="$WARM_VOLUME_ID" WM="$WARM_ID" python3 -c '
+campaign_inventory_capture warm_volumes_json fleet_volumes_json || exit $?
+VOL_ID="$(printf '%s' "$warm_volumes_json" | VN="$VOLUME_NAME" WV="$WARM_VOLUME_ID" WM="$WARM_ID" python3 -c '
 import json,os,sys
 try:
     d=json.load(sys.stdin)
@@ -19766,29 +19775,33 @@ done
 # the unchanged checks below still fail closed on live, incomplete state.
 wait_for_autoscaler_finalization
 AUTOSCALER_FAILURE=0
+# Per-bench attribution lets the sealed lifecycle name the failed autoscaler(s)
+# instead of leaving one fleet-wide flag that hides which case it belongs to.
+AUTOSCALER_FAILED_BENCHES=()
 for j in "${!AUTOSCALER_PIDS[@]}"; do
+    autoscaler_bench_failed=0
     tracked_workers="$(_pool_ids "${CHILD_OUT[$j]}")"
     ready_workers="$(_ready_pool_ids "${CHILD_OUT[$j]}")"
     desired_workers="$(cat "${CHILD_OUT[$j]}/desired-worker-count" 2>/dev/null || true)"
     if [ -s "${CHILD_OUT[$j]}/autoscaler.failed" ]; then
         reason="$(head -1 "${CHILD_OUT[$j]}/autoscaler.failed" 2>/dev/null)"
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler failed during the run: ${reason:-unknown error}" >&2
-        AUTOSCALER_FAILURE=1
+        autoscaler_bench_failed=1
     elif ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not persist desired worker capacity" >&2
-        AUTOSCALER_FAILURE=1
+        autoscaler_bench_failed=1
     elif ! mandatory_worker_health_acceptable "${CHILD_OUT[$j]}" "${CHILD_BENCH[$j]}"; then
-        AUTOSCALER_FAILURE=1
+        autoscaler_bench_failed=1
     elif worker_cleanup_failure="$(find "${CHILD_OUT[$j]}" -maxdepth 1 -name 'worker-*.cleanup-failed' -type f -print -quit 2>/dev/null)" \
         && [ -n "$worker_cleanup_failure" ]; then
         # A launched worker whose runtime evidence or retirement failed is a
         # run failure even when the task finished before needing its capacity.
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler $(head -1 "$worker_cleanup_failure" 2>/dev/null)" >&2
-        AUTOSCALER_FAILURE=1
+        autoscaler_bench_failed=1
     elif [ "$tracked_workers" != "$ready_workers" ] \
         || find "${CHILD_OUT[$j]}" -maxdepth 1 -name 'worker-*.pending' -print -quit 2>/dev/null | grep -q .; then
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker capacity incomplete: $ready_workers/$tracked_workers workers queue-ready" >&2
-        AUTOSCALER_FAILURE=1
+        autoscaler_bench_failed=1
     elif ! mandatory_autoscaler_process_acceptable \
         "${CHILD_OUT[$j]}" "${AUTOSCALER_PIDS[$j]}"; then
         # Capacity shortages above are provider/queue facts and remain the most
@@ -19796,7 +19809,7 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
         # scheduler tick. Only use the generic process reason once measured
         # capacity itself is satisfied.
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler exited during the run" >&2
-        AUTOSCALER_FAILURE=1
+        autoscaler_bench_failed=1
     elif [ ! -e "${CHILD_OUT[$j]}/autoscaler.completed-after-child" ]; then
         # A live process is acceptable during the bounded drain, but never after
         # it. Counts alone are a mutable snapshot; only the autoscaler's causal
@@ -19804,7 +19817,11 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
         printf '%s\n' "mandatory autoscaler did not confirm terminal completion" \
             > "${CHILD_OUT[$j]}/autoscaler.acceptance-failed" 2>/dev/null || true
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not confirm terminal completion" >&2
+        autoscaler_bench_failed=1
+    fi
+    if [ "$autoscaler_bench_failed" = 1 ]; then
         AUTOSCALER_FAILURE=1
+        AUTOSCALER_FAILED_BENCHES+=("${CHILD_BENCH[$j]}")
     fi
     if [ "$ready_workers" -lt "${desired_workers:-0}" ] \
         && [ -e "${CHILD_OUT[$j]}/autoscaler.completed-after-child" ]; then

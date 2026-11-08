@@ -27,6 +27,7 @@ import {
   testSnapshotEndpoint,
 } from './data-grep-sources.cases';
 import { testGrepParameterContract } from './data-grep-contract.cases';
+import { testConcurrentUnclassifiedGrepsKeepBackendResponsive } from './data-grep-responsiveness.cases';
 
 async function testSchemaAndRemovedParams(userId: string): Promise<void> {
   for (const param of [
@@ -620,6 +621,10 @@ async function runAll(): Promise<void> {
       () => testDefaultsWithoutAgentTree(userId),
     ],
     ['ReDoS-catastrophic patterns rejected with 400', () => testRedosGuardRejects(userId)],
+    [
+      'concurrent ReDoS analyses keep the backend answering',
+      () => testConcurrentUnclassifiedGrepsKeepBackendResponsive(userId),
+    ],
     ['dialect patterns normalized and succeed', () => testDialectNormalization(userId)],
     [
       'word boundaries preserve ASCII JS semantics beside Unicode',

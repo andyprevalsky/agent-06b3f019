@@ -17,6 +17,7 @@ import type { MintPurchaseInput } from '../../domains/purchases/types';
 import { prisma } from '../../providers/database';
 import { assert, StubCardStateProvider } from './purchases.testkit';
 import { testIncompleteConsentCannotGrantReuse } from './purchases-incomplete-consent.testkit';
+import { testReuseMintProviderFailureIsTyped } from './purchases-reuse-provider-error.testkit';
 import {
   runApprovalReuseBenchmark,
   testApprovalBenchmarkGrading,
@@ -607,6 +608,7 @@ async function main(): Promise<void> {
     await testApprovalLookupRecognizesCapturedRetry();
     testSignatureIgnoresModelText();
     await testMintReusesSameAgentHeldCard();
+    await testReuseMintProviderFailureIsTyped();
     await testNoReuseAcrossAgentsOrCarts();
     console.log('PASS same-agent held-card reuse across model-written line-item drift');
   } finally {

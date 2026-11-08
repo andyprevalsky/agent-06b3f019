@@ -774,8 +774,10 @@ def validate(receipt, owner, proof):
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [],
                 'preflight_refusals': refused, 'credit_granted': False}
     preallocation = layout == 'campaign-preallocation-v1'
+    mixed = layout == 'campaign-mixed-preallocation-v1'
+    staged_preallocation = preallocation or mixed
     supervision = None
-    if layout in {'campaign-v1','campaign-preallocation-v1'}:
+    if layout in {'campaign-v1','campaign-preallocation-v1','campaign-mixed-preallocation-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and (reference.get('native_directory') == str(campaign) or preallocation
@@ -801,7 +803,7 @@ def validate(receipt, owner, proof):
              <= receipt['finished_at'] <= confirmed, 'campaign terminal clocks')
         pending_hubs = summary.get('shared_transport_cleanup_pending')
         need(not any(summary.get(key) for key in ('cleanup_ticket_failure', 'shared_inventory_failed'))
-             and (not pending_hubs or preallocation and pending_hubs is True
+             and (not pending_hubs or staged_preallocation and pending_hubs is True
                   and isinstance(proof.get('current_hub_retirement'),dict)),
              'campaign shared cleanup pending')
         cohorts = summary.get('startup_cohorts', [])
@@ -819,10 +821,23 @@ def validate(receipt, owner, proof):
         need(published, 'campaign publication or publisher cleanup')
         for path in publication:
             bound(path)
-        if preallocation:
+        if staged_preallocation:
+            expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
+            if mixed:
+                from deploy_test_historical_custody import KIND as CUSTODY_KIND
+                skips = request.get('skips', {})
+                need(isinstance(skips, dict) and not set(skips).intersection(checks)
+                     and all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
+                             and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
+                             and v.get('current_binding', {}).get('source') == receipt['source']
+                             and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
+                             and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
+                             for v in skips.values()),
+                     'mixed original exclusion inventory')
+                expected_cases.update(dict.fromkeys(skips, 'SKIP'))
             need(summary['status'] in {'failed','cancelled'} and not proof.get('purpose')
-                 and not proof.get('recovered_runtime') and not summary.get('workspace_binding')
-                 and receipt['cases']==dict.fromkeys(checks,'UNVERIFIED'),
+                 and not proof.get('recovered_runtime') and (mixed or not summary.get('workspace_binding'))
+                 and receipt['cases'] == expected_cases,
                  'preallocation outcomes')
             supervision=preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound)
             if pending_hubs:
@@ -854,7 +869,7 @@ def validate(receipt, owner, proof):
             for index, line in enumerate(lines):
                 match = re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line.strip())
                 if match:
-                    if preallocation:
+                    if staged_preallocation:
                         need(match[1] == receipt['source']['head'], 'preallocation foreign log ref')
                     ref = match[1]
                 if line.strip() == 'mode: --infra-probe (strict barrier, no LLM / run_benchmark)':
@@ -868,7 +883,7 @@ def validate(receipt, owner, proof):
                     match = re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.', owner_line)
                     canary_links[Path(args[2])] = {'parent': one[0], 'ref': ref, 'owner': match[1] if match else None}
                     infra = False
-                if preallocation:
+                if preallocation or mixed and not one:
                     match=re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory[.]',
                                        lines[index+1].strip() if index+1<len(lines) else '')
                     need(match is not None, 'preallocation controller owner')
@@ -907,6 +922,7 @@ def validate(receipt, owner, proof):
     isolated = proof.get('purpose') == 'isolated-validation'
     need(proof.get('purpose') in {None, 'isolated-validation'} and (not isolated or layout == 'campaign-v1'), 'proof purpose')
     retained, audit_seals, recovered, excluded = {}, {}, {}, {}
+    zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
@@ -929,6 +945,25 @@ def validate(receipt, owner, proof):
              and life['status'] in {'verified', 'failed'}, 'native terminal lifecycle')
         zero_allocation = False
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
+        if mixed and fleet in parents:
+            absent = [not p.exists() and not p.is_symlink() for p in (provenance_path, matrix_path)]
+            if all(absent):
+                need(life['status'] == 'failed' and isolated_canary_release(
+                    fleet, life, benches, run, root, receipt, proof, preallocation_links.get(fleet), bound, tree),
+                    'mixed preallocation zero resources')
+                need(not Path('/proc', fleet.name.rsplit('-', 1)[-1]).exists(), 'mixed preallocation controller PID present')
+                for bench in benches:
+                    for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'):
+                        artifact = fleet / bench['name'] / name
+                        need(not artifact.exists() and not artifact.is_symlink(), 'mixed preallocation task artifact present')
+                need(document(fleet / '_batch/disposable-cleanup.json').get('successful_runtime_inferred') is False,
+                     'mixed preallocation runtime inference is not evidence')
+                zero_parents.add(fleet)
+                zero_allocation = True
+            else:
+                need(all(p.is_file() and not p.is_symlink() for p in (provenance_path, matrix_path)),
+                     'mixed execution evidence incomplete')
+                graded_parents.add(fleet)
         if preallocation:
             need(fleet in parents and life['status']=='failed'
                  and isolated_canary_release(fleet,life,benches,run,root,receipt,proof,
@@ -940,7 +975,7 @@ def validate(receipt, owner, proof):
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if preallocation or failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
+        if preallocation or mixed and fleet in zero_parents or failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
@@ -1005,7 +1040,10 @@ def validate(receipt, owner, proof):
         retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': hub_owner,
                              'disposition': meta['hub_disposition']}
         audit_seals[str(audit)] = seal
-    if preallocation:
+    if mixed:
+        need(zero_parents and graded_parents and zero_parents | graded_parents == set(parents),
+             'mixed cleanup requires both zero-allocation and graded parents')
+    if staged_preallocation:
         need(set(supervision['term_sent']) <= {int(r['owner']['pid'])for r in retained.values()}
              and all(any(v==dict(pid=pid,status=15)for v in supervision['reaped'])for pid in supervision['term_sent']),
              'preallocation unexpected supervised termination')
@@ -1031,9 +1069,10 @@ def validate(receipt, owner, proof):
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
             'participants': sorted(map(str, participants)), 'native_audit_seals': audit_seals,
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
-    if preallocation:
-        result['preallocation_source_authorities']={str(k):v['source_authority']for k,v in preallocation_links.items()}
-    if preallocation and proof.get('current_hub_retirement'):
+    if staged_preallocation:
+        result['preallocation_source_authorities']={str(k):v['source_authority'] for k,v in preallocation_links.items()
+                                                     if preallocation or k in zero_parents}
+    if staged_preallocation and proof.get('current_hub_retirement'):
         result['current_hub_retirement']=copy.deepcopy(proof['current_hub_retirement'])
     if isolated:
         need(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')

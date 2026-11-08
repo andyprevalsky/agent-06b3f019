@@ -7,6 +7,10 @@ import { MessageList } from '@/features/terminal-component-group/components/Mess
 import { makeCtx } from './browser-agent-chip.fixtures';
 import { msg } from './code-agent-steering.fixtures';
 import { renderWithProviders } from './test-wrapper';
+import { extractUpdatePayload } from '@/lib/realtime-types/extractors';
+import { handleUpdateAgent } from '@/features/agent-context/hooks/realtimeHandlers';
+import { reconcileAgent } from '@/lib/progressEstimate';
+import type { AgentDetail } from '@/lib/api';
 vi.mock('@/components/ThinkingAnimation', () => ({ default: () => null }));
 const start = Date.UTC(2026, 9, 21, 12);
 function activity(toolName: string, id = toolName, at = start, toolStatus = 'IN_PROGRESS') {
@@ -51,6 +55,50 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe('current work batch elapsed time and ring semantics', () => {
+  it('keeps the captured database pause at 1h 21m and accepts the canonical refresh', () => {
+    // Retained realtime.messages frames for 77783ad2 on 2026-11-07. The database
+    // trigger serializes TIMESTAMP WITHOUT TIME ZONE, unlike the API emitter.
+    const id = '77783ad2-f547-473d-8191-a98c173edc97';
+    const rows = [activity('read_file', 'work', Date.parse('2026-11-07T18:58:57.979Z'))];
+    let agent = {
+      ...makeCtx(rows).agent,
+      agent_id: id,
+      status: 'ACTIVE',
+      updated_at: '2026-11-07T19:46:29.358Z',
+      user_control_revision: 0,
+    } as AgentDetail;
+    const tree = () => (
+      <AgentContext.Provider value={{ ...makeCtx(rows), agent, selectedAgentId: id }}>
+        <MessageList showThinkingIndicator={false} />
+      </AgentContext.Provider>
+    );
+    const view = renderWithProviders(tree());
+    for (const updatedAt of ['2026-11-07T20:20:51.002', '2026-11-07T20:20:51.226']) {
+      const update = extractUpdatePayload({
+        payload: {
+          schema: 'public',
+          table: 'Agent',
+          record: { id, updatedAt, status: 'PAUSED', userControlRevision: 1 },
+        },
+      });
+      expect(update).not.toBeNull();
+      handleUpdateAgent(
+        update!,
+        (next) => {
+          agent = (typeof next === 'function' ? next(agent) : next)!;
+        },
+        () => {},
+      );
+      view.rerender(tree());
+      expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(
+        'Interrupted after 1h 21m',
+      );
+      expect(agent.updated_at).toBe(`${updatedAt}Z`);
+    }
+    const refreshed = { ...agent, title: 'Refreshed', updated_at: '2026-11-07T20:20:51.226Z' };
+    expect(reconcileAgent(agent, refreshed)).toMatchObject({ title: 'Refreshed' });
+  });
+
   it('shows elapsed time, keeps its start when the activity rotates, and stops its timer after compression', () => {
     vi.useFakeTimers();
     vi.setSystemTime(start + 2000);

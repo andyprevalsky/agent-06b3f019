@@ -190,7 +190,7 @@ py_deps() {
     (cd agents && "$uv" pip install --quiet --python venv/bin/python -r requirements.txt)
   fi
 }
-refs_present() { local d; for d in openclaw hermes-agent codex prime-agent kimi-code; do [ -f "$d/.ref-sha" ] || return 1; done; }
+refs_present() { local d; for d in openclaw hermes-agent codex prime-agent kimi-code; do [ -f "$d/.ref-sha" ] && [ -e "$d/.git" ] || return 1; done; }
 refs_clone() {
   bash scripts/sync-reference-repos.sh >/dev/null 2>&1 || { say "warning: reference repos incomplete"; return 0; }
   # sync-reference-repos.sh rewrites the tracked tip record; sessions start clean.

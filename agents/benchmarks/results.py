@@ -57,6 +57,9 @@ class TaskResult:
     message_count: int
     owned_roots: list[dict] = field(default_factory=list)
     graded_root_creation_outcome: Optional[str] = None
+    # False only when the runner's custody proves no root-creation request (graded,
+    # fixture first run or Codex) was ever issued; None means it was not tracked.
+    root_creation_attempted: Optional[bool] = None
     failure_reason: Optional[str] = None
     # Task-specific measurements recorded on passes AND failures so the two are
     # comparable (e.g. the FCaptcha score, detections and browser session).

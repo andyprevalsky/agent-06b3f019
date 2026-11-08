@@ -18,7 +18,8 @@ assert(
 );
 process.env.GITHUB_AGENT_REPOS = 'on';
 process.env.GITHUB_TOKEN = 'github-agent-repo-test-token';
-delete process.env.GITHUB_DISPATCH_TOKEN;
+// Blank, not deleted: database.ts's dotenv would re-add the .env value as a second token-pool member.
+process.env.GITHUB_DISPATCH_TOKEN = '';
 process.env.GITHUB_REPO_CREATE_MIN_INTERVAL_MS = '0';
 
 const creates: string[] = [];

@@ -3640,6 +3640,100 @@ async def test_agentcard_setup_retries_transient_upstream_failure():
         assert calls == [409]
 
 
+async def test_agentcard_setup_retries_only_the_structured_org_rate_limit():
+    """2026-11-08 deploy smoke: prepare-residual returned the org-wide MCP throttle.
+
+    The backend answers a throttled AgentCard Organization MCP call with a 429
+    whose structured code is ``agentcard_org_mcp_rate_limited``; the upstream
+    refused the call, and every setup action converges on retry. Wait out that
+    window instead of failing the task 9 seconds in. Any other 4xx stays terminal.
+    """
+    import json as _json
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    throttled = _json.dumps(
+        {
+            "error": "AgentCard Organization MCP rate limit exceeded",
+            "code": "agentcard_org_mcp_rate_limited",
+            "retryAfterSeconds": None,
+        }
+    )
+    throttled_with_hint = throttled.replace('"retryAfterSeconds": null', '"retryAfterSeconds": 7')
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self.text = body
+
+        def json(self):
+            return _json.loads(self.text)
+
+    def fake_client(responses):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                status, body = responses[min(len(calls), len(responses) - 1)]
+                calls.append((status, json["action"]))
+                return FakeResponse(status, body)
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    ready = (200, '{"status":"residual_ready"}')
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client([(429, throttled), (429, throttled_with_hint), ready])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual") == {
+                "status": "residual_ready"
+            }
+        assert calls == [(429, "prepare-residual")] * 2 + [(200, "prepare-residual")]
+        # A null hint waits a bounded share of the org window; an explicit hint is honored.
+        assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3, 7.0]
+
+        sleeps.clear()
+        client, calls = fake_client([(429, throttled)])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except RuntimeError as error:
+                assert "agentcard_org_mcp_rate_limited" in str(error)
+            else:
+                raise AssertionError("a persistent org throttle must raise after its bounded attempts")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        # A 429 without the structured transient code is not proof the call never ran.
+        for unstructured in ('{"error":"Too many requests"}', "rate limit exceeded", '{"code":"other_limit"}'):
+            sleeps.clear()
+            client, calls = fake_client([(429, unstructured), ready])
+            with patch.object(bench.httpx, "AsyncClient", client):
+                try:
+                    await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"unstructured 429 must stay terminal: {unstructured}")
+            assert calls == [(429, "prepare-residual")] and sleeps == []
+
+
 def test_agentcard_setup_attention_failure_fails_the_task_with_its_cause():
     """The poll loop must surface a failed setup fixture instead of swallowing it as a warning."""
     import inspect
@@ -6295,6 +6389,51 @@ async def test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_o
             assert isinstance(caught.value, bench.AgentCardReleaseStall) == (flag == "1")
             assert "last observed" in str(caught.value)
     assert calls == {"reads": 0, "recoveries": 0}
+
+
+async def test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error():
+    """PR #1781 deploy smoke (2026-11-08 05:17Z): one lifecycle read got AgentCard's transient 401,
+    the next read observed the exact release stall, and the idempotent abandon re-POST was still
+    in flight at the reconciliation deadline. The superseded read error must not veto the waiver
+    for the fresh exact-stall observation (it saved ERROR while cleanup printed the SKIP)."""
+    import pytest
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+
+    task = get_task_by_name("agent-payment-abandonment")
+    reads = {"count": 0}
+
+    async def read(_base, _aid):
+        reads["count"] += 1
+        if reads["count"] == 1:
+            raise RuntimeError(
+                'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP '
+                'list_transfers failed: Invalid or expired organization token"}'
+            )
+        return _agentcard_release_stall_lifecycle()
+
+    async def slow_recover(_base, _aid):
+        await asyncio.sleep(5)
+        raise AssertionError("the deadline must cancel the in-flight recovery")
+
+    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
+        with pytest.raises(RuntimeError) as caught:
+            await asyncio.wait_for(
+                bench._wait_for_expected_payment_lifecycle(
+                    "http://benchmark.invalid",
+                    "exact-owned-agent",
+                    task,
+                    _agentcard_release_stall_lifecycle(),
+                    timeout_seconds=0.3,
+                    poll_interval_seconds=0.01,
+                    fetch_lifecycle=read,
+                    recover_lifecycle=slow_recover,
+                    resume_pending_after_seconds=0.001,
+                ),
+                timeout=2,
+            )
+    assert reads["count"] == 2
+    assert isinstance(caught.value, bench.AgentCardReleaseStall), caught.value
 
 
 async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation():
@@ -26937,6 +27076,10 @@ async def run_all_tests():
         "agentcard_release_policy_fetch_cancel_strict",
         test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
     )
+    await r.record_async(
+        "agentcard_release_policy_fresh_stall_after_recovered_read_error",
+        test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error,
+    )
 
     await r.record_async(
         "benchmark_native_checks_overlap_judges_without_losing_ownership",
@@ -27860,6 +28003,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_setup_retries_transient_upstream_failure",
         test_agentcard_setup_retries_transient_upstream_failure,
+    )
+    await r.record_async(
+        "agentcard_setup_retries_only_the_structured_org_rate_limit",
+        test_agentcard_setup_retries_only_the_structured_org_rate_limit,
     )
     r.record(
         "agentcard_setup_attention_failure_fails_task",
