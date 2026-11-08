@@ -460,6 +460,19 @@ def list_selected(root: Path, base: str, template: Path) -> dict:
     return selection
 
 
+def refresh_prisma_client(root: Path) -> None:
+    """The local quick gates typecheck this checkout against its own generated Prisma client.
+
+    A sync that pulls a schema change leaves that client stale: PR #1784 and PR #1770 (2026-11-08)
+    both failed typescript with TS2353 on main's new CodeSession.closingTaskId after syncing.
+    scripts/ensure-prisma-client.sh regenerates it only when stale, inside this checkout.
+    """
+    result = subprocess.run(['bash', str(root / 'scripts/ensure-prisma-client.sh'), str(root)], cwd=root)
+    if result.returncode:
+        raise Blocked('prisma', f'scripts/ensure-prisma-client.sh exited {result.returncode}; this checkout\'s '
+                                'Prisma client may not match back-end/prisma/schema.prisma')
+
+
 def unpushed_smoke_refusal(root: Path, head: str) -> str | None:
     """Cloud smoke guests fetch only pushed commits. Refuse before any worker, plan or cycle starts.
 
@@ -756,6 +769,8 @@ def run(args, root: Path) -> int:
             print(f"DEPLOY_GATES CAPACITY ok: need {capacity['memory_mb']} MB available (have "
                   f"{capacity['available_mb']:.0f}), {capacity['disk_mb'] / 1024:.1f} GB disk (have "
                   f"{capacity['free_disk_mb'] / 1024:.1f})")
+        if not args.dry_run:
+            refresh_prisma_client(root)
         if sampler is not None:
             sampler.set_roots({w['gate']: Path(w['path']) for w in workers if w['mode'] in ('create', 'reuse')})
         py = sys.executable
