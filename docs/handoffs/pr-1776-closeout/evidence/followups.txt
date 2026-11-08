@@ -1,0 +1,6 @@
+PR #1776 follow-ups (2026-11-08)
+1. AgentCard release stall recurred on smoke agent-payment-abandonment (agent 374661b0-1227-4db5-8c64-5f0e0c7ab944): org transfer owt_866fb49949f77a36490032bf consumed, releasedCents=0, 4396 cents transferred and unreleased; card card_3f7dbde9570e8175f0bf58f8 CLOSED. Standing warning policy; funds remain an open follow-up.
+2. scripts/tests/devbox-teardown.test.sh case 6 fails on any devbox whose .cloud-env exports ROSE_USE_SYSTEM_PG=true: the script sources $ROOT/.cloud-env after the test unsets the variable. Host-only (passes on Blacksmith); not part of this assignment.
+3. The private closeout archive tool (closeout_archive.py) is not in the repo; this deploy used an equivalent private script (archived under var/tmp/rca-foreign-uid/tools/). A committed `scripts/deploy` archive step would make closeouts CLI-reproducible.
+4. Deploy smoke Hub runs carry code=null, so benchmark-history-backfill.py reports them UNBOUND; rows were added explicitly with hub_ledger_row.
+5. deletion-check reports the boxes daemon's boot-time `codex app-server` (parent sprite-daemon.mjs, cwd /home/boxes/rose) as a live process in the checkout, as on PR #1744. It is platform-owned and holds no workspace records; is_harness_process deliberately keeps codex sessions blocking, so a daemon-standby exclusion needs its own change.

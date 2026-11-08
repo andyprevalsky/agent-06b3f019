@@ -4858,5 +4858,52 @@ class LocalCleanupQuietScan(unittest.TestCase):
                 finally:
                     child.kill(); child.wait(); child.stdout.close()
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc credential semantics')
+    def test_setuid_process_first_seen_as_ours_is_skipped_not_refused(self):
+        # The Blacksmith failure (PR #1760): a sibling suite's `sudo -n` was first seen while its euid
+        # was still ours (pre-exec), then its cwd turned unreadable while its real uid stayed ours, and
+        # quiet() refused it after the grace window. A real sudo is the fixture; only the first look at
+        # /proc/<pid> is pinned to that pre-exec owner.
+        import time
+        import deploy_test_local_cleanup as local
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / '.context').mkdir()
+            (root / '.context/native-worker-admission.lock').write_text('')
+            child = subprocess.Popen(['sudo', '-n', 'sleep', '60'], cwd=root)
+            proc_dir = Path(f'/proc/{child.pid}')
+
+            def steady():
+                # sudo runs the command: its real uid is ours and its euid root, with a root child.
+                uids = (proc_dir / 'status').read_text().split('Uid:')[1].split()[:2]
+                children = (proc_dir / 'task' / str(child.pid) / 'children').read_text().split()
+                return uids == [str(os.getuid()), '0'] and bool(children)
+            try:
+                deadline = time.monotonic() + 10
+                while not steady():
+                    self.assertLess(time.monotonic(), deadline, 'sudo never ran its command as root')
+                    time.sleep(0.05)
+                with self.assertRaises(PermissionError):
+                    (proc_dir / 'cwd').resolve(strict=True)
+                real_stat, seen = Path.stat, []
+
+                def first_look_ours(path, *args, **kwargs):
+                    result = real_stat(path, *args, **kwargs)
+                    if path != proc_dir or seen:
+                        return result
+                    seen.append(path)
+                    return os.stat_result((result.st_mode, *result[1:4], os.geteuid(), *result[5:]))
+                with patch.object(Path, 'stat', first_look_ours):
+                    local.quiet(root)
+                self.assertEqual(seen, [proc_dir])
+            finally:
+                deadline = time.monotonic() + 10
+                while child.poll() is None:
+                    try:
+                        child.terminate()  # refused only while sudo briefly holds a root real uid
+                    except PermissionError:
+                        self.assertLess(time.monotonic(), deadline, 'sudo fixture could not be stopped')
+                    time.sleep(0.05)
+
 
 if __name__ == '__main__': unittest.main()

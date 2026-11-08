@@ -16,6 +16,7 @@
  */
 import { parseGithubUrl } from '../github';
 import { githubApiBase, githubFetch, GithubRateLimitedError } from '../githubRateLimit';
+import { githubPoolFetch } from '../githubTokenPool';
 import { createLogger } from '../logger';
 import type { RepoFacts } from './lifecycle';
 
@@ -53,9 +54,9 @@ export interface CodeSessionMergeFacts {
 type FetchLike = typeof fetch;
 
 /**
- * One GitHub REST call (GET by default) with the backend's GITHUB_TOKEN; shared with publish.
- * A rate limit rejects with GithubRateLimitedError (reset time included) instead of
- * resolving as an ordinary non-200 answer.
+ * One GitHub REST call (GET by default); shared with publish. Reads use the token pool;
+ * a POST (opening a PR) keeps the primary GITHUB_TOKEN identity. A rate limit rejects with
+ * GithubRateLimitedError (reset time included) instead of resolving as an ordinary non-200 answer.
  */
 export async function githubJson(
   fetchImpl: FetchLike,
@@ -68,15 +69,19 @@ export async function githubJson(
   };
   if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   if (init.body !== undefined) headers['Content-Type'] = 'application/json';
+  const method = init.method ?? 'GET';
   const response = await githubFetch(
     `${githubApiBase()}${path}`,
     {
-      method: init.method ?? 'GET',
+      method,
       headers,
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     },
-    { fetchImpl, component: 'GithubJson' }
+    {
+      fetchImpl: githubPoolFetch(method === 'GET' ? 'pool' : 'primary', fetchImpl),
+      component: 'GithubJson',
+    }
   );
   const body: unknown = response.status === 204 ? null : await response.json().catch(() => null);
   return { status: response.status, body };

@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "sha": "2e0403fdf940e9ea4406348929ec0a0db8957fa5",
+  "pr": 1767,
+  "status": "PASS",
+  "started_at": "2026-11-08T00:55:57Z",
+  "finished_at": "2026-11-08T01:09:17Z",
+  "changed_files": 32,
+  "selected": [
+    "render",
+    "fly",
+    "vercel",
+    "mac-release",
+    "wmh",
+    "backend-probes",
+    "workflow-migration",
+    "agentcard",
+    "semantic"
+  ],
+  "lanes": {
+    "render": {
+      "status": "PASS",
+      "reason": "Render serves the merged backend (live)",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T00:55:57Z",
+      "finished_at": "2026-11-08T01:03:22Z",
+      "exit_code": 0,
+      "command": "/var/tmp/rose-base-measure/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-render --merged-sha 2e0403fdf940e9ea4406348929ec0a0db8957fa5 --state-dir /var/tmp/rose-base-measure/.context/deploy-pipeline-r2",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline-r2/production-logs/render.log"
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent runtime or deploy-agents.yml change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "vercel": {
+      "status": "PASS",
+      "reason": "Vercel deployment 7629461884 success",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T00:55:57Z",
+      "finished_at": "2026-11-08T01:00:56Z",
+      "exit_code": 0,
+      "command": "/opt/devbox-tools/gh/current/bin/gh api repos/{owner}/{repo}/deployments?sha=2e0403fdf940e9ea4406348929ec0a0db8957fa5 (vercel[bot]) + statuses",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline-r2/production-logs/vercel.log"
+    },
+    "mac-release": {
+      "status": "PASS",
+      "reason": "release-mac-app run 42432014202 success",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T00:55:57Z",
+      "finished_at": "2026-11-08T01:03:26Z",
+      "exit_code": 0,
+      "command": "/opt/devbox-tools/gh/current/bin/gh run list --workflow release-mac-app.yml --limit 30 (headSha=2e0403fdf940e9ea4406348929ec0a0db8957fa5, created>=2026-11-08T00:55:39Z) && /opt/devbox-tools/gh/current/bin/gh run watch 42432014202 --exit-status",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline-r2/production-logs/mac-release.log"
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "backend-probes": {
+      "status": "PASS",
+      "reason": "/health + /api/agents 200, endpoint smoke passed, Render log clean",
+      "applicable": true,
+      "depends_on": [
+        "render"
+      ],
+      "started_at": "2026-11-08T01:03:22Z",
+      "finished_at": "2026-11-08T01:03:27Z",
+      "exit_code": 0,
+      "command": "GET https://navi-j9a9.onrender.com/health && GET https://navi-j9a9.onrender.com/api/agents (X-API-Key=$BACKEND_API_KEY, X-User-Id=1f85ff25-6e29-4c1b-8739-f917bd101a30) && cd back-end && env -u SMOKE_BASE_URL -u SMOKE_HEALTH_URL -u SMOKE_FRONTEND_URL npx tsx scripts/prod-endpoint-smoke.ts && GET https://api.render.com/v1/logs?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=100&direction=backward",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline-r2/production-logs/backend-probes.log"
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent cutover",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+      "applicable": false,
+      "depends_on": [
+        "render",
+        "vercel"
+      ],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "semantic": {
+      "status": "PASS",
+      "reason": "chat-lifecycle-ratchet run 42432550023 success",
+      "applicable": true,
+      "depends_on": [
+        "render",
+        "vercel"
+      ],
+      "started_at": "2026-11-08T01:03:22Z",
+      "finished_at": "2026-11-08T01:09:17Z",
+      "exit_code": 0,
+      "command": "/var/tmp/rose-base-measure/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha 2e0403fdf940e9ea4406348929ec0a0db8957fa5 --state-dir /var/tmp/rose-base-measure/.context/deploy-pipeline-r2 && /var/tmp/rose-base-measure/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 2e0403fdf940e9ea4406348929ec0a0db8957fa5 --state-dir /var/tmp/rose-base-measure/.context/deploy-pipeline-r2 --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+      "log": "/var/tmp/rose-base-measure/.context/deploy-pipeline-r2/production-logs/semantic.log"
+    }
+  }
+}

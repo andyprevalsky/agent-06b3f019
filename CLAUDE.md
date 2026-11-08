@@ -1396,6 +1396,33 @@ Code: `agents/providers/planner_memory/`, backend `src/domains/planner-memory/` 
   bundles into `agents/benchmarks/fixtures/memory/<n>.json`; `run_benchmark.py` loads them into the local stack's
   history table (internal PUT) for `memory: "on"` tasks. Global kill switch: `PLANNER_MEMORY_ENABLED=0`.
 
+## GitHub token pool
+
+Several GitHub identities share the load because each has its own API quota
+(5,000/h for a user): `GITHUB_TOKEN` (Andy's user token), optional
+machine-account tokens `GITHUB_TOKEN_2` … `GITHUB_TOKEN_9`, the org's GitHub App
+`rose-labs-agents` (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`,
+`GITHUB_APP_PRIVATE_KEY_B64`; the backend mints its hourly installation tokens
+in production, or anywhere `GITHUB_APP_POOL=on`) and `GITHUB_DISPATCH_TOKEN`,
+which the backend ranks after every usable member. Members live in
+`agents/.env`, `back-end/.env` and Render; add one to the boxes.dev managed env
+when Andy supplies it. Backend reads (repo visibility, branch heads, merge
+facts, admin-health commits) use `githubFetch` / `githubTokenCandidates`
+(`back-end/src/providers/githubTokenPool.ts`), which prefer the member with the
+most quota left and move on when one is rate limited. Writes that act as Andy
+never rotate onto a machine account or the App: code-agent clone/push credentials
+read `GITHUB_TOKEN` directly, publishing a PR calls `githubFetch` with
+`identity: 'primary'` (`GITHUB_TOKEN` alone), and agent repo creation uses
+`GITHUB_TOKEN`, falling back to `GITHUB_DISPATCH_TOKEN` only when it is
+rejected. When a read-only script or REST call hits a rate limit, take the token
+with the most quota left from `python3 scripts/github_token_pool.py pick`; never
+use it for pushes, PRs or other writes, and treat a 404 from the App or a
+machine account as not authoritative (it may lack access to a private repo; retry
+with `GITHUB_TOKEN`). `status` shows each member's quota without printing tokens.
+On a boxes.dev devbox the `gh` wrapper ignores `GH_TOKEN`, so pass the picked
+token to `/opt/devbox-tools/gh/current/bin/gh` or `curl`. Never print or commit a
+token, and never revoke or replace a member without Andy's explicit OK.
+
 ## Production Logs (Render)
 
 Fetch backend prod logs via Render API:
