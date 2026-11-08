@@ -46,7 +46,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Never inject synthetic user or tool messages or recovery nudges into the planner trajectory, and never add string-matching classifiers to the harness (rules 25a, 25b).
 - Never print or commit a secret, and never rotate or revoke a credential without Andy's explicit OK.
 - Never delete lockfiles or change dependency ranges to make an install work, and never reinstall dependencies into a `node_modules` or venv linked from another checkout.
-- Never set a Bash tool timeout above 5 minutes; run anything longer in the background and watch it (rule 12).
+- Never give a foreground Bash command a timeout above 5 minutes; run anything longer in the background and watch it (rule 12).
 - Never treat a user pause as a bug's cause; users pause after noticing a problem (rule 11).
 
 ## Delegation and waiting

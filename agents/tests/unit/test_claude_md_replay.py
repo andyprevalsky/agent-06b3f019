@@ -323,6 +323,8 @@ def test_observer_avoids_obvious_false_positives():
     assert [f for f in findings if f.severity in ("break", "warn")] == []
     slow = observer.check_commands(observer.parse_trace(_stream([{"command": "sleep 900"}, {"command": "make", "timeout": 600000}])))
     assert [f.rule for f in slow] == ["R19", "R19"]
+    background = observer.check_commands(observer.parse_trace(_stream([{"command": "make", "timeout": 1800000, "run_in_background": True}])))
+    assert [f.rule for f in background] == []
 
 
 PATCH = textwrap.dedent(

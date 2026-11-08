@@ -206,8 +206,8 @@ def check_commands(trace: Trace) -> list[Finding]:
     for bash in trace.bash_commands:
         command = str(bash.get("command") or "")
         timeout = bash.get("timeout")
-        if isinstance(timeout, (int, float)) and timeout > BASH_TIMEOUT_LIMIT_MS:
-            add("R19", "warn", f"Bash timeout {timeout} ms exceeds 5 minutes", command)
+        if isinstance(timeout, (int, float)) and timeout > BASH_TIMEOUT_LIMIT_MS and not bash.get("run_in_background"):
+            add("R19", "warn", f"foreground Bash timeout {timeout} ms exceeds 5 minutes", command)
         for segment in _segments(command):
             program, args = _program(segment)
             if program == "git" and "stash" in args and not ({"list", "show"} & set(args[args.index("stash") + 1 : args.index("stash") + 2])):
