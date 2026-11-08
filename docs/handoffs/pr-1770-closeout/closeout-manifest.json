@@ -1,0 +1,194 @@
+{
+  "format": "PR1770-CLOSEOUT-MANIFEST-V1",
+  "pr": 1770,
+  "merged_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+  "reviewed_head": "606fe7fe65ce8fc41addb2960c2c3e3f4d45cfbd",
+  "source_digest": "f1b251c8814f1bbb303c1803f6687ce0d1cb90036d4f864caec4672f3159dc52",
+  "original_goal_epoch": 1794082914,
+  "original_deploy_epoch": 1794083515.7049096,
+  "native_deploy_finished_epoch": 1794135896.6602514,
+  "validation": {
+    "selected_checks": 281,
+    "current_quick_pass": 4,
+    "provider_dependency_unverified": 275,
+    "historical_custody_unverified": 2,
+    "current_native_controller_smoke_pass": false
+  },
+  "production": {
+    "native_status": "FAIL",
+    "finished_at": "2026-11-08T10:58:21Z",
+    "lanes": {
+      "render": {
+        "status": "PASS",
+        "reason": "Render serves the merged backend (live)",
+        "applicable": true,
+        "finished_at": "2026-11-08T10:41:18Z",
+        "exit_code": 0
+      },
+      "fly": {
+        "status": "SKIPPED-not-applicable",
+        "reason": "no agent runtime or deploy-agents.yml change",
+        "applicable": false,
+        "finished_at": null,
+        "exit_code": null
+      },
+      "vercel": {
+        "status": "PASS",
+        "reason": "Vercel deployment 7634715867 success",
+        "applicable": true,
+        "finished_at": "2026-11-08T10:39:01Z",
+        "exit_code": 0
+      },
+      "mac-release": {
+        "status": "FAIL",
+        "reason": "release-mac-app run 42472479080 failed (exit 1)",
+        "applicable": true,
+        "finished_at": "2026-11-08T10:47:01Z",
+        "exit_code": 1
+      },
+      "wmh": {
+        "status": "SKIPPED-not-applicable",
+        "reason": "no WMH path change",
+        "applicable": false,
+        "finished_at": null,
+        "exit_code": null
+      },
+      "backend-probes": {
+        "status": "PASS",
+        "reason": "/health + /api/agents 200, endpoint smoke passed, Render log clean",
+        "applicable": true,
+        "finished_at": "2026-11-08T10:41:25Z",
+        "exit_code": 0
+      },
+      "workflow-migration": {
+        "status": "SKIPPED-not-applicable",
+        "reason": "no agent cutover",
+        "applicable": false,
+        "finished_at": null,
+        "exit_code": null
+      },
+      "agentcard": {
+        "status": "FAIL",
+        "reason": "run-bench agent-payment-production-abandonment exited 1; AgentCard release stall not qualified: task status/benchmark_status is not SKIPPED (record 20261108_105810_d379f0ec-1d3e-4aa5-99f0-418b79febdac_agent-payment-production-abandonment.json)",
+        "applicable": true,
+        "finished_at": "2026-11-08T10:58:21Z",
+        "exit_code": 1
+      },
+      "semantic": {
+        "status": "PASS",
+        "reason": "chat-lifecycle-ratchet run 42472476076 success",
+        "applicable": true,
+        "finished_at": "2026-11-08T10:47:44Z",
+        "exit_code": 0
+      }
+    },
+    "qualification": "Exact negative qualifications, not PASS: MacElectron504 external; payment mixed-mode ERROR delegatedNOTINTRO. No Mac binary released."
+  },
+  "repair_handoffs": {
+    "c15": {
+      "url": "https://boxes.dev/thread/thr_5a08a19fe568480e8d901f440844ad36",
+      "devboxId": "a0b96f6a-13d9-4e81-b131-5502c997354b",
+      "folder_verified": true,
+      "originating_merged_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+      "requested_settings": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "high",
+        "speed": "standard",
+        "muted": true
+      }
+    },
+    "report-bug-fetch": {
+      "url": "https://boxes.dev/thread/thr_423ded499834490bb423b9a442d5cbeb",
+      "devboxId": "944bdbf4-497f-43a9-bc15-072df9722b8b",
+      "folder_verified": true,
+      "originating_merged_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+      "requested_settings": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "high",
+        "speed": "standard",
+        "muted": true
+      }
+    },
+    "idempotent-auth-timeout": {
+      "url": "https://boxes.dev/thread/thr_7654328c258b4b28b33daa76e573c178",
+      "devboxId": "5208e9f9-029e-4d6c-9b9e-eb72a90b9310",
+      "folder_verified": true,
+      "originating_merged_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8"
+    },
+    "mac-autotag": {
+      "url": "https://boxes.dev/thread/thr_16c350fec66f4b62bc75cb75751690d8",
+      "devboxId": "1509d562-54a1-43f1-b5ec-b96d91c8b36d",
+      "folder_verified": true,
+      "originating_merged_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+      "requested_settings": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "high",
+        "speed": "standard",
+        "muted": true
+      }
+    },
+    "production-mixed-mode": {
+      "url": "https://boxes.dev/thread/thr_00839bdce7a24e74835d4ac65faf6779",
+      "devboxId": "4e2bc9c9-9751-4e7e-a7b8-fddda4d61beb",
+      "folder_verified": true,
+      "originating_merged_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+      "requested_settings": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "high",
+        "speed": "standard",
+        "muted": true
+      }
+    }
+  },
+  "financial_obligations": [
+    {
+      "case": "historical sandbox abandonment",
+      "last_unreleased_cents": 4396,
+      "livemode": false,
+      "current_financial_state": "UNVERIFIED"
+    },
+    {
+      "case": "historical sandbox idempotent abandonment",
+      "last_unreleased_cents": 4396,
+      "livemode": false,
+      "current_financial_state": "UNVERIFIED"
+    },
+    {
+      "case": "production mixed-mode run d379f0ec",
+      "last_unreleased_cents": 100,
+      "livemode": true,
+      "last_snapshot": "CLOSED/balance0; consumed/transferred100/released0; purchaseHELD/fundingRECLAIMING/refundnull",
+      "financial_cleanup": "FAILED/UNVERIFIED; no rerun/mint"
+    }
+  ],
+  "recording_coverage": "Production FE publisher refused missing browser recording; no FE approval link qualified",
+  "private_snapshot_files": 66656,
+  "private_snapshot_bytes": 12356205952,
+  "preserved_historical_branches": 72,
+  "supplemental_unpublished_commits": [
+    "2529b4d51a06021b9cbfa89a88f4f3440e4c9eee",
+    "2feae2c95fe928ca34c482f16fa76cd6553b7bb3"
+  ],
+  "review": "CodeRabbit exact-head usage-cap skip, merged unreviewed by CodeRabbit",
+  "freedom": "Preserved; no blocking/network/service change",
+  "postmerge_followup": "PR1784 coordinator owns planned alternate-state-dir admission/typed-negative followup; not counted as dispatched goal",
+  "supporting_tooling_delivery": {
+    "headRefOid": "ea9ea83637cf3f98a2b222dab05aecdd56867d06",
+    "mergeCommit": {
+      "oid": "62b3f578582f963c04f77389f0529bbcb76ed39f"
+    },
+    "mergedAt": "2026-11-08T11:50:12Z",
+    "number": 1832,
+    "state": "MERGED",
+    "url": "https://github.com/Rose-Ai-Labs/rose/pull/1832",
+    "validation": {
+      "suite": "python3 scripts/tests/deploy-cli.test.py",
+      "tests": 50,
+      "result": "PASS",
+      "seconds": 3.238,
+      "owning_regression": "unchanged live_processes test FAIL before, PASS after",
+      "code_review": "Independent exact-diff approved; CodeRabbit spending-cap skip",
+      "scope": "CLI tooling only under /push; no application or production PASS credit"
+    }
+  }
+}

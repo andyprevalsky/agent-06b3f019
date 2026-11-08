@@ -1,7 +1,6 @@
 import * as repo from './repo';
 import {
   getUserUsage,
-  getSubscriptionTier,
   getUpgradeOptions,
   createInitialCredit,
   ensureInviteMonthlyCredit,
@@ -26,13 +25,18 @@ export async function getUsageSummary(userId: string) {
   // front-end and worker already make — no scheduler, and no credit-gate change.
   await ensureInviteMonthlyCredit(userId);
 
-  const [usage, tier] = await Promise.all([getUserUsage(userId), getSubscriptionTier(userId)]);
+  const [usage, subscription] = await Promise.all([
+    getUserUsage(userId),
+    repo.findSubscriptionByUserId(userId),
+  ]);
+  const tier = subscription?.subscriptionTier ?? null;
 
   return {
     total: usage.total,
     used: usage.used,
     remaining: usage.remaining,
     tier: tier,
+    stripeLivemode: subscription?.stripeLivemode ?? null,
     upgradeOptions: getUpgradeOptions(tier),
     unlimited: isAdminUser(userId),
   };

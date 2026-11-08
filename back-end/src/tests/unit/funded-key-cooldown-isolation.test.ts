@@ -8,6 +8,11 @@ import {
 } from '../../providers/computeCredentials';
 import { prisma } from '../../providers/database';
 import {
+  __resetCodexFundedCooldown,
+  codexFundedCooldownUntil,
+  markCodexFundedCooldown,
+} from '../../providers/codeSessions/usageLimit';
+import {
   __clearGptApiKeyCooldownCache,
   __resetGptApiKeyCooldown,
   isGptApiKeyOnCooldown,
@@ -35,8 +40,19 @@ async function withLiveSharedCooldowns(
   };
   const shared = { writes: [] as string[], otherReads: 0 };
   integration.findUnique = async (...args: unknown[]) => {
-    const where = (args[0] as { where?: { userId_name_accountId?: unknown } }).where;
-    if (where?.userId_name_accountId === undefined) {
+    const where = (
+      args[0] as {
+        where?: { userId_name_accountId?: { userId: string; name: string; accountId: string } };
+      }
+    ).where;
+    const key = where?.userId_name_accountId;
+    if (
+      key?.userId !== '00000000-0000-0000-0000-000000000000' ||
+      !['gpt_api_key_cooldown', 'anthropic_api_key_cooldown', 'codex_funded_cooldown'].includes(
+        key.name
+      ) ||
+      key.accountId !== ''
+    ) {
       shared.otherReads++;
       return null;
     }
@@ -73,6 +89,7 @@ async function testIsolatedCasesNeitherInheritNorClearSharedCooldowns(): Promise
         false,
         'a live shared Anthropic mark leaked in'
       );
+      assert.equal(await codexFundedCooldownUntil(), null, 'a live shared Codex mark leaked in');
 
       await markGptApiKeyOnCooldown('insufficient_quota');
       __clearGptApiKeyCooldownCache();
@@ -85,14 +102,51 @@ async function testIsolatedCasesNeitherInheritNorClearSharedCooldowns(): Promise
       await __resetAnthropicApiKeyCooldown();
       assert.equal(await isAnthropicApiKeyOnCooldown(), false);
 
+      const reset = new Date(Date.now() + 60_000);
+      await markCodexFundedCooldown(reset);
+      assert.deepEqual(await codexFundedCooldownUntil(), reset, 'a private Codex mark persists');
+      await __resetCodexFundedCooldown();
+      assert.equal(await codexFundedCooldownUntil(), null, 'a private Codex reset clears');
+
       await prisma.integration.findUnique({ where: { id: 'unrelated-integration' } });
+      for (const [name, accountId] of [
+        ['foundry_deployment_cooldown', 'region:deployment'],
+        ['cerebras_api_key_cooldown', 'credential:model'],
+        ['unrelated_global_setting', ''],
+        ['codex_funded_cooldown', 'non-singleton-account'],
+      ]) {
+        const key = { userId: '00000000-0000-0000-0000-000000000000', name, accountId };
+        assert.equal(
+          await prisma.integration.findUnique({ where: { userId_name_accountId: key } }),
+          null,
+          `${name}/${accountId} must reach the shared delegate`
+        );
+      }
     });
 
     assert.deepEqual(shared.writes, [], 'an isolated case wrote or deleted a shared cooldown row');
-    assert.equal(shared.otherReads, 1, 'unrelated integration reads must reach the database');
+    assert.equal(shared.otherReads, 5, 'unrelated integration reads must reach the database');
+    await withIsolatedFundedKeyCooldowns(async () => {
+      const key = {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'foundry_deployment_cooldown',
+        accountId: 'region:deployment',
+      };
+      await integration.upsert({ where: { userId_name_accountId: key }, create: {}, update: {} });
+      await integration.deleteMany({ where: key });
+    });
+    assert.deepEqual(shared.writes, ['upsert', 'deleteMany'], 'unrelated writes are forwarded');
     assert.equal(integration.findUnique, sharedFindUnique, 'the delegate was not restored');
     __clearGptApiKeyCooldownCache();
     assert.equal(await isGptApiKeyOnCooldown(), true, 'the shared GPT mark must survive');
+    assert.ok(await codexFundedCooldownUntil(), 'the shared Codex mark must survive');
+    await assert.rejects(
+      withIsolatedFundedKeyCooldowns(async () => {
+        throw new Error('fixture failure');
+      }),
+      /fixture failure/
+    );
+    assert.equal(integration.findUnique, sharedFindUnique, 'a failed scope restores the delegate');
   });
 }
 

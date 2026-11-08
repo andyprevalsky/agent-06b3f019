@@ -175,10 +175,14 @@ async function main() {
   const { authorizeStripeHold } = await import('../../domains/purchases/chargeAuthorize');
   const { getTestPaymentLifecycle } = await import('../../domains/test-payment/lifecycle');
   const { resolveAndIssuePurchaseCard } = await import('../../domains/purchases/issueCard');
+  const { mintPurchaseCard } = await import('../../domains/purchases/service');
   const { reverseStalePurchasePayment } = await import('../../providers/purchaseStaleReversal');
   const { reconcileAbandonedPurchaseFunding } =
     await import('../../providers/purchaseFundingCompensation');
   const { AgentCardProviderError } = await import('../../providers/card-provider/errors');
+  const { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } =
+    await import('../../providers/benchmarkPaymentIdentity');
+  const { FakeCardProvider, FakeWalletFundingProvider } = await import('./purchases.testkit');
   const users: string[] = [];
   const failures: string[] = [];
   const check = async (label: string, run: () => Promise<void>) => {
@@ -448,6 +452,90 @@ async function main() {
         true
       );
     });
+    // The production identity may change after runner preflight. Exercise the actual
+    // persisted purchase/issuance boundary with no external rails or known allocation.
+    const productionUser = BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID;
+    assert.equal(await prisma.user.findUnique({ where: { userId: productionUser } }), null);
+    await prisma.user.create({ data: { userId: productionUser } });
+    users.push(productionUser);
+    for (const mode of [false, true]) {
+      await prisma.subscription.upsert({
+        where: { userId: productionUser },
+        create: {
+          userId: productionUser,
+          subscriptionTier: 30,
+          stripeCustomerId: mode ? 'cus_live' : 'cus_test',
+          stripeSubscriptionId: 'sub_production_local_fixture',
+          stripeLivemode: mode,
+          currentPeriodEnd: new Date('2099-01-01'),
+        },
+        update: { stripeLivemode: mode, stripeCustomerId: mode ? 'cus_live' : 'cus_test' },
+      });
+      const input = {
+        userId: productionUser,
+        merchant: 'Local Production Admission Fixture',
+        totalCents: 100,
+        subtotalCents: 100,
+        fingerprint: `production-mode-${mode}`,
+        currency: 'usd',
+        lineItems: [
+          {
+            name: 'Local fixture',
+            productUrl: 'https://fixture.invalid/item',
+            rating: '',
+            reviewCount: '',
+            unitPriceCents: 100,
+            quantity: 1,
+            lineTotalCents: 100,
+          },
+        ],
+        fees: [],
+      };
+      const { purchase } = await createPendingPurchaseWithLock({
+        ...input,
+        canonicalFingerprint: input.fingerprint,
+        lineItemsJson: [],
+      });
+      const card = new FakeCardProvider();
+      const wallet = new FakeWalletFundingProvider();
+      const cursor = calls.length;
+      await check(`production purchase mode admission ${mode}`, async () => {
+        if (!mode) {
+          await assert.rejects(
+            resolveAndIssuePurchaseCard(purchase, input, null, card, wallet),
+            (error: unknown) =>
+              error instanceof Error &&
+              'code' in error &&
+              error.code === 'production_payment_billing_mode'
+          );
+          assert.equal(calls.length, cursor, 'test-mode purchase reached Stripe');
+          assert.equal(card.mintCalls, 0, 'test-mode purchase reached live AgentCard');
+          assert.equal(
+            (await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: purchase.id } })).status,
+            'FAILED',
+            'fresh admission rejection must not strand a pending purchase'
+          );
+          await prisma.subscription.update({
+            where: { userId: productionUser },
+            data: { stripeLivemode: true, stripeCustomerId: 'cus_live' },
+          });
+          const retried = await mintPurchaseCard(input, card, wallet);
+          assert.equal(retried.cardId, card.cardId);
+          assert.equal(card.mintCalls, 1, 'valid retry must be admissible');
+        } else {
+          // A later subscription switch cannot change the immutable live snapshot.
+          await prisma.subscription.update({
+            where: { userId: productionUser },
+            data: { stripeLivemode: false },
+          });
+          const issued = await resolveAndIssuePurchaseCard(purchase, input, null, card, wallet);
+          assert.equal(issued.cardId, card.cardId);
+          assert.equal(card.mintCalls, 1);
+          assert.ok(calls.length > cursor);
+          assert.ok(calls.slice(cursor).every((call) => call.mode === true));
+        }
+      });
+    }
     assert.deepEqual(failures, []);
   } finally {
     await prisma.user.deleteMany({ where: { userId: { in: users } } });

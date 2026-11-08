@@ -4250,9 +4250,113 @@ async def test_held_gateway_starts_hold_at_transport_retirement():
                         await first.close()
 
 
+async def test_storage_writer_race_preserves_state_before_transport_release():
+    """Real CDP persistence survives a reply consuming the first stop request."""
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+    from domains.spawn_browser_agent_v3.config import BROWSER_DISCONNECT_TIMEOUT_SECONDS
+
+    entered = asyncio.Event()
+    reply = asyncio.get_running_loop().create_future()
+    cancellations = []
+    persisted_at_release = []
+    with tempfile.TemporaryDirectory(prefix="storage-writer-checkpoint-") as folder:
+        state_path = Path(folder) / "storage.json"
+
+        class PersistenceGateway(FakeTilionGateway):
+            def _release_transport_slot(self, downstream):
+                if downstream in self._sockets:
+                    persisted_at_release.append(json.loads(state_path.read_text()) if state_path.exists() else None)
+                super()._release_transport_slot(downstream)
+
+        async with _chromium() as (playwright, _browser, endpoint), _fixture_site() as site:
+            async with PersistenceGateway(endpoint) as gateway:
+                with _tilion_env(gateway):
+                    local_url, mux = await open_browser_cdp_connection(gateway.cdp_url)
+                    service = DOMService(cdp_url=local_url, cdp_multiplexer=mux)
+                    browser = None
+                    session = None
+                    monitor = None
+                    cleanup = None
+                    try:
+                        await service.connect()
+                        session = service._session
+                        assert session.is_cdp_connected, "fixture must exercise real storage persistence"
+                        browser = await playwright.chromium.connect_over_cdp(local_url)
+                        context = browser.contexts[0]
+                        page = context.pages[0]
+                        await page.goto(site)
+                        await context.add_cookies([{"name": "storage-stop-proof", "value": "retained", "url": site}])
+                        await page.evaluate("localStorage.setItem('storage-stop-proof', 'retained')")
+                        session.browser_profile.storage_state = state_path
+                        watchdog = session._storage_state_watchdog
+                        old_monitor = watchdog._monitoring_task
+                        old_monitor.cancel()
+                        await asyncio.gather(old_monitor, return_exceptions=True)
+                        indicator = service._captcha_indicator_task
+                        service._captcha_indicator_task = None
+                        if indicator is not None:
+                            indicator.cancel()
+                            await asyncio.gather(indicator, return_exceptions=True)
+
+                        async def cookie_rpc():
+                            entered.set()
+                            await asyncio.wait_for(reply, timeout=watchdog.auto_save_interval)
+                            cancellations.append(asyncio.current_task().cancelling())
+                            return False
+
+                        object.__setattr__(watchdog, "_have_cookies_changed", cookie_rpc)
+                        watchdog._monitoring_task = asyncio.create_task(watchdog._monitor_storage_changes())
+                        monitor = watchdog._monitoring_task
+                        await entered.wait()
+                        # This provider callback and owner shutdown are independent
+                        # scheduled work. The completed child future wins the first
+                        # cancellation inside the unmodified Python3.11 wait_for.
+                        asyncio.get_running_loop().call_soon(reply.set_result, False)
+                        cleanup = asyncio.create_task(mux.disconnect_confirmed(service.disconnect))
+                        done, _ = await asyncio.wait({cleanup}, timeout=BROWSER_DISCONNECT_TIMEOUT_SECONDS)
+                        assert cleanup in done, "storage writer did not acknowledge shutdown within the native deadline"
+                        await cleanup
+                        assert cancellations and cancellations[0] >= 1, "fixture did not consume a cancellation at the reply race"
+                        assert monitor.done() and monitor.cancelling() >= 2, "shutdown never redelivered the consumed cancellation"
+                        for _ in range(100):
+                            if persisted_at_release:
+                                break
+                            await asyncio.sleep(0.01)
+                        assert persisted_at_release, "no actual provider transport retirement"
+                        state = persisted_at_release[0]
+                        assert state and any(c["name"] == "storage-stop-proof" and c["value"] == "retained" for c in state["cookies"]), state
+                        assert any(item["name"] == "storage-stop-proof" and item["value"] == "retained" for origin in state["origins"] for item in origin.get("localStorage", [])), state
+                    finally:
+                        if monitor is not None and not monitor.done():
+                            monitor.cancel()
+                            await asyncio.gather(monitor, return_exceptions=True)
+                        if cleanup is not None:
+                            if not cleanup.done():
+                                await asyncio.wait({cleanup}, timeout=5)
+                            if not cleanup.done():
+                                cleanup.cancel()
+                            await asyncio.gather(cleanup, return_exceptions=True)
+                        if session is not None:
+                            session._intentional_stop = True
+                            reconnect = session._reconnect_task
+                            if reconnect is not None and not reconnect.done():
+                                reconnect.cancel()
+                                await asyncio.gather(reconnect, return_exceptions=True)
+                            client = session._cdp_client_root
+                            if client is not None:
+                                await client.stop()
+                            await session.event_bus.stop(clear=True, timeout=5)
+                        if browser is not None:
+                            with contextlib.suppress(Exception):
+                                await browser.close()
+                        await _stop_dom_service(service)
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("storage_writer_race_preserves_state_before_release", test_storage_writer_race_preserves_state_before_transport_release),
         ("fake_gateway_transport_slot_retirement", test_gateway_slot_tracks_closed_transport_while_bridge_retires),
         ("held_gateway_transport_slot_retirement", test_held_gateway_starts_hold_at_transport_retirement),
         ("chromium_native_port_discovery", test_chromium_native_discovery_waits_for_valid_port_file),

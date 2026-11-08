@@ -431,6 +431,7 @@ GATES = (
     # In-definition @quarantine marker (scripts/lib/test_quarantine.py): runs, never blocks.
     Gate("test-quarantine", ("python3", "scripts/tests/test-quarantine.test.py")),
     Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
+    Gate("mac-app-release-drift", ("bash", "scripts/tests/mac-app-release-drift.test.sh")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",

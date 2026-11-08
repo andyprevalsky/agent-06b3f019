@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real staged coordinator; no provider, database, or app processes."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import copy
 import json
 import os
@@ -16,9 +17,60 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 import deploy_gate_progress as progress
+import deploy_test_process
+
+production_process_entries = deploy_test_process.process_entries
+
+
+@contextmanager
+def unrelated_unreadable_process():
+    """A same-user non-dumpable process outside this test's tree, like the runner's pid 211414 (PR #1762)."""
+    grandchild = ("import ctypes,os,sys;ctypes.CDLL(None).prctl(4,0,0,0,0);"
+                  "print(os.getpid(),flush=True);sys.stdin.read()")
+    launcher = subprocess.Popen([sys.executable, '-c', 'import subprocess,sys;subprocess.Popen('
+                                 f'[sys.executable,"-c",{grandchild!r}],start_new_session=True)'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        pid = int(launcher.stdout.readline())
+        launcher.wait(timeout=10)  # the re-parented grandchild leaves this process tree
+        yield pid
+    finally:
+        launcher.stdin.close()  # EOF ends the grandchild; nothing is signalled
+        launcher.stdout.close()
+        launcher.wait(timeout=10)
+
+
+def own_process_entries():
+    """This test process and its descendants: the only processes a test here can create or own.
+
+    quiet() and namespace_quiet() refuse any same-user process they cannot read, which is the real
+    safety check. Unrelated host processes (a sibling suite's non-dumpable fixture, a runner's
+    (sd-pam)) are outside every fixture, so the suite scans only its own process tree.
+    """
+    children = {}
+    for process in Path('/proc').iterdir():
+        try:
+            parent = int((process / 'stat').read_text().rsplit(') ', 1)[1].split()[1]) if process.name.isdigit() else None
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # exited mid-scan
+        if parent is not None:
+            children.setdefault(parent, []).append(int(process.name))
+    owned, frontier = [], [os.getpid()]
+    while frontier:
+        pid = frontier.pop()
+        owned.append(Path('/proc', str(pid)))
+        frontier.extend(children.get(pid, ()))
+    return iter(owned)
+
+
+def setUpModule():
+    hermetic = patch.object(deploy_test_process, 'process_entries', own_process_entries)
+    hermetic.start()
+    unittest.addModuleCleanup(hermetic.stop)
+
 
 class Cycle(unittest.TestCase):
-    def custody_fixture(self):
+    def custody_fixture(self, top_level=None):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
         mocked.start(); self.addCleanup(mocked.stop)
@@ -44,6 +96,10 @@ class Cycle(unittest.TestCase):
             snap['orgTransfer'].update(id='transfer-' + str(i), cardId='card-' + str(i), status='consumed',
                                        releasedCents=0, transferredCents=4396, amountCents=4396, livemode=False)
             snap['stripeHold']['livemode'] = False
+            snap['integrity'] = dict(agentCardProviderCardCount=1, agentCardProviderTransferCount=1,
+                                     agentCardProviderUnlinkedTransferCount=0, cardCount=1, purchaseCount=1,
+                                     stripePaymentIntentCount=1, stripeProviderPaymentIntentCount=1,
+                                     walletFundingCount=1)
             final = dict(root_deleted=True, tree_agent_ids=[snap['agentId']], unsealed_tree_agent_ids=[], browser_sessions=[],
                          purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
                           card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
@@ -54,7 +110,8 @@ class Cycle(unittest.TestCase):
                           execution_provenance={'base_sha': self.state['source']['head']},
                           logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=snap['agentId'], final=final,
                                 provider_receipts=[], agentcard_release_stall_lifecycles={snap['agentId']: snap})})
-            if not i: native['logs']['agentcard_release_stall_lifecycle'] = snap
+            if not i:
+                native['logs']['agentcard_release_stall_lifecycle'] = top_level(copy.deepcopy(snap)) if top_level else snap
             file = self.root / '.context/native' / name / 'cloudbench-run.json'; c.write(file, {'tasks': [native]})
             evidence = dict(native_task=row, path=str(file), sha256=c.sha_file(file))
             result = file.parent / 'result.json'
@@ -78,6 +135,175 @@ class Cycle(unittest.TestCase):
         (self.root / 'code').write_text('changed payment backend contract')
         new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
         return new
+
+    def transfer_fixture(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        donor = copy.deepcopy(self.state)
+        proof = h.build(donor, self.plan, new, self.root)
+        c.refresh(donor, self.plan, new, self.root, historical_no_retry_proof=proof)
+        for i in range(3):
+            negative = copy.deepcopy(donor['failures'][0])
+            negative.update(id='lost-' + str(i), native_result='UNVERIFIED', complete=False,
+                            disposition='execution required', reexecution={'receipt': 'negative-history'})
+            negative.pop('rca', None)
+            file = self.root / '.context/negative' / str(i) / 'cloudbench-run.json'
+            c.write(file, {'tasks': [dict(negative['worker_evidence']['native_task'], logs={})]})
+            negative['worker_evidence']['path'] = str(file)
+            negative['worker_evidence']['sha256'] = c.sha_file(file)
+            donor['failures'].append(negative)
+        file = self.root / '.context/donor/cycle.json'; c.write(file, donor)
+        index = self.root / '.context/donor/contents.json'
+        c.write(index, {'format': 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1',
+                        'files': {str(self.root / '.context/deploy-pipeline/cycle.json'): c.sha_file(file)}})
+        fresh = c.initialize(new, self.root)
+        return fresh, file, index
+
+    def test_historical_import_only_indexed_duties_not_lost_supervisor_history(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        original = donor.read_bytes()
+        self.assertEqual(2, len(h.known(c.read(donor), self.root)))
+        proof = h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        before = copy.deepcopy(fresh)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        self.assertEqual([], fresh['attempts']); self.assertEqual({}, fresh['skips'])
+        self.assertEqual('quick', fresh['phase']); self.assertFalse(fresh['ready'])
+        self.assertEqual(before['source'], fresh['source'])
+        self.assertEqual(before['environment'], fresh['environment'])
+        self.assertEqual(before['input_fingerprints'], fresh['input_fingerprints'])
+        self.assertEqual(2, len(fresh['failures']))
+        self.assertEqual(1, len(fresh['pending_post_merge']))
+        self.assertTrue(all(r['current_execution'] == r['current_financial_state'] == 'UNVERIFIED'
+                            and not any(r['credit'].values()) for r in fresh['historical_no_retry_custody']))
+        h.verify(fresh, self.root)
+        gate = fresh['plan']['gates'][1]
+        self.assertEqual(2, len(c.reuse_qualifications(fresh, gate, root=self.root)))
+        same = copy.deepcopy(fresh)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        self.assertEqual(same, fresh); self.assertEqual(original, donor.read_bytes())
+        self.assertEqual([], c.read(donor).get('attempts', []))
+
+    def test_historical_import_rejects_partial_changed_mixed_and_nonfresh(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        args = (donor, index, c.sha_file(donor), c.sha_file(index))
+        proof = h.import_proof(fresh, *args, self.root)
+        for key, value in [('attempts', [{}]), ('ready', True), ('pending', ['unknown']),
+                           ('skips', {'api/peer': {}}), ('running', ['owner']), ('extra', 'foreign')]:
+            changed = copy.deepcopy(fresh); changed[key] = value
+            before = copy.deepcopy(changed)
+            with self.assertRaises(ValueError): h.import_history(changed, *args, proof, self.root)
+            self.assertEqual(before, changed)
+        bad = copy.deepcopy(proof); bad['cases'].pop()
+        with self.assertRaises(ValueError): h.import_history(fresh, *args, bad, self.root)
+        before = copy.deepcopy(fresh)
+        raw = donor.read_bytes(); data = c.read(donor)
+        data['historical_custody_history'].pop(); c.write(donor, data)
+        with self.assertRaises(ValueError): h.import_proof(fresh, *args, self.root)
+        # Even repinning both files does not authorize a partial indexed set.
+        doc = c.read(index); doc['files'][str(self.root / '.context/deploy-pipeline/cycle.json')] = c.sha_file(donor)
+        c.write(index, doc)
+        with self.assertRaises(ValueError):
+            h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        donor.write_bytes(raw)
+        doc['files'][str(self.root / '.context/deploy-pipeline/cycle.json')] = c.sha_file(donor)
+        c.write(index, doc)
+        native = Path(c.read(donor)['historical_custody_history'][0]['original_failure']['worker_evidence']['path'])
+        native.write_text('{}')
+        with self.assertRaises(ValueError):
+            h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        self.assertEqual(before, fresh)
+
+    def test_historical_import_preserves_universal_missing_native_guard(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        negative = Path(c.read(donor)['failures'][-1]['worker_evidence']['path'])
+        raw = negative.read_bytes(); negative.unlink()
+        before = copy.deepcopy(fresh)
+        with self.assertRaisesRegex(ValueError, 'native bytes missing'):
+            h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        self.assertEqual(before, fresh)
+        negative.write_bytes(raw)
+        proof = h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        self.assertEqual(2, len(fresh['failures']))
+
+    def test_historical_import_cli_and_admission_keep_current_inventory(self):
+        import contextlib, io
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        plan = self.root / '.context/new-plan.json'; c.write(plan, fresh['plan'])
+        state_file = self.directory / 'cycle.json'; c.write(state_file, fresh)
+        args = ['--root', str(self.root), '--plan', str(plan), '--state-dir', str(self.directory),
+                '--donor-state', str(donor), '--donor-index', str(index),
+                '--donor-sha256', c.sha_file(donor), '--donor-index-sha256', c.sha_file(index)]
+        before = state_file.read_bytes()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(0, c.main(['prepare-historical-import', *args]))
+        self.assertEqual(before, state_file.read_bytes())
+        proof = self.root / '.context/import-proof.json'; proof.write_text(out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, c.main(['import-historical-custody', *args, '--proof', str(proof),
+                                      '--historical-no-retry-proof', str(proof)]))
+        self.assertEqual(before, state_file.read_bytes())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['import-historical-custody', *args, '--proof', str(proof)]))
+            self.assertEqual(0, c.main(['import-historical-custody', *args, '--proof', str(proof)]))
+        state = c.read(state_file); gate = state['plan']['gates'][1]
+        request = dict(source=state['source'], gate=gate['name'], checks=gate['checks'][2:],
+            skips=c.reuse_qualifications(state, gate, root=self.root), custody_state=str(state_file),
+            custody_state_sha256=h.state_identity(state), custody_child_environment=h.environment_identity(os.environ),
+            custody_runtime=h.runtime_identity(self.root))
+        h.admission(request, self.root)
+        request['checks'] = gate['checks']
+        with self.assertRaises(ValueError): h.admission(request, self.root)
+        changed = copy.deepcopy(state); changed['historical_custody_import']['donor']['state_digest'] = 'wrong'
+        c.write(state_file, changed)
+        with self.assertRaises(ValueError): h.verify(changed, self.root)
+        self.assertNotEqual(h.state_identity(state), h.state_identity(changed))
+
+    def test_historical_import_retained_provenance_blocks_dropped_collections(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        proof = h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        for key in ('failures', 'historical_custody_history', 'historical_no_retry_custody'):
+            fresh.pop(key)
+        state_file = self.directory / 'cycle.json'; c.write(state_file, fresh)
+        receipt = self.directory / 'retained-receipt.json'; c.write(receipt, {'original': 'unchanged'})
+        gate = fresh['plan']['gates'][1]
+        request = dict(source=fresh['source'], gate=gate['name'], checks=gate['checks'], skips={},
+            custody_state=str(state_file), custody_state_sha256=h.state_identity(fresh),
+            custody_child_environment=h.environment_identity(os.environ), custody_runtime=h.runtime_identity(self.root))
+        before = copy.deepcopy(fresh)
+        files = {str(p): p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
+        operations = {
+            'verification': lambda: h.verify(fresh, self.root),
+            'direct-guard': lambda: h.guard(fresh, gate, self.root),
+            'child-admission': lambda: h.admission(request, self.root),
+            'preallocation': lambda: c._execute(gate, fresh, self.directory, self.root),
+        }
+        for name, operation in operations.items():
+            with self.subTest(boundary=name), patch.object(c, 'run_command', side_effect=AssertionError('allocation entered')) as launch:
+                with self.assertRaises(ValueError): operation()
+                launch.assert_not_called()
+                self.assertEqual(before, fresh)
+                self.assertEqual(files, {str(p): p.read_bytes() for p in self.directory.rglob('*') if p.is_file()})
+
+    def test_historical_import_malformed_retained_provenance_never_looks_absent(self):
+        import deploy_test_historical_custody as h
+        gate = self.plan['gates'][1]
+        for value in (None, False, {}, [], {'donor': None}):
+            state = copy.deepcopy(self.state); state['historical_custody_import'] = value
+            before = copy.deepcopy(state)
+            for operation in (lambda: h.verify(state, self.root), lambda: h.guard(state, gate, self.root),
+                              lambda: c._execute(gate, state, self.directory, self.root)):
+                with self.subTest(provenance=value), patch.object(c.uuid, 'uuid4', side_effect=AssertionError('allocation entered')) as allocate:
+                    with self.assertRaises((ValueError, KeyError, TypeError)): operation()
+                    allocate.assert_not_called()
+                    self.assertEqual(before, state)
 
     def test_concurrent_agentcard_selector_keeps_dataclass_module_registered(self):
         import types
@@ -158,6 +384,177 @@ class Cycle(unittest.TestCase):
         target.write_bytes(changed); os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         catalog.write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
         self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+
+    def test_stall_snapshots_may_differ_only_in_provider_wide_counters(self):
+        # PR #1784 cycle bn8: the end-of-task and cleanup snapshots of one stall disagreed only in
+        # agentCardProviderCardCount/TransferCount (7 vs 12), because six other identical payment
+        # lifecycles minted for the shared cardholder in between; refresh refused the custody proof.
+        import deploy_test_historical_custody as h
+        def concurrent(snapshot):
+            snapshot['integrity'].update(agentCardProviderCardCount=7, agentCardProviderTransferCount=7,
+                                         agentCardProviderUnlinkedTransferCount=2)
+            return snapshot
+        new = self.custody_fixture(top_level=concurrent)
+        proof = h.build(copy.deepcopy(self.state), self.plan, new, self.root)
+        self.assertEqual(['root-0', 'root-1'], sorted(r['root_id'] for r in proof['cases']))
+
+    def test_stall_snapshots_still_refuse_any_lifecycle_difference(self):
+        import deploy_test_historical_custody as h
+        changes = {
+            'lifecycle count': lambda s: s['integrity'].update(cardCount=2) or s,
+            'stripe count': lambda s: s['integrity'].update(stripeProviderPaymentIntentCount=2) or s,
+            'purchase status': lambda s: s['purchase'].update(status='VOIDED') or s,
+            'released funds': lambda s: s['orgTransfer'].update(releasedCents=4396) or s,
+            'card identity': lambda s: s['agentCard'].update(id='card-other') or s,
+        }
+        for name, change in changes.items():
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                new = self.custody_fixture(top_level=change)
+                with self.assertRaisesRegex(ValueError, 'two native snapshots disagree'):
+                    h.build(copy.deepcopy(self.state), self.plan, new, self.root)
+
+    def test_cross_goal_custody_import_preserves_fresh_selection_without_execution_credit(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        donor = copy.deepcopy(self.state)
+        # The independent repair's full selection differs from the donor's;
+        # same-deploy refresh must continue refusing to drop any checks.
+        new['gates'][1]['checks'] = new['gates'][1]['checks'][:2] + ['current-peer']
+        proof = h.build(donor, self.plan, new, self.root)
+        with self.assertRaisesRegex(ValueError, 'remove originally selected checks'):
+            c.refresh(copy.deepcopy(donor), self.plan, new, self.root, historical_no_retry_proof=proof)
+        current = c.initialize(new, self.root)
+        h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(donor, self.state)
+        self.assertEqual('quick', current['phase']); self.assertFalse(current['ready'])
+        self.assertEqual([], current['attempts']); self.assertEqual({}, current['skips'])
+        self.assertEqual(donor['failures'], current['failures'])
+        self.assertEqual(donor['pending_post_merge'], current['pending_post_merge'])
+        self.assertEqual(new, current['plan'])
+        self.assertFalse(current.get('resource_warnings'))
+        self.assertFalse(current.get('carried_passes'))
+        self.assertEqual([4396, 4396], [r['original_amount_cents'] for r in current['historical_no_retry_custody']])
+        for row in current['historical_no_retry_custody']:
+            self.assertEqual('UNVERIFIED', row['current_execution'])
+            self.assertEqual('UNVERIFIED', row['current_financial_state'])
+            self.assertTrue(all(value is False for value in row['credit'].values()))
+        h.verify(current, self.root)
+        same = copy.deepcopy(current)
+        h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(same, current)
+        for key, value in [('environment', 'stale'), ('source', donor['source']),
+                           ('input_fingerprints', {}), ('plan_digest', 'stale')]:
+            changed = copy.deepcopy(current); changed[key] = value; before = copy.deepcopy(changed)
+            with self.assertRaisesRegex(ValueError, 'binding'):
+                h.adopt(changed, donor, self.plan, proof, self.root)
+            self.assertEqual(before, changed)
+        lost = copy.deepcopy(current)
+        lost['failures'] = []; lost['historical_no_retry_custody'] = []; lost['historical_custody_history'] = []
+        before = copy.deepcopy(lost)
+        with self.assertRaisesRegex(ValueError, 'lost original custody'):
+            h.adopt(lost, donor, self.plan, proof, self.root)
+        self.assertEqual(before, lost)
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.verify(lost, self.root)
+        partial = copy.deepcopy(current)
+        auth = donor['failures'][1]['id']
+        partial['failures'] = [f for f in partial['failures'] if f['id'] != auth]
+        for key in ('historical_no_retry_custody', 'historical_custody_history'):
+            partial[key] = [r for r in partial[key] if r['original_failure']['id'] != auth]
+        partial['pending_post_merge'] = []
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.verify(partial, self.root)
+        def worker(argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['current-peer'], request['checks'])
+            self.assertEqual(2, len(request['skips']))
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases={'current-peer': 'PASS'}, complete=True, cleanup_complete=True, reused=False))
+            return 0, False, False, False
+        current.update(phase='final')
+        c.write(self.directory / 'cycle.json', current)
+        with patch.object(c, 'run_command', side_effect=worker):
+            result = c.execute(new['gates'][1], current, self.directory, self.root)
+        self.assertEqual('PASS', result['status'], result)
+        self.assertEqual('PASS', result['cases']['current-peer'])
+        for name in new['gates'][1]['checks'][:2]:
+            self.assertEqual('SKIP', result['cases'][name])
+            self.assertFalse(result['case_complete'][name])
+
+    def test_cross_goal_custody_import_rejects_nonfresh_state_and_changed_proof_atomically(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        proof = h.build(donor, self.plan, new, self.root)
+        current = c.initialize(new, self.root)
+        for key, value in [('ready', True), ('attempts', [{'native': 'FAIL'}]),
+                           ('failures', [{'id': 'current-failure'}]), ('skips', {'api/current': {}})]:
+            changed = copy.deepcopy(current); changed[key] = value; before = copy.deepcopy(changed)
+            with self.assertRaisesRegex(ValueError, 'fresh'):
+                h.adopt(changed, donor, self.plan, proof, self.root)
+            self.assertEqual(before, changed)
+        bad = copy.deepcopy(proof); bad['cases'][0]['original_amount_cents'] = 0
+        with self.assertRaisesRegex(ValueError, 'proof'):
+            h.adopt(current, donor, self.plan, bad, self.root)
+        self.assertEqual(c.initialize(new, self.root), current)
+
+    def test_cross_goal_custody_import_rejects_noncurrent_frozen_ledger_binding(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        proof = h.build(donor, self.plan, new, self.root)
+        current = c.initialize(new, self.root)
+        for key, value in [('environment', 'stale'), ('source', donor['source']), ('input_fingerprints', {})]:
+            changed = copy.deepcopy(current); changed[key] = value; before = copy.deepcopy(changed)
+            with self.assertRaisesRegex(ValueError, 'fresh'):
+                h.adopt(changed, donor, self.plan, proof, self.root)
+            self.assertEqual(before, changed)
+        missing = copy.deepcopy(new); missing['gates'][1]['checks'].remove('agent-payment-abandonment')
+        with self.assertRaisesRegex(ValueError, 'protected task removed'):
+            h.adopt(c.initialize(missing, self.root), donor, self.plan, proof, self.root)
+        native = Path(proof['cases'][0]['original_failure']['worker_evidence']['path'])
+        native.write_text('{}')
+        with self.assertRaises(ValueError):
+            h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(c.initialize(new, self.root), current)
+
+    def test_cross_goal_custody_import_rejects_duplicate_identity_and_changed_pending_wrapper(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        duplicate = copy.deepcopy(donor)
+        duplicate['failures'].append({'id': donor['failures'][0]['id'], 'check': 'other/unrelated',
+                                      'native_result': 'PASS'})
+        with self.assertRaisesRegex(ValueError, 'duplicate historical failure identity'):
+            h.build(duplicate, self.plan, new, self.root)
+        donor['pending_post_merge'][0]['native_result'] = 'PASS'
+        proof = h.build(donor, self.plan, new, self.root)
+        current = c.initialize(new, self.root); before = copy.deepcopy(current)
+        with self.assertRaisesRegex(ValueError, 'pending repair wrapper changed'):
+            h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(before, current)
+
+    def test_cross_goal_custody_import_cli_keeps_donor_and_fresh_cycle_separate(self):
+        import contextlib
+        import io
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        new['gates'][1]['checks'] = new['gates'][1]['checks'][:2] + ['current-peer']
+        directory = self.root / '.context' / 'independent'
+        plan, prior, snapshot, proof = [self.root / '.context' / name for name in
+                                        ('new.json', 'prior.json', 'donor.json', 'proof.json')]
+        c.write(plan, new); c.write(prior, self.plan); c.write(snapshot, donor)
+        c.write(proof, h.build(donor, self.plan, new, self.root))
+        args = ['--root', str(self.root), '--plan', str(plan), '--state-dir', str(directory)]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(0, c.main(['init', *args]))
+            self.assertEqual(0, c.main(['import-historical-no-retry', *args, '--input', str(prior),
+                '--donor-state', str(snapshot), '--historical-no-retry-proof', str(proof)]))
+            before = c.read(directory / 'cycle.json')
+            self.assertEqual(2, c.main(['import-historical-no-retry', *args]))
+        self.assertEqual(before, c.read(directory / 'cycle.json'))
+        self.assertEqual(donor, c.read(snapshot))
+        self.assertEqual('quick', before['phase']); self.assertFalse(before['ready'])
+        self.assertEqual([], before['attempts']); self.assertEqual({}, before['skips'])
+        self.assertEqual(new, before['plan']); self.assertEqual(2, len(before['historical_no_retry_custody']))
 
     def test_historical_stall_cannot_refresh_into_new_card_request_without_proof(self):
         new = self.custody_fixture()
@@ -4885,6 +5282,21 @@ class InterruptedLocalRecovery(unittest.TestCase):
         path=self.paths['output.log.process.json'];path.write_bytes(raw['output.log.process.json']+b' ')
         with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_unrelated_unreadable_host_process_refuses_production_scan_only(self):
+        # PR #1762 Blacksmith failure: pid 211414, a same-user process outside this suite whose cwd stayed
+        # unreadable, refused this class's reconcile ("worker root process 211414 is unverifiable").
+        with unrelated_unreadable_process() as pid:
+            self.assertIn(pid, {int(p.name) for p in production_process_entries()})
+            self.assertNotIn(pid, {int(p.name) for p in own_process_entries()})
+            before=copy.deepcopy(self.state)
+            with patch.object(deploy_test_process,'process_entries',production_process_entries), \
+                    self.assertRaisesRegex(ValueError,r'worker root process \d+ is unverifiable'):
+                self.reconcile()
+            self.assertEqual(before,self.state)
+            self.reconcile()
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
     def test_original_exclusions_stay_skip_without_test_or_cleanup_credit(self):
         name='standing-original-exclusion'
         self.recipe['cases'][name]={'command':['true']}
@@ -5132,6 +5544,9 @@ class RelayStartupEvidence(unittest.TestCase):
         with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={'native_hub_owner_retired':retired_hub}),\
              patch.object(self.native.subprocess,'check_output',side_effect=lambda args,**kwargs:
                  original_check_output(args,**kwargs) if args[0]=='ps' else
+                 original_check_output(['git','--no-replace-objects','-C',str(ROOT),'show',
+                     '4df680391347ed9671734c9d8a6a067b279f2b5d:'+args[-1].split(':',1)[1]]) if proof.get('layout')=='campaign-dispatch-refusal-v1'
+                    and args[-1].split(':',1)[-1] in {'scripts/run-bench','scripts/run-bench-fleet','scripts/lib/cloudbench-env.sh','scripts/run-bench-campaign.py'} else
                  b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
                  (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else
                  (ROOT/'scripts'/args[-1].split(':scripts/',1)[1]).read_bytes() if args[-1].endswith((':scripts/lib/cloudbench-env.sh',':scripts/run-bench-fleet')) else b'original-campaign'):
@@ -5147,22 +5562,83 @@ class RelayStartupEvidence(unittest.TestCase):
             self.native.reconcile(state,occurrence,proof)
             return next(iter(state['reconciled_owners'].values()))
 
+    def dispatch_fixture(self):
+        import time
+        receipt,owner,proof=self.fixture()
+        proof['layout']='campaign-dispatch-refusal-v1'
+        adapter=json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(complete=False,cleanup_complete=False,reused=False)
+        self.save(Path(receipt['worker_result']),adapter)
+        owner['native_cleanup_reference']['result_sha256']=c.sha_file(receipt['worker_result'])
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof.update(receipt_sha256=c.sha_file(Path(receipt['log']).parent/'receipt.json'),
+                     worker_result_sha256=c.sha_file(receipt['worker_result']))
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary.update(peak_concurrency=1,shared_inventory_failed=False)
+        job=summary['jobs'][0]
+        authority=json.loads((self.relay/'authority.private.json').read_text())
+        job.update(status='failed',controller_pid=int(authority['inventory_owner']['pid']),controller_exit_code=1,
+                   started_at=summary['started_at'],finished_at=summary['finished_at'],
+                   controller_command=['bash',str(self.base/'scripts/run-bench'),job['task'],
+                                       '--ref',receipt['source']['head'],'--foreground'])
+        self.save(self.campaign/'summary.json',summary)
+        Path(job['log']).write_text('FATAL: requested benchmark commit '+receipt['source']['head']+
+            ' is not fetchable from origin and local patch shipping is disabled\n')
+        broker=json.loads((self.relay/'broker-owner.json').read_text())
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        ready=dict(authority_sha256=c.sha_file(self.relay/'authority.private.json'),agent=capture['agent'],
+                   pid=broker['pid'],birth=broker['birth'],socket='/tmp/cb-relay-abcdefgh/control.sock')
+        self.save(self.relay/'ready.json',ready)
+        self.save(self.relay/'serve.once.json',ready)
+        (self.relay/'broker.private.log').write_text('{"stopped": true}')
+        (self.relay/'startup-cleanup.json').unlink()
+        proof['confirmed_at']=time.time()
+        self.reseal()
+        return receipt,owner,proof
+
+    def test_source_refusal_retirement_retains_unverified_outcomes_and_no_financial_credit(self):
+        receipt,owner,proof=self.dispatch_fixture()
+        original=copy.deepcopy(receipt)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertEqual(receipt,original)
+        self.assertFalse(result['credit_granted'])
+        self.assertFalse(result['financial_cleanup_credit'])
+        self.assertEqual(result['participants'],[])
+
+    def test_source_refusal_refuses_other_errors_resources_and_ownership(self):
+        for mutation in ('foreign-error','successful-child','retry','cleanup-pending','native-participant','live-child','changed-evidence'):
+            with self.subTest(mutation=mutation):
+                # Each fixture has its own namespace; the proof must not inherit a peer's closure.
+                with tempfile.TemporaryDirectory(prefix='dispatch-negative-') as temporary:
+                    self.base=Path(temporary)
+                    receipt,owner,proof=self.dispatch_fixture()
+                    summary_path=self.campaign/'summary.json'
+                    summary=json.loads(summary_path.read_text())
+                    job=summary['jobs'][0]
+                    if mutation=='foreign-error':Path(job['log']).write_text('provider failed\n')
+                    elif mutation=='successful-child':job['controller_exit_code']=0
+                    elif mutation=='retry':job['attempt']=2
+                    elif mutation=='cleanup-pending':summary['shared_transport_cleanup_pending']=True
+                    elif mutation=='native-participant':(self.runs/'unexpected-fleet').mkdir()
+                    elif mutation=='live-child':job['controller_pid']=os.getpid()
+                    elif mutation=='changed-evidence':Path(job['log']).write_text(Path(job['log']).read_text()+'changed\n')
+                    self.save(summary_path,summary)
+                    if mutation!='changed-evidence':self.reseal()
+                    with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+
     def test_native_adapter_requests_owned_supervision(self):
         import ast,contextlib,hashlib,time
         code=(self.target/'deploy_test_cloud.py').read_text()
-        # execute() and the campaign helpers it calls (launch, rerun_candidates, emit, RERUN_OUTCOMES).
-        function=[n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name in
-                  {'execute','launch','rerun_candidates','emit'} or isinstance(n,ast.Assign)
-                  and any(getattr(t,'id',None)=='RERUN_OUTCOMES' for t in n.targets)]
+        function=next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='execute')
         calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
         namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
-                       origin_fetchable=lambda _r,_h:True,catalog_quarantines=lambda _r,_c:{},Path=Path,
+                       origin_fetchable=lambda _r,_h:True,
                        campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
                        cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
                        capacity_admission_env=lambda _now:{'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH':'fixture'},
                        run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
                        collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
-        exec(compile(ast.Module(body=function,type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
+        exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
         namespace['execute'](requested,self.base)
         self.assertEqual(len(calls),1)
         self.assertIs(calls[0][1].get('owned_lifecycle'),True)
@@ -5225,21 +5701,17 @@ class RelayStartupEvidence(unittest.TestCase):
         pid=capture['agent']['pid'];socket=capture['socket']
         native=self.base/'native';native.mkdir()
         bootstrap=native/'bootstrap.log';(native/'agent-logs').mkdir();agent=native/'agent-logs/123.log'
-        # Build each log for its PID: textual PID substitution changes the PING
-        # payload width but not its recorded frame length whenever the two PIDs
-        # differ in decimal width (concurrent load moves PIDs across 10**k).
-        def native_bootstrap(agent_pid):
-            return f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {agent_pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n'
-        bootstrap.write_text(native_bootstrap(pid))
         when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
         stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
-        def native_agent_log(agent_pid):
-            payload=('ok '+json.dumps({'PID':agent_pid,'Version':'0.5.5'})+'\n').encode()
-            raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
-            return (f'{stamp} srv OK {agent_pid}\n{stamp} #1 -> ({len(raw)}) {json.dumps(raw)}\n'
-                    f'{stamp} srv parent process exited; shutting down\n'
-                    f'{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
-        agent.write_text(native_agent_log(pid))
+        def native_logs(logged):
+            # Re-encode the length-prefixed PING frame for each PID: a text replace of a PID with a different
+            # digit count breaks the frame length and refuses on framing before the identity under test.
+            payload=('ok '+json.dumps({'PID':logged,'Version':'0.5.5'})+'\n').encode()
+            quoted=json.dumps((len(payload).to_bytes(2,'little')+payload).decode('latin1'))
+            return (f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {logged}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n',
+                    f'{stamp} srv OK {logged}\n{stamp} #1 -> ({len(payload)+2}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        original_bootstrap,original_agent=native_logs(pid)
+        bootstrap.write_text(original_bootstrap);agent.write_text(original_agent)
         proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent),'timezone':'UTC'};self.reseal()
         result=self.validate_fixture(receipt,owner,proof)
         self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
@@ -5255,13 +5727,14 @@ class RelayStartupEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'bootstrap binding'):self.validate_fixture(receipt,owner,proof)
         foreign.unlink();proof['fly_native_logs']=saved_logs;self.reseal()
         prior=agent.read_text()
-        for mutation,reason in [(native_agent_log(os.getpid()),'bootstrap|PING|shutdown'),
+        for mutation,reason in [(native_logs(os.getpid())[1],'bootstrap|PING|shutdown'),
                                 (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
                                 (prior.replace(socket,'/foreign/socket'),'shutdown chain')]:
             agent.write_text(mutation);self.reseal()
             with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
         agent.write_text(prior);self.reseal()
-        bootstrap.write_text(native_bootstrap(os.getpid()));agent.write_text(native_agent_log(os.getpid()));self.reseal()
+        live_bootstrap,live_agent=native_logs(os.getpid())
+        bootstrap.write_text(live_bootstrap);agent.write_text(live_agent);self.reseal()
         with self.assertRaisesRegex(ValueError,'PID present'):self.validate_fixture(receipt,owner,proof)
 
     def test_startup_reconciliation_rejects_missing_or_live_or_dispatched_evidence(self):
