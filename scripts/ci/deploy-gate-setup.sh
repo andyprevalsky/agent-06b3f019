@@ -71,22 +71,41 @@ for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
+# flyctl, ngrok and cloudflared come from three external hosts. Downloading them on every gate VM
+# made every gate of a round fail together on one CDN outage (hunt round 7, 2026-11-08: four GitHub
+# Releases 504s in 7 s failed 11 of 12 gates in "Prepare runner"). They live on the sticky dependency
+# disk instead and are fetched only when missing, with retries that ride out a short outage.
+TOOLS="$DEPS/tools"
+sudo mkdir -p "$TOOLS"
+sudo chown "$(id -u):$(id -g)" "$DEPS" "$TOOLS"
+export PATH="$TOOLS:$PATH"
+echo "$TOOLS" >> "$GITHUB_PATH"
+fetch() {  # fetch <url> <output>: bounded retries on any error, then fail the step
+  curl -fsSL --connect-timeout 10 --retry 6 --retry-all-errors --retry-delay 5 --retry-max-time 180 -o "$2" "$1"
+}
+
 step "flyctl"
-for attempt in 1 2 3; do
-  command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] && break
-  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || { echo "flyctl install attempt $attempt failed" >&2; sleep 5; }
-done
-[ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
-echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
+if [ ! -x "$TOOLS/flyctl" ]; then
+  for attempt in 1 2 3; do
+    fetch https://fly.io/install.sh "$TOOLS/.fly-install.sh" \
+      && FLYCTL_INSTALL="$TOOLS/.fly" sh "$TOOLS/.fly-install.sh" >/dev/null \
+      && ln -sf "$TOOLS/.fly/bin/flyctl" "$TOOLS/flyctl" && break
+    echo "flyctl install attempt $attempt failed" >&2; sleep 10
+  done
+fi
+"$TOOLS/flyctl" version >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
 
 step "tunnel tools"
 # run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
 # the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
-sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
+# $TOOLS is first on PATH here and (via GITHUB_PATH) in every later step.
+if ! command -v ngrok >/dev/null; then
+  NGROK_INSTALL_DIR="$TOOLS" bash scripts/cloudbench-install-ngrok.sh >/dev/null \
+    || { sleep 15; NGROK_INSTALL_DIR="$TOOLS" bash scripts/cloudbench-install-ngrok.sh >/dev/null; }
+fi
 if ! command -v cloudflared >/dev/null; then
-  tmp="$(mktemp)"
-  curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-  sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared && rm -f "$tmp"
+  fetch https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 "$TOOLS/.cloudflared"
+  install -m 0755 "$TOOLS/.cloudflared" "$TOOLS/cloudflared" && rm -f "$TOOLS/.cloudflared"
 fi
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
 

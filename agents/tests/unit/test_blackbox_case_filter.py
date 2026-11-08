@@ -6,14 +6,14 @@ as a pass — and the runner labels the domain a partial run.
 """
 
 import asyncio
-import importlib
 import importlib.util
 import os
 import sys
 from pathlib import Path
-from unittest import mock
 
 import pytest
+
+from tests.unit._blackbox_harness import blackbox_harness as _harness
 
 AGENTS = Path(__file__).resolve().parents[2]
 CASE_FILTER_ENV = "BLACKBOX_CASE_FUNCTIONS"
@@ -27,37 +27,17 @@ def BlackboxResult():
 
 @pytest.fixture(autouse=True)
 def blackbox_harness():
-    """Import the blackbox harness for one test, then undo its process-wide setup.
-
-    `_test_utils` patches httpx.AsyncClient (capture buffers whole response
-    streams), exports capture/credential env vars, extends sys.path and stubs
-    Temporal's workflow clock at import. `pytest tests/unit` shares one
-    interpreter, so leaving that installed changed later unit tests (the
-    Foundry post-content stream case saw its stream error before any content).
-    """
+    """The blackbox harness for one test (see tests/unit/_blackbox_harness.py)."""
     global _test_utils
-    from helpers import httpx_capture
-
-    env, path = dict(os.environ), list(sys.path)
-    started = list(mock._patch._active_patches)
-    # The blackbox helpers live beside the domains, which import them as `_test_utils`.
-    sys.path.insert(0, str(AGENTS / "tests" / "blackbox"))
-    _test_utils = importlib.import_module("_test_utils")
-    assert (_test_utils.CASE_FILTER_ENV, _test_utils.CASE_RECEIPT_ENV) == (CASE_FILTER_ENV, CASE_RECEIPT_ENV)
-    os.environ.pop(CASE_FILTER_ENV, None)
-    os.environ.pop(CASE_RECEIPT_ENV, None)
-    try:
-        yield
-    finally:
-        for patcher in [p for p in mock._patch._active_patches if p not in started]:
-            patcher.stop()
-        httpx_capture.uninstall_capture()
-        httpx_capture.clear_mock_handler()
-        sys.modules.pop("_test_utils", None)
-        _test_utils = None
-        sys.path[:] = path
-        os.environ.clear()
-        os.environ.update(env)
+    with _harness() as module:
+        _test_utils = module
+        assert (_test_utils.CASE_FILTER_ENV, _test_utils.CASE_RECEIPT_ENV) == (CASE_FILTER_ENV, CASE_RECEIPT_ENV)
+        os.environ.pop(CASE_FILTER_ENV, None)
+        os.environ.pop(CASE_RECEIPT_ENV, None)
+        try:
+            yield
+        finally:
+            _test_utils = None
 
 
 def _cases(ran):

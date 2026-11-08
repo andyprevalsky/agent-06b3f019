@@ -219,6 +219,21 @@ def _record_case_receipt(fn: Callable) -> None:
             handle.write(getattr(fn, "__name__", "") + "\n")
 
 
+# Every case failure recorded in this interpreter since the runner last reset it.
+# A domain whose run_all_tests() returns only a bool (result.all_passed) would
+# otherwise reach results.json with an empty message: the runner reads this to
+# name the failing cases and their first error.
+_RECORDED_FAILURES: list[str] = []
+
+
+def reset_recorded_failures() -> None:
+    _RECORDED_FAILURES.clear()
+
+
+def recorded_failures() -> list[str]:
+    return list(_RECORDED_FAILURES)
+
+
 class BlackboxResult:
     """Accumulates pass/fail results for the test runner."""
 
@@ -290,6 +305,7 @@ class BlackboxResult:
         if str(error):
             detail += f": {error}"
         self.errors.append(f"{name}: {str(error) or type(error).__name__}")
+        _RECORDED_FAILURES.append(f"{name}: {detail}")
         print(f"  ❌ {name}: {detail}")
         traceback.print_exception(type(error), error, error.__traceback__)
 

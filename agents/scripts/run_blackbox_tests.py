@@ -124,6 +124,34 @@ def _restore_environ(snapshot: dict[str, str]) -> None:
             os.environ[key] = value
 
 
+def _failure_message(result: object) -> tuple[bool, str]:
+    """(passed, message) for a domain result; a failure always names its cases.
+
+    Most domains return only ``result.all_passed``; the failing case names and
+    their first error then come from the cases recorded during this domain.
+    """
+    from _test_utils import recorded_failures
+
+    if result is True or result is None:
+        return True, ""
+    if isinstance(result, dict):
+        if not result.get("failed"):
+            return True, ""
+        counts = f"{result.get('passed', 0)} passed, {result.get('failed', 0)} failed"
+        omitted = f", {result['omitted']} omitted by the case filter" if result.get("omitted") else ""
+        prefix = counts + omitted
+    elif result:
+        return True, ""
+    else:
+        prefix = ""
+    failures = recorded_failures()
+    if not failures:
+        return False, prefix or "run_all_tests() reported failure without a recorded failing case"
+    names = ", ".join(entry.split(":", 1)[0] for entry in failures)
+    detail = f"{len(failures)} failed case(s): {names}; first error: {failures[0][:500]}"
+    return False, f"{prefix}; {detail}" if prefix else detail
+
+
 async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, str]:
     """Run a single domain's blackbox test. Returns (domain, passed, message)."""
     # Domains run sequentially in one interpreter, but each domain must begin
@@ -138,6 +166,9 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
 
     clear_mock_handler()
     env_snapshot = dict(os.environ)
+    from _test_utils import reset_recorded_failures
+
+    reset_recorded_failures()
     try:
         spec = importlib.util.spec_from_file_location(f"blackbox_{domain.replace('-', '_')}", test_file)
         if spec is None or spec.loader is None:
@@ -150,6 +181,9 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
             return (domain, False, "No run_all_tests() function found")
 
         result = await module.run_all_tests()
+        passed_cases, failure_message = _failure_message(result)
+        if not passed_cases:
+            return (domain, False, failure_message)
         if os.environ.get("BLACKBOX_CASE_FUNCTIONS") is not None:
             # Never let a case-filtered domain read like a full pass, whatever run_all_tests returns.
             passed = result is True or result is None or (isinstance(result, dict) and not result.get("failed"))
