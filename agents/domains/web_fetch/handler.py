@@ -219,7 +219,7 @@ class WebFetchManager(ToolManager):
                     agent_id,
                     f"agent:{agent_id}:tool:{tool_call_id}:call:summarize_web_fetch",
                     compute_token_lineage_key,
-                    # Allowlisted head-only facts (title and one publication
+                    # Allowlisted head-only facts (one publication
                     # date) that main-content markdown can drop.
                     select_page_metadata(scrape_metadata),
                 ],

@@ -1425,6 +1425,17 @@ resolve_github_token() {
             return 0
         fi
     done
+    # Every candidate above can be Andy's one user identity; once its quota is
+    # drained none of them can fetch. The token pool's pick adds the org GitHub
+    # App (an hourly installation token), so it is tried last and only for this
+    # ephemeral controller->guest sync, never as a durable Fly secret.
+    if [ -f "$ROOT_DIR/scripts/github_token_pool.py" ]; then
+        t="$(cd "$ROOT_DIR" && python3 scripts/github_token_pool.py pick 2>/dev/null || true)"
+        if [ -n "$t" ] && github_token_can_fetch_repo "$t"; then
+            printf '%s' "$t"
+            return 0
+        fi
+    fi
     return 1
 }
 

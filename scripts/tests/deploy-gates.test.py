@@ -202,7 +202,7 @@ class Inventory(Fixture):
                                   'ROSE_DEPLOY_WORKTREE_PATH': str(path), 'ROSE_DEPLOY_SOURCE_WORKSPACE': str(self.root),
                                   'CONDUCTOR_WORKSPACE_PATH': str(path),
                                   'DEPLOY_RUN_ROOT': str(self.root / '.context/deploy-runs'),
-                                  'BENCHMARK_HISTORY_PARK_DIR': str(self.root / '.context/deploy-ledger-park')}},
+                                  'BENCHMARK_HISTORY_PARK_DIR': ''}},
                          inventory['frontend-coverage-blackbox'])
         backend = self.path('backend-coverage-blackbox')
         self.assertEqual('postgresql://postgres:postgres@localhost:5432/victoria_deploy_backend-coverage-blackbox',
@@ -217,6 +217,20 @@ class Inventory(Fixture):
                        '--source', str(self.root)], self.calls)
         self.assertIn(['git', '-C', str(self.root), 'worktree', 'add', '--detach', str(path), self.head], self.calls)
         self.assertEqual([], g.footprint_conflicts(inventory))
+
+    def test_only_benchmark_gates_park_history_rows(self):
+        """RCA 2026-11-07: every local slot got BENCHMARK_HISTORY_PARK_DIR, so agents coverage's ledger
+        tests wrote fixture rows ('t', 'first', 'second') into the coordinator's publishable park dir and
+        span-history/benchmark failed. Test-suite gates never park; benchmark gates still do."""
+        values = {'CONDUCTOR_WORKSPACE_NAME': 'w', 'CONDUCTOR_PORT': '21530'}
+        # An inherited coordinator park directory must not reach a test-suite gate either.
+        with patch.dict(os.environ, {'BENCHMARK_HISTORY_PARK_DIR': '/srv/inherited-park'}):
+            for gate in ('agents-coverage-blackbox', 'deploy-command-structural', 'semantic-stack'):
+                path = self.path(gate)
+                self.assertEqual('', g.local_slot(self.root, gate, path, values)['env']['BENCHMARK_HISTORY_PARK_DIR'])
+            path = self.path('agentcard-lifecycle')
+            self.assertEqual(str(self.root.resolve() / '.context/deploy-ledger-park'),
+                             g.local_slot(self.root, 'agentcard-lifecycle', path, values)['env']['BENCHMARK_HISTORY_PARK_DIR'])
 
     def test_system_pg_is_carried_only_when_prepared_and_identity_is_required(self):
         self.system_pg = False
@@ -240,7 +254,7 @@ class Inventory(Fixture):
             env = g.local_slot(self.root, 'live-probes', path, values)['env']
         self.assertEqual({'CONDUCTOR_WORKSPACE_NAME': 'w', 'CONDUCTOR_PORT': '21530', 'ROSE_DEPLOY_WORKTREE': '1',
                           'ROSE_DEPLOY_WORKTREE_PATH': str(path), 'DEPLOY_RUN_ROOT': '/srv/runs',
-                          'BENCHMARK_HISTORY_PARK_DIR': str(self.root / '.context/deploy-ledger-park')}, env)
+                          'BENCHMARK_HISTORY_PARK_DIR': ''}, env)
         backend = self.path('backend-coverage-blackbox')
         backend.mkdir(parents=True)
         system = {**values, 'ROSE_DEPLOY_WORKTREE_PATH': str(backend), 'ROSE_USE_SYSTEM_PG': 'true'}
