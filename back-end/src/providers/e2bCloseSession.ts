@@ -11,6 +11,7 @@ import { createLogger } from './logger';
 export { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
 import { type FilePointer, uploadToStorage } from './storage';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
+import { loadCloseRecord, saveCloseRecord } from './codeSessions/closeRecord';
 import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
 import { markPaused, type CodeSessionRow } from './codeSessions/store';
@@ -21,6 +22,16 @@ import { closeLocalDeviceCodeSession } from './localDevices/session';
 
 const log = createLogger('E2B');
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
+
+/**
+ * How long after close starts its checkpoint must be done. The worker's close
+ * call times out at 180 s; a close past it loses the handoff while the lease
+ * stays held, so the checkpoint gives up well before (pause keeps the files).
+ */
+function closeCheckpointDeadline(startedAt: number): number {
+  const raw = Number(process.env.CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS);
+  return startedAt + (Number.isFinite(raw) && raw > 0 ? raw : 75_000);
+}
 
 export interface ClaudeCodeUsage {
   inputTokens: number;
@@ -157,6 +168,7 @@ export async function closeClaudeCodeSession(
   handoff?: CodeAgentHandoff;
 }> {
   log.info(`Closing Claude Code session ${taskId}`);
+  const checkpointDeadlineAt = closeCheckpointDeadline(Date.now());
 
   const session = await prisma.claudeCodeSession.findUnique({
     where: { id: taskId },
@@ -190,8 +202,14 @@ export async function closeClaudeCodeSession(
   }
 
   if (codeSession !== null && session.status === 'CLOSED') {
-    // Retried close: the session was already checkpointed and paused.
-    return { outputFiles: [], codeSession: await closeFacts(codeSession, null, codeSession.state) };
+    // Retried close: the session was already checkpointed and paused. Return the
+    // handoff and outputs the first close consumed, as the local fallback does.
+    const record = await loadCloseRecord(codeSession, taskId);
+    return {
+      outputFiles: record?.outputFiles ?? [],
+      ...(record?.handoff !== undefined ? { handoff: record.handoff } : {}),
+      codeSession: await closeFacts(codeSession, null, codeSession.state),
+    };
   }
 
   if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
@@ -202,6 +220,7 @@ export async function closeClaudeCodeSession(
         fs: localSandboxFs(codeSession.homeDir),
         reason,
         agentId: session.agentId,
+        deadlineAt: checkpointDeadlineAt,
       });
     }
     const local = await closeLocalClaudeCodeSession(taskId, userId, additionalPaths);
@@ -416,15 +435,27 @@ export async function closeClaudeCodeSession(
       }
     }
 
+    if (codeSession !== null) {
+      // Stored before the checkpoint so a retried close returns this result even
+      // when the checkpoint is slow; a concurrent retry that found the file
+      // already consumed reports the stored handoff instead of 'missing'.
+      if (handoff.status === 'missing') {
+        handoff = (await loadCloseRecord(codeSession, taskId))?.handoff ?? handoff;
+      }
+      await saveCloseRecord(codeSession, taskId, { handoff, outputFiles });
+    }
+
     // The project workspace executor belongs to this task either way.
     unregisterWorkspaceExecutor(taskId);
     if (codeSession !== null && ownsSandbox) {
-      // Persistent session: checkpoint, then pause (fs + memory survive).
+      // Persistent session: checkpoint (bounded by the close deadline; a failed
+      // checkpoint returns null), then pause (fs + memory survive).
       const checkpoint = await checkpointCodeSession({
         session: codeSession,
         fs: e2bSandboxFs(sandbox),
         reason,
         agentId: session.agentId,
+        deadlineAt: checkpointDeadlineAt,
       });
       await sandbox.pause();
       await markPaused(codeSession.id);

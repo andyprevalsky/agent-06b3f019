@@ -332,7 +332,7 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
       assert.deepEqual(
         seen.map((turn) => turn.text),
         [
-          'Task:\nRun the counter loop',
+          '/goal Task:\nRun the counter loop',
           'Task:\nReport how many lines counter.txt has',
           'are you done?',
         ],
@@ -439,7 +439,7 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
       const seen = turns(server.dir);
       assert.deepEqual(
         seen.map((turn) => turn.text),
-        ['Task:\nRun the counter loop', goal],
+        ['/goal Task:\nRun the counter loop', goal],
         'the goal reached the CLI exactly once'
       );
       assert.equal(new Set(seen.map((turn) => turn.pid)).size, 1, 'one CLI process');
@@ -477,7 +477,7 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
       await until('the CLI to read both follow-up turns', () => turns(server.dir).length >= 3);
       assert.deepEqual(
         turns(server.dir).map((turn) => turn.text),
-        ['Task:\nRun the counter loop', 'Task:\nfirst follow-up', 'Task:\nsecond follow-up']
+        ['/goal Task:\nRun the counter loop', 'Task:\nfirst follow-up', 'Task:\nsecond follow-up']
       );
     } finally {
       try {

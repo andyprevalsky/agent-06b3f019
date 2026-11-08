@@ -26,6 +26,7 @@ import {
   type CheckpointRepo,
   type VerifiedCheckpoint,
 } from './checkpoint';
+import { deleteCloseRecords } from './closeRecord';
 import { indexCodeEvents } from './codeEvents';
 import { type CodeSessionFs, e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
@@ -111,8 +112,10 @@ export async function checkpointCodeSession(params: {
   fs: CodeSessionFs;
   reason: string;
   agentId: string;
+  /** Epoch ms the checkpoint must finish by (see CreateCheckpointParams.deadlineAt). */
+  deadlineAt?: number;
 }): Promise<CheckpointResult | null> {
-  const { session, fs, reason, agentId } = params;
+  const { session, fs, reason, agentId, deadlineAt } = params;
   try {
     const seq = await allocateCheckpointSeq(session.id);
     const manifest = await createCheckpoint({
@@ -123,6 +126,7 @@ export async function checkpointCodeSession(params: {
       reason,
       codeProvider: session.codeProvider,
       diffBase: session.mergeTarget,
+      ...(deadlineAt !== undefined ? { deadlineAt } : {}),
     });
     const repo = primaryRepoFacts(manifest);
     await commitCheckpoint(session.id, seq, {
@@ -325,6 +329,7 @@ export async function retireCodeSession(session: CodeSessionRow): Promise<void> 
     rmSync(resolve(session.homeDir, '..'), { recursive: true, force: true });
   }
   await deleteCheckpoints(session);
+  await deleteCloseRecords(session);
   await markRetired(session.id);
   log.info('Code session retired', { codeSessionId: session.id });
 }

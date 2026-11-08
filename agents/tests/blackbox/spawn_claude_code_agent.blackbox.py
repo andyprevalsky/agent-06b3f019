@@ -691,6 +691,7 @@ def _collatz_stream_events() -> list[dict]:
 
 
 def _collatz_handoff() -> dict:
+    """The declared fields of the Collatz result (the parent's structured response)."""
     seq = _collatz_27()
     return {
         "source_code": "n = 27\n...",
@@ -698,6 +699,24 @@ def _collatz_handoff() -> dict:
         "collatz_sequence": seq,
         "total_steps": 111,
     }
+
+
+def _standard_handoff(status: str = "complete", **overrides) -> dict:
+    """The standard rose_handoff fields every code agent writes."""
+    return {
+        "status": status,
+        "summary": "Ran collatz.py from 27; checked 112 numbers and 111 steps.",
+        "branch": None,
+        "commit": None,
+        "pr_url": None,
+        "merged": None,
+        **overrides,
+    }
+
+
+def _collatz_handoff_file(status: str = "complete") -> dict:
+    """The handoff file a code agent writes: standard fields plus the declared fields."""
+    return {"rose_handoff": _standard_handoff(status), **_collatz_handoff()}
 
 
 async def _run_verifier_with_handoff(handoff, *, events=None, output_schema=None, output_files=None):
@@ -741,7 +760,9 @@ def test_handoff_json_schema_is_fixed_by_output_schema():
         }
     )
     assert schema["type"] == "object" and schema["additionalProperties"] is False
-    assert schema["required"] == ["source_code", "stdout", "collatz_sequence", "total_steps"]
+    assert schema["required"] == ["rose_handoff", "source_code", "stdout", "collatz_sequence", "total_steps"]
+    assert schema["properties"]["rose_handoff"]["properties"]["status"]["enum"] == ["complete", "blocked", "failed"]
+    assert "question" not in schema["properties"]["rose_handoff"]["properties"]
     assert schema["properties"]["collatz_sequence"] == {
         "type": "array",
         "items": {"type": "integer"},
@@ -780,11 +801,11 @@ def test_handoff_json_schema_carries_declared_field_descriptions():
 
 async def test_handoff_valid_json_is_the_tool_result():
     """A schema-valid handoff is returned as the structured response and the tool result; no event log."""
-    handoff = _collatz_handoff()
+    handoff = _collatz_handoff_file()
     score, reasoning, struct, _i, _o = await _run_verifier_with_handoff(
         {"status": "present", "content": json.dumps(handoff)}
     )
-    assert struct == handoff, struct
+    assert struct == _collatz_handoff(), struct
     assert score == 1.0, reasoning
     assert json.dumps(handoff, ensure_ascii=False, indent=2) in reasoning, reasoning
     assert "code_agent_events" not in reasoning and "Terminal output" not in reasoning, reasoning
@@ -795,7 +816,7 @@ async def test_handoff_missing_or_invalid_is_reported_truthfully():
     cases = [
         ({"status": "missing"}, "no handoff file"),
         ({"status": "present", "content": "{not json"}, "not valid json"),
-        ({"status": "present", "content": json.dumps({**_collatz_handoff(), "total_steps": "111"})}, "total_steps"),
+        ({"status": "present", "content": json.dumps({**_collatz_handoff_file(), "total_steps": "111"})}, "total_steps"),
         (None, "no handoff file"),
     ]
     for handoff, expected in cases:
@@ -807,12 +828,79 @@ async def test_handoff_missing_or_invalid_is_reported_truthfully():
         assert "code_agent_events" not in reasoning and "Terminal output" not in reasoning, reasoning
 
 
+def test_handoff_task_is_a_goal_ending_in_the_handoff_condition():
+    """Every code-agent task carries its end condition: write the handoff valid against the schema file.
+
+    Andy, 2026-11-08 (root 0874662a): code agents had no clean end condition; the
+    goal must always include writing the output-schema file, and no questions.
+    """
+    from domains.spawn_claude_code_agent.service import (
+        CODE_AGENT_HANDOFF_PATH,
+        CODE_AGENT_HANDOFF_SCHEMA_PATH,
+        HANDOFF_END_CONDITION,
+        handoff_json_schema,
+        handoff_task_text,
+    )
+
+    text = handoff_task_text("Compute Collatz from 27.", COLLATZ_OUTPUT_SCHEMA)
+    marker = f"\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n"
+    goal, _, schema = text.rpartition(marker)
+    assert goal == f"Compute Collatz from 27.\n\n{HANDOFF_END_CONDITION}", goal
+    assert json.loads(schema) == handoff_json_schema(COLLATZ_OUTPUT_SCHEMA)
+    for phrase in (CODE_AGENT_HANDOFF_PATH, CODE_AGENT_HANDOFF_SCHEMA_PATH, "Do not ask questions", "assumptions"):
+        assert phrase in HANDOFF_END_CONDITION, phrase
+    # The schema stays out of the goal so Claude's 4000-character /goal cap holds.
+    assert len(goal) < 1_000, len(goal)
+
+
+def test_handoff_schema_reserves_the_standard_key():
+    """A declared field named rose_handoff cannot replace the standard fields."""
+    from domains.spawn_claude_code_agent.service import HANDOFF_STANDARD_SCHEMA, handoff_json_schema
+
+    schema = handoff_json_schema({"fields": [{"name": "rose_handoff", "type": "str"}, {"name": "x", "type": "int"}]})
+    assert schema["properties"]["rose_handoff"] == HANDOFF_STANDARD_SCHEMA
+    assert schema["required"] == ["rose_handoff", "x"]
+    assert handoff_json_schema(None)["required"] == ["rose_handoff"]
+
+
+async def test_handoff_blocked_or_failed_is_reported_without_declared_fields():
+    """A blocked/failed run says so in its standard fields; declared fields are not forced."""
+    for status in ("blocked", "failed"):
+        content = json.dumps({"rose_handoff": _standard_handoff(status, summary="No update card exists in front-end.")})
+        score, reasoning, struct, _i, _o = await _run_verifier_with_handoff({"status": "present", "content": content})
+        assert score < 1.0, (status, reasoning)
+        assert f"rose_handoff.status={status}" in reasoning, reasoning
+        assert "No update card exists in front-end." in reasoning, reasoning
+        assert struct == {}, struct
+
+
+async def test_handoff_complete_needs_standard_and_declared_fields():
+    """complete is only accepted with the standard fields and every required declared field."""
+    no_standard = json.dumps(_collatz_handoff())
+    no_field = json.dumps({k: v for k, v in _collatz_handoff_file().items() if k != "total_steps"})
+    for content, expected in ((no_standard, "rose_handoff"), (no_field, "total_steps")):
+        score, reasoning, struct, _i, _o = await _run_verifier_with_handoff({"status": "present", "content": content})
+        assert score < 1.0 and struct is None, (score, struct)
+        assert expected in reasoning, (expected, reasoning)
+
+
+async def test_claude_ws_server_starts_every_task_as_a_goal():
+    """The sandbox ws-server turns each task into ``/goal <task + end condition>`` and
+    hands a held session back once the goal handoff exists (goal-turn.test.mjs)."""
+    test_file = Path(__file__).resolve().parents[3] / "e2b-templates/claude-code/goal-turn.test.mjs"
+    process = await asyncio.create_subprocess_exec(
+        "node", "--test", str(test_file), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+    )
+    output, _ = await process.communicate()
+    assert process.returncode == 0, output.decode(errors="replace")
+
+
 async def test_handoff_replay_31f51d25_result_is_bounded():
     """Replay of j0026/31f51d25: the 125-snapshot stream used to make a 180k-char result."""
     events = _collatz_stream_events()
     raw = json.dumps(events, indent=2)
     assert len(raw) > 80_000, len(raw)  # the replay reproduces the quadratic stream
-    for handoff in ({"status": "present", "content": json.dumps(_collatz_handoff())}, {"status": "missing"}):
+    for handoff in ({"status": "present", "content": json.dumps(_collatz_handoff_file())}, {"status": "missing"}):
         _score, reasoning, _s, _i, _o = await _run_verifier_with_handoff(handoff, events=events)
         assert len(reasoning) < 5_000, len(reasoning)
 
@@ -2746,7 +2834,7 @@ async def test_spawn_activity_returns_close_handoff_as_result():
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     fake_collector = AsyncMock()
     seen_create_session = {}
-    handoff = _collatz_handoff()
+    handoff = _collatz_handoff_file()
 
     async def fake_create_session(**kwargs):
         seen_create_session.update(kwargs)
@@ -2783,7 +2871,7 @@ async def test_spawn_activity_returns_close_handoff_as_result():
     assert seen_create_session["goal"].startswith("Compute Collatz from 27.")
     assert service.CODE_AGENT_HANDOFF_PATH in seen_create_session["goal"]
     assert result["success"] is True, result["message"]
-    assert result["structured_response"] == handoff
+    assert result["structured_response"] == _collatz_handoff()
     assert json.dumps(handoff, ensure_ascii=False, indent=2) in result["message"]
     assert "code_agent_events" not in result["message"]
     assert len(result["message"]) < 5_000, len(result["message"])
@@ -4848,7 +4936,7 @@ async def test_agent_message_to_running_code_agent_is_delivered_once_and_answere
 
         assert outcome["status"] == "completed" and outcome["success"] is True, outcome
         turns = sandbox.turns()
-        assert turns[0].startswith("Task:\n"), turns
+        assert turns[0].startswith("/goal Task:\n"), turns  # every task is a /goal
         assert turns[1:] == [text], f"the CLI must read the agent turn exactly once, read {turns}"
         events = recorder.verified_events[0]
         user_turns = [event for event in events if event.get("type") == "user_turn"]
@@ -6695,6 +6783,43 @@ async def test_native_codex_terminal_respects_hold_and_newer_active_turn():
         ):
             result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=1.0)
         assert released and result[0] == 0, (guard, released, result[0])
+        teardown_mock()
+
+
+async def test_native_codex_active_goal_outlives_a_completed_turn():
+    """An active thread goal continues the thread itself: a completed turn is not the end.
+
+    Without this, the attachment ended after turn 1 and paused the sandbox while
+    Codex's goal runtime was about to start the continuation turn.
+    """
+    from domains.spawn_claude_code_agent import service
+
+    for final_status in ("complete", "budgetLimited", "cleared"):
+        finished = False
+
+        class GoalTurns(_FakeWsClient):
+            async def listen(self):
+                nonlocal finished
+                ended = {"provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "status": "completed", "turn_outcome": "completed"}
+                await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "t1"})
+                await self.on_event({"provider": "codex", "type": "goal", "status": "active"})
+                await self.on_event({**ended, "turn_id": "t1"})
+                await asyncio.sleep(0.2)  # the goal runtime's continuation gap
+                await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "t2"})
+                await self.on_event({"provider": "codex", "type": "goal", "status": final_status})
+                finished = True
+                await self.on_event({**ended, "turn_id": "t2"})
+                await asyncio.Event().wait()
+
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        with (
+            patch.object(service, "ClaudeCodeWsClient", GoalTurns),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=2.0)
+        assert finished and result[0] == 0, (final_status, finished, result[0])
+        assert service.codex_completed_turn_count(result[-1]) == 2, final_status
         teardown_mock()
 
 

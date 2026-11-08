@@ -9,6 +9,7 @@ import {
   buildCodeAgentSystemPrompt,
   buildLocalCodeAgentSystemPrompt,
   CODE_AGENT_HANDOFF_PATH,
+  CODE_AGENT_HANDOFF_SCHEMA_PATH,
 } from '../../providers/codeAgentPrompt';
 import { readCodeAgentHandoff } from '../../providers/e2bCloseSession';
 
@@ -104,6 +105,34 @@ async function main(): Promise<void> {
       assert.ok(prompt.includes(CODE_AGENT_HANDOFF_PATH), 'handoff path missing');
     }
     assert.ok(!buildLocalCodeAgentSystemPrompt().includes(CODE_AGENT_HANDOFF_PATH));
+  });
+
+  // Andy 2026-11-08 (root 0874662a): every task is a goal ending in the handoff,
+  // with standard outcome/git fields, no questions, and no unrequested merges.
+  await test('E2B code-agent prompt: goal end condition, standard fields, no questions, ship only when asked', () => {
+    for (const roseDesktop of [false, true]) {
+      const prompt = buildCodeAgentSystemPrompt({ roseDesktop });
+      assert.ok(prompt.includes('Your task is a goal.'), 'goal framing missing');
+      assert.ok(prompt.includes(CODE_AGENT_HANDOFF_SCHEMA_PATH), 'schema path missing');
+      assert.ok(prompt.includes('rose_handoff'), 'standard fields missing');
+      assert.ok(
+        prompt.includes('Do not ask questions; nobody answers them.'),
+        'no-questions rule missing'
+      );
+      assert.ok(
+        !/question/i.test(prompt.split('Do not ask questions')[0]),
+        'questions mentioned as a field'
+      );
+      assert.ok(
+        prompt.includes('only when your task or the user asks you to publish or ship'),
+        'merge rule missing'
+      );
+    }
+    assert.ok(
+      buildLocalCodeAgentSystemPrompt().includes(
+        'only when your task or the user asks you to publish or ship'
+      )
+    );
   });
 
   process.stdout.write(`\n${passed} passed, ${failures.length} failed\n`);

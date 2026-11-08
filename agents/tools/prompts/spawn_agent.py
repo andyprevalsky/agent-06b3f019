@@ -8,11 +8,19 @@ and editing go to a code agent (the sandbox ``rose video`` tool + ffmpeg).
 """
 
 CODE_VIDEO_SENTENCE = "Send video generation or editing to a code agent; tell it to make real footage with `rose video` and edit with ffmpeg."
+# A code agent's goal ends with writing its handoff; the standard fields carry
+# its outcome and git facts, so output_schema holds only task results (root
+# 0874662a asked for a file_pointer copy of an edited source file).
+CODE_RESULT_SENTENCE = (
+    "Its result always includes rose_handoff (status complete, blocked or failed; summary; branch; commit; "
+    "pr_url; merged). Put only task-specific results in output_schema, never copies of edited source files. "
+    "It merges or deploys only when its goal says to ship."
+)
 CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
     "Anthropic's Claude Code. After completion it syncs results to the current project's GitHub repo, or "
     "outside a project to a repo created for this agent tree. The task should be tightly scoped and "
-    "self-sufficient. " + CODE_VIDEO_SENTENCE
+    "self-sufficient. " + CODE_RESULT_SENTENCE + " " + CODE_VIDEO_SENTENCE
 )
 CODE_LINE_ROSE_DESKTOP = (
     "- code: A Claude Code or Codex CLI agent in a persistent sandbox holding the user's Rose app UI; give it "
@@ -20,7 +28,7 @@ CODE_LINE_ROSE_DESKTOP = (
     "show with display html. For a game or app the user asked to play or use, "
     "have it show it in Agent Display using rose display and return the display receipt. "
     "A final file path alone does not display the result. Keep the task tightly "
-    "scoped and self-sufficient. " + CODE_VIDEO_SENTENCE
+    "scoped and self-sufficient. " + CODE_RESULT_SENTENCE + " " + CODE_VIDEO_SENTENCE
 )
 
 _PROMPT_TEMPLATE = """Use this tool to launch a new agent for complex, multi-step tasks. Each agent gets an isolated context, toolset, and runtime container.

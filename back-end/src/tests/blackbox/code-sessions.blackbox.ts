@@ -623,4 +623,8 @@ registerCodeSessionLiveResumeCases({
 });
 registerSandboxAttributionCases(userA);
 registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });
-registerCheckpointSizeCases({ fixtureDir });
+registerCheckpointSizeCases({
+  fixtureDir,
+  patchConnect,
+  restoreConnect: () => patchConnect(originalConnect),
+});
