@@ -25,8 +25,9 @@
  *   cutover flips the pointer ─▶ broadcastGenerationHandoff ─▶ moveStrandedResumeRuns
  *   a resend of the same turn ─▶ already started ─▶ ensureResumeRunOnLiveQueue
  *     run RUNNING on a superseded queue, no completed workflow task, older than
- *     STRANDED_MIN_AGE_MS ─▶ terminate ─▶ start the same id/type/request on the
- *     live queue (the reuse policy admits a terminated run)
+ *     STRANDED_MIN_AGE_MS ─▶ terminate THAT run id ─▶ start the same id/type/request
+ *     on the live queue (the reuse policy admits a terminated run); that run already
+ *     closed ─▶ a concurrent mover replaced it: no second start
  *   a run that ever progressed hands off itself (continue-as-new) and is left alone
  *
  * The user only sees "Resuming…" until the move; no error, no polling.
@@ -148,10 +149,14 @@ export type StrandedRunOutcome =
   | 'not-running'
   | 'progressed'
   | 'young'
-  | 'unknown-request';
+  | 'unknown-request'
+  /** The described run closed before this caller could terminate it (another mover got there). */
+  | 'moved-elsewhere';
 
 export interface ResumeRunMoveDependencies {
   describe(workflowId: string): Promise<{
+    /** The described execution (terminate targets exactly it, never a newer one). */
+    runId: string;
     running: boolean;
     terminated?: boolean;
     taskQueue: string;
@@ -172,7 +177,8 @@ export interface ResumeRunMoveDependencies {
   ): Promise<{ workflowType: string; request: unknown; moved?: boolean } | null>;
   /** Flag the stored request: the move terminated this run (the one case a resend revives). */
   markMoved(workflowId: string, saved: { workflowType: string; request: unknown }): Promise<void>;
-  terminate(workflowId: string, reason: string): Promise<void>;
+  /** Terminate exactly that run; false when it already closed (nothing terminated). */
+  terminate(workflowId: string, runId: string, reason: string): Promise<boolean>;
   start(
     workflowType: string,
     workflowId: string,
@@ -190,6 +196,7 @@ function temporalMoveDependencies(): ResumeRunMoveDependencies {
       try {
         const described = await client.workflow.getHandle(workflowId).describe();
         return {
+          runId: described.runId,
           running: described.status.name === 'RUNNING',
           terminated: described.status.name === 'TERMINATED',
           taskQueue: described.taskQueue,
@@ -233,9 +240,16 @@ function temporalMoveDependencies(): ResumeRunMoveDependencies {
       const value = JSON.parse(JSON.stringify({ ...saved, moved: true })) as Prisma.InputJsonObject;
       await putEphemeral(REQUESTS_NAMESPACE, workflowId, value, RUNS_TTL_MS);
     },
-    async terminate(workflowId, reason) {
+    async terminate(workflowId, runId, reason) {
       const client = await getTemporalClient();
-      await client.workflow.getHandle(workflowId).terminate(reason);
+      try {
+        await client.workflow.getHandle(workflowId, runId).terminate(reason);
+        return true;
+      } catch (error) {
+        // That run already closed ("workflow execution already completed").
+        if (error instanceof WorkflowNotFoundError) return false;
+        throw error;
+      }
     },
     async start(workflowType, workflowId, taskQueue, request) {
       const client = await getTemporalClient();
@@ -285,10 +299,15 @@ export async function ensureResumeRunOnLiveQueue(
   if (saved === null || saved.workflowType !== described.workflowType) return 'unknown-request';
   // Only a run terminated BY this move may ever be revived (never a killed one).
   await deps.markMoved(workflowId, saved);
-  await deps.terminate(
+  // Exactly the described run: a concurrent mover (the cutover broadcast beside a
+  // resend) may already have terminated it and started its replacement, which a
+  // run-less terminate would kill before a second start delivered the turn twice.
+  const terminated = await deps.terminate(
     workflowId,
+    described.runId,
     `moved to the live agent queue ${live}: ${described.taskQueue} has no worker for ${described.workflowType}`
   );
+  if (!terminated) return 'moved-elsewhere';
   return restartFromRequest(
     workflowId,
     described.workflowType,

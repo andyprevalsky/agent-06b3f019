@@ -1615,7 +1615,21 @@ function releaseDirectHold(reason) {
   appendEvent({ type: "direct_chat", status: "released", reason });
   // Agent turns held during the chat run next; their results close stdin.
   if (heldAgentTurns.length > 0) releaseHeldAgentTurns();
-  else if (pendingTurns === 0) endCliStdin(`direct hold released: ${reason}`);
+  else closeStdinIfIdle(`direct hold released: ${reason}`);
+}
+
+/**
+ * Close stdin only when nothing still needs it: no hold, no written turn
+ * awaiting its `result`, no held turn and no turn in the delivery chain. A
+ * delivering turn (a released held turn waiting on a settings round-trip
+ * included) is written only after its settings apply, so a `result` arriving
+ * meanwhile must leave stdin open; if that turn is then refused, its settling
+ * delivery calls this again (startSerialDelivery).
+ */
+function closeStdinIfIdle(reason) {
+  if (directHold || pendingTurns > 0 || heldAgentTurns.length > 0) return;
+  if (pendingDeliveries.size > 0) return;
+  endCliStdin(reason);
 }
 
 function onCliTurnResult(message) {
@@ -1629,7 +1643,7 @@ function onCliTurnResult(message) {
       : Math.max(0, pendingTurns - 1);
   if (pendingTurns > 0) return;
   if (!directHold) {
-    endCliStdin("autonomous turn finished");
+    closeStdinIfIdle("autonomous turn finished");
     return;
   }
   clearDirectHoldTimer();
@@ -1746,20 +1760,9 @@ function releaseHeldAgentTurns() {
           turn_ids: [id],
           reason: ack.reason || "rejected",
         });
-        closeStdinIfIdleAfterRelease();
       }
     });
   }
-}
-/**
- * releaseDirectHold left stdin open for the released agent turns; when every one
- * was refused (none written, so no `result` will ever close it), close it here
- * exactly as a finished autonomous turn would.
- */
-function closeStdinIfIdleAfterRelease() {
-  if (directHold || pendingTurns > 0 || heldAgentTurns.length > 0) return;
-  if (pendingDeliveries.size > 0) return;
-  endCliStdin("released agent turns were all undelivered");
 }
 /** The session ended while agent turns waited for the hand back: say which were lost. */
 function dropHeldAgentTurns(reason) {
@@ -1774,7 +1777,13 @@ function startSerialDelivery(id, msg) {
   controlSerial = promise.catch(() => {});
   pendingDeliveries.set(id, promise);
   const done = () => pendingDeliveries.delete(id);
-  promise.then(done, done);
+  promise.then((ack) => {
+    done();
+    // Refused, so no `result` will answer it: when it was the last thing
+    // keeping stdin open (all released turns refused, or a result that arrived
+    // while it waited), close stdin as a finished autonomous turn would.
+    if (ack?.status === "rejected") closeStdinIfIdle("undelivered turn");
+  }, done);
   return promise;
 }
 function queueStartupTurn(id, msg) {

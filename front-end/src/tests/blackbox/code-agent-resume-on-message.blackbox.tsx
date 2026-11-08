@@ -10,6 +10,10 @@
  *             none → "Resuming…" · next run's first row → "Starting container…"
  *             claude_code_started → "Delivered" · ERROR → "Couldn't resume: <text>"
  *   no dupe   the resumed CLI's own record of the same text never renders twice
+ *   final     a message whose own resume failed stays failed when another
+ *             message's later resume starts; one queued behind an open resume
+ *             is carried to the next run and reads Delivered
+ *   a11y      the status line is a live region (role="status")
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -179,6 +183,62 @@ describe('a message to a stopped code agent resumes it', () => {
     const failed = renderPerson([...firstRun, resumeTurn, nextRunFailed]);
     expect(failed.status).toHaveAttribute('data-resume-status', 'failed');
     expect(failed.status).toHaveTextContent("Couldn't resume: Sandbox could not be resumed");
+  });
+
+  it('the status line is a live region announced as it changes', () => {
+    const { status } = renderPerson([...firstRun, resumeTurn, nextRunStarting]);
+    expect(screen.getByRole('status')).toBe(status);
+    expect(status).toHaveTextContent('Starting container…');
+  });
+
+  it("a message whose resume failed keeps Couldn't resume when a later message resumes", () => {
+    const secondTurn = row(
+      {
+        task_id: OLD,
+        action_type: 'user_direct_turn',
+        direct_turn_id: 'cm-resume-2',
+        subAgentId: OLD,
+        resume_requested: true,
+        title: 'You',
+      },
+      'Try again please.',
+      35,
+    );
+    const owner = [...firstRun, resumeTurn, nextRunFailed, secondTurn, nextRunStarted];
+    const rows = viewMessages(owner).filter((m) => m.role === 'USER');
+    const states = Object.fromEntries(
+      rows.map((m) => [m.text, (m.metadata?.codeAgentResume as { status?: string })?.status]),
+    );
+    expect(states['Also update the changelog.']).toBe('failed');
+    expect(states['Try again please.']).toBe('delivered');
+    const first = rows.find((m) => m.text === 'Also update the changelog.');
+    render(<UserBubble message={first!} />);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      "Couldn't resume: Sandbox could not be resumed",
+    );
+  });
+
+  it('a message queued behind an open resume is carried to the next run after it fails', () => {
+    const queuedTurn = row(
+      {
+        task_id: OLD,
+        action_type: 'user_direct_turn',
+        direct_turn_id: 'cm-queued-2',
+        subAgentId: OLD,
+        resume_requested: true,
+        title: 'You',
+      },
+      'And bump the version.',
+      22,
+    );
+    const owner = [...firstRun, resumeTurn, queuedTurn, nextRunFailed, nextRunStarted];
+    const states = Object.fromEntries(
+      viewMessages(owner)
+        .filter((m) => m.role === 'USER')
+        .map((m) => [m.text, (m.metadata?.codeAgentResume as { status?: string })?.status]),
+    );
+    expect(states['Also update the changelog.']).toBe('failed');
+    expect(states['And bump the version.']).toBe('delivered');
   });
 
   it('the resumed run joins the open view once, without a duplicate of the message', () => {

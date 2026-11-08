@@ -251,16 +251,17 @@ test('an owner at its cost limit: the browser does not resume, the message says 
   assert.ok(failure !== null && failure.text.includes('cost limit'), JSON.stringify(failure));
 });
 
-test('a finished owner-woken browser leaves no marker; a resumed run that finished releases its marker', async () => {
+test("a finished owner-woken browser's marker names its next run's inbox; a resumed run that finished releases its marker", async () => {
   const workflowId = `wf-${randomUUID()}`;
   const owned = await seed('ACTIVE', workflowId, [browserTask('completed')]);
   const ownedBrowser = await seedBrowser(owned.agentId, owned.userId, 'CLOSED');
   await send(owned.agentId, owned.userId, ownedBrowser, 'One more.');
-  assert.equal(
-    await getEphemeral('browser-agent-resume', `${owned.agentId}:tc-browser`),
-    undefined,
-    "the owner's fresh run reads its own <id>.run<n> inbox"
+  const ownedMarker = await getEphemeral<{ inbox: string; runWorkflowId?: string }>(
+    'browser-agent-resume',
+    `${owned.agentId}:tc-browser`
   );
+  assert.equal(ownedMarker?.inbox, 'tc-browser.run2', "the owner's fresh run reads <id>.run<n+1>");
+  assert.equal(ownedMarker?.runWorkflowId, undefined, 'an owner wake has no supervised run');
 
   const { userId, agentId } = await seed('COMPLETED', null, [browserTask('paused')]);
   const browserTaskId = await seedBrowser(agentId, userId, 'PAUSED');
@@ -284,6 +285,44 @@ test('a finished owner-woken browser leaves no marker; a resumed run that finish
   const later = await send(agentId, userId, browserTaskId, 'And one more thing.');
   assert.equal((await browserStarts()).length, before + 2, 'a new resume, not a dead inbox');
   assert.ok(later.metadata.browserResume === true);
+});
+
+test('two quick messages to a stopped browser start one resume; the later one joins its inbox', async () => {
+  // Supervised (the owner finished): one BrowserAgentResumeWorkflow, not two.
+  const { userId, agentId } = await seed('COMPLETED', null, [browserTask('completed')]);
+  const browserTaskId = await seedBrowser(agentId, userId, 'CLOSED');
+  const rows = await Promise.all([
+    send(agentId, userId, browserTaskId, 'Add a croissant.'),
+    send(agentId, userId, browserTaskId, 'And a juice.'),
+  ]);
+  const started = (await browserStarts()).filter((entry) =>
+    entry.options.workflowId.startsWith(`code-resume:${agentId}:`)
+  );
+  assert.equal(started.length, 1, 'one run drives the browser profile');
+  const runInbox = (started[0].options.args?.[0] as Record<string, unknown>).inbox_address;
+  assert.equal(
+    rows.filter((row) => row.metadata.recipientTaskId === runInbox).length,
+    1,
+    "the other message is read on the started run's inbox"
+  );
+
+  // Owner wake on a fresh conversation: one wake; the later message lands on its run's inbox.
+  const workflowId = `wf-${randomUUID()}`;
+  const owned = await seed('ACTIVE', workflowId, [browserTask('completed')]);
+  const ownedBrowser = await seedBrowser(owned.agentId, owned.userId, 'CLOSED');
+  const ownedRows = await Promise.all([
+    send(owned.agentId, owned.userId, ownedBrowser, 'One more.'),
+    send(owned.agentId, owned.userId, ownedBrowser, 'And another.'),
+  ]);
+  const wakes = (await signals(workflowId)).filter(
+    (signal) => signal.name === 'receive_agent_message'
+  );
+  assert.equal(wakes.length, 1, 'one wake, never an unanswered second one');
+  assert.deepEqual(
+    ownedRows.map((row) => row.metadata.recipientTaskId ?? null).sort(),
+    ['tc-browser.run2', null].sort(),
+    "the first rides the fresh goal; the second reads on the woken run's inbox"
+  );
 });
 
 test('a supervised fresh browser resume carries its output schema and files; no credits refuses', async () => {

@@ -68,8 +68,21 @@ def _request(**extra):
     }
 
 
-async def _run(activities, request, *, queues=("code-agent-resume",), signal_pause_after=None):
-    """Run CodeAgentResumeWorkflow with workers on `queues`; return (result | exception)."""
+async def _run(
+    activities,
+    request,
+    *,
+    queues=("code-agent-resume",),
+    signal_pause_after=None,
+    workflow_ids=None,
+    run_ids=None,
+):
+    """Run CodeAgentResumeWorkflow with workers on `queues`; return (result | exception).
+
+    ``workflow_ids`` runs one execution per id in order (the same id may repeat, like a
+    resend after a failed run) and returns the last result; ``run_ids`` collects each
+    execution's first_execution_run_id.
+    """
     from temporalio.client import WorkflowFailureError
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Worker
@@ -94,19 +107,21 @@ async def _run(activities, request, *, queues=("code-agent-resume",), signal_pau
         for worker in workers:
             await worker.__aenter__()
         try:
-            handle = await env.client.start_workflow(
-                CodeAgentResumeWorkflow.run,
-                request,
-                id=f"code-resume:owner-1:{uuid.uuid4()}",
-                task_queue=queues[0],
-            )
-            if signal_pause_after is not None:
-                await asyncio.wait_for(signal_pause_after.wait(), timeout=30)
-                await handle.signal(CodeAgentResumeWorkflow.pause)
-            try:
-                return await asyncio.wait_for(handle.result(), timeout=60)
-            except WorkflowFailureError as failure:
-                return failure
+            result = None
+            for workflow_id in workflow_ids or [f"code-resume:owner-1:{uuid.uuid4()}"]:
+                handle = await env.client.start_workflow(
+                    CodeAgentResumeWorkflow.run, request, id=workflow_id, task_queue=queues[0]
+                )
+                if run_ids is not None:
+                    run_ids.append(handle.first_execution_run_id)
+                if signal_pause_after is not None:
+                    await asyncio.wait_for(signal_pause_after.wait(), timeout=30)
+                    await handle.signal(CodeAgentResumeWorkflow.pause)
+                try:
+                    result = await asyncio.wait_for(handle.result(), timeout=60)
+                except WorkflowFailureError as failure:
+                    result = failure
+            return result
         finally:
             for worker in reversed(workers):
                 await worker.__aexit__(None, None, None)
@@ -303,6 +318,66 @@ async def test_usage_bills_the_owner_and_its_limit_stops_the_run():
     assert started == [], "the owner's root is at its limit: nothing runs"
 
 
+async def test_each_execution_of_a_reused_id_bills_under_its_own_key():
+    """A resend reuses the workflow id (ALLOW_DUPLICATE_FAILED_ONLY): each execution gets
+    its own ledger key (first_execution_run_id), kept across continue_as_new.
+
+    One shared key would make the backend's monotonic total ignore the new run's spend
+    until it passed the earlier run's total (under-billed, uncounted toward the limit).
+    """
+    from temporalio import activity
+
+    BILLED.clear()
+    LIMIT_REACHED[0] = False
+
+    async def spawn(*args):
+        if args[15] is None and activity.info().task_queue == "q-old":
+            return {
+                "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+                "code_session": {"task_id": "task-new", "ws_url": "ws://sandbox", "code_provider": "claude"},
+            }
+        return {
+            "success": True,
+            "message": "done",
+            "task_id": "task-new",
+            "code_provider": "claude",
+            "usage_items": [{"type": "service", "cost_cents": 7, "provider": "E2B"}],
+        }
+
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
+
+    workflow_id = f"code-resume:owner-1:{uuid.uuid4()}"
+    run_ids = []
+    result = await _run(
+        _fakes(spawn, [], pointer_queue="q-live"),
+        _request(),
+        queues=("q-old", "q-live"),
+        workflow_ids=[workflow_id, workflow_id],
+        run_ids=run_ids,
+    )
+    assert not isinstance(result, Exception), result
+    assert len(run_ids) == 2 and run_ids[0] != run_ids[1], run_ids
+    keys = [args[1] for kind, args in BILLED if kind == "total"]
+    expected = [f"resume:{workflow_id}:{run_id}" for run_id in run_ids]
+    # Each execution reports before spending (both generations) and after its usage.
+    assert set(keys) == set(expected), (keys, expected)
+    first = keys.index(expected[1])
+    assert keys[:first] and all(key == expected[0] for key in keys[:first]), "continue_as_new keeps the key"
+    totals = {key: max(args[2] for kind, args in BILLED if kind == "total" and args[1] == key) for key in expected}
+    assert totals == {expected[0]: 7.0, expected[1]: 7.0}, "the second run's spend is its own total"
+
+    # A run continued from a worker without per-execution keys (a carried total, no key)
+    # keeps the legacy key its earlier spend was reported under (never billed twice).
+    BILLED.clear()
+    legacy_id = f"code-resume:owner-1:{uuid.uuid4()}"
+    result = await _run(
+        _fakes(spawn, []), _request(billing={"spend_cents": 3.0}), queues=("q-live",), workflow_ids=[legacy_id]
+    )
+    assert not isinstance(result, Exception), result
+    legacy_keys = {args[1] for kind, args in BILLED if kind == "total"}
+    assert legacy_keys == {f"resume:{legacy_id}"}, legacy_keys
+
+
 async def test_owner_wake_forwards_the_persons_files_cli_and_settings_through_spawn_agent():
     """The woken run's spawn args reach the code handler through the real SpawnAgentManager."""
     from types import SimpleNamespace
@@ -466,6 +541,9 @@ async def run_all_tests():
         "pause_carried_across_continue_as_new", test_a_pause_carried_across_continue_as_new_holds_on_the_live_queue
     )
     await r.record_async("usage_bills_owner_limit_stops", test_usage_bills_the_owner_and_its_limit_stops_the_run)
+    await r.record_async(
+        "reused_id_bills_under_its_own_key", test_each_execution_of_a_reused_id_bills_under_its_own_key
+    )
     await r.record_async("root_stops_at_stored_tree_cap", test_a_root_whose_stored_tree_reached_its_cap_stops)
     await r.record_async(
         "worker_records_queue_workflow_types", test_worker_records_the_workflow_types_its_queue_serves

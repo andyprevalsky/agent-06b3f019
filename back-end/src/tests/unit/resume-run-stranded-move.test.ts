@@ -30,6 +30,8 @@ const NOW = 1_000_000_000;
 
 interface Run {
   workflowId: string;
+  /** Temporal's execution id; one workflow id has one execution per start. */
+  runId?: string;
   workflowType: string;
   taskQueue: string;
   running: boolean;
@@ -45,6 +47,12 @@ function fakeTemporal(
   deletedOwners: Set<string> = new Set()
 ) {
   const terminated: string[] = [];
+  const terminatedRuns: string[] = [];
+  let nextRun = 0;
+  for (const run of runs) run.runId ??= `run-${(nextRun += 1)}`;
+  // Like Temporal: a workflow id resolves to its newest execution.
+  const newest = (workflowId: string) =>
+    runs.filter((candidate) => candidate.workflowId === workflowId).at(-1);
   const started: Array<{
     workflowType: string;
     workflowId: string;
@@ -54,8 +62,8 @@ function fakeTemporal(
   const queries: string[] = [];
   const deps: ResumeRunMoveDependencies = {
     async describe(workflowId) {
-      const run = runs.find((candidate) => candidate.workflowId === workflowId);
-      return run ? { ...run } : null;
+      const run = newest(workflowId);
+      return run ? { ...run, runId: run.runId! } : null;
     },
     async progressed(workflowId) {
       return runs.find((candidate) => candidate.workflowId === workflowId)?.progressed === true;
@@ -66,16 +74,24 @@ function fakeTemporal(
     async markMoved(workflowId, savedRequest) {
       saved[workflowId] = { ...savedRequest, moved: true } as never;
     },
-    async terminate(workflowId) {
+    async terminate(workflowId, runId) {
+      // A call without a known run id targets the newest execution (Temporal's run-less handle).
+      const run =
+        runs.find(
+          (candidate) => candidate.workflowId === workflowId && candidate.runId === runId
+        ) ?? newest(workflowId)!;
+      if (!run.running) return false; // "workflow execution already completed"
       terminated.push(workflowId);
-      const run = runs.find((candidate) => candidate.workflowId === workflowId)!;
+      terminatedRuns.push(run.runId!);
       run.running = false;
       run.terminated = true;
+      return true;
     },
     async start(workflowType, workflowId, taskQueue, request) {
       started.push({ workflowType, workflowId, taskQueue, request });
       runs.push({
         workflowId,
+        runId: `run-${(nextRun += 1)}`,
         workflowType,
         taskQueue,
         running: true,
@@ -108,7 +124,7 @@ function fakeTemporal(
     },
     now: () => NOW,
   };
-  return { deps, terminated, started, queries };
+  return { deps, terminated, terminatedRuns, started, queries, runs };
 }
 
 const OLD_ENOUGH = NOW - STRANDED_MIN_AGE_MS - 1;
@@ -254,6 +270,50 @@ async function main(): Promise<void> {
       'not-running'
     );
     assert.deepStrictEqual(fake.started, []);
+  });
+
+  await test('two concurrent movers: only the described run is terminated, the replacement survives', async () => {
+    // The cutover broadcast and a resend both see the stranded run; the broadcast
+    // moves it first, then the resend acts on what it described before that.
+    const fake = fakeTemporal(
+      [
+        {
+          workflowId: 'code-resume:a:m',
+          workflowType: CODE_AGENT_RESUME_WORKFLOW,
+          taskQueue: OLD,
+          running: true,
+          startTimeMs: OLD_ENOUGH,
+          progressed: false,
+        },
+      ],
+      { 'code-resume:a:m': { workflowType: CODE_AGENT_RESUME_WORKFLOW, request: { n: 1 } } }
+    );
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let described = () => {};
+    const describedOnce = new Promise<void>((resolve) => (described = resolve));
+    const resendDeps: ResumeRunMoveDependencies = {
+      ...fake.deps,
+      async describe(workflowId) {
+        const result = await fake.deps.describe(workflowId);
+        described();
+        await gate;
+        return result;
+      },
+    };
+    const resend = ensureResumeRunOnLiveQueue('code-resume:a:m', LIVE, resendDeps);
+    await describedOnce;
+    const broadcast = await moveStrandedResumeRuns(OLD, LIVE, fake.deps);
+    release();
+    assert.deepStrictEqual(broadcast, { listed: 1, moved: 1, failed: 0 });
+    assert.strictEqual(await resend, 'moved-elsewhere');
+    assert.deepStrictEqual(fake.terminatedRuns, ['run-1'], 'never the replacement');
+    assert.deepStrictEqual(
+      fake.started.map((start) => start.taskQueue),
+      [LIVE],
+      'the turn is delivered once'
+    );
+    assert.strictEqual(fake.runs.filter((run) => run.running).length, 1);
   });
 
   await test('the move flags the stored request before it terminates the run', async () => {

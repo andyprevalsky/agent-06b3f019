@@ -993,19 +993,24 @@ async def _resolve_wait_target(workflow_instance: Any, address: str) -> tuple[di
 
 
 _GENERAL_PURPOSE_TYPES = {"agent", "general_purpose", "for_each"}
+# The kinds the FE maps to an icon as-is (waitAgentKinds.ts agentKind; 'code' alone lets
+# the transcript pick the CLI).
+_PLAIN_TARGET_TYPES = {"code", "browser", "explore"}
 
 
 def _wait_target_type(target: dict[str, Any]) -> Optional[str]:
     """A waited-on agent's kind for its icon: code[:claude|:codex] | browser | explore | general_purpose.
 
-    None when the type is unknown (a failed tree read, a path-only fallback): the FE then
-    derives the icon from its transcript instead of showing a wrong one.
+    None when the type is unknown (a failed tree read, a path-only fallback, a type outside
+    that set): the FE then derives the icon from its transcript instead of showing a wrong one.
     """
     kind = target.get("agent_type")
-    if not isinstance(kind, str) or not kind:
+    if not isinstance(kind, str):
         return None
     if kind in _GENERAL_PURPOSE_TYPES:
         return "general_purpose"
+    if kind not in _PLAIN_TARGET_TYPES:
+        return None
     provider = target.get("code_provider")
     if kind == "code" and provider in ("claude", "codex"):
         return f"code:{provider}"

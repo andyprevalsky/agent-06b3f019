@@ -8,6 +8,7 @@
  *   paused browser (metadata.browserResume): "Resuming…" → "Starting browser…" →
  *     "Delivered" | "Couldn't resume: <reason>" (the browser's rows after it)
  *   Rose agent (metadata.resumedFrom): "Resuming…" → "Delivered" (its next row)
+ * The line changes in place, so it is a live region (role="status").
  *
  * A Browser-composer message (metadata.browserTaskId + excludeFromModel) went
  * straight to that browser, not this agent: it reads "You → Browser: …" in the
@@ -77,6 +78,7 @@ function ResumeLine({ message }: { message: Message }) {
   });
   return (
     <p
+      role="status"
       data-testid="code-agent-resume-status"
       data-resume-status={resume.status}
       className={cn(

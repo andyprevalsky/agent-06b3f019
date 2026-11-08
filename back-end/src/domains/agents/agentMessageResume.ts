@@ -9,8 +9,12 @@
  *   a stopped browser (Browser composer, its session not ACTIVE) resumes THAT
  *   browser; the row carries `browserResume` + the spawn's `toolCallId` (FE:
  *   Resuming… → Starting browser… → Delivered | Couldn't resume: <reason>):
+ *     check "already starting?" + claim its marker under ONE lock per spawn
+ *       (two quick messages never both start a run or lose one); every start,
+ *       owner wake included, leaves a marker naming the inbox its run reads
  *     a resume of it already starting → the row joins that run's inbox (read at
- *       its next step), nothing new starts
+ *       its next step; once the owner lists the run as running, its address),
+ *       nothing new starts
  *     owner running + its background browser paused → owner wake,
  *       continue_conversation: the archived conversation + provider session
  *     owner running + its background browser finished → owner wake for a fresh
@@ -21,11 +25,17 @@
  *   no spawn record for the browser → null: the message goes to the owner
  *
  * 10k agents: one indexed agent read per person message, plus one message
- * lookup and one signal for a browser resume. Nothing fans in.
+ * lookup, one per-spawn lock lease and one signal for a browser resume. The
+ * lock is keyed by agent + spawn: nothing fans in.
  */
 import { createMessage } from '../../providers/messages';
 import { signalAgentMessage } from '../../providers/agentResume';
-import { deleteEphemeral, getEphemeral, putEphemeral } from '../../providers/sharedState';
+import {
+  deleteEphemeral,
+  getEphemeral,
+  putEphemeral,
+  withSerializedLock,
+} from '../../providers/sharedState';
 import {
   ensureResumeRunOnLiveQueue,
   startBrowserAgentResumeWorkflow,
@@ -264,12 +274,16 @@ export async function resumeStoppedBrowser(
   const task = listedBackgroundTasks(owner).find(
     (entry) => entry.type === 'browser' && entry.address.replace(/\.run\d+$/, '') === toolCallId
   );
-  const starting = await resumeInFlight(agentId, toolCallId, key);
-  if (starting !== null || task?.status === 'running') {
-    if (starting?.runWorkflowId !== undefined) {
+  const person = { browserTaskId, text, metadata };
+  // Check and claim under one lock: two quick messages must not both start a run.
+  const claim = await withSerializedLock(`${RESUME_NAMESPACE}:start:${key}`, () =>
+    claimBrowserResume(owner, task, spawn, key, person)
+  );
+  if (claim.start === null) {
+    if (claim.joinedRun !== undefined) {
       // A supervised run stranded on a superseded queue moves; one terminated by a
       // move whose restart did not land starts again. Then the message joins it.
-      await ensureResumeRunOnLiveQueue(starting.runWorkflowId, undefined, undefined, {
+      await ensureResumeRunOnLiveQueue(claim.joinedRun, undefined, undefined, {
         reviveTerminated: true,
       }).catch((error: unknown) =>
         log.warn('Could not check the browser resume run queue', {
@@ -278,8 +292,39 @@ export async function resumeStoppedBrowser(
         })
       );
     }
-    const inbox = starting?.inbox ?? task?.address ?? toolCallId;
-    return personRow(agentId, text, metadata, browserTaskId, toolCallId, inbox);
+    return claim.row;
+  }
+  await startBrowserResume({ owner, task, spawn, text, key, ...claim.start });
+  return claim.row;
+}
+
+/** The inbox of the owner's next fresh run of a finished task: `<id>.run<n+1>`. */
+function nextRunInbox(address: string): string {
+  const match = /^(.*)\.run(\d+)$/.exec(address);
+  return match === null ? `${address}.run2` : `${match[1]}.run${Number(match[2]) + 1}`;
+}
+
+/**
+ * Under the spawn's lock: join a resume already starting (its row on that run's
+ * inbox), or store this message's row and claim the marker for its new run.
+ */
+async function claimBrowserResume(
+  owner: Owner,
+  task: TaskEntry | undefined,
+  spawn: { toolCallId: string },
+  key: string,
+  person: { browserTaskId: string; text: string; metadata: Record<string, unknown> | undefined }
+) {
+  const agentId = owner.id;
+  const { toolCallId } = spawn;
+  const { browserTaskId, text, metadata } = person;
+  const starting = await resumeInFlight(agentId, toolCallId, key);
+  if (starting !== null || task?.status === 'running') {
+    // The owner's listed running run names its own inbox; until then, the marker's.
+    const inbox =
+      task?.status === 'running' ? task.address : (starting?.inbox ?? task?.address ?? toolCallId);
+    const row = await personRow(agentId, text, metadata, browserTaskId, toolCallId, inbox);
+    return { row, start: null, joinedRun: starting?.runWorkflowId };
   }
   const session = await repo.findBrowserSessionStatus(browserTaskId);
   const mode: 'continue' | 'fresh' =
@@ -292,31 +337,18 @@ export async function resumeStoppedBrowser(
   const row = await personRow(agentId, text, metadata, browserTaskId, toolCallId, inbox);
   const runInbox = inbox ?? `${toolCallId}.resume-${row.id.slice(0, 8)}`;
   const byOwner = task !== undefined && ownerCanWake(owner, task);
-  // The marker names the inbox the resumed run reads. The owner's fresh run reads
-  // its own `<id>.run<n>` (the tree state lists it as running): no marker then.
-  if (!byOwner || mode === 'continue') {
-    await putEphemeral(
-      RESUME_NAMESPACE,
-      key,
-      {
-        inbox: runInbox,
-        since: new Date().toISOString(),
-        ...(byOwner ? {} : { runWorkflowId: `code-resume:${agentId}:browser:${row.id}` }),
-      },
-      RESUME_MARKER_TTL_MS
-    );
-  }
-  await startBrowserResume({
-    owner,
-    task,
-    byOwner,
-    mode,
-    spawn,
-    row,
-    text,
-    runInbox,
+  // The marker names the inbox the resumed run reads: the owner's fresh run reads
+  // its own next `<id>.run<n>` (the tree state lists it only once the owner persists it).
+  await putEphemeral(
+    RESUME_NAMESPACE,
     key,
-    previous,
-  });
-  return row;
+    {
+      inbox:
+        byOwner && mode === 'fresh' && task !== undefined ? nextRunInbox(task.address) : runInbox,
+      since: new Date().toISOString(),
+      ...(byOwner ? {} : { runWorkflowId: `code-resume:${agentId}:browser:${row.id}` }),
+    },
+    RESUME_MARKER_TTL_MS
+  );
+  return { row, start: { byOwner, mode, row, runInbox, previous }, joinedRun: undefined };
 }

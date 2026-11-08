@@ -23,6 +23,9 @@
  *                  code agent's own data (messages, tokens, sandbox cost, context)
  *   agents drawer (BackgroundAgentsBannerView, on top of the box) → the code
  *                  agent's own sub-agents (Claude's Task / Agent tool)
+ *   every run (c.messages)       → the drawer and the settings' message count read
+ *                  all runs of the spawn as this task (mergeCodeAgentRuns), so a
+ *                  resumed run's sub-agents and rows count too
  * Unknown values render nothing (no "unavailable" placeholder). A delivery ACK's
  * effective settings replace the catalog's.
  */
@@ -129,14 +132,13 @@ export function CodeSessionComposer({
 }) {
   const [draft, setDraft] = useState(() => getCodeDraft(taskId) ?? { text: '', options: {} });
   const live = c.stateText === 'Running';
-  const { messages } = useAgentContext();
   const sessionState: CodeSessionState =
     c.chipState === 'completed' || c.chipState === 'failed' || c.chipState === 'paused'
       ? c.chipState
       : 'running';
   const subAgents = useMemo(
-    () => buildCodeSubAgentPanelModel(messages, taskId, sessionState),
-    [messages, taskId, sessionState],
+    () => buildCodeSubAgentPanelModel(c.messages, taskId, sessionState),
+    [c.messages, taskId, sessionState],
   );
   // A resumed agent runs under a new task id: live state, catalog, usage and
   // container all belong to that newest run (c.liveTaskId).
@@ -179,9 +181,9 @@ export function CodeSessionComposer({
         c,
         { ...settings, model, speed },
         new Date(0).toISOString(),
-        messages.filter((message) => message.metadata?.task_id === taskId).length,
+        c.messages.filter((message) => message.metadata?.task_id === taskId).length,
       ),
-    [taskId, owner.selectedAgentId, c, settings, model, speed, messages],
+    [taskId, owner.selectedAgentId, c, settings, model, speed],
   );
   const submit = async (attachments?: FilePointer[]) => {
     const delivered = await send(draft.text, {

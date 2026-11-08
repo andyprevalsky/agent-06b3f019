@@ -21,6 +21,8 @@
  *   C12    the nub shows the session's context window used
  *   C15    a Claude sub-agent (Task tool) running in the code agent shows in the
  *          query box's running-agents drawer
+ *   C16    a resumed run (same spawn, new task id) counts as the open task: its
+ *          sub-agents show in the drawer and its rows in the settings' Messages
  * Every backend call is served by MSW through the real Terminal (flag on).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -290,6 +292,63 @@ describe('code-agent view renders through the root transcript (prod 1a3d495c)', 
     expect(banner).toHaveTextContent('Running 1 agent');
     fireEvent.click(within(banner).getByRole('button', { expanded: false }));
     expect(await within(banner).findByText(/Audit the open PRs/)).toBeInTheDocument();
+  });
+});
+
+describe('a resumed code agent: every run reads as the open task', () => {
+  it("C16: the resumed run's sub-agents show in the drawer and its rows count in Messages", async () => {
+    const RESUMED = 'run2-6f8f8f4d';
+    const started = PROD_MESSAGES.find(
+      (m) => m.metadata?.task_id === WORKED && m.metadata?.action_type === 'claude_code_started',
+    )!;
+    const startedMeta = started.metadata as Record<string, unknown>;
+    const resumedStart: Message = {
+      ...started,
+      message_id: 'resumed-start',
+      timestamp: '2026-11-06T04:30:00.000Z',
+      metadata: {
+        ...startedMeta,
+        task_id: RESUMED,
+        code_agent: { ...(startedMeta.code_agent as object), task_id: RESUMED, state: 'live' },
+      } as Message['metadata'],
+    };
+    const resumedTask = transcriptRow([
+      {
+        id: 'tool:toolu_task_resumed',
+        rev: 1,
+        seq: 1,
+        provider: 'claude',
+        ts: '2026-11-06T04:30:05.000Z',
+        type: 'tool',
+        text: 'Review the resumed diff',
+        tool: {
+          name: 'Task',
+          target: 'Review the resumed diff',
+          raw_name: 'Task',
+          category: 'other',
+          activity_kind: 'other',
+          result: { status: 'running' },
+        },
+      },
+    ]);
+    resumedTask.message_id = 'resumed-transcript';
+    resumedTask.timestamp = '2026-11-06T04:30:06.000Z';
+    resumedTask.metadata = { ...resumedTask.metadata, task_id: RESUMED, subAgentId: RESUMED };
+    const messages = [...PROD_MESSAGES, resumedStart, resumedTask];
+    const allRuns = messages.filter(
+      (m) => m.metadata?.task_id === WORKED || m.metadata?.task_id === RESUMED,
+    ).length;
+    await openCodeAgent(WORKED, messages, 'ACTIVE');
+    const composer = await screen.findByTestId('query-input-host');
+    const banner = await within(composer).findByTestId('background-agents-banner');
+    expect(banner).toHaveTextContent('Running 1 agent');
+    fireEvent.click(within(banner).getByRole('button', { expanded: false }));
+    expect(await within(banner).findByText(/Review the resumed diff/)).toBeInTheDocument();
+    fireEvent.click(within(composer).getByRole('button', { name: 'Agent settings' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Messages').nextElementSibling).toHaveTextContent(
+      String(allRuns),
+    );
   });
 });
 

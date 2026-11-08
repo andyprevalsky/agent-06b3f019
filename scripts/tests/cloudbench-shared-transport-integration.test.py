@@ -391,7 +391,8 @@ class SharedRelay(unittest.TestCase):
         client=f.connect(lease);client.settimeout(5)
         finished=threading.Event()
         def sender():
-            try:client.sendall(b'x'*(16*1024*1024))
+            # More than the host's kernel socket buffers can absorb (see the backpressure test).
+            try:client.sendall(b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity()))
             except OSError:pass  # Explicit route release may interrupt delivery.
             finally:finished.set()
         thread=threading.Thread(target=sender,daemon=True);thread.start()

@@ -415,6 +415,11 @@ async def test_wait_for_names_a_code_agent_by_its_cli():
         assert _wait_target_type({"agent_type": ""}) is None
         assert _wait_target_type({"agent_type": "agent"}) == "general_purpose"
         assert _wait_target_type({"agent_type": "for_each"}) == "general_purpose"
+        # Only the FE's known kinds (waitAgentKinds.ts) leave the worker; anything else is None.
+        assert _wait_target_type({"agent_type": "browser"}) == "browser"
+        for unknown in ("researcher", "Explore", "code:gpt", "general purpose", ["code"], {"type": "code"}):
+            assert _wait_target_type({"agent_type": unknown}) is None, unknown
+            assert _wait_target_type({"agent_type": unknown, "code_provider": "codex"}) is None, unknown
         explore = await wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_ex")
         wf._note_background_code_provider("toolu_ex", "claude")  # only code records carry a CLI
         target, _ = await _resolve_wait_target(wf, explore["address"])

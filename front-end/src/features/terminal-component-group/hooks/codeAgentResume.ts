@@ -16,6 +16,13 @@
  *     claude_code_started after T (CLI has the turn) ▶ delivered "Delivered"
  *     ERROR / failed task_complete after T, before started
  *                                                  ─▶ failed    "Couldn't resume: <text>"
+ *
+ *   Which failure is final (backend directChatResume.ts, findResumeEndRow):
+ *     the message started its own resume (no earlier resume of the spawn still
+ *       open at T) ─▶ that run's first failure ends it: the run carried the
+ *       message, so a later run (another message's resume) never delivers it
+ *     queued behind an open resume (startupTurns.ts) ─▶ a failure leaves it
+ *       queued for the next resume, which delivers it: started after it wins
  */
 import type { Message } from '@/lib/api/types';
 
@@ -103,28 +110,61 @@ export function codeAgentResumeState(
   const toolCallId = str(metadata.toolCallId);
   const at = eventTimeMs(row.timestamp);
   if (toolCallId === null || at === null) return { status: 'resuming' };
+  const own = spawnRowsByTime(messages, row, toolCallId);
+  const queued = queuedBehindOpenResume(own, at);
   let state: CodeAgentResumeState = { status: 'resuming' };
-  const later = messages
-    .filter((message) => {
-      const time = eventTimeMs(message.timestamp);
-      return (
-        message.message_id !== row.message_id &&
-        message.metadata?.toolCallId === toolCallId &&
-        (message.metadata?.action_type as string) !== 'user_direct_turn' &&
-        time !== null &&
-        time >= at
-      );
-    })
-    .sort((a, b) => (eventTimeMs(a.timestamp) ?? 0) - (eventTimeMs(b.timestamp) ?? 0));
-  for (const message of later) {
+  for (const { message, time } of own) {
+    if (time < at || (message.metadata?.action_type as string) === 'user_direct_turn') continue;
     const m = message.metadata ?? {};
     if (m.action_type === 'claude_code_started') return { status: 'delivered' };
-    const failed =
-      m.toolStatus === 'ERROR' || (m.action_type === 'task_complete' && m.success === false);
-    if (failed) state = { status: 'failed', detail: message.text.trim() || undefined };
-    else if (state.status === 'resuming') state = { status: 'starting' };
+    if (resumeFailed(message)) {
+      state = { status: 'failed', detail: message.text.trim() || undefined };
+      if (!queued) return state;
+    } else if (state.status === 'resuming') state = { status: 'starting' };
   }
   return state;
+}
+
+/** The spawn's other rows (its runs' rows and the person's turns), oldest first. */
+function spawnRowsByTime(
+  messages: Message[],
+  row: Message,
+  toolCallId: string,
+): Array<{ message: Message; time: number }> {
+  const own: Array<{ message: Message; time: number }> = [];
+  for (const message of messages) {
+    const time = eventTimeMs(message.timestamp);
+    if (message.message_id === row.message_id || time === null) continue;
+    if (message.metadata?.toolCallId === toolCallId) own.push({ message, time });
+  }
+  return own.sort((a, b) => a.time - b.time);
+}
+
+function resumeFailed(message: Message): boolean {
+  const m = message.metadata ?? {};
+  return m.toolStatus === 'ERROR' || (m.action_type === 'task_complete' && m.success === false);
+}
+
+/**
+ * An earlier message's resume of the spawn was still open at `at` (no failure,
+ * task_complete or started row since it): this message queued behind it.
+ */
+function queuedBehindOpenResume(own: Array<{ message: Message; time: number }>, at: number) {
+  let open = false;
+  for (const { message, time } of own) {
+    if (time > at) break;
+    const m = message.metadata ?? {};
+    if ((m.action_type as string) === 'user_direct_turn') {
+      if (m.resume_requested === true) open = true;
+    } else if (
+      resumeFailed(message) ||
+      m.action_type === 'task_complete' ||
+      m.action_type === 'claude_code_started'
+    ) {
+      open = false;
+    }
+  }
+  return open;
 }
 
 /**

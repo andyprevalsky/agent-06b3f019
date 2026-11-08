@@ -5,14 +5,20 @@ The resume workflows inherit AgentWorkflow's own billing path (UsageTrackingMixi
 THIS RUN's absolute spend. The backend ledger is the single source of resume spend:
 
     usage ─▶ own_cost_cents (the run's total) ─▶ apply_resume_cost_activity(owner,
-        "resume:<this workflow id>", total): one monotonic total per run key; the
-        owner's and ancestors' tree cost grow by its growth (never own cost).
-        Resends, reordered or older totals change nothing.
+        "resume:<workflow id>:<first execution run id>", total): one monotonic total
+        per run key; the owner's and ancestors' tree cost grow by its growth (never
+        own cost). Resends, reordered or older totals change nothing.
+    run key: the workflow id is reused (ALLOW_DUPLICATE_FAILED_ONLY: a resend after a
+        failed/terminated run, a revive after a move) and each new execution starts at
+        0, so the key adds first_execution_run_id: new per execution, kept across
+        continue_as_new, which also carries the key itself. A run continued from a
+        worker without per-execution keys (a carried total, no key) keeps its legacy
+        "resume:<workflow id>" key: switching would bill its earlier spend twice.
     no workflow is signalled resume spend: every tree-cost write adds the ledger's
         totals under that agent, and a root checks its limit against that stored tree
       ─▶ the owner root's limit ─▶ reached: _cost_limit_reached, is_paused
 
-Only the run's total rides continue_as_new (``billing_state()``).
+Only the run's total and ledger key ride continue_as_new (``billing_state()``).
 """
 
 from __future__ import annotations
@@ -41,11 +47,18 @@ class ResumeBillingMixin(UsageTrackingMixin):
         carried = request.get("billing") if isinstance(request.get("billing"), dict) else {}
         # The run's own total spend so far (carried across continue_as_new).
         self.own_cost_cents = float(carried.get("spend_cents") or 0)
-        self._resume_cost_key = f"resume:{workflow.info().workflow_id}"
+        info = workflow.info()
+        key = carried.get("ledger_key")
+        if isinstance(key, str) and key.startswith("resume:"):
+            self._resume_cost_key = key
+        elif "spend_cents" in carried:  # continued from a worker without per-execution keys
+            self._resume_cost_key = f"resume:{info.workflow_id}"
+        else:  # one ledger total per execution: a reused id never shares the earlier run's
+            self._resume_cost_key = f"resume:{info.workflow_id}:{info.first_execution_run_id}"
 
     def billing_state(self) -> Dict[str, Any]:
-        """The billing to carry across continue_as_new: the run's total."""
-        return {"spend_cents": self.own_cost_cents}
+        """The billing to carry across continue_as_new: the run's total and its ledger key."""
+        return {"spend_cents": self.own_cost_cents, "ledger_key": self._resume_cost_key}
 
     def _usage_checkpoint(self) -> None:
         """No owner checkpoint: the owner's own durable high-water is its own workflow's."""
