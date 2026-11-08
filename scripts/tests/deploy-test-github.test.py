@@ -477,6 +477,27 @@ class Launcher(unittest.TestCase):
             self.assertEqual(result['evidence']['c']['remote_log'], gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log')
             self.assertEqual(result['evidence']['d']['log'], '/etc/passwd')
 
+    def test_capped_bundle_keeps_server_logs_before_bulk_coverage_json(self):
+        # The PR #1762 shard-2 artifact dropped its 10 MB server log: 3,000 raw V8
+        # and replay-cache JSON files, each smaller, had filled the 400 MB budget first.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            coverage = root / 'back-end/coverage'
+            coverage.mkdir(parents=True)
+            (coverage / 'server-shard2.log').write_bytes(b'l' * 1000)
+            raw = root / '.context/test-runs/backend-coverage-failed-x/raw-v8'
+            raw.mkdir(parents=True)
+            for index in range(10):
+                (raw / f'coverage-{index}.json').write_bytes(b'j' * 300)
+            out.mkdir()
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'BUNDLE_TOTAL_BYTES', 2000), \
+                    patch.object(gh, 'publish_done'):
+                gh.remote_bundle(type('Args', (), {'out': out})())
+            self.assertTrue((out / 'artifact/files/back-end/coverage/server-shard2.log').is_file())
+            skipped = {row['path'] for row in json.loads((out / 'artifact/bundle.json').read_text())['skipped']}
+            self.assertNotIn('back-end/coverage/server-shard2.log', skipped)
+            self.assertEqual(len(skipped), 7)  # 1000 B of log, then three 300 B JSON files fit
+
     def test_run_lookup_matches_the_tag_and_reports_a_rejected_workflow(self):
         head, name = 'd' * 40, 'deploy-gates/4vcpu/g-1'
 
