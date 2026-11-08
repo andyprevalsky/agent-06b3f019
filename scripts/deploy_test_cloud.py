@@ -16,10 +16,16 @@ import sys
 import subprocess
 import time
 
+import cloudbench_provider_headroom as provider_headroom
 from cloudbench_execution_provenance import load_provenance, verify_code_binding
 from cloudbench_result import validate_run_document, validate_run_file
+from deploy_test_cloud_refusal import SOURCE_DIFFERS, unpushed_reason
 from deploy_test_cycle import NAME, ROOT, read, source, write
 from deploy_test_process import cancellation_handlers, run_command
+
+
+class SourceRefusal(ValueError):
+    """The source guard refused before this request could admit any resources."""
 
 
 def collect(request, root, runs, started, native_exit):
@@ -113,11 +119,20 @@ def autoscaler_reason(directory):
     return 'mandatory autoscaler failed; see the fleet controller log'
 
 
-def campaign_width(checks):
+def campaign_width(checks, deadline=None):
+    """Smoke width: the reviewed registry cap, narrowed by live usage of shared provider accounts.
+
+    Tilion's browsers are one account shared with production and every other deploy, so the
+    width comes from its live session listing (cloudbench_provider_headroom), waiting with
+    progress lines until `deadline` (epoch; default 15 min) when no browser is free.
+    """
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
-    return min(len(checks), registry['cap'])
+    if deadline is None:
+        deadline = time.time() + provider_headroom.DEFAULT_WAIT_SECONDS
+    return provider_headroom.admitted_width(len(checks), registry, probes=provider_headroom.live_probes(),
+                                            deadline=deadline)
 
 
 def campaign_published(summary, campaign, started, native):
@@ -227,6 +242,43 @@ def shared_canary_env(root, environ=os.environ):
                               ('FLEET_INFRA_CANARY_LOCK', 'transaction.lock'))}
 
 
+def origin_fetchable(root, head, environ=None):
+    """Run the exact run-bench-fleet preflight (cloudbench_fetchable_ref, local patch shipping disabled).
+
+    Guests fetch only origin/main ancestors or live origin branch/tag tips. PR #1767 dispatched a
+    merge commit that was not yet pushed: all 13 campaign jobs died in ~4 s at this same check and
+    the coordinator retained an unreconcilable cleanup owner. Same helper, same env, same answer.
+    The helper bounds its own ls-remote; stdout goes to a file so a lingering grandchild cannot
+    hold a pipe open past the timeout.
+    """
+    import tempfile
+    argv = ['bash', '-c', 'source "$1"; cloudbench_fetchable_ref "$2" "$3" 0', 'deploy-fetchable-ref',
+            str(Path(root) / 'scripts/lib/cloudbench-env.sh'), str(root), head]
+    with tempfile.TemporaryFile() as output:
+        try:
+            code = subprocess.run(argv, cwd=root, env=os.environ if environ is None else environ,
+                                  stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                                  timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            return False
+        output.seek(0)
+        return code == 0 and output.read(4096).decode(errors='replace').strip() == head
+
+
+def capacity_admission_env(now, environ=os.environ):
+    """Pass this gate's deadline to native Fly capacity admission as an explicit input.
+
+    Every devbox shares the benchmark app's DEMO/delegating/Machine/shared-CPU ceilings, so a
+    shortfall is normally another devbox's fleet that will release. The fleet's own default
+    gives up after 300 s and failed smoke; within a deploy it now keeps polling until the
+    gate's existing deadline (deploy_gates.GATE_DEADLINE_SECONDS). The ceilings are unchanged.
+    An operator's explicit deadline wins and is never extended.
+    """
+    from deploy_gates import GATE_DEADLINE_SECONDS
+    key = 'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH'
+    return {key: environ.get(key) or str(int(now) + GATE_DEADLINE_SECONDS)}
+
+
 def execute(request, root):
     """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
     checks, skipped = request['checks'], request.get('skips', {})
@@ -234,9 +286,17 @@ def execute(request, root):
             or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')
                    or n in {'.','..'} for n in checks)):
         raise ValueError('invalid cloud case inventory')
-    if source(root) != request['source']:
-        raise ValueError('cloud source differs from the requested freeze')
     directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    if source(root) != request['source']:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('cloud source differs with an existing request namespace')
+        raise SourceRefusal(SOURCE_DIFFERS)
+    if not origin_fetchable(root, request['source']['head']):
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('unpushed cloud source with an existing request namespace')
+        raise SourceRefusal(unpushed_reason(request['source']['head']))
+    from deploy_test_historical_custody import admission
+    admission(request, root)
     runs = directory / 'runs'
     runs.mkdir(parents=True, exist_ok=False)
     width = campaign_width(checks)
@@ -246,7 +306,8 @@ def execute(request, root):
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
            'DEPLOY_NATIVE_HUB_JOIN': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
-           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root)}
+           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root),
+           **capacity_admission_env(time.time())}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
     catalog = root / 'agents/benchmarks/tasks.json'
@@ -291,6 +352,17 @@ def main():
         result = execute(request, args.root.resolve())
         write(Path(os.environ['DEPLOY_GATE_RESULT']), result)
         return 0 if result['complete'] and all(v == 'PASS' for v in result['cases'].values()) else 1
+    except SourceRefusal as error:
+        # This exception is raised only before mkdir, capacity checks or provider commands.
+        # It closes admission custody, never test execution or financial cleanup credit.
+        receipt = {k: request[k] for k in ('token', 'source', 'gate')}
+        receipt.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                       cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                       native_command=[], fleet_directory=None, reason=str(error),
+                       admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+        write(Path(os.environ['DEPLOY_GATE_RESULT']), receipt)
+        print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
+        return 2
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
         return 2

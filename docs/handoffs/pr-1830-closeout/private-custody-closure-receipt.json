@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1770/historical-custody-closure-supplement-v2.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "43e436ec6cc00f3afd7247e5fb1b19efbb97da472534f409cc2b392f5a9c113a",
+  "gzip_sha256": "33088e8fe205c8f2bebb7ba0ff497667e13d2f98be1c6eef557a081baeab6fb7",
+  "stored_bytes": 36722433,
+  "frames": 5,
+  "files": 96,
+  "original_bytes": 194746290,
+  "manifest_sha256": "4d10420cd37997af21e34d72eda20635b555468d64aa8f4e644967f588d9e8d4",
+  "full_readback_verified": true
+}

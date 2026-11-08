@@ -1,0 +1,136 @@
+{
+  "application_merge": "6c56e81201867ab155d370b6e49c8bf733aed95d",
+  "application_native_cycle": "READY round33; postmerge pending0",
+  "application_pr": 1831,
+  "archives": [
+    {
+      "independent_empty_restore": {
+        "original_bytes": 1253821314,
+        "original_files": 2,
+        "proof_sha256": "6621ca86cdaf995702ac3436a0b5f06b4a984e9147adbf9baf2888b2f922c083",
+        "verified": true
+      },
+      "receipt": {
+        "bucket": "trace-archive",
+        "ciphertext_sha256": "43c6d5ce78219d5a099172f9d39507940c6f1d957be3951262232dd413e71bcd",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "files": 2,
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "frames": 149,
+        "full_readback_verified": true,
+        "gzip_sha256": "c2243bd7e9ad90e7591424ab6ed7dcd119fa7ab3f44bc4cd64d7d0c05aa82cde",
+        "key": "devbox-closeouts/pr-1831/refs-inherited-20261108-v1.enc",
+        "manifest_sha256": "0d967d4c75c06ce8fabaab6fd2ab121de802e2c18730b67241c5335976854ed7",
+        "original_bytes": 1253821314,
+        "stored_bytes": 1242843225
+      },
+      "scope": "Inherited exact local-only refs/stash Git bundle"
+    },
+    {
+      "independent_empty_restore": {
+        "original_bytes": 112953963,
+        "original_files": 2724,
+        "proof_sha256": "1032785282fefe30d3383fa248d25db789eaede4c9f5d2b0c560631a417d5795",
+        "verified": true
+      },
+      "receipt": {
+        "bucket": "trace-archive",
+        "ciphertext_sha256": "39756cab0416eadae80d23a0813b31f5b6d9eca083769dd15bce784c355ba379",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "files": 2724,
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "frames": 5,
+        "full_readback_verified": true,
+        "gzip_sha256": "6276fb97a0c3f8e1ed191b3132fb614a4bd2bceee5ee1c1b82afead264d57e8b",
+        "key": "devbox-closeouts/pr-1831/causal-evidence-20261108-v1.enc",
+        "manifest_sha256": "0f5b7e1549ac989b7816744d453441d4caa77d5a6ac0a3ca50acfd9eb95c086a",
+        "original_bytes": 112953963,
+        "stored_bytes": 40715312
+      },
+      "scope": "Stable causal evidence and original native session snapshot"
+    },
+    {
+      "independent_empty_restore": {
+        "original_bytes": 6932945088,
+        "original_files": 39897,
+        "proof_sha256": "c980ed8656e874aebbe5838255a661909884f1e8c6f9e1e4ac7635ae3babbf88",
+        "verified": true
+      },
+      "receipt": {
+        "bucket": "trace-archive",
+        "ciphertext_sha256": "ae3fdf4b41e65def97a5060221c7685284548857c0a69c62f1082bfcdda26a7d",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "files": 39897,
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "frames": 199,
+        "full_readback_verified": true,
+        "gzip_sha256": "b290f43289d8223c97a043e2cb1d21164a04b7f6f8880f94cc421f2808fed547",
+        "key": "devbox-closeouts/pr-1831/workspace-precloseout-20261108-v1.enc",
+        "manifest_sha256": "798ee92ae082f1079bf08358016f15e3fe65c3b693ae8a668f460707ac319c04",
+        "original_bytes": 6932945088,
+        "recovery": {
+          "kind": "observed-ranged-readback-v1",
+          "native_crypto_or_file_assertions_changed": false,
+          "observed_at": 1794152741.1318314,
+          "original_native_upload_readback": "FAILED: Truncated archive; retained unchanged",
+          "remote_etag": "\"b043d068107de51f12b7134c47e68193-199\"",
+          "remote_last_modified": "2026-11-08T15:29:43+00:00",
+          "source_manifest": "Recomputed from the unchanged original upload filelist and every snapshot file hash",
+          "transport": "boto3 managed range download with unchanged remote ETag and exact ContentLength"
+        },
+        "stored_bytes": 1662643556
+      },
+      "scope": "Private precloseout workspace/configuration; historical and live claims are forensic snapshots only"
+    },
+    {
+      "independent_empty_restore": {
+        "original_bytes": 32778499,
+        "original_files": 48,
+        "proof_sha256": "9ee7deb692a778924420b777837c391b805d52b3f8df5b2f8e7d69a7fee2f669",
+        "verified": true
+      },
+      "receipt": {
+        "bucket": "trace-archive",
+        "ciphertext_sha256": "730444ade2185774723aa3d0a4790205faf5ba84b27153b29c3c38585da34570",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "files": 48,
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "frames": 2,
+        "full_readback_verified": true,
+        "gzip_sha256": "ded4735c38fa7941ea97fa9716a1c9673be4dc1acd9f4081ed3f10db94216f74",
+        "key": "devbox-closeouts/pr-1831/application-terminal-delta-20261108-v1.enc",
+        "manifest_sha256": "53f3c0ff8807dbcfb3208da6bf7a0dcb5725cbb932090e61eddfdc5ea0bc6d01",
+        "original_bytes": 32778499,
+        "stored_bytes": 12798387
+      },
+      "scope": "Terminal application verification delta, actual original attachment bytes and private control receipts"
+    }
+  ],
+  "financial_duties": {
+    "count": 3,
+    "current_state": "UNVERIFIED",
+    "financial_recovery_claim": false,
+    "identities": "Private original packet/custody archives",
+    "last_native_amounts": "production100c andtwohistoricalsandbox4396c each; not a current balance or aggregated debt",
+    "rerun_or_mint_authority": false
+  },
+  "format": "PR1831-PRESERVATION-INDEX-V1",
+  "initial_workspace_readback": "FAILED Truncated archive; unchanged object range-recovered, original failure retained; exact undersized-read causeOPEN",
+  "late_records_scope": "Records-only review/merge/final-card metadata follows as a separate related closeout; no new production service rollout",
+  "native_archive_tool_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+  "original_failure": {
+    "attribution": "NOT_INTRODUCED byPR1770 againstfirstparent211db9ec92a3a4fdbc7593ec977a23551cc34134",
+    "native_exit": 1,
+    "native_result": "ERROR",
+    "native_sha256": "6406e12ac2cb0454d12354d5b123e3a917dfe5fb081f9a6fae4ef79daddf3019",
+    "original_packet_sha256": "16593a7737519fca233752f7933b7972f6f9a7346f003b2e0cacb9e30d5bf252",
+    "packet_members": 18,
+    "passed": false,
+    "why_user107_testmode": "OPEN"
+  },
+  "parent_custody": "1869base+96V2 independentlyEMPTYrestored and hashverified beforedispatch; finalcore actualreceipt+independentproof retained, no full12GBcore restore onthisbox",
+  "production": "Render/Fly/backend-probes/workflow-migration/semantic PASS; agentcard SKIPPED-elected",
+  "recorded_at": 1794153379.002775,
+  "source_preservation": "Application merge and published branches plus inherited refs bundle; private snapshots do not replace a current source checkout",
+  "validated_head": "c96a48ac5832b9e14bb126caa5b6185de3b77a31"
+}

@@ -242,6 +242,35 @@
      "plain_bytes": 47071967
     }
    ]
+  },
+  "extra2": {
+   "name": "extra2",
+   "format": "PR1796-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1796-dd330764/extra2.tar.gz.aesgcm",
+   "frame_bytes": 67108864,
+   "base": "/",
+   "paths": [
+    "var/tmp/agc401/benchwt2/.context",
+    "var/tmp/agc401/solo-bench2.log",
+    "var/tmp/agc401/quiet-loop.log",
+    "var/tmp/agc401/solo-gated-1.log",
+    "var/tmp/agc401/solo-gated-2.log",
+    "var/tmp/agc401/case-correction.md"
+   ],
+   "gzip_sha256": "8e6e2a6857f514566c2d642bd1dfa10cc5bce2dabf06d9fd671a3e64669e7878",
+   "gzip_bytes": 56349444,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/extra2.tar.gz.aesgcm.part0000",
+     "sha256": "ade8708c3fedca8ae31e80e100854e281abf8b5c8d4bf6af51bb78a544a190d0",
+     "plain_bytes": 56349444
+    }
+   ]
   }
  }
 }

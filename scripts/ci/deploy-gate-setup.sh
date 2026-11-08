@@ -71,12 +71,11 @@ for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
-# Release binaries (flyctl, cloudflared) are cached on the dependency disk and otherwise fetched
-# through the GitHub API with the job token. 2026-11-08 (PR #1826): GitHub's unauthenticated release
-# downloads answered 504 for 15+ minutes ("timeouts for some unauthenticated users"), and the old
-# unauthenticated `--retry 3` installs failed every Blacksmith gate in "Prepare runner".
-TOOLS="$DEPS/tools"
-sudo install -d -o "$(id -u)" -g "$(id -g)" "$TOOLS"
+# Release binaries (flyctl, cloudflared) are fetched through the GitHub API with the job token,
+# retrying any error for minutes, and fall back to the public installers. 2026-11-08 (PR #1826):
+# GitHub's unauthenticated release downloads answered 504 for 15+ minutes ("timeouts for some
+# unauthenticated users"), and the old unauthenticated `--retry 3` installs failed every Blacksmith
+# gate in "Prepare runner". scripts/ci/release-tool.sh (below) keeps each tool's last good copy.
 fetch_retry=(--retry 12 --retry-delay 5 --retry-max-time 180 --retry-all-errors)
 release_binary() {  # release_binary <owner/repo> <asset-name-regex> <out>
   local auth=() api asset
@@ -87,32 +86,45 @@ import re
 print(next(a["url"] for a in json.load(sys.stdin)["assets"] if re.fullmatch(sys.argv[1], a["name"])))' "$2")"
   curl -fsSL "${fetch_retry[@]}" "${auth[@]}" -H 'Accept: application/octet-stream' -o "$3" "$asset"
 }
-cached_tool() {  # cached_tool <name> <owner/repo> <asset-name-regex> [tar-member]
-  if [ ! -x "$TOOLS/$1" ]; then
-    local tmp
-    tmp="$(mktemp -d)"
-    release_binary "$2" "$3" "$tmp/asset"
-    if [ -n "${4:-}" ]; then tar -xzf "$tmp/asset" -C "$tmp" "$4" && mv "$tmp/$4" "$tmp/asset"; fi
-    install -m 0755 "$tmp/asset" "$TOOLS/$1" && rm -rf "$tmp"
-  fi
-}
 
 step "flyctl"
-if ! command -v flyctl >/dev/null && [ ! -x "$HOME/.fly/bin/flyctl" ]; then
-  cached_tool flyctl superfly/flyctl 'flyctl_[0-9.]+_Linux_x86_64\.tar\.gz' flyctl
-  install -D -m 0755 "$TOOLS/flyctl" "$HOME/.fly/bin/flyctl"
-fi
-[ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
+# flyctl and cloudflared come from GitHub Releases; scripts/ci/release-tool.sh keeps the last good
+# copy of each on the dependency disk, so a Releases outage does not fail the gate.
+sudo chown "$(id -u):$(id -g)" "$DEPS"
+export RELEASE_TOOL_CACHE="$DEPS/release-tools"
+. scripts/ci/release-tool.sh
+install_flyctl() {
+  local tmp status=0
+  tmp="$(mktemp -d)"
+  { release_binary superfly/flyctl 'flyctl_[0-9.]+_Linux_x86_64\.tar\.gz' "$tmp/flyctl.tar.gz" \
+      && tar -xzf "$tmp/flyctl.tar.gz" -C "$tmp" flyctl \
+      && install -D -m 0755 "$tmp/flyctl" "$HOME/.fly/bin/flyctl"; } \
+    || curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || status=$?
+  rm -rf "$tmp"
+  return "$status"
+}
+command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] \
+  || release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "tunnel tools"
 # run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
 # the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
 sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
-if ! command -v cloudflared >/dev/null; then
-  cached_tool cloudflared cloudflare/cloudflared 'cloudflared-linux-amd64'
-  sudo install -m 0755 "$TOOLS/cloudflared" /usr/local/bin/cloudflared
-fi
+install_cloudflared() {
+  local tmp status=0
+  tmp="$(mktemp)"
+  { release_binary cloudflare/cloudflared 'cloudflared-linux-amd64' "$tmp" \
+      || curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64; } \
+    && sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared || status=$?
+  rm -f "$tmp"
+  return "$status"
+}
+# Only run.sh's public-tunnel fallback uses cloudflared, and it refuses explicitly when it is missing,
+# so an outage costs at most two attempts here instead of failing gates that never open a tunnel.
+command -v cloudflared >/dev/null \
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared \
+  || echo "⚠️ cloudflared unavailable; run.sh refuses any public tunnel that needs it" >&2
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
 
 step "dependency disk"

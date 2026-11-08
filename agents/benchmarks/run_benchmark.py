@@ -2661,6 +2661,8 @@ def _production_payment_identity_gap(usage: dict) -> Optional[str]:
     remaining = usage.get("remaining")
     if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
         return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
+    if usage.get("stripeLivemode") is not True:
+        return f"Stripe billing mode must be live (stripeLivemode={usage.get('stripeLivemode')!r})"
     return None
 
 
@@ -2668,18 +2670,17 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     """Fail fast when the production payment identity was never provisioned.
 
     Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
-    A non-200 is only a warning: a transient backend blip must not abort the gate on its own.
+    Admission requires an authoritative live billing mode before any allocation or fixture write.
     """
     user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
     if response.status_code != 200:
-        print(
-            f"    ⚠ Could not verify production payment identity {user_id} "
+        raise RuntimeError(
+            f"Could not verify production payment identity {user_id} "
             f"({response.status_code}): {response.text[:200]}"
         )
-        return
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
         return
@@ -3781,7 +3782,9 @@ ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS = 90.0
 
 
 def _rate_limit_retry_delay(message: str) -> Optional[float]:
-    """Seconds to wait for an upstream rate-limit refusal, or None if not rate-limited."""
+    """Seconds to wait for an upstream rate-limit refusal or typed provider 401, or None."""
+    if '"code":"agentcard_org_mcp_unauthorized"' in message.replace(" ", ""):
+        return ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3
     if "rate limit" not in message.lower() and "429" not in message:
         return None
     match = re.search(r'"retryAfterSeconds"\s*:\s*(\d+)', message)
@@ -3857,22 +3860,23 @@ async def _start_payment_abandonment_with_recovery(
 # 5xx is retried; 4xx (bad input, cardholder not ready) is not — except the
 # backend's structured org-wide MCP throttle below.
 AGENTCARD_SETUP_RETRY_DELAYS_SECONDS = (2, 4, 8)
-AGENTCARD_ORG_RATE_LIMIT_CODE = "agentcard_org_mcp_rate_limited"
+AGENTCARD_ORG_TRANSIENT_CODES = {429: "agentcard_org_mcp_rate_limited", 401: "agentcard_org_mcp_unauthorized"}
 
 
 def _agentcard_setup_rate_limit_delay(resp: httpx.Response) -> Optional[float]:
-    """Wait for the backend's structured AgentCard org throttle, else None.
+    """Wait out the backend's structured AgentCard org throttle or provider 401, else None.
 
-    Only the exact structured code qualifies: the backend emits it after the
-    upstream refused the call (classifyLifecycleError), so the window must pass.
+    Only the exact status and code pair qualifies: the backend emits these after the
+    upstream refused the call (classifyLifecycleError). Every setup action converges
+    on retry, so the shared org window and intermittent 401 on a healthy secret can pass.
     """
-    if resp.status_code != 429:
+    if AGENTCARD_ORG_TRANSIENT_CODES.get(resp.status_code) is None:
         return None
     try:
         body = resp.json()
     except ValueError:
         return None
-    if not isinstance(body, dict) or body.get("code") != AGENTCARD_ORG_RATE_LIMIT_CODE:
+    if not isinstance(body, dict) or body.get("code") != AGENTCARD_ORG_TRANSIENT_CODES[resp.status_code]:
         return None
     retry_after = body.get("retryAfterSeconds")
     if type(retry_after) in {int, float} and retry_after > 0:

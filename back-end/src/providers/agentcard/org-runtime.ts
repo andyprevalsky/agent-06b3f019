@@ -34,6 +34,13 @@ const log = createLogger('AgentCardOrgRuntime');
  * request behind a throttle that deep.
  */
 const RATE_LIMIT_RETRY_ATTEMPTS = 3;
+/**
+ * A throttle that advertises no `retryAfter` spends only 3 s of the budget under the cap above.
+ * A read cannot change provider state, so a throttled read backs off a little longer (1+2+4+8 s,
+ * still capped by the caller's deadline). Mutations and non-throttle transient failures keep the
+ * smaller cap.
+ */
+const READ_RATE_LIMIT_RETRY_ATTEMPTS = 5;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
 const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
 const ORG_MCP_TOOL_TIMEOUT_MS = 30_000;
@@ -65,7 +72,7 @@ export function orgRetryDeadlineAtMs(): number {
 }
 
 type FetchLike = typeof fetch;
-/** Time source for the read auth-flap backoff; injectable so tests do not wait in real time. */
+/** Time source for the retry backoff; injectable so tests do not wait in real time. */
 export type AgentCardOrgRuntimeClock = {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
@@ -294,13 +301,14 @@ function mcpToolResultRateLimitMessage(result: unknown): string | undefined {
 function rateLimitDelayMs(
   error: unknown,
   attempt: number,
-  remainingBudgetMs: number
+  remainingBudgetMs: number,
+  nowMs: number
 ): number | null {
   if (remainingBudgetMs <= 0) return null;
   const match = /"retryAfter"\s*:\s*(\d+)/.exec(errorMessage(error));
   if (match !== null) {
     // Clear the window boundary rather than racing it.
-    const waitMs = Number(match[1]) - Date.now() + 250;
+    const waitMs = Number(match[1]) - nowMs + 250;
     if (Number.isFinite(waitMs) && waitMs > 0) {
       return waitMs <= remainingBudgetMs ? waitMs : null;
     }
@@ -568,7 +576,7 @@ export class AgentCardOrgRuntime {
   async callTool(
     toolName: string,
     args: Record<string, unknown>,
-    deadlineAtMs: number = orgRetryDeadlineAtMs()
+    deadlineAtMs: number = this.clock.now() + RATE_LIMIT_TOTAL_DELAY_BUDGET_MS
   ): Promise<unknown> {
     if (!IDEMPOTENT_READ_TOOLS.has(toolName))
       return this.callToolWithRateLimitRetry(toolName, args, deadlineAtMs);
@@ -588,7 +596,9 @@ export class AgentCardOrgRuntime {
     deadlineAtMs: number
   ): Promise<unknown> {
     let lastRetryError: unknown;
-    for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+    let attemptsMade = 0;
+    for (let attempt = 1; ; attempt += 1) {
+      attemptsMade = attempt;
       const startedAtMs = Date.now();
       try {
         const result = await this.callToolOnce(toolName, args, deadlineAtMs);
@@ -619,23 +629,25 @@ export class AgentCardOrgRuntime {
         // itself counts against the budget too, and a shared deadline already reflects every wait
         // the caller's earlier calls consumed.
         const waitMs =
-          retryable && attempt < RATE_LIMIT_RETRY_ATTEMPTS
-            ? rateLimitDelayMs(error, attempt, deadlineAtMs - Date.now())
+          retryable && attempt < this.retryAttemptCap(toolName, error)
+            ? rateLimitDelayMs(error, attempt, deadlineAtMs - this.clock.now(), this.clock.now())
             : null;
         log.warn('Organization MCP tool call failed', {
           tool: toolName,
           attempt,
           duration_ms: Date.now() - startedAtMs,
           error: errorMessage(error),
+          status: error instanceof AgentCardOrgRuntimeError ? error.status : undefined,
+          code: error instanceof AgentCardOrgRuntimeError ? error.code : undefined,
           retryable,
           retry_after_advertised: /"retryAfter"\s*:\s*\d+/.test(errorMessage(error)),
           retry_wait_ms: waitMs,
-          retry_budget_remaining_ms: Math.max(0, deadlineAtMs - Date.now()),
+          retry_budget_remaining_ms: Math.max(0, deadlineAtMs - this.clock.now()),
         });
         if (!retryable) throw error;
         lastRetryError = error;
         if (waitMs === null) break;
-        await delay(waitMs);
+        await this.clock.sleep(waitMs);
       }
     }
     if (
@@ -644,7 +656,7 @@ export class AgentCardOrgRuntime {
     ) {
       throw new AgentCardOrgRuntimeError(
         `AgentCard Organization MCP ${toolName} is temporarily unavailable ` +
-          `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+          `after ${attemptsMade} attempts; upstream: ${errorMessage(lastRetryError)}`,
         503,
         'agentcard_org_mcp_unavailable',
         { tool: toolName, error: errorMessage(lastRetryError) }
@@ -659,11 +671,17 @@ export class AgentCardOrgRuntime {
     // to characterise.
     throw new AgentCardOrgRuntimeError(
       `AgentCard Organization MCP rate limit exhausted for ${toolName} ` +
-        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+        `after ${attemptsMade} attempts; upstream: ${errorMessage(lastRetryError)}`,
       429,
       'agentcard_org_mcp_rate_limited',
       { tool: toolName, error: errorMessage(lastRetryError) }
     );
+  }
+
+  private retryAttemptCap(toolName: string, error: unknown): number {
+    return IDEMPOTENT_READ_TOOLS.has(toolName) && looksLikeRateLimitError(error)
+      ? READ_RATE_LIMIT_RETRY_ATTEMPTS
+      : RATE_LIMIT_RETRY_ATTEMPTS;
   }
 
   private async callToolOnce(
@@ -710,9 +728,7 @@ export class AgentCardOrgRuntime {
       const nowMs = this.clock.now();
       const fits =
         nowMs - startedAtMs + waitMs <= ORG_MCP_READ_AUTH_FLAP_WINDOW_MS &&
-        // The shared deadline is wall-clock (orgRetryDeadlineAtMs); the injected clock only
-        // measures the flap window.
-        Date.now() + waitMs <= deadlineAtMs;
+        nowMs + waitMs <= deadlineAtMs;
       log.warn('Organization MCP read auth rejected', {
         tool: toolName,
         flap_step: step,

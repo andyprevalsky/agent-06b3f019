@@ -9,6 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+try:
+    from benchmarks import history_ledger
+except ImportError:  # loaded by file path: run as a script, or through importlib by a tool
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "benchmark_history_ledger", Path(__file__).resolve().with_name("history_ledger.py")
+    )
+    assert _spec and _spec.loader
+    history_ledger = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(history_ledger)
+
 DEFAULT_WINDOW = 10
 
 
@@ -20,21 +32,18 @@ class PredeploySchedule:
 
 def _load_task_durations(history_file: Path) -> dict[str, list[float]]:
     durations: dict[str, list[float]] = {}
-    if not history_file.exists():
-        return durations
-    with history_file.open() as handle:
-        for raw_line in handle:
-            try:
-                row = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-            task = row.get("task")
-            duration = row.get("duration_seconds")
-            if not isinstance(task, str):
-                continue
-            if not isinstance(duration, (int, float)) or duration <= 0:
-                continue
-            durations.setdefault(task, []).append(float(duration))
+    for raw_line in history_ledger.read_lines(history_file):  # base file + per-writer shards
+        try:
+            row = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        task = row.get("task")
+        duration = row.get("duration_seconds")
+        if not isinstance(task, str):
+            continue
+        if not isinstance(duration, (int, float)) or duration <= 0:
+            continue
+        durations.setdefault(task, []).append(float(duration))
     return durations
 
 

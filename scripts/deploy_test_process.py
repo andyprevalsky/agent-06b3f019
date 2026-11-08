@@ -16,6 +16,11 @@ OWNED_DRAIN_SECONDS = 13.0
 
 
 
+def process_entries():
+    """Every /proc/<pid> entry: the scan's population. Tests narrow it to processes they created."""
+    return (process for process in Path('/proc').iterdir() if process.name.isdigit())
+
+
 def scan_same_user_processes(inspect, refuse, grace=2.0):
     """Call inspect(process) for each /proc entry owned by this euid; never signals anything.
 
@@ -32,9 +37,7 @@ def scan_same_user_processes(inspect, refuse, grace=2.0):
                 return real != os.getuid() or effective != os.geteuid()
         raise PermissionError(f'{process}: no Uid line')
 
-    for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
+    for process in process_entries():
         deadline, unreadable = time.monotonic() + grace, False
         while True:
             try:
