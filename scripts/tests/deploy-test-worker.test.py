@@ -701,7 +701,7 @@ class CloudCampaign(unittest.TestCase):
         cases,_,cleaned,_=self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
         self.assertEqual('FAIL',cases['task-16']);self.assertEqual('PASS',cases['task-0']);self.assertTrue(cleaned)
 
-    def seal_native_lifecycle(self, fleet, *, teardown='0', benches='task-5', autoscaler='1'):
+    def seal_native_lifecycle(self, fleet, *, teardown='0', benches='task-5', autoscaler='1', verdicts=''):
         """Run the fleet's actual lifecycle writer for a controller that exited 1."""
         text=(ROOT/'scripts/run-bench-fleet').read_text()
         start=text.index("<<'PY'\n",text.index('# Seal the lifecycle after provider audit'))
@@ -710,7 +710,8 @@ class CloudCampaign(unittest.TestCase):
         (fleet/'_batch/lifecycle.json').unlink()
         subprocess.run([sys.executable,'-c',body,str(fleet),owner,fleet.name,str(self.root),'1',teardown,'0','1',
                         autoscaler,str(self.root/'registry'),'0','1'],check=True,timeout=30,
-                       env={**os.environ,'CLOUDBENCH_AUTOSCALER_FAILED_BENCHES':benches})
+                       env={**os.environ,'CLOUDBENCH_AUTOSCALER_FAILED_BENCHES':benches,
+                            'CLOUDBENCH_FLEET_BENCH_VERDICTS':verdicts})
 
     def mass_agent_autoscaler_capacity_failure(self, **lifecycle):
         """PR #1760 smoke: the task passed, its worker clone was capacity-denied, teardown was verified."""
@@ -773,6 +774,39 @@ class CloudCampaign(unittest.TestCase):
         self.assertNotIn('AUTOSCALER_FAILURE=1\n        ',loop.split('if [ "$autoscaler_bench_failed" = 1 ]')[0])
         self.assertGreaterEqual(loop.count('autoscaler_bench_failed=1'),7)
         self.assertIn('AUTOSCALER_FAILED_BENCHES+=("${CHILD_BENCH[$j]}")',loop)
+
+    def child_failed_after_its_task_passed(self, verdicts):
+        """PR #1775 smoke: parallel-tool-calls passed its task, then failed the cache ratchet (exit 1)."""
+        fleet=self.runs/'fleet-3'
+        self.seal_native_lifecycle(fleet,benches='',autoscaler='0',verdicts=verdicts)
+        self.summary['status']='failed';self.summary['jobs'][3].update(status='failed',controller_exit_code=1)
+        self.seal_campaign(self.campaign)
+        return self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
+
+    def test_child_failure_after_a_passed_task_is_one_verified_failure(self):
+        from deploy_test_result import validate
+        cases,details,cleaned,_=self.child_failed_after_its_task_passed('task-3=CHILDFAIL')
+        self.assertEqual('FAIL',cases['task-3']);self.assertTrue(cleaned)
+        self.assertIn('CHILDFAIL',details['task-3']['fleet_verdict'])
+        self.assertEqual({n:'PASS' for n in self.request['checks'] if n!='task-3'},
+                         {k:v for k,v in cases.items() if k!='task-3'})
+        result={**{k:self.request[k] for k in ('token','source','gate')},'cases':cases,'complete':True,
+                'cleanup_complete':cleaned,'reused':False}
+        self.assertEqual((cases,True),validate(result,self.request,1))
+        lifecycle=cycle.read(self.runs/'fleet-3/_batch/lifecycle.json')
+        self.assertEqual(('verified',{'task-3':'CHILDFAIL'}),(lifecycle['status'],lifecycle['bench_verdicts']))
+
+    def test_unexplained_exit_after_a_passed_task_stays_unverified(self):
+        for verdicts in ('', 'task-3=PASS', 'task-3=NORESULT'):
+            with self.subTest(verdicts=verdicts):
+                cases,_,cleaned,_=self.child_failed_after_its_task_passed(verdicts)
+                self.assertEqual('UNVERIFIED',cases['task-3']);self.assertFalse(cleaned)
+
+    def test_fleet_seals_every_summary_verdict(self):
+        text=(ROOT/'scripts/run-bench-fleet').read_text()
+        loop=text[text.index('FLEET_BENCH_VERDICTS=()\n'):text.index('FLEET_EXECUTION_COMPLETED=1')]
+        self.assertIn('FLEET_BENCH_VERDICTS+=("$bench=$status")',loop)
+        self.assertIn('CLOUDBENCH_FLEET_BENCH_VERDICTS="${FLEET_BENCH_VERDICTS[*]:-}"',text)
 
     def test_execute_seventeen_tasks_crosses_real_capacity_and_receipt_boundary(self):
         import shutil

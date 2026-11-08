@@ -77,6 +77,19 @@ Regressions (deploy structural gate `deploy-test-worker`): the capacity-failure 
 
 Golden reference: not applicable (no approval-gated hunk).
 
+## Recurrence through a second trigger (PR #1775 gate round, 2026-11-08)
+
+The same "one case poisons the whole gate" failure recurred on this deploy's own smoke with no autoscaler involved:
+`parallel-tool-calls` passed its task, then failed run_benchmark's per-task cache ratchet (27.1% < 30.0%), so the
+child exited 1 and the fleet printed `REAL CHILDFAIL` with verified teardown. The adapter only saw a PASSED task row
+plus exit 1, marked the case UNVERIFIED, the campaign's cleanup became incomplete and all 13 cases were UNVERIFIED with
+a retained cleanup owner. The fleet already computed that verdict in its summary but never sealed it. The lifecycle
+now also seals `bench_verdicts` (PASS / CHILDFAIL / FAIL / NORESULT per bench), and `collect_fleet` turns a PASSED row
+whose fleet verdict is CHILDFAIL or FAIL into a verified FAIL of that one case; an unexplained exit (no verdict,
+PASS or NORESULT) still stays UNVERIFIED. Regressions: `test_child_failure_after_a_passed_task_is_one_verified_failure`
+(red on the previous adapter), `test_unexplained_exit_after_a_passed_task_stays_unverified`,
+`test_fleet_seals_every_summary_verdict`.
+
 ## Human feedback
 
 None recorded.
