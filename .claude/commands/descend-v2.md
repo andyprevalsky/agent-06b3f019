@@ -81,7 +81,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - A cluster is the failed tasks whose own evidence shows the same first-bad boundary, so that one fix there is expected to flip all of them; a two-cause task joins both clusters.
 - Every inferred card is a singleton, and an unknown cause is an observability-gap singleton.
 - Never cluster on a shared symptom (failure string, evaluator, status, timeout, website or issue class).
-- Triage cards are written in parallel as failures arrive; the parent clusters them before dispatching any RCA, so one cluster gets one RCA.
+- Cluster each card as it arrives: it joins an open cluster whose observed boundary it shares (that cluster's fix owner gets the new member) or opens a new cluster whose fix owner starts at once, so fixing begins while the batch still runs.
 - Run a choke-point pass over every FAIL and PASS run: a mechanism common in failures and rare in passes is a cluster hypothesis; prevalence only ranks hypotheses, and each run's own observed mechanism grants membership.
 - Before blaming the agent, confirm the judge saw what the user sees and no inherited repo-default gate applies; prove evaluator clusters with judge-only replays and count the verdicts they change.
 - Every cluster names a concrete defect at a code site (does X, should do Y, observed Z); a measurement is not a cause, and timeout and provider-limit evidence follows `docs/root-cause-analysis.md`.
@@ -99,7 +99,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - Workers never contact the user, change the active benchmark snapshot, launch paid runs or deploy; the parent applies each fix as its own row-tagged commit on the descent branch so it can be ablated.
 - Any change may be applied; guarded hunks (prompts, agent behavior, trajectory injection, Zod schemas) and task-definition edits are approved in **Final change review** before deploying.
 - Never `/deploy` to test a change; infra blockers that production needs ship with `/push`, everything else waits for the end.
-- In the next batch run: every member passing confirms the fix; an exemplar passing while a sibling fails splits that sibling back to triage with this run as evidence; a failing exemplar returns the cluster to `/RCA` at its rank.
+- In the next batch run, every member passing confirms the fix; a member that still fails is re-triaged in parallel from its newest run, where a later first-bad boundary means the fix helped and the task now joins whatever cluster matches; a failing exemplar returns the cluster to `/RCA` at its rank.
 
 ## Final change review
 

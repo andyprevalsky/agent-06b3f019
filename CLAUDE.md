@@ -16,7 +16,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Treat each new user message as added acceptance criteria unless it cancels one, and before claiming done validate against the latest combined set, reporting anything unmet or unverified.
 - Own "make X work in prod" end to end: check `git log --all` and open PRs for an in-flight fix, then reproduce, fix the root cause and rerun the real gate until it is green (rule 0a).
 - Build approval-gated changes (prompts, Zod schemas, harness behavior) now and queue their approvals for the start of `/deploy`; a pending approval blocks only its own action, and infra fixes need none (rule 5).
-- Outside `/descend`, a benchmark definition, pass-criteria or timeout change is never built while it waits for approval: propose it, leave it undone and list it at the end; `/descend` may apply a cross-reviewed task edit, which its final change review approves before deploying (rule 25).
+- Outside `/descend`, never edit a benchmark's definition, pass criteria or timeout yourself: describe the change you would make in your final message and leave the file untouched; `/descend` may apply a cross-reviewed task edit, which its final change review approves before deploying (rule 25).
 - Leave a destructive or irreversible action, or spend beyond what was authorized, undone and list it for the user at the end instead of asking mid-run.
 - Never stop early because you think you are out of context; the conversation is summarized automatically (rule 0).
 - No milestone gain is a signal: if the same blocker survives a checkpoint with no new evidence, change the approach.
