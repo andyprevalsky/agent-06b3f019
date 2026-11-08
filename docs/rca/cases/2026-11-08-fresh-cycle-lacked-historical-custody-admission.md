@@ -8,7 +8,7 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: deploy_test_historical_custody supported same-cycle refresh only while initialize created empty historical failures and no cross-state admission action existed
 symptoms:
-  - "AttributeError: module has no attribute prepare_import"
+  - "AttributeError: module 'deploy_test_historical_custody' has no attribute 'prepare_import'"
   - fresh independent repair cycle has no discoverable historical no-retry obligations
   - init did not consume historical-no-retry-proof
 tags:
@@ -57,6 +57,15 @@ cycle bytes unchanged. Existing native/renewal/admission guards are unchanged.
 The ladder stops at the supported metadata API: a workflow that requires a new
 coordinator cannot express transfer using only an old coordinator's refresh.
 No provider, credentials, financial state or agent behavior caused this gap.
+
+Integration validation also exposed an instruction-level environment mismatch.
+Manual Python init/import bound the caller's environment, while the documented
+shell wrapper prepended dependency directories to PATH again. The existing guard
+correctly refused that launch with `source/plan changed; refresh after RCA before
+running` (exit 2), before tests started. Running the same gate coordinator through
+`python3 scripts/deploy_cli.py gates` preserved the original environment and passed
+all four quick gates. The operational instructions now use that entrypoint after
+manual setup; the environment guard and shell wrapper remain unchanged.
 
 ## Solution
 

@@ -490,9 +490,18 @@ replay is idempotent; drift or non-fresh current state refuses admission without
 changing it. `--historical-no-retry-proof` remains exclusive to same-cycle
 `refresh`; supplying it to `init` fails instead of silently losing custody.
 
-After reviewing the admitted state, the parent resumes ordinary `scripts/deploy
-gates --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"`, with the same plan inputs,
-worker bindings and timing root. No import command starts workers, contacts a
+After reviewing the admitted state, the parent runs the existing Python CLI
+entrypoint in the same pinned environment used for manual init/import:
+
+```sh
+python3 scripts/deploy_cli.py gates --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+Keep the same plan inputs, worker bindings and timing root. The `scripts/deploy`
+shell wrapper prepends dependency directories to `PATH`; invoking it after a
+manual Python init changes the bound environment and correctly refuses execution.
+The Python CLI entrypoint preserves that caller environment and uses the ordinary
+gate coordinator. No import command starts workers, contacts a
 provider, renews a provider warning, retries a payment, or clears repair debt.
 Production live-mode duties remain with their separate owner and are not
 eligible for this sandbox protocol.
