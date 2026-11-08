@@ -48,7 +48,10 @@ export function spawnLifecycleWorker(
       () => reject(new Error(`lifecycle worker not ready within 120s: ${output}`)),
       120_000
     );
-    child.on('message', (message: { type?: string }) => {
+    child.on('message', (message: { type?: string; error?: string }) => {
+      // A pre-ready failure reports its cause only on the result message.
+      if (message.type === 'result' && !started)
+        reject(new Error(`worker failed before ready: ${message.error}`));
       if (message.type !== 'ready') return;
       started = true;
       resolve();

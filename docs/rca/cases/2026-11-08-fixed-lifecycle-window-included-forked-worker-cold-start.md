@@ -67,8 +67,9 @@ belongs to no product path.
 The worker now loads its import graph (`browserSessionResume`, `lifecycleClaim`)
 and awaits `prisma.$connect()` before resuming. It then sends `{ type: 'ready' }` over IPC.
 `spawnLifecycleWorker` exposes a `ready` promise. It rejects with the worker's
-output if the process exits first, or after a separate 120 s startup bound, so a
-hung worker still fails clearly instead of hanging the unbounded fixture process. The fixture starts each fixed 10 s
+reported error or output if the worker fails or exits first, or after a separate
+120 s startup bound. A hung or failed worker therefore still fails with its cause,
+instead of hanging the unbounded fixture process. The fixture starts each fixed 10 s
 window only after the worker inside it is ready:
 `firstWorker.ready.then(() => within(entered))` and
 `secondWorker.ready.then(() => within(Promise.all(...)))`. The timeout value,
