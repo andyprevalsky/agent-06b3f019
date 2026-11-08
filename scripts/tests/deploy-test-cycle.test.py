@@ -131,6 +131,175 @@ class Cycle(unittest.TestCase):
         new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
         return new
 
+    def transfer_fixture(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        donor = copy.deepcopy(self.state)
+        proof = h.build(donor, self.plan, new, self.root)
+        c.refresh(donor, self.plan, new, self.root, historical_no_retry_proof=proof)
+        for i in range(3):
+            negative = copy.deepcopy(donor['failures'][0])
+            negative.update(id='lost-' + str(i), native_result='UNVERIFIED', complete=False,
+                            disposition='execution required', reexecution={'receipt': 'negative-history'})
+            negative.pop('rca', None)
+            file = self.root / '.context/negative' / str(i) / 'cloudbench-run.json'
+            c.write(file, {'tasks': [dict(negative['worker_evidence']['native_task'], logs={})]})
+            negative['worker_evidence']['path'] = str(file)
+            negative['worker_evidence']['sha256'] = c.sha_file(file)
+            donor['failures'].append(negative)
+        file = self.root / '.context/donor/cycle.json'; c.write(file, donor)
+        index = self.root / '.context/donor/contents.json'
+        c.write(index, {'format': 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1',
+                        'files': {str(self.root / '.context/deploy-pipeline/cycle.json'): c.sha_file(file)}})
+        fresh = c.initialize(new, self.root)
+        return fresh, file, index
+
+    def test_historical_import_only_indexed_duties_not_lost_supervisor_history(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        original = donor.read_bytes()
+        self.assertEqual(2, len(h.known(c.read(donor), self.root)))
+        proof = h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        before = copy.deepcopy(fresh)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        self.assertEqual([], fresh['attempts']); self.assertEqual({}, fresh['skips'])
+        self.assertEqual('quick', fresh['phase']); self.assertFalse(fresh['ready'])
+        self.assertEqual(before['source'], fresh['source'])
+        self.assertEqual(before['environment'], fresh['environment'])
+        self.assertEqual(before['input_fingerprints'], fresh['input_fingerprints'])
+        self.assertEqual(2, len(fresh['failures']))
+        self.assertEqual(1, len(fresh['pending_post_merge']))
+        self.assertTrue(all(r['current_execution'] == r['current_financial_state'] == 'UNVERIFIED'
+                            and not any(r['credit'].values()) for r in fresh['historical_no_retry_custody']))
+        h.verify(fresh, self.root)
+        gate = fresh['plan']['gates'][1]
+        self.assertEqual(2, len(c.reuse_qualifications(fresh, gate, root=self.root)))
+        same = copy.deepcopy(fresh)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        self.assertEqual(same, fresh); self.assertEqual(original, donor.read_bytes())
+        self.assertEqual([], c.read(donor).get('attempts', []))
+
+    def test_historical_import_rejects_partial_changed_mixed_and_nonfresh(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        args = (donor, index, c.sha_file(donor), c.sha_file(index))
+        proof = h.import_proof(fresh, *args, self.root)
+        for key, value in [('attempts', [{}]), ('ready', True), ('pending', ['unknown']),
+                           ('skips', {'api/peer': {}}), ('running', ['owner']), ('extra', 'foreign')]:
+            changed = copy.deepcopy(fresh); changed[key] = value
+            before = copy.deepcopy(changed)
+            with self.assertRaises(ValueError): h.import_history(changed, *args, proof, self.root)
+            self.assertEqual(before, changed)
+        bad = copy.deepcopy(proof); bad['cases'].pop()
+        with self.assertRaises(ValueError): h.import_history(fresh, *args, bad, self.root)
+        before = copy.deepcopy(fresh)
+        raw = donor.read_bytes(); data = c.read(donor)
+        data['historical_custody_history'].pop(); c.write(donor, data)
+        with self.assertRaises(ValueError): h.import_proof(fresh, *args, self.root)
+        # Even repinning both files does not authorize a partial indexed set.
+        doc = c.read(index); doc['files'][str(self.root / '.context/deploy-pipeline/cycle.json')] = c.sha_file(donor)
+        c.write(index, doc)
+        with self.assertRaises(ValueError):
+            h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        donor.write_bytes(raw)
+        doc['files'][str(self.root / '.context/deploy-pipeline/cycle.json')] = c.sha_file(donor)
+        c.write(index, doc)
+        native = Path(c.read(donor)['historical_custody_history'][0]['original_failure']['worker_evidence']['path'])
+        native.write_text('{}')
+        with self.assertRaises(ValueError):
+            h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        self.assertEqual(before, fresh)
+
+    def test_historical_import_preserves_universal_missing_native_guard(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        negative = Path(c.read(donor)['failures'][-1]['worker_evidence']['path'])
+        raw = negative.read_bytes(); negative.unlink()
+        before = copy.deepcopy(fresh)
+        with self.assertRaisesRegex(ValueError, 'native bytes missing'):
+            h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        self.assertEqual(before, fresh)
+        negative.write_bytes(raw)
+        proof = h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        self.assertEqual(2, len(fresh['failures']))
+
+    def test_historical_import_cli_and_admission_keep_current_inventory(self):
+        import contextlib, io
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        plan = self.root / '.context/new-plan.json'; c.write(plan, fresh['plan'])
+        state_file = self.directory / 'cycle.json'; c.write(state_file, fresh)
+        args = ['--root', str(self.root), '--plan', str(plan), '--state-dir', str(self.directory),
+                '--donor-state', str(donor), '--donor-index', str(index),
+                '--donor-sha256', c.sha_file(donor), '--donor-index-sha256', c.sha_file(index)]
+        before = state_file.read_bytes()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(0, c.main(['prepare-historical-import', *args]))
+        self.assertEqual(before, state_file.read_bytes())
+        proof = self.root / '.context/import-proof.json'; proof.write_text(out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, c.main(['import-historical-custody', *args, '--proof', str(proof),
+                                      '--historical-no-retry-proof', str(proof)]))
+        self.assertEqual(before, state_file.read_bytes())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['import-historical-custody', *args, '--proof', str(proof)]))
+            self.assertEqual(0, c.main(['import-historical-custody', *args, '--proof', str(proof)]))
+        state = c.read(state_file); gate = state['plan']['gates'][1]
+        request = dict(source=state['source'], gate=gate['name'], checks=gate['checks'][2:],
+            skips=c.reuse_qualifications(state, gate, root=self.root), custody_state=str(state_file),
+            custody_state_sha256=h.state_identity(state), custody_child_environment=h.environment_identity(os.environ),
+            custody_runtime=h.runtime_identity(self.root))
+        h.admission(request, self.root)
+        request['checks'] = gate['checks']
+        with self.assertRaises(ValueError): h.admission(request, self.root)
+        changed = copy.deepcopy(state); changed['historical_custody_import']['donor']['state_digest'] = 'wrong'
+        c.write(state_file, changed)
+        with self.assertRaises(ValueError): h.verify(changed, self.root)
+        self.assertNotEqual(h.state_identity(state), h.state_identity(changed))
+
+    def test_historical_import_retained_provenance_blocks_dropped_collections(self):
+        import deploy_test_historical_custody as h
+        fresh, donor, index = self.transfer_fixture()
+        proof = h.import_proof(fresh, donor, index, c.sha_file(donor), c.sha_file(index), self.root)
+        h.import_history(fresh, donor, index, c.sha_file(donor), c.sha_file(index), proof, self.root)
+        for key in ('failures', 'historical_custody_history', 'historical_no_retry_custody'):
+            fresh.pop(key)
+        state_file = self.directory / 'cycle.json'; c.write(state_file, fresh)
+        receipt = self.directory / 'retained-receipt.json'; c.write(receipt, {'original': 'unchanged'})
+        gate = fresh['plan']['gates'][1]
+        request = dict(source=fresh['source'], gate=gate['name'], checks=gate['checks'], skips={},
+            custody_state=str(state_file), custody_state_sha256=h.state_identity(fresh),
+            custody_child_environment=h.environment_identity(os.environ), custody_runtime=h.runtime_identity(self.root))
+        before = copy.deepcopy(fresh)
+        files = {str(p): p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
+        operations = {
+            'verification': lambda: h.verify(fresh, self.root),
+            'direct-guard': lambda: h.guard(fresh, gate, self.root),
+            'child-admission': lambda: h.admission(request, self.root),
+            'preallocation': lambda: c._execute(gate, fresh, self.directory, self.root),
+        }
+        for name, operation in operations.items():
+            with self.subTest(boundary=name), patch.object(c, 'run_command', side_effect=AssertionError('allocation entered')) as launch:
+                with self.assertRaises(ValueError): operation()
+                launch.assert_not_called()
+                self.assertEqual(before, fresh)
+                self.assertEqual(files, {str(p): p.read_bytes() for p in self.directory.rglob('*') if p.is_file()})
+
+    def test_historical_import_malformed_retained_provenance_never_looks_absent(self):
+        import deploy_test_historical_custody as h
+        gate = self.plan['gates'][1]
+        for value in (None, False, {}, [], {'donor': None}):
+            state = copy.deepcopy(self.state); state['historical_custody_import'] = value
+            before = copy.deepcopy(state)
+            for operation in (lambda: h.verify(state, self.root), lambda: h.guard(state, gate, self.root),
+                              lambda: c._execute(gate, state, self.directory, self.root)):
+                with self.subTest(provenance=value), patch.object(c.uuid, 'uuid4', side_effect=AssertionError('allocation entered')) as allocate:
+                    with self.assertRaises((ValueError, KeyError, TypeError)): operation()
+                    allocate.assert_not_called()
+                    self.assertEqual(before, state)
+
     def test_concurrent_agentcard_selector_keeps_dataclass_module_registered(self):
         import types
         bridge = types.ModuleType('_deploy_selector_race_fixture')
