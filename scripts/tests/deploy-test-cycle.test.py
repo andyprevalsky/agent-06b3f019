@@ -154,6 +154,80 @@ class Cycle(unittest.TestCase):
         c.resolve_post_merge(self.state, debt[0]['id'], 'https://boxes.dev/thread/repair-fixture')
         self.assertEqual([], self.state['pending_post_merge']); h.verify(self.state, self.root)
 
+    def test_historical_custody_full_receipt_carries_across_history_only_commit(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.state.update(phase='final')
+        gate = self.state['plan']['gates'][1]
+        def worker(argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['peer-' + str(i) for i in range(13)], request['checks'])
+            self.assertEqual(2, len(request['skips']))
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases=dict.fromkeys(request['checks'], 'PASS'), complete=True, cleanup_complete=True))
+            return 0, False, False, False
+        c.write(self.directory / 'cycle.json', self.state)
+        with patch.object(c, 'run_command', side_effect=worker):
+            receipt = c.execute(gate, self.state, self.directory, self.root)
+        self.state['attempts'].append(dict(phase='final', results=[receipt]))
+        self.state.update(phase='ready', ready=True)
+        original = c.full_pass_binding(self.state, gate, root=self.root)
+        self.assertIsNotNone(original)
+        old = self.state['plan']
+        native_files = {str(Path(receipt['log']).parent / name): (Path(receipt['log']).parent / name).read_bytes()
+                        for name in ('request.json', 'receipt.json', 'result.json')}
+        ledger = self.root / 'agents/benchmarks/history/writer.jsonl'
+        ledger.parent.mkdir(parents=True); ledger.write_text('{"run": 1}\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', str(ledger)], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'history only'], check=True)
+        newer = copy.deepcopy(old); newer['source'] = c.source(self.root)
+        self.assertNotEqual(old['source']['head'], newer['source']['head'])
+        # Source digest includes HEAD; execution inputs must remain byte-identical.
+        self.assertNotEqual(old['source']['digest'], newer['source']['digest'])
+        self.assertEqual(self.state['input_fingerprints'], c.input_fingerprints(newer, self.root))
+        renewal = h.build(self.state, old, newer, self.root)
+        with patch.object(c, 'run_command') as launch:
+            c.refresh(self.state, old, newer, self.root, historical_no_retry_proof=renewal)
+            self.assertIn('api', self.state['carried_passes'])
+            self.assertEqual(original, self.state['carried_passes']['api']['native_binding'])
+            self.assertEqual(original, c.full_pass_binding(self.state, gate, root=self.root))
+            launch.assert_not_called()
+        self.assertEqual(receipt['source'], original['native_source'])
+        h.verify(self.state, self.root)
+        self.assertTrue(c.carried_pass(self.state, gate, root=self.root))
+        # A second history-only commit must still point to the same original native files.
+        prior = self.state['plan']
+        ledger.write_text(ledger.read_text() + '{"run": 2}\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', str(ledger)], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'second history'], check=True)
+        current = copy.deepcopy(prior); current['source'] = c.source(self.root)
+        renewal = h.build(self.state, prior, current, self.root)
+        c.refresh(self.state, prior, current, self.root, historical_no_retry_proof=renewal)
+        self.assertEqual(original, self.state['carried_passes']['api']['native_binding'])
+        self.assertTrue(c.carried_pass(self.state, gate, root=self.root))
+        self.assertEqual(native_files, {p: Path(p).read_bytes() for p in native_files})
+        recovered = copy.deepcopy(self.state)
+        recovered['attempts'][-1]['results'][0]['kind'] = 'recovered-native-execution-v1'
+        self.assertIsNone(c.full_pass_binding(recovered, gate, root=self.root, custody_refresh=True))
+        # File or environment changes invalidate positive carry, even though custody renews.
+        code = (self.root / 'code').read_text()
+        for change in ('file', 'environment'):
+            candidate = copy.deepcopy(self.state)
+            if change == 'file': (self.root / 'code').write_text('actual changed input')
+            with patch.dict(os.environ, {'CUSTODY_CHANGED_INPUT': '1'} if change == 'environment' else {}):
+                updated = copy.deepcopy(current); updated['source'] = c.source(self.root)
+                proof = h.build(candidate, current, updated, self.root)
+                with patch.object(c, 'run_command') as launch:
+                    c.refresh(candidate, current, updated, self.root, historical_no_retry_proof=proof)
+                    self.assertNotIn('api', candidate['carried_passes'])
+                    self.assertFalse(c.carried_pass(candidate, gate, root=self.root))
+                    launch.assert_not_called()
+            (self.root / 'code').write_text(code)
+
     def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
         import deploy_test_historical_custody as h
         new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)

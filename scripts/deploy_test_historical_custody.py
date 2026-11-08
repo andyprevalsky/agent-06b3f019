@@ -237,6 +237,17 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
+def identical_inputs_binding(state, root):
+    """Validate an old FULL receipt during refresh, without rebinding its native source."""
+    import deploy_test_cycle as c
+    c.validate_plan(state['plan'], root)
+    need(state['plan']['source'] == state['source'] and c.digest(state['plan']) == state['plan_digest']
+         and c.environment_digest() == state['environment']
+         and c.input_fingerprints(state['plan'], root) == state['input_fingerprints'],
+         'old FULL receipt inputs changed')
+    return {k: state[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+
+
 def qualifications(state, gate, root, *, current=None):
     import deploy_test_cycle as c
     found = known(state, root)

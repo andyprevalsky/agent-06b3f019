@@ -255,7 +255,7 @@ def initialize(plan: dict, root: Path) -> dict:
             "input_fingerprints": input_fingerprints(plan, root)}
 
 
-def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=ROOT) -> dict:
+def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=ROOT, custody_refresh=False) -> dict:
     """Replay existing dispositions; projected source fields never replace native proof."""
     from deploy_failure_report import decision
     revalidate_standing_skips(state)
@@ -286,20 +286,29 @@ def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=
             validate_active(state, warning)
         expected[case] = {'disposition': RESOURCE_SKIP, **warning}
     if include_custody:
-        from deploy_test_historical_custody import guard
-        expected.update(guard(state, gate, root, expected))
+        from deploy_test_historical_custody import guard, identical_inputs_binding
+        current = (identical_inputs_binding(state, root)
+                   if custody_refresh and state.get('historical_no_retry_custody') else None)
+        expected.update(guard(state, gate, root, expected, current=current))
     if not set(expected) <= set(gate['checks']):
         raise ValueError('reuse qualification outside full inventory')
     return expected
 
 
 def qualification_identity(skips: dict) -> dict:
-    # refresh changes ONLY these outer projection fields; nested native/RCA bytes stay bound.
-    return {key: {k: v for k, v in value.items() if k not in {'source', 'original_source'}}
-            for key, value in skips.items()}
+    # Only projection source/plan may change during an identical-input refresh.
+    # Native source, task, financial facts, environment and fingerprints remain bound.
+    result = copy.deepcopy(skips)
+    for value in result.values():
+        for field in ('source', 'original_source'):
+            value.pop(field, None)
+        if value.get('disposition') == 'NO_RETRY_CUSTODY':
+            for field in ('source', 'plan_digest'):
+                value['current_binding'].pop(field, None)
+    return result
 
 
-def full_pass_binding(state: dict, gate: dict, *, root=ROOT) -> dict | None:
+def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> dict | None:
     """Latest FULL execution: native PASS subset plus exact existing qualified exclusions."""
     latest = latest_receipts(state).get(gate['name'])
     if not latest or gate.get('quick'):
@@ -309,7 +318,7 @@ def full_pass_binding(state: dict, gate: dict, *, root=ROOT) -> dict | None:
     if receipt.get('kind') == 'recovered-native-execution-v1':
         return None
     try:
-        skips = reuse_qualifications(state, gate, root=root)
+        skips = reuse_qualifications(state, gate, root=root, custody_refresh=custody_refresh)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         return None
     active = [case for case in gate['checks'] if case not in skips]
@@ -359,14 +368,14 @@ def full_pass_binding(state: dict, gate: dict, *, root=ROOT) -> dict | None:
         return None
 
 
-def carried_pass(state: dict, gate: dict) -> bool:
+def carried_pass(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> bool:
     entry = state.get('carried_passes', {}).get(gate['name'])
     if not entry:
         return False
     return (entry.get('validated_source') == state['source']
             and entry.get('input_fingerprint') == state['input_fingerprints'].get(gate['name'])
             and entry.get('contract_digest') == digest(gate)
-            and full_pass_binding(state, gate) == entry.get('native_binding'))
+            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh) == entry.get('native_binding'))
 
 
 def reusable_full_pass(state: dict, gate: dict) -> bool:
@@ -1981,8 +1990,8 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
         for name, gate in old_gates.items():
             if name in removed:
                 continue
-            binding = full_pass_binding(state, gate, root=root)
-            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
+            binding = full_pass_binding(state, gate, root=root, custody_refresh=True)
+            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate, root=root, custody_refresh=True))
                     and digest(gate) == digest(new_gates[name])):
                 # Retire historical repair routing using the OLD validated FULL
                 # receipt. This grants no new-source credit: changed inputs
