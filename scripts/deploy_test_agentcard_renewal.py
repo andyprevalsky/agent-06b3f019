@@ -174,7 +174,9 @@ def renew(state, proof, root):
     expected = binding(state, proof['binding']['occurrence'], root)
     supplied = dict(proof['binding'])
     prepared_at = supplied.pop('prepared_at', None)
-    if set(proof) != {'binding', 'started_at', 'finished_at', 'observations'} or supplied != expected:
+    negative = 'confirmation_failure' in proof
+    payload = 'confirmation_failure' if negative else 'observations'
+    if set(proof) != {'binding', 'started_at', 'finished_at', payload} or supplied != expected:
         raise ValueError('renewal proof binding mismatch or mixed waiver fields')
     current = [w for w in state.get('resource_warnings', []) if w['id'] == expected['occurrence']]
     if current:
@@ -192,7 +194,35 @@ def renew(state, proof, root):
         raise ValueError('read observation predates native execution or is in future')
     if time.time() - proof['started_at'] > 300:
         raise ValueError('stale read-only confirmation')
-    observations = proof['observations']
+    if negative:
+        exception = proof['confirmation_failure']
+        if (not isinstance(exception, dict)
+                or set(exception) != {'provider', 'reason', 'status', 'code', 'tool'}
+                or exception != {'provider': 'AgentCard', 'reason': 'credential or billing change',
+                                 'status': 401, 'code': 'agentcard_org_mcp_unauthorized',
+                                 'tool': exception.get('tool')}
+                or type(exception['status']) is not int
+                or exception['tool'] not in ('get_card', 'list_transfers')):
+            raise ValueError('not an exact provider authentication refusal')
+    else:
+        validate_observations(proof['observations'], expected)
+    warning = next(w for w in reversed(state['superseded_resource_warnings']) if w['id'] == expected['occurrence'])
+    entry = {k: copy.deepcopy(v) for k, v in warning.items() if k != 'superseded'}
+    entry.pop('provider_exception', None)
+    entry.pop('current_resource_state', None)
+    entry.update(source=state['source'], original_source=failure['source'],
+                 input_fingerprint=expected['input_fingerprint'], renewal=copy.deepcopy(proof))
+    if negative:
+        entry['provider_exception'] = copy.deepcopy(proof['confirmation_failure'])
+        entry['current_resource_state'] = 'UNVERIFIED; original native financial obligation retained'
+    if binding(state, expected['occurrence'], root) != expected:
+        raise ValueError('source/input changed during renewal validation')
+    state.setdefault('resource_warnings', []).append(entry)
+    state.setdefault('resource_warning_renewals', []).append(copy.deepcopy(proof))
+
+
+def validate_observations(observations, expected):
+    import deploy_test_cycle as c
     if not isinstance(observations, dict) or not isinstance(observations.get('card'), dict):
         raise ValueError('missing card observation')
     expected_card = {'id': expected['card_id'], 'status': 'CLOSED', 'balanceCents': 0}
@@ -210,14 +240,6 @@ def renew(state, proof, root):
     # Exact shape and types: bool/number equality cannot admit malformed JSON.
     if c.digest(observations) != c.digest(expected_observations):
         raise ValueError('provider observation no longer proves original sandbox stall')
-    warning = next(w for w in reversed(state['superseded_resource_warnings']) if w['id'] == expected['occurrence'])
-    entry = {k: copy.deepcopy(v) for k, v in warning.items() if k != 'superseded'}
-    entry.update(source=state['source'], original_source=failure['source'],
-                 input_fingerprint=expected['input_fingerprint'], renewal=copy.deepcopy(proof))
-    if binding(state, expected['occurrence'], root) != expected:
-        raise ValueError('source/input changed during renewal validation')
-    state.setdefault('resource_warnings', []).append(entry)
-    state.setdefault('resource_warning_renewals', []).append(copy.deepcopy(proof))
 
 
 def validate_active(state, warning):

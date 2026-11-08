@@ -388,3 +388,13 @@ rejected. Sandbox mode must always be proved by the linked transfer. Preparation
 fresh read timestamps; admission requires a read started within five minutes.
 An exact accepted proof is idempotent. All remaining current-source checks run
 under the existing full-plan, source, cleanup and deadline rules.
+
+If the read-only producer instead receives the exact typed AgentCard organization
+authentication refusal (HTTP 401, `agentcard_org_mcp_unauthorized`), it writes a
+separate `confirmation_failure` payload under the standing provider credential
+exception. It contains no resource observations. The same original-native,
+unchanged-contract, current-input and freshness guards still apply. Only the
+already stalled case stays excluded; every peer must execute. Its current
+financial state is UNVERIFIED, and the original unreleased obligation remains
+open. This is neither a fresh stall confirmation nor PASS or financial release.
+Other failures, malformed/mixed proofs and mutating tools cannot use this path.

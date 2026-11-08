@@ -2,7 +2,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { callOrgTool, orgRetryDeadlineAtMs } from '../src/providers/agentcard/org-runtime';
+import {
+  AgentCardOrgRuntimeError,
+  callOrgTool,
+  orgRetryDeadlineAtMs,
+} from '../src/providers/agentcard/org-runtime';
 import {
   mcpResultRecord,
   mcpResultRows,
@@ -79,6 +83,39 @@ export async function confirmStall(binding: Binding, call: Caller = callOrgTool)
   return { binding, started_at, finished_at: Date.now() / 1000, observations };
 }
 
+export async function confirmationProof(binding: Binding, call: Caller = callOrgTool) {
+  const started_at = Date.now() / 1000;
+  let tool = '';
+  try {
+    return await confirmStall(binding, (name, args, deadline) => {
+      tool = name;
+      return call(name, args, deadline);
+    });
+  } catch (error) {
+    // The standing provider-credential exception cannot assert a fresh resource state.
+    // Keep this negative observation distinct from a successful stall confirmation.
+    if (
+      !(error instanceof AgentCardOrgRuntimeError) ||
+      error.status !== 401 ||
+      error.code !== 'agentcard_org_mcp_unauthorized' ||
+      !['get_card', 'list_transfers'].includes(tool)
+    )
+      throw error;
+    return {
+      binding,
+      started_at,
+      finished_at: Date.now() / 1000,
+      confirmation_failure: {
+        provider: 'AgentCard',
+        reason: 'credential or billing change',
+        status: 401,
+        code: error.code,
+        tool,
+      },
+    };
+  }
+}
+
 async function main() {
   const [input, output] = process.argv.slice(2);
   if (!input || !output || process.argv.length !== 4)
@@ -88,7 +125,7 @@ async function main() {
     .update(readFileSync(new URL(import.meta.url)))
     .digest('hex');
   if (binding.producer_sha256 !== sha) throw new Error('Producer changed after source freeze');
-  const proof = await confirmStall(binding);
+  const proof = await confirmationProof(binding);
   writeFileSync(output, JSON.stringify(proof, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

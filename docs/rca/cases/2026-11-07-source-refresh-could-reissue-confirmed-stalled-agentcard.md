@@ -109,3 +109,28 @@ permission to retry the stalled card or waive tests was given.
 ## Reusable lesson
 
 Provide a typed fresh-observation renewal for a still-confirmed resource exclusion when source refresh must preserve a no-retry boundary.
+
+## Provider authentication refusal during a later source refresh
+
+After the forced integration of main, the unchanged organization credential was
+rejected by AgentCard with the typed HTTP 401
+`agentcard_org_mcp_unauthorized` / invalid or expired organization token.
+The current managed credential bytes matched the earlier preserved configuration;
+no credential or organization setting was changed. The read-only confirmation
+could not establish a current financial snapshot.
+
+The producer can now preserve this exact negative observation under the standing
+provider credential exception, separately from successful resource observations.
+The consumer keeps all original-native, unchanged payment/task/assertion contract,
+source/input/environment, producer identity and freshness guards. It excludes
+only the already confirmed stalled case; all peers still execute. The original
+FAIL/SKIPPED record and last confirmed $43.96 sandbox obligation remain intact,
+and the current resource state is explicitly UNVERIFIED. No card, transfer, reclaim,
+refund or credential is created or changed. Other errors and mixed proofs fail closed.
+
+The unchanged regression fails against the prior consumer with a proof-binding
+rejection and passes after this narrow exception path. Producer controls accept
+only the typed 401 from one of the two allowlisted reads, preserve its status and
+code without private provider text, and reject generic errors, 403, 503 and
+unrecognized codes. Consumer controls preserve the native record and execute
+every peer while rejecting stale, malformed, mixed and mutating-tool evidence.
