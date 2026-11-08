@@ -84,52 +84,40 @@
   },
   "live_processes": [
     {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794100442467-cb6bl2.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
+      "argv": "/opt/devbox-tools/claude/current/bin/claude --settings /home/boxes/.devbox/daemon/claude-sessions/hooks/claude-settings.1794100415609.704458.695660279.json -p --verbose --input-format stream-json --ou",
       "cwd": "/home/boxes/rose",
-      "pid": 636700
-    },
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794100442467-cb6bl2.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
-      "cwd": "/home/boxes/rose",
-      "pid": 636701
-    },
-    {
-      "argv": "tail -15",
-      "cwd": "/home/boxes/rose",
-      "pid": 636702
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v FACTORY_EVENT",
-      "cwd": "/home/boxes/rose",
-      "pid": 636703
-    },
-    {
-      "argv": "cut -c1-250",
-      "cwd": "/home/boxes/rose",
-      "pid": 636704
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v live process",
-      "cwd": "/home/boxes/rose",
-      "pid": 636705
+      "pid": 704085
     }
   ],
   "manifest": "docs/handoffs/pr-1777-closeout/deletion-manifest.json",
   "open_items": [
-    "1 unpushed commit(s) in /home/boxes/rose",
-    "branch backup/cerebras-chat-quota-prepush-20261002 has 14 commit(s) on no remote",
-    "branch records/pr1777-closeout has 1 commit(s) on no remote",
-    "branch worktree-agent-a16d18293e35c396c has 1 commit(s) on no remote",
-    "git stash entry 0e2ffe95ba40 is not preserved (archive it, then add a `stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2` manifest entry)",
-    "live process 636700 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794100442467-cb6bl2.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
-    "live process 636701 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794100442467-cb6bl2.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
-    "live process 636702 in this checkout: tail -15",
-    "live process 636703 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v FACTORY_EVENT",
-    "live process 636704 in this checkout: cut -c1-250",
-    "live process 636705 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v live process"
+    "live process 704085 in this checkout: /opt/devbox-tools/claude/current/bin/claude --settings /home/boxes/.devbox/daemon/claude-sessions/hooks/claude-settings.1794100415609.704458.695660279.json -p --verbose --input-format stream-json --ou"
   ],
   "pr": 1777,
-  "preserved_refs": {},
+  "preserved_refs": {
+    "branch:backup/cerebras-chat-quota-prepush-20261002": {
+      "archive": "devbox-closeout-private/pr1780-a252579c/20261108-core.tar.gz.aesgcm",
+      "disposition": "archived",
+      "member": "pr1780-evidence/refs/backup-and-stash.bundle",
+      "sha256": "c72cb788c6d9b1e1891e502cfe9336a6985ab640ff64a990b5e1bd3b70368cad",
+      "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+    },
+    "branch:worktree-agent-a16d18293e35c396c": {
+      "archive": "devbox-closeout-private/pr1777-839396e4/20261108-refs.tar.gz.aesgcm",
+      "disposition": "archived",
+      "member": "rose/.context/pr1777-session/refs/worktree-agent-a16d18293e35c396c.bundle",
+      "note": "mint-RCA sub-agent commit; integrated by cherry-pick 0a66973665 and merged in 839396e4",
+      "sha256": "7d69e4008c7fb2bf92971348b5131ed50f46fd7aaf54488fcc3e2ac91cf29f6a",
+      "tip": "f54e72d023bbad577b5ace81a8769e1042429d02"
+    },
+    "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+      "archive": "devbox-closeout-private/pr1780-a252579c/20261108-core.tar.gz.aesgcm",
+      "disposition": "archived",
+      "member": "pr1780-evidence/refs/backup-and-stash.bundle",
+      "sha256": "c72cb788c6d9b1e1891e502cfe9336a6985ab640ff64a990b5e1bd3b70368cad",
+      "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+    }
+  },
   "ready": false,
   "worktrees": [
     {
@@ -138,8 +126,10 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [],
-      "unpushed_commits": 1
+      "uncommitted": [
+        "docs/handoffs/pr-1777-closeout/deletion-readiness.json"
+      ],
+      "unpushed_commits": 0
     }
   ]
 }

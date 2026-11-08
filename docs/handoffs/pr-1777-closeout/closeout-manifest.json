@@ -80,5 +80,12 @@
   "archives": {
     "core": "devbox-closeout-private/pr1777-839396e4/20261108-core.tar.gz.aesgcm",
     "cloud": "devbox-closeout-private/pr1777-839396e4/20261108-cloud.tar.gz.aesgcm"
+  },
+  "deletion_readiness": {
+    "receipt": "docs/handoffs/pr-1777-closeout/deletion-readiness.json",
+    "status": "NOT_READY",
+    "open": 1,
+    "open_item": "live process: this Claude session (/opt/devbox-tools/claude/.../claude -p, cwd /home/boxes/rose) running the closeout; ends with the session",
+    "owned_cleanup": "complete: gate/production systemd units exited; orphaned monitor tails stopped by exact PID; own flyctl agent 224928 stopped; worktrees retired (outcome-gate buggy/fixed, mint sub-agent; ~11 GB reclaimed); scratch DB victoria_rca_idem_reuse dropped; managed investigator thread archived; 0 Fly machines carry this deploy's campaign ids; every local-only ref bound to a private archive"
   }
 }
