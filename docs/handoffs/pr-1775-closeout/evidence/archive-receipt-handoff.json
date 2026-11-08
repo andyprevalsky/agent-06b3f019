@@ -1,0 +1,22 @@
+{
+ "name": "pr1775-handoff-evidence",
+ "key_prefix": "devbox-closeout-private/pr1775-handoff-evidence/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "6491311fddf0132104f96f13bda8fc0c6315fbdac543b67abafc7f8362255f96",
+ "archive_size_bytes": 176751125,
+ "parts": 3,
+ "chunk_size": 67108864,
+ "members": [
+  "/home/boxes/rose/.context/deploy-pipeline.archived-20261108T063725Z/attempts/2/initial/smoke",
+  "/home/boxes/rose/.context/deploy-cloud/d8549b43b4c9d086c13b4248e511a7af2ef1368a7f9131f545ca2613f8899dbf/runs/20261108-053821-479076",
+  "/home/boxes/rose/.context/deploy-cloud/d8549b43b4c9d086c13b4248e511a7af2ef1368a7f9131f545ca2613f8899dbf/campaigns",
+  "/home/boxes/rose/.context/deploy-cloud/a66fdea9c5dd110e0c7cfc07336c9d6e2307747ec4d4508d3454d9bef12a1a6b/runs/20261108-015557-1713873",
+  "/home/boxes/rose/.context/deploy-pipeline.archived-20261108T051554Z/attempts/13/final/backend-coverage-blackbox",
+  "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/backend-coverage-blackbox"
+ ],
+ "files": 13433,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}
