@@ -1,15 +1,15 @@
 {
   "primary_merge": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
   "status": "NOT_SHIPPED",
-  "as_of": 1794135288.5147574,
+  "as_of": 1794136227.6113102,
   "visual": {
     "schemaVersion": 1,
     "ok": true,
-    "artifactId": "vis_e5c495c4936cfba1ebebbb03c7e36a19",
+    "artifactId": "vis_2e2a0a47a5b8bbe3367f7983a58d8d8b",
     "title": "Code-session deploy progress",
-    "url": "https://boxes.dev/visuals/vis_e5c495c4936cfba1ebebbb03c7e36a19",
-    "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_e5c495c4936cfba1ebebbb03c7e36a19)",
-    "sizeBytes": 59238
+    "url": "https://boxes.dev/visuals/vis_2e2a0a47a5b8bbe3367f7983a58d8d8b",
+    "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_2e2a0a47a5b8bbe3367f7983a58d8d8b)",
+    "sizeBytes": 59333
   },
   "native_ready": false,
   "records_pr": 1822,
@@ -20,19 +20,16 @@
     "run": "d18-gates4",
     "started_at": "2026-11-08T10:33:38Z",
     "previous_remote_results": "UNVERIFIED; mandatory installer release download HTTP504 before gate execution",
-    "source_of_current_status": "existing repair owner native start receipt; terminal summary pending",
-    "observed_at": "2026-11-08T10:54:00Z",
+    "source_of_current_status": "existing owner native status; terminal smoke/qualification pending",
+    "observed_at": "2026-11-08T11:08:08Z",
     "owner_native_main_pid": 4133056,
-    "quick_checks_passed": 4,
-    "full_gates_passed": 5,
     "remaining_running": [
-      "agents-coverage",
-      "deploy-command-structural",
-      "semantic-stack",
-      "cloudbench-controller"
+      "Fly smoke"
     ],
-    "smoke": "waiting for controller",
-    "review": "10:45 exact-head request rate-limited; next allowed request scheduled by owner; no exception claimed"
+    "smoke": "live under d18-gates4/MainPID4133056; terminal result pending",
+    "review": "10:45 exact-head request rate-limited; next allowed request scheduled by owner; no exception claimed",
+    "local_gates": "all passed",
+    "remaining_identity": "d18-gates4/MainPID4133056"
   },
   "scheduled_resume": {
     "complete": false,
