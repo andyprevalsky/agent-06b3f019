@@ -78,7 +78,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - Triage only failed tasks: each gets a read-only card at `.context/descend/<run>/triage/<epoch>/<task>.json` with agent IDs, FE link, run and attempt IDs, verbatim failed evaluator, terminal status and last tool, boundary evidence (line, span or row), archive hits, prior outcomes and a contrast with a passing run.
 - Triage workers run only `/rca` Steps 0–0.5 (including `python3 scripts/rca_archive.py search <terms>`) and write no repro, fix or code.
 - The first-bad boundary is the earliest point where a run diverges from correct behavior; `observed` means the task's own evidence shows it, otherwise the card is `inferred`.
-- A cluster is the failed tasks whose own evidence shows the same first-bad boundary, so that one fix there is expected to flip all of them; a two-cause task joins both clusters.
+- A cluster is the failed tasks whose own evidence shows the same first-bad boundary; it routes work to one fix owner and is a hypothesis, not a claim that one fix flips them all; a two-cause task joins both clusters.
 - Every inferred card is a singleton, and an unknown cause is an observability-gap singleton.
 - Never cluster on a shared symptom (failure string, evaluator, status, timeout, website or issue class).
 - Cluster each card as it arrives: it joins an open cluster whose observed boundary it shares (that cluster's fix owner gets the new member) or opens a new cluster whose fix owner starts at once, so fixing begins while the batch still runs.
@@ -91,7 +91,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 ## Fixes
 
 - Dispatch one muted fix thread per cluster via `boxes-delegated-threads`, each with its own worktree and non-overlapping files, carrying the cluster row, cards, exemplar logs, source SHA, scope, priorities and a 60-minute time box (84% of 140 recorded RCA lanes finished within 60 minutes).
-- An RCA owner first checks the live cluster ledger and `rca_archive.py search` for the same boundary and reports a duplicate instead of starting; when two RCAs prove the same boundary, the parent merges their clusters.
+- An RCA owner first checks the live cluster ledger and `rca_archive.py search` for the same boundary and reports a duplicate instead of starting; before writing a fix it posts its named defect (code site and mechanism) to the ledger, and the parent merges lanes that name the same site.
 - At 50 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 60 minutes take what it handed back.
 - The next batch launches once every dispatched fix is applied or its time box expires; an expired cluster keeps its evidence and rank, carries over, and never ships a guessed repair.
 - Each RCA proves its fix at the owning boundary with an isolated repro and lands that regression in the owning suite; it never uses a full end-to-end benchmark rerun as proof.
@@ -99,7 +99,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - Workers never contact the user, change the active benchmark snapshot, launch paid runs or deploy; the parent applies each fix as its own row-tagged commit on the descent branch so it can be ablated.
 - Any change may be applied; guarded hunks (prompts, agent behavior, trajectory injection, Zod schemas) and task-definition edits are approved in **Final change review** before deploying.
 - Never `/deploy` to test a change; infra blockers that production needs ship with `/push`, everything else waits for the end.
-- In the next batch run, every member passing confirms the fix; a member that still fails is re-triaged in parallel from its newest run, where a later first-bad boundary means the fix helped and the task now joins whatever cluster matches; a failing exemplar returns the cluster to `/RCA` at its rank.
+- In the next batch run, every member passing confirms the fix; a member that still fails is re-triaged in parallel from its newest run, where a later first-bad boundary is recorded as partial progress (the fix helped) and the task now joins whatever cluster matches; a failing exemplar returns the cluster to `/RCA` at its rank.
 
 ## Final change review
 
