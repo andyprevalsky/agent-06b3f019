@@ -1,15 +1,15 @@
 import { unregisterWorkspaceExecutor } from './projects/workspaceExecutor';
-import { InvalidArgumentError, Sandbox } from 'e2b';
+import { InvalidArgumentError, NotFoundError, Sandbox } from 'e2b';
 import { Prisma } from '@prisma/client';
 import mime from 'mime-types';
 import { CODE_AGENT_HANDOFF_PATH, CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
-import { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
+import { readCodeAgentHandoff } from './codeAgentHandoff';
 import { randomUUID } from './crypto';
 import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
 
 export { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
-import { type FilePointer, uploadToStorage } from './storage';
+import { uploadToStorage } from './storage';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle';
 import { e2bSandboxFs, localSandboxFs, shellQuote } from './codeSessions/sandboxFs';
@@ -20,15 +20,15 @@ import { resolveMergeFacts, type CodeSessionMergeFacts } from './codeSessions/me
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
 
-const log = createLogger('E2B');
-const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
+import type {
+  ClaudeCodeUsage,
+  CodeSessionCloseFacts,
+  CloseReceipt,
+  CloseResult,
+} from './e2bCloseSession.types';
+export type { ClaudeCodeUsage, CodeSessionCloseFacts } from './e2bCloseSession.types';
 
-export interface ClaudeCodeUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
-}
+const log = createLogger('E2B');
 
 /**
  * Parse Claude Code JSONL logs to extract token usage.
@@ -80,22 +80,14 @@ export function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
 }
 
 /** Facts the code-agent tool result reports about the persistent session. */
-export interface CodeSessionCloseFacts {
-  code_session_id: string;
-  state: string;
-  checkpoint_seq: number | null;
-  cli_session_id: string | null;
-  /** Branch this session works on and where it merges (plan §1b). */
-  branch: string | null;
-  merge_target: string | null;
-  repo: RepoFacts | null;
-  /** merged=true only when GitHub confirms the PR merged and the target contains head. */
-  merge: CodeSessionMergeFacts;
-}
 
 async function closeFacts(
   row: CodeSessionRow,
-  checkpoint: { seq: number; cliSessionId: string | null; repo: RepoFacts | null } | null,
+  checkpoint: {
+    seq: number;
+    cliSessionId: string | null;
+    repo: RepoFacts | null;
+  } | null,
   state: string
 ): Promise<CodeSessionCloseFacts> {
   const stored = (row.lastRepoFacts ?? null) as
@@ -111,7 +103,9 @@ async function closeFacts(
     await prisma.codeSession
       .update({
         where: { id: row.id },
-        data: { lastRepoFacts: { ...repo, merge } as unknown as Prisma.InputJsonValue },
+        data: {
+          lastRepoFacts: { ...repo, merge } as unknown as Prisma.InputJsonValue,
+        },
       })
       .catch(() => undefined);
   }
@@ -134,32 +128,23 @@ async function closeFacts(
  * checkpoint over it or pause it underneath the newer one.
  */
 async function ownsCodeSessionSandbox(
-  session: { id: string; sandboxId: string; createdAt: Date; codeSessionId: string | null },
+  session: {
+    id: string;
+    sandboxId: string;
+    createdAt: Date;
+    codeSessionId: string | null;
+  },
   codeSession: CodeSessionRow
 ): Promise<boolean> {
   if (codeSession.sandboxId !== session.sandboxId) return false;
   const newer = await prisma.claudeCodeSession.findFirst({
-    where: { codeSessionId: codeSession.id, createdAt: { gt: session.createdAt } },
+    where: {
+      codeSessionId: codeSession.id,
+      createdAt: { gt: session.createdAt },
+    },
     select: { id: true },
   });
   return newer === null;
-}
-
-interface CloseResult {
-  outputFiles: FilePointer[];
-  usage?: ClaudeCodeUsage;
-  codeSession?: CodeSessionCloseFacts;
-  handoff?: CodeAgentHandoff;
-}
-
-interface CloseReceipt {
-  version: 1;
-  complete: boolean;
-  extracted: boolean;
-  result: CloseResult;
-  uploads: Record<string, string>;
-  phase?: 'collecting' | 'pause_requested' | 'paused';
-  localStopped?: boolean;
 }
 
 /** One task closes once across backend instances; HTTP response loss only replays its receipt. */
@@ -203,6 +188,7 @@ async function runClaudeCodeClose(
   if (receipt.version !== 1 || !Array.isArray(receipt.result?.outputFiles)) {
     throw new Error(`Invalid close receipt for task ${taskId}`);
   }
+  if (receipt.failure) throw new Error(receipt.failure);
   if (receipt.complete) return receipt.result;
   if (session.status === 'CLOSED' && session.closeResult === null) {
     throw new Error(`Closed task ${taskId} has no persisted close result`);
@@ -218,10 +204,15 @@ async function runClaudeCodeClose(
     if (count !== 1) throw new Error(`Close custody lost for task ${taskId}`);
   };
   const saveReceipt = () => writeReceipt(prisma);
-  const finish = async (result: CloseResult, paused?: CodeSessionRow): Promise<CloseResult> => {
+  const finish = async (
+    result: CloseResult,
+    paused?: CodeSessionRow,
+    failure?: string
+  ): Promise<CloseResult> => {
     // Return the same JSON value the receipt stores, including on the first call.
     receipt.result = JSON.parse(JSON.stringify(result)) as CloseResult;
-    receipt.complete = true;
+    receipt.complete = failure === undefined;
+    receipt.failure = failure;
     await runTransactionWithRetry(async (tx) => {
       await writeReceipt(tx, true);
       if (paused !== undefined) {
@@ -258,6 +249,7 @@ async function runClaudeCodeClose(
         });
       }
     });
+    if (failure) throw new Error(failure);
     return receipt.result;
   };
   // Lock only the final provider transition, never extraction or checkpointing.
@@ -275,7 +267,9 @@ async function runClaudeCodeClose(
         const [held] = await tx.$queryRaw<
           Array<{ held: boolean }>
         >`SELECT ${lock.predicate} AS held`;
-        const current = await tx.codeSession.findUniqueOrThrow({ where: { id: owned.id } });
+        const current = await tx.codeSession.findUniqueOrThrow({
+          where: { id: owned.id },
+        });
         const newer = await tx.claudeCodeSession.findFirst({
           where: {
             codeSessionId: owned.id,
@@ -316,7 +310,9 @@ async function runClaudeCodeClose(
   }
   const codeSession =
     session.codeSessionId !== null
-      ? await prisma.codeSession.findUnique({ where: { id: session.codeSessionId } })
+      ? await prisma.codeSession.findUnique({
+          where: { id: session.codeSessionId },
+        })
       : null;
   const ownsSandbox =
     codeSession !== null &&
@@ -342,7 +338,10 @@ async function runClaudeCodeClose(
   if (ownsSandbox && codeSession?.leaseOwner?.startsWith('tool:') === true) {
     // The task's startup row (messages queued before it existed) is spent.
     await forgetStartupTurns(codeSession.leaseOwner).catch((error: unknown) => {
-      log.warn('Dropping the startup message row failed', { taskId, error: String(error) });
+      log.warn('Dropping the startup message row failed', {
+        taskId,
+        error: String(error),
+      });
     });
   }
 
@@ -379,58 +378,67 @@ async function runClaudeCodeClose(
         agentId: session.agentId,
       });
     }
-    const local = await closeLocalClaudeCodeSession(
-      taskId,
-      userId,
-      additionalPaths,
-      async (result) => {
-        receipt.result = {
-          ...result,
-          ...(codeSession !== null
-            ? { codeSession: await closeFacts(codeSession, checkpoint, 'PAUSED') }
-            : {}),
-        };
-        receipt.localStopped = true;
-        receipt.extracted = true;
-        await saveReceipt();
-      }
-    );
-    return finish(
-      {
-        outputFiles: local.outputFiles,
-        ...(local.handoff !== undefined ? { handoff: local.handoff } : {}),
+    await closeLocalClaudeCodeSession(taskId, userId, additionalPaths, async (result) => {
+      receipt.result = {
+        ...result,
         ...(codeSession !== null
           ? {
-              codeSession: await closeFacts(
-                codeSession,
-                checkpoint,
-                ownsSandbox ? 'PAUSED' : codeSession.state
-              ),
+              codeSession: await closeFacts(codeSession, checkpoint, 'PAUSED'),
             }
           : {}),
-      },
-      codeSession !== null && ownsSandbox ? codeSession : undefined
-    );
+      };
+      receipt.localStopped = true;
+      receipt.extracted = true;
+      await saveReceipt();
+    });
+    return finish(receipt.result, codeSession ?? undefined);
   }
 
   if (isLocalDeviceSandboxId(session.sandboxId)) {
-    // The work stays in the user's Mac folder; nothing is uploaded from their disk.
-    return finish(await closeLocalDeviceCodeSession(taskId, session.sandboxId));
+    // Persist intent before the device helper can mark this task CLOSED.
+    if (!receipt.localStopped) {
+      await saveReceipt();
+      receipt.result = await closeLocalDeviceCodeSession(taskId, session.sandboxId, undefined, {
+        propagateStopFailure: true,
+      });
+      receipt.extracted = true;
+      receipt.localStopped = true;
+      await saveReceipt();
+    }
+    return finish(receipt.result);
   }
 
-  // A provider pause may have succeeded just before the final database write
-  // failed. Inspect without connect(), which would resume that paused sandbox.
-  if (receipt.phase === 'paused' && codeSession !== null)
-    return finish(receipt.result, codeSession);
-  if (receipt.phase === 'pause_requested' && codeSession !== null) {
-    await confirmPause(codeSession, async () => {
+  const finishMissing = async () => {
+    const result = { ...receipt.result };
+    if (codeSession !== null && result.codeSession === undefined)
+      result.codeSession = await closeFacts(codeSession, null, 'PAUSED');
+    return finish(
+      result,
+      codeSession ?? undefined,
+      receipt.extracted
+        ? undefined
+        : `Task ${taskId} outputs could not be recovered: sandbox is missing`
+    );
+  };
+  const observePause = async (requireMissing = false): Promise<boolean> => {
+    try {
       const info = await Sandbox.getInfo(session.sandboxId, {
         apiKey: process.env.E2B_API_KEY,
         requestTimeoutMs: 60_000,
       });
-      return info.state === 'paused';
-    });
-    return finish(receipt.result, codeSession);
+      return !requireMissing && info.state === 'paused';
+    } catch (error) {
+      if (!(error instanceof NotFoundError)) throw error;
+      receipt.sandboxMissing = true;
+      return true;
+    }
+  };
+  // Observation never reconnects/resumes or repeats an uncertain provider call.
+  if (receipt.phase === 'paused' && codeSession !== null)
+    return receipt.sandboxMissing ? finishMissing() : finish(receipt.result, codeSession);
+  if (receipt.phase === 'pause_requested' && codeSession !== null) {
+    await confirmPause(codeSession, observePause);
+    return receipt.sandboxMissing ? finishMissing() : finish(receipt.result, codeSession);
   }
 
   const outputFiles = receipt.result.outputFiles;
@@ -485,7 +493,9 @@ async function runClaudeCodeClose(
 
         for (const jsonlFile of jsonlFiles) {
           try {
-            const content = await sandbox.files.read(jsonlFile.trim(), { format: 'text' });
+            const content = await sandbox.files.read(jsonlFile.trim(), {
+              format: 'text',
+            });
             const fileUsage = parseClaudeCodeUsage(content as string);
             totalUsage.inputTokens += fileUsage.inputTokens;
             totalUsage.outputTokens += fileUsage.outputTokens;
@@ -539,12 +549,12 @@ async function runClaudeCodeClose(
         await saveReceipt();
       };
       const found = await sandbox.commands.run(
-        `find ${OUTPUT_DIR} -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null || echo "NO_DIR"`,
+        `find ${CODE_AGENT_OUTPUT_DIR} -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null || echo "NO_DIR"`,
         { timeoutMs: 5000 }
       );
       if (found.stdout && !found.stdout.includes('NO_DIR')) {
         for (const filename of found.stdout.split('\n').filter(Boolean)) {
-          await extract(`${OUTPUT_DIR}/${filename}`);
+          await extract(`${CODE_AGENT_OUTPUT_DIR}/${filename}`);
         }
       }
       for (const path of additionalPaths ?? []) {
@@ -568,7 +578,9 @@ async function runClaudeCodeClose(
         reason,
         agentId: session.agentId,
       });
-      const current = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSession.id } });
+      const current = await prisma.codeSession.findUniqueOrThrow({
+        where: { id: codeSession.id },
+      });
       if (
         current.state !== 'RETIRED' &&
         current.leaseOwner === codeSession.leaseOwner &&
@@ -612,6 +624,14 @@ async function runClaudeCodeClose(
       log.info(`Killed sandbox: ${session.sandboxId}`);
     }
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      if (codeSession !== null) await confirmPause(codeSession, () => observePause(true));
+      else {
+        await lock.assertHeld();
+        if (!(await observePause(true))) throw error;
+      }
+      return finishMissing();
+    }
     log.error('Failed to pause/kill sandbox', {
       error: error instanceof Error ? error.message : String(error),
     });

@@ -24,7 +24,7 @@ repair_metadata() (
     echo "[sync-ref] invalid saved revision for $dir: $sha" >&2
     exit 1
   fi
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/rose-reference.XXXXXX")"
+  tmp="$(mktemp -d "$dir/.rose-reference.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
   git init -q "$tmp"
   git -C "$tmp" remote add origin "$url"

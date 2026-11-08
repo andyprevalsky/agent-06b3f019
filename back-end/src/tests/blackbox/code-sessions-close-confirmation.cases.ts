@@ -82,6 +82,20 @@ export async function fixture(ctx: Context) {
 }
 
 export function registerCloseConfirmationCases(ctx: Context): void {
+  test('close confirmation recovery: legacy CLOSED without receipt never invents empty success', async () => {
+    const f = await fixture(ctx);
+    await prisma.claudeCodeSession.update({
+      where: { id: f.task.id },
+      data: { status: 'CLOSED' },
+    });
+    try {
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /no persisted close result/);
+      assert.equal(f.connects(), 0);
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
   test('close confirmation: another backend process joins the close and replays its durable result', async () => {
     const f = await fixture(ctx);
     const entered = barrier();

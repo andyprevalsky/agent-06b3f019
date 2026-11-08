@@ -200,10 +200,47 @@ export function registerCheckpointSizeCases(ctx: CheckpointSizeContext): void {
         git(workspace, 'add', '-A');
         git(workspace, 'commit', '-q', '-m', 'reference setup');
         git(workspace, 'push', '-q', 'origin', 'main');
+        // Model an interrupted mv across the temporary/workspace filesystem boundary.
+        // Linux uses real tmpfs; other hosts simulate that boundary at the same path.
+        const tempBase = existsSync('/dev/shm') ? '/dev/shm' : ctx.fixtureDir;
+        const moveBin = join(ctx.fixtureDir, `reference-mv-${randomUUID()}`);
+        mkdirSync(moveBin);
+        const realMv = execFileSync('bash', ['-c', 'command -v mv'], {
+          encoding: 'utf8',
+        }).trim();
+        writeFileSync(
+          join(moveBin, 'mv'),
+          [
+            '#!/usr/bin/env node',
+            "const fs = require('node:fs');",
+            "const { dirname } = require('node:path');",
+            "const { spawnSync } = require('node:child_process');",
+            'const [source, destination] = process.argv.slice(2);',
+            `const externalTemp = ${JSON.stringify(tempBase + '/rose-reference.')};`,
+            'if (source.startsWith(externalTemp) || fs.statSync(source).dev !== fs.statSync(dirname(destination)).dev) {',
+            '  fs.mkdirSync(destination, { recursive: true });',
+            "  fs.writeFileSync(destination + '/HEAD', 'partial metadata copy\\n');",
+            "  process.stderr.write('simulated interrupted cross-filesystem metadata move\\n');",
+            '  process.exit(1);',
+            '}',
+            `process.exit(spawnSync(${JSON.stringify(realMv)}, process.argv.slice(2), { stdio: 'inherit' }).status ?? 1);`,
+          ].join('\n') + '\n',
+          { mode: 0o755 }
+        );
         const sync = (...args: string[]): void => {
           execFileSync('bash', ['scripts/sync-reference-repos.sh', ...args], {
             cwd: workspace,
-            env: { ...process.env, GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: '1' },
+            env: {
+              ...process.env,
+              GIT_CONFIG_GLOBAL: config,
+              GIT_CONFIG_NOSYSTEM: '1',
+              ...(legacy
+                ? {
+                    TMPDIR: tempBase,
+                    PATH: `${moveBin}:${process.env.PATH ?? ''}`,
+                  }
+                : {}),
+            },
             stdio: 'pipe',
           });
         };

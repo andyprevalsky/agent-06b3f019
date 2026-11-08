@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { Sandbox } from 'e2b';
+import { NotFoundError, Sandbox } from 'e2b';
+import { localDeviceHub } from '../../providers/localDevices/hub';
 import { prisma } from '../../providers/database';
 import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { CodeSessionBusyError, resolveSpawnCodeSession } from '../../providers/codeSessions/spawn';
@@ -12,6 +13,236 @@ import { CodeSessionBusyError, resolveSpawnCodeSession } from '../../providers/c
 import { barrier, fixture, type Context } from './code-sessions-close-confirmation.cases';
 
 export function registerCloseReviewCases(ctx: Context): void {
+  test('close confirmation nonpersistent: kill followed by final transaction loss replays saved output', async (t) => {
+    const f = await fixture(ctx);
+    await prisma.claudeCodeSession.update({
+      where: { id: f.task.id },
+      data: { codeSessionId: null },
+    });
+    mkdirSync(join(f.home, 'output'), { recursive: true });
+    writeFileSync(join(f.home, 'output', 'result.txt'), 'durable output');
+    f.fake.sandbox.kill = async () => {
+      f.fake.calls.killed += 1;
+    };
+    ctx.patchConnect(async () => {
+      if (f.fake.calls.killed > 0) throw new NotFoundError('fixture killed sandbox');
+      return f.fake.sandbox;
+    });
+    t.mock.method(Sandbox, 'getInfo', async () => {
+      throw new NotFoundError('fixture killed sandbox');
+    });
+    t.mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response(JSON.stringify({ Key: 'result.txt' }), { status: 200 })
+    );
+    const transaction = prisma.$transaction.bind(prisma);
+    let fail = true;
+    t.mock.method(prisma, '$transaction', async (...args: Parameters<typeof transaction>) => {
+      if (f.fake.calls.killed > 0 && fail) {
+        fail = false;
+        throw new Error('fixture killed before final transaction');
+      }
+      return transaction(...args);
+    });
+    try {
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /killed before final transaction/);
+      const saved = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: f.task.id } });
+      const prepared = saved.closeResult as { result: { outputFiles: unknown[] } };
+      assert.equal(prepared.result.outputFiles.length, 1);
+      const result = await closeClaudeCodeSession(f.task.id);
+      assert.deepEqual(result, prepared.result);
+      assert.deepEqual(await closeClaudeCodeSession(f.task.id), result);
+      assert.equal(f.fake.calls.killed, 1);
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
+  test('close confirmation nonpersistent: missing uncollected output never becomes empty success', async (t) => {
+    const f = await fixture(ctx);
+    await prisma.claudeCodeSession.update({
+      where: { id: f.task.id },
+      data: { codeSessionId: null },
+    });
+    ctx.patchConnect(async () => {
+      throw new NotFoundError('fixture missing sandbox');
+    });
+    t.mock.method(Sandbox, 'getInfo', async () => {
+      throw new NotFoundError('fixture missing sandbox');
+    });
+    try {
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /outputs could not be recovered/);
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /outputs could not be recovered/);
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
+  test('close confirmation recovery: missing paused sandbox preserves prepared output and checkpoints', async (t) => {
+    const f = await fixture(ctx);
+    const result = {
+      codeSession: {
+        code_session_id: f.session.id,
+        state: 'PAUSED',
+        checkpoint_seq: 7,
+        cli_session_id: 'frozen-cli',
+        branch: 'frozen-branch',
+        merge_target: 'main',
+        repo: null,
+        merge: {
+          branch: 'frozen-branch',
+          merge_target: 'main',
+          head: 'original',
+          local_commits: 1,
+          pushed: true,
+          pr: null,
+          merge_target_contains_head: false,
+          merged: false,
+          source: 'cached',
+          rate_limited_until: null,
+        },
+      },
+      outputFiles: [
+        {
+          id: randomUUID(),
+          storage_path: 'saved',
+          original_filename: 'saved.txt',
+          mime_type: 'text/plain',
+          size_bytes: 4,
+          created_at: new Date().toISOString(),
+        },
+      ],
+    };
+    await prisma.codeSession.update({
+      where: { id: f.session.id },
+      data: { latestCheckpointSeq: 7 },
+    });
+    await prisma.claudeCodeSession.update({
+      where: { id: f.task.id },
+      data: {
+        closeResult: {
+          version: 1,
+          complete: false,
+          extracted: true,
+          phase: 'pause_requested',
+          result,
+          uploads: {},
+        },
+      },
+    });
+    t.mock.method(Sandbox, 'getInfo', async () => {
+      throw new NotFoundError('fixture sandbox gone');
+    });
+    try {
+      const closed = await closeClaudeCodeSession(f.task.id);
+      assert.deepEqual(closed, result);
+      assert.equal(closed.codeSession?.checkpoint_seq, 7);
+      const row = await prisma.codeSession.findUniqueOrThrow({
+        where: { id: f.session.id },
+      });
+      assert.equal(row.latestCheckpointSeq, 7);
+      assert.equal(row.closingTaskId, null);
+      assert.equal(row.leaseOwner, null);
+      const next = await resolveSpawnCodeSession({
+        agentId: ctx.rootAgentId,
+        userId: ctx.userA,
+        repoUrl: null,
+        codeProvider: 'claude',
+        codeSessionId: row.id,
+        leaseOwner: 'next',
+      });
+      assert.equal(next?.leaseOwner, 'next');
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
+  test('close confirmation recovery: missing uncollected outputs remain an explicit failure while custody releases', async (t) => {
+    const f = await fixture(ctx);
+    ctx.patchConnect(async () => {
+      throw new NotFoundError('fixture sandbox gone');
+    });
+    t.mock.method(Sandbox, 'getInfo', async () => {
+      throw new NotFoundError('fixture sandbox gone');
+    });
+    try {
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /outputs could not be recovered/);
+      const row = await prisma.codeSession.findUniqueOrThrow({
+        where: { id: f.session.id },
+      });
+      assert.equal(row.closingTaskId, null);
+      assert.equal(row.leaseOwner, null);
+      assert.equal(row.state, 'PAUSED');
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /outputs could not be recovered/);
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
+  test('close confirmation recovery: local device final transaction loss replays prepared receipt', async (t) => {
+    const f = await fixture(ctx);
+    const sandboxId = `mac-${randomUUID()}-${f.task.id}`;
+    await prisma.codeSession.update({
+      where: { id: f.session.id },
+      data: { sandboxId },
+    });
+    await prisma.claudeCodeSession.update({
+      where: { id: f.task.id },
+      data: { sandboxId },
+    });
+    let stopped = 0;
+    t.mock.method(localDeviceHub(), 'stopSession', async () => {
+      stopped += 1;
+    });
+    const transaction = prisma.$transaction.bind(prisma);
+    let fail = true;
+    t.mock.method(prisma, '$transaction', async (...args: Parameters<typeof transaction>) => {
+      if (fail) {
+        fail = false;
+        throw new Error('fixture device final transaction failed');
+      }
+      return transaction(...args);
+    });
+    try {
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /device final transaction failed/);
+      const result = await closeClaudeCodeSession(f.task.id);
+      assert.deepEqual(result.outputFiles, []);
+      assert.deepEqual(await closeClaudeCodeSession(f.task.id), result);
+      assert.equal(stopped, 1);
+      const row = await prisma.codeSession.findUniqueOrThrow({
+        where: { id: f.session.id },
+      });
+      assert.equal(row.closingTaskId, null);
+      assert.equal(row.leaseOwner, 'tool:first');
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
+  test('close confirmation recovery: rejected device stop preserves custody and unconfirmed result', async (t) => {
+    const f = await fixture(ctx);
+    const sandboxId = `mac-${randomUUID()}-${f.task.id}`;
+    await prisma.codeSession.update({ where: { id: f.session.id }, data: { sandboxId } });
+    await prisma.claudeCodeSession.update({ where: { id: f.task.id }, data: { sandboxId } });
+    t.mock.method(localDeviceHub(), 'stopSession', async () => {
+      throw new Error('fixture device stop rejected');
+    });
+    try {
+      await assert.rejects(closeClaudeCodeSession(f.task.id), /device stop rejected/);
+      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: f.session.id } });
+      assert.equal(row.closingTaskId, f.task.id);
+      assert.equal(row.leaseOwner, 'tool:first');
+      const task = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: f.task.id } });
+      assert.equal(task.status, 'ACTIVE');
+      const receipt = task.closeResult as { complete?: boolean; localStopped?: boolean };
+      assert.equal(receipt.complete, false);
+      assert.notEqual(receipt.localStopped, true);
+    } finally {
+      ctx.restoreConnect();
+    }
+  });
+
   test('close confirmation wrapper: retries transaction admission without replaying pause', async (t) => {
     const f = await fixture(ctx);
     const transaction = prisma.$transaction.bind(prisma);
@@ -160,15 +391,20 @@ export function registerCloseReviewCases(ctx: Context): void {
     const closing = closeClaudeCodeSession(f.task.id);
     try {
       await entered.promise;
-      const before = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: f.task.id } });
+      const before = await prisma.claudeCodeSession.findUniqueOrThrow({
+        where: { id: f.task.id },
+      });
       await prisma.$executeRaw`UPDATE "SharedEphemeralState" SET value = '{"token":"replacement"}'::jsonb
         WHERE namespace = 'serialized-lock' AND key = ${`code-session-close:${f.task.id}`}`;
       finish.release();
       await assert.rejects(closing, /custody lost|lock lost/i);
       assert.equal(f.fake.calls.paused, 0);
       assert.deepEqual(
-        (await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: f.task.id } }))
-          .closeResult,
+        (
+          await prisma.claudeCodeSession.findUniqueOrThrow({
+            where: { id: f.task.id },
+          })
+        ).closeResult,
         before.closeResult
       );
       await assert.rejects(
@@ -207,7 +443,9 @@ export function registerCloseReviewCases(ctx: Context): void {
       completed.release();
       return true;
     };
-    t.mock.method(Sandbox, 'getInfo', async () => ({ state: paused ? 'paused' : 'running' }));
+    t.mock.method(Sandbox, 'getInfo', async () => ({
+      state: paused ? 'paused' : 'running',
+    }));
     const transaction = prisma.$transaction.bind(prisma);
     let disconnect = true;
     let transactionEntered = false;
@@ -275,7 +513,13 @@ export function registerCloseReviewCases(ctx: Context): void {
     writeFileSync(join(home, '.rose', 'handoff.json'), content);
     writeFileSync(
       join(home, 'session.json'),
-      JSON.stringify({ taskId, sandboxId: `local-${taskId}`, workDir: home, port: 0, pid: null })
+      JSON.stringify({
+        taskId,
+        sandboxId: `local-${taskId}`,
+        workDir: home,
+        port: 0,
+        pid: null,
+      })
     );
     await prisma.claudeCodeSession.create({
       data: {
@@ -317,7 +561,9 @@ export function registerCloseReviewCases(ctx: Context): void {
     let uploads = 0;
     t.mock.method(globalThis, 'fetch', async () => {
       uploads += 1;
-      return new Response(JSON.stringify({ Key: 'result.txt' }), { status: 200 });
+      return new Response(JSON.stringify({ Key: 'result.txt' }), {
+        status: 200,
+      });
     });
     try {
       const cleanup = await closeClaudeCodeSession(f.task.id);
