@@ -9,7 +9,8 @@
   "pr": 1778,
   "reviewed_head": "b4fc555f6f0da68149c1130047affa6e6bd87c65",
   "merged_sha": "81fe1bdb16735ed781b06af72f61ed5fa6413093",
-  "change": "scripts/run-deploy-semantic-stack.sh launches run.sh --benchmark with BENCHMARK_SKIP_PUBLIC_TUNNEL=1; regression scripts/tests/run-deploy-semantic-stack.test.sh (deploy structural gate deploy-semantic-stack)"
+  "change": "scripts/run-deploy-semantic-stack.sh launches run.sh --benchmark with BENCHMARK_SKIP_PUBLIC_TUNNEL=1; regression scripts/tests/run-deploy-semantic-stack.test.sh (deploy structural gate deploy-semantic-stack)",
+  "landing": "The fix commit 2c36501e57 (cherry-picked unchanged as 1c44682df3 on PR #1778) reached main first through PR #1767 (merge 2e0403fdf9, 2026-11-08 00:55:39Z), from feat/gate-early-failure where it was in flight. PR #1778's own merge 81fe1bdb16 therefore changed only the RCA case and docs/rca/INDEX.md; its Blacksmith gates (including both concurrent semantic-stack runs) executed head b4fc555f6f, which contains the fix, and production semantics passed on 81fe1bdb16, which contains it too."
  },
  "local_repro": {
   "setup": "scratch checkout 'semrepro', rose-semrepro.ngrok.app held by a second ngrok agent, failing cloudflared shim (the VM's unroutable quick tunnels), CONDUCTOR_PORT=23000 CONDUCTOR_WORKSPACE_NAME=deploy-semantic-stack ROSE_USE_SYSTEM_PG=true",
@@ -21,7 +22,7 @@
  "two_concurrent_deploy_gates": [
   {
    "role": "deploy cycle A semantic-stack",
-   "actions_run": 42432099868,
+   "actions_run": 42432099402,
    "stack_start": "2026-11-08T00:57:51Z",
    "stack_ready": "2026-11-08T01:00:26Z",
    "lane_end": "2026-11-08T01:14:14Z",
@@ -40,7 +41,7 @@
    "result": "PASS (56 passed + 5 passed, ui=0 latency=0)"
   }
  ],
- "final_cycle_semantic_stack": "PASS again in cycle B (final, same head b4fc555f6f)",
+ "final_cycle_semantic_stack": "PASS again in cycle B (final, same head b4fc555f6f; Actions run 42436258230)",
  "production_semantic": {
   "actions_run": 42440297234,
   "merged_sha": "81fe1bdb16735ed781b06af72f61ed5fa6413093",

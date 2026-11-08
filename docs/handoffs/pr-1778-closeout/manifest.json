@@ -8,7 +8,7 @@
   "archive": "devbox-closeout-private/pr1778-b4fc555f6f-core/",
   "archive_sha256": "36ebd8b870db99e7b77292f9563c4e36784c0ae0426fd1adc69c12b93933092b",
   "receipt": "docs/handoffs/pr-1778-closeout/evidence/archive-receipt-core.json",
-  "note": "deploy cycles A (archived as deploy-pipeline.archive-cycleA-*, quick backend-structural timeout under CPU steal) and B (final, ready), both smoke campaigns (deploy-cloud/9409cfbb\u2026 cycle A, 12e75fe6\u2026 cycle B), review/approval/PR/merge state, deploy-runs, factory events; everything except pr1634-archive-recovery.env"
+  "note": "deploy cycles A (archived as deploy-pipeline.archive-cycleA-*, quick backend-structural timeout under CPU steal) and B (final, ready), both smoke campaigns (deploy-cloud/9409cfbb\u2026 cycle A, 12e75fe6\u2026 cycle B), review/approval/PR/merge state, deploy-runs, factory events; everything except pr1634-archive-recovery.env (archive cut 2026-11-08T03:11Z; later .context writes are this records PR's review/factory events and the deletion-readiness rehearsal)"
  },
  "agents/.env": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file; a new devbox receives it by managed env delivery. Values are never archived.",
  "agents/.env.benchmark-temporal": "managed project env (boxes.dev): `dvb-onbox env list` holds every variable name of this file; a new devbox receives it by managed env delivery. Values are never archived.",
