@@ -493,6 +493,34 @@ def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_r
         assert "username/password or code entry" not in prompt
 
 
+def test_dismissible_sign_in_prompt_is_not_an_authentication_blocker():
+    """H-74: a closable sign-in/sign-up prompt is not an auth wall.
+
+    DoorDash shows guests a closable "Sign in or Sign up" modal (it has its own
+    Close button) on the home page. In descend epoch 24 the browser agent read that
+    modal as "DoorDash requires login", never closed it, and called
+    request_user_assistance_for_authentication before it shopped (agents da6804c7 and
+    ac41b31f). The ladder said to try guest completion first but never said whether
+    closing an optional prompt is a login attempt or leaves the guest path open. The
+    rule must reach the actor in both challenge-recovery modes and come before the
+    step-8 handoff rule.
+    """
+    rule = (
+        "- A sign-in or sign-up prompt you can close or skip does not block the task. Closing it is not a "
+        "login attempt: close it and continue as a guest. Authentication blocks the task only when the "
+        "step you need still requires signing in after that.\n"
+    )
+    handoff = "- When authentication still blocks the task after steps 1-7 are exhausted or unavailable"
+    for disable_recover in ("", "1"):
+        with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": disable_recover}):
+            prompt = build_browser_use_system_prompt(
+                ["request_user_assistance_for_authentication", "recover_from_challenge"]
+            )
+        auth = prompt[prompt.index("# Authentication") :]
+        assert rule in auth, f"actor Authentication contract missing dismissible-prompt rule (disable={disable_recover!r})"
+        assert auth.index(rule) < auth.index(handoff), "the rule must precede the step-8 handoff rule"
+
+
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
     prompt = build_browser_use_system_prompt([])
 
@@ -2857,6 +2885,10 @@ async def run_all_tests():
         "auth_assistance_requires_sign_in_form_open",
         test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery,
     )
+    r.record(
+        "dismissible_sign_in_prompt_is_not_an_authentication_blocker",
+        test_dismissible_sign_in_prompt_is_not_an_authentication_blocker,
+    )
     await r.record_async(
         "browser_request_asserts_no_auth_state_its_inventory_contradicts",
         test_browser_request_asserts_no_auth_state_its_inventory_contradicts,
@@ -3073,16 +3105,26 @@ def test_phone_off_matches_prephone_bytes():
     recovery-enabled ('0') tools hash changed; the recovery-disabled ('1') hashes and
     every system/messages hash are unchanged; 268e9550b0 reproduces the previous tools
     hash exactly.
+    Re-pinned for H-39a (rca/h-39-20261108): the recover_from_challenge description now
+    says recovery returns to the page that submitted a form result without repeating
+    the submission. Only the recovery-enabled ('0') tools hash changed; the
+    recovery-disabled ('1') hashes and every system/messages hash are unchanged;
+    72889c4389 reproduces the previous tools hash exactly.
+    Re-pinned for H-74 (rca/h-74-20261108): the shared Authentication contract now
+    states that a sign-in or sign-up prompt the agent can close or skip does not block
+    the task. Only the system/messages hashes changed in both modes; both tools hashes
+    are unchanged; d49ef3c511 reproduces the previous system/messages hashes exactly.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('90483bb1d90dbd8371f4a44b63ab720ae21a0a0a65a38a2e016a2e1eb00d5735', '3f50042e64b15fb8b8c91008163dc3b2f9886da5a52d97200ece77fabb50737a', '3822ffe092a5e0834aeec47486b27bd473624f3078a3de1466d183bda9e06dd3'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', 'cef5a1e96f3d475a84a4b49e08dac1955354404be4a398dd921a00657c7bf639', '0cad5190c943eca3b6ebe9e7b6ec3c5cdb0a39b4fa194bc86ff07b75eec58509')}
+    expected = {'0': ('90483bb1d90dbd8371f4a44b63ab720ae21a0a0a65a38a2e016a2e1eb00d5735', '9f1642e66773c0a3654197c244cd6323a0b11162c78f3bb1faa8fb1ff037e252', '7ceafb4771c8f568a624555ce0c7ab3ff7c6460d7971f896f9a91e3801a0fe90'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', '5afa54b43c68ad1cc5bd31e360f98db029964e19b757ad83bba8aa6efff617cf', '7e2e89ccafb20a6b6926ba402fff3927905b5107bb9b6e888eaf97665022c4c3')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
         assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57+H-31"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57+H-31+H-39a+H-74"
 
 
 async def test_phone_off_actual_rose_request():

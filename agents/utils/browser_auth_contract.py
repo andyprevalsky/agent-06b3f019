@@ -6,6 +6,13 @@ OTP_DELIVERY_CONTRACT = 'OTP codes from email or SMS are automatically injected 
 EXHAUSTED_AUTH_OPTIONS_HANDOFF_RULE = 'When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.'
 
 
+DISMISSIBLE_AUTH_PROMPT_RULE = (
+    "A sign-in or sign-up prompt you can close or skip does not block the task. Closing it is not a "
+    "login attempt: close it and continue as a guest. Authentication blocks the task only when the "
+    "step you need still requires signing in after that."
+)
+
+
 AUTH_ASSISTANCE_HANDOFF_RULE = (
     "Before calling request_user_assistance_for_authentication, leave the auth step you are blocked on "
     "open and visible, so the user can complete it without navigating."
@@ -54,6 +61,7 @@ def build_authentication_contract(*, recover_enabled: bool) -> str:
 - When a site offers OTP delivery options, prefer email over SMS.
 - {OTP_DELIVERY_CONTRACT}
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 6 first.
+- {DISMISSIBLE_AUTH_PROMPT_RULE}
 - If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.
 - {EXHAUSTED_AUTH_OPTIONS_HANDOFF_RULE}
 - {AUTH_ASSISTANCE_HANDOFF_RULE}
