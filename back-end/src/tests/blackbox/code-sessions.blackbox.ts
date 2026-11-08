@@ -608,30 +608,17 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
 registerFailedStartPauseCases(userA, rootAgentId);
 registerSpawnReplayCases(userA);
 registerWsStartupCases({ fixtureDir });
-registerCodeSessionLifecycleCases({
+const liveSandboxCases = {
   userA,
   fixtureDir,
   seedWorkspace,
   fakeSandbox,
   patchConnect,
   restoreConnect: () => patchConnect(originalConnect),
-});
-registerCodeSessionLiveResumeCases({
-  userA,
-  fixtureDir,
-  seedWorkspace,
-  fakeSandbox,
-  patchConnect,
-  restoreConnect: () => patchConnect(originalConnect),
-});
-registerCodeSessionHeldAttachCases({
-  userA,
-  fixtureDir,
-  seedWorkspace,
-  fakeSandbox,
-  patchConnect,
-  restoreConnect: () => patchConnect(originalConnect),
-});
+};
+registerCodeSessionLifecycleCases(liveSandboxCases);
+registerCodeSessionLiveResumeCases(liveSandboxCases);
+registerCodeSessionHeldAttachCases(liveSandboxCases);
 registerSandboxAttributionCases(userA);
 registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });
 registerCheckpointSizeCases({ fixtureDir });
