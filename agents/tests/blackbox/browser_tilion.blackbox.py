@@ -9,6 +9,7 @@ while a client is attached.
 import asyncio
 import base64
 import contextlib
+import importlib.util
 import json
 import logging
 import os
@@ -35,13 +36,21 @@ TILION_TOKEN = "tok_secret_value_never_logged"
 _SLOT_RELEASE_TIMEOUT_SECONDS = 10.0
 
 
+def _load_condition_wait():
+    """The repo's canonical condition wait (scripts/lib/condition_wait.py; stdlib only)."""
+    path = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py"
+    spec = importlib.util.spec_from_file_location("condition_wait", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_condition_wait = _load_condition_wait()
+
+
 async def _wait_until(predicate, timeout: float, what: str) -> None:
     """Poll a real readiness condition up to a bound instead of sleeping blind."""
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            raise AssertionError(f"{what} not observed within {timeout}s")
-        await asyncio.sleep(0.05)
+    await _condition_wait.async_wait_until(predicate, timeout=timeout, description=what)
 
 
 class FakeTilionGateway:
