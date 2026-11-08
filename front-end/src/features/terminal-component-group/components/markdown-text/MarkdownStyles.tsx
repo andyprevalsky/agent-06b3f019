@@ -1,6 +1,7 @@
 /**
  * Scoped prose styles for MarkdownText: inline code pills, blockquotes,
- * fenced code blocks, paragraph spacing, lists, and link colors.
+ * fenced code blocks, paragraph spacing, lists, link colors, and tables
+ * (scroll container, whole-word cells).
  */
 
 const MARKDOWN_STYLES = `
@@ -35,9 +36,9 @@ const MARKDOWN_STYLES = `
     content: '' !important;
   }
   .dark .prose code:not(pre code) {
-    background-color: rgb(30 41 59);
-    color: rgb(226 232 240);
-    border-color: rgb(51 65 85);
+    background-color: rgb(255 255 255 / 0.07);
+    color: rgb(236 236 232);
+    border-color: rgb(255 255 255 / 0.1);
   }
 
   .custom-blockquote {
@@ -66,14 +67,14 @@ const MARKDOWN_STYLES = `
 
   .prose pre {
     background-color: rgb(241 245 249);
-    padding: 1rem;
+    padding: 0.75rem 1rem;
     border-radius: 0.5rem;
     overflow-x: auto;
-    margin: 1.5em 0;
+    margin: 0.75em 0;
     white-space: pre;
   }
   .dark .prose pre {
-    background-color: rgb(15 23 42);
+    background-color: rgb(0 0 0 / 0.28);
   }
   .prose pre code {
     background-color: transparent;
@@ -84,7 +85,7 @@ const MARKDOWN_STYLES = `
     white-space: pre;
   }
   .dark .prose pre code {
-    color: rgb(226 232 240);
+    color: rgb(236 236 232);
   }
 
   .prose.tool-message-markdown pre {
@@ -107,9 +108,12 @@ const MARKDOWN_STYLES = `
   }
 
   .prose ul, .prose ol {
-    margin: 1.5em 0;
+    margin: 0.75em 0;
     padding-left: 1.5em;
     list-style-position: outside;
+  }
+  .prose li > :is(ul, ol) {
+    margin: 0.25em 0;
   }
   .prose ul {
     list-style-type: disc;
@@ -118,7 +122,7 @@ const MARKDOWN_STYLES = `
     list-style-type: decimal;
   }
   .prose li {
-    margin: 0.5em 0;
+    margin: 0.35em 0;
     padding-left: 0.25em;
   }
 
@@ -133,11 +137,32 @@ const MARKDOWN_STYLES = `
     text-decoration: underline;
   }
 
-  .prose table {
-    display: block;
+  .prose .markdown-table-scroll {
+    max-width: 100%;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    max-width: 100%;
+    margin: 0.75em 0;
+  }
+  .prose .markdown-table-scroll table {
+    width: 100%;
+    margin: 0;
+  }
+  /* Cells size to whole words; a table wider than the reply scrolls instead. */
+  .prose :is(th, td),
+  .prose :is(th, td) * {
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+  .prose :is(th, td) {
+    vertical-align: top;
+  }
+  .prose thead,
+  .prose tbody tr {
+    border-color: rgb(0 0 0 / 0.08);
+  }
+  .dark .prose thead,
+  .dark .prose tbody tr {
+    border-color: rgb(255 255 255 / 0.09);
   }
 
   .prose img {

@@ -1,0 +1,28 @@
+{
+ "archives": {
+  "cloud": "devbox-closeout-private/pr1807-149aeeac/20261108-cloud.tar.gz.aesgcm",
+  "core": "devbox-closeout-private/pr1807-149aeeac/20261108-core.tar.gz.aesgcm"
+ },
+ "followups": [
+  "AgentCard sandbox release stall on every smoke run (4396 cents transferred, 0 released per run)",
+  "devbox-teardown: no test case covers the .cloud-env-present path; default/system-PG greps are unanchored (pre-existing)",
+  "shared GitHub API quota exhausted by external consumers twice (06:08Z, 08:30Z) delayed production verification"
+ ],
+ "format": "PR-CLOSEOUT-V1",
+ "gates": "14/14 PASS; smoke 13 PASS + agent-payment-abandonment AgentCard release-stall resource_skip",
+ "ledger": {
+  "excluded": "infra-probe batch 20261108-075945-1272927",
+  "task_attempts_rows": 12,
+  "task_durations_rows": 3
+ },
+ "merged_sha": "149aeeacc913800148810faee76adc081bbf35d0",
+ "pr": 1807,
+ "purpose": "make the original deploy-command-structural command pass in full on boxes devboxes: devbox-teardown test depended on the devbox-only .cloud-env",
+ "reliability_evidence_for_assigned_test": {
+  "blackbox_gate_runs": "deploy-command-structural PASS with original600-portable-operator PASS on 6 sources containing the fix (bad9cf5, a808cc0, ad966fa x2, 8524038, 3f453cf)",
+  "local_original_command": "python3 scripts/run-deploy-structural-gates.py on git 2.55: run 1 original600 PASS (devbox-teardown failed: this PR), run 3 with this fix: All 100 deploy structural gates passed",
+  "stress_git_2_55": "two shortest checkout tests x8 workers: old fixture 6/96 failures (all ENOTEMPTY); fixed fixture 0/288"
+ },
+ "review": "CodeRabbit path-filtered (tests); independent reviewer PASS; cycle 1 closed clean",
+ "reviewed_head": "3f453cf3f0b2d7cb913de0e58e7897485a69af08"
+}

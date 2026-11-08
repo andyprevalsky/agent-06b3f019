@@ -1,0 +1,16 @@
+{
+  "failures": [
+    {
+      "id": "agentcard-production-abandonment-livemode-8dbb27dbf",
+      "description": "AgentCard production lifecycle (agent-payment-production-abandonment, run 20261107_222820_99047d36) exited 1: payment_lifecycle.stripeHold.livemode must be true for a production lifecycle. The production Stripe fixture is test-mode; a live-mode lifecycle needs a KYC cardholder only the user can provide (user decision 2026-11-06). The lane minted card_b57a2701da0be91c0e262886 and org transfer owt_59a1bbedcffc99386a116fa9 consumed 100 cents with releasedCents=0 (CLOSED card, balance 0); the unreleased $1 stays a followup.",
+      "evidence": "agents/benchmarks/runs/20261107_222820_99047d36-8942-4822-987e-261e2e3d17af_agent-payment-production-abandonment.json (failure_reason, native ERROR); production lanes log; same cause recorded by the PR #1747 closeout (SKIPPED-elected)",
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "external_provider": {
+        "name": "AgentCard/Stripe",
+        "reason": "credential or billing change"
+      },
+      "disposition": "external / waived"
+    }
+  ]
+}

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 
+import deploy_gate_progress
 from deploy_test_cycle import source
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 
@@ -168,6 +169,9 @@ def run_case(root, folder, name, command):
     temporary = Path(tempfile.mkdtemp(prefix='cloudbench-local-' + name + '-', dir='/var/tmp'))
     env = {**os.environ, 'TMPDIR': str(temporary), 'PYTHONDONTWRITEBYTECODE': '1'}
     env['PATH'] = str(root / 'agents' / 'venv' / 'bin') + os.pathsep + env.get('PATH', '')
+    # Only this runner writes the gate's progress rows: a suite that exercises a
+    # runner with failing fixtures must not report them as real gate failures.
+    env.pop(deploy_gate_progress.ENV, None)
     temporary_identity = temporary.stat()
     supervisor_receipt = folder / (name + '.supervisor.json')
     supervisor = Path(__file__).with_name('cloudbench-local-supervisor.py')
@@ -210,6 +214,25 @@ def run_case(root, folder, name, command):
     return row
 
 
+def report_progress(row):
+    """One DEPLOY_GATE_PROGRESS suite row as each case finishes (advisory, never raises)."""
+    if not os.environ.get(deploy_gate_progress.ENV):
+        return
+    detail = ''
+    if row['status'] != 'PASS':
+        try:
+            with open(row.get('log') or os.devnull, 'rb') as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 2 * deploy_gate_progress.DETAIL_LIMIT))
+                detail = stream.read().decode(errors='replace')
+        except OSError:
+            detail = ''
+        if row.get('reason'):
+            detail += '\n' + row['status'] + ': ' + row['reason']
+    deploy_gate_progress.report(row['name'], row['status'], scope='suite', detail=detail,
+                                log=row.get('log', ''))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
@@ -233,6 +256,7 @@ def main():
         futures = [pool.submit(run_case, root, folder, name, command) for name, command in cases]
         for future in as_completed(futures):
             rows.append(future.result())
+            report_progress(rows[-1])
     after = source(root)
     if before != after:
         rows = [{**row, 'status': 'UNVERIFIED', 'reason': 'source changed'} for row in rows]

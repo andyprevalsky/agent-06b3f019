@@ -13586,6 +13586,67 @@ async def test_execute_action_request_payment_card_accepts_image_urls_rendered_o
     assert private_out["payment_request"]["line_items"][2]["image_url"].endswith("Canvas+Tote")
 
 
+async def test_verifier_history_keeps_card_receipt_image_urls_after_private_entry():
+    """Agent ce9d2ae6: the second browser task requested its card (with the three
+    rendered image URLs), then typed the card. Every later history read re-applied
+    the private-entry media policy and stripped `image_url` from that earlier typed
+    receipt, so the verifier never saw the image URLs the request carried and
+    rejected each completion at 50% until the 900s task timeout."""
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
+
+    card_number = "4000056655669176"
+    images = [_TEST_SHOP_PAGE_IMAGES[i] for i in (0, 2, 3)]
+    receipt = _test_shop_receipt(images)
+    dom = DOMService("ws://offline-verifier-receipt-control")
+    dom.register_secret_refs({"card_number": card_number})
+    history = ActionHistory()
+    history.bind_dom_service(dom)
+    history.restore_entries(
+        [
+            {
+                "step": 1,
+                "action": "request_payment_card",
+                "params": receipt,
+                "result": {
+                    "success": True,
+                    "status": "approved",
+                    "card_last4": "9176",
+                    "payment_request": receipt,
+                    "media": [{"kind": "product", "url": images[0]}],
+                },
+            },
+            {"step": 2, "action": "input_text", "index": 7, "params": {"text": card_number}},
+        ]
+    )
+    dom.mark_secret_used()
+
+    final_state = {"url": f"{_TEST_SHOP_ORIGIN}/test_payment", "dom_tree": "Payment confirmed tp_fixture"}
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Request the card with every visible descriptor, then pay",
+            current_url=final_state["url"],
+            browser_state=final_state,
+            action_history=history,
+            config=SimpleNamespace(),
+            session_id="sess",
+        )
+    context = _model_visible_browser_verifier_context(context, dom, final_state)
+    wire = json.dumps(context)
+    step = wire.split("Step 1: request_payment_card", 1)[1].split("Step 2:", 1)[0]
+    params, result = step.split("Result:", 1)
+    for image in images:
+        assert image in params, f"verifier lost request image_url {image}"
+        assert image in result, f"verifier lost receipt image_url {image}"
+    assert "'media'" not in step, "private-entry media policy no longer withholds arbitrary media"
+    assert card_number not in wire, "card number reached the verifier"
+    # The browser model's own action history uses the same receipt projection.
+    entry = history.get_entries()[0]
+    assert [item["image_url"] for item in entry["result"]["payment_request"]["line_items"]] == images
+    assert [item["image_url"] for item in entry["params"]["line_items"]] == images
+
+
 async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -21168,6 +21229,116 @@ async def test_execute_goto_err_aborted_persists_attachment_download():
     assert out["download"]["path"] == "/tmp/downloads/rs.jpeg"
     assert "saved to session" in out["message"]
     ah.record_action.assert_awaited_once()
+
+
+async def test_execute_action_goto_download_fallback_uses_the_session_provider():
+    """CR 4501806264: the ERR_ABORTED goto fallback persisted by the ambient BROWSER_PROVIDER.
+
+    ``_execute_goto`` called the download helper without the session's provider
+    or user, so the helper resolved the provider from the BROWSER_PROVIDER env
+    (tilion on Fly). A Kernel session's download then landed in the Tilion
+    worker ledger instead of its session files, and a Tilion session's download
+    skipped the durable attachment copy. The provider and user ride from the
+    harness through ``execute_action`` to the persistence helper; the env is
+    pinned to the *other* provider so only the session's own value can pass.
+    """
+    from domains.spawn_browser_agent_v3 import tilion_worker
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    url = "https://files.example.com/export/report.pdf"
+    body = b"%PDF-1.4 goto fallback"
+    payload = {
+        "ok": True,
+        "status": 200,
+        "size": len(body),
+        "contentType": "application/pdf",
+        "filename": "report.pdf",
+        "base64": base64.b64encode(body).decode(),
+        "disposition": 'attachment; filename="report.pdf"',
+    }
+
+    class _AbortedNavigation:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    def dom_for_aborted_download():
+        cdp = SimpleNamespace(
+            session_id="cdp",
+            cdp_client=SimpleNamespace(
+                send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=AsyncMock(return_value={"result": {"value": payload}})))
+            ),
+        )
+        dom = MagicMock()
+        dom.selector_map = {}
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = SimpleNamespace(
+            event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_AbortedNavigation())),
+            get_or_create_cdp_session=AsyncMock(return_value=cdp),
+        )
+        return dom
+
+    async def goto_download(*, env_provider, session_provider, session_id):
+        upload = AsyncMock(return_value={"path": "/tmp/downloads/report.pdf", "size": len(body)})
+        storage = AsyncMock(return_value={"storage_path": "user-1/report.pdf", "file_name": "report.pdf"})
+        with (
+            patch.dict(os.environ, {"BROWSER_PROVIDER": env_provider}, clear=False),
+            patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", new=upload),
+            patch("helpers.attachments.upload_to_storage", new=storage),
+        ):
+            out = await execute_action(
+                dom_for_aborted_download(),
+                _mocked_action_history(),
+                {"action": "goto", "params": {"url": url}},
+                session_id=session_id,
+                config=_fake_config(),
+                user_id="user-1",
+                provider=session_provider,
+            )
+        return out, upload, storage
+
+    try:
+        # A Kernel session on a tilion-default worker keeps the session-files path.
+        out, upload, storage = await goto_download(
+            env_provider="tilion", session_provider="kernel", session_id="goto-dl-kernel"
+        )
+        assert out["success"] is True, out
+        assert out["download"]["path"] == "/tmp/downloads/report.pdf"
+        upload.assert_awaited_once()
+        assert upload.await_args.args[2:4] == ("report.pdf", body)
+        storage.assert_not_awaited()
+        assert tilion_worker.list_downloads("goto-dl-kernel") == [], "Kernel bytes never enter the Tilion ledger"
+
+        # A Tilion session on a kernel-default worker keeps the durable ledger path.
+        out, upload, storage = await goto_download(
+            env_provider="kernel", session_provider="tilion", session_id="goto-dl-tilion"
+        )
+        assert out["success"] is True, out
+        upload.assert_not_awaited()
+        storage.assert_awaited_once()
+        assert storage.await_args.kwargs["user_id"] == "user-1"
+        assert [entry["filename"] for entry in tilion_worker.list_downloads("goto-dl-tilion")] == ["report.pdf"]
+        assert tilion_worker.download_file_pointer("goto-dl-tilion", out["download"]["path"]) is not None
+    finally:
+        tilion_worker.release_session("goto-dl-kernel")
+        tilion_worker.release_session("goto-dl-tilion")
+
+
+def test_browser_handler_passes_the_session_provider_to_execute_action():
+    """The harness hands execute_action the live session provider (it changes on rotation)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index("_execute_action(\n")
+    call = source[start : source.index('if action_name == "phone":', start)]
+    assert 'provider=browser_session_metadata.get("provider")' in call
 
 
 # ── live challenge helpers ───────────────────────────────────────────
@@ -36573,6 +36744,10 @@ async def run_all_tests():
         test_execute_action_request_payment_card_accepts_image_urls_rendered_on_page,
     )
     await r.record_async(
+        "verifier_history_keeps_card_receipt_image_urls_after_private_entry",
+        test_verifier_history_keeps_card_receipt_image_urls_after_private_entry,
+    )
+    await r.record_async(
         "execute_action_request_payment_card_no_image_urls_skips_page_read",
         test_execute_action_request_payment_card_without_image_urls_skips_page_read,
     )
@@ -37183,6 +37358,14 @@ async def run_all_tests():
     await r.record_async(
         "goto_err_aborted_persists_download_to_session",
         test_goto_err_aborted_persists_download_to_session,
+    )
+    await r.record_async(
+        "execute_action_goto_download_uses_session_provider",
+        test_execute_action_goto_download_fallback_uses_the_session_provider,
+    )
+    r.record(
+        "handler_passes_session_provider_to_execute_action",
+        test_browser_handler_passes_the_session_provider_to_execute_action,
     )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
     await r.record_async(

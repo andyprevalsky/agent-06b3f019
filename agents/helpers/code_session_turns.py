@@ -54,7 +54,9 @@ TURN_TOKEN_CONTEXT = "rose-code-session-turn:v1:"
 DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_ATTEMPTS = 3
 
-TurnStatus = Literal["delivered", "duplicate", "rejected", "unreachable"]
+# "queued": the CLI has not been given its task yet, so the ws-server holds the turn and writes
+# it right after the task prompt (it has not reached the CLI, and it is not a refusal).
+TurnStatus = Literal["delivered", "duplicate", "queued", "rejected", "unreachable"]
 TurnSender = Literal["user", "agent"]
 
 
@@ -178,6 +180,8 @@ async def deliver_user_turn_to_code_session(
                 status = "delivered"
             elif raw_status == "duplicate":
                 status = "duplicate"
+            elif raw_status == "queued":
+                status = "queued"
             reason = ack.get("reason")
             logger.info(
                 "[CodeSessionTurns] Turn acknowledged",

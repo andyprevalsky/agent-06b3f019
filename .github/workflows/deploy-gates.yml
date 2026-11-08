@@ -53,9 +53,23 @@ jobs:
             git init --quiet --bare --initial-branch=main "$mirror"
           fi
           ts "mirror $(du -sh "$mirror" | cut -f1)"
-          git -C "$mirror" -c http.extraheader="$auth" fetch --quiet --no-tags "$url" \
+          # A detached auto-gc kept rewriting the mirror's commit-graph chain after this step, so
+          # the sticky disk could save a chain naming a deleted graph file; in the next job's
+          # --shared clone every git command then printed "warning: unable to find all
+          # commit-graph files" (PR #1787 run 42440778292 failed original600's exact-stderr
+          # check). A broken chain is rebuilt before and after the fetch; gc runs in the foreground.
+          graph() {
+            git -C "$mirror" commit-graph verify --shallow >/dev/null 2>&1 && return
+            rm -rf "$mirror/objects/info/commit-graphs" "$mirror/objects/info/commit-graph"
+            git -C "$mirror" commit-graph write --reachable
+            ts "mirror commit-graph rebuilt"
+          }
+          graph
+          git -C "$mirror" -c gc.autoDetach=false -c maintenance.autoDetach=false \
+            -c http.extraheader="$auth" fetch --quiet --no-tags "$url" \
             '+refs/heads/main:refs/heads/main' "+$GITHUB_REF:refs/deploy-gate/request"
           ts "mirror fetched"
+          graph
           ws="$GITHUB_WORKSPACE"
           find "$ws" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
           git clone --quiet --shared --no-checkout "$mirror" "$ws"
@@ -75,7 +89,18 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # setup-uv downloads uv from GitHub Releases, which answered 504 for 30+ minutes on 2026-11-08.
+      # PyPI publishes the same uv wheels, so an outage there falls back instead of failing the gate.
       - uses: astral-sh/setup-uv@v6
+        id: setup-uv
+        continue-on-error: true
+
+      - name: Install uv from PyPI (GitHub Releases unavailable)
+        if: steps.setup-uv.outcome == 'failure'
+        run: |
+          python3 -m pip install --quiet --user --break-system-packages uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/uv" --version
 
       # Dependencies live on a sticky disk keyed by every manifest/lockfile and toolchain version
       # (actions/cache is ref-scoped, and every gate run is a new tag). The setup script bind-mounts

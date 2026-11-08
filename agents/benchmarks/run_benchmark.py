@@ -59,7 +59,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup, display_check
+from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup, code_agent_checks, display_check
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -2436,7 +2436,20 @@ def _bind_task_root_custody(result: TaskResult, custody: dict) -> TaskResult:
             root["logs"] = result.logs if isinstance(result.logs, dict) else {}
     result.owned_roots = custody["roots"]
     result.graded_root_creation_outcome = custody["graded_creation"]
+    result.root_creation_attempted = custody.get("root_creation_attempted")
     return result
+
+
+def _mark_task_root_creation_attempted() -> None:
+    """Record that this task may own a root before any creation request is sent.
+
+    Composite runners (minted accounts) run stages through nested run_single_task calls; the
+    mark reaches every enclosing task so a lost stage create keeps the composite fail-closed.
+    """
+    custody = _task_root_custody.get()
+    while custody is not None:
+        custody["root_creation_attempted"] = True
+        custody = custody.get("parent")
 
 
 def _current_benchmark_user_id() -> str:
@@ -2648,6 +2661,8 @@ def _production_payment_identity_gap(usage: dict) -> Optional[str]:
     remaining = usage.get("remaining")
     if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
         return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
+    if usage.get("stripeLivemode") is not True:
+        return f"Stripe billing mode must be live (stripeLivemode={usage.get('stripeLivemode')!r})"
     return None
 
 
@@ -2655,18 +2670,17 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     """Fail fast when the production payment identity was never provisioned.
 
     Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
-    A non-200 is only a warning: a transient backend blip must not abort the gate on its own.
+    Admission requires an authoritative live billing mode before any allocation or fixture write.
     """
     user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
     if response.status_code != 200:
-        print(
-            f"    ⚠ Could not verify production payment identity {user_id} "
+        raise RuntimeError(
+            f"Could not verify production payment identity {user_id} "
             f"({response.status_code}): {response.text[:200]}"
         )
-        return
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
         return
@@ -3095,11 +3109,32 @@ async def _delete_owned_native_admission_root(base_url: str, task: BenchmarkTask
     return True
 
 
+async def _resolve_benchmark_project_id(base_url: str, name: str) -> str:
+    """Id of the benchmark user's Project named ``name`` (the product list call).
+
+    Listing is the supported path that creates the Rose repo owner's configured
+    "Rose" project out of the box (back-end domains/projects/roseProject.ts), so
+    a fresh benchmark database gets the same project production has.
+    """
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(f"{base_url}/api/projects", headers=await _api_headers())
+    if resp.status_code != 200:
+        raise RuntimeError(f"Project lookup failed: {resp.status_code} - {resp.text[:300]}")
+    projects = (resp.json() or {}).get("projects") or []
+    matches = [p for p in projects if isinstance(p, dict) and p.get("name") == name]
+    if len(matches) != 1 or not matches[0].get("id"):
+        raise RuntimeError(f"Expected exactly one project named {name!r}, found {len(matches)}")
+    return str(matches[0]["id"])
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
+    # A lost create response can still have allocated a root, so custody must stop
+    # proving zero allocation before the POST is issued.
+    _mark_task_root_creation_attempted()
     # Flag the created root agent as a benchmark run so admin-health metrics strip it
     # out. Benchmarks run under a real operator account (e.g. Andy) via JWT or API key;
     # echoing the internal backend key here proves the marker came from a benchmark
@@ -3180,6 +3215,11 @@ async def create_agent(
             "engine": os.environ.get("WMH_ENGINE", "legacy"),
         }
         print(f"    🌍 WHM initial state seeded before agent start: {session_id[:12]}...")
+
+    # A task may run its root agent inside one of the user's Projects: its code
+    # agents then start in that project's repo checkout (code-agent-rose-repo).
+    if task.project:
+        body["project_id"] = await _resolve_benchmark_project_id(base_url, task.project)
 
     # A task may narrow the user context its agent sees. Used when a real user's
     # connected data offers a route the scenario is not testing — the gate removes
@@ -3644,6 +3684,11 @@ async def _wait_for_expected_payment_lifecycle(
                         candidate_error = _validate_payment_lifecycle(
                             task, {"_benchmark": {"payment_lifecycle": candidate}}
                         )
+                        # This successful read supersedes any earlier failed one: a deadline
+                        # during the recovery POST below classifies this fresh snapshot.
+                        lifecycle, consecutive_fetch_errors, last_fetch_error = candidate, 0, None
+                        if candidate_error is not None:
+                            error = candidate_error
                         candidate_purchase = candidate.get("purchase") if isinstance(candidate, dict) else None
                         candidate_funding = candidate.get("walletFunding") if isinstance(candidate, dict) else None
                         candidate_status = (
@@ -3737,7 +3782,9 @@ ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS = 90.0
 
 
 def _rate_limit_retry_delay(message: str) -> Optional[float]:
-    """Seconds to wait for an upstream rate-limit refusal, or None if not rate-limited."""
+    """Seconds to wait for an upstream rate-limit refusal or typed provider 401, or None."""
+    if '"code":"agentcard_org_mcp_unauthorized"' in message.replace(" ", ""):
+        return ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3
     if "rate limit" not in message.lower() and "429" not in message:
         return None
     match = re.search(r'"retryAfterSeconds"\s*:\s*(\d+)', message)
@@ -3807,9 +3854,34 @@ async def _start_payment_abandonment_with_recovery(
 
 
 # The setup fixture resolves the cardholder through the AgentCard org MCP, which
-# intermittently rejects a healthy secret for a couple of seconds. Both actions are
-# idempotent, so a 5xx is retried; 4xx (bad input, cardholder not ready) is not.
+# intermittently rejects a healthy secret for a couple of seconds. Every action is
+# idempotent (reset/complete rewrite the user's setup row; prepare-residual reruns
+# the cardholder-scoped recover_funds, which converges on nothing_to_recover), so a
+# 5xx is retried; 4xx (bad input, cardholder not ready) is not — except the
+# backend's structured org-wide MCP throttle below.
 AGENTCARD_SETUP_RETRY_DELAYS_SECONDS = (2, 4, 8)
+AGENTCARD_ORG_TRANSIENT_CODES = {429: "agentcard_org_mcp_rate_limited", 401: "agentcard_org_mcp_unauthorized"}
+
+
+def _agentcard_setup_rate_limit_delay(resp: httpx.Response) -> Optional[float]:
+    """Wait out the backend's structured AgentCard org throttle or provider 401, else None.
+
+    Only the exact status and code pair qualifies: the backend emits these after the
+    upstream refused the call (classifyLifecycleError). Every setup action converges
+    on retry, so the shared org window and intermittent 401 on a healthy secret can pass.
+    """
+    if AGENTCARD_ORG_TRANSIENT_CODES.get(resp.status_code) is None:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("code") != AGENTCARD_ORG_TRANSIENT_CODES[resp.status_code]:
+        return None
+    retry_after = body.get("retryAfterSeconds")
+    if type(retry_after) in {int, float} and retry_after > 0:
+        return min(float(retry_after), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    return ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3
 
 
 async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dict:
@@ -3827,7 +3899,10 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
         if resp.status_code == 200:
             return resp.json()
         failure = f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}"
-        if resp.status_code < 500 or retry_delay is None:
+        rate_limit_delay = _agentcard_setup_rate_limit_delay(resp)
+        if rate_limit_delay is not None and retry_delay is not None:
+            retry_delay = rate_limit_delay
+        elif resp.status_code < 500 or retry_delay is None:
             raise RuntimeError(failure)
         print(f"    ⚠ AgentCard setup attempt {attempt} failed; retrying in {retry_delay}s ({failure})")
         await asyncio.sleep(retry_delay)
@@ -7162,15 +7237,24 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and isinstance(meta := getattr(r, "stop_metadata", None), dict)
         and meta == {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": meta.get("occurrence_index")}
         and type(meta.get("occurrence_index")) is int and meta["occurrence_index"] >= 0]
+    # A task that failed before issuing any root-creation request (e.g. a setup
+    # fixture refused before create_agent) keeps its ordinary verdict. Only the
+    # runner's own custody can prove that: no root, no live id, never attempted.
+    rootless_setup = [r for r in results if not any(r is proof for proof in never_admitted_results)
+        and not r.agent_id and not getattr(r, "owned_roots", None) and not live_ids.get(r.name)
+        and r.status != "SKIPPED" and r.passed is False
+        and getattr(r, "graded_root_creation_outcome", None) == "not_started"
+        and getattr(r, "root_creation_attempted", None) is False]
     if len(rootless_queued) + len(rootless_credentials) != len(never_admitted_results):
         failures.append("invalid coordinator nonadmission proof")
     if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and not any(r is proof for proof in rootless_queued)
+           and not any(r is proof for proof in rootless_setup)
            and not (getattr(r, "graded_root_creation_outcome", None) == "not_started"
                     and getattr(r, "owned_roots", None)) for r in results) or any(
                         getattr(r, "graded_root_creation_outcome", None) == "unknown" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials]
+        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials, *rootless_setup]
         if failures or not rootless or any(not any(r is proof for proof in rootless) for r in results):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
@@ -9807,6 +9891,7 @@ async def _run_auth_test_site_first_run(
         enforce_declared_evaluators=False,
         evaluators=[],
     )
+    _mark_task_root_creation_attempted()
     first_agent_id = await create_agent(base_url, first_task)
     owned = _register_task_root(task.name, first_agent_id, "fixture_first_run")
     manifest["firstRunAgentId"] = first_agent_id
@@ -14799,6 +14884,11 @@ def _run_declared_static_check(
             ):
                 return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type in code_agent_checks.CHECK_TYPES:
+            ok, reason = code_agent_checks.run_check(data, check)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "code_bench_hidden_tests":
             from benchmarks.code_bench import static_check as code_bench_static_check
 
@@ -14845,6 +14935,30 @@ def _run_declared_static_check(
     return True, "All declared static checks passed"
 
 
+def _run_all_evaluators(task: Any) -> bool:
+    """The task's run_all_evaluators option (tests build tasks as plain namespaces without it)."""
+    return bool(getattr(task, "run_all_evaluators", False))
+
+
+def _runs_declared_evaluators(task: BenchmarkTask, passed: bool) -> bool:
+    """Whether the declared evaluators run for this run.
+
+    A pass always runs them; a ``run_all_evaluators`` task also evaluates a failed or timed-out run's
+    collected evidence (static checks only) so every verdict is reported, not just the first failure.
+    """
+    return bool(
+        task.enforce_declared_evaluators
+        and (passed or _run_all_evaluators(task) or _task_declares_static_check(task, "claude_code_session_output"))
+    )
+
+
+def _declared_failure_reason(task: BenchmarkTask, earlier_failure: Optional[str], evaluator_reason: str) -> str:
+    """A run-all task keeps the run's own failure (e.g. the timeout) beside the evaluators' verdict."""
+    if _run_all_evaluators(task) and earlier_failure:
+        return f"{earlier_failure} | {evaluator_reason}"
+    return evaluator_reason
+
+
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
@@ -14873,6 +14987,9 @@ async def _run_declared_evaluators(
 
     if task.name.startswith("code-bench-"):
         await _hydrate_code_bench_results(task, data)
+
+    if code_agent_checks.declares_check(task.evaluators):
+        await code_agent_checks.hydrate(data, benchmark=task.name, base_url=base_url, evaluators=task.evaluators)
 
     from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
 
@@ -15009,8 +15126,13 @@ async def _run_declared_evaluators(
                 result["perfect"] = polar_results.get("perfect")
                 result["num_screenshots_sent"] = polar_results.get("num_screenshots_sent")
         results.append(result)
-        if not passed:
+        if not passed and not _run_all_evaluators(task):
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
+    failed = [r for r in results if not r["passed"]]
+    if failed:
+        first = failed[0]
+        others = f" (+{len(failed) - 1} more failing: {', '.join(r['id'] for r in failed[1:])})" if len(failed) > 1 else ""
+        return False, f"Declared evaluator {first['id']} failed: {first['reasoning']}{others}", results
     return True, None, results
 
 
@@ -15065,7 +15187,8 @@ async def run_single_task(
             raise RuntimeError(f"Claude Code credentials unavailable at task dispatch: {task.name}")
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
-    custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started"}
+    custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started",
+               "root_creation_attempted": False, "parent": _task_root_custody.get()}
     token = _task_root_custody.set(custody)
     async def evaluated_with_custody(result):
         _bind_task_root_custody(result, custody)
@@ -15408,6 +15531,8 @@ async def _run_single_task_as_run_user(
 
             fast_mode_cache = _resolved_fast_mode_cache(task)
             benchmark_goal = _benchmark_goal_for_task(task, base_url)
+            # The Codex runner posts its own root outside create_agent.
+            _mark_task_root_creation_attempted()
             return await run_codex_task(
                 base_url,
                 task,
@@ -15419,6 +15544,7 @@ async def _run_single_task_as_run_user(
         custody = _task_root_custody.get()
         if custody is not None:
             custody["graded_creation"] = "unknown"
+        _mark_task_root_creation_attempted()
         prompt_cache_warmup = await _warm_cache_gated_root(base_url, task)
         agent_id = await create_agent(base_url, task)
         _register_task_root(task.name, agent_id, "graded")
@@ -15846,10 +15972,8 @@ async def _run_single_task_as_run_user(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
-        run_declared = task.enforce_declared_evaluators and (
-            passed or _task_declares_static_check(task, "claude_code_session_output")
-        )
-        if run_declared and passed:
+        run_declared = _runs_declared_evaluators(task, passed)
+        if run_declared and (passed or _run_all_evaluators(task)):
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
                 tree = canonicalize_agent_tree(
@@ -15877,6 +16001,8 @@ async def _run_single_task_as_run_user(
                     "live_output_tokens": tokens_out,
                     "tree_tokens_out": tree_tokens_out,
                 }
+        if not run_declared and code_agent_checks.declares_check(task.evaluators):
+            await code_agent_checks.record_evidence(data, benchmark=task.name, base_url=base_url)
         if run_declared:
             data.setdefault("_benchmark", {})["api_base_url"] = base_url
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
@@ -15890,8 +16016,10 @@ async def _run_single_task_as_run_user(
                 "declared_evaluator_results": declared_evaluator_results,
             }
             if not evaluator_passed:
+                failure_reason = _declared_failure_reason(
+                    task, None if passed else failure_reason, evaluator_reason
+                )
                 passed = False
-                failure_reason = evaluator_reason
 
         # Collect diagnostic logs; prod log APIs only for prod-backed runs.
         print("    Collecting logs...")
@@ -15904,6 +16032,12 @@ async def _run_single_task_as_run_user(
         claude_code_sessions = (data.get("_benchmark") or {}).get("claude_code_sessions")
         if isinstance(claude_code_sessions, list) and claude_code_sessions:
             logs["claude_code_sessions"] = claude_code_sessions
+        # A passing run's evaluator reasoning is generic: keep the code-agent evidence
+        # (per-phase startup, spawn calls, session rows) in the run record. The external
+        # lane modules' raw run hydration ("run") can be large and is not persisted.
+        code_agent_evidence = (data.get("_benchmark") or {}).get(code_agent_checks.EVIDENCE_KEY)
+        if isinstance(code_agent_evidence, dict):
+            logs["code_agent_evidence"] = {k: v for k, v in code_agent_evidence.items() if k != "run"}
         session_evidence_error = (data.get("_benchmark") or {}).get("claude_code_session_evidence_error")
         if session_evidence_error:
             logs["claude_code_session_evidence_error"] = session_evidence_error

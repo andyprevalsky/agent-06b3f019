@@ -1,6 +1,7 @@
 """Offline regression: runs of merged code recorded outside the ledger are backfilled latest-only."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -9,6 +10,10 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmark-history-backfill.py"
+_LEDGER_SPEC = importlib.util.spec_from_file_location(
+    "history_ledger_for_backfill_test", SCRIPT.parents[1] / "agents/benchmarks/history_ledger.py")
+history_ledger = importlib.util.module_from_spec(_LEDGER_SPEC)
+_LEDGER_SPEC.loader.exec_module(history_ledger)
 HISTORY = Path("agents/benchmarks/history")
 
 
@@ -135,8 +140,11 @@ class BackfillTests(unittest.TestCase):
         (self.repo / HISTORY / "task_attempts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
 
     def current(self):
-        text = (self.repo / HISTORY / "task_attempts.jsonl").read_text()
-        return [json.loads(line) for line in text.splitlines() if line.strip()]
+        """The attempts ledger as readers see it: base file plus per-writer shards."""
+        return history_ledger.read_rows(self.repo / HISTORY / "task_attempts.jsonl")
+
+    def ledger_text(self, name):
+        return "".join(line + "\n" for line in history_ledger.read_lines(self.repo / HISTORY / name))
 
     def run_tool(self, *extra):
         return subprocess.run(
@@ -158,7 +166,9 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual(added["lost-1"]["backfill_source"], "main-loss")
         self.assertEqual(added["hist-only"]["backfill_source"], "branch")
         self.assertTrue(all(r["counts_for_deploy_eligibility"] is False for r in added.values()))
-        durations = (self.repo / HISTORY / "task_durations.jsonl").read_text().splitlines()
+        durations = self.ledger_text("task_durations.jsonl").splitlines()
+        # Backfilled rows land in this checkout's shard; the shared base files are not edited.
+        self.assertEqual(self.git("diff", "--name-only", "HEAD", "--", str(HISTORY)), "")
         duration_agents = sorted(json.loads(line)["agent_id"] for line in durations)
         self.assertEqual(duration_agents, ["fix-late", "hist-only", "hub-pass", "lost-1", "main-1"])
         # the deploy-time latest-only pass leaves backfilled history alone
@@ -167,16 +177,17 @@ class BackfillTests(unittest.TestCase):
                                 "--check"), capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
         # idempotent
-        before = (self.repo / HISTORY / "task_attempts.jsonl").read_text()
+        before = self.ledger_text("task_attempts.jsonl")
         self.assertIn("0 attempt rows, 0 duration rows", self.run_tool("--write"))
-        self.assertEqual(before, (self.repo / HISTORY / "task_attempts.jsonl").read_text())
+        self.assertEqual(before, self.ledger_text("task_attempts.jsonl"))
         # an interrupted write that appended attempts but not durations is recovered
-        durations_path = self.repo / HISTORY / "task_durations.jsonl"
-        durations_path.write_text("".join(
-            line + "\n" for line in durations if not json.loads(line).get("backfill_source")))
+        for shard in history_ledger.shard_files(self.repo / HISTORY / "task_durations.jsonl"):
+            kept = [line for line in Path(shard).read_text().splitlines()
+                    if not json.loads(line).get("backfill_source")]
+            Path(shard).write_text("".join(line + "\n" for line in kept))
         self.assertIn("0 attempt rows, 4 duration rows", self.run_tool("--write"))
-        self.assertEqual(before, (self.repo / HISTORY / "task_attempts.jsonl").read_text())
-        recovered = sorted(json.loads(line)["agent_id"] for line in durations_path.read_text().splitlines())
+        self.assertEqual(before, self.ledger_text("task_attempts.jsonl"))
+        recovered = sorted(json.loads(line)["agent_id"] for line in self.ledger_text("task_durations.jsonl").splitlines())
         self.assertEqual(recovered, duration_agents)
 
 

@@ -36,6 +36,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+import deploy_gate_progress as progress
 
 TRANSPORT = 'github-actions'
 WORKFLOW = 'deploy-gates.yml'
@@ -54,7 +55,12 @@ POLL_SECONDS = 60.0          # ETag-conditional; gates take minutes and the REST
 START_POLL_SECONDS = 10.0
 CHANNEL_POLL_SECONDS = 15.0     # R2 GETs: no GitHub quota
 LIVENESS_SECONDS = 600.0        # one REST status read per gate every 10 min
+STREAM_SECONDS = 5.0            # VM -> R2 progress uploads while the worker runs
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
+# After TERM/INT/HUP or parent exit: find, cancel and confirm the launched run inside the owning
+# supervisor's 10 s TERM grace (deploy_test_supervisor.TERM_GRACE_SECONDS), then write the receipt.
+STOP_CANCEL_SECONDS = 7.0
+PARENT_POLL_SECONDS = 1.0
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PUSH_ATTEMPTS = 4
 MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -62,8 +68,27 @@ BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 BUNDLE_TOTAL_BYTES = 400 * 1024 * 1024
 BUNDLE_SKIP = {'seed-cache', 'tsbuildinfo', 'frontend-builds', 'experiential-venv', 'node_modules'}
 SERVICE_LOGS = ('back-end/backend-logs.log', 'agents/navi-worker-log.txt', 'front-end/frontend-logs.log')
+BUNDLE_SUMMARIES = ('summary.json', 'manifest.json')  # small run indexes RCA reads first
 LOG_TREES = ('back-end/coverage', 'front-end/coverage', 'agents/coverage', 'front-end/test-results')
 STOP = threading.Event()
+STOPPED = {'at': None, 'cause': None}
+
+
+def request_stop(cause: str) -> None:
+    if STOPPED['at'] is None:
+        STOPPED.update(at=time.time(), cause=cause)
+    STOP.set()
+
+
+def stop_bound() -> float:
+    return (STOPPED['at'] or time.time()) + STOP_CANCEL_SECONDS
+
+
+def watch_parent(parent: int) -> None:
+    """A launcher whose supervisor/cycle died (SIGKILL, OOM) still cancels the run it launched."""
+    while not STOP.wait(PARENT_POLL_SECONDS):
+        if os.getppid() != parent:
+            request_stop('parent exited')
 
 
 # ---------------------------------------------------------------- shared helpers
@@ -141,10 +166,25 @@ def repository(root: Path) -> str:
     return match.group(1)
 
 
+def rate_limit_pause(headers, now: float) -> float:
+    """Seconds until GitHub says the limit lifts: Retry-After (secondary), else X-RateLimit-Reset (primary).
+
+    GitHub documents waiting at least a minute when a secondary limit names neither.
+    """
+    for name, base in (('Retry-After', 0.0), ('X-RateLimit-Reset', now - 1.0)):
+        try:
+            return max(float(headers[name]) - base, 1.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return 60.0
+
+
 class GitHub:
-    def __init__(self, token: str, repo: str):
+    def __init__(self, token: str, repo: str, deadline: float | None = None):
         self.token, self.repo, self.etags, self.cache = token, repo, {}, {}
         self.rate_limited_seconds = 0.0  # time spent waiting out the shared REST quota, for the receipt
+        self.deadline = deadline  # epoch the caller must be done by; a rate-limit wait never passes it
+        self.until = None  # epoch every request must finish by (the stop-cancel bound); None: 60 s per request
 
     def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
@@ -155,8 +195,11 @@ class GitHub:
             req.add_header('If-None-Match', self.etags[url])
         opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
         for attempt in range(5):
+            if self.until is not None and time.time() >= self.until:
+                raise urllib.error.URLError(f'stop-cancel bound exhausted before {method} {path}')
             try:
-                with opener.open(req, timeout=60) as response:
+                timeout = 60.0 if self.until is None else max(0.5, min(60.0, self.until - time.time()))
+                with opener.open(req, timeout=timeout) as response:
                     body = response.read()
                     if conditional and response.headers.get('ETag'):
                         self.etags[url] = response.headers['ETag']
@@ -168,9 +211,14 @@ class GitHub:
                 if error.code in (301, 302, 303, 307, 308) and not redirect:
                     return error.code, error.headers, b''
                 if error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower():
-                    reset = float(error.headers.get('X-RateLimit-Reset') or time.time() + 60)
-                    pause = min(max(reset - time.time(), 5), 300)
-                    print(f'DEPLOY_GATE_RATE_LIMITED waiting {pause:.0f}s', flush=True)
+                    now = time.time()
+                    pause = rate_limit_pause(error.headers, now)
+                    if self.deadline is not None:
+                        if self.deadline - now <= 0:
+                            raise  # the caller's deadline is spent; its own timeout path reports it
+                        pause = min(pause, self.deadline - now)
+                    print(f'DEPLOY_GATE_RATE_LIMITED waiting {pause:.0f}s (until '
+                          f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + pause))})', flush=True)
                     self.rate_limited_seconds += pause
                     STOP.wait(pause)
                     continue
@@ -298,13 +346,14 @@ class WorkflowRejected(Exception):
     """GitHub refused the workflow file at this commit; the run never owned a VM."""
 
 
-def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
+def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float, stopping: bool = False) -> dict | None:
     # Filter by path, not the by-filename endpoint: that 404s until the workflow is on the default branch.
     # head_branch is the tag for a tag push; the small filtered list rarely changes, so most polls are 304s.
     path = f'/actions/runs?event=push&head_sha={head}&branch={urllib.parse.quote(name, safe="")}&per_page=20'
     unnamed = f'/actions/runs?event=push&head_sha={head}&per_page=20'
     rejected_since = None
-    while time.time() < deadline and not STOP.is_set():
+    # `stopping`: the tag was pushed before the stop, so its run may exist although nothing named it yet.
+    while time.time() < deadline and (stopping or not STOP.is_set()):
         mine = [r for r in gh.json(path, conditional=True).get('workflow_runs', [])
                 if r.get('path') == WORKFLOW_PATH and r.get('head_branch') == name]
         if mine:
@@ -317,8 +366,25 @@ def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -
             rejected_since = rejected_since or time.time()
             if time.time() - rejected_since > 30:
                 raise WorkflowRejected(f"GitHub rejected {WORKFLOW_PATH} at {head}: {invalid[0].get('html_url')}")
-        STOP.wait(START_POLL_SECONDS)
+        if stopping:
+            time.sleep(min(1.0, max(0.0, deadline - time.time())))
+        else:
+            STOP.wait(START_POLL_SECONDS)
     return None
+
+
+def launched_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
+    """find_run, then (once stopped) one bounded lookup of the run this tag push started."""
+    run = find_run(gh, head, name, deadline, pushed)
+    if run is None and STOP.is_set():
+        gh.until = stop_bound()
+        try:
+            run = find_run(gh, head, name, gh.until, pushed, stopping=True)
+        except (WorkflowRejected, urllib.error.URLError, RuntimeError, OSError):
+            run = None
+        finally:
+            gh.until = None
+    return run
 
 
 def iso_epoch(value: str | None) -> float:
@@ -334,18 +400,20 @@ def wait_run(gh: GitHub, run_id: int, deadline: float) -> dict:
         STOP.wait(min(POLL_SECONDS, max(1.0, deadline - time.time())))
 
 
-def cancel_run(gh: GitHub, run_id: int) -> dict:
+def cancel_run(gh: GitHub, run_id: int, end: float | None = None, note: dict | None = None) -> dict:
     try:
         gh.request('POST', f'/actions/runs/{run_id}/cancel')
     except urllib.error.HTTPError as error:
         if error.code != 409:  # 409: already completed
             raise
-    end = time.time() + CANCEL_SECONDS
+    if note is not None:
+        note['cancel_requested_at'] = time.time()
+    end = time.time() + CANCEL_SECONDS if end is None else end
     while time.time() < end:
-        run = gh.json(f'/actions/runs/{run_id}')
+        run = gh.json(f'/actions/runs/{run_id}', conditional=True)  # a 5 s poll; unchanged reads are free 304s
         if run.get('status') == 'completed':
             return run
-        time.sleep(5)
+        time.sleep(max(0.0, min(5.0, end - time.time())))
     return gh.json(f'/actions/runs/{run_id}')
 
 
@@ -421,7 +489,8 @@ def launch(args) -> int:
     started = time.time()
     deadline = started + args.deadline_seconds - CANCEL_SECONDS
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda *_: STOP.set())
+        signal.signal(sig, lambda number, _frame: request_stop(signal.Signals(number).name))
+    threading.Thread(target=watch_parent, args=(os.getppid(),), daemon=True).start()
 
     def finish(result: dict) -> int:
         result.setdefault('remote', {})
@@ -444,7 +513,8 @@ def launch(args) -> int:
     except (KeyError, ValueError, OSError, subprocess.CalledProcessError, urllib.error.URLError) as error:
         detail = error.stderr.decode(errors='replace')[-2000:] if isinstance(error, subprocess.CalledProcessError) else ''
         return finish(blocked(request, f'remote gate launch failed: {error} {detail}'.strip()))
-    gh = GitHub(token, repo)
+    # Watching stops CANCEL_SECONDS early so a cancel still fits; a rate-limit wait keeps that window too.
+    gh = GitHub(token, repo, deadline=deadline)
     folder = result_path.parent / 'remote-artifact'
     try:
         channel = Channel(env_file_values(root))
@@ -452,20 +522,33 @@ def launch(args) -> int:
         print(f'DEPLOY_GATE_CHANNEL unavailable ({error}); watching the run through the GitHub API', flush=True)
         channel = None
     try:
-        outcome = (watch_channel(gh, channel, head, name, deadline, started) if channel is not None
+        mirror = ProgressMirror(os.environ.get(progress.ENV))
+        outcome = (watch_channel(gh, channel, head, name, deadline, started, mirror) if channel is not None
                    else watch_rest(gh, head, name, deadline, started))
     except (WorkflowRejected, urllib.error.URLError) as error:
         delete_tag(root, token, repo, name)
         return finish(blocked(request, str(error), receipt={'transport': TRANSPORT, 'tag': name}))
     kind, receipt = outcome['kind'], outcome.get('receipt') or {'transport': TRANSPORT, 'tag': name}
     receipt['rate_limited_seconds'] = gh.rate_limited_seconds
+    gh.deadline = started + args.deadline_seconds  # cancel, receipts and artifacts may use the reserved window
+    if STOP.is_set():
+        receipt['stop_cause'] = STOPPED['cause']
     if kind == 'never-started':
         delete_tag(root, token, repo, name)  # Nothing started that we can name; the tag alone owns no VM.
+        if STOP.is_set():
+            receipt['run_lookup'] = f'no run named {name} within the stop-cancel bound'
         reason = 'cancelled before the remote run started' if STOP.is_set() else 'deploy-gates workflow run never started'
         return finish(blocked(request, reason, receipt=receipt))
     if kind == 'unfinished':
         reason = 'cancelled' if STOP.is_set() else 'existing gate deadline exhausted'
-        run = cancel_run(gh, receipt['run_id'])
+        end = stop_bound() if STOP.is_set() else None
+        gh.until = end  # stopped: every cancel request fits the supervisor's TERM grace
+        try:
+            run = cancel_run(gh, receipt['run_id'], end, note=receipt)
+        except (urllib.error.URLError, RuntimeError, OSError) as error:  # best effort: the owner is retained
+            run = {}
+            receipt['cancel_error'] = f'{type(error).__name__}: {error}'[:300]
+        gh.until = None
         confirmed = run.get('status') == 'completed'
         receipt.update(status=run.get('status'), conclusion=run.get('conclusion'))
         if confirmed:
@@ -510,7 +593,7 @@ def launch(args) -> int:
 
 
 def watch_rest(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict:
-    run = find_run(gh, head, name, min(deadline, time.time() + START_SECONDS), pushed)
+    run = launched_run(gh, head, name, min(deadline, time.time() + START_SECONDS), pushed)
     if run is None:
         return {'kind': 'never-started'}
     print(f'DEPLOY_GATE_REMOTE_RUN {run["html_url"]}', flush=True)
@@ -519,12 +602,50 @@ def watch_rest(gh: GitHub, head: str, name: str, deadline: float, pushed: float)
     return {'kind': 'rest' if run.get('status') == 'completed' else 'unfinished', 'receipt': receipt}
 
 
-def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline: float, pushed: float) -> dict:
+class ProgressMirror:
+    """Appends the VM's new progress rows to the cycle's local progress file (DEPLOY_GATE_PROGRESS).
+
+    The VM uploads its whole append-only file; only complete lines past what was mirrored are added.
+    Advisory: an unreadable object or an unset path never affects the gate's result.
+    """
+
+    def __init__(self, path: str | None):
+        self.path = Path(path) if path else None
+        self.length = 0
+
+    def pull(self, channel: 'Channel', name: str) -> int:
+        if self.path is None:
+            return 0
+        try:
+            data = channel.get(name, 'progress.jsonl')
+        except Exception:  # advisory channel read
+            return 0
+        if not data or len(data) <= self.length:
+            return 0
+        new = data[self.length:]
+        new = new[:new.rfind(b'\n') + 1]
+        if not new:
+            return 0
+        try:
+            with self.path.open('ab') as stream:
+                stream.write(new)
+        except OSError:
+            return 0
+        self.length += len(new)
+        return len(new)
+
+
+def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline: float, pushed: float,
+                  mirror: ProgressMirror | None = None) -> dict:
     """Poll the R2 channel; GitHub is asked only when the channel stays silent or the run must be cancelled."""
     start_by, receipt, checked = min(deadline, time.time() + START_SECONDS), None, time.time()
     while not STOP.is_set() and time.time() < deadline:
+        if mirror is not None and receipt is not None:
+            mirror.pull(channel, name)  # a still-running gate's failing tests reach the cycle now
         raw = channel.get(name, 'done.json')
         if raw is not None:
+            if mirror is not None:
+                mirror.pull(channel, name)
             done = json.loads(raw)
             receipt = {**(receipt or {}), **{k: v for k, v in done.items() if k not in ('objects', 'at')},
                        'finished_at': done.get('at')}
@@ -538,6 +659,8 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
                 # Silent channel: a rejected workflow, a setup failure before the env bundle, or no runner yet.
                 run = find_run(gh, head, name, time.time() + 30, pushed)
                 if run is None:
+                    if STOP.is_set():
+                        break  # stopped mid-lookup: the bounded lookup below still names the run
                     return {'kind': 'never-started'}
                 receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
                 print(f"DEPLOY_GATE_REMOTE_RUN {receipt['url']}", flush=True)
@@ -554,7 +677,7 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
                     return {'kind': 'rest', 'receipt': job_receipt(gh, run)}
         STOP.wait(START_POLL_SECONDS if receipt is None else CHANNEL_POLL_SECONDS)
     if receipt is None:
-        run = find_run(gh, head, name, time.time() + 30, pushed)
+        run = launched_run(gh, head, name, time.time() + 30, pushed)
         if run is None:
             return {'kind': 'never-started'}
         receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
@@ -588,6 +711,40 @@ def remote_extract(args) -> int:
     return 0
 
 
+class ProgressStreamer(threading.Thread):
+    """Puts the gate's growing progress file to the R2 channel while the worker runs (advisory)."""
+
+    def __init__(self, channel: 'Channel', name: str, path: Path, interval: float | None = None):
+        super().__init__(daemon=True)
+        self.channel, self.name, self.path = channel, name, Path(path)
+        self.interval = STREAM_SECONDS if interval is None else interval
+        self.done = threading.Event()
+        self.sent = 0
+        self.failed = False
+
+    def flush(self) -> None:
+        try:
+            data = self.path.read_bytes()
+        except FileNotFoundError:
+            return
+        data = data[:data.rfind(b'\n') + 1]  # complete rows only
+        if len(data) <= self.sent:
+            return
+        try:
+            self.channel.put(self.name, 'progress.jsonl', data)
+        except Exception as error:  # advisory upload; the result still arrives at the end
+            if not self.failed:
+                print(f'DEPLOY_GATE_PROGRESS upload failed ({type(error).__name__}); retrying', flush=True)
+            self.failed = True
+            return
+        self.sent = len(data)
+
+    def run(self) -> None:
+        while not self.done.wait(self.interval):
+            self.flush()
+        self.flush()
+
+
 def remote_run(args) -> int:
     out = args.out
     timing = json.loads((out / 'timing.json').read_text())
@@ -598,19 +755,42 @@ def remote_run(args) -> int:
     started = subprocess.run(['bash', str(ROOT / 'scripts/run-deploy-stage'), '--start', '--run-id',
                               'gate-' + hashlib.sha256(token.encode()).hexdigest()[:16]], cwd=ROOT)
     timing['timing_run_started'] = started.returncode == 0
-    env = {**os.environ, 'DEPLOY_GATE_REQUEST': str(out / 'request.json'), 'DEPLOY_GATE_RESULT': str(out / 'result.json')}
-    code = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), '--root', str(ROOT)], env=env).returncode
+    env = {**os.environ, 'DEPLOY_GATE_REQUEST': str(out / 'request.json'), 'DEPLOY_GATE_RESULT': str(out / 'result.json'),
+           progress.ENV: str(out / 'progress.jsonl')}
+    streamer = None
+    try:
+        streamer = ProgressStreamer(Channel(env_file_values(ROOT)), os.environ['GITHUB_REF_NAME'], out / 'progress.jsonl')
+        streamer.start()
+    except (ImportError, ValueError, KeyError) as error:
+        print(f'DEPLOY_GATE_PROGRESS stream unavailable ({error}); failures arrive with the result', flush=True)
+    try:
+        code = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), '--root', str(ROOT)], env=env).returncode
+    finally:
+        if streamer is not None:
+            streamer.done.set()
+            streamer.join(timeout=120)
     timing.update(worker_finished_at=time.time(), worker_exit=code)
     (out / 'timing.json').write_text(json.dumps(timing))
     print(f'DEPLOY_GATE_WORKER_EXIT {code}')
     return 0  # The verdict is result.json; a failing gate still uploads its evidence and caches.
 
 
+def bundle_priority(path: Path, evidence: frozenset) -> tuple:
+    """Order files for the capped artifact: the gate's named evidence and every log first.
+
+    Smallest-first alone let thousands of raw V8 and replay-cache JSON files fill the
+    400 MB budget, so the 10 MB backend server log of a failed coverage shard was the
+    file dropped (docs/rca/cases/2026-11-08-grep-regex-safety-blocked-event-loop.md).
+    """
+    text = str(path) in evidence or path.suffix in ('.log', '.txt') or path.name in BUNDLE_SUMMARIES
+    return (0 if text else 1, path.stat().st_size, str(path))
+
+
 def remote_bundle(args) -> int:
     out = args.out
     artifact = out / 'artifact'
     artifact.mkdir(parents=True, exist_ok=True)
-    for name in ('result.json', 'timing.json', 'request.json'):
+    for name in ('result.json', 'timing.json', 'request.json', 'progress.jsonl'):
         if (out / name).is_file():
             shutil.copyfile(out / name, artifact / name)
     root = ROOT.resolve()
@@ -619,6 +799,7 @@ def remote_bundle(args) -> int:
         for row in (json.loads((out / 'result.json').read_text()).get('evidence') or {}).values():
             if isinstance(row, dict):
                 paths.update(v for k, v in row.items() if isinstance(v, str) and v.startswith(str(root) + '/'))
+    evidence = frozenset(paths)
     # Everything a gate leaves for RCA: its .context state and logs plus the stack's service logs.
     # Caches and dependency trees stay behind; per-file and total caps bound the artifact.
     if (root / '.context').is_dir():
@@ -632,7 +813,7 @@ def remote_bundle(args) -> int:
             paths.update(str(p) for p in (root / rel).rglob('*')
                          if p.is_file() and not p.is_symlink() and p.suffix in ('.log', '.json', '.txt'))
     total, skipped = 0, []
-    for raw in sorted(paths, key=lambda p: (Path(p).stat().st_size, p)):
+    for raw in sorted(paths, key=lambda p: bundle_priority(Path(p), evidence)):
         path = Path(raw)
         if not path.is_file() or root not in path.resolve().parents:
             continue

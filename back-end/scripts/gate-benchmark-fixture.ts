@@ -4,6 +4,7 @@ import { basename } from 'node:path';
 import {
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
+  waitOutBenchmarkOrgBackpressure,
 } from '../src/providers/agentcard/benchmark-float';
 
 dotenv.config();
@@ -137,8 +138,11 @@ async function apply(): Promise<Record<string, unknown>> {
   let agentcardOrgCardholderId: string | null = null;
   if (userId === ADMIN_SUBSCRIPTION_BYPASS_USER_ID) {
     // Prefer andy@roselabs.ai (live KYC-verified) or agentcard-benchmark@ (sandbox KYC).
-    agentcardOrgCardholderId = await resolveBenchmarkCardholderId();
-    await ensureBenchmarkOrgCardholder(agentcardOrgCardholderId);
+    agentcardOrgCardholderId = await waitOutBenchmarkOrgBackpressure(async () => {
+      const resolvedId = await resolveBenchmarkCardholderId();
+      await ensureBenchmarkOrgCardholder(resolvedId);
+      return resolvedId;
+    });
     await seedOrgManagedAgentCardForUser(userId, agentcardOrgCardholderId);
   }
 

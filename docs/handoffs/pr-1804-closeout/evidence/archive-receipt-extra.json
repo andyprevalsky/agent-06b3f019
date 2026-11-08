@@ -1,0 +1,21 @@
+{
+ "name": "pr1804-closeout-extra",
+ "key_prefix": "devbox-closeout-private/pr1804-closeout-extra/",
+ "manifest_object": "devbox-closeout-private/pr1804-closeout-extra/manifest.json.aesgcm",
+ "files_object": "devbox-closeout-private/pr1804-closeout-extra/files.txt.aesgcm",
+ "manifest_sha256": "1f148c3464430306b18a730922f17a619686e13fdec0aa980cdfbb16eb0b559f",
+ "archive_sha256": "cb42780e4b76e94d240eed1435ad472af965091752ce725c37b2553b25e1c052",
+ "archive_size_bytes": 6411577,
+ "parts": 1,
+ "chunk_size": 67108864,
+ "files": 6,
+ "paths": [
+  "/home/boxes/rose/agents/.context",
+  "/home/boxes/rose/agents/benchmarks/runs"
+ ],
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (Render/Fly/back-end env; same key as the trace archive)",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "restore": "download each part, decrypt with aad=its key, concatenate in order, tar -xzf",
+ "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches"
+}

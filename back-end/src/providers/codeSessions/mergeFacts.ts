@@ -15,6 +15,8 @@
  * already-confirmed merge of the same head is reused without calling GitHub.
  */
 import { parseGithubUrl } from '../github';
+import { githubApiBase, githubFetch, GithubRateLimitedError } from '../githubRateLimit';
+import { githubPoolFetch } from '../githubTokenPool';
 import { createLogger } from '../logger';
 import type { RepoFacts } from './lifecycle';
 
@@ -39,17 +41,23 @@ export interface CodeSessionMergeFacts {
   merge_target_contains_head: boolean | null;
   /** True only when GitHub confirms the PR merged and the merge target contains head. */
   merged: boolean;
-  /** How the facts were established. */
-  source: 'github' | 'cached' | 'no_repo' | 'github_unavailable';
+  /**
+   * How the facts were established. `github_rate_limited` means GitHub answered
+   * nothing usable: `merged` and `merge_target_contains_head` are unknown, and
+   * `rate_limited_until` says when to ask again.
+   */
+  source: 'github' | 'cached' | 'no_repo' | 'github_unavailable' | 'github_rate_limited';
+  /** ISO time GitHub allows the next call; set only for `github_rate_limited`. */
+  rate_limited_until: string | null;
 }
 
 type FetchLike = typeof fetch;
 
-function githubApiBase(): string {
-  return (process.env.GITHUB_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
-}
-
-/** One GitHub REST call (GET by default) with the backend's GITHUB_TOKEN; shared with publish. */
+/**
+ * One GitHub REST call (GET by default); shared with publish. Reads use the token pool;
+ * a POST (opening a PR) keeps the primary GITHUB_TOKEN identity. A rate limit rejects with
+ * GithubRateLimitedError (reset time included) instead of resolving as an ordinary non-200 answer.
+ */
 export async function githubJson(
   fetchImpl: FetchLike,
   path: string,
@@ -61,12 +69,20 @@ export async function githubJson(
   };
   if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   if (init.body !== undefined) headers['Content-Type'] = 'application/json';
-  const response = await fetchImpl(`${githubApiBase()}${path}`, {
-    method: init.method ?? 'GET',
-    headers,
-    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-    signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
-  });
+  const method = init.method ?? 'GET';
+  const response = await githubFetch(
+    `${githubApiBase()}${path}`,
+    {
+      method,
+      headers,
+      ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    },
+    {
+      fetchImpl: githubPoolFetch(method === 'GET' ? 'pool' : 'primary', fetchImpl),
+      component: 'GithubJson',
+    }
+  );
   const body: unknown = response.status === 204 ? null : await response.json().catch(() => null);
   return { status: response.status, body };
 }
@@ -117,6 +133,7 @@ export async function resolveMergeFacts(
     merge_target_contains_head: null,
     merged: false,
     source: 'no_repo',
+    rate_limited_until: null,
   };
   const parsed = params.repoUrl !== null ? parseGithubUrl(params.repoUrl) : null;
   if (parsed === null || base.branch === null || base.head === null) return base;
@@ -157,6 +174,14 @@ export async function resolveMergeFacts(
       source: 'github',
     };
   } catch (error) {
+    if (error instanceof GithubRateLimitedError) {
+      log.warn('GitHub rate limited; merge facts unknown until the reset', {
+        repo: `${parsed.owner}/${parsed.repo}`,
+        branch: base.branch,
+        resetAt: error.resetAt,
+      });
+      return { ...base, source: 'github_rate_limited', rate_limited_until: error.resetAt };
+    }
     log.warn('GitHub merge facts unavailable; reporting merged=false', {
       repo: `${parsed.owner}/${parsed.repo}`,
       branch: base.branch,

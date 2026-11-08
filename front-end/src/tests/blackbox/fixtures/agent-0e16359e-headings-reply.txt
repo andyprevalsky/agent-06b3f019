@@ -1,0 +1,57 @@
+## Important ratio correction
+The verified Giranda label is **per 2 tablets**: **1,200 mg myo-inositol + 300 mg D-chiro-inositol + 400 mcg Quatrefolic® (5-MTHF)**. Those quantities equal **4:1**, not 40:1. A true 40:1 formula containing 1,200 mg myo-inositol would contain only 30 mg D-chiro-inositol. Therefore, products marketed as 40:1 are not exact quantitative substitutes for Giranda.
+
+## Ranked candidates
+
+### 1. Giranda 1 g, 60 tablets — exact reference formula
+- **Brand/product:** Giranda / IFA Celtics, Giranda 1G 60 tablets
+- **Myo-inositol:** 1,200 mg per serving
+- **D-chiro-inositol:** 300 mg per serving
+- **Folate:** Quatrefolic® / 5-methyltetrahydrofolate (5-MTHF), 400 mcg per serving
+- **Serving size:** 2 tablets daily; 60 tablets = 30 servings
+- **Price:** **$1,504.52 MXN**
+- **Retailer:** WeCare Pharma; page reported 8 units available and national shipping
+- **Purchase URL:** https://wecarepharma.mx/en/products/giranda-myo-inositol-d-chiro-inositol-quatrefolic-tabletas-1g-con-60
+- **Label source:** https://www.actuamed.com.mx/marca/1153576
+- **Closeness:** **Exact match** to the verified Giranda formula. Its actual ratio is 4:1, despite the user-supplied 40:1 description. Price and inventory are time-sensitive.
+
+### 2. Giranda 60 tablets — exact formula, lower indexed price but unavailable
+- **Brand/product:** Giranda / IFA Celtics, 60 tablets
+- **Myo-inositol:** 1,200 mg per serving
+- **D-chiro-inositol:** 300 mg per serving
+- **Folate:** Quatrefolic® / 5-MTHF, 400 mcg per serving
+- **Serving size:** 2 tablets daily; 60 tablets = 30 servings
+- **Price:** **$925 MXN promotional price**; regular price reported as $1,415 MXN
+- **Retailer:** Farmacias Benavides
+- **Purchase URL:** https://www.benavides.com.mx/giranda-suplemento-alimenticio-myo-inositold-chiro-insositolquatrefolic-60-tabletas
+- **Label source:** https://www.actuamed.com.mx/marca/1153576
+- **Closeness:** **Exact match** to Giranda’s verified formula and 4:1 ratio. The indexed page showed “agotado”/unavailable in the selected region, so this is a price reference rather than a confirmed currently purchasable option.
+
+### 3. Wholesome Story Myo & D-Chiro Inositol with MTHF Folate + Vitamin D3
+- **Brand/product:** Wholesome Story, 120 vegetarian capsules
+- **Myo-inositol:** 2,000 mg per serving
+- **D-chiro-inositol:** 50 mg per serving
+- **Folate:** L-5-methyltetrahydrofolate (L-5-MTHF), 500 mcg DFE per serving
+- **Serving size:** 4 capsules; 30 servings per 120-capsule bottle
+- **Price:** **$29.95**, displayed without a confirmed MXN currency code; no reliable MXN price was captured
+- **Retailer:** iHerb; Mexico shipping/checkout was not verified in the captured page
+- **Purchase URL:** https://www.iherb.com/pr/wholesome-story-myo-d-chiro-inositol-with-mthf-folate-vitamin-d3-120-vegetarian-capsules/114885
+- **Closeness:** **Genuine 40:1 + 5-MTHF formulation**, but not an exact Giranda substitute: it supplies 2,000/50 mg rather than 1,200/300 mg and 500 rather than 400 mcg folate. Because Mexico delivery and MXN pricing were not confirmed, it is a research lead rather than a verified Mexico-purchasable option.
+
+## Products found but excluded from the verified ranked list
+- **Eternal Nutrition Essentials 40:1 + 5-MTHF — Farmacias del Ahorro/Amazon Mexico:** $392 MXN at Farmacias del Ahorro or approximately $299 MXN on Amazon Mexico. The pages confirm a 40:1 claim, 5-MTHF, and a 2,020 mg total blend, but do **not** disclose separate myo-inositol, D-chiro-inositol, or folate mcg amounts. It cannot be quantitatively compared with Giranda.
+  - https://www.fahorro.com/essentials-inositol-40-1-myo-d-chiro-150-capsulas-71452ac4.html
+  - https://www.amazon.com.mx/dp/B0G4FHL412
+- **Vitatú 40:1 + folate — Amazon Mexico:** $899 MXN. It lists 4,000 mg myo-inositol and 100 mg D-chiro-inositol, but the folate is only identified generically and its type/mcg amount is not verified; the serving interpretation is also unclear.
+  - https://www.amazon.com.mx/dp/B09BDFK9PV
+- **B-fit Inositol 40:1 + Folatos y NAC:** $749 MXN, but out of stock. The product claims 40:1 and Quatrefolic®, while the image-only nutrition panel did not provide verified readable quantities.
+  - https://bfit.mx/products/myo-inositol-y-d-chiro-inositol-slm
+- **Beyond Vitamins Inositol 40:1 powder:** $629 MXN. Exact myo/D-chiro amounts, serving size, and folate content were not verified.
+  - https://beyondvitamins.mx/products/inositol-40-1-myo-y-d-chiro-en-polvo
+- **INOFOLIC HP:** Has 1,200 mg myo-inositol and 400 mcg L-5-MTHF per 2 capsules, but D-chiro-inositol is not listed and no verified MXN purchase price was found.
+  - https://www.actuamed.com.mx/marca/1163551
+- **Nomuk Woman:** $599 MXN and reportedly 1,920 mg myo + 48 mg D-chiro (40:1), but folate type and mcg amount were not disclosed.
+  - https://nomuk.com.mx/products/inositol
+
+## Bottom line
+Only the two Giranda listings provide a fully verified match for **1,200 mg myo-inositol + 300 mg D-chiro-inositol + 400 mcg Quatrefolic/5-MTHF per 2-tablet serving**. WeCare is the strongest confirmed purchase listing at $1,504.52 MXN. Benavides had a lower indexed price of $925 MXN but was unavailable in the captured region. Wholesome Story is the clearest verified example of a genuine **40:1 + 5-MTHF** product, but it has a materially different formula and lacked confirmed Mexico-specific MXN availability.

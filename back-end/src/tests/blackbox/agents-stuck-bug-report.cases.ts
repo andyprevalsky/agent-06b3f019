@@ -18,7 +18,11 @@ import {
   withTransientDbRetry,
 } from './agents-blackbox-harness';
 import { reportAgentBugFromAgent } from '../../domains/agents/agentBugReportService';
-import { reportAgentBug, type ReportBugLaunchArgs } from '../../domains/agents/bugReportService';
+import {
+  BUG_REPORT_DEDUP_LINE,
+  reportAgentBug,
+  type ReportBugLaunchArgs,
+} from '../../domains/agents/bugReportService';
 import { agentSelfBugReportKey } from '../../domains/agents/repoAgentSelfBugReports';
 import {
   AGENT_BUG_REPORT_OPERATION_TYPE,
@@ -265,6 +269,7 @@ test('report_bug files one report per root run against the real claim table', as
       fake.calls.every((call) => call.promptText === fake.calls[0].promptText) &&
         fake.calls[0].promptText ===
           '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful\n' +
+            `${BUG_REPORT_DEDUP_LINE}\n` +
             `/rca the following bug for agent with ID: [${agentId}]\n` +
             'Reported by the agent itself with its report_bug tool:\ngrep 500' &&
         fake.calls[0].name === '--ai-- grep 500' &&

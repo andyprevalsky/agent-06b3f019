@@ -7,6 +7,7 @@
  * read repositories its owner was never granted.
  */
 import { checkGithubRepoAccess } from '../github';
+import { GithubRateLimitedError } from '../githubRateLimit';
 import { createLogger } from '../logger';
 import { prepareProjectWorkspace, ProjectWorkspaceError } from './store';
 import type { ProjectWorkspace } from './types';
@@ -31,6 +32,9 @@ async function resolveCloneUrl(userId: string, repoUrl: string | null): Promise<
   if (host !== 'github.com') return repoUrl;
   const token = process.env.GITHUB_TOKEN;
   const access = await checkGithubRepoAccess(userId, repoUrl);
+  // A limit is not a denial: cloning without credentials would fail or, worse,
+  // fall back to an empty checkout. Say so, with the reset time.
+  if (access.rateLimit !== undefined) throw new GithubRateLimitedError(access.rateLimit);
   if (!access.allowed || !access.normalizedUrl) {
     log.warn('Project repo not granted to owner; cloning without credentials', { userId });
     return repoUrl;

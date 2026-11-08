@@ -26,7 +26,7 @@
         "back-end/package.json", "back-end/package-lock.json", "back-end/tsconfig*.json", "back-end/.c8rc.json",
         "back-end/eslint.config.*", "back-end/prisma/migrations/*", "back-end/scripts/run-blackbox-tests.sh",
         "back-end/scripts/run-coverage.sh", "back-end/scripts/run-unit-tests.ts",
-        "back-end/scripts/unit-test-database-isolation.ts", "back-end/src/tests/blackbox/run.ts",
+        "back-end/scripts/unit-test-database-isolation.ts", "back-end/scripts/unit-test-child-exit.ts", "back-end/src/tests/blackbox/run.ts",
         "back-end/src/tests/helpers/*", "back-end/Dockerfile*", "back-end/.env.example"
       ],
       "lanes": ["backend-blackbox", "backend-unit", "backend-structural", "deploy-structural-gates"]

@@ -244,8 +244,10 @@ grep -q 'the fps probe is skipped' "$TMP/out3" || fail "the skipped probe must b
 #    `admin-health` is a real late-exclusive (whole-DB aggregate) name; both get
 #    the same fake body that records start/end order and obeys FAKE_FAIL_<domain>.
 RUNNER_REPO="$TMP/runner"
-mkdir -p "$RUNNER_REPO/src/tests/blackbox"
+mkdir -p "$RUNNER_REPO/src/tests/blackbox" "$RUNNER_REPO/src/tests/helpers"
 cp "$ROOT_DIR/back-end/src/tests/blackbox/run.ts" "$RUNNER_REPO/src/tests/blackbox/run.ts"
+# The runner's own module imports travel with it (its gate-progress reporter).
+cp "$ROOT_DIR/back-end/src/tests/helpers/gateProgress.ts" "$RUNNER_REPO/src/tests/helpers/gateProgress.ts"
 # Domain children are spawned with `node --import tsx` from the runner's repo root.
 ln -s "$ROOT_DIR/node_modules" "$RUNNER_REPO/node_modules"
 cat >"$RUNNER_REPO/fake.ts" <<'FAKE'

@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1830/inherited-git-refs-v1.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "6da28267df85db1e31c921ff4b442dd1483f6a4ee804325b9a55d2453c56954a",
+  "gzip_sha256": "9722791eeeb5c5ccecfad541a883f6e0d5341a349c4d3110a47ae203533bb8f6",
+  "stored_bytes": 1244156060,
+  "frames": 149,
+  "files": 3,
+  "original_bytes": 1255007376,
+  "manifest_sha256": "bcda719980a496464dbb4a6f03c23af96ea9a6891890061526aa7746b84c1481",
+  "full_readback_verified": true
+}

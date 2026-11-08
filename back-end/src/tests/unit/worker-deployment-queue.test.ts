@@ -1,5 +1,6 @@
 import { emptyRetentionCases } from './worker-empty-retention.cases';
 import { retainedRouteMismatchCases } from './worker-route-retention.cases';
+import { coalesceCases, coalesceCliCases } from './worker-deployment-coalesce.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
@@ -453,6 +454,8 @@ async function main() {
       abort(lease.ownerId));
     await test('unpublished prepared abort requires real target tombstone and releases exact bank idempotently', () =>
       preparedAbort(lease.ownerId));
+    await test('unstarted queued releases coalesce into a proven git descendant only', () =>
+      coalesceCases({ api, owner: lease.ownerId, appFor, identity, plan }));
     await lease.release();
     await test(
       'parent idle admission, interrupted wait and actual owned child lease loss',
@@ -462,6 +465,8 @@ async function main() {
       'parent resumes FIFO predecessors and exit75 wait without failure or duplicate completed execution',
       parentRecovery
     );
+    await test('queue CLI coalesces into proven descendants and never rolls the live release back', () =>
+      coalesceCliCases({ api, appFor, identity }));
     lease = await acquireWorkflowDeploymentLease({ leaseMs: 60000, heartbeatMs: 59000 });
     await test('expired and replaced global owners cannot mutate', async () => {
       const app = appFor('expiry');
@@ -490,7 +495,12 @@ async function main() {
     await prisma.toolSideEffect.deleteMany({
       where: {
         operationType: {
-          in: ['WORKER_DEPLOYMENT_JOB', 'WORKER_DEPLOYMENT_RESERVATION', 'AGENT_QUEUE_ADMISSION'],
+          in: [
+            'WORKER_DEPLOYMENT_JOB',
+            'WORKER_DEPLOYMENT_RESERVATION',
+            'AGENT_QUEUE_ADMISSION',
+            'WORKER_DEPLOYMENT_ANCESTRY',
+          ],
         },
         externalId: { in: apps },
       },

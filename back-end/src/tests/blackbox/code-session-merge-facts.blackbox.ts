@@ -20,6 +20,8 @@ import {
   buildLocalCodeAgentSystemPrompt,
 } from '../../providers/codeAgentPrompt';
 import { resolveMergeFacts } from '../../providers/codeSessions/mergeFacts';
+import { resetGithubRateLimitStateForTests } from '../../providers/githubRateLimit';
+import { rateLimitResponse, startFakeGithub } from '../helpers/fake-github';
 import {
   installedRoseSkills,
   roseSkillsTableOfContents,
@@ -48,10 +50,17 @@ test('all coding sessions know their Rose parent owns browser authentication', (
 });
 
 const savedGithubApi = process.env.GITHUB_API_BASE_URL;
+const savedDispatch = process.env.GITHUB_DISPATCH_TOKEN;
+// One identity: a .env GITHUB_DISPATCH_TOKEN would be a second token-pool member, and the
+// rate-limit cases count requests against a single limited identity.
+process.env.GITHUB_DISPATCH_TOKEN = '';
 
 after(() => {
+  resetGithubRateLimitStateForTests();
   if (savedGithubApi === undefined) delete process.env.GITHUB_API_BASE_URL;
   else process.env.GITHUB_API_BASE_URL = savedGithubApi;
+  if (savedDispatch === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
+  else process.env.GITHUB_DISPATCH_TOKEN = savedDispatch;
 });
 
 test('merged is reported only when GitHub confirms the merge and the target contains head', async () => {
@@ -119,6 +128,88 @@ test('merged is reported only when GitHub confirms the merge and the target cont
     assert.equal(merged.source, 'github');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+const rateLimitHead = 'd'.repeat(40);
+const rateLimitRepo = {
+  path: 'workspace',
+  branch: 'rose/feature-1',
+  head: rateLimitHead,
+  localCommits: 0,
+  pushed: true,
+  remoteUrl: 'https://github.com/rose-test/app',
+  dirtyFiles: 0,
+  defaultBranch: 'main',
+};
+const mergeFactsUnderLimit = () =>
+  resolveMergeFacts({
+    repoUrl: 'https://github.com/rose-test/app',
+    repo: rateLimitRepo,
+    mergeTarget: 'main',
+  });
+
+test('a rate-limited GitHub is reported as limited with its reset time, never as "merged: no"', async () => {
+  // Real GitHub primary-limit response (fixtures/github-rate-limit/primary-403.json),
+  // reset one hour away: longer than any wait budget, so no waiting and no retries.
+  resetGithubRateLimitStateForTests();
+  const resetEpochS = Math.floor(Date.now() / 1000) + 3600;
+  const fake = await startFakeGithub(() => rateLimitResponse('primary', { resetEpochS }));
+  process.env.GITHUB_API_BASE_URL = fake.baseUrl;
+  try {
+    const limited = await mergeFactsUnderLimit();
+    assert.equal(
+      limited.source,
+      'github_rate_limited',
+      'a 403/429 limit is not a confirmed answer from GitHub'
+    );
+    assert.equal(limited.merged, false);
+    assert.equal(
+      limited.merge_target_contains_head,
+      null,
+      'unknown, not "false": GitHub never answered the compare'
+    );
+    assert.equal(limited.rate_limited_until, new Date(resetEpochS * 1000).toISOString());
+    assert.equal(fake.requests.length, 1, 'the first limited call stops the lookup');
+    const stillBlocked = await mergeFactsUnderLimit();
+    assert.equal(stillBlocked.source, 'github_rate_limited');
+    assert.equal(fake.requests.length, 1, 'while blocked, no call reaches GitHub');
+  } finally {
+    await fake.close();
+  }
+});
+
+test('a short secondary limit is waited out once, then the lookup succeeds', async () => {
+  // Real secondary-limit status and body, with the documented retry-after header.
+  resetGithubRateLimitStateForTests();
+  let pullCalls = 0;
+  const fake = await startFakeGithub((request) => {
+    if (request.path === '/repos/rose-test/app/pulls') {
+      pullCalls += 1;
+      if (pullCalls === 1) return rateLimitResponse('secondary', { retryAfterS: 1 });
+      return {
+        json: [
+          {
+            number: 12,
+            html_url: 'https://github.com/rose-test/app/pull/12',
+            state: 'closed',
+            merged_at: '2026-10-20T00:00:00Z',
+          },
+        ],
+      };
+    }
+    return { json: { status: 'behind' } };
+  });
+  process.env.GITHUB_API_BASE_URL = fake.baseUrl;
+  try {
+    const startedAt = Date.now();
+    const facts = await mergeFactsUnderLimit();
+    assert.equal(facts.source, 'github');
+    assert.equal(facts.merged, true, 'the retry after retry-after reads the real PR state');
+    assert.equal(pullCalls, 2, 'one limited call, one retry after Retry-After');
+    assert.ok(Date.now() - startedAt >= 900, 'it waited for retry-after before retrying');
+  } finally {
+    await fake.close();
   }
 });
 

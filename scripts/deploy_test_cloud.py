@@ -17,8 +17,10 @@ import subprocess
 import time
 import tempfile
 
+import cloudbench_provider_headroom as provider_headroom
 from cloudbench_execution_provenance import load_provenance, verify_code_binding
 from cloudbench_result import validate_run_document, validate_run_file
+from deploy_test_cloud_refusal import SOURCE_DIFFERS, unpushed_reason
 from deploy_test_cycle import NAME, ROOT, read, source, write
 from deploy_test_process import cancellation_handlers, run_command
 
@@ -115,6 +117,8 @@ def capture_preallocation_evidence(runs):
         evidence[str(fleet)] = {name: hashlib.sha256(path.read_bytes()).hexdigest()
                                 for name, path in paths.items()}
     return evidence
+class SourceRefusal(ValueError):
+    """The source guard refused before this request could admit any resources."""
 
 
 def collect(request, root, runs, started, native_exit):
@@ -136,8 +140,15 @@ def collect_fleet(request, root, fleet, started, native_exit):
         raise ValueError('invalid native teardown audit')
     audit = dict(audit_rows)
     release = float((fleet / 'teardown-ownership/provider-teardown-verified.epoch').read_text())
+    # A failed mandatory autoscaler fails its run but not the verified release of
+    # its resources; the fleet seals both facts (PR #1760 smoke, 2026-11-07).
+    autoscaler_failed = lifecycle.get('autoscaler_failed_benches')
+    autoscaler_only = (lifecycle.get('status') == 'failed' and lifecycle.get('cleanup_verified') is True
+                       and native_exit == 1 and isinstance(autoscaler_failed, list) and autoscaler_failed
+                       and set(autoscaler_failed) <= set(request['checks']))
     if (type(lifecycle.get('version')) is not int or lifecycle['version'] != 1
-            or lifecycle.get('status') != 'verified' or lifecycle.get('run_id') != fleet.name
+            or (lifecycle.get('status') != 'verified' and not autoscaler_only)
+            or lifecycle.get('run_id') != fleet.name
             or lifecycle.get('workspace_root') != str(root)
             or type(lifecycle.get('controller_exit_code')) is not int
             or lifecycle.get('controller_exit_code') != native_exit
@@ -166,24 +177,55 @@ def collect_fleet(request, root, fleet, started, native_exit):
             outcome = str(task.get('benchmark_status') or task.get('status') or '').upper()
             if not math.isfinite(finish) or finish < started or task.get('cleanup_failure'):
                 raise ValueError('unverified native task or task cleanup')
+            # Hash before any verdict: an unreadable record must stay UNVERIFIED, never a bare PASS.
+            details[name] = {'native_task': {k: task.get(k) for k in ('name','status','benchmark_status','passed','failure_reason','agent_id')}, 'path': str(child),
+                             'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
             if task.get('passed') is True and outcome == 'PASSED':
                 cases[name] = 'PASS'
             elif task.get('passed') is False and outcome in {'FAILED', 'ERROR', 'INFRA_ERROR', 'SKIPPED'}:
                 cases[name] = 'FAIL'
-            details[name] = {'native_task': {k: task.get(k) for k in ('name','status','benchmark_status','passed','failure_reason','agent_id')}, 'path': str(child),
-                             'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
         except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
             details[name] = {'unverified': str(error), 'path': str(child)}
+    for name in autoscaler_failed if autoscaler_only else ():
+        if cases[name] == 'PASS':
+            cases[name] = 'FAIL'
+        if cases[name] == 'FAIL':
+            details[name]['mandatory_autoscaler_failure'] = autoscaler_reason(fleet / name)
     if native_exit != 0 and all(v == 'PASS' for v in cases.values()):
         cases = dict.fromkeys(cases, 'UNVERIFIED')
     return cases, details, True, str(fleet)
 
 
-def campaign_width(checks):
+def autoscaler_reason(directory):
+    """The native autoscaler's own first-line reason, or an explicit evidence gap."""
+    for leaf in ('autoscaler.failed', 'autoscaler.acceptance-failed'):
+        path = directory / leaf
+        try:
+            if path.is_file() and not path.is_symlink():
+                with path.open(errors='replace') as stream:
+                    reason = stream.readline(4096).strip()
+                if reason:
+                    return reason
+        except OSError:
+            # The verified FAIL and cleanup stand; only its explanation is missing.
+            return f'mandatory autoscaler failed; {leaf} unreadable'
+    return 'mandatory autoscaler failed; see the fleet controller log'
+
+
+def campaign_width(checks, deadline=None):
+    """Smoke width: the reviewed registry cap, narrowed by live usage of shared provider accounts.
+
+    Tilion's browsers are one account shared with production and every other deploy, so the
+    width comes from its live session listing (cloudbench_provider_headroom), waiting with
+    progress lines until `deadline` (epoch; default 15 min) when no browser is free.
+    """
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
-    return min(len(checks), registry['cap'])
+    if deadline is None:
+        deadline = time.time() + provider_headroom.DEFAULT_WAIT_SECONDS
+    return provider_headroom.admitted_width(len(checks), registry, probes=provider_headroom.live_probes(),
+                                            deadline=deadline)
 
 
 def campaign_published(summary, campaign, started, native):
@@ -293,6 +335,43 @@ def shared_canary_env(root, environ=os.environ):
                               ('FLEET_INFRA_CANARY_LOCK', 'transaction.lock'))}
 
 
+def origin_fetchable(root, head, environ=None):
+    """Run the exact run-bench-fleet preflight (cloudbench_fetchable_ref, local patch shipping disabled).
+
+    Guests fetch only origin/main ancestors or live origin branch/tag tips. PR #1767 dispatched a
+    merge commit that was not yet pushed: all 13 campaign jobs died in ~4 s at this same check and
+    the coordinator retained an unreconcilable cleanup owner. Same helper, same env, same answer.
+    The helper bounds its own ls-remote; stdout goes to a file so a lingering grandchild cannot
+    hold a pipe open past the timeout.
+    """
+    import tempfile
+    argv = ['bash', '-c', 'source "$1"; cloudbench_fetchable_ref "$2" "$3" 0', 'deploy-fetchable-ref',
+            str(Path(root) / 'scripts/lib/cloudbench-env.sh'), str(root), head]
+    with tempfile.TemporaryFile() as output:
+        try:
+            code = subprocess.run(argv, cwd=root, env=os.environ if environ is None else environ,
+                                  stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                                  timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            return False
+        output.seek(0)
+        return code == 0 and output.read(4096).decode(errors='replace').strip() == head
+
+
+def capacity_admission_env(now, environ=os.environ):
+    """Pass this gate's deadline to native Fly capacity admission as an explicit input.
+
+    Every devbox shares the benchmark app's DEMO/delegating/Machine/shared-CPU ceilings, so a
+    shortfall is normally another devbox's fleet that will release. The fleet's own default
+    gives up after 300 s and failed smoke; within a deploy it now keeps polling until the
+    gate's existing deadline (deploy_gates.GATE_DEADLINE_SECONDS). The ceilings are unchanged.
+    An operator's explicit deadline wins and is never extended.
+    """
+    from deploy_gates import GATE_DEADLINE_SECONDS
+    key = 'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH'
+    return {key: environ.get(key) or str(int(now) + GATE_DEADLINE_SECONDS)}
+
+
 def execute(request, root):
     """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
     checks, skipped = request['checks'], request.get('skips', {})
@@ -300,9 +379,17 @@ def execute(request, root):
             or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')
                    or n in {'.','..'} for n in checks)):
         raise ValueError('invalid cloud case inventory')
-    if source(root) != request['source']:
-        raise ValueError('cloud source differs from the requested freeze')
     directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    if source(root) != request['source']:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('cloud source differs with an existing request namespace')
+        raise SourceRefusal(SOURCE_DIFFERS)
+    if not origin_fetchable(root, request['source']['head']):
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('unpushed cloud source with an existing request namespace')
+        raise SourceRefusal(unpushed_reason(request['source']['head']))
+    from deploy_test_historical_custody import admission
+    admission(request, root)
     runs = directory / 'runs'
     runs.mkdir(parents=True, exist_ok=False)
     binding = prepare_source_transport(request, root, directory)
@@ -314,7 +401,7 @@ def execute(request, root):
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '0',
            'DEPLOY_NATIVE_HUB_JOIN': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
-           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root)}
+           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root), **capacity_admission_env(time.time())}
     # Replace foreign payloads with the exact prelaunch seal, including parent canary.
     for key in ('CLOUDBENCH_LOCAL_PATCH_SOURCE', 'CLOUDBENCH_LOCAL_PATCH_SHA256', 'CLOUDBENCH_LOCAL_PATCH_BASE_REF'):
         env.pop(key, None)
@@ -367,6 +454,17 @@ def main():
         result = execute(request, args.root.resolve())
         write(Path(os.environ['DEPLOY_GATE_RESULT']), result)
         return 0 if result['complete'] and all(v == 'PASS' for v in result['cases'].values()) else 1
+    except SourceRefusal as error:
+        # This exception is raised only before mkdir, capacity checks or provider commands.
+        # It closes admission custody, never test execution or financial cleanup credit.
+        receipt = {k: request[k] for k in ('token', 'source', 'gate')}
+        receipt.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                       cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                       native_command=[], fleet_directory=None, reason=str(error),
+                       admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+        write(Path(os.environ['DEPLOY_GATE_RESULT']), receipt)
+        print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
+        return 2
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
         return 2

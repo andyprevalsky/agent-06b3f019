@@ -1,0 +1,100 @@
+{
+ "failures": [
+  {
+   "id": "b6778c0863be48cca0a6cc26edeb5351",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "e0dfb8b88cbf8dbd5de7e3d1668bc3545889e7c5",
+    "digest": "231b8aca90fa996c8fbb2ebbb997749cf58358c4a9341ddb0bc1028c61315d35"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "cloudbench_campaign_workspace_test.py TIMEOUT_POLICY_MODULES lacked history_ledger.py, which this branch's timeout_history now imports (benchmark-live-results suite)",
+   "evidence": "fix bfd0b4d1cd: 4/4 fail on the old list, pass 5x"
+  },
+  {
+   "id": "46ec398d4c1941979c1b17ccc7d4050a",
+   "check": "agents-coverage-blackbox/agents-coverage-blackbox",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "e0dfb8b88cbf8dbd5de7e3d1668bc3545889e7c5",
+    "digest": "231b8aca90fa996c8fbb2ebbb997749cf58358c4a9341ddb0bc1028c61315d35"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "benchmark domain runs the same local-predeploy fixture test (cloudbench_dependency_rebuild_permanent_gate)",
+   "evidence": "fix 7e3c01543c"
+  },
+  {
+   "id": "c524d4f09123433ba4aa92d20b87e81e",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-4vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "e0dfb8b88cbf8dbd5de7e3d1668bc3545889e7c5",
+    "digest": "231b8aca90fa996c8fbb2ebbb997749cf58358c4a9341ddb0bc1028c61315d35"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "the local-predeploy fixture in cloudbench_dependency_sync_test.py copied select_predeploy_benches.py without history_ledger.py",
+   "evidence": "fix 7e3c01543c: fails on the old fixture, passes 5x"
+  },
+  {
+   "id": "6a9aed37f3b64ad19550dc40ecf2b304",
+   "check": "semantic-stack/semantic-stack",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "e0dfb8b88cbf8dbd5de7e3d1668bc3545889e7c5",
+    "digest": "231b8aca90fa996c8fbb2ebbb997749cf58358c4a9341ddb0bc1028c61315d35"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "this branch's Cerebras quota wait polled an HTTP 403 probe for its full 3600 s budget and then failed the latency ratchet (67 min gate)",
+   "evidence": "remote deploy-smoke.log 'Cerebras quota probe answered HTTP 403'; fixes eb5a5460c3 (30 min gate deadline) and 11ab61c131 (bounded advisory wait, 401/403 stop at once)"
+  }
+ ]
+}

@@ -16,8 +16,9 @@
  *   - useTopBarProps     : account/viewport gating shared by TopBar + NubToolbar
  *
  * DIRECT CHANNEL (directChannel, the Rose Desktop code-agent view): the same
- *   shell, attachments and send button with native session controls; no Rose nub tab
- *   or pinned tools. Draft attachments clear only after confirmed delivery.
+ *   shell, attachments, model chip, speed toggle (speedControl) and send button;
+ *   the nub tab carries the caller's working settings (props.nub) instead of the
+ *   Rose toolbar; no pinned tools. Draft attachments clear only after confirmed delivery.
  *
  * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
@@ -111,9 +112,9 @@ export default function QueryInput(props: QueryInputProps) {
             roseDesktop && !browser && 'relative mt-[14px]',
           )}
         >
-          {roseDesktop && !directChannel && !browser && (
+          {roseDesktop && !browser && (!directChannel || props.nub) && (
             <NubTab reveal={reveal}>
-              <NubToolbar {...topBarProps} />
+              {directChannel ? props.nub : <NubToolbar {...topBarProps} />}
             </NubTab>
           )}
           {!browser && props.topAttachment}
@@ -219,10 +220,15 @@ function QueryInputBody(props: QueryInputBodyProps) {
     browser,
   } = props;
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
-  const speed =
-    roseDesktop && !directChannel && !browser && topBarProps.showFastMode
-      ? { fastMode: topBarProps.fastMode ?? false, onFastModeChange: topBarProps.onFastModeChange }
-      : undefined;
+  const speed = browser
+    ? undefined
+    : (props.speedControl ??
+      (roseDesktop && !directChannel && topBarProps.showFastMode
+        ? {
+            fastMode: topBarProps.fastMode ?? false,
+            onFastModeChange: topBarProps.onFastModeChange,
+          }
+        : undefined));
   const toolbar = roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />;
 
   return (
@@ -246,7 +252,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         onModelChange={onModelChange}
         availableModels={availableModels}
         showModelSelector={showModelSelector}
-        hideModelSelector={directChannel || browser}
+        hideModelSelector={browser || (directChannel && !availableModels.length)}
         readOnlyModelLabel={props.browserModelLabel}
         textareaRef={textareaRef}
         roseDesktop={roseDesktop}

@@ -79,6 +79,8 @@ export interface CodeAgentSessionResult {
   sandboxSize?: SandboxSize | null;
   /** Attached to a live CLI: its events before this spawn's goal are history. */
   historyEvents?: number;
+  /** How long the ws-server took to serve, and the repo clone inside that (null: none). */
+  startup?: { wsReadyMs: number; cloneMs: number | null };
 }
 
 /** Persistent workspace and conversation controls for a Claude code spawn. */
@@ -595,6 +597,23 @@ export async function releaseSandboxAfterFailedStart(
   } else {
     await markPaused(codeSession.id);
   }
+}
+
+/**
+ * A project restore that failed. A persistent session's sandbox may hold work
+ * newer than its last checkpoint (a resumed sandbox keeps its filesystem), so
+ * it is paused like any failed start and the retry resumes it; only a one-shot
+ * sandbox is killed, with the restore error kept if the kill itself fails.
+ */
+export async function releaseSandboxAfterFailedRestore(
+  sandbox: Sandbox,
+  codeSession: SpawnCodeSession | null
+): Promise<void> {
+  if (codeSession === null) {
+    await sandbox.kill().catch(() => undefined);
+    return;
+  }
+  await releaseSandboxAfterFailedStart(sandbox, codeSession);
 }
 
 /**

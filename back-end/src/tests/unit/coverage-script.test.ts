@@ -463,6 +463,16 @@ assert.match(
   'unit logs must preserve nested paths instead of colliding on basenames'
 );
 assert.match(
+  unitRunner,
+  /child\.once\('close', \(code, signal\) => \{\s*resolveExit\(describeChildTermination\(code, signal\)\)/,
+  'unit runner must keep the signal of a child that dies without output'
+);
+assert.match(
+  unitRunner,
+  /ended with \$\{terminationLabel\}[\s\S]*writeFile\(logPath, result\.output\)/,
+  'a silent child death must leave its exit code or signal in the per-file log'
+);
+assert.match(
   coverageScript,
   /BACKEND_UNIT_COVERAGE_DIR="\$COV_TMP"[\s\S]*node --import tsx scripts\/run-unit-tests\.ts/,
   'coverage must be passed to unit children without instrumenting the scheduler itself'

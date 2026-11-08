@@ -150,6 +150,38 @@ async function run(): Promise<void> {
     'failed serialization must not leave temporary files'
   );
 
+  // ── (5) Memory bookkeeping never retains whole request keys ──
+  // Replay keys embed the full outbound body. A 16M-character chat prompt kept
+  // one 32 MB key per recorded call alive for the server's lifetime and drove
+  // the shard-2 coverage server to a V8 heap OOM (2026-11-07). In-memory maps
+  // and sets must be keyed by the same sha256 digest used for the file name.
+  const retention = new NonBlockingFileCache({ cacheDir: dir, namespace: 'retention' });
+  const hugeKey = `call:${JSON.stringify(['https://api.example.test', 'POST', 'y'.repeat(1_000_000)])}`;
+  retention.set(hugeKey, { status: 200 });
+  assert.strictEqual(retention.has(hugeKey), true, 'large keys must still replay');
+  await retention.flushPendingWrites();
+  assert.deepStrictEqual(retention.get(hugeKey), { status: 200 }, 'large keys replay after flush');
+  retention.delete(hugeKey);
+  retention.set(hugeKey, { status: 201 });
+  await retention.flushPendingWrites();
+  const hugeEntry = JSON.parse(
+    readSource(
+      join(dir, 'retention', `${createHash('sha256').update(hugeKey).digest('hex')}.json`),
+      'utf8'
+    )
+  ) as { key: string; value: unknown };
+  assert.strictEqual(hugeEntry.key, hugeKey, 'the fixture file still records the full key');
+  for (const [field, held] of Object.entries(retention)) {
+    const ids =
+      held instanceof Map ? [...held.keys()] : held instanceof Set ? [...held.values()] : [];
+    for (const id of ids) {
+      assert.ok(
+        typeof id !== 'string' || id.length <= 64,
+        `${field} retained a ${String(id.length)}-character request key instead of its digest`
+      );
+    }
+  }
+
   writeLine('non-blocking-fetch-cache tests passed');
 }
 

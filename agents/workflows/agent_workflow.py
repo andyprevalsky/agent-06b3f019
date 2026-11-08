@@ -146,6 +146,8 @@ with workflow.unsafe.imports_passed_through():
     from utils.prompts import (
         build_system_prompt,
         build_verifier_prompt,
+        render_project_context,
+        user_context_with_project,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
     from utils.user_tool_models import is_user_tool_name
@@ -903,8 +905,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
-        # The startup agent-config read failed, so output_schema is unknown
-        # (not known-absent) until a later read succeeds.
+        # The startup agent-config read failed, so output_schema and the project
+        # section are unknown (not known-absent) until a later read succeeds.
         self._agent_config_unavailable: bool = False
         # Getter reloads back off across turns while the read keeps failing.
         self._agent_config_retry_count: int = 0
@@ -1017,6 +1019,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # User customization (fetched at workflow start for dynamic name in approvals/SMS)
         self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
         self.custom_system_prompt: Optional[str] = None  # Custom personality prompt to inject
+        # `## Project` section from the agent's project placement ("" = Home); kept
+        # apart from the per-user user_context_section and recomputed each start.
+        self.project_context_section: str = ""
 
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
@@ -1292,6 +1297,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             ("custom_system_prompt", "custom_system_prompt"),
             ("agent_source", "agent_source"),
             ("user_context_section", "user_context_section"),
+            ("project_context_section", "project_context_section"),
             ("fast_cache_goal", "demo_cache_goal"),
             ("root_goal", "root_goal"),
         ):
@@ -1525,6 +1531,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "custom_system_prompt": self.custom_system_prompt,
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
+                "project_context_section": self.project_context_section,
                 "fast_cache_goal": self.demo_cache_goal,
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
@@ -2536,6 +2543,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             if not (self._deployment_resume and isinstance(response_schema, dict) and response_schema.get("fields")):
                 response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
+            self._apply_agent_project(agent_config)
             self.output_schema = response_schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
             workflow.logger.info(
@@ -3165,14 +3173,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         return generate
 
     async def _load_output_schema(self, *, poll_until_present: bool, max_attempts: int = 5) -> None:
-        """Read output_schema from the agent row while it is missing.
+        """Read the agent config while its output_schema or project is unknown.
 
         ``poll_until_present`` keeps polling a successful read that returns no
         schema yet (async schema generation at completion); otherwise the first
         successful read is final: no schema then means the task has none.
+
+        A failed startup read leaves the project section unknown too, so any
+        later successful read applies it, even when output_schema is already set
+        (an accepted schema is never replaced by a read).
         """
         attempt = 0
-        while self.output_schema is None and attempt < max_attempts:
+        while (self.output_schema is None or self._agent_config_unavailable) and attempt < max_attempts:
             attempt += 1
             try:
                 agent_config = await workflow.execute_activity(
@@ -3189,7 +3201,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._agent_config_unavailable = False
             self._agent_config_retry_count = 0
             self._agent_config_retry_at = None
-            self.output_schema = agent_config.get("response_schema")
+            self._apply_agent_project(agent_config)
+            if self.output_schema is None:
+                self.output_schema = agent_config.get("response_schema")
             workflow.logger.info(
                 f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
             )
@@ -3210,18 +3224,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
             if self.output_schema is None and self._agent_config_unavailable:
-                await self._reload_output_schema_with_backoff()
+                await self._reload_agent_config_with_backoff()
             return self.output_schema
 
         return get_schema
 
-    async def _reload_output_schema_with_backoff(self) -> None:
+    async def _reload_agent_config_with_backoff(self) -> None:
         """One config read per turn; failures back off exponentially across turns.
 
-        The getter runs every main-loop turn, so retries must not stack inside a
-        turn. Delay 1 s doubling to a 60 s cap plus up to 25% jitter (claude-code
-        withRetry.ts getRetryDelay; codex async-utils backoff.rs) spreads a
-        correlated backend outage. workflow.now()/random() keep it deterministic.
+        Recovers the output schema and the project section after a failed
+        startup read. The getter and the system-prompt builder run every
+        main-loop turn, so retries must not stack inside a turn. Delay 1 s
+        doubling to a 60 s cap plus up to 25% jitter (claude-code withRetry.ts
+        getRetryDelay; codex async-utils backoff.rs) spreads a correlated
+        backend outage. workflow.now()/random() keep it deterministic.
         """
         now = workflow.now()
         if self._agent_config_retry_at is not None and now < self._agent_config_retry_at:
@@ -3581,6 +3597,15 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_refresh_failed_revision = 0
         self._response_schema_refresh_error = None
 
+    def _apply_agent_project(self, agent_config: Dict[str, Any]) -> None:
+        """Derive the project section from a fetched agent config.
+
+        An empty config (failed fetch) keeps the section restored from the
+        previous run, so continue_as_new never loses or duplicates it.
+        """
+        if agent_config:
+            self.project_context_section = render_project_context(agent_config.get("project"))
+
     def _phase_tool_lists(self) -> Tuple[List[str], List[str]]:
         """(PLAN tools, EXECUTE tools) for this agent; root-only tools join for eligible roots."""
         if matches_demo_goal(self.goal):
@@ -3593,11 +3618,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         Called by run_agent before each LLM call.
         """
         await self._advance_cloud_agent_lifecycle(STARTING_REASONING_TITLE, "IN_PROGRESS")
+        if self._agent_config_unavailable:
+            # The startup config read failed: recover the project section (and
+            # a missing schema) instead of running without them for the rest of
+            # the run. Bounded to one read per turn with backoff.
+            await self._reload_agent_config_with_backoff()
         return build_system_prompt(
             phase=self.current_phase,
             enabled_tools=self._current_tools,
             disabled_tools=self._disabled_tools,
-            user_context_section=self.user_context_section,
+            user_context_section=user_context_with_project(self.user_context_section, self.project_context_section),
             response_schema=self.output_schema,
             tool_prompts=TOOL_PROMPTS,
         )
@@ -3789,10 +3819,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         ``helpers.generation_handoff.park_pending_tool``). Returns False when
         the tool must instead close its chip with DEPLOY_INTERRUPTED.
         """
-        if tool_call_id in self._background_tasks:
+        record = self._background_tasks.get(tool_call_id)
+        if record is not None and not record.get("foreground"):
             # Background records already travel in the continuation snapshot;
             # keep the hint so the next generation relaunches it in the background.
-            self._background_tasks[tool_call_id]["resume"] = dict(resume)
+            # A foreground spawn's record is only its address: the call itself parks
+            # below and is re-entered through _execute_tool like any foreground tool.
+            record["resume"] = dict(resume)
             workflow.logger.info(f"Parked background task {tool_call_id} for generation handoff")
             return True
         if not self._tool_parking_enabled:
@@ -4390,8 +4423,21 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         moved this agent to that child's finish, so the next "now" it sees is
         the world's.
         Outside a WMH world no cursor exists and nothing extra runs.
+
+        A foreground explore/browser/code spawn is recorded under its task path
+        while it runs (workflows/background_agents.py), so it is addressable.
         """
-        result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        tracked = self._tracks_foreground_spawn(tool_name, tool_args)
+        if tracked:
+            refused = await self._begin_foreground_spawn(tool_name, tool_args, tool_call_id)
+            if refused is not None:
+                return refused
+        result: Any = None
+        try:
+            result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        finally:
+            if tracked:
+                await self._end_foreground_spawn(tool_call_id, result)
         await self._refresh_world_time_cursor_after_tool()
         return result
 

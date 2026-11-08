@@ -1,0 +1,38 @@
+{
+ "captured_at": "2026-11-07T22:37:35Z",
+ "workflow": {
+  "id": 196946381,
+  "name": "Deploy Agents to Fly.io",
+  "path": ".github/workflows/deploy-agents.yml",
+  "state": "disabled_manually",
+  "created_at": "2025-10-10T21:05:40.000Z",
+  "updated_at": "2026-11-07T18:32:58.000Z"
+ },
+ "latest_runs": [
+  {
+   "id": 42386003546,
+   "event": "push",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "89906b0f3b8c51d85ceb6b3f610aa836dc500161",
+   "created_at": "2026-11-07T15:21:38Z"
+  },
+  {
+   "id": 42385314212,
+   "event": "schedule",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "b0abff1020494f261670352141a8d8e10d4df7e4",
+   "created_at": "2026-11-07T15:13:15Z"
+  },
+  {
+   "id": 42381494351,
+   "event": "push",
+   "status": "completed",
+   "conclusion": "success",
+   "head_sha": "3e770c9e10be3ee23f6cf0a2ad4a523b1241789e",
+   "created_at": "2026-11-07T14:25:01Z"
+  }
+ ],
+ "note": "state disabled_manually since updated_at (first managed deployment hold, not by this deploy); no push run exists for merge commit 8dbb27dbfc. Not re-enabled or dispatched."
+}

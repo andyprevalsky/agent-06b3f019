@@ -1,161 +1,42 @@
 /**
  * STATE MACHINE: DesktopCodeAgentChip (Rose Desktop flag on AND metadata.code_agent present)
  *
- * LIFECYCLE (code_agent.state; a terminal task_complete message wins):
- *   [spinning_up] → header only (spinner · target)
- *   [live]        → header (pulsing dot · Active · running timer · target) + body
- *   [completed]   → header (check · Completed Successfully · duration · target) + summary
- *   [failed]      → header (✕ · Failed · duration · target) + red failure box (always shown)
- *                   with the backend's failure text verbatim (LOCAL_TARGET_UNAVAILABLE etc.)
- *   [paused]      → header (muted pause · Paused · duration · target), never red: the
- *                   session is saved and resumable. Under it, one muted line with the
- *                   backend's text for the user (pausedNote: a usage-limit stop's
- *                   message, else its usage_limit details); no Retry button (the
- *                   backend has no user-callable retry/resume route).
+ * The code agent's row in the root transcript. It folds into the surrounding
+ * "Worked for …" history like every other tool row (no card, header, body or
+ * bottom rows): the tool icon, the code agent's title, its state word, the
+ * devbox usage bars while it runs, and its elapsed time.
  *
- * TARGET (code_agent.target): 'local' → "This Mac · <folder>" (device_name tooltip),
- *   else "Cloud". No terminal affordances (no "Open in Terminal").
+ *   [spinning_up | live | verifying] → "<title> · Running" + CodeResourcesIndicator
+ *                                      (CPU · memory · disk) + running clock
+ *   [completed]                      → "<title> · Completed" + duration
+ *   [failed]                         → "<title> · Failed" (red) + duration
+ *   [paused]                         → "<title> · Paused" + duration
  *
- * BODY: [OPEN] (default) ⇄ [CLOSED] via header click
- *   live:      transcript (no terminal view) + "Message <agent> directly…" steer input
- *   completed: commit · branch · merged into · tests · files ± · Open preview
- *              (no summary → read-only transcript when events exist)
- *   failed / paused: read-only transcript when events exist
- *   not running + code_session: "<branch> → <merge_target> · pushed · PR #n · merged"
+ * CLICK (with a view provider): opens this session's code-agent view (the code
+ * agent's own conversation and query box); isolated renders have no click.
  *
- * OPEN APP (code_agent.preview_url, dev cloud sessions; rows 10/39): a plain
- *   "Open app" header button opens the full-screen app view for this task; the
- *   chip frames no live preview itself (OpenAppButton).
- *
- * MAXIMIZE: opens this session's code-agent view (useCodeAgentView, transcript only:
- *   no terminal); without a view provider (isolated renders) there is no Maximize.
+ * FailureBox / PausedNote: the backend's failure / pause text, shown by the
+ * code-agent view.
  */
 
-import { useState, type ReactNode } from 'react';
-import { ChevronDown, ChevronUp, Maximize2 } from 'lucide-react';
+import { type ReactNode } from 'react';
 
+import { getToolIcon } from '@/lib/toolIcons';
+import { cn } from '@/lib/utils';
 import {
   codeAgentLabel,
-  codeAgentTargetLabel,
   eventTimeMs,
   pausedNote,
   type CodeAgentMeta,
-  type CodeAgentSummary,
   type CodeAgentTranscriptEvent,
-  type CodeSessionFacts,
 } from '../hooks/codeAgentContract';
 import { useAgentContext } from '../hooks';
-import { useLocalEchoes } from '../hooks/codeAgentLocalState';
 import { desktopChipState, formatElapsed, useNow } from '../hooks/codeAgentSteering';
-import { ProviderIcon, StatusDisplay } from './claudeCodeChip.shared';
 import type { ClaudeCodeChipVM } from './claudeCodeChip.hooks';
-import { CodeAgentSteerInput, CodeAgentTranscript } from './codeAgentChip.steer';
-import { OpenAppButton } from './app-view/OpenAppButton';
 import { useCodeAgentView } from './code-agent-view/codeAgentViewState';
 import { CodeResourcesIndicator } from './CodeResourcesIndicator';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
-const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
-
-/** Chip rows share the transcript / steer input inset; `flush` (the view): its left edge. */
-const ROW_INSET = 'px-3.5';
-
-export function Summary({ summary, flush }: { summary: CodeAgentSummary; flush?: boolean }) {
-  const tests =
-    summary.tests_passed === undefined
-      ? null
-      : summary.tests_total === undefined
-        ? `tests ${summary.tests_passed} passed`
-        : `tests ${summary.tests_passed}/${summary.tests_total} passed`;
-  return (
-    <div
-      data-testid="code-agent-summary"
-      className={`border-t border-border pb-3 pt-2.5 text-[13px] ${flush ? '' : ROW_INSET} text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]`}
-    >
-      <div>
-        Committed <code className={CODE}>{summary.commit.slice(0, 7)}</code> on{' '}
-        <code className={CODE}>{summary.branch}</code>
-        {summary.merged_into && (
-          <>
-            {' '}
-            · merged into <code className={CODE}>{summary.merged_into}</code>
-          </>
-        )}
-        {tests && <> · {tests}</>}
-      </div>
-      {summary.files.length > 0 && (
-        <div className="mb-1.5 mt-2">
-          {summary.files.map((file) => (
-            <div
-              key={file.path}
-              data-testid="code-agent-file"
-              className="flex gap-2.5 py-0.5 font-mono text-[12.5px]"
-            >
-              <span className="text-green-600 dark:text-green-400">+{file.added}</span>
-              <span className="text-red-600 dark:text-red-400">−{file.removed}</span>
-              <span className="min-w-0 truncate">{file.path}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {summary.preview_url && (
-        <a
-          href={summary.preview_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="font-semibold text-[#e8507f] no-underline hover:underline"
-        >
-          Open preview
-        </a>
-      )}
-    </div>
-  );
-}
-
-/** The persistent code session's branch and where it merges, with push / PR / merge facts. */
-export function SessionLine({
-  session,
-  meta,
-  flush,
-}: {
-  session: CodeSessionFacts;
-  meta: CodeAgentMeta;
-  flush?: boolean;
-}) {
-  const branch = session.branch ?? meta.branch;
-  if (!branch) return null;
-  const target = session.merge_target ?? meta.base_branch;
-  return (
-    <div
-      data-testid="code-agent-session"
-      className={`border-t border-border pb-2.5 pt-2.5 text-[13px] ${flush ? '' : ROW_INSET} text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]`}
-    >
-      <code className={CODE}>{branch}</code>
-      {target && (
-        <>
-          {' → '}
-          <code className={CODE}>{target}</code>
-        </>
-      )}
-      {session.pushed && ' · pushed'}
-      {session.pr && (
-        <>
-          {' · '}
-          <a
-            href={session.pr.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(event) => event.stopPropagation()}
-            className="font-semibold text-[#e8507f] no-underline hover:underline"
-          >
-            PR #{session.pr.number}
-          </a>
-        </>
-      )}
-      {session.merged && ' · merged'}
-    </div>
-  );
-}
 
 /**
  * The backend's failure text verbatim (a LOCAL_TARGET_UNAVAILABLE message is
@@ -197,7 +78,7 @@ export function PausedNote({ meta, className }: { meta: CodeAgentMeta; className
   );
 }
 
-/** Maximize → this session's code-agent view (its owner is the chat that holds the chip). */
+/** Opens this session's code-agent view (its owner is the chat that holds the row). */
 function useOpenViewAction(meta: CodeAgentMeta): (() => void) | null {
   const view = useCodeAgentView();
   const { selectedAgentId } = useAgentContext();
@@ -212,115 +93,72 @@ function useOpenViewAction(meta: CodeAgentMeta): (() => void) | null {
     });
 }
 
+const STATE_WORD = {
+  spinning_up: 'Running',
+  live: 'Running',
+  verifying: 'Running',
+  completed: 'Completed',
+  failed: 'Failed',
+  paused: 'Paused',
+} as const;
+
 interface DesktopCodeAgentChipProps {
   meta: CodeAgentMeta;
   vm: ClaudeCodeChipVM;
-  events: CodeAgentTranscriptEvent[];
-  toolCallId: string | undefined;
+  events?: CodeAgentTranscriptEvent[];
+  toolCallId?: string | undefined;
 }
 
-export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCodeAgentChipProps) {
+export function DesktopCodeAgentChip({ meta, vm }: DesktopCodeAgentChipProps) {
   const state = desktopChipState(meta, vm.chipState);
   const running = state === 'live' || state === 'verifying' || state === 'spinning_up';
-  const [open, setOpen] = useState(true);
-  const echoes = useLocalEchoes(meta.task_id);
   const now = useNow(running);
   const openView = useOpenViewAction(meta);
-
   const startedAt = eventTimeMs(meta.started_at);
   const endedAt = running ? now : (eventTimeMs(meta.ended_at) ?? null);
   const elapsed = startedAt !== null && endedAt !== null ? formatElapsed(endedAt - startedAt) : '';
-
-  const hasTranscript = events.length > 0 || echoes.length > 0;
-  const isLive = state === 'live' || state === 'verifying';
-  const showSummary = state === 'completed' && meta.summary;
-  const session = !running && meta.code_session ? meta.code_session : null;
-  const expandable = isLive || Boolean(showSummary) || hasTranscript || session !== null;
-
+  const Icon = getToolIcon('spawn_claude_code_agent');
+  const title = meta.title || codeAgentLabel(meta.provider);
   return (
     <div
+      role={openView ? 'button' : undefined}
+      tabIndex={openView ? 0 : undefined}
+      onClick={openView ?? undefined}
+      onKeyDown={(event) => {
+        if (openView && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          openView();
+        }
+      }}
       data-testid="code-agent-chip"
+      data-code-agent-id={meta.task_id}
       data-code-agent-state={state}
       data-code-agent-target={meta.target}
-      className="w-full overflow-hidden rounded-xl border border-border bg-card/50 backdrop-blur-sm dark:border-white/[.09] dark:bg-[#262624] dark:text-[#ecece8]"
-    >
-      <div
-        onClick={() => expandable && setOpen((v) => !v)}
-        className={`flex min-w-0 items-center gap-3 p-3 ${expandable ? 'cursor-pointer' : ''}`}
-      >
-        <ProviderIcon codeProvider={meta.provider} className="h-5 w-5 flex-shrink-0" />
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <StatusDisplay state={state} codeProvider={meta.provider} />
-          {meta.title && (
-            <span className={`truncate text-sm ${MUTED}`} data-testid="code-agent-title">
-              · {meta.title}
-            </span>
-          )}
-        </div>
-        <span
-          data-testid="code-agent-target"
-          title={meta.target === 'local' ? meta.device_name : undefined}
-          className={`whitespace-nowrap text-xs ${MUTED}`}
-        >
-          {codeAgentTargetLabel(meta)}
-        </span>
-        {meta.preview_url && (
-          <OpenAppButton
-            taskId={meta.task_id}
-            previewUrl={meta.preview_url}
-            title={meta.title ?? null}
-            provider={meta.provider}
-          />
-        )}
-        <CodeResourcesIndicator taskId={meta.task_id} running={running} />
-        {elapsed && (
-          <span data-testid="code-agent-elapsed" className={`text-xs tabular-nums ${MUTED}`}>
-            {elapsed}
-          </span>
-        )}
-        {openView && (
-          <button
-            type="button"
-            aria-label={`Maximize ${codeAgentLabel(meta.provider)}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              openView();
-            }}
-            className="rounded p-1 transition-colors hover:bg-muted dark:hover:bg-white/[.06]"
-          >
-            <Maximize2 className={`h-4 w-4 ${MUTED}`} />
-          </button>
-        )}
-        {expandable &&
-          (open ? (
-            <ChevronUp className={`h-4 w-4 flex-shrink-0 ${MUTED}`} />
-          ) : (
-            <ChevronDown className={`h-4 w-4 flex-shrink-0 ${MUTED}`} />
-          ))}
-      </div>
-
-      {state === 'failed' && <FailureBox meta={meta} fallback={vm.failureMessage} />}
-      {state === 'paused' && <PausedNote meta={meta} className="-mt-1.5 px-3.5 pb-2.5" />}
-
-      {isLive && (
-        <div className={open ? 'border-t border-border dark:border-white/[0.07]' : 'hidden'}>
-          <CodeAgentTranscript events={events} echoes={echoes} provider={meta.provider} />
-          <CodeAgentSteerInput
-            taskId={meta.task_id}
-            toolCallId={toolCallId}
-            provider={meta.provider}
-          />
-        </div>
+      className={cn(
+        'flex w-full min-w-0 items-center gap-2 text-sm',
+        MUTED,
+        openView && 'cursor-pointer hover:text-foreground',
       )}
-
-      {open && session && <SessionLine session={session} meta={meta} />}
-
-      {!isLive && open && showSummary && meta.summary && <Summary summary={meta.summary} />}
-
-      {!isLive && open && !showSummary && hasTranscript && (
-        <div className="border-t border-border pb-2 dark:border-white/[0.07]">
-          <CodeAgentTranscript events={events} echoes={echoes} provider={meta.provider} />
-        </div>
+    >
+      <Icon size={14} aria-hidden className="shrink-0" />
+      <span data-testid="code-agent-title" className="min-w-0 truncate">
+        {title}
+      </span>
+      <span
+        data-testid="code-agent-state"
+        className={cn('shrink-0', state === 'failed' && 'text-red-600 dark:text-red-400')}
+      >
+        · {STATE_WORD[state]}
+      </span>
+      <span className="flex-1" />
+      {/* Its popover opens on click: the row's click must not also open the view. */}
+      <span className="shrink-0" onClick={(event) => event.stopPropagation()}>
+        <CodeResourcesIndicator taskId={meta.task_id} running={running} />
+      </span>
+      {elapsed && (
+        <span data-testid="code-agent-elapsed" className="shrink-0 text-xs tabular-nums">
+          {elapsed}
+        </span>
       )}
     </div>
   );

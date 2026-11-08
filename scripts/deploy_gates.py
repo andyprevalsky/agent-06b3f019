@@ -46,10 +46,22 @@ DEFAULT_STATE_DIR = '.context/deploy-pipeline'
 OUTPUT_LEDGER = 'agents/benchmarks/history/'  # same exclusion as deploy_test_worker.prepare_checkout
 PARK_ENV = 'BENCHMARK_HISTORY_PARK_DIR'  # honoured by agents/benchmarks/timeout_history.py + span_history.py
 PARK_DIR = '.context/deploy-ledger-park'  # published by `scripts/deploy finish` (--apply-parked)
+# Only gates that run real benchmark tasks record publishable history rows. A test-suite gate's
+# ledger rows are fixtures: parking them made the agents span-history/benchmark ledger tests write
+# into this directory instead of their own files (and queued fixture rows for publication).
+PARK_GATES = frozenset({'smoke', 'agentcard-lifecycle'})
 LEDGER_KEEP = '.context/deploy-worker-ledgers'  # retire preserves pre-park worker ledger edits here
-# No standard gate declares its own deadline. Local transports need a finite one, so every
-# slot carries the existing backend handoff deadline (deploy_test_backend.handoff_recipe).
+# Local transports need a finite deadline, so every slot carries the existing backend handoff
+# deadline (deploy_test_backend.handoff_recipe) unless its gate has a measured one below.
 GATE_DEADLINE_SECONDS = 14400
+# Measured per-gate deadlines. semantic-stack: 72 passing runs (2026-10-29..11-06) had p50 13.7 min,
+# p99 23.1 min, max 25.1 min (Blacksmith passes 17-21 min); a run blocked for its runner's own
+# hour-long waits held PR1784's whole round for 70+ min under the 4 h default (2026-11-08).
+GATE_DEADLINES = {'semantic-stack': 1800}
+
+
+def gate_deadline(gate: str) -> int:
+    return GATE_DEADLINES.get(gate, GATE_DEADLINE_SECONDS)
 PREPARE_TIMEOUT_SECONDS = 3600
 PROVISION_JOBS = 4
 BACKEND_GATE = 'backend-coverage-blackbox'
@@ -229,14 +241,16 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
         raise Blocked('workers', f'{gate}: prepared env belongs to {values["ROSE_DEPLOY_WORKTREE_PATH"]}, not {path}')
     env = {key: values[key] for key in (*SLOT_ENV, *OPTIONAL_ENV) if values.get(key)}
     env[RUN_ROOT_ENV] = str(run_root(root))
-    env[PARK_ENV] = str(root.resolve() / PARK_DIR)
+    # Gates inherit the coordinator's environment, so a test-suite gate clears an inherited park
+    # directory explicitly (the ledger writers treat an empty value as unset).
+    env[PARK_ENV] = str(root.resolve() / PARK_DIR) if gate in PARK_GATES else ''
     marker = path / SYSTEM_PG_MARKER
     if gate == BACKEND_GATE and values.get('ROSE_USE_SYSTEM_PG') == 'true' and marker.is_file():
         # run-coverage.sh refuses an isolated system-Postgres worktree without this exact prepared database.
         env['BACKEND_COVERAGE_DATABASE_URL'] = ('postgresql://postgres:postgres@localhost:5432/'
                                                 + marker.read_text().strip())
     slot = {'id': f'{gate}-local', 'transport': 'local-isolated', 'worker_root': str(path), 'cwd': str(path),
-            'env': env, 'timeout_seconds': GATE_DEADLINE_SECONDS}
+            'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
     return slot
@@ -247,7 +261,7 @@ def remote_slot(root: Path, gate: str) -> dict:
     env = {'CONDUCTOR_WORKSPACE_NAME': f'deploy-{gate}', 'CONDUCTOR_PORT': REMOTE_PORT}
     slot = {'id': f'{gate}-blacksmith', 'transport': GITHUB_TRANSPORT,
             'runner': BLACKSMITH_RUNNERS.get(gate, DEFAULT_BLACKSMITH_RUNNER),
-            'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': GATE_DEADLINE_SECONDS}
+            'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
     return slot
@@ -444,6 +458,33 @@ def list_selected(root: Path, base: str, template: Path) -> dict:
     if not all(isinstance(selection.get(k), list) for k in ('selected', 'quick', 'needs_worker', 'omitted')):
         raise Blocked('select', 'deploy_test_plan.py --list-selected returned an incomplete selection')
     return selection
+
+
+def refresh_prisma_client(root: Path) -> None:
+    """The local quick gates typecheck this checkout against its own generated Prisma client.
+
+    A sync that pulls a schema change leaves that client stale: PR #1784 and PR #1770 (2026-11-08)
+    both failed typescript with TS2353 on main's new CodeSession.closingTaskId after syncing.
+    scripts/ensure-prisma-client.sh regenerates it only when stale, inside this checkout.
+    """
+    result = subprocess.run(['bash', str(root / 'scripts/ensure-prisma-client.sh'), str(root)], cwd=root)
+    if result.returncode:
+        raise Blocked('prisma', f'scripts/ensure-prisma-client.sh exited {result.returncode}; this checkout\'s '
+                                'Prisma client may not match back-end/prisma/schema.prisma')
+
+
+def unpushed_smoke_refusal(root: Path, head: str) -> str | None:
+    """Cloud smoke guests fetch only pushed commits. Refuse before any worker, plan or cycle starts.
+
+    PR #1767 ran gates on an unpushed `scripts/deploy sync` merge: every smoke job died at run-bench
+    preflight and the cycle kept an unreconcilable cleanup owner, costing a fresh cycle and ~1 h of
+    reruns. Same check as the adapter and run-bench-fleet (deploy_test_cloud.origin_fetchable).
+    """
+    from deploy_test_cloud import origin_fetchable
+    if origin_fetchable(root, head):
+        return None
+    return (f'HEAD {head} is not fetchable from origin and cloud smoke is selected; push it first '
+            f'(git push origin HEAD), then rerun scripts/deploy gates')
 
 
 def factory_event(root: Path, *event: str) -> None:
@@ -718,12 +759,18 @@ def run(args, root: Path) -> int:
                 sampler = MemorySampler(target.resolve(), {'coordinator': root}, args.abort_below_mb)
                 sampler.begin()
             selection = list_selected(root, args.base, candidate_template)
+        if CLOUD_GATE in selection['selected']:
+            refusal = unpushed_smoke_refusal(root, head)
+            if refusal:
+                raise Blocked('source', refusal)
         workers = layout(root, head, selection['needs_worker'], args.executor)
         capacity = check_capacity(root, [w for w in workers if w['mode'] != 'remote'])  # remote VMs use no host room
         if not args.dry_run:
             print(f"DEPLOY_GATES CAPACITY ok: need {capacity['memory_mb']} MB available (have "
                   f"{capacity['available_mb']:.0f}), {capacity['disk_mb'] / 1024:.1f} GB disk (have "
                   f"{capacity['free_disk_mb'] / 1024:.1f})")
+        if not args.dry_run:
+            refresh_prisma_client(root)
         if sampler is not None:
             sampler.set_roots({w['gate']: Path(w['path']) for w in workers if w['mode'] in ('create', 'reuse')})
         py = sys.executable

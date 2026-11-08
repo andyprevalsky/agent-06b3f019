@@ -751,6 +751,13 @@ const codexHome = join(home, ".codex");
 // and the session's scratch dirs stay under HOME.
 const PROJECT_WORKDIR = process.env.ROSE_PROJECT_WORKDIR || "";
 const projectMode = Boolean(PROJECT_WORKDIR) && existsSync(PROJECT_WORKDIR);
+// Project sessions (backend restoreWorkspace): the checkout is already in
+// ~/workspace with its env files; run the project's startup script before the
+// CLI on every boot (create and resume) and tell the CLI how it went.
+const PROJECT_STARTUP = process.env.ROSE_PROJECT_STARTUP || "";
+const PROJECT_STARTUP_CONFIG = process.env.ROSE_PROJECT_STARTUP_CONFIG || "";
+const PROJECT_NAME = process.env.ROSE_PROJECT_NAME || "";
+const PROJECT_STARTUP_REPORT_PREFIX = "ROSE_PROJECT_STARTUP_REPORT ";
 mkdirSync(codexHome, { recursive: true });
 mkdirSync(join(home, "attachments"), { recursive: true });
 mkdirSync(join(home, "output"), { recursive: true });
@@ -873,7 +880,7 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
     log("info", "Resuming existing repository", { workDir });
   } catch (err) {
     log("error", "Failed to refresh resumed repository", {
-      error: err.message,
+      error: redactCredentials(err.message),
     });
   }
 } else if (GITHUB_REPO_URL && !projectMode) {
@@ -902,9 +909,11 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
   } catch (err) {
     appendOutput(
       "stderr",
-      `[Setup] Failed to clone repository: ${err.message}\n`,
+      `[Setup] Failed to clone repository: ${redactCredentials(err.message)}\n`,
     );
-    log("error", "Failed to clone repository", { error: err.message });
+    log("error", "Failed to clone repository", {
+      error: redactCredentials(err.message),
+    });
   }
 }
 
@@ -916,6 +925,14 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
 
 // Persistent code sessions work on their own branch (code-agent-persistent-
 // sessions.md §1b); same contract as the Claude Code ws-server.
+// Credentials never leave the server in text: a URL's userinfo and the token
+// itself are masked in every error that reaches a log, an event or the output.
+function redactCredentials(text) {
+  let out = String(text ?? "").replace(/(https?:\/\/)[^@\s/]+@/g, "$1***@");
+  if (GITHUB_TOKEN) out = out.split(GITHUB_TOKEN).join("***");
+  return out;
+}
+
 function gitRun(args, cwd) {
   try {
     const stdout = execFileSync("git", args, {
@@ -927,8 +944,26 @@ function gitRun(args, cwd) {
     });
     return { ok: true, out: String(stdout).trim() };
   } catch (err) {
-    return { ok: false, out: String(err?.stderr || err?.message || "").trim() };
+    return {
+      ok: false,
+      status: err?.status ?? null,
+      out: redactCredentials(String(err?.stderr || err?.message || "").trim()),
+    };
   }
+}
+
+// A base that cannot be fetched is "not on the remote" only when the remote
+// answers that no such branch exists (`git ls-remote --exit-code` exits 2). Any
+// other failure (GitHub refusing with a rate limit, an outage, no network) is
+// reported with git's own output, so the agent is not told to fix a branch that
+// is fine. git exposes no reset time for a refusal.
+function baseFetchError(base, repoDir, fetched) {
+  const probe = gitRun(
+    ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${base}`],
+    repoDir,
+  );
+  if (probe.status === 2) return `base branch ${base} is not on the remote`;
+  return `could not fetch base branch ${base}: ${(fetched.out || probe.out).slice(0, 300)}`;
 }
 
 function prepareCodeSessionBranch(repoDir) {
@@ -982,7 +1017,7 @@ function prepareCodeSessionBranch(repoDir) {
         start = `origin/${base}`;
         result.source = "base";
       } else {
-        result.error = `base branch ${base} is not on the remote`;
+        result.error = baseFetchError(base, repoDir, fetched);
       }
     } else {
       gitRun(["remote", "set-head", "origin", "-a"], repoDir);
@@ -1006,9 +1041,10 @@ function prepareCodeSessionBranch(repoDir) {
   return result;
 }
 
+// A restored project workspace gets the same branch model as a cloned repo.
 const codeSessionBranch =
-  GITHUB_REPO_URL && workDir === REPO_WORKDIR
-    ? prepareCodeSessionBranch(REPO_WORKDIR)
+  (GITHUB_REPO_URL && workDir === REPO_WORKDIR) || projectMode
+    ? prepareCodeSessionBranch(workDir)
     : null;
 if (codeSessionBranch) {
   appendEvent({
@@ -1033,11 +1069,165 @@ appendEvent({
     )?.[1] || null,
 });
 
+function startupBudgetMs() {
+  try {
+    const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
+    const timeoutS = Number(cfg.timeoutS);
+    return ((Number.isFinite(timeoutS) ? timeoutS : 120) + 30) * 1000;
+  } catch {
+    return 150 * 1000;
+  }
+}
+
+/**
+ * The runner's report: the last stdout line with the report prefix, parsed.
+ * Returns { report } or { problem: "missing" | "malformed" }, so a crash that
+ * wrote nothing is told apart from a report that cannot be read.
+ */
+function parseProjectStartupReport(output) {
+  const line = output
+    .split("\n")
+    .reverse()
+    .find((l) => l.startsWith(PROJECT_STARTUP_REPORT_PREFIX));
+  if (line === undefined) return { problem: "missing" };
+  try {
+    const report = JSON.parse(line.slice(PROJECT_STARTUP_REPORT_PREFIX.length));
+    if (
+      report !== null &&
+      typeof report === "object" &&
+      !Array.isArray(report) &&
+      typeof report.status === "string"
+    ) {
+      return { report };
+    }
+  } catch {
+    // Not JSON: reported as malformed below.
+  }
+  return { problem: "malformed" };
+}
+
+/** Run the project's startup script (bounded); resolves its report or null. */
+function runProjectStartup() {
+  if (!projectMode || !PROJECT_STARTUP || !existsSync(PROJECT_STARTUP)) {
+    return Promise.resolve(null);
+  }
+  appendEvent({
+    type: "project_startup",
+    status: "running",
+    project: PROJECT_NAME,
+  });
+  appendOutput(
+    "stdout",
+    `[Project] Running startup script for ${PROJECT_NAME}\n`,
+  );
+  return new Promise((resolve) => {
+    let stdout = "";
+    let settled = false;
+    let guard = null;
+    const done = (report) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(guard);
+      appendEvent({
+        type: "project_startup",
+        project: PROJECT_NAME,
+        ...report,
+      });
+      log("info", "Project startup finished", {
+        status: report.status,
+        exitCode: report.exitCode,
+        durationMs: report.durationMs,
+      });
+      resolve(report);
+    };
+    const fallback = (status, detail) => ({
+      status,
+      exitCode: null,
+      durationMs: 0,
+      timeoutS: null,
+      outputTail: detail,
+      logPath: null,
+    });
+    const child = spawn(
+      process.execPath,
+      [PROJECT_STARTUP, PROJECT_STARTUP_CONFIG].filter(Boolean),
+      {
+        cwd: workDir,
+        env: { ...process.env, HOME: home },
+        // A piped stdin closed at once: the startup script gets EOF, and the
+        // stdin structural guard (no "ignore") still holds for every spawn.
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    child.stdin.end();
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      stdout = (stdout + text).slice(-64 * 1024);
+      appendOutput("stdout", text);
+    });
+    child.stderr.on("data", (chunk) =>
+      appendOutput("stderr", chunk.toString("utf8")),
+    );
+    // Backstop only: the runner enforces the script's own timeout (SIGTERM then
+    // SIGKILL of the script's process group, which it spawns detached) well
+    // inside this budget. Daemons the script starts (Postgres, dev servers)
+    // are meant to outlive startup (startupRunner.ts contract), and they are
+    // not in the runner's group, so killing more than the runner is wrong.
+    guard = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already exited
+      }
+      done(fallback("timeout", "startup runner did not finish"));
+    }, startupBudgetMs());
+    child.on("error", (err) => done(fallback("failed", err.message)));
+    // "close", not "exit": "exit" can fire before the last stdout chunk (the
+    // report line) is read. The runner is the only holder of its stdout pipe
+    // (the script runs on pipes of its own), so close follows its exit.
+    child.on("close", (code, signal) => {
+      const ended = signal ? `signal ${signal}` : `exit code ${code}`;
+      const parsed = parseProjectStartupReport(stdout);
+      if (parsed.report) {
+        done(parsed.report);
+        return;
+      }
+      done(
+        fallback(
+          "failed",
+          parsed.problem === "malformed"
+            ? `startup runner wrote a malformed report (${ended})`
+            : `startup runner produced no report (${ended})`,
+        ),
+      );
+    });
+  });
+}
+
+/** One factual paragraph for the CLI about the project startup outcome. */
+function projectStartupNote(report) {
+  if (!report || report.status === "skipped") return "";
+  const name = PROJECT_NAME ? ` for project ${PROJECT_NAME}` : "";
+  const secs = ((report.durationMs || 0) / 1000).toFixed(1);
+  const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
+  if (report.status === "ok") {
+    return `Project startup${name} finished OK in ${secs}s.${logRef}\n\n`;
+  }
+  const tail = String(report.outputTail || "").slice(-1500);
+  const what =
+    report.status === "timeout"
+      ? `TIMED OUT after ${report.timeoutS ?? "?"}s and was stopped; services it starts may not be running.`
+      : `FAILED (exit ${report.exitCode ?? "?"}) after ${secs}s.`;
+  return `Project startup${name} ${what}${logRef}\nLast output:\n${tail}\n\n`;
+}
+
+const projectStartupReport = await runProjectStartup();
+
 const sanitizedGoal = [
   CODE_AGENT_SYSTEM_PROMPT
     ? `System instructions:\n${CODE_AGENT_SYSTEM_PROMPT}`
     : "",
-  `Task:\n${GOAL.replace(/\0/g, "")}`,
+  `${projectStartupNote(projectStartupReport)}Task:\n${GOAL.replace(/\0/g, "")}`,
 ]
   .filter(Boolean)
   .join("\n\n");
