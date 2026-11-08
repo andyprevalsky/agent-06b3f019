@@ -135,6 +135,17 @@ class GateSetupTools(unittest.TestCase):
         self.assertIn('pypi', version.stdout)
         self.assertIn(f"UV_CACHE_DIR={self.deps / 'uv-cache'}", (Path(self.tmp.name) / 'github-env').read_text())
 
+    def test_optional_tools_down_warn_but_do_not_fail_every_gate(self):
+        (Path(self.tmp.name) / 'no-github').touch()
+        executable(self.bin / 'curl', '#!/bin/sh\nexit 22\n')  # GitHub Releases and fly.io both 504
+        result = self.run_block(failures=0)
+        self.assertEqual(result.returncode, 0, result.stderr)  # uv came from PyPI
+        self.assertIn('DEPLOY_GATE_TOOLS_UNAVAILABLE flyctl ngrok cloudflared', result.stderr)
+        for tool in ('flyctl', 'ngrok', 'cloudflared'):
+            self.assertFalse((self.deps / 'tools' / tool).exists(), f'a broken {tool} must not be cached')
+        rerun = self.run_block(failures=0)  # the next VM retries the missing tools, not a stale stub
+        self.assertIn('DEPLOY_GATE_TOOLS_UNAVAILABLE', rerun.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

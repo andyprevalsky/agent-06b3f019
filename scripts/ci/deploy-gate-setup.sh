@@ -100,7 +100,12 @@ for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
+# flyctl, ngrok and cloudflared serve only the gates that drive Fly or a public tunnel. Hunt round 9:
+# fly.io/install.sh and GitHub Releases both returned 504s for minutes, and a fatal install failed
+# every gate of the round, including the many that never call them. A missing optional tool is now a
+# loud warning naming it; a gate that needs it fails at first use with "command not found: <tool>".
 step "flyctl"
+MISSING_TOOLS=()
 if [ ! -x "$TOOLS/flyctl" ]; then
   for attempt in 1 2 3; do
     fetch https://fly.io/install.sh "$TOOLS/.fly-install.sh" \
@@ -109,7 +114,7 @@ if [ ! -x "$TOOLS/flyctl" ]; then
     echo "flyctl install attempt $attempt failed" >&2; sleep 10
   done
 fi
-"$TOOLS/flyctl" version >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
+"$TOOLS/flyctl" version >/dev/null 2>&1 || { rm -f "$TOOLS/flyctl"; MISSING_TOOLS+=(flyctl); }
 
 step "tunnel tools"
 # run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
@@ -117,13 +122,21 @@ step "tunnel tools"
 # $TOOLS is first on PATH here and (via GITHUB_PATH) in every later step.
 if ! command -v ngrok >/dev/null; then
   NGROK_INSTALL_DIR="$TOOLS" bash scripts/cloudbench-install-ngrok.sh >/dev/null \
-    || { sleep 15; NGROK_INSTALL_DIR="$TOOLS" bash scripts/cloudbench-install-ngrok.sh >/dev/null; }
+    || { sleep 15; NGROK_INSTALL_DIR="$TOOLS" bash scripts/cloudbench-install-ngrok.sh >/dev/null; } \
+    || MISSING_TOOLS+=(ngrok)
 fi
 if ! command -v cloudflared >/dev/null; then
-  fetch https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 "$TOOLS/.cloudflared"
-  install -m 0755 "$TOOLS/.cloudflared" "$TOOLS/cloudflared" && rm -f "$TOOLS/.cloudflared"
+  if fetch https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 "$TOOLS/.cloudflared"; then
+    install -m 0755 "$TOOLS/.cloudflared" "$TOOLS/cloudflared"
+  else
+    MISSING_TOOLS+=(cloudflared)
+  fi
+  rm -f "$TOOLS/.cloudflared"
 fi
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
+if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
+  echo "::warning::DEPLOY_GATE_TOOLS_UNAVAILABLE ${MISSING_TOOLS[*]}: their download hosts failed after retries; a gate that needs them fails at first use" >&2
+fi
 
 step "dependency disk"
 sudo chown "$(id -u):$(id -g)" "$DEPS"
