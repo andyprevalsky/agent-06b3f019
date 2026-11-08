@@ -711,6 +711,44 @@ with (root/'wireguard-calls').open('a')as stream:
                 for name in ('log','bootstrap_log'):
                     if not value[name].closed:value[name].close()
 
+    def test_relay_app_metadata_read_retries_a_transient_fly_stall(self):
+        """PR #1826 gates r5: one `flyctl status -a <bench app> --json` stalled past its 30 s timeout
+        (Fly answered in 2.5 s minutes later) and the whole 13-task deploy smoke campaign failed before
+        allocating anything. The read-only metadata call retries within its bound; the relay still starts."""
+        from unittest.mock import patch
+        f,repo,home,module,environment=self.campaign_relay_fixture()
+        bin_path=f.root/'bin';(bin_path/'flyctl').rename(bin_path/'flyctl-real')
+        (bin_path/'flyctl').write_text('#!/usr/bin/env bash\n'
+            'if [ "$1" = status ]; then echo "$*" >> "$PARENT_RELAY_CASE/status-calls"; fi\n'
+            'if [ "$1" = status ] && [ ! -e "$PARENT_RELAY_CASE/stalled-once" ]; then\n'
+            ' : > "$PARENT_RELAY_CASE/stalled-once"; exec sleep 20\nfi\n'
+            'exec "$(dirname "$0")/flyctl-real" "$@"\n')
+        (bin_path/'flyctl').chmod(0o700)
+        relay_globals=module['read_relay_app_metadata'].__globals__
+        value=None
+        try:
+            with patch.dict(os.environ,environment,clear=True),patch.dict(relay_globals,RELAY_METADATA_TIMEOUT=1):
+                started=time.monotonic()
+                value=module['start_shared_relay'](repo,f.root/'campaign',repo,f.feed,time.monotonic()+15)
+                self.assertLess(time.monotonic()-started,12)
+                self.assertEqual(len((f.root/'status-calls').read_text().splitlines()),2)
+                self.assertIsNone(value['process'].poll())
+                self.assertTrue(module['stop_shared_relay'](value))
+            # The bound holds: a stall on every attempt still fails the campaign normally.
+            (f.root/'status-calls').unlink()
+            (bin_path/'flyctl').write_text('#!/usr/bin/env bash\necho "$*" >> "$PARENT_RELAY_CASE/status-calls"; exec sleep 20\n')
+            with patch.dict(os.environ,environment,clear=True),patch.dict(relay_globals,RELAY_METADATA_TIMEOUT=1):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    module['read_relay_app_metadata']('fixture',repo,dict(os.environ),time.monotonic()+15)
+            self.assertEqual(len((f.root/'status-calls').read_text().splitlines()),3)
+        finally:
+            if value:
+                for name in ('process','bootstrap'):
+                    process=value[name]
+                    if process.poll()is None:process.terminate();process.wait(timeout=4)
+                for name in ('log','bootstrap_log'):
+                    if not value[name].closed:value[name].close()
+
     def test_second_campaign_in_one_home_refuses_a_second_agent_on_the_wireguard_peer(self):
         """One HOME has one wire_guard_state peer, so at most one campaign agent.
 
