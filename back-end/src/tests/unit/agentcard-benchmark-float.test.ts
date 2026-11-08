@@ -30,10 +30,20 @@ async function withOrgRuntime(
   for (const name of ORG_ENV_NAMES) delete process.env[name];
   process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'direct-org-token';
   let calls = 0;
-  const runtime = new AgentCardOrgRuntime(async (_token, toolName) => {
-    calls += 1;
-    return toolResults(toolName, calls);
-  });
+  let virtualNowMs = Date.now();
+  const runtime = new AgentCardOrgRuntime(
+    async (_token, toolName) => {
+      calls += 1;
+      return toolResults(toolName, calls);
+    },
+    fetch,
+    {
+      now: () => virtualNowMs,
+      sleep: async (ms) => {
+        virtualNowMs += ms;
+      },
+    }
+  );
   try {
     await run(
       (toolName, args, deadlineAtMs) => runtime.callTool(toolName, args, deadlineAtMs),
@@ -440,7 +450,7 @@ async function main(): Promise<void> {
           return true;
         }
       );
-      assert.equal(calls(), 3, 'rate-limit retries must stay bounded');
+      assert.equal(calls(), 5, 'rate-limit retries on a read must stay bounded');
     }
   );
 
