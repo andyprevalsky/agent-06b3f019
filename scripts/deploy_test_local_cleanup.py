@@ -165,11 +165,26 @@ def quiet(root):
         scan_same_user_processes(inspect, lambda pid: need(False, f'worker root process {pid} is unverifiable'))
 
 
+def structural_original_gate(original, current):
+    """Authenticate only a selection-explanation change, never an execution change."""
+    from deploy_test_cycle import digest
+    need(isinstance(original, dict) and set(original) == set(current)
+         and all(isinstance(gate.get('selection_evidence'), list)
+                 and all(isinstance(item, str) for item in gate['selection_evidence'])
+                 for gate in (original, current)), 'structural original contract shape')
+    need(digest({k: v for k, v in original.items() if k != 'selection_evidence'}) ==
+         digest({k: v for k, v in current.items() if k != 'selection_evidence'}),
+         'structural execution contract changed')
+
+
 def structural_cleanup(state, receipt, proof):
     """A fully reaped failed structural suite may launch again, without test credit."""
     import hashlib
     from deploy_test_cycle import bounded_read, digest, sha_file
     gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    if 'original_gate' in proof:
+        structural_original_gate(proof['original_gate'], gate)
+        gate = proof['original_gate']
     root = Path(gate['worker_root']).resolve(strict=True)
     name = gate['name']
     need(gate.get('category') == name == 'deploy-command-structural'
@@ -455,7 +470,12 @@ def validate(state, receipt, proof):
         from deploy_test_backend_preflight_cleanup import validate as validate_preflight
         return validate_preflight(state, receipt, proof)
     from deploy_test_cycle import bounded_read, digest, sha_file
-    need(set(proof) == {'kind', 'files', 'confirmed_at', 'observed_by'} and proof['kind'] == KIND,
+    fields = {'kind', 'files', 'confirmed_at', 'observed_by'}
+    if (receipt.get('gate') == 'deploy-command-structural'
+            and receipt.get('cancelled') is False and receipt.get('lifecycle') == 'owned'
+            and 'original_gate' in proof):
+        fields.add('original_gate')
+    need(set(proof) == fields and proof['kind'] == KIND,
          'proof fields')
     need(isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'independent observer missing')
     confirmed = proof['confirmed_at']
@@ -566,6 +586,7 @@ def reconcile(state, occurrence_id, proof):
 
 
 def still_bound(state, receipt, entry):
+    from deploy_test_cycle import digest
     need(entry.get('kind') == KIND and entry.get('gate') == receipt['gate']
          and entry.get('token') == receipt['token'] and entry.get('credit_granted') is False, 'reconciliation changed')
     # Cleanup belongs to the original execution contract; a refreshed full
@@ -573,9 +594,15 @@ def still_bound(state, receipt, entry):
     gate = entry.get('execution_gate')
     original = {**state, 'plan': {'gates': [gate]}} if gate is not None else state
     try:
+        if 'original_gate' in entry['proof']:
+            need(entry['gate'] == 'deploy-command-structural'
+                 and isinstance(gate, dict) and digest(gate) == digest(entry['proof']['original_gate']),
+                 'original structural witness changed')
         if gate is not None:
             from deploy_test_result import preserve_contract
             current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+            if 'original_gate' in entry['proof']:
+                structural_original_gate(gate, current)
             preserve_contract(gate, current)
             need(set(gate['checks']) <= set(current['checks']), 'original checks removed')
         validate(original, receipt, entry['proof'])

@@ -4677,6 +4677,112 @@ class StructuralSupervisorCleanup(unittest.TestCase):
 
     reconcile = LocalCleanup.reconcile
 
+    def metadata_drift_fixture(self):
+        self.set_cases_only_recipe()
+        self.gate['selection_evidence'] = ['dependency graph: 98 affected units']
+        self.receipt['execution_binding']['contract_digest'] = c.digest(self.gate)
+        self.write_native()
+        original = copy.deepcopy(self.gate)
+        self.gate['selection_evidence'] = ['dependency graph: 101 affected units']
+        self.proof['original_gate'] = original
+        return original
+
+    def test_original_contract_witness_allows_selection_metadata_drift_without_credit(self):
+        self.metadata_drift_fixture()
+        native = {n: p.read_bytes() for n, p in self.paths.items()}
+        pending = copy.deepcopy(self.state['pending'])
+        failure = copy.deepcopy(self.failure)
+        self.reconcile()
+        self.assertEqual([], c.retained_owners(self.state, [self.gate['name']]))
+        self.assertEqual(pending, self.state['pending'])
+        self.assertEqual(failure, self.failure)
+        self.assertFalse(self.state['ready'])
+        self.assertIsNone(c.full_pass_binding(self.state, self.gate))
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual(native, {n: p.read_bytes() for n, p in self.paths.items()})
+        self.gate['selection_evidence'] = ['dependency graph: 102 affected units']
+        self.assertEqual([], c.retained_owners(self.state, [self.gate['name']]))
+
+    def test_original_contract_witness_rejects_forged_digest_and_execution_drift(self):
+        self.metadata_drift_fixture()
+        original_proof = copy.deepcopy(self.proof)
+        original_gate = copy.deepcopy(self.gate)
+        changes = [
+            lambda: self.proof.pop('original_gate'),
+            lambda: self.proof.update(original_gate='not a contract'),
+            lambda: self.proof['original_gate'].update(selection_evidence=['forged old count']),
+            lambda: self.proof['original_gate'].pop('command'),
+            lambda: self.proof['original_gate'].update(extra='unbound'),
+            lambda: self.proof['original_gate'].update(checks=['another-check']),
+            lambda: self.proof['original_gate'].update(env={'UNBOUND': '1'}),
+            lambda: self.proof['original_gate'].update(worker_root='/foreign'),
+            lambda: self.proof['original_gate'].update(result_transport='file'),
+            lambda: self.gate.update(env={'CHANGED': '1'}),
+            lambda: self.proof['original_gate'].update(selection_evidence=[False]),
+        ]
+        for index, change in enumerate(changes):
+            with self.subTest(change=index):
+                self.proof = copy.deepcopy(original_proof)
+                self.gate.clear(); self.gate.update(copy.deepcopy(original_gate))
+                change()
+                before = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    self.reconcile()
+                self.assertEqual(before, self.state)
+
+    def test_original_contract_witness_is_structural_only_and_sealed_on_recheck(self):
+        import deploy_test_local_cleanup as local
+        self.metadata_drift_fixture()
+        for changes in ({'gate': 'backend-coverage-blackbox'}, {'gate': 'agentcard-lifecycle'},
+                        {'cancelled': True}, {'lifecycle': 'interrupted'}):
+            with self.subTest(changes=changes):
+                with self.assertRaisesRegex(ValueError, 'proof fields'):
+                    local.validate(self.state, {**self.receipt, **changes}, self.proof)
+        self.reconcile()
+        baseline = copy.deepcopy(self.state)
+        for field, value in [('command', ['foreign']), ('env', {'CHANGED': '1'}),
+                             ('native_cloud', True), ('native_backend', True),
+                             ('quick', True), ('unrecognized_option', True),
+                             ('checks', ['foreign']), ('selection_evidence', [False])]:
+            with self.subTest(field=field):
+                state = copy.deepcopy(baseline)
+                state['plan']['gates'][0][field] = value
+                with self.assertRaises(ValueError):
+                    c.retained_owners(state, [self.gate['name']])
+        state = copy.deepcopy(baseline)
+        next(iter(state['reconciled_owners'].values())).pop('execution_gate')
+        with self.assertRaises(ValueError):
+            c.retained_owners(state, [self.gate['name']])
+
+    def test_original_contract_witness_rejects_boolean_numeric_execution_drift(self):
+        self.metadata_drift_fixture()
+        for field in ('aggregate', 'case_protocol'):
+            for value in (1, 1.0):
+                with self.subTest(field=field, value=value):
+                    state = copy.deepcopy(self.state)
+                    gate = state['plan']['gates'][0]
+                    if field == 'aggregate':
+                        gate['worker_recipe']['cases'][gate['name']]['aggregate'] = value
+                    else:
+                        gate[field] = value
+                    with self.assertRaises(ValueError):
+                        c.reconcile(state, 'occurrence', copy.deepcopy(self.proof))
+
+    def test_original_contract_witness_recheck_rejects_boolean_numeric_execution_drift(self):
+        self.metadata_drift_fixture()
+        self.reconcile()
+        for field in ('aggregate', 'case_protocol'):
+            for value in (1, 1.0):
+                with self.subTest(field=field, value=value):
+                    state = copy.deepcopy(self.state)
+                    gate = state['plan']['gates'][0]
+                    if field == 'aggregate':
+                        gate['worker_recipe']['cases'][gate['name']]['aggregate'] = value
+                    else:
+                        gate[field] = value
+                    with self.assertRaises(ValueError):
+                        c.retained_owners(state, [self.gate['name']])
+
     def test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts(self):
         original={n:p.read_bytes() for n,p in self.paths.items()}
         pending=copy.deepcopy(self.state['pending'])
