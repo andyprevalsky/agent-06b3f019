@@ -439,6 +439,77 @@ class HarnessProcesses(unittest.TestCase):
             self.assertFalse(d.is_harness_process(exe, argv), (exe, argv))
 
 
+class CurrentCodeModeHost(unittest.TestCase):
+    EXE = '/opt/devbox-tools/codex/versions/test/vendor/bin/codex-code-mode-host'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.proc = Path(self.tmp.name) / 'proc'
+        self.root = Path(self.tmp.name) / 'checkout'
+        self.root.mkdir()
+        self.add(900, 1, str(Path(self.EXE).with_name('codex')))
+        self.add(123, 900, self.EXE)
+
+    def add(self, pid, ppid, exe):
+        folder = self.proc / str(pid)
+        (folder / 'task' / str(pid)).mkdir(parents=True)
+        (folder / 'task' / str(pid) / 'children').write_text('')
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + ' 100 0\n')
+        (folder / 'cmdline').write_bytes(exe.encode() + b'\0')
+        (folder / 'cwd').symlink_to(self.root)
+        (folder / 'exe').symlink_to(exe)
+
+    def live(self):
+        with patch.object(d, 'own_pids', return_value={900}), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            return {row['pid'] for row in d.live_processes(self.root)}
+
+    def test_current_managed_code_host_is_harness_but_foreign_host_is_live(self):
+        self.assertNotIn(123, self.live())
+        with patch.object(d, 'own_pids', return_value=set()), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            self.assertIn(123, {row['pid'] for row in d.live_processes(self.root)})
+
+    def test_full_agents_unmanaged_hosts_and_non_sibling_parents_stay_live(self):
+        for exe in ('/usr/bin/node', '/tmp/codex-code-mode-host', self.EXE.replace('-code-mode-host', ''),
+                    '/opt/devbox-tools/codex-evil/bin/codex-code-mode-host'):
+            with self.subTest(exe=exe):
+                link = self.proc / '123' / 'exe'
+                link.unlink()
+                link.symlink_to(exe)
+                self.assertIn(123, self.live())
+        link.unlink()
+        link.symlink_to(self.EXE)
+        parent = self.proc / '900' / 'exe'
+        parent.unlink()
+        parent.symlink_to('/opt/devbox-tools/codex/versions/other/bin/codex')
+        self.assertIn(123, self.live())
+
+    def test_child_of_nonleader_thread_or_unknown_task_blocks(self):
+        thread = self.proc / '123' / 'task' / '124'
+        thread.mkdir()
+        (thread / 'children').write_text('456')
+        self.assertIn(123, self.live())
+        (thread / 'children').unlink()
+        self.assertIn(123, self.live())
+
+    def test_pid_reuse_or_changing_parent_identity_refuses_exemption(self):
+        original = d.stat_fields
+        for changed_pid in (123, 900):
+            calls = 0
+            def changing(proc, pid):
+                nonlocal calls
+                row = original(proc, pid)
+                if pid == changed_pid:
+                    calls += 1
+                    if calls > 1:
+                        row[19] = str(100 + calls)
+                return row
+            with self.subTest(pid=changed_pid), patch.object(d, 'stat_fields', side_effect=changing):
+                self.assertIn(123, self.live())
+
+
 class IdleDaemonCodexServer(unittest.TestCase):
     """2026-11-08 (PR #1778 closeout): the daemon's idle codex app-server kept every devbox NOT_READY."""
     EXE = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/bin/codex'
