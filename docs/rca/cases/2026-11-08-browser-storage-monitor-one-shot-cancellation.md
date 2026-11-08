@@ -79,6 +79,23 @@ claim shutdown or release at the native deadline. Final storage-save dispatch
 precedes BrowserStopEvent, and success requires the real WebSocket close
 handshake. Receipt hashes, native logs and the initial controlled stack are
 preserved privately. No production money or paid provider was used locally.
+The first three-case proof checks event order, not actual storage persistence.
+Review caught that gap and that its race was scheduled after the new prejoin.
+A supplemental registered browser_tilion blackbox connects real Chromium through
+the isolated single-client gateway, seeds a cookie and localStorage, independently
+schedules the RPC future completion during the first prejoin cancellation, and
+requires a reply observed with cancellation pending plus at least two cancellation
+requests before task completion. The provider's actual transport retirement reads
+the persisted state file and checks both seeded values. The exact same test fails
+at20seconds against an isolated single-cancel/await control and passes with the
+real fix. Fixture-only teardown after the recorded failure allows5seconds for
+native stop before stopping its own client/event bus; it does not extend the
+assertion deadline or credit a late cleanup as success. Earlier interrupted
+fixture trials are retained and are not counted as complete proof. See the private
+storage-persistence-native-pair.json receipt. The unchanged existing full Tilion
+suite also passed on38e61 before this additional case; final-source gates must
+include the new registered case.
+
 Golden reference: existing owned-CDP checkpoint contract; no prompt or trajectory
 change, no assertion, timeout, concurrency or coverage relaxation.
 
