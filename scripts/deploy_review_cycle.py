@@ -401,6 +401,7 @@ def _gh_json(args: list[str]) -> object:
 
 
 def _gh_pages(endpoint: str) -> list[object]:
+    """Read a complete endpoint inventory or reject pagination truncation."""
     items: list[object] = []
     for page in range(1, GH_MAX_PAGES + 1):
         payload = _gh_json(["api", f"{endpoint}?per_page={GH_PAGE_SIZE}&page={page}"])
@@ -593,6 +594,7 @@ def _review_source_links(body: str) -> tuple[set[tuple[str, str]], set[tuple[str
 
 
 def _contradicts_review_head(body: str, head: str, repository: str) -> bool:
+    """Detect conflicting labelled source references while leaving opaque tokens alone."""
     # Only labelled references and native links assert commit identity. The v2
     # invocation and unrelated identifiers stay opaque, including 40-hex tokens.
     plain = re.sub(r'[*`]', '', body)
@@ -627,6 +629,7 @@ def _modern_exhaustion_binding(
         return None
 
     def official(comment: dict[str, object]) -> bool:
+        """Require the native CodeRabbit bot and application identities."""
         app, user = comment.get('performed_via_github_app'), comment.get('user')
         return (_is_bot(comment) and isinstance(user, dict) and user.get('type') == 'Bot'
                 and isinstance(app, dict) and app.get('slug') == 'coderabbitai')

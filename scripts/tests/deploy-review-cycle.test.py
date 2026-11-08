@@ -1128,7 +1128,7 @@ class ModernQuotaTest(unittest.TestCase):
         for label in ['no-config', 'no-request', 'path-only', 'rate-only', 'no-marker',
                       'wrong-config-head', 'wrong-pr', 'spoof-bot', 'stale-reply',
                       'stale-config', 'edited-request', 'untrusted-request',
-                      'duplicate-request', 'duplicate-token', 'no-exact-check', 'successful-check']:
+                      'duplicate-request', 'request-after-reply', 'duplicate-token', 'no-exact-check', 'successful-check']:
             cases[label] = deepcopy(self.data)
         cases['no-config']['issue_comments'].pop(0)
         cases['no-request']['issue_comments'].pop(1)
@@ -1143,6 +1143,7 @@ class ModernQuotaTest(unittest.TestCase):
         cases['edited-request']['issue_comments'][1]['updated_at'] = '2026-11-08T10:45:33Z'
         cases['untrusted-request']['issue_comments'][1]['author_association'] = 'NONE'
         cases['duplicate-request']['issue_comments'].append(deepcopy(self.data['issue_comments'][1]))
+        cases['request-after-reply']['issue_comments'][1].update(created_at='2026-11-08T10:45:39Z', updated_at='2026-11-08T10:45:39Z')
         cases['duplicate-token']['issue_comments'].append(deepcopy(self.data['issue_comments'][2]))
         cases['no-exact-check']['check_runs'][0].pop('head_sha')
         cases['successful-check']['check_runs'][0]['conclusion'] = 'success'

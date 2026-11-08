@@ -379,6 +379,7 @@ def guard(state, gate, root, legacy=None, *, current=None):
 
 
 def verify(state, root):
+    """Validate retained provenance and every protected obligation against the current plan."""
     import deploy_test_cycle as c
     verify_import_origin(state, root)
     if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
@@ -411,6 +412,7 @@ def verify_import_origin(state, root):
 
 
 def state_identity(state):
+    """Bind admission to current inputs and the complete retained custody provenance."""
     import deploy_test_cycle as c
     return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
                     'historical_no_retry_custody', 'historical_custody_history', 'historical_custody_import')})

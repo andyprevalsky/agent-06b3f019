@@ -490,6 +490,7 @@ def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, roo
 
 
 def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+    """Admit one source-bound gate, run it, and retain its native cleanup receipt."""
     from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
@@ -2160,6 +2161,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
