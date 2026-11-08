@@ -12,6 +12,7 @@ import sys
 import builtins
 import contextlib
 import io
+import json
 import runpy
 from unittest.mock import patch
 from pathlib import Path
@@ -253,6 +254,31 @@ def check_new_test_stability() -> None:
         row = next(iter(report["units"].values()))
         check(report["status"] == "FAIL" and row["consecutive_passes"] == 2 and len(row["attempts"]) == 3,
               "stability: a third-run failure fails the check and stops the streak")
+        # A reader of the gate artifact must find the failing run's log from the unit name alone
+        # (2026-11-08: browser-tilion's run-3 log sat in `001-run3.log`, unnamed and unreferenced).
+        failing_log = Path(row["attempts"][-1]["log"])
+        summary_path = work / "logs-flaky" / "summary.json"
+        summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+        check(failing_log.exists() and "flaky" in failing_log.name and failing_log.name.endswith("-run3.log")
+              and summary.get("units", {}).get(next(iter(report["units"])), {}).get("attempts", [{}])[-1].get("log")
+              == str(failing_log),
+              f"stability: the failing run's log is named for its unit and indexed in log_root/summary.json ({failing_log.name})")
+        printed = io.StringIO()
+        real_run = sat.run_stability
+        with patch.object(sat, "new_test_units", return_value=[unit(flaky, str(work / "count-cli"))]), \
+                patch.object(sat, "run_stability", lambda *a, **k: real_run(*a, **{**k, "log_root": work / "logs-cli"})), \
+                contextlib.redirect_stdout(printed):
+            code = sat.main(["--stability", "--changed-file", "x.test.py", "--load-workers", "1"])
+        cli_row = json.loads((work / "logs-cli" / "summary.json").read_text())["units"]
+        cli_log = next(iter(cli_row.values()))["attempts"][-1]["log"]
+        check(code == 1 and f"log {cli_log}" in printed.getvalue(),
+              "stability: the report prints the failing run's log path under its FAIL row")
+        vanish = work / "vanish.py"
+        vanish.write_text("import shutil, sys\nshutil.rmtree(sys.argv[1], ignore_errors=True)\n")
+        report = sat.run_stability([unit(vanish, str(work / "logs-vanish"))], load_workers=1, timeout=60,
+                                   log_root=work / "logs-vanish")
+        check(report["status"] == "UNVERIFIED" and "deleted" in next(iter(report["units"].values())).get("reason", ""),
+              "stability: a run whose logs were deleted mid-check is UNVERIFIED, never a PASS without evidence")
 
         leaky = work / "leaky.py"
         leaky.write_text("import json, os\n"

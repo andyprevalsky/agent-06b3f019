@@ -1520,16 +1520,27 @@ def _run_once(command: list[str], cwd: Path, log: Path, timeout: float,
     return code, round(time.monotonic() - started, 2)
 
 
+def _log_slug(key: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")[-80:] or "unit"
+
+
 def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_root: Path, load: CpuLoad) -> dict:
     attempts = []
     status = "PASS"
+    gone = ""
     started = time.monotonic()
+    # Name every file for its unit: a reader of the gate artifact finds a failing run's log
+    # from the printed unit name, not an internal launch index.
+    stem = f"{index:03d}-{_log_slug(plan.key)}"
     load.take()
     try:
         for run in range(1, runs + 1):
-            log = log_root / f"{index:03d}-run{run}.log"
+            if not log_root.is_dir():
+                status, gone = "UNVERIFIED", f"log root {log_root} was deleted during the runs"
+                break
+            log = log_root / f"{stem}-run{run}.log"
             env = dict(plan.env)
-            receipt = log_root / f"{index:03d}-run{run}.cases"
+            receipt = log_root / f"{stem}-run{run}.cases"
             if plan.receipt:
                 env[BLACKBOX_CASE_RECEIPT_ENV] = str(receipt)
             code, seconds = _run_once(plan.command, plan.cwd, log, timeout, env)
@@ -1555,7 +1566,9 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_ro
            "selection": plan.reason, "attempts": attempts,
            "consecutive_passes": sum(1 for a in attempts if a["exit"] == 0),
            "wall_seconds": round(time.monotonic() - started, 2)}
-    if status == "UNVERIFIED":
+    if gone:
+        row["reason"] = gone
+    elif status == "UNVERIFIED":
         row["reason"] = "a load slot was empty during the run"
     elif attempts and attempts[-1].get("missing_cases"):
         row["reason"] = f"selected case(s) did not run: {', '.join(attempts[-1]['missing_cases'])}"
@@ -1641,11 +1654,25 @@ def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: i
             if row["status"] == "PASS":
                 row.update(status="UNVERIFIED", reason="test code changed during the stability runs")
     ordered = {f"{u.lane}:{u.name}": results[f"{u.lane}:{u.name}"] for u in units if f"{u.lane}:{u.name}" in results}
+    for row in ordered.values():
+        # Evidence must survive the runs: a rerun test that deletes the log root (or a log)
+        # must not leave a PASS without its logs or a FAIL whose log silently vanished.
+        lost = [a["log"] for a in row.get("attempts", []) if not Path(a["log"]).is_file()]
+        if lost:
+            row["missing_logs"] = lost
+            note = f"{len(lost)} run log(s) missing after the runs (deleted under {log_root})"
+            row["reason"] = f"{row['reason']}; {note}" if row.get("reason") else note
+            if row["status"] == "PASS":
+                row["status"] = "UNVERIFIED"
     statuses = {row["status"] for row in ordered.values()}
     overall = "FAIL" if "FAIL" in statuses else ("UNVERIFIED" if statuses - {"PASS"} else "PASS")
-    return {"status": overall, "runs": runs, "load": load_record, "digest_before": before,
-            "digest_after": after, "units": ordered, "logs": str(log_root),
-            "wall_seconds": round(time.monotonic() - began, 2)}
+    report = {"status": overall, "runs": runs, "load": load_record, "digest_before": before,
+              "digest_after": after, "units": ordered, "logs": str(log_root),
+              "wall_seconds": round(time.monotonic() - began, 2)}
+    # The unit -> attempt -> log index travels with the logs into the gate artifact.
+    log_root.mkdir(parents=True, exist_ok=True)
+    (log_root / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
+    return report
 
 
 # ------------------------------------------------------------------- cli ---
@@ -1754,6 +1781,9 @@ def main(argv: list[str] | None = None) -> int:
                 if cases and cases != [WHOLE_UNIT]:
                     for case in cases:
                         print(f"      {case}")
+                attempts = row.get("attempts") or []
+                if row["status"] != "PASS" and attempts:
+                    print(f"      log {attempts[-1]['log']}")
         return {"PASS": 0, "FAIL": 1}.get(report["status"], 2)
     if args.rev:
         global SRC

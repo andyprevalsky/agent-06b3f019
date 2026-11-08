@@ -6,23 +6,58 @@ as a pass — and the runner labels the domain a partial run.
 """
 
 import asyncio
+import importlib
 import importlib.util
+import os
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 AGENTS = Path(__file__).resolve().parents[2]
-# The blackbox helpers live beside the domains, which import them as `_test_utils`.
-sys.path.insert(0, str(AGENTS / "tests" / "blackbox"))
-_test_utils = importlib.import_module("_test_utils")
-BlackboxResult = _test_utils.BlackboxResult
+CASE_FILTER_ENV = "BLACKBOX_CASE_FUNCTIONS"
+CASE_RECEIPT_ENV = "BLACKBOX_CASE_RECEIPT"
+_test_utils = None
+
+
+def BlackboxResult():
+    return _test_utils.BlackboxResult()
 
 
 @pytest.fixture(autouse=True)
-def no_inherited_filter(monkeypatch):
-    monkeypatch.delenv(_test_utils.CASE_FILTER_ENV, raising=False)
-    monkeypatch.delenv(_test_utils.CASE_RECEIPT_ENV, raising=False)
+def blackbox_harness():
+    """Import the blackbox harness for one test, then undo its process-wide setup.
+
+    `_test_utils` patches httpx.AsyncClient (capture buffers whole response
+    streams), exports capture/credential env vars, extends sys.path and stubs
+    Temporal's workflow clock at import. `pytest tests/unit` shares one
+    interpreter, so leaving that installed changed later unit tests (the
+    Foundry post-content stream case saw its stream error before any content).
+    """
+    global _test_utils
+    from helpers import httpx_capture
+
+    env, path = dict(os.environ), list(sys.path)
+    started = list(mock._patch._active_patches)
+    # The blackbox helpers live beside the domains, which import them as `_test_utils`.
+    sys.path.insert(0, str(AGENTS / "tests" / "blackbox"))
+    _test_utils = importlib.import_module("_test_utils")
+    assert (_test_utils.CASE_FILTER_ENV, _test_utils.CASE_RECEIPT_ENV) == (CASE_FILTER_ENV, CASE_RECEIPT_ENV)
+    os.environ.pop(CASE_FILTER_ENV, None)
+    os.environ.pop(CASE_RECEIPT_ENV, None)
+    try:
+        yield
+    finally:
+        for patcher in [p for p in mock._patch._active_patches if p not in started]:
+            patcher.stop()
+        httpx_capture.uninstall_capture()
+        httpx_capture.clear_mock_handler()
+        sys.modules.pop("_test_utils", None)
+        _test_utils = None
+        sys.path[:] = path
+        os.environ.clear()
+        os.environ.update(env)
 
 
 def _cases(ran):
@@ -57,8 +92,8 @@ def test_unset_filter_runs_every_case():
 
 def test_filter_runs_only_named_functions_and_omits_the_rest(monkeypatch, tmp_path):
     receipt = tmp_path / "ran.cases"
-    monkeypatch.setenv(_test_utils.CASE_FILTER_ENV, "test_beta,test_gamma")
-    monkeypatch.setenv(_test_utils.CASE_RECEIPT_ENV, str(receipt))
+    monkeypatch.setenv(CASE_FILTER_ENV, "test_beta,test_gamma")
+    monkeypatch.setenv(CASE_RECEIPT_ENV, str(receipt))
     ran = []
     result = BlackboxResult()
     _run(result, *_cases(ran))
@@ -68,14 +103,14 @@ def test_filter_runs_only_named_functions_and_omits_the_rest(monkeypatch, tmp_pa
 
 
 def test_omitted_cases_are_never_counted_as_passes(monkeypatch):
-    monkeypatch.setenv(_test_utils.CASE_FILTER_ENV, "test_alpha")
+    monkeypatch.setenv(CASE_FILTER_ENV, "test_alpha")
     result = BlackboxResult()
     _run(result, *_cases([]))
     assert result.summary() == {"passed": 1, "failed": 0, "total": 1, "omitted": 2}
 
 
 def test_an_empty_filter_runs_nothing_and_passes_nothing(monkeypatch):
-    monkeypatch.setenv(_test_utils.CASE_FILTER_ENV, "")
+    monkeypatch.setenv(CASE_FILTER_ENV, "")
     result = BlackboxResult()
     ran = []
     _run(result, *_cases(ran))
@@ -86,14 +121,14 @@ def test_select_keeps_filtered_cases_and_records_the_rest_omitted(monkeypatch):
     alpha, beta, gamma = _cases([])
     result = BlackboxResult()
     assert result.select([("a", alpha), ("b", beta)]) == [("a", alpha), ("b", beta)]
-    monkeypatch.setenv(_test_utils.CASE_FILTER_ENV, "test_beta")
+    monkeypatch.setenv(CASE_FILTER_ENV, "test_beta")
     assert result.select([("a", alpha), ("b", beta), ("g", gamma)]) == [("b", beta)]
     assert result.omitted == ["a", "g"]
 
 
 def test_receipt_is_written_only_by_a_filtered_run(monkeypatch, tmp_path):
     receipt = tmp_path / "ran.cases"
-    monkeypatch.setenv(_test_utils.CASE_RECEIPT_ENV, str(receipt))
+    monkeypatch.setenv(CASE_RECEIPT_ENV, str(receipt))
     _run(BlackboxResult(), *_cases([]))
     assert not receipt.exists()
 
@@ -121,6 +156,6 @@ def test_runner_labels_a_filtered_domain_as_partial(monkeypatch, tmp_path):
     runner = _load_runner()
     name, passed, message = asyncio.run(runner.run_single_domain(domain, "fixture"))
     assert (passed, message) == (True, "")
-    monkeypatch.setenv(_test_utils.CASE_FILTER_ENV, "test_two")
+    monkeypatch.setenv(CASE_FILTER_ENV, "test_two")
     name, passed, message = asyncio.run(runner.run_single_domain(domain, "fixture"))
     assert passed and "partial" in message

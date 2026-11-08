@@ -498,3 +498,110 @@ def test_quarantined_case_rows_are_forwarded_with_the_domain_prefix(tmp_path: Pa
     assert [(row["unit"], row["status"]) for row in rows] == [("alpha::case_fails", "QUARANTINED_FAIL"), ("alpha", "PASS")]
     assert "quarantined boom" in rows[0]["detail"]
     assert rows[0]["log"].endswith("/alpha.log")
+
+
+def load_pytest_rerun():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "run_pytest_rerun_once.py"
+    spec = importlib.util.spec_from_file_location("pytest_rerun_once", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_DIRECT_PYTEST_CASES = '''
+from pathlib import Path
+
+MARK = Path(__file__).with_name("flaky.mark")
+
+
+def test_passes():
+    pass
+
+
+def test_flaky_once():
+    if not MARK.exists():
+        MARK.write_text("failed once")
+        raise AssertionError("first attempt fails")
+
+
+def test_always_fails():
+    raise AssertionError("fails every attempt")
+'''
+
+
+def _direct_pytest_fixture(tmp_path: Path, monkeypatch, *, always_fails: bool):
+    """A real pytest project behind a fake coverage executable that records each attempt."""
+    rerun = load_pytest_rerun()
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pytest.ini").write_text("[pytest]\n")
+    source = _DIRECT_PYTEST_CASES if always_fails else _DIRECT_PYTEST_CASES.split("\n\ndef test_always_fails")[0]
+    (project / "test_cases.py").write_text(source)
+    calls = tmp_path / "coverage-calls.txt"
+    coverage = tmp_path / "coverage"
+    # `coverage run --append -m pytest ...` -> `python -m pytest ...`, keeping the argv on record.
+    coverage.write_text(f'#!/bin/sh\necho "$@" >> {calls}\nshift 2\nexec {sys.executable} "$@"\n')
+    coverage.chmod(0o755)
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setattr(rerun, "AGENTS_ROOT", project)
+    monkeypatch.setattr(rerun, "ROOT_DIR", tmp_path)
+    monkeypatch.setenv("COVERAGE_BIN", str(coverage))
+    monkeypatch.setenv("DEPLOY_GATE_PROGRESS", str(progress))
+    return rerun, calls, progress
+
+
+def _progress_rows(progress: Path) -> list[dict]:
+    return [json.loads(line) for line in progress.read_text().splitlines()] if progress.exists() else []
+
+
+def test_direct_pytest_step_reruns_only_failed_node_ids_once_and_reports_flaky(tmp_path, monkeypatch, capsys):
+    rerun, calls, progress = _direct_pytest_fixture(tmp_path, monkeypatch, always_fails=False)
+
+    assert rerun.main(["unit", "test_cases.py"]) == 0
+
+    attempts = calls.read_text().splitlines()
+    assert len(attempts) == 2
+    assert all(line.startswith("run --append -m pytest ") for line in attempts)
+    assert " test_cases.py::test_flaky_once " in f" {attempts[1]} " and "test_passes" not in attempts[1]
+    out = capsys.readouterr().out
+    assert "TEST_FLAKY unit=test_cases.py::test_flaky_once attempts=2 attribution=REQUIRED" in out
+    rows = _progress_rows(progress)
+    assert [(row["unit"], row["status"], row.get("attempts")) for row in rows] == [
+        ("test_cases.py::test_flaky_once", "FLAKY", 2)
+    ]
+    assert "first attempt fails" in rows[0]["detail"] and rows[0]["log"].endswith("attempt-1.log")
+
+
+def test_direct_pytest_step_second_failure_stays_fail_without_a_third_run(tmp_path, monkeypatch, capsys):
+    rerun, calls, progress = _direct_pytest_fixture(tmp_path, monkeypatch, always_fails=True)
+
+    assert rerun.main(["unit", "test_cases.py"]) == 1
+
+    attempts = calls.read_text().splitlines()
+    assert len(attempts) == 2
+    assert "test_cases.py::test_always_fails" in attempts[1] and "test_passes" not in attempts[1]
+    out = capsys.readouterr().out
+    assert "TEST_FLAKY unit=test_cases.py::test_always_fails" not in out
+    statuses = {row["unit"]: (row["status"], row.get("attempts")) for row in _progress_rows(progress)}
+    assert statuses == {
+        "test_cases.py::test_flaky_once": ("FLAKY", 2),
+        "test_cases.py::test_always_fails": ("FAIL", None),
+    }
+
+
+def test_direct_pytest_step_that_passes_runs_once_without_rows(tmp_path, monkeypatch):
+    rerun, calls, progress = _direct_pytest_fixture(tmp_path, monkeypatch, always_fails=False)
+    (tmp_path / "project" / "flaky.mark").write_text("already failed")
+
+    assert rerun.main(["unit", "test_cases.py"]) == 0
+
+    assert len(calls.read_text().splitlines()) == 1
+    assert _progress_rows(progress) == []
+
+
+def test_run_coverage_routes_every_direct_pytest_step_through_the_single_rerun():
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "run-coverage.sh").read_text()
+    assert "-m pytest" not in script
+    for label, target in (("demo-cache", "tests/demo_cache"), ("unit", "tests/unit")):
+        assert f"scripts/run_pytest_rerun_once.py {label} {target}" in script
