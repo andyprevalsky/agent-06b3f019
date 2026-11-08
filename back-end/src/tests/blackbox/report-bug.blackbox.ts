@@ -15,6 +15,12 @@ import { z } from 'zod';
 import { agentSelfBugReportKey } from '../../domains/agents/repoAgentSelfBugReports';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
+import { reportBugDiagnosticCases } from './report-bug.diagnostics.cases';
+import {
+  formatReportBugDiagnostic,
+  reportBugStage,
+  withReportBugCleanup,
+} from './report-bug.diagnostics.support';
 config();
 
 const BASE_URL =
@@ -133,6 +139,18 @@ async function deleteFixtureAgents(agentIds: string[]): Promise<void> {
   await prisma.agentTrajectoryAgent.deleteMany({ where: { agentId: { in: agentIds } } });
 }
 
+/** Retain both the test failure and cleanup failure while always cleaning once. */
+async function withFixtureAgent(
+  userId: string,
+  operation: (agentId: string) => Promise<void>
+): Promise<void> {
+  const agentId = await reportBugStage('fixture-create', () => createAgent(userId));
+  await withReportBugCleanup(
+    () => operation(agentId),
+    () => deleteFixtureAgents([agentId])
+  );
+}
+
 /** Remove marked fixture agents an interrupted earlier run left in a persistent DB. */
 async function purgeEarlierFixtures(): Promise<void> {
   const earlier = await prisma.agent.findMany({
@@ -158,8 +176,7 @@ async function testNoAuth(): Promise<void> {
 
 async function testNonAdminForbidden(): Promise<void> {
   const userId = await createAnonymousUser();
-  const agentId = await createAgent(userId);
-  try {
+  await withFixtureAgent(userId, async (agentId) => {
     const res = await request(`${BASE_URL}/api/agents/${agentId}/report-bug`, {
       method: 'POST',
       headers: apiKeyHeaders(userId),
@@ -167,14 +184,11 @@ async function testNonAdminForbidden(): Promise<void> {
     });
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'non-admin');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 async function testEmptyDescription(): Promise<void> {
-  const agentId = await createAgent(ANDY_USER_ID);
-  try {
+  await withFixtureAgent(ANDY_USER_ID, async (agentId) => {
     const res = await request(`${BASE_URL}/api/agents/${agentId}/report-bug`, {
       method: 'POST',
       headers: apiKeyHeaders(ANDY_USER_ID),
@@ -182,9 +196,7 @@ async function testEmptyDescription(): Promise<void> {
     });
     assertStatus(res.status, 400, res.data);
     assertSchema(ErrorResponse, res.data, 'empty-description');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 /** A fresh backend answers 503 + Retry-After while the Hub archive index warms. */
@@ -246,8 +258,7 @@ async function testByAgentNoAuth(): Promise<void> {
 /** A user session cannot file as the agent, even on its own agent. */
 async function testByAgentRequiresInternalKey(): Promise<void> {
   const session = await createAnonymousSession();
-  const agentId = await createAgent(session.userId);
-  try {
+  await withFixtureAgent(session.userId, async (agentId) => {
     const res = await postByAgent(
       agentId,
       { Authorization: `Bearer ${session.accessToken}` },
@@ -255,23 +266,18 @@ async function testByAgentRequiresInternalKey(): Promise<void> {
     );
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'by-agent-user-session');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 async function testByAgentNonAdminForbidden(): Promise<void> {
   const userId = await createAnonymousUser();
-  const agentId = await createAgent(userId);
-  try {
+  await withFixtureAgent(userId, async (agentId) => {
     const res = await postByAgent(agentId, apiKeyHeaders(userId), {
       description: 'non-admin agents do not launch bug report threads',
     });
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'by-agent-non-admin');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 const RecordedReport = z.object({
@@ -303,8 +309,7 @@ const SelfReportView = z.object({
  * launched, and the internal read returns it.
  */
 async function testByAgentSavesOutsideProduction(): Promise<void> {
-  const agentId = await createAgent(ANDY_USER_ID);
-  try {
+  await withFixtureAgent(ANDY_USER_ID, async (agentId) => {
     const before = await request(`${BASE_URL}/api/agents/${agentId}/report-bug/by-agent`, {
       headers: apiKeyHeaders(ANDY_USER_ID),
     });
@@ -336,24 +341,19 @@ async function testByAgentSavesOutsideProduction(): Promise<void> {
     if (report?.description !== 'grep returned HTTP 500 twice for a valid pattern') {
       throw new Error(`self-report read returned ${JSON.stringify(view.data)}`);
     }
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 /** /rca reads go through the internal key; a user session is refused. */
 async function testByAgentReadRequiresInternalKey(): Promise<void> {
   const session = await createAnonymousSession();
-  const agentId = await createAgent(session.userId);
-  try {
+  await withFixtureAgent(session.userId, async (agentId) => {
     const res = await request(`${BASE_URL}/api/agents/${agentId}/report-bug/by-agent`, {
       headers: { Authorization: `Bearer ${session.accessToken}` },
     });
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'self-report-read-user-session');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 async function postScreenshot(
@@ -363,12 +363,15 @@ async function postScreenshot(
 ): Promise<{ status: number; data: unknown }> {
   const form = new FormData();
   form.append('file', new Blob([file.bytes], { type: file.type }), file.name);
-  const response = await fetch(`${BASE_URL}/api/agents/${agentId}/report-bug/screenshots`, {
-    method: 'POST',
-    headers: { 'X-Capture-Token': CAPTURE_TOKEN, ...headers },
-    body: form,
-  });
-  return { status: response.status, data: await response.json() };
+  const response = await reportBugStage('upload-headers', () =>
+    fetch(`${BASE_URL}/api/agents/${agentId}/report-bug/screenshots`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': CAPTURE_TOKEN, ...headers },
+      body: form,
+    })
+  );
+  const data: unknown = await reportBugStage('upload-body', () => response.json());
+  return { status: response.status, data };
 }
 
 async function testScreenshotNoAuth(): Promise<void> {
@@ -383,8 +386,7 @@ async function testScreenshotNoAuth(): Promise<void> {
 
 async function testScreenshotNonAdminForbidden(): Promise<void> {
   const userId = await createAnonymousUser();
-  const agentId = await createAgent(userId);
-  try {
+  await withFixtureAgent(userId, async (agentId) => {
     const res = await postScreenshot(agentId, apiKeyHeaders(userId), {
       bytes: PNG_1X1,
       name: 'a.png',
@@ -392,14 +394,11 @@ async function testScreenshotNonAdminForbidden(): Promise<void> {
     });
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'screenshot-non-admin');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 async function testScreenshotRejectsNonImage(): Promise<void> {
-  const agentId = await createAgent(ANDY_USER_ID);
-  try {
+  await withFixtureAgent(ANDY_USER_ID, async (agentId) => {
     const res = await postScreenshot(agentId, apiKeyHeaders(ANDY_USER_ID), {
       bytes: Buffer.from('<!doctype html><html></html>'),
       name: 'not-really.png',
@@ -407,29 +406,33 @@ async function testScreenshotRejectsNonImage(): Promise<void> {
     });
     assertStatus(res.status, 400, res.data);
     assertSchema(ErrorResponse, res.data, 'screenshot-non-image');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+  });
 }
 
 /** The signed URL must serve the uploaded bytes to whoever reads the description. */
 async function testScreenshotSignedUrlServesImage(): Promise<void> {
-  const agentId = await createAgent(ANDY_USER_ID);
-  try {
+  await withFixtureAgent(ANDY_USER_ID, async (agentId) => {
     const res = await postScreenshot(agentId, apiKeyHeaders(ANDY_USER_ID), {
       bytes: PNG_1X1,
       name: 'live view.png',
       type: 'image/png',
     });
-    assertStatus(res.status, 201, res.data);
-    const body = assertSchema(ScreenshotResponse, res.data, 'screenshot-upload');
-    const image = await fetch(body.url);
-    if (image.status !== 200) throw new Error(`signed URL returned ${image.status}`);
-    const served = Buffer.from(await image.arrayBuffer());
-    if (!served.equals(PNG_1X1)) throw new Error('signed URL served different bytes');
-  } finally {
-    await deleteFixtureAgents([agentId]);
-  }
+    const body = await reportBugStage('upload-assertions', async () => {
+      assertStatus(res.status, 201, res.data);
+      return assertSchema(ScreenshotResponse, res.data, 'screenshot-upload');
+    });
+    const image = await reportBugStage('signed-image-headers', async () => {
+      const response = await fetch(body.url);
+      if (response.status !== 200) throw new Error(`signed URL returned ${response.status}`);
+      return response;
+    });
+    const served = await reportBugStage('signed-image-body', async () =>
+      Buffer.from(await image.arrayBuffer())
+    );
+    await reportBugStage('signed-image-assertions', async () => {
+      if (!served.equals(PNG_1X1)) throw new Error('signed URL served different bytes');
+    });
+  });
 }
 
 /**
@@ -488,7 +491,7 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
     return {
       name,
       passed: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: formatReportBugDiagnostic(error, [API_KEY]),
       duration: Date.now() - start,
     };
   }
@@ -526,6 +529,7 @@ async function main(): Promise<void> {
       'POST /report-bug/screenshots -- signed URL serves the image',
       testScreenshotSignedUrlServesImage
     ),
+    ...reportBugDiagnosticCases.map(([name, fn]) => runTest(name, fn)),
   ]);
   results.push(
     await runTest('fixtures start no agent run or model call', testFixturesStartNoAgentRun),

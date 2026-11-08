@@ -44,7 +44,10 @@ Every selected nonquick gate needs a worker binding:
     "transport": "local-isolated",
     "cwd": "/prepared-workers/backend",
     "worker_root": "/prepared-workers/backend",
-    "env": {"CONDUCTOR_WORKSPACE_NAME": "deploy-backend", "CONDUCTOR_PORT": "12000"},
+    "env": {
+      "CONDUCTOR_WORKSPACE_NAME": "deploy-backend",
+      "CONDUCTOR_PORT": "12000"
+    },
     "timeout_seconds": 3600
   }
 }
@@ -156,9 +159,15 @@ can set `command` to an SSH argv ending in `python3 scripts/deploy_test_worker.p
 ```json
 {
   "cases": {
-    "coordinator": {"command": ["python3", "scripts/tests/deploy-test-cycle.test.py"]},
-    "selection": {"command": ["python3", "scripts/tests/deploy-test-plan.test.py"]},
-    "worker": {"command": ["python3", "scripts/tests/deploy-test-worker.test.py"]}
+    "coordinator": {
+      "command": ["python3", "scripts/tests/deploy-test-cycle.test.py"]
+    },
+    "selection": {
+      "command": ["python3", "scripts/tests/deploy-test-plan.test.py"]
+    },
+    "worker": {
+      "command": ["python3", "scripts/tests/deploy-test-worker.test.py"]
+    }
   }
 }
 ```
@@ -206,11 +215,14 @@ The coordinator supplies `DEPLOY_GATE_REQUEST` (JSON file) and
 ```json
 {
   "token": "copy the unique request token",
-  "source": {"head": "exact requested head", "digest": "exact requested digest"},
+  "source": {
+    "head": "exact requested head",
+    "digest": "exact requested digest"
+  },
   "gate": "backend-coverage-blackbox",
   "complete": true,
   "cleanup_complete": true,
-  "cases": {"selected-case-id": "PASS", "another-case-id": "FAIL"}
+  "cases": { "selected-case-id": "PASS", "another-case-id": "FAIL" }
 }
 ```
 
@@ -426,3 +438,61 @@ waiver refuses refresh/admission/verification. Repeated source changes require
 another exact binding. Pending post-merge debt survives until the existing
 `resolve` action records the actual repair link. Legacy warning renewal and
 compute-quota revocation keep their existing requirements.
+
+### Import custody into an independent repair cycle
+
+The refresh commands above operate on one existing cycle. An independent repair
+uses the ordinary current full plan and normal `init`, then the separate typed
+import below. The donor cycle is an immutable evidence index, never the current
+state. No donor attempt, PASS, READY, environment, fingerprint or legacy skip is
+imported. Original failures, native statuses, authority, pending auth repair or
+its actual repair link stay intact. Both current execution and financial state
+remain UNVERIFIED, with no credit; every peer still executes.
+
+First review and admit the exact immutable native/adapter files and complete
+fleet lifecycle/local/canonical audit trees required by `known()` and
+`historical()`. Include discovery dependencies even when they are not protected
+cases. Admission must check approved manifests, canonical paths and hashes,
+refuse symlinks/differing overlaps and create files without overwriting. This
+metadata API copies no files and cannot bypass missing closure, active owners,
+broken ownership symlinks, live PIDs, changed catalogs or native financial joins.
+Never overlay source, managed configuration, requests, live claims or a donor
+`cycle.json`. Obtain the approved donor-index hash from the verified preservation
+manifest; do not compute a replacement hash to authorize changed donor bytes.
+
+Keep the current cycle separate from historical `attempts/<round>` paths.
+Use the existing `DEPLOY_TEST_CYCLE_STATE_DIR` (or `gates --state-dir`) route;
+`DEPLOY_RUN_ROOT` selects timing receipts. There is no `ROSE_DEPLOY_RUN_ROOT`
+setting. Set these before plan generation/init and retain them throughout.
+Existing request-owned/canonical custody locator checks are unchanged. A custom
+cycle requires the default `.context/deploy-pipeline/cycle.json` to be absent.
+
+With the parent-frozen source and the normal template and provisioned inventory,
+the parent generates the full plan through `deploy_test_plan.py --inventory`
+and initializes it before any gate execution. `scripts/deploy gates --dry-run`
+shows the normal selection/worker commands; it is not a prepare-only execution
+mode. The following commands consume those already prepared paths:
+
+```sh
+python3 scripts/deploy_test_plan.py --inventory "$INVENTORY" --template "$TEMPLATE" --base origin/main --output "$PLAN"
+python3 scripts/deploy_test_cycle.py init --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+python3 scripts/deploy_test_cycle.py prepare-historical-import --input "$DONOR" --donor-sha256 "$DONOR_SHA256" --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR" > "$IMPORT_PROOF"
+python3 scripts/deploy_test_cycle.py admit-historical-import --input "$DONOR" --donor-sha256 "$DONOR_SHA256" --proof "$IMPORT_PROOF" --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+`DONOR` is the absolute canonical path to the preserved donor `cycle.json`.
+`IMPORT_PROOF` is a new private output file. Preparation leaves the current
+cycle unchanged. Admission re-reads donor/native evidence and binds the exact
+target cycle path plus fresh current source/full-plan/environment/input hashes.
+It requires pristine initialized state and no existing attempt namespace. All
+validation precedes the cycle writer's atomic publication. Immediate exact
+replay is idempotent; drift or non-fresh current state refuses admission without
+changing it. `--historical-no-retry-proof` remains exclusive to same-cycle
+`refresh`; supplying it to `init` fails instead of silently losing custody.
+
+After reviewing the admitted state, the parent resumes ordinary `scripts/deploy
+gates --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"`, with the same plan inputs,
+worker bindings and timing root. No import command starts workers, contacts a
+provider, renews a provider warning, retries a payment, or clears repair debt.
+Production live-mode duties remain with their separate owner and are not
+eligible for this sandbox protocol.

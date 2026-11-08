@@ -2160,10 +2160,11 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--historical-no-retry-proof", type=Path)
+    parser.add_argument('--donor-sha256', help='historical import: approved immutable donor-index SHA256')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -2176,6 +2177,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
+        if args.historical_no_retry_proof is not None and args.action != 'refresh':
+            raise ValueError('--historical-no-retry-proof applies only to same-cycle refresh')
+        if args.donor_sha256 is not None and args.action not in {'prepare-historical-import', 'admit-historical-import'}:
+            raise ValueError('--donor-sha256 applies only to historical import')
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
@@ -2227,6 +2232,19 @@ def main(argv: list[str] | None = None) -> int:
                 if args.proof is None:
                     raise ValueError('--proof read-only provider confirmation required')
                 renew(state, bounded_read(args.proof, 'AgentCard renewal'), args.root)
+            elif args.action in {'prepare-historical-import', 'admit-historical-import'}:
+                from deploy_test_historical_custody import prepare_import, admit_import
+                if args.input is None:
+                    raise ValueError('--input immutable historical donor cycle required')
+                if args.donor_sha256 is None:
+                    raise ValueError('--donor-sha256 approved immutable donor-index hash required')
+                if args.action == 'prepare-historical-import':
+                    print(json.dumps(prepare_import(state, args.input, directory, args.root, donor_sha256=args.donor_sha256)))
+                    return 0
+                if args.proof is None:
+                    raise ValueError('--proof typed historical import preparation required')
+                admit_import(state, bounded_read(args.proof, 'historical import proof'), args.input, directory, args.root,
+                             donor_sha256=args.donor_sha256)
             elif args.action == 'prepare-historical-no-retry':
                 if args.input is None:
                     raise ValueError('--input previous plan required')

@@ -236,6 +236,78 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
+IMPORT_KIND = 'historical-agentcard-no-retry-import-v1'
+
+
+def prepare_import(state, donor_path, directory, root, *, donor_sha256):
+    """Bind exact donor obligations to a pristine independent cycle; never copy files."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    directory, donor_path = Path(directory), Path(donor_path)
+    for path in (directory, donor_path):
+        need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+             and not path.is_symlink(), 'noncanonical import path')
+    need(donor_path.name == 'cycle.json' and donor_path.is_file()
+         and donor_path != directory / 'cycle.json', 'invalid independent donor index')
+    need(not (directory / 'cycle.json').is_symlink(), 'symlinked target cycle')
+    need(not (directory / 'attempts').exists() and not (directory / 'attempts').is_symlink(),
+         'import target has an existing attempt namespace')
+    donor_sha = c.sha_file(donor_path)
+    need(isinstance(donor_sha256, str) and re.fullmatch('[0-9a-f]{64}', donor_sha256)
+         and donor_sha == donor_sha256, 'donor bytes differ from approved hash')
+    donor = c.bounded_read(donor_path, 'historical donor index')
+    need(not c.CANCEL.is_set() and not any(donor.get(k) for k in
+         ('running', 'live_failures', 'resume_phase', 'pending')), 'active/unknown donor coordinator')
+    found = known(donor, root)
+    history = donor.get('historical_custody_history', [])
+    ids = [row['original_failure']['id'] for row in history]
+    need(ids and len(ids) == len(set(ids)) and set(ids) == set(found), 'donor custody inventory differs')
+    need(not any(w['id'] in ids for w in donor.get('resource_warnings', []))
+         and not any(found[i]['check'] in donor.get('skips', {}) for i in ids), 'mixed donor waiver and custody')
+    for identifier in ids:
+        for raw in (found[identifier]['worker_evidence']['path'], found[identifier]['worker_result']):
+            path = Path(raw)
+            need(path.is_absolute() and path.resolve() == path and path.is_file()
+                 and path.is_relative_to(root / '.context') and not path.is_symlink(), 'noncanonical native/adapter file')
+    rows = [historical(donor, found[identifier], root) for identifier in ids]
+    need(c.digest(rows) == c.digest(history), 'donor native custody history changed')
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({row[key] for row in rows}) == len(rows), 'borrowed resource identity')
+    gates = {gate['name']: gate for gate in state['plan']['gates']}
+    for row in rows:
+        failure = row['original_failure']
+        gate = gates.get(failure['gate'], {})
+        need(failure['check'].split('/', 1)[1] in gate.get('checks', [])
+             and gate.get('case_protocol') is True, 'protected task or case protocol missing')
+    need(c.sha_file(donor_path) == donor_sha, 'donor index changed during preparation')
+    return {'kind': IMPORT_KIND, 'donor_path': str(donor_path), 'donor_sha256': donor_sha,
+            'target_state': str(directory / 'cycle.json'), 'before_state_sha256': c.digest(fresh),
+            'current_binding': binding(state['plan'], root), 'cases': rows,
+            'failures': [copy.deepcopy(found[identifier]) for identifier in ids],
+            'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', []) if p['id'] in ids]}
+
+
+def admit_import(state, proof, donor_path, directory, root, *, donor_sha256):
+    """Revalidate everything before one state publication by the existing CLI writer."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    expected = prepare_import(fresh, donor_path, directory, root, donor_sha256=donor_sha256)
+    need(c.digest(proof) == c.digest(expected), 'import proof differs from exact donor/current binding')
+    candidate = copy.deepcopy(fresh)
+    candidate['failures'] = copy.deepcopy(expected['failures'])
+    candidate['pending_post_merge'] = copy.deepcopy(expected['pending_post_merge'])
+    apply(candidate, expected['cases'], root)
+    candidate['historical_custody_import'] = {'kind': IMPORT_KIND, 'proof_sha256': c.digest(expected),
+        'donor_path': expected['donor_path'], 'donor_sha256': expected['donor_sha256']}
+    verify(candidate, root)
+    if state.get('historical_custody_import'):
+        need(c.digest(state) == c.digest(candidate), 'import replay changed or cycle is no longer fresh')
+    else:
+        need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    state.clear(); state.update(candidate)
+
+
 def identical_inputs_binding(state, root):
     """Validate an old FULL receipt during refresh, without rebinding its native source."""
     import deploy_test_cycle as c
