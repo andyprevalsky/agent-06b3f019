@@ -1527,6 +1527,132 @@ def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
             "prerequisite": held["prerequisite"], "reason": held["reason"]}
 
 
+def settled_round49_missing_request(state, directory, gate, request_path):
+    import hashlib
+    import json
+    import os
+    import stat
+    from pathlib import Path
+    import deploy_test_local_cleanup as cleanup_module
+    import deploy_test_process as process_module
+    import deploy_test_result as result_module
+    import deploy_test_cycle as cycle_module
+    quiet = cleanup_module.quiet
+    MAX_RECEIPT_BYTES = result_module.MAX_RECEIPT_BYTES
+
+    def need(value, reason):
+        if not value:
+            raise ValueError('round49 launch proof: ' + reason)
+
+    def encode(value):
+        return (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + '\n').encode()
+
+    def sha(path):
+        path = Path(path)
+        need(path.is_absolute() and not path.is_symlink() and path.resolve(strict=True) == path
+             and path.is_file() and path.stat().st_uid == os.getuid()
+             and not path.stat().st_mode & 0o022, 'noncanonical artifact')
+        with path.open('rb') as stream:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+    def doc(path, limit=MAX_RECEIPT_BYTES):
+        path = Path(path)
+        before = sha(path)
+        need(path.stat().st_size <= limit, 'typed artifact size')
+        obj = json.loads(path.read_bytes())
+        need(isinstance(obj, dict) and sha(path) == before, 'artifact changed/object required')
+        return obj
+
+    directory = Path(directory).resolve(strict=True)
+    request_path = Path(request_path)
+    journal_path = directory / 'settlement-round49-journal.json'
+    if not journal_path.exists() and not journal_path.is_symlink():
+        return False
+    journal = doc(journal_path)
+    marker = doc(directory / 'settlement-round49-committed.json')
+    need(marker == {'journal_sha256':sha(journal_path)}
+         and journal.get('kind') == 'native-settlement-journal-v1'
+         and type(journal.get('round')) is int and journal['round'] == 49
+         and journal.get('positive_credit') is False, 'committed typed negative settlement required')
+    proposal_path, authorization_path = map(Path, (journal['proposal_path'], journal['authorization_path']))
+    need(sha(proposal_path) == journal['proposal_sha256']
+         and sha(authorization_path) == journal['authorization_sha256'], 'sealed proposal/authorization changed')
+    # These are state+source manifests, not ordinary small control receipts.
+    proposal = doc(proposal_path, 32 * 1024 * 1024)
+    authorization = doc(authorization_path, 32 * 1024 * 1024)
+    need(proposal.get('round') == 49 and proposal.get('positive_credit') is False
+         and proposal['source'] == journal['native_source'] == authorization['native_source']
+         and authorization['operator_source'] == journal['operator_source']
+         and authorization['proposal_sha256'] == journal['proposal_sha256']
+         and authorization['after_state_sha256'] == journal['after_state_sha256']
+         == hashlib.sha256(encode(proposal['after_state'])).hexdigest(), 'native/operator/after-state binding')
+    controller = Path(__file__).absolute()
+    controller_stat = controller.stat()
+    expected_controller = authorization['operator_files']['scripts/deploy_test_cycle.py']
+    need(stat.S_ISREG(controller_stat.st_mode)
+         and sha(controller) == expected_controller['sha256']
+         and stat.S_IFMT(controller_stat.st_mode) | (controller_stat.st_mode & stat.S_IXUSR)
+         == expected_controller['mode'], 'reviewed admission controller bytes/mode changed')
+    for relative, module in [('scripts/deploy_test_cycle.py', cycle_module),
+                             ('scripts/deploy_test_local_cleanup.py', cleanup_module),
+                             ('scripts/deploy_test_process.py', process_module),
+                             ('scripts/deploy_test_result.py', result_module)]:
+        actual_path = Path(module.__file__).absolute()
+        actual_mode = actual_path.stat().st_mode
+        expected = authorization['operator_files'][relative]
+        need(stat.S_ISREG(actual_mode) and sha(actual_path) == expected['sha256']
+             and stat.S_IFMT(actual_mode) | (actual_mode & stat.S_IXUSR) == expected['mode'],
+             'reviewed admission dependency bytes/mode changed: ' + relative)
+    for function, module in [(quiet, cleanup_module),
+                             (process_module.scan_same_user_processes, process_module),
+                             (cycle_module.bounded_read, cycle_module)]:
+        need(getattr(function, '__module__', None) == module.__name__
+             and getattr(function, '__globals__', None) is vars(module)
+             and Path(function.__code__.co_filename).absolute() == Path(module.__file__).absolute(),
+             'admission callable is not owned by pinned module')
+    # run_phase already verifies actual current source/environment/input fingerprints.
+    # Historical native cleanup never grants current-source PASS adoption.
+    expected_path = directory / 'attempts/49/triage' / gate['name'] / 'request.json'
+    need(request_path == expected_path and str(request_path.parent / 'receipt.json')
+         in proposal['original_missing_outer_paths']
+         and not (request_path.parent / 'receipt.json').exists()
+         and not (request_path.parent / 'receipt.json').is_symlink(), 'exact original missing request path')
+    request = doc(request_path)
+    after = proposal['after_state']
+    original_gate, = [g for g in after['plan']['gates'] if g['name'] == gate['name']]
+    need(encode(original_gate) == encode(gate), 'current gate contract/recipe/inventory changed')
+    need(request['source'] == journal['native_source'] and request['gate'] == gate['name']
+         and request['worker_root'] == gate['worker_root']
+         and encode(request['worker_recipe']) == encode(gate['worker_recipe']), 'original request binding')
+    expected = [r for a in after['attempts'] for r in a.get('results', [])
+                if r.get('gate') == gate['name'] and r.get('token') == request['token']]
+    current = [r for a in state['attempts'] for r in a.get('results', [])
+               if r.get('gate') == gate['name'] and r.get('token') == request['token']]
+    need(len(expected) == len(current) == 1 and encode(current[0]) == encode(expected[0]), 'retained recovered row changed')
+    row = expected[0]
+    need(row.get('kind') == 'recovered-native-execution-v1' and row.get('status') == 'FAIL'
+         and row.get('complete') is False and row.get('source') == journal['native_source']
+         and row.get('cancelled') == row.get('timed_out') == 'UNKNOWN'
+         and set(row['cases']) == set(gate['checks'])
+         and all(v in ('UNVERIFIED', 'SKIP') for v in row['cases'].values())
+         and 'UNVERIFIED' in row['cases'].values(), 'negative-only recovered admission')
+    for path, expected_sha in proposal['input_artifacts'].items():
+        if Path(path) != directory / 'cycle.json':
+            need(sha(path) == expected_sha, 'original sealed input changed')
+    need(str(request_path) in proposal['input_artifacts'], 'request not sealed')
+    process_path = request_path.parent / 'output.log.process.json'
+    need(str(process_path) in proposal['input_artifacts'], 'native closure not sealed')
+    process = doc(process_path)
+    need(process.get('quiescent') is True and process.get('remaining') == []
+         and process.get('orphaned_children') is False and process.get('error') is None
+         and process.get('cancelled') is False and process.get('timed_out') is False
+         and process.get('term_sent') == process.get('kill_sent') == []
+         and not Path('/proc', str(process['supervisor_pid'])).exists()
+         and not Path('/proc', str(process['child_pid'])).exists(), 'native closure no longer quiet')
+    quiet(Path(gate['worker_root']))  # Rechecked each launch, never signals anything.
+    return True  # Launch eligibility ONLY. No receipt/result/state mutation or PASS credit.
+
+
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
               excluded_roots=()) -> None:
@@ -1546,7 +1672,8 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                     and (g.get('worker_transport') != 'local-isolated'
                          or local_admission_root(g, root) not in excluded)]
         for gate in selected:
-            if any(not (p.parent / 'receipt.json').is_file() for p in
+            if any(not (p.parent / 'receipt.json').is_file()
+                   and not settled_round49_missing_request(state, directory, gate, p) for p in
                    (directory / 'attempts').glob('*/' + '*/' + gate['name'] + '/request.json')):
                 raise ValueError('prior independent worker request has no terminal receipt')
     else:
@@ -2084,10 +2211,25 @@ def main(argv: list[str] | None = None) -> int:
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
-            journal = directory / 'settlement-journal.json'
-            if journal.exists():
-                committed = directory / 'settlement-committed.json'
-                if not committed.is_file() or read(committed) != {'journal_sha256': sha_file(journal)}:
+            journals = [directory / 'settlement-journal.json',
+                        *sorted(directory.glob('settlement-round*-journal.json'))]
+            for journal in journals:
+                if journal.is_symlink():
+                    raise ValueError('settlement journal must be an owned regular file')
+                if not journal.exists():
+                    continue
+                if journal.name == 'settlement-journal.json':
+                    committed = directory / 'settlement-committed.json'
+                else:
+                    match = re.fullmatch(r'settlement-round([1-9][0-9]*)-journal\.json', journal.name)
+                    if match is None or not journal.is_file():
+                        raise ValueError('invalid round-bound settlement journal')
+                    metadata = bounded_read(journal, 'settlement journal')
+                    if type(metadata.get('round')) is not int or metadata['round'] != int(match[1]):
+                        raise ValueError('invalid round-bound settlement journal')
+                    committed = directory / ('settlement-round' + match[1] + '-committed.json')
+                if (committed.is_symlink() or not committed.is_file()
+                        or read(committed) != {'journal_sha256': sha_file(journal)}):
                     raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)

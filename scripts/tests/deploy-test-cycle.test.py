@@ -6395,4 +6395,150 @@ class BackendPrismaPreflightCleanup(unittest.TestCase):
         Path(row['path']).chmod(0o666)
         with self.assertRaises(ValueError): self.reconcile()
 
+class Round49NegativeLaunchAdmission(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.directory=Path(self.tmp.name);self.folder=self.directory/'attempts/49/triage/gate';self.folder.mkdir(parents=True)
+        self.worker=self.directory/'worker';self.worker.mkdir()
+        self.controller=self.directory/'deploy_test_cycle.py';self.controller.write_bytes(b'reviewed controller fixture\n');self.controller.chmod(0o700)
+        self.controllerpatch=patch.object(c,'__file__',str(self.controller));self.controllerpatch.start();self.addCleanup(self.controllerpatch.stop)
+        self.modules={}
+        codes={'deploy_test_local_cleanup':"calls=[]\nrefuse=False\ndef quiet(root):\n    from deploy_test_process import scan_same_user_processes\n    calls.append(root)\n    if refuse: raise ValueError('live native root')\n    scan_same_user_processes(None, None)\n",
+               'deploy_test_process':"def scan_same_user_processes(inspect, refuse):\n    return None\n",
+               'deploy_test_result':"MAX_RECEIPT_BYTES=64*1024*1024\n",
+               'deploy_test_cycle':"def bounded_read(path, label):\n    return {}\n"}
+        for name, code in codes.items():
+            file=self.controller if name=='deploy_test_cycle' else self.directory/(name+'.py');file.write_text(code);file.chmod(0o700 if name=='deploy_test_cycle' else 0o600)
+            module=__import__('types').ModuleType(name);module.__file__=str(file)
+            exec(compile(code,str(file),'exec'),module.__dict__);self.modules[name]=module
+        self.modulepatch=patch.dict(__import__('sys').modules,self.modules);self.modulepatch.start();self.addCleanup(self.modulepatch.stop)
+        self.native={'head':'0f23','digest':'native'};self.operator={'head':'reviewed-guard','digest':'operator'}
+        self.gate={'name':'gate','worker_root':str(self.worker),'checks':['active','qualified'],
+                   'worker_recipe':{'cases':{'active':{'command':['fixture']},'qualified':{'command':['qualified']}}}}
+        self.request={'source':self.native,'gate':'gate','token':'original','worker_root':str(self.worker),
+                      'worker_recipe':self.gate['worker_recipe'],'checks':['active'],'skips':{'qualified':{'source':self.native}}}
+        self.request_path=self.folder/'request.json';self.put(self.request_path,self.request)
+        self.process={'quiescent':True,'remaining':[],'orphaned_children':False,'error':None,
+                      'cancelled':False,'timed_out':False,'term_sent':[],'kill_sent':[],'supervisor_pid':987654320,'child_pid':987654321}
+        self.process_path=self.folder/'output.log.process.json';self.put(self.process_path,self.process)
+        self.row={'kind':'recovered-native-execution-v1','gate':'gate','source':self.native,'token':'original',
+                  'status':'FAIL','complete':False,'cancelled':'UNKNOWN','timed_out':'UNKNOWN',
+                  'cases':{'active':'UNVERIFIED','qualified':'SKIP'}}
+        self.after={'source':self.native,'plan':{'gates':[self.gate]},'attempts':[{'results':[self.row]}]}
+        self.state=copy.deepcopy(self.after);self.state['source']=self.operator
+        self.proposal={'round':49,'positive_credit':False,'source':self.native,'after_state':self.after,
+                       'original_missing_outer_paths':[str(self.folder/'receipt.json')],
+                       'input_artifacts':{str(p):self.sha(p)for p in [self.request_path,self.process_path]}}
+        self.proposal_path=self.directory/'proposal.json';self.authorization_path=self.directory/'authorization.json'
+        self.journal_path=self.directory/'settlement-round49-journal.json';self.marker_path=self.directory/'settlement-round49-committed.json'
+        self.reseal()
+
+
+    def put(self,p,obj):p.write_text(json.dumps(obj,sort_keys=True,indent=2)+'\n');p.chmod(0o600)
+    def sha(self,p):
+        import hashlib
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    def reseal(self):
+        self.put(self.proposal_path,self.proposal)
+        aftersha=__import__('hashlib').sha256((json.dumps(self.after,sort_keys=True,indent=2,allow_nan=False)+'\n').encode()).hexdigest()
+        auth={'native_source':self.native,'operator_source':self.operator,'operator_files':{'scripts/deploy_test_cycle.py':{'sha256':self.sha(self.controller),'mode':0o100100}, **{'scripts/'+name+'.py':{'sha256':self.sha(Path(module.__file__)),'mode':0o100100 if name=='deploy_test_cycle' else 0o100000}for name,module in self.modules.items()}},'proposal_sha256':self.sha(self.proposal_path),'after_state_sha256':aftersha}
+        self.put(self.authorization_path,auth)
+        self.put(self.journal_path,{'kind':'native-settlement-journal-v1','round':49,'positive_credit':False,
+                 'native_source':self.native,'operator_source':self.operator,'proposal_path':str(self.proposal_path),
+                 'authorization_path':str(self.authorization_path),'proposal_sha256':self.sha(self.proposal_path),
+                 'authorization_sha256':self.sha(self.authorization_path),'after_state_sha256':aftersha})
+        self.put(self.marker_path,{'journal_sha256':self.sha(self.journal_path)})
+    def admit(self):return c.settled_round49_missing_request(self.state,self.directory,self.gate,self.request_path)
+
+    def test_exact_negative_settlement_allows_launch_only_and_preserves_bytes(self):
+        before={p:p.read_bytes()for p in self.directory.rglob('*')if p.is_file()};state=copy.deepcopy(self.state)
+        self.assertTrue(self.admit());self.assertEqual(self.state,state)
+        self.assertEqual(before,{p:p.read_bytes()for p in self.directory.rglob('*')if p.is_file()})
+        self.assertFalse((self.folder/'receipt.json').exists());self.assertEqual(self.modules['deploy_test_local_cleanup'].calls,[self.worker])
+        self.assertEqual(self.row['cases'],{'active':'UNVERIFIED','qualified':'SKIP'})
+
+    def test_uncommitted_or_wrong_marker_refuses(self):
+        self.marker_path.unlink()
+        with self.assertRaises((ValueError,FileNotFoundError)):self.admit()
+        self.put(self.marker_path,{'journal_sha256':'wrong'})
+        with self.assertRaises(ValueError):self.admit()
+
+    def test_row_source_recipe_contract_and_artifact_tamper_refuse(self):
+        baseline=copy.deepcopy(self.state)
+        for change in [lambda:self.state['attempts'][0]['results'][0].update(cancelled=False),
+                       lambda:self.state['attempts'][0]['results'][0].update(source={'head':'wrong-native','digest':'wrong-native'}),
+                       lambda:self.state['attempts'][0]['results'][0].update(cases={'active':'PASS','qualified':'SKIP'})]:
+            self.state=copy.deepcopy(baseline);change()
+            with self.assertRaises(ValueError):self.admit()
+        self.state=copy.deepcopy(baseline)
+        original=copy.deepcopy(self.gate)
+        for change in [lambda:self.gate.update(checks=['different']),
+                       lambda:self.gate['worker_recipe']['cases']['active'].update(command=['wrong'])]:
+            self.gate=copy.deepcopy(original);change()
+            with self.assertRaises(ValueError):self.admit()
+        self.gate=original;self.request_path.write_bytes(self.request_path.read_bytes()+b' ')
+        with self.assertRaises(ValueError):self.admit()
+
+    def test_later_fixture_or_ledger_head_keeps_cleanup_eligibility(self):
+        self.state['source']={'head':'later-app-fixture-or-ledger','digest':'new-full-source'}
+        self.assertTrue(self.admit())
+        self.assertEqual(self.row['cases']['active'],'UNVERIFIED')
+
+    def test_controller_bytes_mode_or_gate_environment_drift_refuse(self):
+        before=self.controller.read_bytes()
+        self.controller.write_bytes(before+b'# unreviewed\n')
+        with self.assertRaisesRegex(ValueError,'controller bytes/mode'):self.admit()
+        self.controller.write_bytes(before);self.controller.chmod(0o600)
+        with self.assertRaisesRegex(ValueError,'controller bytes/mode'):self.admit()
+        self.controller.chmod(0o700);self.gate['env']={'CHANGED':'1'}
+        with self.assertRaisesRegex(ValueError,'contract/recipe'):self.admit()
+
+    def test_cleanup_process_and_result_dependency_bytes_modes_refuse(self):
+        for name in ['deploy_test_local_cleanup','deploy_test_process','deploy_test_result']:
+            with self.subTest(module=name):
+                file=Path(self.modules[name].__file__);before=file.read_bytes()
+                file.write_bytes(before+b'# changed dependency\n')
+                with self.assertRaisesRegex(ValueError,'dependency bytes/mode'):self.admit()
+                file.write_bytes(before);file.chmod(0o700)
+                with self.assertRaisesRegex(ValueError,'dependency bytes/mode'):self.admit()
+                file.chmod(0o600)
+
+    def test_callable_replaced_outside_pinned_module_refuses(self):
+        module=self.modules['deploy_test_process'];before=module.scan_same_user_processes
+        module.scan_same_user_processes=lambda *args:None
+        with self.assertRaisesRegex(ValueError,'not owned by pinned module'):self.admit()
+        module.scan_same_user_processes=before
+        module=self.modules['deploy_test_local_cleanup'];module.quiet=lambda *args:None
+        with self.assertRaisesRegex(ValueError,'not owned by pinned module'):self.admit()
+
+    def test_live_or_nonquiet_native_root_refuses(self):
+        self.modules['deploy_test_local_cleanup'].refuse=True
+        with self.assertRaises(ValueError):self.admit()
+        self.modules['deploy_test_local_cleanup'].refuse=False
+        self.process['supervisor_pid']=__import__('os').getpid();self.put(self.process_path,self.process)
+        self.proposal['input_artifacts'][str(self.process_path)]=self.sha(self.process_path);self.reseal()
+        with self.assertRaises(ValueError):self.admit()
+
+    def test_unrelated_missing_path_or_fake_original_receipt_refuses(self):
+        wrong=self.directory/'attempts/50/triage/gate/request.json'
+        with self.assertRaises(ValueError):c.settled_round49_missing_request(self.state,self.directory,self.gate,wrong)
+        self.put(self.folder/'receipt.json',{})
+        with self.assertRaises(ValueError):self.admit()
+
+
+
+class StrictRoundSettlementJournal(unittest.TestCase):
+    def test_float_and_boolean_rounds_with_matching_marker_refuse(self):
+        for name, value in [('49', 49.0), ('1', True)]:
+            with self.subTest(name=name, value=value), tempfile.TemporaryDirectory() as folder:
+                directory = Path(folder)
+                c.write(directory / 'plan.json', {})
+                c.write(directory / 'cycle.json', {'phase':'triage', 'ready':False, 'source':{}, 'pending':[]})
+                journal = directory / ('settlement-round' + name + '-journal.json')
+                c.write(journal, {'round':value})
+                c.write(directory / ('settlement-round' + name + '-committed.json'), {'journal_sha256':c.sha_file(journal)})
+                before = (directory / 'cycle.json').read_bytes()
+                self.assertEqual(c.main(['status', '--plan', str(directory / 'plan.json'), '--state-dir', str(directory)]), 2)
+                self.assertEqual(before, (directory / 'cycle.json').read_bytes())
+
 if __name__ == '__main__': unittest.main()
