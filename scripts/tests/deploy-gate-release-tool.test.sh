@@ -87,4 +87,13 @@ assert "pip install" in fallback and " uv" in fallback and "GITHUB_PATH" in fall
 PY
 pass=$((pass + 1))
 
+# Every optional tool in Prepare runner is non-fatal: a cold-disk outage of its host must not fail
+# gates that never call it (hunt round 9: fly.io/install.sh 504s failed 10 of 11 gates).
+setup="$ROOT/scripts/ci/deploy-gate-setup.sh"
+for tool in flyctl ngrok cloudflared; do
+  grep -A3 "release_tool $tool " "$setup" | grep -q "|| echo \"⚠️ $tool unavailable" \
+    || fail "$tool install is fatal in deploy-gate-setup.sh"
+done
+bash -n "$setup" || fail "deploy-gate-setup.sh does not parse"
+pass=$((pass + 1))
 echo "RESULTS: $pass passed, 0 failed"

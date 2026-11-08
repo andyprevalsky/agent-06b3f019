@@ -78,14 +78,22 @@ sudo chown "$(id -u):$(id -g)" "$DEPS"
 export RELEASE_TOOL_CACHE="$DEPS/release-tools"
 . scripts/ci/release-tool.sh
 install_flyctl() { curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null; }
+# Optional like cloudflared: hunt round 9 (cold disk) lost 10 of 11 gates, most never calling flyctl,
+# to fly.io/install.sh 504s. A gate that drives Fly fails at first use with "flyctl: command not found".
 command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] \
-  || release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl
+  || release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl \
+  || echo "⚠️ flyctl unavailable; only gates that drive Fly fail, at first use" >&2
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "tunnel tools"
 # run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
 # the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
-sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
+# ngrok (bin.equinox.io) gets the same last-good-copy cache and is optional: only run.sh's public
+# tunnel uses it, and that refuses explicitly when ngrok is missing.
+install_ngrok() { sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null; }
+command -v ngrok >/dev/null \
+  || release_tool ngrok /usr/local/bin/ngrok install_ngrok \
+  || echo "⚠️ ngrok unavailable; run.sh refuses any public tunnel that needs it" >&2
 install_cloudflared() {
   local tmp status=0
   tmp="$(mktemp)"
