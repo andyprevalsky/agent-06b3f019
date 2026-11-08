@@ -710,7 +710,9 @@ export class AgentCardOrgRuntime {
       const nowMs = this.clock.now();
       const fits =
         nowMs - startedAtMs + waitMs <= ORG_MCP_READ_AUTH_FLAP_WINDOW_MS &&
-        nowMs + waitMs <= deadlineAtMs;
+        // The shared deadline is wall-clock (orgRetryDeadlineAtMs); the injected clock only
+        // measures the flap window.
+        Date.now() + waitMs <= deadlineAtMs;
       log.warn('Organization MCP read auth rejected', {
         tool: toolName,
         flap_step: step,
