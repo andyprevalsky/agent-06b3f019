@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { confirmStall } from '../../../scripts/agentcard-confirm-stall';
+import { confirmationProof, confirmStall } from '../../../scripts/agentcard-confirm-stall';
 
 const binding = {
   kind: 'agentcard-release-stall-renewal-v1',
@@ -112,5 +112,52 @@ test('optional card mode cannot hide explicit live or malformed card or transfer
     if (!includeCardMode) Reflect.deleteProperty(f.card, 'livemode');
     Reflect.deleteProperty(f.transfer, 'livemode');
     await assert.rejects(confirmStall(binding, f.call));
+  }
+});
+
+test('a full newer provider page preserves unknown transfer state without leaking other records', async () => {
+  const native_finished_at = Date.now() / 1000 - 3600;
+  const f = fixture();
+  const rows = Array.from({ length: 100 }, (_, i) => ({
+    id: `owt_new_${i}`,
+    created_at: new Date(Date.now() - 1000 * i).toISOString(),
+    private: 'SECRET_OTHER',
+    status: 'consumed',
+  }));
+  const call = async (name: string, args: Record<string, unknown>, deadline?: number) =>
+    name === 'list_transfers'
+      ? { structuredContent: { transfers: rows } }
+      : f.call(name, args, deadline);
+  const proof = await confirmationProof({ ...binding, native_finished_at }, call);
+  assert.ok('transfer_page' in proof.observations);
+  assert.equal(Object.hasOwn(proof.observations, 'transfer'), false);
+  assert.equal(proof.observations.transfer_page.row_count, 100);
+  assert.ok(proof.observations.transfer_page.oldest_created_at > native_finished_at);
+  assert.ok(!JSON.stringify(proof).includes('owt_new_'));
+  assert.ok(!JSON.stringify(proof).includes('SECRET'));
+  for (const change of [
+    (r: typeof rows) => r.pop(),
+    (r: typeof rows) => {
+      r[0].id = r[1].id;
+    },
+    (r: typeof rows) => {
+      r[0].created_at = new Date(native_finished_at * 1000).toISOString();
+    },
+    (r: typeof rows) => {
+      r[0].created_at = 'invalid';
+    },
+    (r: typeof rows) => {
+      r[0].id = binding.transfer_id;
+    },
+  ]) {
+    const altered = structuredClone(rows);
+    change(altered);
+    await assert.rejects(
+      confirmationProof({ ...binding, native_finished_at }, async (name, args, deadline) =>
+        name === 'list_transfers'
+          ? { structuredContent: { transfers: altered } }
+          : f.call(name, args, deadline)
+      )
+    );
   }
 });

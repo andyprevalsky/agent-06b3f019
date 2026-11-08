@@ -388,3 +388,14 @@ rejected. Sandbox mode must always be proved by the linked transfer. Preparation
 fresh read timestamps; admission requires a read started within five minutes.
 An exact accepted proof is idempotent. All remaining current-source checks run
 under the existing full-plan, source, cleanup and deadline rules.
+
+The provider's transfer listing is a bounded newest-first window. If exactly
+100 distinct, dated rows are all newer than the original native failure's
+completion and omit its transfer, the producer can instead record
+`observations.transfer_page` with count, oldest timestamp and a redacted row
+hash. The original exact card must still be CLOSED with zero balance. This
+preserves the historical no-retry obligation, not a current transfer-state
+claim: the financial state stays UNVERIFIED and the original obligation stays
+open. Original-native, unchanged-contract, producer, current-input and freshness
+guards remain mandatory; every peer executes. Partial, old, duplicate, malformed
+or mixed pages fail closed. No refund, release or PASS is inferred from absence.

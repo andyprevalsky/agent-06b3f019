@@ -109,3 +109,23 @@ permission to retry the stalled card or waive tests was given.
 ## Reusable lesson
 
 Provide a typed fresh-observation renewal for a still-confirmed resource exclusion when source refresh must preserve a no-retry boundary.
+
+## Later provider history-window boundary
+
+After a forced main integration, fresh reads returned the same CLOSED zero-balance
+card and a full 100-row consumed-transfer page without the original transfer.
+The provider integration documents that the transfer list has no pagination or
+card filter. An earlier organization-token rejection was intermittent: later
+reads succeeded with the unchanged credential. A proposed credential-exception
+path was reverted; it is not the basis for this renewal.
+
+A full page of distinct records dated after the original native failure ended
+can now preserve the original no-retry warning with a separate bounded-visibility
+observation. It does not establish the current transfer state. The fresh exact
+card must still be CLOSED with zero balance, and all original-native, unchanged
+payment/task/assertion contract, source/input/environment, producer and freshness
+guards remain. Partial, old, duplicate, malformed or mixed pages fail closed.
+Only the original already-stalled case is excluded; every peer executes. The
+original FAIL/SKIPPED and last-confirmed $43.96 sandbox obligation remain open,
+with current financial state UNVERIFIED and no PASS, refund or release credit.
+No card, transfer, reclaim or credential is created or changed.

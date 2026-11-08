@@ -150,3 +150,4 @@ def test_thinking_rows_cli_crash_is_a_failure_not_an_exception():
     assert result["passed"] is False and result["report"] is None
     assert len(result["failures"]) == 1 and result["failures"][0].startswith("check-thinking-rows exited 1:")
     assert "does-not-exist.mjs" in result["failures"][0]
+

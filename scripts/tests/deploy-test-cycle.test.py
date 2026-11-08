@@ -2145,6 +2145,32 @@ class Cycle(unittest.TestCase):
         self.assertEqual('SKIP', result['cases']['a'])
         self.assertEqual('SKIPPED_WITH_WARNING', request['skips']['a']['disposition'])
 
+    def test_bounded_transfer_visibility_preserves_original_failure_and_runs_peers(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        proof['observations'].pop('transfer')
+        proof['observations']['transfer_page'] = {'status': 'consumed', 'limit': 100, 'row_count': 100,
+            'target_present': False, 'oldest_created_at': proof['started_at'], 'rows_sha256': 'a' * 64}
+        native = path.read_bytes(); before = copy.deepcopy(self.state)
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            for key, value in [('row_count', 99), ('limit', True), ('target_present', True),
+                               ('oldest_created_at', 0), ('oldest_created_at', True), ('rows_sha256', 'bad')]:
+                variant = copy.deepcopy(proof); variant['observations']['transfer_page'][key] = value
+                with self.assertRaises(ValueError): renewal.renew(self.state, variant, self.root)
+                self.assertEqual(before, self.state)
+            mixed = copy.deepcopy(proof); mixed['observations']['transfer'] = {}
+            with self.assertRaises(ValueError): renewal.renew(self.state, mixed, self.root)
+            self.assertEqual(before, self.state)
+            renewal.renew(self.state, proof, self.root)
+            renewal.validate_active(self.state, self.state['resource_warnings'][0])
+        self.assertIn('UNVERIFIED', self.state['resource_warnings'][0]['current_resource_state'])
+        self.assertEqual(original, self.state['failures']); self.assertEqual(native, path.read_bytes())
+        gate = copy.deepcopy(next(g for g in self.plan['gates'] if g['name'] == 'api')); gate['case_protocol'] = True
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            result = c.execute(gate, self.state, self.directory / 'bounded-visibility', self.root)
+        request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
+        self.assertEqual(['b'], request['checks']); self.assertEqual('SKIP', result['cases']['a'])
+        self.assertFalse(self.state['ready'])
+
     def test_renewal_accepts_absent_card_mode_without_fabrication(self):
         renewal, task, proof, original, path = self.renewal_fixture()
         proof['observations']['card'].pop('livemode')

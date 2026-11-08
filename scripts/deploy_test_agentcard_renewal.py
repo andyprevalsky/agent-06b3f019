@@ -162,7 +162,7 @@ def binding(state, occurrence, root):
             'environment': state['environment'], 'contract_sha256': contract_sha,
             'producer_sha256': c.sha_file(root / PRODUCER),
             'card_id': lifecycle['agentCard']['id'], 'transfer_id': lifecycle['orgTransfer']['id'],
-            'amount_cents': lifecycle['orgTransfer']['amountCents']}
+            'amount_cents': lifecycle['orgTransfer']['amountCents'], 'native_finished_at': failure['finished_at']}
 
 
 def renew(state, proof, root):
@@ -202,18 +202,36 @@ def renew(state, proof, root):
         if observations['card']['livemode'] is not False:
             raise ValueError('invalid or live card mode')
         expected_card['livemode'] = False
+    page = observations.get('transfer_page')
+    bounded_page = page is not None
+    if bounded_page:
+        if (set(observations) != {'card', 'transfer_page'} or observations['card'] != expected_card
+                or not isinstance(page, dict)
+                or set(page) != {'status', 'limit', 'row_count', 'target_present', 'oldest_created_at', 'rows_sha256'}
+                or page['status'] != 'consumed' or type(page['limit']) is not int or page['limit'] != 100
+                or type(page['row_count']) is not int or page['row_count'] != 100 or page['target_present'] is not False
+                or type(page['oldest_created_at']) not in (int, float) or not math.isfinite(page['oldest_created_at'])
+                or not expected['native_finished_at'] < page['oldest_created_at'] <= proof['finished_at'] + 5
+                or not isinstance(page['rows_sha256'], str) or not re.fullmatch('[0-9a-f]{64}', page['rows_sha256'])
+                or c.digest(observations['card']) != c.digest(expected_card)):
+            raise ValueError('provider page does not prove the original transfer is outside its bounded window')
     expected_observations = {
         'card': expected_card,
         'transfer': {'id': expected['transfer_id'], 'cardId': expected['card_id'], 'status': 'consumed',
                      'amountCents': expected['amount_cents'], 'transferredCents': expected['amount_cents'],
                      'releasedCents': 0, 'livemode': False}}
     # Exact shape and types: bool/number equality cannot admit malformed JSON.
-    if c.digest(observations) != c.digest(expected_observations):
+    if not bounded_page and c.digest(observations) != c.digest(expected_observations):
         raise ValueError('provider observation no longer proves original sandbox stall')
     warning = next(w for w in reversed(state['superseded_resource_warnings']) if w['id'] == expected['occurrence'])
     entry = {k: copy.deepcopy(v) for k, v in warning.items() if k != 'superseded'}
+    entry.pop('current_resource_state', None)
+    entry.pop('renewal_basis', None)
     entry.update(source=state['source'], original_source=failure['source'],
                  input_fingerprint=expected['input_fingerprint'], renewal=copy.deepcopy(proof))
+    if bounded_page:
+        entry['current_resource_state'] = 'UNVERIFIED; original transfer outside bounded provider page'
+        entry['renewal_basis'] = 'historical no-retry obligation; fresh closed card and full newer provider page'
     if binding(state, expected['occurrence'], root) != expected:
         raise ValueError('source/input changed during renewal validation')
     state.setdefault('resource_warnings', []).append(entry)

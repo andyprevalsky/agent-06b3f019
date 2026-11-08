@@ -15,6 +15,7 @@ type Binding = {
   card_id: string;
   transfer_id: string;
   amount_cents: number;
+  native_finished_at?: number;
 };
 const integer = (v: unknown): number => {
   if (typeof v !== 'number' || !Number.isSafeInteger(v))
@@ -79,6 +80,74 @@ export async function confirmStall(binding: Binding, call: Caller = callOrgTool)
   return { binding, started_at, finished_at: Date.now() / 1000, observations };
 }
 
+export async function confirmationProof(binding: Binding, call: Caller = callOrgTool) {
+  let card: Record<string, unknown> | undefined;
+  let rows: Record<string, unknown>[] | undefined;
+  const started_at = Date.now() / 1000;
+  try {
+    return await confirmStall(binding, async (name, args, deadline) => {
+      const result = await call(name, args, deadline);
+      if (name === 'get_card') {
+        const record = mcpResultRecord(result);
+        card = (record.card ?? record) as Record<string, unknown>;
+      } else if (name === 'list_transfers') rows = mcpResultRows(result, 'transfers');
+      return result;
+    });
+  } catch (error) {
+    const nativeFinishedAt = binding.native_finished_at;
+    if (
+      !(error instanceof Error) ||
+      error.message !== 'Original transfer missing or ambiguous' ||
+      !card ||
+      !rows ||
+      rows.length !== 100 ||
+      rows.some((row) => row.id === binding.transfer_id) ||
+      new Set(rows.map((row) => row.id)).size !== 100 ||
+      rows.some((row) => typeof row.id !== 'string' || row.status !== 'consumed') ||
+      typeof nativeFinishedAt !== 'number' ||
+      !Number.isFinite(nativeFinishedAt)
+    )
+      throw error;
+    const times = rows.map((row) =>
+      typeof row.created_at === 'string' ? Date.parse(row.created_at) / 1000 : NaN
+    );
+    const finished_at = Date.now() / 1000;
+    if (
+      times.some((t) => !Number.isFinite(t) || t <= nativeFinishedAt || t > finished_at + 5) ||
+      card.id !== binding.card_id ||
+      String(card.status).toUpperCase() !== 'CLOSED' ||
+      integer(card.balanceCents ?? card.balance_cents) !== 0 ||
+      (Object.hasOwn(card, 'livemode') && card.livemode !== false)
+    )
+      throw error;
+    // A full newer page cannot establish this original transfer's current state.
+    // Preserve its historical no-retry obligation without inventing a transfer observation.
+    return {
+      binding,
+      started_at,
+      finished_at,
+      observations: {
+        card: {
+          id: card.id,
+          status: 'CLOSED',
+          balanceCents: 0,
+          ...(Object.hasOwn(card, 'livemode') ? { livemode: false } : {}),
+        },
+        transfer_page: {
+          status: 'consumed',
+          limit: 100,
+          row_count: 100,
+          target_present: false,
+          oldest_created_at: Math.min(...times),
+          rows_sha256: createHash('sha256')
+            .update(JSON.stringify(rows.map((row) => [row.id, row.created_at])))
+            .digest('hex'),
+        },
+      },
+    };
+  }
+}
+
 async function main() {
   const [input, output] = process.argv.slice(2);
   if (!input || !output || process.argv.length !== 4)
@@ -88,7 +157,7 @@ async function main() {
     .update(readFileSync(new URL(import.meta.url)))
     .digest('hex');
   if (binding.producer_sha256 !== sha) throw new Error('Producer changed after source freeze');
-  const proof = await confirmStall(binding);
+  const proof = await confirmationProof(binding);
   writeFileSync(output, JSON.stringify(proof, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
