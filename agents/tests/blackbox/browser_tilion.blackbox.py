@@ -30,6 +30,18 @@ from _test_utils import BlackboxResult
 
 TILION_SESSION = "sess_0123456789abcdef0123456789abcdef"
 TILION_TOKEN = "tok_secret_value_never_logged"
+# websockets' default close_timeout: the bound on the multiplexer's upstream
+# close handshake, which is what frees the provider's single client slot.
+_SLOT_RELEASE_TIMEOUT_SECONDS = 10.0
+
+
+async def _wait_until(predicate, timeout: float, what: str) -> None:
+    """Poll a real readiness condition up to a bound instead of sleeping blind."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{what} not observed within {timeout}s")
+        await asyncio.sleep(0.05)
 
 
 class FakeTilionGateway:
@@ -46,6 +58,22 @@ class FakeTilionGateway:
         self._sockets: set = set()
         self.withhold = None  # predicate(raw request) -> True to never deliver its reply
         self.withheld_ids: set = set()
+        self._slot_released = asyncio.Event()
+
+    async def wait_released(self, timeout: float = _SLOT_RELEASE_TIMEOUT_SECONDS) -> None:
+        """Wait for the native transport to free the single client slot.
+
+        The multiplexer releases it with a websocket close handshake that the
+        server observes asynchronously; a fixed sleep raced that under load.
+        """
+        deadline = time.monotonic() + timeout
+        while self.active:
+            self._slot_released.clear()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"slot not released within {timeout}s (active={self.active})")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._slot_released.wait(), remaining)
 
     async def drop_all(self) -> None:
         """Simulate Tilion dropping the attached client (network blip, LB)."""
@@ -95,6 +123,7 @@ class FakeTilionGateway:
         if downstream in self._sockets:
             self._sockets.remove(downstream)
             self.active -= 1
+            self._slot_released.set()
 
     async def __aenter__(self):
         quiet = logging.getLogger("browser_tilion.fake_gateway")
@@ -402,7 +431,7 @@ async def test_tilion_worker_attach_uses_one_upstream_socket():
                     if pw_browser is not None:
                         await pw_browser.close()
                     await _stop_dom_service(service)
-                await asyncio.sleep(0.2)
+                await gateway.wait_released()
                 assert gateway.active == 0, "worker teardown must release Tilion's single client slot"
                 assert service.cdp_bytes_received >= len(png), "the byte count outlives the disconnect"
                 assert gateway.rejected_4409 == 0
@@ -429,7 +458,7 @@ async def test_multiplexer_releases_upstream_when_clients_leave_and_reattaches()
                         assert second["id"] == 7 and "targetInfos" in second["result"], second
                         assert "sessionId" not in first and "sessionId" not in second
                         assert gateway.active == 1
-                    await asyncio.sleep(0.2)
+                    await gateway.wait_released()
                     assert gateway.active == 0, f"round {round_number}: slot not released"
                 assert multiplexer.upstream_connections_opened == 2
                 assert gateway.rejected_4409 == 0
@@ -483,11 +512,8 @@ async def test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_ru
                     assert (await service.get_browser_state(include_screenshot=False))["url"] is not None
                     session._intentional_stop = True  # the drop callback sees a deliberate stop and starts nothing
                     await gateway.drop_all()
-                    for _ in range(100):
-                        if not session.is_cdp_connected:
-                            break
-                        await asyncio.sleep(0.05)
-                    await asyncio.sleep(0.3)
+                    await _wait_until(lambda: not session.is_cdp_connected, 5, "CDP socket drop")
+                    await asyncio.sleep(0.3)  # the drop callback runs while the stop is still intentional
                     session._intentional_stop = False
                     assert not session.is_cdp_connected and not session.is_reconnecting
                     state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
@@ -512,7 +538,8 @@ async def test_state_fetch_waits_for_a_reconnect_browser_use_left_pending():
                     session = service.session
                     session._intentional_stop = True
                     await gateway.drop_all()
-                    await asyncio.sleep(0.5)
+                    await _wait_until(lambda: not session.is_cdp_connected, 5, "CDP socket drop")
+                    await asyncio.sleep(0.5)  # the drop callback runs while the stop is still intentional
                     session._intentional_stop = False
                     assert not session.is_cdp_connected and not session.is_reconnecting
                     real_reconnect = type(session)._auto_reconnect
@@ -550,7 +577,8 @@ async def test_state_fetch_reports_provider_close_when_the_socket_cannot_be_rest
                     session = service.session
                     session._intentional_stop = True
                     await gateway.drop_all()
-                    await asyncio.sleep(0.5)
+                    await _wait_until(lambda: not session.is_cdp_connected, 5, "CDP socket drop")
+                    await asyncio.sleep(0.5)  # the drop callback runs while the stop is still intentional
                     session._intentional_stop = False
                     gateway._server.close()  # the provider no longer accepts connections
                     with contextlib.suppress(Exception):

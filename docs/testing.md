@@ -237,6 +237,46 @@ in `scripts/test.sh`; no live 50-task campaign is added to deploy by default.
 - **Agent tool:** Add `agents/tests/blackbox/<tool-name>/test_<tool-name>.py`
 - **Frontend component:** Add `front-end/src/tests/blackbox/<domain>.blackbox.tsx`
 
+**Waiting in tests: wait for the condition, never a fixed sleep.** A
+`time.sleep(0.2)`, `asyncio.sleep(0.5)` or `await sleep(100)` followed by an
+assertion passes on an idle host and fails under CPU load; it is our most
+common flake class. Poll the observable condition with the canonical helper,
+which backs off until the predicate is true or the overall deadline passes and
+reports the last observed value on timeout:
+
+- **Python** (agents and `scripts/tests`): put `scripts/lib` on `sys.path`, then
+  `from condition_wait import wait_until, async_wait_until, FakeClock`, e.g.
+  `wait_until(lambda: pid_file.exists() and pid_file.read_text(), timeout=30, description="child pid")`.
+- **Backend TypeScript:** `waitFor(description, probe, { timeoutMs })` from
+  `back-end/src/tests/helpers/waitFor.ts`; `undefined`/`null`/`false` mean "not yet".
+- **Frontend:** testing-library `waitFor`/`findBy*`, or vitest fake timers.
+
+Code under test that computes deadlines takes an injectable clock; drive it with
+`FakeClock` (both languages), whose `sleep` advances time instantly, instead of
+real waiting. Keep the timeout generous: it bounds a failure, it is not the
+synchronization. `scripts/check_test_sleeps.py` (regression
+`scripts/tests/condition-waits.test.py`) fails when a test file adds a non-zero
+literal sleep beyond `scripts/test-sleep-baseline.json`. Counts only go down:
+run `python3 scripts/check_test_sleeps.py --update` after removing sleeps; it
+never raises an entry. There is no inline suppression. A delay that deliberately
+simulates slow work, rather than synchronizing, uses a named constant saying why.
+
+**Five consecutive runs under load.** A new or changed test is finalized only
+after `python3 scripts/select_affected_tests.py --stability` passes (activate
+`agents/venv`; default base `origin/main` plus the worktree, or repeat
+`--changed-file`). It selects every lane unit whose own test file was added or
+changed and runs each five consecutive times while it holds `nproc` busy CPU
+workers (`stress-ng` when installed, else Python loops), started and reaped by
+their exact PIDs. A failed or timed-out run fails the check; a dead load worker
+or test bytes that change during the runs make it UNVERIFIED. Deploy
+structural gates, cloudbench-controller commands, agents pytest/blackbox and
+frontend vitest units run through their owning runners; backend and mac-app
+units are reported UNSUPPORTED (exit 2), never PASS. Idle-host 5/5 is not
+enough: Blacksmith runners differ in `/proc` readability, Git 2.47 background
+maintenance and CPU steal. Where the Blacksmith executor is available, also run
+the same check once there; the deploy-plan gate that routes it to Blacksmith is
+not yet registered. The regression is `scripts/tests/select-affected-tests.test.py`.
+
 The compact live-result deploy control also owns native inert worker admission,
 cancellation between stages and clone retries, exact prelaunch retirement,
 launched-worker capture failures, and the decoded-size Hub transport boundary.

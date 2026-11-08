@@ -7542,6 +7542,12 @@ cleanup() {{
   exit "$status"
 }}
 trap cleanup EXIT
+# Trace the production clock (Bash SECONDS) out of band: retry eligibility is
+# judged from the ticks the deadline arithmetic actually saw.
+exec 9>"$FAKE/native-clock.trace"
+BASH_XTRACEFD=9
+PS4='+TRACE seconds=$SECONDS fn=${{FUNCNAME[0]:-top}}: '
+set -x
 exit 143
 """
     started = time.monotonic()
@@ -7584,12 +7590,63 @@ exit 143
     assert receipt["verified"] is False, receipt
     assert receipt["verified_state"] == initial, receipt
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
-    if case == "stop-always-fails":
-        # The owning deadline uses Bash SECONDS, whose integer ticks can reach
-        # six before Python observes six full monotonic seconds. Check that
-        # clock for exhaustion; the independent wall-clock bound above stays strict.
-        native_seconds = int(result.stdout.removeprefix("native_stop_seconds=").strip())
-        assert len(stops) == 3 or native_seconds >= 6, (stops, native_seconds, elapsed)
+    if case == "stop-always-fails" and len(stops) < 3:
+        # Under load the shared whole-second deadline can expire before the
+        # third request's backoff tick. Only the production clock trace may
+        # excuse it: the deadline was refused and no retry check before it was
+        # eligible. The independent wall-clock bound above stays strict.
+        trace = (fake / "native-clock.trace").read_text()
+        assert _native_stop_retry_unreachable_before_deadline(trace, len(stops)), trace
+
+
+def _native_stop_retry_unreachable_before_deadline(trace: str, sent: int) -> bool:
+    """Prove from the production clock trace that a further retry could not run.
+
+    After the last request the verifier schedules the next one on a backoff
+    tick. Fewer than the capped requests are acceptable only when that
+    schedule is the production backoff, the shared deadline was refused, and
+    no retry check at or after the scheduled tick happened before the deadline.
+    """
+    prefix = r"\++TRACE seconds=(\d+) fn=fleet_native_stop_"
+    deadlines = [int(m[2]) for line in trace.splitlines()
+                 if (m := re.fullmatch(prefix + r"undelivered_guests: deadline=(\d+)", line))]
+    if len(deadlines) != 1 or not _native_stop_last_tick_exhausted(trace, deadlines[0]):
+        return False
+    deadline = deadlines[0]
+    scheduled_at = next_request = requests = None
+    checks: list[tuple[int, int]] = []
+    for line in trace.splitlines():
+        if m := re.fullmatch(prefix + r"verify_guest: next_request=(\d+)", line):
+            scheduled_at, next_request, checks = int(m[1]), int(m[2]), []
+        elif m := re.fullmatch(prefix + r"verify_guest: requests=(\d+)", line):
+            requests = int(m[2])
+        elif m := re.fullmatch(prefix + r"verify_guest: '\[' (\d+) -ge (\d+) '\]'", line):
+            checks.append((int(m[2]), int(m[3])))
+    if next_request is None or scheduled_at is None:
+        return False
+    if sent >= 2:
+        # The PS4 clock is read just after the assignment's own SECONDS read.
+        if requests != sent or next_request - (1 << (sent - 1)) not in {scheduled_at - 1, scheduled_at}:
+            return False
+    return all(target == next_request and not (next_request <= now < deadline) for now, target in checks)
+
+
+def test_native_stop_retry_unreachable_observer_rejects_eligible_or_unscheduled_retry() -> None:
+    head = ("+TRACE seconds=0 fn=fleet_native_stop_undelivered_guests: deadline=6\n"
+            "++TRACE seconds=1 fn=fleet_native_stop_verify_guest: requests=2\n"
+            "++TRACE seconds=3 fn=fleet_native_stop_verify_guest: next_request=5\n")
+    tail = ("++TRACE seconds=6 fn=fleet_native_stop_verify_guest: '[' 6 -lt 6 ']'\n"
+            "++TRACE seconds=6 fn=fleet_native_stop_verify_guest: break\n")
+    early = "++TRACE seconds=4 fn=fleet_native_stop_verify_guest: '[' 4 -ge 5 ']'\n"
+    assert _native_stop_retry_unreachable_before_deadline(head + early + tail, 2)
+    assert _native_stop_retry_unreachable_before_deadline(
+        head + "++TRACE seconds=6 fn=fleet_native_stop_verify_guest: '[' 6 -ge 5 ']'\n" + tail, 2)
+    eligible = "++TRACE seconds=5 fn=fleet_native_stop_verify_guest: '[' 5 -ge 5 ']'\n"
+    for trace, sent in ((head + eligible + tail, 2), (head + early, 2),
+                        (head.replace("next_request=5", "next_request=9") + early + tail, 2),
+                        (head + early + tail, 3), (head.replace("deadline=6", "deadline=7") + early + tail, 2),
+                        (early + tail, 2)):
+        assert not _native_stop_retry_unreachable_before_deadline(trace, sent), trace
 
 
 def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:

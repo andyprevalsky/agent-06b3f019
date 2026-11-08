@@ -183,6 +183,42 @@ def deploy_commands() -> tuple[Command, ...]:
             ROOT / "back-end",
             after="amplitude-live",
         ),
+        # Real-internet provider cases kept out of the hermetic coverage gate.
+        # Same workspace test database as the stages above, so serialized.
+        Command(
+            "browser-provider-live",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "browser-provider-live",
+                "--",
+                "env",
+                "BROWSER_PROVIDER_LIVE=1",
+                "BLACKBOX_TEST_CONCURRENCY=1",
+                "bash",
+                "scripts/run-blackbox-tests.sh",
+                "browser-provider",
+            ),
+            ROOT / "back-end",
+            after="chat-router-failover-live",
+        ),
+        Command(
+            "report-bug-storage-live",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "report-bug-storage-live",
+                "--",
+                "env",
+                "REPORT_BUG_STORAGE_LIVE=1",
+                "BLACKBOX_TEST_CONCURRENCY=1",
+                "bash",
+                "scripts/run-blackbox-tests.sh",
+                "report-bug",
+            ),
+            ROOT / "back-end",
+            after="browser-provider-live",
+        ),
         # Read-only: EXPLAINs and counts every migration production has not applied
         # yet against its data, which local and CI databases never contain.
         Command(
