@@ -166,6 +166,14 @@
    "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
    "parts": 40,
    "files": 56742
+  },
+  {
+   "name": "pr1804-closeout-extra",
+   "key_prefix": "devbox-closeout-private/pr1804-closeout-extra/",
+   "archive_sha256": "cb42780e4b76e94d240eed1435ad472af965091752ce725c37b2553b25e1c052",
+   "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
+   "parts": 1,
+   "files": 6
   }
  ]
 }
