@@ -5225,14 +5225,21 @@ class RelayStartupEvidence(unittest.TestCase):
         pid=capture['agent']['pid'];socket=capture['socket']
         native=self.base/'native';native.mkdir()
         bootstrap=native/'bootstrap.log';(native/'agent-logs').mkdir();agent=native/'agent-logs/123.log'
-        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
+        # Build each log for its PID: textual PID substitution changes the PING
+        # payload width but not its recorded frame length whenever the two PIDs
+        # differ in decimal width (concurrent load moves PIDs across 10**k).
+        def native_bootstrap(agent_pid):
+            return f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {agent_pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n'
+        bootstrap.write_text(native_bootstrap(pid))
         when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
         stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
-        payload=('ok '+json.dumps({'PID':pid,'Version':'0.5.5'})+'\n').encode()
-        raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
-        import json as json_module
-        quoted=json_module.dumps(raw)
-        agent.write_text(f'{stamp} srv OK {pid}\n{stamp} #1 -> ({len(raw)}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        def native_agent_log(agent_pid):
+            payload=('ok '+json.dumps({'PID':agent_pid,'Version':'0.5.5'})+'\n').encode()
+            raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
+            return (f'{stamp} srv OK {agent_pid}\n{stamp} #1 -> ({len(raw)}) {json.dumps(raw)}\n'
+                    f'{stamp} srv parent process exited; shutting down\n'
+                    f'{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        agent.write_text(native_agent_log(pid))
         proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent),'timezone':'UTC'};self.reseal()
         result=self.validate_fixture(receipt,owner,proof)
         self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
@@ -5248,14 +5255,13 @@ class RelayStartupEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'bootstrap binding'):self.validate_fixture(receipt,owner,proof)
         foreign.unlink();proof['fly_native_logs']=saved_logs;self.reseal()
         prior=agent.read_text()
-        for mutation,reason in [(prior.replace(str(pid),str(os.getpid())),'bootstrap|PING|shutdown'),
+        for mutation,reason in [(native_agent_log(os.getpid()),'bootstrap|PING|shutdown'),
                                 (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
                                 (prior.replace(socket,'/foreign/socket'),'shutdown chain')]:
             agent.write_text(mutation);self.reseal()
             with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
         agent.write_text(prior);self.reseal()
-        live=bootstrap.read_text().replace(str(pid),str(os.getpid()))
-        bootstrap.write_text(live);agent.write_text(prior.replace(str(pid),str(os.getpid())));self.reseal()
+        bootstrap.write_text(native_bootstrap(os.getpid()));agent.write_text(native_agent_log(os.getpid()));self.reseal()
         with self.assertRaisesRegex(ValueError,'PID present'):self.validate_fixture(receipt,owner,proof)
 
     def test_startup_reconciliation_rejects_missing_or_live_or_dispatched_evidence(self):
