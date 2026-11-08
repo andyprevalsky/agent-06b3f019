@@ -18,6 +18,549 @@ import deploy_test_cycle as c
 import deploy_gate_progress as progress
 
 class Cycle(unittest.TestCase):
+    def custody_fixture(self):
+        import deploy_test_historical_custody as h
+        mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
+        mocked.start(); self.addCleanup(mocked.stop)
+        names = ['agent-payment-abandonment', 'agent-payment-idempotent-abandonment']
+        catalog = [t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text()) if t['name'] in names]
+        path = self.root / 'agents/benchmarks/tasks.json'
+        path.parent.mkdir(parents=True); c.write(path, catalog)
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'catalog'], check=True)
+        gate = self.plan['gates'][1]
+        gate.update(checks=names + ['peer-' + str(i) for i in range(13)], case_protocol=True)
+        self.plan['source'] = c.source(self.root)
+        self.state = c.initialize(self.plan, self.root)
+        failures, reports = [], []
+        for i, name in enumerate(names):
+            task = next(t for t in catalog if t['name'] == name)
+            snap = copy.deepcopy(task['expected_payment_lifecycle'])
+            snap.update(agentId='root-' + str(i), stripeRefund=None)
+            snap['purchase'].update(id='purchase-' + str(i), cardId='card-' + str(i), status='HELD')
+            snap['walletFunding'].update(providerTransferId='transfer-' + str(i), status='RECLAIMING')
+            snap['agentCard'].update(id='card-' + str(i), status='CLOSED', balanceCents=0)
+            snap['orgTransfer'].update(id='transfer-' + str(i), cardId='card-' + str(i), status='consumed',
+                                       releasedCents=0, transferredCents=4396, amountCents=4396, livemode=False)
+            snap['stripeHold']['livemode'] = False
+            final = dict(root_deleted=True, tree_agent_ids=[snap['agentId']], unsealed_tree_agent_ids=[], browser_sessions=[],
+                         purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
+                          card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
+                          total_cents=4396, status='HELD', funding_status='RECLAIMING')])
+            row = dict(name=name, agent_id=snap['agentId'], passed=False, status='ACTIVE' if i else 'SKIPPED',
+                       benchmark_status='FAILED' if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
+            native = dict(**row, cleanup_failure=None, context_violations=[],
+                          execution_provenance={'base_sha': self.state['source']['head']},
+                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=snap['agentId'], final=final,
+                                provider_receipts=[], agentcard_release_stall_lifecycles={snap['agentId']: snap})})
+            if not i: native['logs']['agentcard_release_stall_lifecycle'] = snap
+            file = self.root / '.context/native' / name / 'cloudbench-run.json'; c.write(file, {'tasks': [native]})
+            evidence = dict(native_task=row, path=str(file), sha256=c.sha_file(file))
+            result = file.parent / 'result.json'
+            c.write(result, dict(source=self.state['source'], gate='api', complete=True, cleanup_complete=True,
+                                 evidence={name: evidence}))
+            f = dict(id='failure-' + str(i), check='api/' + name, gate='api', source=self.state['source'],
+                     native_result='FAIL', complete=True, command=gate['command'], finished_at=1000,
+                     worker_evidence=evidence, worker_result=str(result))
+            failures.append(f)
+            entry = dict(id=f['id'], check=f['check'], source=f['source'], command=f['command'], native_result='FAIL',
+                         attribution='NOT_INTRODUCED', description='native original failure', evidence=str(file))
+            if i:
+                entry['post_merge'] = dict(test=f['check'], command=f['command'], scope='original auth failure',
+                                          error='auth then timeout', source=f['source'], evidence=str(file))
+            else:
+                entry['resource_skip'] = self.stall_confirmation(receipt_sha256=evidence['sha256'])
+            reports.append(entry)
+        self.state.update(phase='triage', failure_phase='final', pending=[f['id'] for f in failures], failures=failures)
+        c.adjudicate(self.state, {'failures': reports})
+        self.state.update(phase='ready', ready=True)
+        (self.root / 'code').write_text('changed payment backend contract')
+        new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
+        return new
+
+    def test_concurrent_agentcard_selector_keeps_dataclass_module_registered(self):
+        import types
+        bridge = types.ModuleType('_deploy_selector_race_fixture')
+        bridge.first_entered = threading.Event()
+        bridge.second_entered = threading.Event()
+        bridge.first_finished = threading.Event()
+        bridge.lock = threading.Lock()
+        bridge.calls = 0
+        argv, search_path = list(sys.argv), list(sys.path)
+        modules_before = {key for key in sys.modules if key.startswith('_deploy_source_')}
+        def enter():
+            with bridge.lock:
+                bridge.calls += 1
+                first = bridge.calls == 1
+            if first:
+                bridge.first_entered.set()
+                if not bridge.second_entered.wait(5): raise RuntimeError('second selector never entered')
+            else:
+                bridge.second_entered.set()
+                if not bridge.first_finished.wait(5): raise RuntimeError('first selector never finished')
+        bridge.enter = enter
+        target = self.root / 'agents/benchmarks/select_predeploy_benches.py'
+        target.parent.mkdir(parents=True)
+        real_selector = (ROOT / 'agents/benchmarks/select_predeploy_benches.py').read_text()
+        target.write_text(real_selector.replace('@dataclass(frozen=True)',
+            'import _deploy_selector_race_fixture\n_deploy_selector_race_fixture.enter()\n@dataclass(frozen=True)', 1))
+        (target.parent / 'tasks.json').write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
+        with patch.dict(sys.modules, {'_deploy_selector_race_fixture': bridge}), ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(c.agentcard_release_stall_task, 'agent-payment-abandonment', self.root)
+            try:
+                self.assertTrue(bridge.first_entered.wait(5))
+                second = pool.submit(c.agentcard_release_stall_task, 'agent-payment-abandonment', self.root)
+                self.assertTrue(first.result(timeout=10))
+            finally:
+                bridge.first_finished.set()
+            self.assertTrue(second.result(timeout=10))
+        self.assertEqual(2, bridge.calls)
+        self.assertEqual(argv, sys.argv)
+        self.assertEqual(search_path, sys.path)
+        self.assertEqual(modules_before, {key for key in sys.modules if key.startswith('_deploy_source_')})
+
+    def test_agentcard_selector_failed_load_retires_only_its_own_module_and_never_caches(self):
+        import types
+        bridge = types.ModuleType('_deploy_selector_failure_fixture')
+        bridge.foreign = object()
+        target = self.root / 'agents/benchmarks/select_predeploy_benches.py'
+        target.parent.mkdir(parents=True)
+        prefix = 'import sys, _deploy_selector_failure_fixture as bridge\nbridge.name = __name__\n'
+        with patch.dict(sys.modules, {'_deploy_selector_failure_fixture': bridge}):
+            target.write_text(prefix + 'raise RuntimeError("load failed")\n')
+            with self.assertRaisesRegex(RuntimeError, 'load failed'):
+                c.agentcard_release_stall_task('agent-payment-abandonment', self.root)
+            self.assertNotIn(bridge.name, sys.modules)
+            target.write_text(prefix + 'sys.modules[__name__] = bridge.foreign\nraise RuntimeError("replaced")\n')
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'replaced'):
+                    c.agentcard_release_stall_task('agent-payment-abandonment', self.root)
+                self.assertIs(bridge.foreign, sys.modules[bridge.name])
+            finally:
+                sys.modules.pop(bridge.name, None)
+        target.write_bytes((ROOT / 'agents/benchmarks/select_predeploy_benches.py').read_bytes())
+        catalog = target.parent / 'tasks.json'
+        catalog.write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+        catalog.write_text('[]')
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-abandonment', ROOT))
+        # A stale same-size/same-mtime .pyc must never restore an old predicate.
+        import py_compile
+        original = target.read_bytes(); stamp = target.stat()
+        changed = original.replace(b'AgentCard release-stall standing warning', b'agentCard release-stall standing warning')
+        self.assertEqual(len(original), len(changed)); self.assertNotEqual(original, changed)
+        py_compile.compile(str(target), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+        target.write_bytes(changed); os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        catalog.write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+
+    def test_historical_stall_cannot_refresh_into_new_card_request_without_proof(self):
+        new = self.custody_fixture()
+        before = copy.deepcopy(self.state)
+        with self.assertRaisesRegex(ValueError, 'historical custody'):
+            c.refresh(self.state, self.plan, new, self.root)
+        self.assertEqual(before, self.state)
+
+    def test_historical_custody_refresh_runs_all_peers_and_keeps_native_debt(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        originals = copy.deepcopy(self.state['failures'])
+        debt = copy.deepcopy(self.state['pending_post_merge'])
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        same = copy.deepcopy(self.state)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual(same, self.state)
+        with self.assertRaisesRegex(ValueError, 'mix election'):
+            c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof, election_proof={})
+        self.assertEqual(same, self.state)
+        self.assertEqual(originals, self.state['failures'])
+        self.assertEqual(debt, self.state['pending_post_merge'])
+        self.assertEqual({}, self.state['skips']); self.assertEqual([], self.state['resource_warnings'])
+        h.verify(self.state, self.root)
+        self.state.update(phase='final')
+        gate = self.state['plan']['gates'][1]
+        def worker(argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['peer-' + str(i) for i in range(13)], request['checks'])
+            self.assertEqual(2, len(request['skips']))
+            self.assertTrue(all(x['disposition'] == h.DISPOSITION for x in request['skips'].values()))
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases=dict.fromkeys(request['checks'], 'PASS'), complete=True, cleanup_complete=True, reused=False))
+            return 0, False, False, False
+        c.write(self.directory / 'cycle.json', self.state)
+        with patch.object(c, 'run_command', side_effect=worker):
+            result = c.execute(gate, self.state, self.directory, self.root)
+        self.assertEqual('PASS', result['status'], result); self.assertTrue(result['complete'])
+        for check in gate['checks'][:2]:
+            self.assertEqual('SKIP', result['cases'][check])
+            self.assertFalse(result['case_complete'][check]); self.assertEqual('UNVERIFIED', result['current_execution'][check])
+        self.assertEqual(originals, self.state['failures'])
+        self.state['attempts'].append(dict(phase='final', results=[result]))
+        self.assertIsNotNone(c.full_pass_binding(self.state, gate, root=self.root))
+        failed_directory = self.directory / 'peer-failure'
+        c.write(failed_directory / 'cycle.json', self.state)
+        def peer_failure(argv, **kw):
+            worker(argv, **kw)
+            path = Path(kw['env']['DEPLOY_GATE_RESULT']); value = c.read(path)
+            value['cases']['peer-12'] = 'FAIL'; c.write(path, value)
+            return 1, False, False, False
+        with patch.object(c, 'run_command', side_effect=peer_failure):
+            failed = c.execute(gate, self.state, failed_directory, self.root)
+        self.assertEqual('FAIL', failed['status'])
+        self.assertEqual('FAIL', failed['cases']['peer-12'])
+        only_omissions = {**gate, 'checks': gate['checks'][:2]}
+        with patch.object(c, 'run_command') as launch:
+            omitted = c.execute(only_omissions, self.state, self.directory / 'only-omissions', self.root)
+            launch.assert_not_called()
+        self.assertFalse(omitted['executed'])
+        self.assertEqual(dict.fromkeys(only_omissions['checks'], False), omitted['case_complete'])
+        self.assertEqual(dict.fromkeys(only_omissions['checks'], 'UNVERIFIED'), omitted['current_execution'])
+        self.assertFalse(failed['case_complete']['agent-payment-abandonment'])
+        # A second source refresh preserves the original packet after legacy skips disappeared.
+        old = self.state['plan']; (self.root / 'code').write_text('next current source')
+        newer = copy.deepcopy(old); newer['source'] = c.source(self.root)
+        self.state.update(phase='ready', ready=True)
+        renewed = h.build(self.state, old, newer, self.root)
+        c.refresh(self.state, old, newer, self.root, historical_no_retry_proof=renewed)
+        self.assertEqual(debt, self.state['pending_post_merge'])
+        self.assertEqual(originals, self.state['failures'])
+        h.verify(self.state, self.root)
+        c.resolve_post_merge(self.state, debt[0]['id'], 'https://boxes.dev/thread/repair-fixture')
+        self.assertEqual([], self.state['pending_post_merge']); h.verify(self.state, self.root)
+
+    def test_historical_custody_full_receipt_carries_across_history_only_commit(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.state.update(phase='final')
+        gate = self.state['plan']['gates'][1]
+        def worker(argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['peer-' + str(i) for i in range(13)], request['checks'])
+            self.assertEqual(2, len(request['skips']))
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases=dict.fromkeys(request['checks'], 'PASS'), complete=True, cleanup_complete=True))
+            return 0, False, False, False
+        c.write(self.directory / 'cycle.json', self.state)
+        with patch.object(c, 'run_command', side_effect=worker):
+            receipt = c.execute(gate, self.state, self.directory, self.root)
+        self.state['attempts'].append(dict(phase='final', results=[receipt]))
+        self.state.update(phase='ready', ready=True)
+        original = c.full_pass_binding(self.state, gate, root=self.root)
+        self.assertIsNotNone(original)
+        old = self.state['plan']
+        native_files = {str(Path(receipt['log']).parent / name): (Path(receipt['log']).parent / name).read_bytes()
+                        for name in ('request.json', 'receipt.json', 'result.json')}
+        ledger = self.root / 'agents/benchmarks/history/writer.jsonl'
+        ledger.parent.mkdir(parents=True); ledger.write_text('{"run": 1}\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', str(ledger)], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'history only'], check=True)
+        newer = copy.deepcopy(old); newer['source'] = c.source(self.root)
+        self.assertNotEqual(old['source']['head'], newer['source']['head'])
+        # Source digest includes HEAD; execution inputs must remain byte-identical.
+        self.assertNotEqual(old['source']['digest'], newer['source']['digest'])
+        self.assertEqual(self.state['input_fingerprints'], c.input_fingerprints(newer, self.root))
+        renewal = h.build(self.state, old, newer, self.root)
+        with patch.object(c, 'run_command') as launch:
+            c.refresh(self.state, old, newer, self.root, historical_no_retry_proof=renewal)
+            self.assertIn('api', self.state['carried_passes'])
+            self.assertEqual(original, self.state['carried_passes']['api']['native_binding'])
+            self.assertEqual(original, c.full_pass_binding(self.state, gate, root=self.root))
+            launch.assert_not_called()
+        self.assertEqual(receipt['source'], original['native_source'])
+        h.verify(self.state, self.root)
+        self.assertTrue(c.carried_pass(self.state, gate, root=self.root))
+        # A second history-only commit must still point to the same original native files.
+        prior = self.state['plan']
+        ledger.write_text(ledger.read_text() + '{"run": 2}\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', str(ledger)], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'second history'], check=True)
+        current = copy.deepcopy(prior); current['source'] = c.source(self.root)
+        renewal = h.build(self.state, prior, current, self.root)
+        c.refresh(self.state, prior, current, self.root, historical_no_retry_proof=renewal)
+        self.assertEqual(original, self.state['carried_passes']['api']['native_binding'])
+        self.assertTrue(c.carried_pass(self.state, gate, root=self.root))
+        self.assertEqual(native_files, {p: Path(p).read_bytes() for p in native_files})
+        recovered = copy.deepcopy(self.state)
+        recovered['attempts'][-1]['results'][0]['kind'] = 'recovered-native-execution-v1'
+        self.assertIsNone(c.full_pass_binding(recovered, gate, root=self.root, custody_refresh=True))
+        # File or environment changes invalidate positive carry, even though custody renews.
+        code = (self.root / 'code').read_text()
+        for change in ('file', 'environment'):
+            candidate = copy.deepcopy(self.state)
+            if change == 'file': (self.root / 'code').write_text('actual changed input')
+            with patch.dict(os.environ, {'CUSTODY_CHANGED_INPUT': '1'} if change == 'environment' else {}):
+                updated = copy.deepcopy(current); updated['source'] = c.source(self.root)
+                proof = h.build(candidate, current, updated, self.root)
+                with patch.object(c, 'run_command') as launch:
+                    c.refresh(candidate, current, updated, self.root, historical_no_retry_proof=proof)
+                    self.assertNotIn('api', candidate['carried_passes'])
+                    self.assertFalse(c.carried_pass(candidate, gate, root=self.root))
+                    launch.assert_not_called()
+            (self.root / 'code').write_text(code)
+
+    def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)
+        before = copy.deepcopy(self.state)
+        for change in (lambda p: p['cases'].pop(), lambda p: p.update(extra=True),
+                       lambda p: p['current_binding'].update(environment='wrong'),
+                       lambda p: p['cases'][0].update(snapshot_sha256='0' * 64)):
+            bad = copy.deepcopy(proof); change(bad)
+            with self.assertRaises(ValueError):
+                c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=bad)
+            self.assertEqual(before, self.state)
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        mutations = [lambda t: t['logs']['cloud_cleanup_evidence']['agentcard_release_stall_lifecycles'][t['agent_id']]['orgTransfer'].update(livemode=True),
+                     lambda t: t['logs']['cloud_cleanup_evidence']['agentcard_release_stall_lifecycles'][t['agent_id']]['orgTransfer'].update(releasedCents=1),
+                     lambda t: t['logs']['cloud_cleanup_evidence'].update(errors=['unknown owner'])]
+        # Even a newly hashed native snapshot cannot turn live/released/nonstalled facts into custody.
+        for change in mutations:
+            candidate = copy.deepcopy(self.state)
+            doc = json.loads(raw); change(doc['tasks'][0]); c.write(file, doc)
+            candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+            adapter = c.read(adapter_path)
+            adapter['evidence'][doc['tasks'][0]['name']] = candidate['failures'][1]['worker_evidence']
+            c.write(adapter_path, adapter)
+            with self.assertRaises(ValueError): h.build(candidate, self.plan, new, self.root)
+            adapter_path.write_bytes(adapter_raw)
+        mutations.append(lambda t: t['logs']['cloud_cleanup_evidence'].pop('agentcard_release_stall_lifecycles'))
+        for change in mutations:
+            doc = json.loads(raw); change(doc['tasks'][0]); c.write(file, doc)
+            with self.assertRaises(ValueError): h.build(self.state, self.plan, new, self.root)
+        file.write_bytes(raw)
+        missing = copy.deepcopy(self.state); missing['failures'][1]['source']['head'] = '0' * 40
+        with self.assertRaisesRegex(ValueError, 'original catalog'):
+            h.known(missing, self.root)
+        catalog = self.root / 'agents/benchmarks/tasks.json'; original = catalog.read_bytes()
+        changed = json.loads(original); changed[0]['prompt'] = 'changed assertion/task'; c.write(catalog, changed)
+        with self.assertRaises(ValueError): h.build(self.state, self.plan, new, self.root)
+        catalog.write_bytes(original)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.state.update(phase='ready', ready=True); c.write(self.directory / 'cycle.json', self.state)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        request = dict(source=new['source'], gate='api', checks=['peer-' + str(i) for i in range(13)],
+                       skips=c.reuse_qualifications(self.state, new['gates'][1], root=self.root),
+                       custody_state=str(self.directory / 'cycle.json'), custody_state_sha256=h.state_identity(self.state), custody_child_environment=h.environment_identity(os.environ), custody_runtime=h.runtime_identity(self.root))
+        h.admission(request, self.root)
+        runtime = self.root / '.env'; runtime.write_text('CUSTODY_FIXTURE=changed')
+        with self.assertRaises(ValueError): h.admission(request, self.root)
+        runtime.unlink()
+        with patch.dict(os.environ, CUSTODY_FIXTURE='changed'):
+            with self.assertRaises(ValueError): h.admission(request, self.root)
+        self.state['historical_no_retry_custody'] = []; c.write(self.directory / 'cycle.json', self.state)
+        self.assertNotEqual(0, c.verify_saved(self.directory, self.root))
+        request['custody_state_sha256'] = h.state_identity(self.state)
+        with self.assertRaises(ValueError): h.admission(request, self.root)
+        with patch.object(c, 'run_command') as launch:
+            with self.assertRaises(ValueError): c.execute(new['gates'][1], self.state, self.directory, self.root)
+            launch.assert_not_called()
+
+    def test_historical_native_audit_rejects_corrupt_tree_and_active_owner(self):
+        import deploy_test_historical_custody as h
+        import runpy
+        token = 'b' * 32
+        fleet = self.root / '.context/native/run-2147483647'
+        local = fleet / 'teardown-ownership'
+        canonical = self.root / '.git/cloudbench-fleet-audits' / token
+        local.mkdir(parents=True); canonical.mkdir(parents=True)
+        meta = ('status=provider-teardown-verified\nfleet_owner_token=' + token
+                + '\nrun_id=' + fleet.name + '\nworkspace_root=' + str(self.root) + '\n')
+        for directory in (local, canonical): (directory / 'meta').write_text(meta)
+        digest = runpy.run_path(str(ROOT / 'scripts/cloudbench-retained-successor.py'))['tree_digest']
+        def seal():
+            sha = digest(local)
+            for directory in (local, canonical):
+                (directory / 'source-audit').write_text('path=' + str(canonical) + '\nsha256=' + sha + '\n')
+            c.write(fleet / '_batch/lifecycle.json', dict(fleet_owner_token=token, status='verified',
+                hub_publication_failed=False, workspace_root=str(self.root), run_id=fleet.name, audit_sha256=sha))
+        seal()
+        native = fleet / 'task/cloudbench-run.json'
+        self.assertEqual(str(fleet), h.native_closure(native, self.root)['fleet'])
+        argv = list(sys.argv)
+        owned_modules = {key for key in sys.modules if key.startswith('_deploy_source_')}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(h.native_closure, native, self.root) for _ in range(2)]
+            self.assertTrue(all(f.result(timeout=10)['fleet'] == str(fleet) for f in futures))
+        self.assertEqual(argv, sys.argv)
+        self.assertEqual(owned_modules, {key for key in sys.modules if key.startswith('_deploy_source_')})
+        (canonical / 'meta').write_text(meta + 'changed=true\n')
+        with self.assertRaises(ValueError): h.native_closure(native, self.root)
+        self.assertEqual(owned_modules, {key for key in sys.modules if key.startswith('_deploy_source_')})
+        (canonical / 'meta').write_text(meta)
+        registry = self.root / '.git/cloudbench-fleet-ownership' / token; registry.mkdir(parents=True)
+        with self.assertRaises(ValueError): h.native_closure(native, self.root)
+        registry.rmdir()
+        for directory in (local, canonical):
+            (directory / 'meta').write_text(meta + 'hub_pid=' + str(os.getpid()) + '\n')
+        seal()
+        with self.assertRaises(ValueError): h.native_closure(native, self.root)
+
+    def test_refresh_unstarted_final_preserves_history_and_refuses_active_or_started_phase(self):
+        state = copy.deepcopy(self.state)
+        state.update(phase='final', next_after_quick='final')
+        state['attempts'].append({'phase': 'quick', 'source': state['source'], 'results': []})
+        (self.root / 'code').write_text('repaired source before final admission')
+        new = copy.deepcopy(self.plan)
+        new['source'] = c.source(self.root)
+        before = copy.deepcopy(state)
+        c.refresh(state, self.plan, new, self.root)
+        self.assertEqual(state['attempts'], before['attempts'])
+        self.assertEqual(state['phase'], 'quick')
+        self.assertFalse(state['ready'])
+        for extra in ({'running': [{'gate': 'api'}]}, {'live_failures': []},
+                      {'resume_phase': 'final'}, {'pending': ['unresolved']}):
+            candidate = {**copy.deepcopy(before), **extra}
+            original = copy.deepcopy(candidate)
+            with self.assertRaises(ValueError):
+                c.refresh(candidate, self.plan, new, self.root)
+            self.assertEqual(candidate, original)
+        candidate = copy.deepcopy(before)
+        candidate['attempts'].append({'phase': 'final', 'source': candidate['source'], 'results': []})
+        with self.assertRaises(ValueError):
+            c.refresh(candidate, self.plan, new, self.root)
+
+    def source_refusal_fixture(self):
+        import hashlib, time
+        import deploy_test_cloud_refusal as refusal
+        policies = {}
+        for name in refusal.POLICIES:
+            path = self.root / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text('# audited pre-admission fixture: ' + name)
+            policies[name] = (hashlib.sha256(path.read_bytes()).hexdigest(),)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'audited producer'], check=True)
+        gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+                'worker_transport': 'benchmark-cloud-cli', 'cwd': str(self.root),
+                'command': ['/fixture/bin/python3', str(self.root / 'scripts/deploy_test_cloud.py')],
+                'checks': ['one', 'two']}
+        token = 'a' * 32
+        folder = self.root / '.context/deploy-pipeline/attempts/2/initial/smoke'
+        folder.mkdir(parents=True)
+        owner = {'request_token': token, 'worker_root': str(self.root), 'native_cleanup_reference': None}
+        receipt = dict(gate='smoke', token=token, source=c.source(self.root), native_exit=2,
+                       executed=True, status='FAIL', complete=False, lifecycle='native-producer',
+                       timed_out=False, cancelled=False, lingering_group=True, worker_result=None,
+                       native_cleanup_reference=None, cleanup_owner=owner,
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'),
+                       case_complete=dict.fromkeys(gate['checks'], False), command=gate['command'],
+                       execution_binding={'contract_digest': c.digest(gate)},
+                       log=str(folder / 'output.log'), stderr_log=str(folder / 'stderr.log'),
+                       started_at=time.time() - 2, finished_at=time.time() - 1)
+        c.write(folder / 'request.json', {k: receipt[k] for k in ('token', 'source', 'gate')} |
+                {'checks': gate['checks'], 'skips': {}, 'phase': 'initial'})
+        c.write(folder / 'receipt.json', receipt)
+        (folder / 'output.log').write_bytes(refusal.MESSAGE)
+        (folder / 'stderr.log').write_bytes(b'')
+        state = copy.deepcopy(self.state)
+        state['plan']['gates'].append(gate)
+        state['attempts'].append({'phase': 'initial', 'results': [receipt]})
+        proof = dict(kind=refusal.KIND, root=str(self.root), request_token=token,
+                     files={str(p): c.sha_file(p) for p in folder.iterdir()},
+                     confirmed_at=time.time(), observed_by='hermetic source-refusal test')
+        return refusal, policies, state, receipt, proof
+
+    def test_source_refusal_reconciliation_preserves_unverified_history_and_is_idempotent(self):
+        refusal, policies, state, receipt, proof = self.source_refusal_fixture()
+        original = copy.deepcopy(state)
+        originals = {p: Path(p).read_bytes() for p in proof['files']}
+        with patch.dict(refusal.POLICIES, policies, clear=True), \
+                patch.object(refusal, 'no_holders'), patch.object(refusal, 'namespace_quiet'):
+            self.assertEqual(c.retained_owners(state, ['smoke']), ['smoke'])
+            c.reconcile(state, receipt['token'], proof)
+            self.assertEqual(c.retained_owners(state, ['smoke']), [])
+            accepted = copy.deepcopy(state)
+            c.reconcile(state, receipt['token'], proof)
+            self.assertEqual(state, accepted)
+            entry, = state['reconciled_owners'].values()
+            self.assertFalse(entry['credit_granted'])
+            self.assertFalse(entry['financial_cleanup_credit'])
+            self.assertEqual({k: v for k, v in state.items() if k != 'reconciled_owners'}, original)
+            self.assertEqual(originals, {p: Path(p).read_bytes() for p in proof['files']})
+            (Path(receipt['log'])).write_bytes(b'changed evidence')
+            self.assertEqual(c.retained_owners(state, ['smoke']), ['smoke'])
+
+    def test_source_refusal_reconciliation_refuses_unbound_or_allocated_evidence(self):
+        import hashlib
+        refusal, policies, state, receipt, proof = self.source_refusal_fixture()
+        with patch.dict(refusal.POLICIES, policies, clear=True), \
+                patch.object(refusal, 'no_holders'), patch.object(refusal, 'namespace_quiet'):
+            mutations = [lambda s, p: p.update(request_token='b' * 32),
+                         lambda s, p: p.update(confirmed_at=receipt['started_at'] - 1),
+                         lambda s, p: p['files'].update({receipt['log']: '0' * 64}),
+                         lambda s, p: p['files'].update({'/unbound': '0' * 64}),
+                         lambda s, p: s['plan']['gates'][-1]['command'].append('--other')]
+            for mutate in mutations:
+                candidate, changed = copy.deepcopy(state), copy.deepcopy(proof)
+                mutate(candidate, changed)
+                before = copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):
+                    c.reconcile(candidate, receipt['token'], changed)
+                self.assertEqual(candidate, before)
+            for name in ('no_holders', 'namespace_quiet'):
+                with patch.object(refusal, name, side_effect=ValueError('unknown consumer')):
+                    with self.assertRaises(ValueError):
+                        c.reconcile(state, receipt['token'], proof)
+            with patch.dict(refusal.POLICIES, {next(iter(policies)): ('0' * 64,)}):
+                with self.assertRaisesRegex(ValueError, 'unaudited producer'):
+                    c.reconcile(state, receipt['token'], proof)
+            namespace = self.root / '.context/deploy-cloud' / hashlib.sha256(receipt['token'].encode()).hexdigest()
+            namespace.mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], proof)
+            namespace.rmdir()
+            namespace.symlink_to(self.root, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], proof)
+            namespace.unlink()
+            log = Path(receipt['log'])
+            log.rename(log.with_suffix('.original'))
+            log.symlink_to(log.with_suffix('.original'))
+            with self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], proof)
+
+    def test_explicit_cloud_source_refusal_has_no_owner_and_no_test_credit(self):
+        import deploy_test_cloud_refusal as refusal
+        gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+                'worker_transport': 'benchmark-cloud-cli', 'cwd': str(self.root),
+                'command': [sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')],
+                'case_protocol': True, 'checks': ['one', 'two']}
+        state = copy.deepcopy(self.state)
+        state['input_fingerprints']['smoke'] = 'fixture'
+        def native(argv, **kwargs):
+            request = c.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+            result = {k: request[k] for k in ('token', 'source', 'gate')}
+            result.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                          cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                          native_command=[], fleet_directory=None,
+                          reason='cloud source differs from the requested freeze',
+                          admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+            c.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), result)
+            return 2, False, False, False
+        with patch.object(c, 'run_command', side_effect=native):
+            receipt = c._execute(gate, state, self.directory, self.root)
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(receipt['status'], 'FAIL')
+        self.assertEqual(receipt['cases'], dict.fromkeys(gate['checks'], 'UNVERIFIED'))
+        self.assertFalse(receipt['lingering_group'])
+        self.assertIsNone(c.receipt_owner('smoke', receipt))
+        request = c.read(Path(receipt['log']).parent / 'request.json')
+        result = c.read(Path(receipt['worker_result']))
+        for field, value in [('admission', None), ('cleanup_complete', False), ('cases', {'one': 'PASS', 'two': 'PASS'}),
+                             ('native_command', ['provider']), ('token', 'other')]:
+            changed = {**result, field: value}
+            self.assertFalse(refusal.refused_before_admission(changed, request, gate, self.root, 2, invalid_process=False))
+        self.assertFalse(refusal.refused_before_admission(result, request, gate, self.root, 2, invalid_process=True))
+
     def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
         plan = copy.deepcopy(self.plan)
         plan['gates'][1].update(native_cloud=True, case_protocol=True,
@@ -1880,6 +2423,202 @@ class Cycle(unittest.TestCase):
         c.adjudicate(self.state, report)
         self.assertEqual('needs-focused-plan', self.state['phase']); self.assertFalse(self.state['ready'])
         self.assertEqual(['ui'], self.state['repair_gates']); self.assertEqual(1, len(self.state['resource_warnings']))
+
+    def test_renewal_contract_tracks_dependencies_task_and_payment_bytes(self):
+        import deploy_test_agentcard_renewal as renewal
+        task = {'name': 'fixture', 'tags': ['agentcard-lifecycle-sandbox']}
+        tasks = self.root / 'agents/benchmarks/tasks.json'
+        tasks.parent.mkdir(parents=True)
+        tasks.write_text(json.dumps([task]))
+        runtime = tasks.with_name('run_benchmark.py')
+        runtime.write_text('LIMIT = 1\n' + '\n'.join('def ' + name + '(): return LIMIT'
+                                                        for name in renewal.FUNCTIONS))
+        cleanup = tasks.with_name('cloud_batch_cleanup.py'); cleanup.write_text('cleanup = 1')
+        payment = self.root / renewal.PAYMENT_PATHS[0] / 'fixture.ts'
+        payment.parent.mkdir(parents=True); payment.write_text('payment = 1')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'contract fixture'], check=True)
+        head = c.source(self.root)['head']
+        baseline = renewal.contract(self.root, head, 'fixture')
+        (self.root / 'unrelated').write_text('unrelated source')
+        self.assertEqual(baseline, renewal.contract(self.root, head, 'fixture'))
+        for path, changed in ((payment, 'payment = 2'), (runtime, runtime.read_text().replace('LIMIT = 1', 'LIMIT = 2')),
+                              (tasks, json.dumps([{**task, 'timeout_seconds': 1}])), (cleanup, 'cleanup = 2')):
+            original = path.read_text(); path.write_text(changed)
+            with self.assertRaises(ValueError): renewal.contract(self.root, head, 'fixture')
+            path.write_text(original)
+
+    def renewal_fixture(self):
+        import deploy_test_agentcard_renewal as renewal
+        import time
+        task = next(t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text())
+                    if t['name'] == 'agent-payment-abandonment')
+        lifecycle = copy.deepcopy(task['expected_payment_lifecycle'])
+        lifecycle.update(agentId='root-fixture', stripeRefund=None)
+        lifecycle['purchase'].update(status='HELD', cardId='card_fixture')
+        lifecycle['walletFunding'].update(status='RECLAIMING', providerTransferId='owt_fixture')
+        lifecycle['agentCard'].update(id='card_fixture', status='CLOSED')
+        lifecycle['orgTransfer'].update(id='owt_fixture', cardId='card_fixture', status='consumed', releasedCents=0)
+        lifecycle['stripeHold']['livemode'] = False
+        path = self.stall_run_document(lifecycle['orgTransfer'])
+        doc = c.read(path)
+        row = doc['tasks'][0]
+        row.update(agent_id='root-fixture', cleanup_failure=None, context_violations=[],
+                   execution_provenance={'base_sha': self.state['source']['head']})
+        row['logs']['agentcard_release_stall_lifecycle'] = lifecycle
+        row['logs']['cloud_cleanup_evidence'] = {
+            'errors': [], 'root_agent_id': 'root-fixture',
+            'agentcard_release_stall_lifecycles': {'root-fixture': lifecycle},
+            'final': {'root_deleted': True, 'unsealed_tree_agent_ids': [], 'browser_sessions': []}}
+        c.write(path, doc)
+        sha = c.sha_file(path)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
+        failure['worker_evidence'].update(path=str(path))
+        failure['worker_evidence']['native_task']['agent_id'] = 'root-fixture'
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                           resource_skip=self.stall_confirmation(receipt_sha256=sha)))
+        original = copy.deepcopy(self.state['failures'])
+        (self.root / 'code').write_text('changed source requiring all current gates')
+        (self.root / renewal.PRODUCER).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / renewal.PRODUCER).write_text('hermetic producer')
+        new = {**self.plan, 'source': c.source(self.root)}
+        c.refresh(self.state, self.plan, new, self.root)
+        self.plan = new
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            binding = {**renewal.binding(self.state, failure['id'], self.root), 'prepared_at': time.time() - 2}
+        proof = {'binding': binding, 'started_at': time.time() - 1, 'finished_at': time.time(),
+                 'observations': {'card': {'id': 'card_fixture', 'status': 'CLOSED', 'balanceCents': 0, 'livemode': False},
+                                  'transfer': copy.deepcopy(lifecycle['orgTransfer'])}}
+        return renewal, task, proof, original, path
+
+    def test_changed_source_agentcard_renewal_cli_keeps_failure_and_runs_peers(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        self.assertEqual([], self.state['resource_warnings'])  # original refresh revokes the exclusion
+        self.assertEqual(original, self.state['failures'])
+        native = path.read_bytes()
+        before_gate = copy.deepcopy(next(g for g in self.plan['gates'] if g['name'] == 'api'))
+        before_gate['case_protocol'] = True
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            c.execute(before_gate, self.state, self.directory / 'before-renewal', self.root)
+        before_request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
+        self.assertEqual(['a', 'b'], before_request['checks'])  # old path would request another card
+        plan = self.directory / 'plan.json'
+        c.write(plan, self.plan)
+        c.write(self.directory / 'cycle.json', self.state)
+        proof_path = self.directory / 'proof.json'; c.write(proof_path, proof)
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            self.assertEqual(0, c.main(['renew-agentcard-warning', '--plan', str(plan), '--state-dir',
+                str(self.directory), '--root', str(self.root), '--proof', str(proof_path)]))
+            state = c.read(self.directory / 'cycle.json')
+            before = copy.deepcopy(state)
+            with patch.object(renewal.time, 'time', return_value=proof['finished_at'] + 600):
+                renewal.renew(state, proof, self.root)
+            self.assertEqual(before, state)
+        self.assertEqual(original, state['failures'])
+        self.assertEqual(native, path.read_bytes())
+        self.assertEqual({}, state['skips'])
+        self.assertFalse(state['ready'])
+        self.assertEqual(1, len(state['superseded_resource_warnings']))
+        gate = next(g for g in self.plan['gates'] if g['name'] == 'api')
+        gate['case_protocol'] = True
+        state.update(phase='failed-gates')
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            result = c.execute(gate, state, self.directory, self.root)
+        request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
+        self.assertEqual(['b'], request['checks'])
+        self.assertEqual('SKIP', result['cases']['a'])
+        self.assertEqual('SKIPPED_WITH_WARNING', request['skips']['a']['disposition'])
+
+    def test_bounded_transfer_visibility_preserves_original_failure_and_runs_peers(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        proof['observations'].pop('transfer')
+        proof['observations']['transfer_page'] = {'status': 'consumed', 'limit': 100, 'row_count': 100,
+            'target_present': False, 'oldest_created_at': proof['started_at'], 'rows_sha256': 'a' * 64}
+        native = path.read_bytes(); before = copy.deepcopy(self.state)
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            for key, value in [('row_count', 99), ('limit', True), ('target_present', True),
+                               ('oldest_created_at', 0), ('oldest_created_at', True), ('rows_sha256', 'bad')]:
+                variant = copy.deepcopy(proof); variant['observations']['transfer_page'][key] = value
+                with self.assertRaises(ValueError): renewal.renew(self.state, variant, self.root)
+                self.assertEqual(before, self.state)
+            mixed = copy.deepcopy(proof); mixed['observations']['transfer'] = {}
+            with self.assertRaises(ValueError): renewal.renew(self.state, mixed, self.root)
+            self.assertEqual(before, self.state)
+            renewal.renew(self.state, proof, self.root)
+            renewal.validate_active(self.state, self.state['resource_warnings'][0])
+        self.assertIn('UNVERIFIED', self.state['resource_warnings'][0]['current_resource_state'])
+        self.assertEqual(original, self.state['failures']); self.assertEqual(native, path.read_bytes())
+        gate = copy.deepcopy(next(g for g in self.plan['gates'] if g['name'] == 'api')); gate['case_protocol'] = True
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            result = c.execute(gate, self.state, self.directory / 'bounded-visibility', self.root)
+        request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
+        self.assertEqual(['b'], request['checks']); self.assertEqual('SKIP', result['cases']['a'])
+        self.assertFalse(self.state['ready'])
+
+    def test_renewal_accepts_absent_card_mode_without_fabrication(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        proof['observations']['card'].pop('livemode')
+        native = path.read_bytes()
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            renewal.renew(self.state, proof, self.root)
+        self.assertNotIn('livemode', self.state['resource_warnings'][0]['renewal']['observations']['card'])
+        self.assertIs(False, self.state['resource_warnings'][0]['renewal']['observations']['transfer']['livemode'])
+        self.assertEqual(original, self.state['failures'])
+        self.assertEqual(native, path.read_bytes())
+        self.assertFalse(self.state['ready'])
+
+    def test_optional_card_mode_preserves_strict_transfer_and_explicit_mode_guards(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            for value in (True, None, 0, 1, 'false', [], {}):
+                state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                changed['observations']['card']['livemode'] = value
+                with self.assertRaises(ValueError):
+                    renewal.renew(state, changed, self.root)
+                self.assertEqual(self.state, state)
+            for include_card_mode in (True, False):
+                for value in (True, None, 0, 1, 'false', [], {}):
+                    state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                    if not include_card_mode:
+                        changed['observations']['card'].pop('livemode')
+                    changed['observations']['transfer']['livemode'] = value
+                    with self.assertRaises(ValueError):
+                        renewal.renew(state, changed, self.root)
+                    self.assertEqual(self.state, state)
+                state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                if not include_card_mode:
+                    changed['observations']['card'].pop('livemode')
+                changed['observations']['transfer'].pop('livemode')
+                with self.assertRaises(ValueError):
+                    renewal.renew(state, changed, self.root)
+                self.assertEqual(self.state, state)
+        self.assertEqual(original, self.state['failures'])
+
+    def test_changed_source_renewal_fail_closed(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        mutations = [lambda s, p: p['binding'].update(native_sha256='0' * 64),
+                     lambda s, p: p['binding'].update(source={'head': 'wrong'}),
+                     lambda s, p: p.update(started_at=0),
+                     lambda s, p: p.update(provider_waiver=True),
+                     lambda s, p: p['observations']['transfer'].update(livemode=True),
+                     lambda s, p: p['observations']['transfer'].update(releasedCents=4396),
+                     lambda s, p: p['observations']['card'].update(balanceCents=False),
+                     lambda s, p: p['observations']['card'].update(id='card_wrong'),
+                     lambda s, p: s.update(running=[]),
+                     lambda s, p: s['failures'][0].update(complete=False),
+                     lambda s, p: s['failures'][0]['rca']['resource_skip'].update(reason_code='compute_quota_exhausted')]
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            for mutate in mutations:
+                state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                mutate(state, changed); before = copy.deepcopy(state)
+                with self.assertRaises((ValueError, KeyError)):
+                    renewal.renew(state, changed, self.root)
+                self.assertEqual(before, state)
+            with patch.object(c, 'retained_owners', return_value=['api']):
+                with self.assertRaises(ValueError): renewal.renew(self.state, proof, self.root)
+            path.write_text('{}')
+            with self.assertRaises(ValueError): renewal.renew(self.state, proof, self.root)
 
     def test_resource_warning_needs_renewed_confirmation_after_changed_inputs(self):
         failure = self.resource_failure()
@@ -4698,6 +5437,120 @@ class RelayStartupEvidence(unittest.TestCase):
         self.save(Path(receipt['log']).parent/'receipt.json',receipt)
         proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
         self.reseal();return receipt,owner,proof,fleet
+
+    def mixed_preallocation_fixture(self, graded_count=11):
+        import hashlib, shutil
+        from cloudbench_execution_provenance import build_config, build_task_matrix
+        receipt, owner, proof, original = self.preallocation_fixture()
+        seed = self.base / 'seed'; shutil.copytree(original, seed)
+        shutil.rmtree(original)
+        shutil.rmtree(self.base / '.git/cloudbench-fleet-audits' / ('c' * 32))
+        jobs, fleets = [], []
+        names = ['browser-smoke', 'zero-two'] + ['graded-' + str(i) for i in range(graded_count)]
+        for index, name in enumerate([*names, 'infra-probe']):
+            pid = 2100000000 + index
+            fleet = self.runs / ('20261106-090000-' + str(pid)); shutil.copytree(seed, fleet)
+            fleets.append(fleet); token = f'{index + 256:032x}'
+            audit = fleet / 'teardown-ownership'; (audit / 'source-audit').unlink()
+            meta = self.native.fields((audit / 'meta').read_bytes()); meta.update(fleet_owner_token=token, run_id=fleet.name)
+            (audit / 'meta').write_text(''.join(k+'='+str(v)+'\n' for k,v in meta.items()))
+            batch = fleet / '_batch'
+            self.save(batch / 'benches.json', [dict(name=name, mode='REAL')])
+            life = json.loads((batch / 'lifecycle.json').read_text())
+            life.update(fleet_owner_token=token, run_id=fleet.name, status='failed' if index < 2 else 'verified', controller_exit_code=1 if index < 2 else 0)
+            if index >= 2:
+                matrix = build_task_matrix([name + '=real'])
+                self.save(fleet / 'execution-task-matrix.json', matrix)
+                self.save(fleet / 'execution-provenance.json', dict(schema_version='cloudbench-execution-provenance-v1',
+                    base_sha=receipt['source']['head'], workspace_patch_sha256='none',
+                    config=build_config('cloudbench-fleet-config-v1', ['task_count=1', 'task_matrix_sha256='+matrix['sha256']]),
+                    controller_snapshot=dict(schema_version='cloudbench-controller-snapshot-v1', sha256='d'*64)))
+            self.save(batch / 'run.json', dict(run_id=fleet.name, controller_exit_code=life['controller_exit_code'],
+                status='failed' if index < 2 else 'passed', tasks=[dict(name=name, passed=index >= 2,
+                status='INFRA_ERROR' if index < 2 else 'PASSED', lifecycle_stage='released',
+                failure_reason='no current run artifact produced' if index < 2 else None)]))
+            self.save(batch / 'disposable-cleanup.json', dict(schema='disposable-cleanup-v1', owner=token,
+                guest_cleanup_missing=False, runtime_evidence_missing=False, successful_runtime_inferred=False))
+            canonical=self.base/'.git/cloudbench-fleet-audits'/token; shutil.copytree(audit,canonical)
+            seal=hashlib.sha256()
+            for path in sorted(audit.rglob('*'), key=lambda p:str(p.relative_to(audit))):
+                if path.is_file():
+                    for raw in [str(path.relative_to(audit)).encode(),path.read_bytes()]:seal.update(len(raw).to_bytes(8,'big'));seal.update(raw)
+            (audit/'source-audit').write_text('path='+str(canonical)+'\nsha256='+seal.hexdigest()+'\n')
+            life['audit_sha256']=seal.hexdigest(); self.save(batch/'lifecycle.json',life)
+            if index < len(names):
+                log=self.campaign/f'r001-j{index+1:04d}.log'
+                log.write_text(f'{self.base}/scripts/run-bench monitor {fleet}\nowner: {token}; private controller diagnostics stay in this run directory.\n')
+                jobs.append(dict(job_id=log.stem,task=name,run=1,attempt=1,attempts=[],
+                    status='cancelled' if index==0 else 'failed' if index==1 else 'passed',controller_exit_code=life['controller_exit_code'],
+                    controller_pid=pid,log=str(log),controller_command=['bash',str(self.base/'scripts/run-bench'),name,'--ref',receipt['source']['head'],'--foreground']))
+        shutil.rmtree(seed)
+        with (self.campaign/'r001-j0001.log').open('a') as stream:
+            stream.write(f'{self.base}/scripts/run-bench monitor {fleets[-1]}\n')
+        summary=json.loads((self.campaign/'summary.json').read_text()); summary.update(jobs=jobs,task_count=len(names),total_jobs=len(names),concurrency=len(names),peak_concurrency=len(names))
+        self.save(self.campaign/'summary.json',summary)
+        request_path=Path(receipt['log']).parent/'request.json';request=json.loads(request_path.read_text());request['checks']=names;request['skips']={k:{'kind':'historical-agentcard-no-retry-v1','disposition':'NO_RETRY_CUSTODY','source':receipt['source'], 'current_binding':{'source':receipt['source']},'current_execution':'UNVERIFIED','current_financial_state':'UNVERIFIED','credit':{'test_execution':False,'assertions':False,'financial_release':False}} for k in ('old-one','old-two')};self.save(request_path,request)
+        receipt['cases']={**dict.fromkeys(names,'UNVERIFIED'),**dict.fromkeys(request['skips'],'SKIP')};receipt['case_complete']=dict.fromkeys(receipt['cases'],False)
+        adapter_path=Path(receipt['worker_result']);adapter=json.loads(adapter_path.read_text())
+        adapter.update(checks=names,cases={name:'UNVERIFIED' if i<2 else 'PASS' for i,name in enumerate(names)},fleet_directory=str(self.campaign),
+            native_command=['bash','scripts/run-bench',*names,'--runs','1','--concurrency',str(len(names)),'--retry-infra','0','--ref',receipt['source']['head']])
+        self.save(adapter_path,adapter);reference=receipt['native_cleanup_reference'];reference.update(native_directory=str(self.campaign),result_sha256=c.sha_file(adapter_path))
+        proof.update(worker_result_sha256=reference['result_sha256'],layout='campaign-mixed-preallocation-v1')
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt);proof['receipt_sha256']=c.sha_file(Path(receipt['log']).parent/'receipt.json')
+        self.reseal();return receipt,owner,proof,fleets
+
+    def test_mixed_preallocation_cleanup_preserves_all_unverified_without_credit(self):
+        receipt,owner,proof,fleets=self.mixed_preallocation_fixture()
+        before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(14,len(result['participants']))
+        self.assertEqual(2,len(result['preallocation_source_authorities']))
+        self.assertEqual(['UNVERIFIED']*13+['SKIP']*2,list(receipt['cases'].values()))
+        self.assertEqual(11,list(c.read(Path(receipt['worker_result']))['cases'].values()).count('PASS'))
+        self.assertEqual(before,{p:p.read_bytes() for p in before})
+        for layout in ('campaign-v1','campaign-preallocation-v1'):
+            with self.assertRaises(ValueError): self.validate_fixture(receipt,owner,{**proof,'layout':layout})
+
+    def test_mixed_preallocation_refuses_ambiguous_artifacts_source_and_ownership(self):
+        import shutil
+        receipt,owner,proof,fleets=self.mixed_preallocation_fixture()
+        original={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        def edit(path, change):
+            value=c.read(path); change(value); self.save(path,value)
+        zero,normal=fleets[0],fleets[2]
+        def dangling():
+            for name in ('execution-provenance.json','execution-task-matrix.json'):
+                (zero/name).symlink_to(zero/'absent')
+        variants=[
+            ('one-sided provenance',lambda:c.write(zero/'execution-provenance.json',{})),
+            ('dangling provenance',dangling),
+            ('zero task artifact',lambda:c.write(zero/'browser-smoke/cloudbench-run.json',{})),
+            ('native agent',lambda:edit(zero/'_batch/run.json',lambda v:v['tasks'][0].update(agent_id='unexpected'))),
+            ('inferred runtime',lambda:edit(zero/'_batch/disposable-cleanup.json',lambda v:v.update(successful_runtime_inferred=True))),
+            ('invalid normal provenance',lambda:edit(normal/'execution-provenance.json',lambda v:v.update(base_sha='f'*40))),
+            ('normal missing provenance',lambda:(normal/'execution-provenance.json').unlink()),
+            ('foreign command',lambda:edit(self.campaign/'summary.json',lambda v:v['jobs'][0]['controller_command'].__setitem__(-2,'f'*40))),
+            ('foreign skip kind',lambda:edit(Path(receipt['log']).parent/'request.json',lambda v:v['skips']['old-one'].update(kind='waiver'))),
+            ('foreign skip source',lambda:edit(Path(receipt['log']).parent/'request.json',lambda v:v['skips']['old-one'].update(source={'head':'f'*40}))),
+            ('unaccounted participant',lambda:(self.runs/'unknown-owner').mkdir()),
+            ('unknown supervisor',lambda:edit(self.runs.parent/'cli.log.process.json',lambda v:v.update(quiescent=False))),
+            ('allocation omitted from audit',lambda:(zero/'teardown-ownership/owned-clones.ids').write_text('unreconciled')),
+        ]
+        for name, mutate in variants:
+            with self.subTest(case=name):
+                for path in list(self.base.rglob('*')):
+                    if path.is_symlink() or path.is_file() and path not in original: path.unlink()
+                unknown=self.runs/'unknown-owner'
+                if unknown.exists(): shutil.rmtree(unknown)
+                for path,raw in original.items(): path.write_bytes(raw)
+                mutate();self.reseal()
+                with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+
+    def test_mixed_preallocation_requires_a_graded_parent_not_just_a_canary(self):
+        receipt,owner,proof,fleet=self.mixed_preallocation_fixture(graded_count=0)
+        with self.assertRaisesRegex(ValueError,'requires both'):
+            self.validate_fixture(receipt,owner,proof)
 
     def pending_hub_fixture(self):
         receipt,owner,proof,fleet=self.preallocation_fixture()
