@@ -37,3 +37,10 @@ The first closeout review attempt was path-filtered; the requested full review
 was temporarily rate-limited. Neither result is a substantive review or a quota
 exception. The exact closeout directory is explicitly included for its next
 review. The generated deletion-readiness record is committed with this packet.
+
+After the targeted filter correction, CodeRabbit selected all seven closeout
+files. Its exact03ef190 HEAD check was neutral with Review rate limited, and
+the commit-naming bot comment explicitly reported the organization usage spending
+cap. Native quota disposition accepted that evidence. This PR merges unreviewed
+under the standing quota policy, not under the earlier path-filter/rate-only
+results. The filter change strengthens review coverage; service code is unchanged.
