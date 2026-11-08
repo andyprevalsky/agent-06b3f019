@@ -1,0 +1,124 @@
+"""Headless Claude Code for one replay, through the code_bench_parity helpers.
+
+Differences from the parity raw leg, on purpose: the default toolset is allowed (parity's narrow
+--allowedTools would hide Task, WebSearch and TodoWrite behavior), HOME is the run's own empty home
+(no ~/.claude/CLAUDE.md, no project memory), and PATH starts with the refusing shims.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, AsyncIterator, Mapping, Optional
+
+from benchmarks import code_bench_parity as parity
+from benchmarks.claude_md_replay.sandbox import RunPaths, playwright_browsers
+
+DEFAULT_MODEL = parity.DEFAULT_MODELS["claude"]
+CREDENTIAL_MODES = ("env", "lease", "openrouter")
+INIT_KEYS = ("cwd", "model", "tools", "permissionMode", "claude_code_version", "memory_paths", "slash_commands", "agents", "skills", "output_style")
+
+
+def claude_argv(cli_bin: str, model: str, effort: str, repo: Path, prompt: str, max_budget_usd: Optional[float]) -> parity.CliCommand:
+    command = parity.cli_command("claude", model, repo, prompt, cli_bin=cli_bin, effort=effort)
+    argv = list(command.argv)
+    if "--allowedTools" in argv:
+        index = argv.index("--allowedTools")
+        del argv[index : index + 2]
+    if max_budget_usd:
+        argv += ["--max-budget-usd", f"{max_budget_usd:g}"]
+    return parity.CliCommand(argv=argv, stdin=command.stdin)
+
+
+def replay_env(paths: RunPaths, source_env: Mapping[str, str]) -> dict[str, str]:
+    env = parity.cli_env("claude", paths.root, source_env=source_env)
+    env["HOME"] = str(paths.home)
+    env["TMPDIR"] = str(paths.tmp)
+    env["PATH"] = f"{paths.bin}:{env.get('PATH', '/usr/bin:/bin')}"
+    env["GIT_CONFIG_GLOBAL"] = str(paths.home / ".gitconfig")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    browsers = playwright_browsers(dict(source_env))
+    if browsers:
+        env["PLAYWRIGHT_BROWSERS_PATH"] = browsers
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "FLY_API_TOKEN", "RENDER_API_KEY", "VERCEL_TOKEN"):
+        env.pop(name, None)
+    return env
+
+
+@asynccontextmanager
+async def credentials(mode: str, *, env_file: Optional[Path], lease_backend: str, lease_user_id: str) -> AsyncIterator[dict[str, str]]:
+    """Caller-environment credentials, or a Claude compute token leased (and released) via the backend."""
+    base = dict(parity._CALLER_ENV)
+    if mode == "env":
+        if not any(base.get(name) for name in parity.CREDENTIAL_ENV["claude"][:3]):
+            raise RuntimeError("--credential env needs CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the environment")
+        yield base
+        return
+    if mode not in CREDENTIAL_MODES:
+        raise ValueError(f"credential mode must be one of {CREDENTIAL_MODES}")
+    if env_file is not None:
+        # The lease helpers import agents config, which needs the full agents env in THIS process.
+        # The CLI never sees it: its environment is built from parity._CALLER_ENV, captured at import.
+        from dotenv import load_dotenv
+
+        load_dotenv(env_file, override=False)
+    if mode == "openrouter":
+        # The gateway the Rose sandbox uses when no Claude credential is leasable (claudeCodeSandboxAuth.ts).
+        yield parity.openrouter_gateway_env({**base, "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY", "")})
+        return
+    lease = await parity.lease_claude_token(lease_backend, lease_user_id)
+    try:
+        source = {k: v for k, v in base.items() if k not in parity.CREDENTIAL_ENV["claude"]}
+        source["CLAUDE_CODE_OAUTH_TOKEN"] = str(lease["accessToken"])
+        yield source
+    finally:
+        await parity.release_lease(lease)
+
+
+def init_event(transcript: str) -> dict[str, Any]:
+    for event in parity._json_lines(transcript):
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return {key: event.get(key) for key in INIT_KEYS if key in event}
+    return {}
+
+
+async def run_claude(
+    paths: RunPaths,
+    prompt: str,
+    *,
+    source_env: Mapping[str, str],
+    model: str = DEFAULT_MODEL,
+    effort: str = parity.DEFAULT_EFFORT,
+    timeout: int,
+    cli_bin: Optional[str] = None,
+    max_budget_usd: Optional[float] = None,
+) -> dict[str, Any]:
+    resolved = cli_bin or shutil.which("claude", path=source_env.get("PATH")) or "claude"
+    command = claude_argv(resolved, model, effort, paths.repo, prompt, max_budget_usd)
+    env = replay_env(paths, source_env)
+    started = time.monotonic()
+    exit_code, transcript = await asyncio.to_thread(
+        parity._run_cli, command.argv, cwd=paths.repo, stdin=command.stdin, timeout=timeout, env=env
+    )
+    duration = round(time.monotonic() - started, 1)
+    (paths.root / "trace.jsonl").write_text(transcript)
+    summary = parity.summarize_transcript("claude", transcript)
+    return {
+        "argv": [a if a != prompt else "<prompt>" for a in command.argv],
+        "cli_bin": resolved,
+        "transport": parity.describe_transport(env),
+        "config_dir": env.get("CLAUDE_CONFIG_DIR"),
+        "home": env["HOME"],
+        "exit_code": exit_code,
+        "duration_seconds": duration,
+        "timed_out": exit_code == -9,
+        "summary": summary,
+        "init": init_event(transcript),
+        "infra": parity.infra_failure(summary, exit_code)
+        or (None if "result" in summary else f"CLI exited {exit_code} without a result event: {transcript.strip()[-300:]}"),
+    }
