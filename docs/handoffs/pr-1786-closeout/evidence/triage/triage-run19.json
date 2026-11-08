@@ -1,0 +1,60 @@
+{
+  "failures": [
+    {
+      "id": "ecf086f2824b44e0a0ef8a17db2f422a",
+      "check": "smoke/agent-payment-abandonment",
+      "command": [
+        "/home/boxes/rose/agents/venv/bin/python3",
+        "/home/boxes/rose/scripts/deploy_test_cloud.py"
+      ],
+      "source": {
+        "head": "e684eefae6bf19005a6cb4dd4f450b6e38018ede",
+        "digest": "f0d470fc39c6956ad8ea10e3fa463fbbddf23fe3948b799853072dd263d342b8"
+      },
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "description": "agent-payment-abandonment smoke task hit the exact standing AgentCard release stall (closed card transfer consumed, releasedCents=0); native SKIPPED. PR #1786 is test-only and never runs on the guest.",
+      "evidence": "Native row failure_reason: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before | docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md",
+      "resource_skip": {
+        "reason_code": "agentcard_release_stall",
+        "receipt_sha256": "2f86abfaad2539b213ee28244475bec0cb5c546a940656372a32e419c99efd80",
+        "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_f5ad6de623db41c96aa53437\", \"cardId\": \"card_5f383976ea07fe2bdfadbaf2\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 3853d23a-4a53-43b3-a055-b50047a34a60 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+        "resource_scope": "third_party",
+        "exclusive_cause": true,
+        "provider": "AgentCard",
+        "evidence": "Exact standing release stall proven by the native row; no PR #1786 code path involved.",
+        "confirmed_at": 1794127210.192266
+      }
+    },
+    {
+      "id": "6997fe5ee72641c49bc470c9659c15c4",
+      "check": "smoke/agent-payment-idempotent-abandonment",
+      "command": [
+        "/home/boxes/rose/agents/venv/bin/python3",
+        "/home/boxes/rose/scripts/deploy_test_cloud.py"
+      ],
+      "source": {
+        "head": "e684eefae6bf19005a6cb4dd4f450b6e38018ede",
+        "digest": "f0d470fc39c6956ad8ea10e3fa463fbbddf23fe3948b799853072dd263d342b8"
+      },
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "description": "agent-payment-idempotent-abandonment timed out (903s) with agent PAUSED: the second browser agent verifier (check_progress, agents/helpers/llm.py:6422) resolves @ref:message pointers without user_id, so POST /api/agents/messages/batch returns 401 and the verifier never sees the referenced first-agent result, scoring 50% repeatedly until the harness timeout. Payment lifecycle itself matched (CLEARED, $43.96).",
+      "evidence": "RCA: worker.log:12790,21103,31512,50950,59014 (401 Batch message fetch failed), backend.log:7048, worker.log:18156 (verifier: first_checkout_submitted unverifiable), cloudbench-driver.log:7471,7473; run dir .context/deploy-cloud/f8d84a670cd8b994e23a12fcae8b5139ed98701c7e4f3a99708eaaca9f259042/runs/20261108-081401-851631/agent-payment-idempotent-abandonment. Code unchanged since 843a6ab3877 (2026-03-31); context_pointers.py, llm.py, routes.messages.ts identical across 34fd7d036..e684eefa; PR #1786 is test-only (backend browser-session fixtures). Same 401 seen in an earlier passing run of this task (deploy-cloud 99720381.../runs/20261108-052446-2739264).",
+      "post_merge": {
+        "test": "smoke/agent-payment-idempotent-abandonment",
+        "command": [
+          "/home/boxes/rose/agents/venv/bin/python3",
+          "/home/boxes/rose/scripts/deploy_test_cloud.py"
+        ],
+        "scope": "agents/helpers/llm.py:6422 check_progress -> resolve_pointers_in_messages(messages, local_context=context) without user_id -> agents/helpers/context_pointers.py _fetch_messages_batch (no X-User-Id) -> back-end/src/domains/agents/routes.messages.ts:284-289 401",
+        "error": "Timeout after 903s (task timeout=900s) | Agent status: PAUSED (expected COMPLETED); first-bad: worker.log:12790 {\"status\": 401, \"event\": \"Batch message fetch failed\"} / backend POST /api/agents/messages/batch -> 401",
+        "source": {
+          "head": "e684eefae6bf19005a6cb4dd4f450b6e38018ede",
+          "digest": "f0d470fc39c6956ad8ea10e3fa463fbbddf23fe3948b799853072dd263d342b8"
+        },
+        "evidence": ".context/deploy-cloud/f8d84a670cd8b994e23a12fcae8b5139ed98701c7e4f3a99708eaaca9f259042/runs/20261108-081401-851631/agent-payment-idempotent-abandonment"
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "ecf086f2824b44e0a0ef8a17db2f422a",
+  "check": "smoke/agent-payment-abandonment",
+  "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+  ],
+  "source": {
+    "head": "e684eefae6bf19005a6cb4dd4f450b6e38018ede",
+    "digest": "f0d470fc39c6956ad8ea10e3fa463fbbddf23fe3948b799853072dd263d342b8"
+  },
+  "native_result": "FAIL",
+  "attribution": "NOT_INTRODUCED",
+  "description": "agent-payment-abandonment smoke task hit the exact standing AgentCard release stall (closed card transfer consumed, releasedCents=0); native SKIPPED. PR #1786 is test-only and never runs on the guest.",
+  "evidence": "Native row failure_reason: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before | docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md",
+  "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "2f86abfaad2539b213ee28244475bec0cb5c546a940656372a32e419c99efd80",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_f5ad6de623db41c96aa53437\", \"cardId\": \"card_5f383976ea07fe2bdfadbaf2\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 3853d23a-4a53-43b3-a055-b50047a34a60 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "evidence": "Exact standing release stall proven by the native row; no PR #1786 code path involved.",
+    "confirmed_at": 1794127210.192266
+  }
+}

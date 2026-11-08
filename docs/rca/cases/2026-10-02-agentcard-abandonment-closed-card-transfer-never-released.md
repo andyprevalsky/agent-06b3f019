@@ -656,3 +656,31 @@ roots completed separate execution/provider cleanup, and the local owner
 receipt reached cleanup_verified. Physical cleanup does not settle the
 financial liability. Original native snapshots, warning, run bundle and owner
 receipt remain in .context/benchmarks/1793050320-4012092-89922.
+
+### Recurrence on 2026-11-08 (PR #1796 deploy): recovery credited to concurrent transfers
+
+The stall recurred on every fixed-source run on 2026-11-08: deploy smoke on bf0e288cf, cfb2bd34c and d01078768, plus a solo `scripts/run-bench agent-payment-abandonment` on main e8e974958 (fleet run 20261108-091559-2958796, agent 732898a0-f6cc-4be1-9e3a-e25dfa0a0c66). None of these runs logged an org-MCP 401. The read-only `list_transfers` evidence below supplies the attribution that was "Not proven" above:
+
+- 09:28:35Z: our mint `owt_3e8d584c8bc9cb9aca26d2f8` was created (4396). The card closed at 09:28:44Z.
+- 09:28:05Z and 09:28:08Z: other consumers created two 4396 mints on the same shared sandbox cardholder `cmrfpz6d1000bl804w1gggfto`, `owt_622531dd32f119b33753b55e` and `owt_685d3758f404813836e1e03e`.
+- 09:31:11Z: our `recover_funds` swept the cardholder residual (`rcv_d2c20fdb3e4bb460945f83ab`, 3721 cents, completed). AgentCard then reported `released_cents=3721` on both of those other transfers, while ours stayed `consumed`, `released_cents=0`.
+- An hour later, attempt 4's transfer `owt_720b0c809c695510fb8437ab` was still `consumed`/0.
+- From 07:00Z to 09:59Z, 83 mints of 4396 cents were created on that cardholder, while about one 4396 closed-card reclaim per hour succeeded.
+
+Closed-card releases on the shared sandbox cardholder are attributed to whichever concurrent mint AgentCard nets them against. Under org-wide concurrency, a native PASS for this task is therefore a matter of chance. A deterministic PASS needs an exclusive sandbox cardholder for this task. `resolveBenchmarkCardholderId` deliberately never creates one, so that fixture/environment change is an open follow-up, not a code fix in this repair. The standing SKIP policy above still applies.
+
+#### Correction (same day): the 3721-cent releases were not our funds
+
+The paragraph above misread the evidence. The `released_cents=3721` values sit on many 4396 transfers (`owt_622531dd…`, `owt_685d3758…`, `owt_4fbf26d7…` and others). 3721 = 4396 − 675, the residual a completed test-shop purchase leaves after its $6.75 charge. Each of those releases is that purchase's own leftover, credited to its own transfer.
+
+Our `recover_funds` swept such a 3721 residual both times (09:31:11Z and 10:08:47Z). Our closed card's 4396 never appeared as recoverable cardholder balance at all. The correct finding is therefore the original one: the sandbox does not return a closed card's balance to the cardholder, so the transfer cannot be released.
+
+What changed around 2026-11-06 is concurrency. The four sandbox lifecycle tasks became parallel cloud smoke tasks, so several deploys across devboxes now mint on the one shared cardholder. The stall went from occasional (passes 2026-10-26 to 10-28) to every run since 2026-11-08T00:37Z. Whether that concurrency causes the missing return is still not proven. Gated solo attempts that launch only after ≥8 quiet minutes on the cardholder are the discriminating experiment (results below).
+
+Gated results (main bf26a925f, which contains #1796):
+- **Solo run 20261108-095414-3397378** (close 10:06:19Z): stalled. Another consumer's campaign minted five cards at 10:08 inside the window, so this run does not discriminate.
+- **Gated attempt 20261108-102251-3748298**: launched after 14 quiet minutes. Our mint `owt_a160ef981048ea3ddf9fe6d1` (10:28:24Z, card closed 10:28:32Z) was the **only** mint on the cardholder from 10:20Z until the run ended, and it still stayed `consumed`, `released_cents=0`. The run logged zero org-MCP 401s.
+
+Concurrency is therefore **ruled out** as the cause: the sandbox does not release closed-card transfers even with no other consumer active. The remaining attempts were stopped. An operator cancellation of attempt 2 (run 20261108-104322-3997016, TERMed before any Machine was allocated) shows `INFRA_ERROR` in the Hub; it is a cancellation, not an infrastructure failure, and was left out of the ledger.
+
+A native PASS for `agent-payment-abandonment` depends on AgentCard restoring closed-card releases in the sandbox. The October 12 standing SKIP policy applies, and this case stays open.
