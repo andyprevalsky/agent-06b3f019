@@ -175,6 +175,14 @@
    "parts": 1,
    "files": 6,
    "verified_note": "verified by closeout_archive.py verify (run interactively; the receipt's verified field is written only after full readback); no separate log file"
+  },
+  {
+   "name": "pr1804-closeout-addendum",
+   "key_prefix": "devbox-closeout-private/pr1804-closeout-addendum/",
+   "archive_sha256": "c3b8ac9112d99d253ac16dd74be230cd76892bf95d4614904a0a5920f192acc4",
+   "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
+   "parts": 1,
+   "files": 3058
   }
  ],
  "outcome_record": "factory outcome 'completed' for run 20261108-070509-1005569 was emitted by `scripts/deploy finish` (Process step 15) at 2026-11-08T09:00:35Z, before deletion readiness (step 16); the deletion check reached READY only after this records PR and its main-generated receipt (see the closeout's final receipt)."

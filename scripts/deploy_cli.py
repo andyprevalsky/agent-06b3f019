@@ -520,6 +520,43 @@ def parent_map(proc: Path) -> dict[int, int]:
     return parents
 
 
+def current_code_mode_host(pid: int, exe: str | None, proc: Path, mine: set[int],
+                           parents: dict[int, int]) -> bool:
+    """Recognize the current managed Codex parent's tool host, without exempting other agents.
+
+    This is an owned harness classification, not proof that an in-memory tool call is idle.
+    Any OS child, unreadable thread or changing process identity keeps it live work.
+    """
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or Path(exe).name != 'codex-code-mode-host':
+        return False
+    if pid in parents.values():
+        return False
+
+    def identity():
+        fields = stat_fields(proc, pid)
+        if not fields or len(fields) < 20 or int(fields[1]) not in mine:
+            return None
+        parent = proc / fields[1]
+        parent_fields = stat_fields(proc, int(fields[1]))
+        if not parent_fields or len(parent_fields) < 20:
+            return None
+        if os.readlink(parent / 'exe') != str(Path(exe).with_name('codex')):
+            return None
+        if os.readlink(proc / str(pid) / 'exe') != exe:
+            return None
+        threads = sorted((proc / str(pid) / 'task').iterdir())
+        if not threads or any(not thread.name.isdigit() or (thread / 'children').read_text().strip()
+                              for thread in threads):
+            return None
+        return fields[1], fields[19], parent_fields[19], tuple(thread.name for thread in threads)
+
+    try:
+        first = identity()
+        return first is not None and first == identity()
+    except (OSError, ValueError):
+        return False
+
+
 def idle_daemon_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc'),
                              sessions: Path = CODEX_SESSIONS, parents: dict[int, int] | None = None) -> bool:
     """The devbox daemon's shared `codex app-server`, started in the agent's cwd, serving no Codex session.
@@ -571,8 +608,9 @@ def live_processes(root: Path) -> list[dict]:
         if cwd == root or root in cwd.parents:
             try:
                 exe = os.readlink(entry / 'exe')
-                if is_harness_process(exe, argv) or idle_daemon_codex_server(int(entry.name), exe, argv, proc,
-                                                                             parents=parents):
+                if (is_harness_process(exe, argv)
+                        or current_code_mode_host(int(entry.name), exe, proc, mine, parents)
+                        or idle_daemon_codex_server(int(entry.name), exe, argv, proc, parents=parents)):
                     continue
             except OSError:
                 pass

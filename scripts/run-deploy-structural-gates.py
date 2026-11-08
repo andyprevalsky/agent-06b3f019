@@ -333,6 +333,7 @@ GATES = (
     Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
     Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
     Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
+    Gate("mac-app-release-drift", ("bash", "scripts/tests/mac-app-release-drift.test.sh")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",

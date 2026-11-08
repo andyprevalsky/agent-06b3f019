@@ -5,10 +5,11 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_MIN_SANDBOX_FLOAT_CENTS,
-  defaultUnadvertisedRateLimitWaitMs,
   ensureAgentCardSandboxFloat,
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
+  verifyBenchmarkOrgFixture,
+  waitOutBenchmarkOrgBackpressure,
 } from '../../providers/agentcard/benchmark-float';
 import {
   AgentCardOrgRuntime,
@@ -31,10 +32,20 @@ async function withOrgRuntime(
   for (const name of ORG_ENV_NAMES) delete process.env[name];
   process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'direct-org-token';
   let calls = 0;
-  const runtime = new AgentCardOrgRuntime(async (_token, toolName) => {
-    calls += 1;
-    return toolResults(toolName, calls);
-  });
+  let virtualNowMs = Date.now();
+  const runtime = new AgentCardOrgRuntime(
+    async (_token, toolName) => {
+      calls += 1;
+      return toolResults(toolName, calls);
+    },
+    fetch,
+    {
+      now: () => virtualNowMs,
+      sleep: async (ms) => {
+        virtualNowMs += ms;
+      },
+    }
+  );
   try {
     await run(
       (toolName, args, deadlineAtMs) => runtime.callTool(toolName, args, deadlineAtMs),
@@ -178,78 +189,6 @@ async function main(): Promise<void> {
     const float = await ensureAgentCardSandboxFloat(10_000, callOrgTool);
     assert.equal(calls, 2, 'retries a rate-limited wallet read');
     assert.equal(float.availableCents, 32_416);
-  }
-
-  // PR #1784 deploy smoke (2026-11-08, r001-j0010): seven payment guests released together hit
-  // the org-wide "120 requests per minute" limit, and get_company_wallet returned the text-only
-  // throttle, which advertises no reset. The org runtime spent its three attempts in ~3.5 s and
-  // raised its typed 429; this layer only recognised `retryAfter`, so setup failed before the start
-  // barrier and the campaign's infra stop cancelled all fifteen smoke tasks. The typed throttle
-  // must get this layer's bounded window wait too.
-  {
-    const upstream =
-      'AgentCard Organization MCP rate limit exhausted for get_company_wallet after 3 attempts; ' +
-      'upstream: AgentCard Organization MCP get_company_wallet is rate limited: get_company_wallet ' +
-      'failed: Too many requests, please try again later';
-    const throttled = () =>
-      new AgentCardOrgRuntimeError(upstream, 429, 'agentcard_org_mcp_rate_limited');
-    let calls = 0;
-    const waits: number[] = [];
-    const callOrgTool = async () => {
-      calls += 1;
-      if (calls <= 2) throw throttled();
-      return walletResult({ balance: 32_416, available: 32_416 });
-    };
-    const float = await ensureAgentCardSandboxFloat(10_000, callOrgTool, {
-      unadvertisedRateLimitWaitMs: (attempt) => {
-        waits.push(attempt);
-        return 0;
-      },
-    });
-    assert.equal(calls, 3, 'a typed org throttle without a reset is retried at this layer');
-    assert.deepEqual(waits, [1, 2], 'each unadvertised throttle waits before the next read');
-    assert.equal(float.availableCents, 32_416);
-
-    let exhausted = 0;
-    await assert.rejects(
-      ensureAgentCardSandboxFloat(
-        10_000,
-        async () => {
-          exhausted += 1;
-          throw throttled();
-        },
-        { unadvertisedRateLimitWaitMs: () => 0 }
-      ),
-      (error: unknown) =>
-        error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
-    );
-    assert.equal(exhausted, 4, 'the window wait stays bounded by the existing attempt cap');
-
-    // The default unadvertised wait is a jittered share of the documented one-minute window,
-    // never longer than the existing per-wait bound.
-    for (const attempt of [1, 2, 3]) {
-      const waitMs = defaultUnadvertisedRateLimitWaitMs(attempt);
-      assert.ok(waitMs >= 7_500 && waitMs <= 22_500, `wait ${waitMs} ms outside 7.5-22.5 s`);
-    }
-
-    // Other typed provider failures are not throttles and still fail at once.
-    let unavailable = 0;
-    await assert.rejects(
-      ensureAgentCardSandboxFloat(
-        10_000,
-        async () => {
-          unavailable += 1;
-          throw new AgentCardOrgRuntimeError(
-            'temporarily unavailable',
-            503,
-            'agentcard_org_mcp_unavailable'
-          );
-        },
-        { unadvertisedRateLimitWaitMs: () => 0 }
-      ),
-      /temporarily unavailable/
-    );
-    assert.equal(unavailable, 1, 'a non-throttle provider error is not retried');
   }
 
   // Non-rate-limit failures remain immediate and are never masked by retries.
@@ -513,7 +452,7 @@ async function main(): Promise<void> {
           return true;
         }
       );
-      assert.equal(calls(), 3, 'rate-limit retries must stay bounded');
+      assert.equal(calls(), 5, 'rate-limit retries on a read must stay bounded');
     }
   );
 
@@ -545,6 +484,175 @@ async function main(): Promise<void> {
     assert.deepEqual(kycReads, ['ch-andy'], 'no further candidates are read once throttled');
     assert.equal(deadlines.size, 1, 'list + KYC reads share one rate-limit deadline');
     assert.equal(typeof [...deadlines][0], 'number');
+  }
+
+  // REGRESSION (PR #1786 deploy attempt 4 smoke, 2026-11-08): a provider 401 on the first pre-barrier
+  // list_cardholders failed setup-benchmark-payment.ts, and one such INFRA_ERROR stopped all 13 jobs.
+  {
+    const unauthorized = (tool: string) =>
+      new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP ${tool} failed: Invalid or expired organization token`,
+        401,
+        'agentcard_org_mcp_unauthorized',
+        { status: 401 }
+      );
+    const throttled = (tool: string) =>
+      new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP rate limit exhausted for ${tool} after 3 attempts`,
+        429,
+        'agentcard_org_mcp_rate_limited'
+      );
+    const healthyOrg = (name: string, args: Record<string, unknown>): Record<string, unknown> => {
+      if (name === 'list_cardholders') {
+        return cardholdersResult([{ id: 'ch-ready', email: 'agentcard-benchmark@roselabs.ai' }]);
+      }
+      if (name === 'get_cardholder_kyc_status') {
+        assert.equal(args.cardholder_id, 'ch-ready');
+        return { structuredContent: { kyc_status: 'verified' } };
+      }
+      if (name === 'get_company_wallet') {
+        return walletResult({ balance: 200_000, available: 200_000 });
+      }
+      if (name === 'whoami') return { structuredContent: { mode: 'sandbox' } };
+      throw new Error(`unexpected tool ${name}`);
+    };
+
+    const sleeps: number[] = [];
+    const sleep = async (ms: number): Promise<void> => {
+      sleeps.push(ms);
+    };
+    let listCalls = 0;
+    const flapping: AgentCardOrgToolCaller = async (name, args) => {
+      if (name === 'list_cardholders') {
+        listCalls += 1;
+        if (listCalls === 1) throw unauthorized(name);
+        if (listCalls === 2) throw throttled(name);
+      }
+      return healthyOrg(name, args);
+    };
+    const fixture = await verifyBenchmarkOrgFixture(flapping, { sleep });
+    assert.equal(fixture.cardholderId, 'ch-ready');
+    assert.equal(fixture.cardholderVerificationStatus, 'verified');
+    assert.equal(fixture.sandboxFloat.availableCents, 200_000);
+    assert.deepEqual(sleeps, [30_000, 30_000], 'backpressure waits out the shared window');
+
+    // A sustained outage stays bounded and surfaces the provider's own error.
+    let outageCalls = 0;
+    const outage: AgentCardOrgToolCaller = async (name) => {
+      outageCalls += 1;
+      throw unauthorized(name);
+    };
+    const outageSleeps: number[] = [];
+    await assert.rejects(
+      () =>
+        verifyBenchmarkOrgFixture(outage, {
+          sleep: async (ms) => {
+            outageSleeps.push(ms);
+          },
+        }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 401 &&
+        /Invalid or expired organization token/.test(error.message)
+    );
+    assert.equal(outageCalls, 4, 'one initial attempt plus three bounded retries');
+    assert.deepEqual(outageSleeps, [30_000, 30_000, 30_000]);
+
+    // A real fixture defect is not backpressure and must fail on the first pass, with no wait.
+    let defectSleeps = 0;
+    const emptyOrg: AgentCardOrgToolCaller = async () => cardholdersResult([]);
+    await assert.rejects(
+      () =>
+        verifyBenchmarkOrgFixture(emptyOrg, {
+          sleep: async () => {
+            defectSleeps += 1;
+          },
+        }),
+      /no cardholders/
+    );
+    assert.equal(defectSleeps, 0, 'non-backpressure failures must not be retried');
+
+    // Nested per-call retries must not multiply the total wait: no new pass past the elapsed cap.
+    let cappedPasses = 0;
+    let clockMs = 0;
+    await assert.rejects(
+      () =>
+        waitOutBenchmarkOrgBackpressure(
+          async () => {
+            cappedPasses += 1;
+            clockMs += 100_000; // one pass consumed its full nested per-call retry budget
+            throw throttled('get_company_wallet');
+          },
+          { now: () => clockMs, sleep: async () => undefined }
+        ),
+      /rate limit exhausted/
+    );
+    assert.equal(cappedPasses, 2, 'the elapsed cap stops new passes before the retry count');
+
+    // An exhausted transient outage is the same provider state; a permanent 502 is not.
+    let unavailablePasses = 0;
+    assert.equal(
+      await waitOutBenchmarkOrgBackpressure(
+        async () => {
+          unavailablePasses += 1;
+          if (unavailablePasses === 1) {
+            throw new AgentCardOrgRuntimeError(
+              'AgentCard Organization MCP list_cardholders is temporarily unavailable',
+              503,
+              'agentcard_org_mcp_unavailable'
+            );
+          }
+          return 'ready';
+        },
+        { sleep: async () => undefined }
+      ),
+      'ready'
+    );
+    let permanentPasses = 0;
+    await assert.rejects(() =>
+      waitOutBenchmarkOrgBackpressure(
+        async () => {
+          permanentPasses += 1;
+          throw new AgentCardOrgRuntimeError(
+            'AgentCard Organization MCP list_cardholders failed: bad gateway',
+            502,
+            'agentcard_org_mcp_unavailable'
+          );
+        },
+        { sleep: async () => undefined }
+      )
+    );
+    assert.equal(permanentPasses, 1, 'a non-transient 502 fails on the first pass');
+
+    // A provider 401 says nothing about the cardholder being read. Treating it as not-ready used
+    // to fall through and return a less-preferred, unverified cardholder for seeding.
+    const kycFlap: AgentCardOrgToolCaller = async (name, args) => {
+      if (name === 'list_cardholders') {
+        return cardholdersResult([
+          { id: 'ch-pending', email: 'pending@roselabs.ai' },
+          { id: 'ch-ready', email: 'ready@roselabs.ai' },
+        ]);
+      }
+      if (args.cardholder_id === 'ch-ready') throw unauthorized(name);
+      return { structuredContent: { kyc_status: 'pending' } };
+    };
+    await assert.rejects(
+      () => resolveBenchmarkCardholderId(['ch-pending', 'ch-ready'], kycFlap),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_unauthorized'
+    );
+
+    // The readiness wrapper keeps its message but must stay classifiable as backpressure.
+    await assert.rejects(
+      () =>
+        ensureBenchmarkOrgCardholder('ch-ready', async (name) => {
+          throw unauthorized(name);
+        }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.code === 'agentcard_org_mcp_unauthorized' &&
+        /cardholder readiness check failed/i.test(error.message)
+    );
   }
 
   process.stdout.write('AgentCard benchmark sandbox float tests passed\n');

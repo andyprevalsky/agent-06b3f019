@@ -6,7 +6,10 @@ import {
 } from './org-runtime';
 import { getOrgCardholderVerificationStatus } from './org-onboarding';
 import { readAgentCardOrgWallet } from './org-wallet-monitor';
+import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
+
+const log = createLogger('AgentCardBenchmarkFloat');
 
 /**
  * Minimum sandbox pool the benchmark payment fixture requires, in cents.
@@ -22,12 +25,17 @@ export const DEFAULT_MIN_SANDBOX_FLOAT_CENTS = 100_000;
 const MAX_RATE_LIMIT_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 65_000;
 /**
- * AgentCard documents an org-wide "120 requests per minute" limit per API key, shared by every
- * devbox's smoke fleet and production. Its text-only throttle ("Too many requests, please try
- * again later") advertises no reset, so wait a jittered share of that one-minute window: guests
- * released together by the smoke start barrier must not retry in lockstep.
+ * Benchmark fixtures verify the org with read-only calls, and a failure before the start barrier
+ * cancels the whole smoke campaign. Two transient provider states outlast a single call's own
+ * retries: the fixed 60 s rate-limit window shared with every lane using these credentials, and
+ * the intermittent HTTP 401 on a healthy secret (seen spanning 19 s, longer than the runtime's
+ * 15 s auth-flap window). The fixture waits them out: 30 s between attempts (the setup fixture's
+ * convention in run_benchmark.py), 1 + 3 attempts, spanning more than one full window, and no new
+ * attempt once 180 s have elapsed so nested per-call retries cannot multiply the total wait.
  */
-const UNADVERTISED_RATE_LIMIT_WAIT_MS = 15_000;
+const ORG_BACKPRESSURE_RETRY_DELAY_MS = 30_000;
+const ORG_BACKPRESSURE_TOTAL_WAIT_MS = 180_000;
+const ORG_BACKPRESSURE_MAX_RETRIES = 3;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
 /**
@@ -147,16 +155,13 @@ export async function resolveBenchmarkCardholderId(
 
   for (const id of ordered) {
     // A cardholder whose status cannot be read is treated as not-ready rather than failing the
-    // whole resolution: another candidate may still be verified. An exhausted org-wide throttle
-    // says nothing about this cardholder, and reading the next one would only add load to it.
+    // whole resolution: another candidate may still be verified. Org-wide backpressure says
+    // nothing about this cardholder: skipping it could seed a less-preferred, unverified one, and
+    // reading the next candidate would only add load.
     const status = await getOrgCardholderVerificationStatus(id, {
       callOrgTool: callWithinBudget,
     }).catch((error: unknown) => {
-      if (
-        error instanceof AgentCardOrgRuntimeError &&
-        error.code === 'agentcard_org_mcp_rate_limited'
-      )
-        throw error;
+      if (isOrgBackpressureError(error)) throw error;
       return undefined;
     });
     if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase())) return id;
@@ -165,6 +170,20 @@ export async function resolveBenchmarkCardholderId(
   // specific KYC error surfaces, and so an org whose status endpoint is unavailable still
   // resolves the same cardholder the preference order would have chosen.
   return ordered[0];
+}
+
+/** Provider states that say nothing about this org or cardholder and clear on their own. */
+function isOrgBackpressureError(error: unknown): error is AgentCardOrgRuntimeError {
+  if (!(error instanceof AgentCardOrgRuntimeError)) return false;
+  return (
+    error.code === 'agentcard_org_mcp_rate_limited' ||
+    (error.code === 'agentcard_org_mcp_unauthorized' && error.status === 401) ||
+    (error.code === 'agentcard_org_mcp_unavailable' && error.status === 503)
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function minSandboxFloatCents(env: Record<string, string | undefined> = process.env): number {
@@ -188,43 +207,14 @@ function retryAfterMs(error: unknown, nowMs: number = Date.now()): number | unde
   return Math.max(0, retryAtMs - nowMs) + 250;
 }
 
-/** 7.5–22.5 s: half to one and a half of UNADVERTISED_RATE_LIMIT_WAIT_MS, uniformly jittered. */
-export function defaultUnadvertisedRateLimitWaitMs(_attempt: number): number {
-  return Math.round(UNADVERTISED_RATE_LIMIT_WAIT_MS * (0.5 + Math.random()));
-}
-
-/**
- * The org runtime's own throttle retries span seconds; it then raises its typed 429. Treat that as
- * the same backpressure as an advertised `retryAfter`, bounded by this layer's existing attempt cap.
- */
-function isUnadvertisedOrgThrottle(error: unknown): boolean {
-  return (
-    error instanceof AgentCardOrgRuntimeError &&
-    error.code === 'agentcard_org_mcp_rate_limited' &&
-    retryAfterMs(error) === undefined
-  );
-}
-
-export interface SandboxFloatOptions {
-  /** Delay before re-reading after a throttle with no advertised reset (tests inject 0). */
-  unadvertisedRateLimitWaitMs?: (attempt: number) => number;
-}
-
-async function readWalletWithRateLimitRetry(
-  callOrgTool: AgentCardOrgToolCaller,
-  unadvertisedWaitMs: (attempt: number) => number
-): Promise<unknown> {
+async function readWalletWithRateLimitRetry(callOrgTool: AgentCardOrgToolCaller): Promise<unknown> {
   return retryWithBackoff(() => callOrgTool('get_company_wallet', {}), {
     maxRetries: MAX_RATE_LIMIT_ATTEMPTS,
     isRetryable: (error) => {
-      if (isUnadvertisedOrgThrottle(error)) return true;
       const waitMs = retryAfterMs(error);
       return waitMs !== undefined && waitMs <= MAX_RATE_LIMIT_WAIT_MS;
     },
-    getBackoffDelayMs: (error, attempt) =>
-      isUnadvertisedOrgThrottle(error)
-        ? Math.min(unadvertisedWaitMs(attempt), MAX_RATE_LIMIT_WAIT_MS)
-        : (retryAfterMs(error) ?? 0),
+    getBackoffDelayMs: (error) => retryAfterMs(error) ?? 0,
     component: 'AgentCardBenchmarkFloat',
   });
 }
@@ -242,14 +232,11 @@ async function readWalletWithRateLimitRetry(
  */
 export async function ensureAgentCardSandboxFloat(
   minCents: number = minSandboxFloatCents(),
-  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool,
-  options: SandboxFloatOptions = {}
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
 ): Promise<AgentCardSandboxFloat> {
-  const unadvertisedWaitMs =
-    options.unadvertisedRateLimitWaitMs ?? defaultUnadvertisedRateLimitWaitMs;
   const wallet = await readAgentCardOrgWallet((toolName, args, deadlineAtMs) =>
     toolName === 'get_company_wallet'
-      ? readWalletWithRateLimitRetry(callOrgTool, unadvertisedWaitMs)
+      ? readWalletWithRateLimitRetry(callOrgTool)
       : callOrgTool(toolName, args, deadlineAtMs)
   );
 
@@ -308,6 +295,14 @@ export async function ensureBenchmarkOrgCardholder(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (isOrgBackpressureError(error)) {
+      throw new AgentCardOrgRuntimeError(
+        `AgentCard benchmark cardholder readiness check failed: ${message}`,
+        error.status,
+        error.code,
+        error.details
+      );
+    }
     if (isCardholderNotFoundMessage(message)) {
       throw new Error(
         'AgentCard benchmark cardholder does not exist in the OAuth org tied to ' +
@@ -327,4 +322,60 @@ export async function ensureBenchmarkOrgCardholder(
   }
 
   return { verificationStatus };
+}
+
+type OrgBackpressureClock = {
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+};
+
+/**
+ * Re-runs a read-only org verification after provider backpressure outlasts its per-call retries.
+ * Anything else (an empty org, a low float, a pending cardholder) fails on the first pass.
+ */
+export async function waitOutBenchmarkOrgBackpressure<T>(
+  verify: () => Promise<T>,
+  { sleep = delay, now = Date.now }: OrgBackpressureClock = {}
+): Promise<T> {
+  const startedAtMs = now();
+  for (let retries = 0; ; retries += 1) {
+    try {
+      return await verify();
+    } catch (error) {
+      if (
+        !isOrgBackpressureError(error) ||
+        retries >= ORG_BACKPRESSURE_MAX_RETRIES ||
+        now() - startedAtMs + ORG_BACKPRESSURE_RETRY_DELAY_MS > ORG_BACKPRESSURE_TOTAL_WAIT_MS
+      ) {
+        throw error;
+      }
+      log.warn('Waiting out AgentCard org backpressure before re-verifying the benchmark org', {
+        retry: retries + 1,
+        max_retries: ORG_BACKPRESSURE_MAX_RETRIES,
+        delay_ms: ORG_BACKPRESSURE_RETRY_DELAY_MS,
+        code: error.code,
+        error: error.message,
+      });
+      await sleep(ORG_BACKPRESSURE_RETRY_DELAY_MS);
+    }
+  }
+}
+
+export type BenchmarkOrgFixture = {
+  cardholderId: string;
+  sandboxFloat: AgentCardSandboxFloat;
+  cardholderVerificationStatus: string;
+};
+
+/** The pre-barrier org verification for the sandbox payment fixture, as one read-only unit. */
+export function verifyBenchmarkOrgFixture(
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool,
+  clock: OrgBackpressureClock = {}
+): Promise<BenchmarkOrgFixture> {
+  return waitOutBenchmarkOrgBackpressure(async () => {
+    const cardholderId = await resolveBenchmarkCardholderId(undefined, callOrgTool);
+    const sandboxFloat = await ensureAgentCardSandboxFloat(undefined, callOrgTool);
+    const { verificationStatus } = await ensureBenchmarkOrgCardholder(cardholderId, callOrgTool);
+    return { cardholderId, sandboxFloat, cardholderVerificationStatus: verificationStatus };
+  }, clock);
 }
