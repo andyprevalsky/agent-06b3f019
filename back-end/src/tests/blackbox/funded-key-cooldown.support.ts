@@ -48,7 +48,7 @@ function sharedCooldownName(args: unknown[]): string | undefined {
  * minutes. A case that asserts which provider served a request must not inherit
  * those marks, and its resets must not delete a mark another case is asserting.
  */
-export async function withIsolatedFundedKeyCooldowns<T>(run: () => Promise<T>): Promise<T> {
+export async function beginIsolatedFundedKeyCooldowns(): Promise<() => Promise<void>> {
   const integration = prisma.integration as unknown as IntegrationCooldownDelegate;
   const shared: IntegrationCooldownDelegate = {
     findUnique: integration.findUnique,
@@ -82,14 +82,33 @@ export async function withIsolatedFundedKeyCooldowns<T>(run: () => Promise<T>): 
     __clearGptApiKeyCooldownCache();
     await __resetAnthropicApiKeyCooldown();
   };
+  let finished = false;
+  const finish = async (): Promise<void> => {
+    if (finished) return;
+    finished = true;
+    try {
+      await resetCaches();
+    } finally {
+      integration.findUnique = shared.findUnique;
+      integration.upsert = shared.upsert;
+      integration.deleteMany = shared.deleteMany;
+    }
+  };
   try {
     await resetCaches();
+    return finish;
+  } catch (error) {
+    await finish();
+    throw error;
+  }
+}
+
+export async function withIsolatedFundedKeyCooldowns<T>(run: () => Promise<T>): Promise<T> {
+  const finish = await beginIsolatedFundedKeyCooldowns();
+  try {
     return await run();
   } finally {
-    await resetCaches();
-    integration.findUnique = shared.findUnique;
-    integration.upsert = shared.upsert;
-    integration.deleteMany = shared.deleteMany;
+    await finish();
   }
 }
 
