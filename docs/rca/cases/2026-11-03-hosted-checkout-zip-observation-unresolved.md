@@ -38,11 +38,13 @@ status: fixed
 The native agent-payment-new-user-journey benchmark intermittently failed at the
 hosted Stripe Checkout ZIP step, about 40s into the run and well inside its
 unchanged 1200s and 500c limits. Paid-session/webhook and browser-trajectory
-assertions followed from that first failure. Four cloud-fleet occurrences are
-in the Benchmark Hub: 2026-10-07, 11-03, 11-06 and 11-08 (deploy of PR #1784).
-The newest one carried the probe counters: 728 probes per selector and zero
-matches. The field was never in any frame, while card, expiry, CVC and
-cardholder name had filled seconds earlier.
+assertions followed from that first failure. The Benchmark Hub has five
+cloud-fleet ZIP failures of the shared helper: new-user-journey on 2026-10-07,
+11-03, 11-06 and 11-08 (deploy of PR #1784), plus
+browser-auth-signup-purchase-no-subscription on 10-18 (run
+20261018-073842-20569). The newest one carried the probe counters: 728 probes
+per selector and zero matches. The field was never in any frame, while card,
+expiry, CVC and cardholder name had filled seconds earlier.
 
 ## Diagnosis
 
@@ -55,11 +57,14 @@ non-US country the hosted form shows a country dropdown with no
 and HK. The helper filled ZIP but never set the country, so it timed out.
 
 Evidence:
-- All benchmark subscription sessions in the sandbox since 2026-10-01: 963
-  presented in USD completed paid; all 6 presented in EUR stayed unpaid. The 4
-  ZIP failures match 4 of those EUR sessions minute for minute, for example
-  `cs_test_b1lSnYNA…` at 04:30:51Z on 11-08 (presentment 2800 eur,
-  payment_method_types card/link only).
+- All benchmark subscription sessions in the sandbox since 2026-10-01: 963 of
+  the 987 sessions without presentment_details completed paid (24 expired
+  unpaid). None of the 6 sessions presented in EUR was paid, and all of them
+  offered only card/link. Five of them match the five Hub ZIP failures (11-03,
+  11-06 and 11-08 within minutes of the run; 10-07 at 16:16 for a run that
+  started at 15:55; 10-18 07:46 for run 20261018-073842-20569). The sixth
+  (10-18 10:51) belongs to a run with no recorded reason. On 11-08 the session
+  was `cs_test_b1lSnYNA…` at 04:30:51Z, presentment 2800 eur.
 - Live local repro on main 617bb467f: the real unchanged helper ran on a real
   sandbox session, and only the `/init` geocoding was rewritten to NL. It failed
   with byte-identical diagnostics (`probes:728, matched_probes:0` on both
@@ -68,10 +73,12 @@ Evidence:
 - The actual failed production session (still open, EUR-sticky) gave the same
   result: with NL geocoding the unchanged helper failed identically, and the
   fixed helper completed it paid.
-- Ruled out: browser locale/timezone (UTC/en-US defaults to US), and
-  datacenter/residential proxy IPs (Stripe kept US for them). A 400-run
+- Ruled out: browser locale/timezone (UTC/en-US defaults to US). A 400-run
   soak from a US IP had zero misses. The failure only occurs when Stripe
   geolocates the guest's Fly egress IP to the eurozone.
+- Not reproduced: a real eurozone IP. Stripe kept US for Kernel
+  datacenter/residential proxies, so the repro relies on the rewritten geocoding
+  plus the rerun on the EUR-presented production session.
 
 ## Solution
 

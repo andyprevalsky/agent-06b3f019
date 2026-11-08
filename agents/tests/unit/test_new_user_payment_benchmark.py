@@ -163,7 +163,7 @@ async def test_checkout_field_success_keeps_original_fill_and_does_not_emit_diag
     assert calls == ["count", "visible", ("fake-ZIP", 5000)]
 
 
-@pytest.mark.parametrize("geolocated_country", ["NL", "US"])
+@pytest.mark.parametrize("geolocated_country", ["NL", "US", None])
 @pytest.mark.asyncio
 async def test_hosted_checkout_pays_when_stripe_geolocates_the_guest_outside_the_us(monkeypatch, geolocated_country):
     """Hosted Checkout preselects Stripe's IP-geolocated country; a eurozone default renders no ZIP input.
@@ -173,14 +173,14 @@ async def test_hosted_checkout_pays_when_stripe_geolocates_the_guest_outside_the
     from types import SimpleNamespace
     from benchmarks import subscription_checkout as checkout
 
-    form = {"billingCountry": geolocated_country}
+    form = {"billingCountry": geolocated_country or "US"}
     filled, selected = {}, []
     names = {"email": "email", "cardNumber": "cc-number", "cardExpiry": "cc-exp", "cardCvc": "cc-csc",
              "billingName": "cc-name", "billingPostalCode": "postal-code"}
 
     def rendered(selector):
         if selector == 'select[name="billingCountry"]':
-            return "billingCountry"
+            return "billingCountry" if geolocated_country else None
         if selector in ("card", 'button[type="submit"]'):
             return selector
         for name, autocomplete in names.items():
@@ -291,5 +291,5 @@ async def test_hosted_checkout_pays_when_stripe_geolocates_the_guest_outside_the
 
     assert result["payment_status"] == "paid" and result["webhook_delivered"] is True
     assert filled["billingPostalCode"] == "94105" and filled["cardNumber"] == "4242424242424242"
-    assert selected == ([] if geolocated_country == "US" else ["US"])
+    assert selected == (["US"] if geolocated_country == "NL" else [])
     assert deliveries == ["http://127.0.0.1:1/webhooks/stripe"]
