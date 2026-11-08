@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "bb87242a2e704928bb01dd06085052e8",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "47646bab7fae928c35db89e0c20334adda1abee3",
+    "digest": "9b8ecddb39d6351b1aecf4339d76db65067b1ebdda210f7eab688e1c8159010d"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "standing AgentCard sandbox release stall: the closed card's org transfer was consumed with releasedCents=0, so the native row is SKIPPED (docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md); identical on round 1",
+   "evidence": "/var/tmp/rose-base-measure/.context/deploy-cloud/200d983453e5e2a7b113df8f386a8667219b4e649254eac380855d4da49d8aea/runs/20261107-212102-2846331/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "4e5912d96fdca240f305c7472d4772e83f0aceed31e0546fcfbd093c1bc0ef60",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_99bf0b4f86e15b1895657a34\", \"cardId\": \"card_4d1e24683859fd2b19e591c3\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py be70c2d3-f5f1-4faf-b1b5-74536d8b30ad | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard sandbox (org transfer release)",
+    "evidence": "/var/tmp/rose-base-measure/.context/deploy-cloud/200d983453e5e2a7b113df8f386a8667219b4e649254eac380855d4da49d8aea/runs/20261107-212102-2846331/agent-payment-abandonment/cloudbench-run.json",
+    "confirmed_at": 1794088081.9479218
+   }
+  }
+ ]
+}
