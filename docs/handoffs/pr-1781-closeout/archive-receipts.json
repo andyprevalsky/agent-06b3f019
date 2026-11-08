@@ -1,0 +1,312 @@
+{
+ "archives": {
+  "core": {
+   "name": "core",
+   "format": "PR1781-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0000",
+     "sha256": "238d4c05517d7b95bafcd4e703ddce8b27b1c509a23f0dd8d9cf23dc102d35f9",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0001",
+     "sha256": "59925a3caa3c6022d1eda48c537815f36f0a20b1f8229e916ce87c56d9a87776",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0002",
+     "sha256": "245a6702669e975339eb8a78ead57e157145cc0286f19ba93079c88fd9b4ad33",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0003",
+     "sha256": "08c9781f099faf9d9dddb0991ae7ece77d35fdc375b5e6c8a904176d12f8314b",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0004",
+     "sha256": "8f718e7d4efa2948c0b4fd6b688eca3b6140aa34141a0b4dacc74d4953f99a6c",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0005",
+     "sha256": "312846da430ba7c8873debc7930f5a2bdb211b9e5e44751ec2e2d2cac8bf7882",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0006",
+     "sha256": "70ca4e4a4c97c4c8cb004667238445b50e384c1de065904da2eac68aca91fd97",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm.part0007",
+     "sha256": "e7093545f943fc2fe6ca3bd69fdbd2c3d8a85620c07e32e8602cec2918d640bd",
+     "plain_bytes": 1037277
+    }
+   ],
+   "frame_bytes": 67108864,
+   "files": 47559,
+   "paths": [
+    ".context/benchmark-hub",
+    ".context/deploy-approval-batch.diff",
+    ".context/deploy-approval-batch.json",
+    ".context/deploy-collect.json",
+    ".context/deploy-lanes",
+    ".context/deploy-merged.json",
+    ".context/deploy-pipeline",
+    ".context/deploy-pipeline-archived-c1-envsync-0205Z",
+    ".context/deploy-pipeline-archived-c2-smoke-infrastop-0417Z",
+    ".context/deploy-pr.json",
+    ".context/deploy-review-cycle.json",
+    ".context/deploy-review-dispositions.jsonl",
+    ".context/deploy-runs",
+    ".context/deploy-triage",
+    ".context/factory-events.jsonl",
+    ".context/fast-forward-cache",
+    ".context/frontend-builds",
+    ".context/ngrok.log",
+    ".context/pr1634-archive-recovery.env",
+    ".context/rca-shard2-records",
+    ".context/services.json",
+    ".context/test-runs",
+    "agents/navi-worker-log.txt",
+    "back-end/backend-logs.log",
+    "front-end/frontend-logs.log"
+   ],
+   "gzip_sha256": "229950b172bc513c85193ccc203eeba9cf7358232bc351e3307afcff4cef34c0",
+   "gzip_bytes": 470799325,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf"
+  },
+  "cloud": {
+   "name": "cloud",
+   "format": "PR1781-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0000",
+     "sha256": "ce3e912e3045e9220f3e69e35a3dc625f2f4f5eb983cee042c99d815f9b2668c",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0001",
+     "sha256": "c8de2de8908e9ede4baac4352c3ac377ab58c97c380e297f1a61107517d6d87a",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0002",
+     "sha256": "a816eb15e4dd379806e89374bf8518a3762346efb536dd0d55a732ffde82dfab",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0003",
+     "sha256": "dc9926c4dee16fea75a7c9e9819b3b02084443f70aa8085d54ed684a2e38c8e9",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0004",
+     "sha256": "542a0b9e37471d257e3e500bc5ade71b2a1d8335506e2eadeee98f4cbedf7e21",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0005",
+     "sha256": "50410b11b7bdb5b8fcb5c054ddc37b4badf9ef5f0486bb54b4bdfe8d3d045d85",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0006",
+     "sha256": "cbcb6b1d0f491d712a7bfcf2d5ebf78002c3ee5a9f086063b8442a90c4c2c371",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0007",
+     "sha256": "754b25ba849dcfe951243f6edd3f018a48129a5b1b462cb07a6a0408913b8a44",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0008",
+     "sha256": "aea3d7ca4838c9cdacec030598fd642c31d999ce52aa5c5239318e945214c3d5",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0009",
+     "sha256": "3599e073e1acc89b5dc8fb12986766d5b9ed4692e88bffb03d82083cab65f265",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0010",
+     "sha256": "38b5ffdb8e1eeafb0ee6f6e7f5d43f0a787f6d2500327733eb54db08e57fb01a",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0011",
+     "sha256": "6038d7e5b8192b87ec256d888643c893c9a9fceaa9929dace1ee871631cdca4c",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0012",
+     "sha256": "23b913778b2810e98fd103dc8fc132e3ca8699a20698ace42e1aeb7292856b26",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0013",
+     "sha256": "99457e794a085d576effa7b448a2434a528da1ded99c9741b0d70f7bc6676043",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0014",
+     "sha256": "234a1d7a89e13742a6b8ec44fc665fd13deb837bcdc4dc81918b60e475d98578",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0015",
+     "sha256": "87d7d19a9cdf2d9cca3d3acd94c9c952394f6692f404396462dcbbfe15d7871f",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0016",
+     "sha256": "20a673e01b03c933b3103321cea279df2b09ddb0c9ac8f6d241958d8a1b996d7",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0017",
+     "sha256": "c19fb875e13a5f03cb7d0c47fac674a9d3180751b8ae0e90ed011a185e72b995",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0018",
+     "sha256": "d88e1bbcd90e1d34c3f9d5841ea22ff404b811966118cc5e9360b8a77ac19cb2",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0019",
+     "sha256": "5d6ecdf2cad455c6d4f15c3f38c24756ad82acc754c9cbfe045f20b660f54c88",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0020",
+     "sha256": "2e558ef0e3f4159dcc9b3947d1cd8071de9398d391687a3afc7371a775e27121",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0021",
+     "sha256": "78ce74a769503cf98dfb4708395417197d687b4f97eb93f7b17bdedbcd1a0fde",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0022",
+     "sha256": "c59ff6322d96f3b94a31412c555dd8620e2d3f5cb42a71c1bf101bc808a0d819",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0023",
+     "sha256": "03974b58419d09ba3b65fb70811421a14647b5edda90219570139f9c663a96cc",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0024",
+     "sha256": "20f8b2e626c22541faeef8d44280f0a2428ad3d3a3fe5a6e5ebabde54aa34a8e",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0025",
+     "sha256": "5ed78f3d8b5091619d1fb8855505d83a9a71fd6a7e2fbbfb88c27b0397783ca5",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0026",
+     "sha256": "b39332429395fa9a6f4a98ee6f83f2b1422062c7593c597ee55d04e94c2f2af6",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0027",
+     "sha256": "1521124b2fe4b2d3ce1019b64459eecc1642e276aae7ac7400b63ed1d0eb1406",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0028",
+     "sha256": "e368aba64bccee0171d652de26b0739c89d474aa68fac7286b2a43229f23bd7d",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm.part0029",
+     "sha256": "3a85afb91d34933e9da3fda158b1587fb91355ec0122a7960df01d3804e53284",
+     "plain_bytes": 2562687
+    }
+   ],
+   "frame_bytes": 67108864,
+   "files": 8463,
+   "paths": [
+    ".context/deploy-cloud"
+   ],
+   "gzip_sha256": "80759318e45a82d3c567ede28a27665fde9347928a3fc2e2c60cc7a01651fc4d",
+   "gzip_bytes": 1948719743,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf"
+  },
+  "rca": {
+   "name": "rca",
+   "format": "PR1781-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1781-49c2c60c/rca.tar.gz.aesgcm",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/rca.tar.gz.aesgcm.part0000",
+     "sha256": "c6633b9d887750a5786058c9278074b8e4c8031e1709ca47801e25261c654322",
+     "plain_bytes": 59953900
+    }
+   ],
+   "frame_bytes": 67108864,
+   "files": 6672,
+   "paths": [
+    "/var/tmp/rca-shard2/runs",
+    "/var/tmp/rca-shard2/prof-bad",
+    "/var/tmp/rca-shard2/gh",
+    "/var/tmp/rca-shard2/delegation",
+    "/var/tmp/rca-shard2/scripts",
+    "/var/tmp/rca-shard2/probe",
+    "/var/tmp/rca-shard2/probe2"
+   ],
+   "gzip_sha256": "764bdab28c9959d195248a8378b26875dea900eaae93c6cc944d567ec1b91a05",
+   "gzip_bytes": 59953900,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf"
+  },
+  "extra": {
+   "name": "extra",
+   "format": "PR1781-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1781-49c2c60c/extra.tar.gz.aesgcm",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1781-49c2c60c/extra.tar.gz.aesgcm.part0000",
+     "sha256": "9226b756a7a271b6b3d44fd4165b6680e3d8a2db1e22e28010e63d26773f8a6e",
+     "plain_bytes": 64807
+    }
+   ],
+   "frame_bytes": 67108864,
+   "files": 8,
+   "paths": [
+    "agents/providers/fast_cache",
+    "agents/.env.benchmark-temporal",
+    "hub-poller-logs.log"
+   ],
+   "gzip_sha256": "399e0394c595b97eabefda899486256e33c11ef8498977fa3da9fe7e2597ec41",
+   "gzip_bytes": 64807,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf"
+  }
+ }
+}

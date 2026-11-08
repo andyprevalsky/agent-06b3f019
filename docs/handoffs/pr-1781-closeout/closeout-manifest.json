@@ -1,0 +1,86 @@
+{
+ "pr": 1781,
+ "merged_sha": "49c2c60cec3137ae52762b4a544676be759852bb",
+ "final_head": "2a6396121d3d5eb6158436ba266d1a808a594e6f",
+ "archives": {
+  "core": "devbox-closeout-private/pr1781-49c2c60c/core.tar.gz.aesgcm",
+  "cloud": "devbox-closeout-private/pr1781-49c2c60c/cloud.tar.gz.aesgcm",
+  "rca": "devbox-closeout-private/pr1781-49c2c60c/rca.tar.gz.aesgcm",
+  "extra": "devbox-closeout-private/pr1781-49c2c60c/extra.tar.gz.aesgcm"
+ },
+ "assignment": {
+  "test": "backend-coverage-blackbox / blackbox:integration-accounts \"LinkedIn upload: a corrupt archive ends the run sync_failed\"",
+  "command": "cd back-end && npm run test:coverage:sharded (shard 2; Blacksmith executor via scripts/deploy gates)",
+  "originating": {
+   "pr": 1762,
+   "merge": "4a0e080d71e3f8f9972e912d4ecc1c44de7ed6b1",
+   "failed_source": "6427f84e11f0a9c0becc754ae5017858e9903607",
+   "devbox": "9c4f8215-56fa-4552-a3b7-f66db0da873f",
+   "ci_run": 42389794271
+  },
+  "repair_devbox": "fb2cf1b1-fae8-4b75-8771-ccf1abc5d73e (Bugs folder)",
+  "root_cause": "back-end/src/domains/data/regexSafety.ts checkPatternSafety ran recheck checkSync (synckit Atomics.wait) for up to 1 s per unclassifiable grep on the shared backend main thread; ~16 concurrent report-bug fixture chats serialized into a 6.7 s freeze, after which Node keep-alive timers closed reused sockets -> fetch failed",
+  "fix": "async recheck check off the event loop, wall-clock deadline (AbortSignal + own deadline race), memoized analyzer spawn; deploy-gate bundler keeps logs/evidence ahead of bulk JSON",
+  "rca_case": "docs/rca/cases/2026-11-08-grep-regex-safety-blocked-event-loop.md",
+  "proof": {
+   "pre_fix": "failed source + report-bug: /health stalled up to 8.2-10.4 s; CPU profile 9.3 s in synckit receiveMessageWithId; fetch failed reproduced; new data-grep regression on unfixed main FAIL (GET /health took 8498/8128 ms)",
+   "post_fix": "data-grep regression PASS x5; unit deadline cases PASS x5 (FAIL without race); worker full shard-2 run 123/123",
+   "original_command": "backend-coverage-blackbox 252/252 PASS on Blacksmith (be5c2f2c8 x2, 33172d70a, final 2a6396121) incl. PASS LinkedIn upload: a corrupt archive ends the run sync_failed; server-shard1/2.log present in uploaded artifact"
+  }
+ },
+ "gates_final": {
+  "head": "2a6396121",
+  "pass": [
+   "format",
+   "eslint",
+   "typescript",
+   "backend-structural",
+   "deploy-command-structural",
+   "seed-cache-decision",
+   "canonical-seed-whatsapp-content",
+   "seed-memory-ratchet",
+   "backend-coverage-blackbox",
+   "frontend-coverage-blackbox",
+   "agents-coverage-blackbox",
+   "live-probes",
+   "semantic-stack",
+   "e2b-smoke",
+   "cloudbench-controller"
+  ],
+  "smoke": "12/13 PASS; agent-payment-abandonment SKIPPED_WITH_WARNING (standing AgentCard sandbox release stall, $43.96 sandbox unreleased, livemode false)"
+ },
+ "review": "CodeRabbit org usage spending cap on be5c2f2c8 and 2a6396121 (deploy_review_cycle.py skip --reason usage-cap); merged unreviewed by CodeRabbit; independent adversarial sub-agent review (2 rounds) findings fixed",
+ "production": {
+  "render": "PASS",
+  "backend_probes": "PASS 15/15, log clean",
+  "semantic": "PASS run 42455942261"
+ },
+ "handoffs": {
+  "agentcard_401": {
+   "occurrence": "smoke/agent-payment-abandonment AgentCard Organization MCP 401 Invalid or expired organization token (NOT_INTRODUCED; 04:17Z and ~05:20Z on 33172d70a)",
+   "delivered_to": "boxes.dev thread ph76spe3bj2f84xm06wa6xfqkn8hty7y (existing owner \"Test repair: agent-payment-abandonment AgentCard org 401 flap\"), threads message delivered"
+  }
+ },
+ "followups": [
+  "GET /api/benchmarks synchronous tasks.json read/parse/stringify blocks 1.7-2.4 s under 10 concurrent GETs (below 5 s keep-alive threshold)",
+  "regexSafety: log or respawn when the recheck agent dies (fails closed silently until restart)"
+ ],
+ "retained": {
+  "rca_worker_devbox": {
+   "devbox": "750e9ae5-3617-4aa5-822b-4206b89ddbde",
+   "thread": "ph789yaeh5xbr9qrnqgry363sn8hvm9x",
+   "paths": [
+    "/var/tmp/shard2-rca (evidence 616 MB, src export 5.4 GB, artifact 416 MB)",
+    "postgres db victoria_src_s2"
+   ],
+   "reason": "raw profiles/repro scripts of the independent confirmation; report preserved in core archive (.context/rca-shard2-records/worker-result.json) and prototype pushed as rca/shard2-stall-worker-recheck-async",
+   "retirement": "destroy the devbox once its owner confirms no further use; nothing on it is required by this deploy"
+  }
+ },
+ "ledger": {
+  "source": "BenchmarkRun._record_history over the final merged-code smoke campaign deploy-d3b55289 (head 2a6396121, ancestor of merge 49c2c60ce); SKIPPED stall row excluded by design",
+  "task_attempts_rows": 12,
+  "task_durations_rows": 3,
+  "span_file": "agents/benchmarks/history/span_durations.20261108.records-pr1781-closeout.jsonl"
+ }
+}
