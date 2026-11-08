@@ -20,7 +20,7 @@
    "report-bug blackbox pre-fix 13/15 (72 model calls; 9 agents/29 trajectory rows left), post-fix 15/15, five consecutive runs (three times as the test changed)",
    "NonBlockingFileCache unit case fails on main ('mem retained a 1000043-character request key') and passes with the patch",
    "standalone npm run test:coverage:sharded on a persistent DB: exit 0, merged coverage 90.32% lines, peak shard server RSS 1.38 GB (originating box: 4.67 GB watchdog kill then OOM)",
-   "backend-coverage-blackbox PASS in every staged sweep: 8cc6df20b (local x2), ddfe9f288, c9d4f587b, 6e347fb7f (Blacksmith)"
+   "backend-coverage-blackbox PASS in every staged sweep: 8cc6df20b (local initial), 7c092b611 (local final, cycle v1 attempt 7), ddfe9f288, c9d4f587b, 6e347fb7f (Blacksmith)"
   ]
  },
  "rca_cases": [

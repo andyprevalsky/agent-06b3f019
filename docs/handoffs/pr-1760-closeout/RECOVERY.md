@@ -1,6 +1,6 @@
 # PR1760 preservation recovery
 
-[closeout-manifest.json](closeout-manifest.json) lists five private archives (core, workers, cloud, refs, extra) with
+[closeout-manifest.json](closeout-manifest.json) lists six private archives (core, workers, cloud, refs, stash, extra) with
 their R2 object keys, hashes and sizes. Every one was read back in full and each frame authenticated at upload; the
 `extra` archive was also restored into an empty directory and a member hash compared. Deployed `cdb8ce580`; gated
 `6e347fb7f`.
