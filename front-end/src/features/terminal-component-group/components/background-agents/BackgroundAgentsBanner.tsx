@@ -18,7 +18,15 @@
  *             one CompletedAgentsDrawer row ("▸ X completed agents, Y
  *             succeeded, Z failed"); expanding lists them at the same level
  *     | click an agent row  -> onNavigate(agentId)
- *     | click an explore/browser task row (selected agent's own task)
+ *     | click a browser task row -> owner's Browser drawer tab: openAgentBrowser
+ *     |   (task id known) or openAgentBrowserTab (agent only, never an empty id);
+ *     |   a descendant's task navigates to its owner first
+ *     | click a code task row -> its code-agent view (useCodeAgentView().open);
+ *     |   id from the spawn rows, else the code-agents list (cache, then ONE fetch)
+ *     | no view for the task (no id found, view unavailable) -> onNavigate(owner)
+ *     | rows with nothing to open (a code agent's own Task sub-agents) are not
+ *     |   clickable: no pointer, no chevron
+ *     | click an explore task row (selected agent's own task)
  *     v
  * [EXPANDED + TASK OPEN] that task's trajectory unfolds under its row
  *             (MessageList subAgentId=<task id>, the rows the client already
@@ -50,7 +58,10 @@ import { isTerminalNode } from '../subAgentTree.helpers';
 import { CompletedAgentsDrawer } from './CompletedAgentsDrawer';
 import { ForEachResultsDisclosure, NodeSchemaDisclosure } from './DockSchema';
 import { TreeNodeRow } from '../subAgentTree/TreeNodeRow';
-import { isTaskNodeId, type AgentPanelModel } from './agentsPanelGroups';
+import { isTaskNodeId, type AgentPanelModel, type TaskTarget } from './agentsPanelGroups';
+import { useCodeAgentView } from '../code-agent-view/codeAgentViewState';
+import { useRoseApps } from '../rose-apps/roseAppsState';
+import { useFindCodeAgent } from '../rose-sidebar/useRoseCodeAgents';
 import { useAgentsPanelData } from './useAgentsPanelData';
 
 export const FINISHED_FLASH_MS = 5000;
@@ -79,7 +90,59 @@ function useFinishedFlash(running: number): boolean {
   return flash;
 }
 
-/** Open explore/browser task rows → their trajectory ids (unknown tasks never open). */
+/**
+ * Opens what a task row stands for: a browser task's drawer tab, a code task's
+ * code-agent view, else (no id yet, or that view is unavailable) its owner.
+ */
+function useOpenTaskTarget(onNavigate: (agentId: string) => void, rootAgentId: string | null) {
+  const codeView = useCodeAgentView();
+  const apps = useRoseApps();
+  const findCodeAgent = useFindCodeAgent();
+  const openCode = async (target: TaskTarget, view: NonNullable<typeof codeView>) => {
+    const { ownerAgentId: owner, taskName } = target;
+    const row = target.taskId ? null : await findCodeAgent(owner, taskName, rootAgentId);
+    const taskId = target.taskId ?? row?.code_agent_id;
+    if (!taskId) return onNavigate(owner);
+    const title = taskName ?? row?.title ?? '';
+    const provider = row?.provider ?? null;
+    view.open({ taskId, ownerAgentId: owner, provider, title, status: null });
+  };
+  return (target: TaskTarget) => {
+    const { ownerAgentId: owner, own, taskId } = target;
+    if (target.type === 'browser' && apps) {
+      if (!own) onNavigate(owner);
+      if (taskId) apps.openAgentBrowser(owner, taskId);
+      else apps.openAgentBrowserTab(owner);
+      return;
+    }
+    if (target.type === 'code' && codeView) return void openCode(target, codeView);
+    onNavigate(owner);
+  };
+}
+
+/**
+ * Row clicks: agents navigate; the selected agent's explore tasks unfold their
+ * trajectory; other tasks open their target. Rows with nothing to open
+ * (canNavigate false) render without a click target.
+ */
+function usePanelNavigation(model: AgentPanelModel, onNavigate: (agentId: string) => void) {
+  const { trajectories, taskTargets, rootAgentId } = model;
+  const tasks = useOpenTrajectories(trajectories);
+  const openTask = useOpenTaskTarget(onNavigate, rootAgentId ?? null);
+  const navigate = (agentId: string) => {
+    if (!isTaskNodeId(agentId)) return onNavigate(agentId);
+    if (trajectories.has(agentId)) return tasks.toggle(agentId);
+    const target = taskTargets?.get(agentId);
+    if (target) openTask(target);
+  };
+  const canNavigate = (node: TreeNode) =>
+    !isTaskNodeId(node.agentId) ||
+    trajectories.has(node.agentId) ||
+    Boolean(taskTargets?.has(node.agentId));
+  return { tasks, navigate, canNavigate };
+}
+
+/** Open explore task rows → their trajectory ids (unknown tasks never open). */
 function useOpenTrajectories(trajectories: ReadonlyMap<string, string>) {
   const [openIds, setOpenIds] = useState<ReadonlySet<string>>(new Set());
   const open = new Map<string, string>();
@@ -111,6 +174,7 @@ interface PanelBodyProps {
   onNavigate: (agentId: string) => void;
   /** Open task node id → the trajectory rows' subAgentId. */
   openTrajectories: ReadonlyMap<string, string>;
+  canNavigate: (node: TreeNode) => boolean;
 }
 
 /** A task's trajectory, rendered from the selected agent's loaded rows (no fetch). */
@@ -132,7 +196,13 @@ function TaskTrajectory({ taskId }: { taskId: string }) {
   );
 }
 
-function PanelBody({ groups, getChildren, onNavigate, openTrajectories }: PanelBodyProps) {
+function PanelBody({
+  groups,
+  getChildren,
+  onNavigate,
+  openTrajectories,
+  canNavigate,
+}: PanelBodyProps) {
   /** Hierarchy in the SubAgentTree language: TreeHeader per for_each group, TreeNodeRow per agent. */
   const afterNode = (withSchema: boolean) => (node: TreeNode, childPrefix: string) => {
     const trajectory = openTrajectories.get(node.agentId);
@@ -160,6 +230,7 @@ function PanelBody({ groups, getChildren, onNavigate, openTrajectories }: PanelB
             roots={group.roots}
             getChildren={getChildren}
             onNavigate={onNavigate}
+            canNavigate={canNavigate}
             // for_each children share the cluster's results table instead.
             renderAfterNode={afterNode(group.header === null)}
           />
@@ -174,11 +245,13 @@ function GroupRows({
   roots,
   getChildren,
   onNavigate,
+  canNavigate,
   renderAfterNode,
 }: {
   roots: TreeNode[];
   getChildren: AgentPanelModel['getChildren'];
   onNavigate: (agentId: string) => void;
+  canNavigate: (node: TreeNode) => boolean;
   renderAfterNode: (node: TreeNode, childPrefix: string) => ReactNode;
 }) {
   const active = roots.filter((node) => !isTerminalNode(node));
@@ -193,6 +266,7 @@ function GroupRows({
           prefix=""
           getChildren={getChildren}
           onNavigate={onNavigate}
+          canNavigate={canNavigate}
           renderAfterNode={renderAfterNode}
         />
       ))}
@@ -200,6 +274,7 @@ function GroupRows({
         nodes={finished}
         getChildren={getChildren}
         onNavigate={onNavigate}
+        canNavigate={canNavigate}
         renderAfterNode={renderAfterNode}
       />
     </>
@@ -245,19 +320,13 @@ export function BackgroundAgentsBannerView({
   model: AgentPanelModel;
   onNavigate: (agentId: string) => void;
 }) {
-  const { groups, getChildren, counts, trajectories } = model;
+  const { groups, getChildren, counts } = model;
+  const { tasks, navigate, canNavigate } = usePanelNavigation(model, onNavigate);
   const [expanded, setExpanded] = useState(false);
   // The body mounts on the first open and then stays, so close animates too.
   const [bodyMounted, setBodyMounted] = useState(false);
   if (expanded && !bodyMounted) setBodyMounted(true);
-  const tasks = useOpenTrajectories(trajectories);
   const flash = useFinishedFlash(counts.running);
-  // Synthetic task rows (explore/browser/code) have no agent page to open;
-  // the selected agent's explore/browser tasks unfold their trajectory instead.
-  const navigate = (agentId: string) => {
-    if (isTaskNodeId(agentId)) tasks.toggle(agentId);
-    else onNavigate(agentId);
-  };
 
   const visible =
     counts.running > 0 || counts.paused > 0 || flash || (expanded && groups.length > 0);
@@ -311,6 +380,7 @@ export function BackgroundAgentsBannerView({
               groups={groups}
               getChildren={getChildren}
               onNavigate={navigate}
+              canNavigate={canNavigate}
               openTrajectories={tasks.open}
             />
           </div>

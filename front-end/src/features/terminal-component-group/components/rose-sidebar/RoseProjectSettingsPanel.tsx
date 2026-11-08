@@ -187,11 +187,14 @@ function LifecycleSection({ draft, setField }: { draft: ProjectDraft; setField: 
 export default function RoseProjectSettingsPanel({
   project,
   barExpanded,
+  barExpandedWidth,
   onClose,
   embedded = false,
 }: {
   project: Project;
   barExpanded: boolean;
+  /** The bar's current expanded width, so the panel sits flush against a dragged bar. */
+  barExpandedWidth?: number;
   onClose: () => void;
   embedded?: boolean;
 }) {
@@ -249,6 +252,7 @@ export default function RoseProjectSettingsPanel({
       label="Project settings"
       testId="rose-project-settings"
       barExpanded={barExpanded}
+      barExpandedWidth={barExpandedWidth}
       onClose={onClose}
     >
       {content}

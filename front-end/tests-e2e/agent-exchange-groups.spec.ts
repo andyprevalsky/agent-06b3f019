@@ -105,10 +105,13 @@ test('mobile GP traffic stays collapsed and survives reload without duplicate ex
   await expect(page.getByText('The work is ready for review.', { exact: true })).toBeVisible();
   await expect(page.getByTestId('a2a-row')).toHaveCount(0);
   await row.getByRole('button', { name: /Worked/ }).click();
-  await expect(row.getByTestId('a2a-row')).toHaveCount(20);
-  await row.getByRole('button', { name: 'Next activities' }).click();
-  await expect(row.getByText('Internal coordination 20', { exact: true })).toBeVisible();
-  await expect(row.getByText('Internal coordination 0', { exact: true })).toHaveCount(0);
+  // 50 a page, opening on the newest: exchanges 60-109 of 110.
+  await expect(row.getByTestId('a2a-row')).toHaveCount(50);
+  await expect(row.getByText('Internal coordination 109', { exact: true })).toBeVisible();
+  await expect(row.getByText('Internal coordination 59', { exact: true })).toHaveCount(0);
+  await row.getByRole('button', { name: 'Previous activities' }).click();
+  await expect(row.getByText('Internal coordination 59', { exact: true })).toBeVisible();
+  await expect(row.getByText('Internal coordination 109', { exact: true })).toHaveCount(0);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(row).toContainText('110 exchanges');
   await expect(row.getByRole('button', { name: /Worked/ })).toHaveAttribute(

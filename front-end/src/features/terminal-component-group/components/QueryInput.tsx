@@ -18,7 +18,8 @@
  * DIRECT CHANNEL (directChannel, the Rose Desktop code-agent view): the same
  *   shell, attachments, model chip, speed toggle (speedControl) and send button;
  *   the nub tab carries the caller's working settings (props.nub) instead of the
- *   Rose toolbar; no pinned tools. Draft attachments clear only after confirmed delivery.
+ *   Rose toolbar; no pinned tools; props.cornerStatus sits at the box's top-right
+ *   corner. Draft attachments clear only after confirmed delivery.
  *
  * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
@@ -260,6 +261,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         speed={speed}
         attachable
         sessionControls={browser ? undefined : props.sessionControls}
+        cornerStatus={browser || !directChannel ? undefined : props.cornerStatus}
       />
     </>
   );

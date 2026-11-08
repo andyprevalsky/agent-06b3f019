@@ -2,8 +2,11 @@
  * STATE MACHINE: CodeResourcesIndicator (item 29: a code agent's CPU / memory / disk)
  *
  *   [HIDDEN]  ← no live sample (not running, or none received yet) AND no preview link
+ *             AND not `persistent`
  *      │ CODE_RESOURCES sample for this task (lib/codeResources store) while running,
- *      │ or a session with a dev-preview URL (the code-agent view passes `preview`)
+ *      │ or a session with a dev-preview URL (the code-agent view passes `preview`),
+ *      │ or `persistent` (the code-agent view's query box: always shown; empty bars
+ *      │ and "Usage shows while the container is awake" when nothing is measured)
  *      ▼
  *   [BARS]    three small vertical bars (CPU · Memory · Disk), filled to usage;
  *      │      a bar ≥ RESOURCE_WARNING_PCT (80%) is amber; an unmeasured one is empty
@@ -15,7 +18,7 @@
  *             An unmeasured resource reads "Unavailable", never 0.
  *             With `preview`: one "Open app" link (OpenAppButton: the session's
  *             full-screen dev preview, UI ledger rows 10/39). When no sample is live
- *             (sandbox asleep) the popover holds only that link.
+ *             (sandbox asleep) the popover holds the idle line and that link.
  *             The surface is opaque (the nub's info popover surface), never the base
  *             popover's 80% glass: the transcript text behind it must not bleed through.
  *      │ mouse leave, click / tap again, or Escape
@@ -129,12 +132,15 @@ export function CodeResourcesIndicator({
   taskId,
   running,
   preview,
+  persistent = false,
 }: {
   taskId: string;
   /** Finished or paused sessions have no live sandbox to measure: no bars, no values. */
   running: boolean;
   /** Adds the "Open app" link to the popover (and keeps the indicator for an idle session). */
   preview?: CodePreviewLink;
+  /** Always render (the code-agent view's query box), empty bars when nothing is measured. */
+  persistent?: boolean;
 }) {
   const stored = useCodeResources(taskId);
   const appView = useAppView();
@@ -145,7 +151,7 @@ export function CodeResourcesIndicator({
     preview !== undefined && appView !== null && isCrossOriginHttpUrl(preview.previewUrl)
       ? preview
       : null;
-  if (!sample && !link) return null;
+  if (!sample && !link && !persistent) return null;
   const rows = resourceRows(sample);
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -214,8 +220,13 @@ export function CodeResourcesIndicator({
             </div>
           </>
         )}
+        {!sample && (
+          <div data-testid="code-resources-idle" className={`text-xs ${MUTED}`}>
+            Usage shows while the container is awake
+          </div>
+        )}
         {link && (
-          <div className={sample ? 'mt-2 border-t border-border pt-2 dark:border-white/[.09]' : ''}>
+          <div className="mt-2 border-t border-border pt-2 dark:border-white/[.09]">
             <OpenAppButton
               taskId={taskId}
               previewUrl={link.previewUrl}

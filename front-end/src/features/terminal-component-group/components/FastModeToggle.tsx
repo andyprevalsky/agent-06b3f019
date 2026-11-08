@@ -32,6 +32,8 @@
  *
  * NORMAL = muted outline; FAST = icy rose-blue; ULTRA = very icy with a glow.
  * fast/ultra send fast mode on; the fast-vs-ultra choice lives in speedLevel.ts.
+ * With an exact `level` (the code-agent view's session speed) the square shows
+ * that level, clicks go to onLevelChange, and no onLevelChange = read-only.
  * Dark mode tones both down (roseQueryBox.css, html.dark only).
  */
 
@@ -42,6 +44,7 @@ import { useAuth } from '../hooks';
 import { cn } from '@/lib/utils';
 import {
   SPEED_LABELS,
+  type SpeedLevel,
   nextSpeedLevel,
   setUltraPreferred,
   speedLevelOf,
@@ -100,18 +103,36 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
 interface SpeedToggleProps {
   fastMode: boolean;
   onFastModeChange: (enabled: boolean) => void;
+  /**
+   * The caller's exact level (the code-agent view: its session's speed) instead
+   * of the account's fast-vs-ultra preference; clicks then go to onLevelChange
+   * and never write that preference (no onLevelChange → read-only).
+   */
+  level?: SpeedLevel;
+  onLevelChange?: (level: SpeedLevel) => void;
 }
 
 /** Rose Desktop 3-state speed square (normal → fast → ultra), Zap icon only. */
-export function SpeedToggle({ fastMode, onFastModeChange }: SpeedToggleProps) {
+export function SpeedToggle({
+  fastMode,
+  onFastModeChange,
+  level: exactLevel,
+  onLevelChange,
+}: SpeedToggleProps) {
   const { user } = useAuth({ passive: true });
-  const level = speedLevelOf(fastMode, useUltraPreferred(user?.id));
+  const preferred = speedLevelOf(fastMode, useUltraPreferred(user?.id));
+  const level = exactLevel ?? preferred;
   const label = SPEED_LABELS[level];
+  const readOnly = exactLevel !== undefined && !onLevelChange;
   const handleClick = useCallback(() => {
     const next = nextSpeedLevel(level);
+    if (exactLevel !== undefined) {
+      onLevelChange?.(next);
+      return;
+    }
     if (next !== 'normal') setUltraPreferred(next === 'ultra', user?.id);
     onFastModeChange(next !== 'normal');
-  }, [level, onFastModeChange, user?.id]);
+  }, [level, exactLevel, onLevelChange, onFastModeChange, user?.id]);
 
   return (
     <Tooltip delayDuration={0}>
@@ -120,6 +141,7 @@ export function SpeedToggle({ fastMode, onFastModeChange }: SpeedToggleProps) {
           type="button"
           onClick={handleClick}
           aria-label={label}
+          aria-disabled={readOnly || undefined}
           data-state={level}
           data-testid="speed-toggle"
           className="rose-speed inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[8px] border transition-all duration-200"
