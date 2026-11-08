@@ -172,3 +172,50 @@ protected instructions and exact stopped38970c3 custody without duplicate recove
 ## Reusable lesson
 
 Attach an existing parent-owned native inventory feed before its read-only admission consumers, while preserving fail-closed capacity and exact mutation ownership.
+
+
+## November 8 recurrence: warm-volume selection bypassed the attached feed
+
+PR #1770 source `7df366f750b44cc53abea9dc0ffb2167e637b3b5` launched
+13 smoke tasks on November 8 at 07:11:11 UTC. Eleven passed;
+`parallel-tool-calls` failed before task allocation and the native infra-stop
+cancelled `test-mass-agent-run-0`. Both original controller logs ended with
+`Could not find warm volume 'cloudbench_data'`. The campaign ended at
+07:29:19 UTC. No parent signal or operator retry was used. The native cancellation
+is distinct from an independently diagnosed second provider failure.
+
+The warm-volume producer still executed raw `FLY volumes list` even after the
+campaign inventory feed was attached. That producer and its exact WV/VN/WM
+parser are byte-identical on baseline main `34c48f601f6aeb54c1fb80ceca023fe644b81912`
+and the failed source (SHA256 `045b11d581f53494f9cc126f666d881ed0c1ee321caa647e6c3171c18b93e065`).
+Gate: NOT_INTRODUCED for this bypass. The older ordering repair covered Machines
+reads, but its test did not cover this later volume consumer. Archive searches
+used `Could not find warm volume cloudbench_data` and `warm volume shared
+inventory per-child live provider reads`; this is a recurrence of the shared-read
+contract gap at a different consumer.
+
+The original Fly read status, stderr and parser error were discarded. Empty
+VOL_ID therefore does not prove that a volume was absent, credentials were bad,
+or Fly was in outage. A later unchanged-auth bounded read succeeded with
+127 JSON rows in 5.64 seconds; it is availability evidence, not reconstruction
+of the earlier transport error. That historical attribution gap remains open.
+
+The narrow repair routes volume input through the existing parent-shell
+`campaign_inventory_capture` and `fleet_volumes_json`, then runs the unchanged
+exact-volume/name/attachment parser. Shared mode uses the owned feed or refuses;
+temporary status 75 retains the original admission deadline. No timeout, task,
+concurrency, evaluator, capacity guard or standalone policy is changed.
+
+A permanent actual-caller test fails on the old producer because it makes a
+forbidden per-child provider read despite a healthy owned snapshot, then passes
+unchanged after the repair. Controls retain publisher identity/freshness,
+transient and expired retryable reads, fatal ownership errors, malformed JSON
+and all eight original exact-volume parser assertions. The owning deploy gate
+already discovers the new campaign_inventory-named test. Local test proof
+repairs this routing boundary; it does not reproduce the uncaptured historical
+Fly error or establish a canonical local benchmark outcome.
+
+The final scoped inventory group passed 18 tests in 6.80 seconds; the exact
+coordinator suite passed 219 tests in 59.242 seconds. Independent review
+confirmed the final source and refusal controls. Full current-source deployment
+validation remains required; this does not close the historical transport gap.
