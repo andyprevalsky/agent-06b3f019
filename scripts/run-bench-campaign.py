@@ -1350,18 +1350,22 @@ def provider_capacity_refusal(benches: int) -> int:
 # recorded name list is untrusted input (parity regression in
 # cloudbench_campaign_inventory_test.py).
 SECRET_LIKE_SETTING_NAME = re.compile(
-    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH_HEADER|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE|OTP"
-    r"|(_KEY|_B64|_AUTH|_DSN|_PAT|_PAN|_CVV|_CVC|_PIN|_EXPIRY)$"
+    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH_HEADER|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE|OTP|SIGNATURE"
+    r"|(_KEY|_B64|_AUTH|_DSN|_PAT|_PASS|_PWD|_JWT|_PAN|_CVV|_CVC|_PIN|_EXPIRY)\Z"
 )
-URL_CREDENTIALS = re.compile(r"://[^/]*@|://[^/]*:[^@]*@")
-SWITCH_VALUES = frozenset(("", "0", "1", "true", "false", "TRUE", "FALSE", "True", "False", "yes", "no", "on", "off"))
+SECRET_LIKE_SETTING_VALUE = re.compile(
+    r"://[^/]*@|://[^/]*:[^@]*@|Bearer |FlyV1 |-----BEGIN|ghp_|github_pat_|X-Amz-Signature"
+)
+SWITCH_VALUES = frozenset(("", "0", "1", "true", "false", "yes", "no", "on", "off"))
+ASCII_SPACE = " \t\n\v\f\r"
 OPERATOR_SETTING_VALUE_LIMIT = 1024
 
 
 def secret_like_setting(name: str, value: str) -> bool:
-    if value in SWITCH_VALUES:
-        return False
-    return bool(SECRET_LIKE_SETTING_NAME.search(name) or URL_CREDENTIALS.search(value))
+    switch = value.strip(ASCII_SPACE)
+    if switch.isascii() and switch.lower() in SWITCH_VALUES:
+        return False  # read like _benchmark_env_bool: no secret in a switch
+    return bool(SECRET_LIKE_SETTING_NAME.search(name) or SECRET_LIKE_SETTING_VALUE.search(value))
 
 
 def bounded_setting_value(value: str) -> str:

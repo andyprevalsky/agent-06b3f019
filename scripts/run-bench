@@ -159,19 +159,26 @@ fi
 # The one secret-like filter (NAME VALUE) for every launch setting run-bench
 # copies out of its environment: the durable unit's --setenv list (readable
 # via systemctl show) and the campaign's recorded operator settings (descend
-# I-31). Credentials come from env files. A plain switch value carries no
-# secret; a URL with userinfo always does. run-bench-campaign.py
+# I-31). Credentials come from env files. A plain switch value, read like
+# _benchmark_env_bool (ASCII case-insensitive, whitespace-trimmed), carries no
+# secret; URL userinfo or a credential-shaped value always does. LC_ALL=C
+# matches bytes, so invalid UTF-8 cannot evade it. run-bench-campaign.py
 # secret_like_setting re-applies exactly this (parity regression in
 # cloudbench_campaign_inventory_test.py). No bare *AUTH*: *_AUTHORITY names
 # and the CLOUDBENCH_CODEX_AUTH_* helper settings are ordinary settings.
 run_bench_secret_like_setting() {
-    local url_credentials='://[^/]*@|://[^/]*:[^@]*@'
-    case "${2-}" in ''|0|1|true|false|TRUE|FALSE|True|False|yes|no|on|off) return 1 ;; esac
-    case "$1" in
-        *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*API_KEY*|*AUTH_HEADER*|*AUTHORIZATION*|*COOKIE*|*CREDENTIAL*|*PRIVATE*|*OTP*) return 0 ;;
-        *_KEY|*_B64|*_AUTH|*_DSN|*_PAT|*_PAN|*_CVV|*_CVC|*_PIN|*_EXPIRY) return 0 ;;
+    local LC_ALL=C value="${2-}" switch
+    local secret_values='://[^/]*@|://[^/]*:[^@]*@|Bearer |FlyV1 |-----BEGIN|ghp_|github_pat_|X-Amz-Signature'
+    switch="${value#"${value%%[![:space:]]*}"}"
+    switch="${switch%"${switch##*[![:space:]]}"}"
+    case "$switch" in
+        ''|0|1|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|[Oo][Nn]|[Oo][Ff][Ff]) return 1 ;;
     esac
-    [[ "${2-}" =~ $url_credentials ]]
+    case "$1" in
+        *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*API_KEY*|*AUTH_HEADER*|*AUTHORIZATION*|*COOKIE*|*CREDENTIAL*|*PRIVATE*|*OTP*|*SIGNATURE*) return 0 ;;
+        *_KEY|*_B64|*_AUTH|*_DSN|*_PAT|*_PASS|*_PWD|*_JWT|*_PAN|*_CVV|*_CVC|*_PIN|*_EXPIRY) return 0 ;;
+    esac
+    [[ "$value" =~ $secret_values ]]
 }
 
 # --durable: run this exact command as a transient SYSTEM service. setsid/nohup

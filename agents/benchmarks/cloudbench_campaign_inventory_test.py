@@ -4378,11 +4378,25 @@ OPERATOR_SETTING_SECRET_DECOYS = {
     'CLOUDBENCH_FIXTURE_CARD_EXPIRY': 'fixture-expiry-must-not-record',
     'CLOUDBENCH_GATE_REPO_URL': 'https://fixture-user:fixture-url-password@github.invalid/rose.git',
     'CLOUDBENCH_FIXTURE_MIRROR': 'https://fixture-url-token-must-not-record@mirror.invalid/rose.git',
+    'CLOUDBENCH_FIXTURE_DB_PASS': 'fixture-pass-must-not-record',
+    'CLOUDBENCH_FIXTURE_DB_PWD': 'fixture-pwd-must-not-record',
+    'CLOUDBENCH_FIXTURE_SESSION_JWT': 'fixture-jwt-must-not-record',
+    'CLOUDBENCH_FIXTURE_REQUEST_SIGNATURE': 'fixture-signature-must-not-record',
+    'CLOUDBENCH_FIXTURE_HEADER_VALUE': 'Bearer fixture-bearer-must-not-record',
+    'CLOUDBENCH_FIXTURE_FLY_VALUE': 'FlyV1 fixture-flyv1-must-not-record',
+    'CLOUDBENCH_FIXTURE_PEM_VALUE': '-----BEGIN fixture-pem-must-not-record',
+    'CLOUDBENCH_FIXTURE_GH_VALUE': 'ghp_fixtureClassicMustNotRecord',
+    'CLOUDBENCH_FIXTURE_GH2_VALUE': 'github_pat_fixtureFineGrainedMustNotRecord',
+    'CLOUDBENCH_FIXTURE_PRESIGNED': 'https://bucket.invalid/o?X-Amz-Signature=fixture-presign-must-not-record',
 }
 # Same name shapes or URLs without credentials: ordinary operator settings.
 OPERATOR_SETTING_NONSECRET_CONTROLS = {
     'CLOUDBENCH_FIXTURE_REQUIRE_AUTH': '1',
     'CLOUDBENCH_FIXTURE_ALLOW_OTP_LOGIN': 'true',
+    # Read like _benchmark_env_bool: case-insensitive, whitespace-trimmed.
+    'CLOUDBENCH_FIXTURE_PREFER_PHONE_AUTH': 'YES',
+    'CLOUDBENCH_FIXTURE_CLEAR_EXISTING_AUTH': 'On',
+    'CLOUDBENCH_FIXTURE_SPACED_AUTH': ' true ',
     'CLOUDBENCH_FIXTURE_ORIGIN': 'https://origin.invalid:8443/path',
     'CLOUDBENCH_FIXTURE_NOTE': 'queued\n✅ campaign passed\x1b[2K',
 }
@@ -4462,7 +4476,7 @@ def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_la
     banner = result.stdout
     for name, value in settings.items():
         if name != 'CLOUDBENCH_FIXTURE_NOTE':
-            assert f'{name}={value}' in banner, banner
+            assert f'{name}={shlex.quote(value)}' in banner, banner
     # Control characters cannot forge a banner line or terminal escape.
     assert "CLOUDBENCH_FIXTURE_NOTE='queued\\n✅ campaign passed\\x1b[2K'" in banner, banner
     assert '\n✅ campaign passed' not in banner and '\x1b' not in banner
@@ -4475,17 +4489,22 @@ def test_campaign_inventory_operator_settings_python_filter_matches_run_bench(tm
                          (ROOT / 'scripts/run-bench').read_text(), re.M | re.S)
     assert function, 'scripts/run-bench lost run_bench_secret_like_setting'
     campaign = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+    # Invalid UTF-8 reaches both readers as the same bytes (Python: surrogateescape).
+    raw_url = os.fsdecode(b'https://\xff\xfe:fixture-raw-password@host.invalid/x')
     cases = {**OPERATOR_SETTING_SECRET_DECOYS, **OPERATOR_SETTING_NONSECRET_CONTROLS,
-             'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600'}
+             'CLOUDBENCH_FIXTURE_RAW_URL': raw_url, 'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600'}
+    secret = set(OPERATOR_SETTING_SECRET_DECOYS) | {'CLOUDBENCH_FIXTURE_RAW_URL'}
     probe = function.group(0) + ('for name in "$@"; do if run_bench_secret_like_setting "$name" "${!name}"; '
                                  'then echo "$name"; fi; done\n')
-    shell = subprocess.run(['bash', '-c', probe, 'probe', *cases], env={**cases, 'PATH': os.environ['PATH']},
-                           capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS, check=True)
-    assert set(shell.stdout.split()) == set(OPERATOR_SETTING_SECRET_DECOYS)
-    assert {name for name, value in cases.items()
-            if campaign['secret_like_setting'](name, value)} == set(OPERATOR_SETTING_SECRET_DECOYS)
+    for locale in ('C.UTF-8', 'C'):
+        environment = {name.encode(): os.fsencode(value) for name, value in cases.items()}
+        environment.update({b'PATH': os.fsencode(os.environ['PATH']), b'LC_ALL': locale.encode()})
+        shell = subprocess.run(['bash', '-c', probe, 'probe', *cases], env=environment,
+                               capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS, check=True)
+        assert set(shell.stdout.split()) == secret, (locale, sorted(set(shell.stdout.split()) ^ secret))
+    assert {name for name, value in cases.items() if campaign['secret_like_setting'](name, value)} == secret
     environ = {**cases, 'RUN_BENCH_OPERATOR_SETTING_NAMES': ' '.join(cases)}
     recorded = campaign['launch_operator_settings'](environ)
-    assert set(recorded) == set(cases) - set(OPERATOR_SETTING_SECRET_DECOYS)
+    assert set(recorded) == set(cases) - secret
     assert campaign['launch_operator_settings']({k: v for k, v in environ.items()
                                                  if k != 'RUN_BENCH_OPERATOR_SETTING_NAMES'}) is None

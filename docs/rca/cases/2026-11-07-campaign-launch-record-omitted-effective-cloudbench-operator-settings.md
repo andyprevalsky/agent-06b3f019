@@ -24,6 +24,7 @@ sources:
   - benchmark run campaign-20261107-211039-3331466 (epoch20; unit run-bench-20261107T211039Z-3331434)
   - benchmark run campaign-20261107-225538-1478726 (proof-B successor; r001-j0003.log line 453)
   - commit 4e378a35fa (first fix; review CHANGES_REQUIRED)
+  - commit 658daf10d0 (second fix; round-2 review CHANGES_REQUIRED)
 repro: agents/benchmarks/cloudbench_campaign_inventory_test.py::test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_launch (+ test_campaign_inventory_operator_settings_python_filter_matches_run_bench, scripts/tests/run-bench-durable-service.test.py)
 status: fixed
 ---
@@ -84,14 +85,20 @@ just before the ordinary campaign `exec` uses it too, exporting
 names). The filter withholds three kinds of setting:
 
 - names containing TOKEN, SECRET, PASSWORD, PASSWD, API_KEY, AUTH_HEADER,
-  AUTHORIZATION, COOKIE, CREDENTIAL, PRIVATE or OTP;
-- names ending in `_KEY`, `_B64`, `_AUTH`, `_DSN`, `_PAT` or a card field
-  (`_PAN`, `_CVV`, `_CVC`, `_PIN`, `_EXPIRY`);
-- any value with URL userinfo (`://[^/]*@` or `://[^/]*:[^@]*@`).
+  AUTHORIZATION, COOKIE, CREDENTIAL, PRIVATE, OTP or SIGNATURE;
+- names ending in `_KEY`, `_B64`, `_AUTH`, `_DSN`, `_PAT`, `_PASS`, `_PWD`,
+  `_JWT` or a card field (`_PAN`, `_CVV`, `_CVC`, `_PIN`, `_EXPIRY`);
+- any value with URL userinfo (`://[^/]*@` or `://[^/]*:[^@]*@`), or
+  containing `Bearer `, `FlyV1 `, `-----BEGIN`, `ghp_`, `github_pat_` or
+  `X-Amz-Signature`.
 
-A plain switch value (`''`, 0/1, true/false, yes/no, on/off) is never
-withheld, so flags such as `BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true` and
-`BENCHMARK_ALLOW_DEV_OTP_LOGIN=1` still forward. There is deliberately no
+The function sets `LC_ALL=C`, so invalid UTF-8 matches byte-wise exactly as
+Python's surrogateescape strings do. A plain switch value is never withheld.
+Like `_benchmark_env_bool`, it is matched ASCII case-insensitively after
+trimming whitespace: `''`, 0/1, true/false, yes/no, on/off. That way flags
+such as `BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true`,
+`BENCHMARK_MINTED_PREFER_PHONE_AUTH=YES` and `BENCHMARK_ALLOW_DEV_OTP_LOGIN=1`
+still forward. There is deliberately no
 bare `*AUTH*`: `*_AUTHORITY` names and the `CLOUDBENCH_CODEX_AUTH_*` helper
 settings are ordinary settings.
 
@@ -123,6 +130,14 @@ the cost is one environment scan and one small dict per campaign launch, with
 no per-agent work.
 
 ## Human feedback
+
+Round-2 review (CHANGES_REQUIRED on commit 658daf10d0) found that the
+switch exemption was case-sensitive. `=YES`/`=On` on `*_AUTH` switches was
+withheld under `--durable`, although `_benchmark_env_bool` accepts it. It
+required a case-insensitive, trimmed match, `LC_ALL=C` for invalid-UTF-8
+parity and `\Z` anchors. It also suggested the optional
+`_PASS`/`_PWD`/`_JWT`/`SIGNATURE` names and the credential-shaped value
+patterns.
 
 Adversarial review (descend coordinator, I-31) rejected the name-only filter
 as leaking credential-carrying names and URL userinfo. It required the same

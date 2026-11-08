@@ -182,7 +182,12 @@ class DurableLaunchContract(DurableLaunchBase):
         self.withheld = {"CLOUDBENCH_FIXTURE_ENV_B64": "Zml4dHVyZS1kdXJhYmxlLWI2NA==",
                          "ROSE_AGENT_CARD_PAN": "fixture-durable-pan",
                          "BENCHMARK_FIXTURE_DATABASE_URL": "postgres://fixture:fixture-durable-pass@db.invalid/x"}
-        self.env.update(self.withheld, BENCHMARK_DISABLE_SAVED_BROWSER_AUTH="true")
+        # Switches are read case-insensitively and trimmed (_benchmark_env_bool).
+        self.switches = {"BENCHMARK_DISABLE_SAVED_BROWSER_AUTH": "true",
+                         "BENCHMARK_MINTED_PREFER_PHONE_AUTH": "YES",
+                         "BENCHMARK_MINTED_CLEAR_EXISTING_AUTH": "On",
+                         "BENCHMARK_FIXTURE_SPACED_AUTH": " true "}
+        self.env.update(self.withheld, **self.switches)
 
     def test_controller_is_the_system_service_main_process(self):
         result = self.run_bench(TASK, "--sim-on", "a$b", "--durable-log", str(self.log), "--durable")
@@ -205,7 +210,8 @@ class DurableLaunchContract(DurableLaunchBase):
         for name, value in self.withheld.items():
             self.assertFalse([o for o in options if name in o or value in o], name)
             self.assertIn(name, result.stderr)
-        self.assertIn("--setenv=BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true", options)
+        for name, value in self.switches.items():
+            self.assertIn(f"--setenv={name}={value}", options)
         self.assertEqual(command[1:], [str(RUN_BENCH), TASK, "--sim-on", "a$$b"])
         receipt = self.controller_receipt()
         # exec semantics: the service MainPID is the controller itself.
