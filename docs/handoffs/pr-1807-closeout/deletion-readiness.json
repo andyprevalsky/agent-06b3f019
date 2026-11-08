@@ -86,9 +86,23 @@
     "scripts/test-map/__pycache__/": "reproducible",
     "scripts/tests/__pycache__/": "reproducible"
   },
-  "live_processes": [],
+  "live_processes": [
+    {
+      "argv": "git --no-optional-locks -c diff.autoRefreshIndex=false rev-list --count HEAD --not 87b887bd39f8d762976fb33511aaafcb8e023512 --remotes=origin",
+      "cwd": "/home/boxes/rose",
+      "pid": 1938135
+    },
+    {
+      "argv": "git --no-optional-locks -c diff.autoRefreshIndex=false log --max-count=20 --pretty=format:%H%x1f%s%x1e HEAD --not 87b887bd39f8d762976fb33511aaafcb8e023512 --remotes=origin",
+      "cwd": "/home/boxes/rose",
+      "pid": 1938139
+    }
+  ],
   "manifest": "docs/handoffs/pr-1807-closeout/deletion-manifest.json",
-  "open_items": [],
+  "open_items": [
+    "live process 1938135 in this checkout: git --no-optional-locks -c diff.autoRefreshIndex=false rev-list --count HEAD --not 87b887bd39f8d762976fb33511aaafcb8e023512 --remotes=origin",
+    "live process 1938139 in this checkout: git --no-optional-locks -c diff.autoRefreshIndex=false log --max-count=20 --pretty=format:%H%x1f%s%x1e HEAD --not 87b887bd39f8d762976fb33511aaafcb8e023512 --remotes=origin"
+  ],
   "pr": 1807,
   "preserved_refs": {
     "branch:backup/cerebras-chat-quota-prepush-20261002": {
@@ -106,7 +120,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": true,
+  "ready": false,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr1807-closeout",
@@ -114,9 +128,7 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1807-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
