@@ -668,3 +668,19 @@ The stall recurred on every fixed-source run on 2026-11-08: deploy smoke on bf0e
 - From 07:00Z to 09:59Z, 83 mints of 4396 cents were created on that cardholder, while about one 4396 closed-card reclaim per hour succeeded.
 
 Closed-card releases on the shared sandbox cardholder are attributed to whichever concurrent mint AgentCard nets them against. Under org-wide concurrency, a native PASS for this task is therefore a matter of chance. A deterministic PASS needs an exclusive sandbox cardholder for this task. `resolveBenchmarkCardholderId` deliberately never creates one, so that fixture/environment change is an open follow-up, not a code fix in this repair. The standing SKIP policy above still applies.
+
+#### Correction (same day): the 3721-cent releases were not our funds
+
+The paragraph above misread the evidence. The `released_cents=3721` values sit on many 4396 transfers (`owt_622531dd…`, `owt_685d3758…`, `owt_4fbf26d7…` and others). 3721 = 4396 − 675, the residual a completed test-shop purchase leaves after its $6.75 charge. Each of those releases is that purchase's own leftover, credited to its own transfer.
+
+Our `recover_funds` swept such a 3721 residual both times (09:31:11Z and 10:08:47Z). Our closed card's 4396 never appeared as recoverable cardholder balance at all. The correct finding is therefore the original one: the sandbox does not return a closed card's balance to the cardholder, so the transfer cannot be released.
+
+What changed around 2026-11-06 is concurrency. The four sandbox lifecycle tasks became parallel cloud smoke tasks, so several deploys across devboxes now mint on the one shared cardholder. The stall went from occasional (passes 2026-10-26 to 10-28) to every run since 2026-11-08T00:37Z. Whether that concurrency causes the missing return is still not proven. Gated solo attempts that launch only after ≥8 quiet minutes on the cardholder are the discriminating experiment (results below).
+
+Gated results (main bf26a925f, which contains #1796):
+- **Solo run 20261108-095414-3397378** (close 10:06:19Z): stalled. Another consumer's campaign minted five cards at 10:08 inside the window, so this run does not discriminate.
+- **Gated attempt 20261108-102251-3748298**: launched after 14 quiet minutes. Our mint `owt_a160ef981048ea3ddf9fe6d1` (10:28:24Z, card closed 10:28:32Z) was the **only** mint on the cardholder from 10:20Z until the run ended, and it still stayed `consumed`, `released_cents=0`. The run logged zero org-MCP 401s.
+
+Concurrency is therefore **ruled out** as the cause: the sandbox does not release closed-card transfers even with no other consumer active. The remaining attempts were stopped. An operator cancellation of attempt 2 (run 20261108-104322-3997016, TERMed before any Machine was allocated) shows `INFRA_ERROR` in the Hub; it is a cancellation, not an infrastructure failure, and was left out of the ledger.
+
+A native PASS for `agent-payment-abandonment` depends on AgentCard restoring closed-card releases in the sandbox. The October 12 standing SKIP policy applies, and this case stays open.

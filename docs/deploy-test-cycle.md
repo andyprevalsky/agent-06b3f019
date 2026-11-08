@@ -464,3 +464,34 @@ import and later verification/admission. After execution begins, use normal
 current-cycle history refresh for source changes, never reset or reimport.
 This sandbox protocol grants no production lifecycle retry or financial action;
 separate live-mode financial duties remain separate.
+
+### Independent-deploy custody transfer
+
+A donor deploy's full ledger is not the new repair's execution ledger. Its
+selection may include checks that the independent repair's current planner
+does not select. Same-deploy `refresh` still refuses to remove originally
+selected checks; do not edit that guard or overlay a donor READY cycle.
+
+After restoring and hash-validating the immutable donor evidence/audits, retain
+its cycle and plan separately. Prepare against the new frozen full plan using
+the donor state directory, then initialize the new cycle normally and import
+only its verified no-retry facts:
+
+```sh
+python3 scripts/deploy_test_cycle.py prepare-historical-no-retry --input <donor-plan.json> --plan .context/deploy-pipeline/plan.json --state-dir <donor-state-directory> > .context/deploy-pipeline/historical-no-retry.json
+python3 scripts/deploy_test_cycle.py init --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py import-historical-no-retry --input <donor-plan.json> --donor-state <donor-state-directory>/cycle.json --historical-no-retry-proof .context/deploy-pipeline/historical-no-retry.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py run --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+```
+
+Import requires an exact fresh current-source ledger and revalidates the donor
+plan/state, native bytes, catalog contracts, sealed audits and absent owners.
+It transfers the immutable failure history and canonical pending/resolved
+repair debt, with a donor digest and current binding. No donor PASS, READY,
+attempt, provider waiver or execution qualification is imported. Every selected
+current peer executes; protected cases remain `NO_RETRY_CUSTODY`, without
+execution or financial credit. Exact replay is idempotent and revalidates the
+current binding and complete transferred obligations. Removing any protected
+failure/history/projection fails closed during ordinary guard/admission/verify
+as well as replay. Duplicate identities and changed debt wrappers are rejected
+before atomic publication. No provider timestamps are refreshed.

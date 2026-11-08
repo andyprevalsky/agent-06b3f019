@@ -104,6 +104,24 @@ export async function syncWaitlistAccounts(
   return syncUserRecordsByIdentity(localUser, users);
 }
 
+/**
+ * Opens another Prisma client only after `first` has connected.
+ *
+ * The library engine's first TLS connector runs openssl-probe on an engine thread, which
+ * setenv()s SSL_CERT_FILE and SSL_CERT_DIR once per process (even when they are already set).
+ * A PrismaClient constructed earlier loads its engine library asynchronously and reads
+ * process.env on the main thread meanwhile; glibc getenv() then walks a reallocated environ and
+ * the seed dies with SIGSEGV (rc 139) right after its banner. Once `first.$connect()` resolves,
+ * that one-time probe has run, so a client opened afterwards cannot race it.
+ */
+export async function connectThenOpen<T>(
+  first: { $connect(): Promise<void> },
+  open: () => T
+): Promise<T> {
+  await first.$connect();
+  return open();
+}
+
 export async function syncUserRecord(
   remoteUser: RemoteUserModel,
   localUser: LocalUserModel,

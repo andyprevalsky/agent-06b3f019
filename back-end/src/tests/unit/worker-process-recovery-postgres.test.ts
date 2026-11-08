@@ -20,6 +20,8 @@ async function main() {
   const isolated = new URL(url!);
   isolated.searchParams.set('schema', schema);
   const db = new PrismaClient({ datasources: { db: { url: isolated.toString() } } });
+  // The engine's one-time TLS setenv must finish before another client reads process.env.
+  await db.$connect();
   const { prisma } = await import('../../providers/database');
   const {
     registerExistingWorkerProcesses,
