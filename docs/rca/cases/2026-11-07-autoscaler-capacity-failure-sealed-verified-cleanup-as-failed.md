@@ -77,6 +77,18 @@ Regressions (deploy structural gate `deploy-test-worker`): the capacity-failure 
 
 Golden reference: not applicable (no approval-gated hunk).
 
+## Open follow-up: a second trigger of the same gate-wide UNVERIFIED (PR #1775, 2026-11-08)
+
+On this deploy's own smoke (fleet run 20261108-053821-479076) `parallel-tool-calls` passed its task, then failed
+run_benchmark's per-task cache ratchet (27.1% < 30.0%, Cerebras rate-limit fall-throughs), so its child exited 1 and
+the fleet printed `REAL CHILDFAIL` with verified teardown. `collect_fleet` sees only a PASSED row plus exit 1, keeps
+that case UNVERIFIED, and the campaign then reports cleanup incomplete for all 13 cases with a retained cleanup owner.
+A first fix that sealed the fleet's per-bench verdict and mapped CHILDFAIL to a verified FAIL was reverted after
+review: CHILDFAIL only says the child exited non-zero, which also happens when `_finalize_owned_cloud_batch` raises
+after saving a PASSED row (unknown or foreign root custody), and then cleanup beyond the fleet's Machines is not
+proven. A safe fix needs positive evidence that the ratchet alone caused the exit (for example, the guest sealing its
+non-zero-exit reason next to the run record). Status for this trigger: open.
+
 ## Human feedback
 
 None recorded.
