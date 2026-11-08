@@ -17,7 +17,7 @@
  "gates": {
   "result": "DEPLOY_GATES PASS head=04b4d4a5f4f4 gates=16 (verify bound-staged)",
   "deploy_command_structural": "PASS on both rounds of this PR (attempt1 and attempt2)",
-  "attempt1": "smoke infra stop: agent-payment-abandonment guest refused cleanup ack after AgentCard org MCP list_transfers 401 'Invalid or expired organization token' during payment finalization (job r001-j0011, machine 862e77ae461618 destroyed, volume vol_vxmpp6dq59xzm8j4 destroyed); smoke receipt kept a native cleanup owner so the cycle was re-initialised on the same source",
+  "attempt1": "smoke infra stop: agent-payment-abandonment payment finalization hit AgentCard org MCP list_transfers 401 'Invalid or expired organization token' (run_benchmark: owned cloud evidence finalization failed); the guest then reported root cleanup not confirmed, the controller's guest cleanup request failed (HTTP 000) and shutdown was not delivered (job r001-j0011). Machine 862e77ae461618 destroyed; volume vol_vxmpp6dq59xzm8j4 pending_destroy (DELETE accepted, unattached). The smoke receipt kept a native cleanup owner, so the cycle was re-initialised on the same source.",
   "resource_warnings": [
    "smoke/agent-payment-abandonment: exact AgentCard release stall, natively SKIPPED (agent 0c763320-34c3-42c1-ba66-d4dcd2923c07)"
   ],
@@ -173,7 +173,9 @@
    "archive_sha256": "cb42780e4b76e94d240eed1435ad472af965091752ce725c37b2553b25e1c052",
    "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
    "parts": 1,
-   "files": 6
+   "files": 6,
+   "verified_note": "verified by closeout_archive.py verify (run interactively; the receipt's verified field is written only after full readback); no separate log file"
   }
- ]
+ ],
+ "outcome_record": "factory outcome 'completed' for run 20261108-070509-1005569 was emitted by `scripts/deploy finish` (Process step 15) at 2026-11-08T09:00:35Z, before deletion readiness (step 16); the deletion check reached READY only after this records PR and its main-generated receipt (see the closeout's final receipt)."
 }

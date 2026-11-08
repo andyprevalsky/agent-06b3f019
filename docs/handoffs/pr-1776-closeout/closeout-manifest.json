@@ -186,8 +186,9 @@
   "flakes": "see evidence/followups.txt item 6"
  },
  "outcome_record": {
-  "factory_outcome": "completed recorded 2026-11-08T01:40:01Z (step 15) before deletion readiness",
-  "deletion_ready_at": "about 2026-11-08T06:28Z on main",
+  "factory_outcome": "completed emitted by scripts/deploy finish (Process step 15) at 2026-11-08T01:40:01Z, before deletion readiness",
+  "deletion_ready_probe_on_main": "about 2026-11-08T05:49Z (after #1792)",
+  "deletion_ready_committed_receipt": "about 2026-11-08T06:28Z (after #1798, #1800)",
   "premature_scorecard": "vis_e322c03c9992beec805da6ee079ff55c claimed SHIPPED while deletion-check was NOT_READY"
  },
  "reliability_followup": {
