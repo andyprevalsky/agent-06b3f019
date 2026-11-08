@@ -17,26 +17,30 @@
  *   finished thought appends its recorded generation (duration · ↓ tokens ·
  *   tok/s, thoughtGeneration). Nothing is estimated from text length.
  *   When the latest activity is a spawned agent, a smaller line beneath rotates
- *   through the tool(s) it is using now (SpawnedAgentToolLine).
+ *   through the tool(s) it is using now (SpawnedAgentToolLine). A wait on agents
+ *   reads "Waiting for <icon> Task Title" (WaitAgentTargets).
  * DONE header: chevron + "Worked for Xs" + activity count.
  * EXPANDED: the ordered history so far (completed and in-progress activities),
- *   paged 20 at a time; opening a running batch shows its latest page, and new
- *   activities append while it stays open. The live elapsed clock is a leaf
+ *   paged 50 at a time, anchored at the newest activity (the latest page holds
+ *   the 50 most recent); opening any batch (running or done) shows that page
+ *   first, and new activities append while it stays open. The live elapsed clock is a leaf
  *   (BatchElapsed), so its 100 ms tick never re-renders the history rows.
  */
 import { useId, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Lightbulb, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
 import { useBatchElapsed } from './useBatchElapsed';
+import { useWorkHistoryPage, workHistoryPageSlice } from './useWorkHistoryPage';
 import { thoughtGeneration } from './thoughtGeneration';
 import { ThoughtGenerationMetric } from './ThoughtGenerationMetric';
 import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import type { ExploreStep } from '../types';
 import { SpawnedAgentToolLine } from './SpawnedAgentToolLine';
+import { WaitAgentTargets } from './WaitAgentTargets';
+import { waitAgentTargets } from './waitForPhrase';
 import { workLabel } from '../hooks/codeSessionTurns';
 import { AGENT_MESSAGE_TOOL_NAME, isInboundAgentMessage } from './message-bubble/agentToolData';
-const PAGE_SIZE = 20;
 /** Leaf clock: its tick re-renders only this text, never the open history rows. */
 function BatchElapsed({ startedAt }: { startedAt: number | null }) {
   return <span data-testid="trajectory-batch-elapsed">{useBatchElapsed(startedAt, true)}</span>;
@@ -80,7 +84,9 @@ export function TrajectoryWorkGroup({
   exploreStepMap?: ReadonlyMap<string, ExploreStep[]>;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [page, setPage] = useState(0);
+  const { activePage, lastPage, setPage, openAtLatest } = useWorkHistoryPage(
+    group.activities.length,
+  );
   const running = group.status === 'running';
   const historyId = useId();
   const latest = group.activities.at(-1)!;
@@ -95,10 +101,15 @@ export function TrajectoryWorkGroup({
       : latest.kind === 'thinking'
         ? Lightbulb
         : getToolIcon(toolName);
-  const lastPage = Math.max(0, Math.ceil(group.activities.length / PAGE_SIZE) - 1);
-  const activePage = Math.min(page, lastPage);
   const label = running ? latest.label : workLabel(group);
   const thinking = running && latest.kind === 'thinking';
+  // Only a live wait reads "Waiting for …"; its final "Wait ended" / "Wait timed out"
+  // row keeps the same targets but keeps its own label.
+  const waitsOnAgents =
+    running &&
+    toolName === 'wait_for' &&
+    latest.message.metadata?.toolStatus === 'IN_PROGRESS' &&
+    waitAgentTargets(latest.message.metadata) !== null;
   return (
     <div
       data-testid="trajectory-work-group"
@@ -114,7 +125,7 @@ export function TrajectoryWorkGroup({
         aria-expanded={expanded}
         aria-controls={expanded ? historyId : undefined}
         onClick={() => {
-          if (!expanded && running) setPage(lastPage);
+          if (!expanded) openAtLatest();
           setExpanded(!expanded);
         }}
         className="flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden text-left text-sm text-muted-foreground"
@@ -146,7 +157,13 @@ export function TrajectoryWorkGroup({
             data-activity-key={latest.key}
             className={running ? 'trajectory-activity-enter block truncate' : 'block truncate'}
           >
-            {thinking ? <ThinkingLabel message={latest.message} label={label} /> : label}
+            {thinking ? (
+              <ThinkingLabel message={latest.message} label={label} />
+            ) : waitsOnAgents ? (
+              <WaitAgentTargets metadata={latest.message.metadata} prefix="Waiting for" />
+            ) : (
+              label
+            )}
           </span>
         </span>
         <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs">
@@ -173,13 +190,11 @@ export function TrajectoryWorkGroup({
           data-testid="trajectory-work-history"
           className="mt-2 max-h-80 space-y-3 overflow-y-auto overscroll-contain border-l border-border pl-3"
         >
-          {group.activities
-            .slice(activePage * PAGE_SIZE, (activePage + 1) * PAGE_SIZE)
-            .map(({ key, message }) => (
-              <div key={key} data-testid="trajectory-history-entry">
-                {renderMessage(message)}
-              </div>
-            ))}
+          {workHistoryPageSlice(group.activities, activePage).map(({ key, message }) => (
+            <div key={key} data-testid="trajectory-history-entry">
+              {renderMessage(message)}
+            </div>
+          ))}
           {lastPage > 0 && (
             <div className="flex gap-3 text-xs">
               <button

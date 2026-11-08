@@ -630,13 +630,23 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
                 ActivityEnvironment().run(
                     service.spawn_claude_code_activity,
                     *_activity_args(
-                        code_session_request={"code_session_id": paused["code_session"]["code_session_id"]}
+                        code_session_request={
+                            "code_session_id": paused["code_session"]["code_session_id"],
+                            "task_name": "fix_parser_again",
+                        }
                     ),
                 ),
                 timeout=30,
             )
         assert resumed["status"] == "completed" and resumed["success"] is True, resumed
         assert backend.created[1]["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", backend.created
+        # Each spawn's task row carries its own task_name, a resume of the same session included.
+        assert backend.created[0]["task_name"] is None, backend.created
+        assert backend.created[1]["task_name"] == "fix_parser_again", backend.created
+        blocks = [m["code_agent"] for m in backend.messages if m.get("code_agent")]
+        resumed_blocks = [b for b in blocks if b.get("task_id") == "task-2"]
+        assert resumed_blocks and all(b.get("title") == "fix_parser_again" for b in resumed_blocks), blocks
+        assert all("title" not in b for b in blocks if b.get("task_id") == "task-1"), blocks
         second_run = session_home.runs()[-1]
         assert second_run["argv"][-2:] == ["--resume", _CLI_SESSION_ID] or (
             "--resume" in second_run["argv"]

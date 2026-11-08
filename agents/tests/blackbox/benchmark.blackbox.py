@@ -3720,6 +3720,47 @@ async def test_agentcard_setup_retries_only_the_structured_org_rate_limit():
                 raise AssertionError("a persistent org throttle must raise after its bounded attempts")
         assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
 
+        # PR #1813 smoke, 2026-11-08: recover_funds got the provider's intermittent 401 on a healthy
+        # secret. The typed code is the same transient org state; every setup action converges.
+        unauthorized = _json.dumps(
+            {
+                "error": "AgentCard Organization MCP recover_funds failed: Invalid or expired organization token",
+                "code": "agentcard_org_mcp_unauthorized",
+            }
+        )
+        sleeps.clear()
+        client, calls = fake_client([(401, unauthorized), ready])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual") == {
+                "status": "residual_ready"
+            }
+        assert calls == [(401, "prepare-residual"), (200, "prepare-residual")]
+        assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3]
+
+        sleeps.clear()
+        client, calls = fake_client([(401, unauthorized)])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except RuntimeError as error:
+                assert "agentcard_org_mcp_unauthorized" in str(error)
+            else:
+                raise AssertionError("a sustained org auth rejection must raise after its bounded attempts")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        # Any other 401, including one without the typed provider code, stays terminal.
+        for untyped in ('{"error":"Unauthorized"}', '{"code":"api_key_invalid"}', "Invalid API key"):
+            sleeps.clear()
+            client, calls = fake_client([(401, untyped), ready])
+            with patch.object(bench.httpx, "AsyncClient", client):
+                try:
+                    await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"an untyped 401 must stay terminal: {untyped}")
+            assert calls == [(401, "prepare-residual")] and sleeps == []
+
         # A 429 without the structured transient code is not proof the call never ran.
         for unstructured in ('{"error":"Too many requests"}', "rate limit exceeded", '{"code":"other_limit"}'):
             sleeps.clear()
@@ -24722,17 +24763,19 @@ def test_history_ledger_task_names_still_exist_in_catalog():
     import json as _json
     from pathlib import Path
 
+    from benchmarks import history_ledger
     from benchmarks.benchmark_tasks import all_tasks
 
     ledger = Path(__file__).resolve().parents[2] / "benchmarks" / "history" / "task_durations.jsonl"
-    if not ledger.exists() or ledger.stat().st_size == 0:
+    # The ledger is its base file plus per-writer shards (history_ledger.py).
+    lines = history_ledger.read_lines(ledger)
+    if not lines:
         return  # fresh checkout — nothing recorded yet
     recorded = set()
-    with ledger.open() as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                recorded.add(_json.loads(line)["task"])
+    for line in lines:
+        line = line.strip()
+        if line:
+            recorded.add(_json.loads(line)["task"])
     catalog_names = {t.name for t in all_tasks()}
     orphaned = sorted(recorded - catalog_names)
     assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"
@@ -25696,6 +25739,52 @@ def test_multi_task_run_record_survives_a_long_task_name_list():
             ):
                 paths.append(run.save(directory=directory))
         assert paths[0] != paths[1], "distinct suites collapsed onto one run-record filename"
+
+
+async def test_abandon_retries_typed_org_auth_rejection_after_reconciling():
+    """A provider 401 on the idempotent abandon POST is the same org state as its throttle.
+
+    PR #1813 smoke, 2026-11-08: a healthy secret was rejected as "Invalid or expired
+    organization token". Reconcile through the read endpoint first, then wait the org window.
+    An untyped 401 proves nothing about the provider and stays terminal.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    typed = (
+        'Failed to abandon test payment: 401 {"error":"AgentCard Organization MCP close_card failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+    posts = []
+
+    async def abandon(_base_url, _agent_id):
+        posts.append(_agent_id)
+        if len(posts) == 1:
+            raise Exception(typed)
+        return {"purchase": {"status": "VOIDED"}}
+
+    reads = []
+
+    async def lifecycle(_base_url, agent_id):
+        reads.append(agent_id)
+        return {"purchase": {"status": "HELD"}}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench.asyncio, "sleep", fake_sleep):
+        result = await bench._start_payment_abandonment_with_recovery(
+            "http://backend", "agent-1", abandon_payment=abandon, fetch_lifecycle=lifecycle
+        )
+    assert result == {"purchase": {"status": "VOIDED"}}
+    assert posts == ["agent-1", "agent-1"] and reads == ["agent-1"]
+    assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3]
+
+    assert bench._rate_limit_retry_delay('Failed to abandon test payment: 401 {"error":"Unauthorized"}') is None
+    assert bench._rate_limit_retry_delay('Failed to abandon test payment: 401 {"code":"api_key_invalid"}') is None
 
 
 def test_abandon_retry_waits_out_upstream_rate_limit_window():
@@ -28005,6 +28094,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_setup_retries_only_the_structured_org_rate_limit",
         test_agentcard_setup_retries_only_the_structured_org_rate_limit,
+    )
+    await r.record_async(
+        "abandon_retries_typed_org_auth_rejection",
+        test_abandon_retries_typed_org_auth_rejection_after_reconciling,
     )
     r.record(
         "agentcard_setup_attention_failure_fails_task",

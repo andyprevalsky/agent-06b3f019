@@ -8,8 +8,10 @@
  *          ◄──────            {type:"user_turn_ack", id, status, reason?}
  *
  * The ws-server dedupes by `id` for the life of the session, so retries never
- * write a second turn. `rejected` reasons: `relay_paused` (an agent turn while
- * the user holds the session), `session_ended`, `provider_unsupported`
+ * write a second turn. An agent turn while the user holds the session is
+ * `queued` and delivered after the hand back. `rejected` reasons: `relay_paused`
+ * (a spawn attaching while the user holds the session), `relay_queue_full`,
+ * `session_ended`, `provider_unsupported`
  * (Codex), `unauthorized`, `invalid_text`, `invalid_id`, `startup_queue_full`. The control socket
  * connects with `?replay=0` so the ack never queues behind the history replay. `token` is an HMAC of the task id under
  * BACKEND_API_KEY, injected into the sandbox as CODE_SESSION_TURN_TOKEN at

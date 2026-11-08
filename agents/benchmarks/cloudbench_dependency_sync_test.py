@@ -7226,6 +7226,56 @@ confirm_guest_shutdown
     assert not list(tmp_path.glob("*.tmp*")), "a temporary receipt leaked"
 
 
+@pytest.mark.parametrize("case", ["second-try-answers", "never-answers"])
+def test_guest_shutdown_request_retries_a_relay_transport_error_within_the_deadline(
+    tmp_path: Path, case: str
+) -> None:
+    """2026-11-08 (PR1784): one 3 s POST through the shared relay (10 s connect budget) got HTTP 000
+    from a healthy guest and turned a passing task into exit 125. A transport error retries, bounded."""
+    source = CLOUD_SCRIPT.read_text()
+    functions = [_extract_fleet_function(source, "confirm_guest_shutdown() {")]
+    if "publish_guest_shutdown_delivery_receipt() {" in source:
+        functions.append(_extract_fleet_function(source, "publish_guest_shutdown_delivery_receipt() {"))
+    posts = tmp_path / "posts"
+    answer = "204" if case == "second-try-answers" else "000"
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+OUT_DIR={shlex.quote(str(tmp_path))}
+FLEET_MACHINE_ID={_NATIVE_STOP_MACHINE}
+RUN_LOG_TOKEN={_NATIVE_STOP_OWNER}-3
+CLOUDBENCH_FLEET_RUN_ID=20261108-042041-2844772
+TASKS_CSV=bench-owned
+CLOUDBENCH_INFRA_PROBE=0
+FINISHED=0
+LOCAL_STATUS_PORT=61001
+STATUS_PROXY_PID=$$
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+CLOUDBENCH_CHILD_TERM_SECONDS=20
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+sleep() {{ :; }}
+curl() {{
+  case " $* " in
+    *" POST "*) echo x >> {shlex.quote(str(posts))}
+      if [ "$(wc -l < {shlex.quote(str(posts))})" -ge 2 ]; then printf {answer}; else printf 000; fi ;;
+    *) printf 204 ;;
+  esac
+}}
+{chr(10).join(functions)}
+confirm_guest_shutdown
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    attempts = len(posts.read_text().splitlines())
+    if case == "second-try-answers":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert attempts == 2
+        assert (tmp_path / "guest-shutdown.confirmed").read_text().strip() == "20261108-042041-2844772"
+    else:
+        assert result.returncode != 0
+        assert attempts == 3, "transport-error retries must stay bounded"
+        assert "guest cleanup request failed (HTTP 000)" in result.stderr
+        assert not (tmp_path / "guest-shutdown.confirmed").exists()
+
+
 @pytest.mark.parametrize("phase", ["during-post", "during-health-poll"])
 def test_guest_shutdown_child_confirmation_receipt_survives_term_during_delivery(
     tmp_path: Path,
@@ -19655,6 +19705,7 @@ def test_alternate_warm_donor_cannot_borrow_legacy_snapshot_proof(tmp_path: Path
         "patch_conflict",
         "no_delta",
         "peer_refreshed",
+        "peer_refreshed_clock_ahead",
         "peer_stale",
         "peer_foreign_ref",
         "peer_patched",
@@ -19687,7 +19738,7 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     guest = tmp_path / "warm"
     subprocess.run(["git", "clone", "-q", str(repo), str(guest)], check=True)
     # Peer reuse requires an unpatched request for the peer's exact source ref.
-    unpatched = scenario in ("no_delta", "peer_refreshed", "peer_stale", "peer_foreign_ref")
+    unpatched = scenario in ("no_delta", "peer_refreshed", "peer_refreshed_clock_ahead", "peer_stale", "peer_foreign_ref")
     if not unpatched:
         (repo / "agents/requirements.txt").write_text("temporalio[grpc]>=1.18.1\n")
         (repo / "scripts/branch-only-helper.txt").write_text("same source as task guests\n")
@@ -19713,6 +19764,16 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     (bin_dir / "gosu").chmod(0o755)
     (bin_dir / "chown").write_text("#!/usr/bin/env bash\nexit 0\n")
     (bin_dir / "chown").chmod(0o755)
+    if scenario == "peer_refreshed_clock_ahead":
+        # The wall clock reads a second ahead of the filesystem's file times (ext4
+        # stamps mtimes from a coarser clock): a peer's proof written just after the
+        # request started must still be reused (2026-11-08 deploy-suite flake).
+        real_date = shutil.which("date")
+        (bin_dir / "date").write_text(
+            "#!/usr/bin/env bash\n"
+            f'if [ "$1" = "+%s" ]; then echo $(( $({real_date} +%s) + 1 )); else exec {real_date} "$@"; fi\n'
+        )
+        (bin_dir / "date").chmod(0o755)
     script = f"""set -euo pipefail
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 MODE=refresh-deps
@@ -19729,7 +19790,7 @@ ensure_app() {{ echo ensure >> "$CALLS"; }}
 acquire_app_environment_lock() {{
     echo lock >> "$CALLS"
     # A queued controller's peer finishes the same refresh while it waits.
-    case "$SCENARIO" in peer_refreshed|peer_foreign_ref|peer_patched)
+    case "$SCENARIO" in peer_refreshed|peer_refreshed_clock_ahead|peer_foreign_ref|peer_patched)
         printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$(date +%s)" snap-peer > "$WARM_DEPS_STATE_FILE"
         peer_ref="$EXPECTED_REF"
         [ "$SCENARIO" != peer_foreign_ref ] || peer_ref=0000000000000000000000000000000000000000
@@ -19794,9 +19855,18 @@ fi
             CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest),
         )
     result = subprocess.run(["bash", "-c", script], cwd=repo, env=env, text=True, capture_output=True, timeout=20)
-    success = scenario in ("pinned", "direct", "no_delta", "peer_refreshed", "peer_stale", "peer_foreign_ref", "peer_patched")
+    success = scenario in (
+        "pinned",
+        "direct",
+        "no_delta",
+        "peer_refreshed",
+        "peer_refreshed_clock_ahead",
+        "peer_stale",
+        "peer_foreign_ref",
+        "peer_patched",
+    )
     assert (result.returncode == 0) == success, result.stdout + result.stderr
-    if scenario == "peer_refreshed":
+    if scenario in ("peer_refreshed", "peer_refreshed_clock_ahead"):
         assert "reusing snapshot snap-peer" in result.stdout
         assert calls.read_text().splitlines() == ["ensure", "lock"]
         assert not built.exists(), "a peer's exact proof must not trigger another install"
@@ -20491,9 +20561,9 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
                 }
             )
     (history_dir / "task_attempts.jsonl").write_text("\n".join(json.dumps(row) for row in attempt_rows) + "\n")
-    (fixture / "agents" / "benchmarks" / "select_predeploy_benches.py").write_text(
-        (ROOT / "agents" / "benchmarks" / "select_predeploy_benches.py").read_text()
-    )
+    # The selector reads the attempts ledger through its per-writer shard helper.
+    for module in ("select_predeploy_benches.py", "history_ledger.py"):
+        (fixture / "agents" / "benchmarks" / module).write_text((ROOT / "agents" / "benchmarks" / module).read_text())
     capture = fixture / "capture"
     (fixture / "scripts" / "run-bench").write_text(
         '#!/usr/bin/env bash\nprintf "%s\\n" "${BENCHMARK_SKIP_WMH_BUILD:-unset}" "$*" > "$CAPTURE"\n'

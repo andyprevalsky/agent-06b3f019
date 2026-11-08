@@ -191,6 +191,10 @@ def test_local_runner_persists_console_log_and_summary() -> None:
             repo_root / "agents/benchmarks/select_predeploy_benches.py",
             fixture / "agents/benchmarks/select_predeploy_benches.py",
         )
+        shutil.copy(
+            repo_root / "agents/benchmarks/history_ledger.py",
+            fixture / "agents/benchmarks/history_ledger.py",
+        )
         (fixture / "agents/benchmarks/history/task_attempts.jsonl").write_text("")
         (fixture / "agents/benchmarks/tasks.json").write_text(
             json.dumps(
@@ -305,6 +309,10 @@ def test_timing_wrappers_terminate_child_groups_and_record_signal() -> None:
         shutil.copy(
             repo_root / "agents/benchmarks/select_predeploy_benches.py",
             fixture / "agents/benchmarks/select_predeploy_benches.py",
+        )
+        shutil.copy(
+            repo_root / "agents/benchmarks/history_ledger.py",
+            fixture / "agents/benchmarks/history_ledger.py",
         )
         (fixture / "agents/benchmarks/history/task_attempts.jsonl").write_text("")
         (fixture / "agents/benchmarks/tasks.json").write_text(

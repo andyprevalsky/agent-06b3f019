@@ -786,6 +786,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-source.py" \
+       "$ROOT_DIR/scripts/cloudbench-warm-pool.py" \
+       "$ROOT_DIR/scripts/cloudbench-warm-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
        "$ROOT_DIR/scripts/cloudbench_result.py" \
@@ -855,6 +857,7 @@ MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readine
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
 WORKER_SNAPSHOT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-snapshot.py"
 SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source.py"
+WARM_SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-warm-source.py"
 AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
 CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-snapshot-manifest.json"
@@ -14090,9 +14093,16 @@ campaign_inventory_wait() {
     # budget. Healthy reads do not start it; first pending or admission does.
     local status remaining interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
-    case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}" in
+    # A caller with its own gate deadline (the deploy cloud adapter) passes it as
+    # an absolute epoch; the shared admission clock then ends there instead.
+    local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}"
+    case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}:$caller_deadline" in
         *[!0-9:]*) echo "❌ invalid inventory admission wait clock" >&2; return 2 ;;
     esac
+    if [ -n "$caller_deadline" ]; then
+        wait_seconds=$((caller_deadline - $(date +%s)))
+        [ "$wait_seconds" -gt 0 ] || wait_seconds=1
+    fi
     [ "$wait_seconds" -gt 0 ] && [ "$interval" -gt 0 ] || return 2
     while :; do
         status=0
@@ -16034,6 +16044,36 @@ validate_private_fleet_source() {
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
     campaign_inventory_wait start_machines_snapshot_loop || exit $?
 fi
+# One warm source per dependency set (opt-in until proven on Fly). The single
+# shared `cloudbench-warm` donor is rebuilt whenever a fleet's dependency set
+# differs, so every other devbox waits for it to stop and two sets keep
+# flipping it. With CLOUDBENCH_WARM_SOURCE_PER_DEPS=1 the fleet selects
+# `cloudbench-warm-<set>` (created once from the base donor's snapshot under
+# the cross-devbox claim, scripts/cloudbench-warm-source.py); a fleet whose
+# set already has a warm source never waits on another set's maintenance, and
+# its run-bench-cloud children inherit the same names. An explicit
+# CLOUDBENCH_WARM_MACHINE_NAME or a private fleet source keeps its selection.
+select_dependency_set_warm_source() {
+    local node_fp py_fp selected set_id
+    [ "${CLOUDBENCH_WARM_SOURCE_PER_DEPS:-0}" = 1 ] || return 0
+    { [ -z "${PRIVATE_SOURCE_FILE:-}" ] && [ -z "${CLOUDBENCH_WARM_MACHINE_NAME:-}" ]; } || return 0
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+    selected="$(python3 "$WARM_SOURCE_HELPER" --app "$APP" ensure --node-fp "$node_fp" --py-fp "$py_fp" \
+        --owner "fleet-$FLEET_OWNER_TOKEN")" || {
+        echo "❌ could not select this dependency set's warm source" >&2
+        return 1
+    }
+    read -r set_id MACHINE_NAME VOLUME_NAME <<< "$selected"
+    if [ "$MACHINE_NAME" != "cloudbench-warm-$set_id" ] || [ "$VOLUME_NAME" != "cloudbench_data_$set_id" ]; then
+        echo "❌ warm source helper returned an unexpected selection" >&2
+        return 1
+    fi
+    export CLOUDBENCH_WARM_MACHINE_NAME="$MACHINE_NAME" CLOUDBENCH_WARM_VOLUME_NAME="$VOLUME_NAME"
+    WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.$MACHINE_NAME.fp"
+    echo "🏷️  dependency set $set_id uses warm source $MACHINE_NAME"
+}
+select_dependency_set_warm_source || exit 1
 if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
     validate_private_fleet_source || exit 1
     WARM_ID="$PRIVATE_SOURCE_ID"
@@ -16769,14 +16809,29 @@ admit_app_capacity_with_wait() {
     local deadline interval remaining inventory_status phase="during admission wait"
     local refresh_inventory="${1:-0}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
+    # Every devbox shares the app's ceilings, so a shortfall is normally another
+    # devbox's fleet that will release. A caller with its own gate deadline (the
+    # deploy cloud adapter) passes it explicitly as an absolute epoch and
+    # admission keeps polling at the same cadence until then; the ceilings and
+    # the 300 s default for other callers are unchanged.
+    local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}" budget_label
     interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
-    case "$wait_seconds:$interval" in
-        *[!0-9:]*) echo "❌ capacity admission wait and retry seconds must be integers" >&2; return 2 ;;
+    case "$wait_seconds:$interval:$caller_deadline" in
+        *[!0-9:]*) echo "❌ capacity admission wait, retry seconds and caller deadline must be integers" >&2; return 2 ;;
     esac
+    if [ -n "$caller_deadline" ] && [ -z "${CAPACITY_ADMISSION_DEADLINE:-}" ]; then
+        wait_seconds=$((caller_deadline - $(date +%s)))
+        if [ "$wait_seconds" -lt 1 ]; then
+            echo "❌ caller's capacity admission deadline already passed (epoch $caller_deadline)" >&2
+            return 1
+        fi
+    fi
     if [ "$wait_seconds" -lt 1 ] || [ "$interval" -lt 1 ]; then
         echo "❌ capacity admission wait and retry seconds must be positive" >&2
         return 2
     fi
+    budget_label="admission wait"
+    [ -z "$caller_deadline" ] || budget_label="caller's deadline"
     [ "$refresh_inventory" != 1 ] || phase="after infra canary"
     deadline="${CAPACITY_ADMISSION_DEADLINE:-$((SECONDS + wait_seconds))}"
     case "$deadline" in ''|*[!0-9]*) echo "❌ invalid original capacity admission deadline" >&2; return 2 ;; esac
@@ -16797,11 +16852,11 @@ admit_app_capacity_with_wait() {
         fi
         remaining=$((deadline - SECONDS))
         if [ "$remaining" -le 0 ]; then
-            echo "❌ capacity admission remained blocked for ${wait_seconds}s" >&2
+            echo "❌ capacity admission remained blocked for ${wait_seconds}s (${budget_label})" >&2
             return 1
         fi
         [ "$interval" -gt "$remaining" ] && interval="$remaining"
-        echo "⏳ capacity admission pending; retrying provider observation in ${interval}s" >&2
+        echo "⏳ capacity admission pending; retrying provider observation in ${interval}s (${remaining}s left before the ${budget_label})" >&2
         sleep "$interval"
         refresh_inventory=1
         phase="during admission wait"

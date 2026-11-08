@@ -1344,6 +1344,20 @@ class DOMService:
                 except (asyncio.CancelledError, Exception):
                     pass
             try:
+                # Stop this session's periodic storage writer before the final
+                # SaveStorageStateEvent. Python 3.11 wait_for can consume a
+                # cancellation when a CDP reply wins the race, leaving the
+                # native watchdog's one-shot cancel waiting on its next poll.
+                watchdog = getattr(session, "_storage_state_watchdog", None)
+                monitor = getattr(watchdog, "_monitoring_task", None)
+                if isinstance(monitor, asyncio.Task) and monitor is not asyncio.current_task():
+                    while not monitor.done():
+                        monitor.cancel()
+                        await asyncio.wait({monitor}, timeout=0.05)
+                    if not monitor.cancelled():
+                        error = monitor.exception()
+                        if error is not None:
+                            logger.warning(f"Storage monitor stopped with error: {error}")
                 # keep_alive prevents BrowserStopEvent from stopping a remote
                 # provider, including sessions discovered from their CDP URL.
                 await session.stop()

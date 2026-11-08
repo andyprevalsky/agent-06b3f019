@@ -49,6 +49,7 @@ from domains.spawn_claude_code_agent.repo import (
     keepalive_e2b_session,
     persist_terminal_output,
     report_code_usage_limit,
+    report_undelivered_code_turns,
     resize_e2b_session,
     save_claude_code_message,
     save_code_transcript_batch,
@@ -920,6 +921,10 @@ async def _run_agentic_loop(
     # The native Codex thread goal (ws-server `goal` events). While it is active
     # Codex starts continuation turns itself, so a completed turn is not the end.
     codex_goal_status: str | None = None
+    # Agent turns the ws-server accepted (`queued`) and lost when the session
+    # ended (`user_turn_undelivered`): their senders are told once (the backend
+    # is idempotent per turn; this set only skips repeats within one attach).
+    reported_undelivered: set[str] = set()
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -996,6 +1001,14 @@ async def _run_agentic_loop(
         # Events before this spawn's goal turn (attached to a live CLI) are the
         # earlier turns' history: their usage limit or login failure is not this run's.
         history = event_index < history_events
+        if not history and event.get("type") == "user_turn_undelivered":
+            lost = [
+                str(turn_id)
+                for turn_id in event.get("turn_ids") or []
+                if isinstance(turn_id, str) and turn_id and turn_id not in reported_undelivered
+            ]
+            reported_undelivered.update(lost)
+            await report_undelivered_code_turns(agent_id, task_id, lost, str(event.get("reason") or "rejected"))
         usage_limit = None if history else usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
@@ -3344,6 +3357,7 @@ async def spawn_claude_code_activity(
         code_session_request: ``{"code_session_id": ...}`` to resume a specific
             persistent code session; omitted, the backend resumes the spawning
             agent's latest session for the repo (or creates one on a new branch).
+            ``task_name`` (the spawn's) is stored on the task row as its title.
 
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
@@ -3401,6 +3415,10 @@ async def spawn_claude_code_activity(
         code_agent_meta["folder"] = attached["folder"]
     if isinstance(attached, dict) and attached.get("preview_url"):
         code_agent_meta["preview_url"] = attached["preview_url"]
+    task_name = (code_session_request or {}).get("task_name")
+    if isinstance(task_name, str) and task_name:
+        # metadata.code_agent.title: the code-agent view's header when opened without one.
+        code_agent_meta["title"] = task_name
     if isinstance(attached, dict) and isinstance(attached.get("sandbox_size"), dict):
         code_agent_meta["sandbox_size"] = attached["sandbox_size"]
 
@@ -3534,6 +3552,8 @@ async def spawn_claude_code_activity(
                 target=target,
                 local_device_id=local_device_id,
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
+                task_name=(code_session_request or {}).get("task_name"),
+                cli_settings=(code_session_request or {}).get("cli_settings"),
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)

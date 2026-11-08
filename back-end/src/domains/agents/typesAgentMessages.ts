@@ -35,6 +35,14 @@ export const agentAddressMessageSchema = z.object({
   idempotency_key: z.string().min(1).max(200),
   continue_conversation: z.boolean().optional(),
 });
+// POST /:owner/code-turns-undelivered (internal): agent turns a code session's
+// ws-server accepted (`queued`) but never wrote to the CLI before it ended.
+export const undeliveredCodeTurnsSchema = z.object({
+  session_id: z.string().min(1).max(200),
+  turn_ids: z.array(z.string().min(1).max(128)).min(1).max(50),
+  reason: z.string().min(1).max(100),
+});
+export type UndeliveredCodeTurnsBody = z.infer<typeof undeliveredCodeTurnsSchema>;
 export type AgentAddressMessageBody = z.infer<typeof agentAddressMessageSchema>;
 export type AgentMessageBody = z.infer<typeof agentMessageSchema>;
 export type AgentInboxQuery = z.infer<typeof agentInboxQuerySchema>;

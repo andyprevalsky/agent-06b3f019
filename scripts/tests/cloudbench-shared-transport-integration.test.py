@@ -114,6 +114,15 @@ class FakeUnixAgent:
         for thread in self.threads:thread.join(timeout=2)
 
 
+def kernel_socket_buffer_capacity():
+    """Upper bound of bytes one TCP hop plus one Unix hop can hold in kernel buffers on this host."""
+    def maximum(name):
+        try:return int(Path('/proc/sys/net',name).read_text().split()[-1])
+        except (OSError,ValueError):return 0
+    return (maximum('ipv4/tcp_wmem')+maximum('ipv4/tcp_rmem')
+            +maximum('core/wmem_max')+maximum('core/rmem_max'))
+
+
 def birth(pid):
     return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()[19]
 
@@ -323,7 +332,10 @@ class SharedRelay(unittest.TestCase):
     def test_backpressure_bounds_memory_and_keeps_control_responsive(self):
         f=RelayFixture(self);owner=f.owner();lease=f.acquire(owner,'a'*32);f.agent.mode='backpressure'
         client=f.connect(lease);client.settimeout(8)
-        payload=b'x'*(16*1024*1024);finished=threading.Event();errors=[]
+        # The kernel's own socket buffers on the client->broker and broker->agent hops can hold a
+        # payload without any relay buffering (Blacksmith VMs tune tcp_[rw]mem far above 16 MiB), so
+        # send more than those hops can absorb; the relay's RSS bound below is unchanged.
+        payload=b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity());finished=threading.Event();errors=[]
         def sender():
             try:client.sendall(payload)
             except OSError as error:errors.append(error)
@@ -379,7 +391,8 @@ class SharedRelay(unittest.TestCase):
         client=f.connect(lease);client.settimeout(5)
         finished=threading.Event()
         def sender():
-            try:client.sendall(b'x'*(16*1024*1024))
+            # More than the host's kernel socket buffers can absorb (see the backpressure test).
+            try:client.sendall(b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity()))
             except OSError:pass  # Explicit route release may interrupt delivery.
             finally:finished.set()
         thread=threading.Thread(target=sender,daemon=True);thread.start()
@@ -703,6 +716,44 @@ with (root/'wireguard-calls').open('a')as stream:
                 self.assertNotIn('FLY_AGENT_ISOLATED',child)
                 self.assertTrue(module['stop_shared_relay'](value))
                 self.assertTrue((f.root/'agent-eof-joined').exists())
+        finally:
+            if value:
+                for name in ('process','bootstrap'):
+                    process=value[name]
+                    if process.poll()is None:process.terminate();process.wait(timeout=4)
+                for name in ('log','bootstrap_log'):
+                    if not value[name].closed:value[name].close()
+
+    def test_relay_app_metadata_read_retries_a_transient_fly_stall(self):
+        """PR #1826 gates r5: one `flyctl status -a <bench app> --json` stalled past its 30 s timeout
+        (Fly answered in 2.5 s minutes later) and the whole 13-task deploy smoke campaign failed before
+        allocating anything. The read-only metadata call retries within its bound; the relay still starts."""
+        from unittest.mock import patch
+        f,repo,home,module,environment=self.campaign_relay_fixture()
+        bin_path=f.root/'bin';(bin_path/'flyctl').rename(bin_path/'flyctl-real')
+        (bin_path/'flyctl').write_text('#!/usr/bin/env bash\n'
+            'if [ "$1" = status ]; then echo "$*" >> "$PARENT_RELAY_CASE/status-calls"; fi\n'
+            'if [ "$1" = status ] && [ ! -e "$PARENT_RELAY_CASE/stalled-once" ]; then\n'
+            ' : > "$PARENT_RELAY_CASE/stalled-once"; exec sleep 20\nfi\n'
+            'exec "$(dirname "$0")/flyctl-real" "$@"\n')
+        (bin_path/'flyctl').chmod(0o700)
+        relay_globals=module['read_relay_app_metadata'].__globals__
+        value=None
+        try:
+            with patch.dict(os.environ,environment,clear=True),patch.dict(relay_globals,RELAY_METADATA_TIMEOUT=1):
+                started=time.monotonic()
+                value=module['start_shared_relay'](repo,f.root/'campaign',repo,f.feed,time.monotonic()+15)
+                self.assertLess(time.monotonic()-started,12)
+                self.assertEqual(len((f.root/'status-calls').read_text().splitlines()),2)
+                self.assertIsNone(value['process'].poll())
+                self.assertTrue(module['stop_shared_relay'](value))
+            # The bound holds: a stall on every attempt still fails the campaign normally.
+            (f.root/'status-calls').unlink()
+            (bin_path/'flyctl').write_text('#!/usr/bin/env bash\necho "$*" >> "$PARENT_RELAY_CASE/status-calls"; exec sleep 20\n')
+            with patch.dict(os.environ,environment,clear=True),patch.dict(relay_globals,RELAY_METADATA_TIMEOUT=1):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    module['read_relay_app_metadata']('fixture',repo,dict(os.environ),time.monotonic()+15)
+            self.assertEqual(len((f.root/'status-calls').read_text().splitlines()),3)
         finally:
             if value:
                 for name in ('process','bootstrap'):
