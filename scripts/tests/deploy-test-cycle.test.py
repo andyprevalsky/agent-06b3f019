@@ -4457,7 +4457,7 @@ class StructuralSupervisorCleanup(unittest.TestCase):
     def test_unreaped_unknown_signalled_or_foreign_supervisor_closure_refuses_atomically(self):
         original=copy.deepcopy(self.process)
         variants=[('quiescent',False),('remaining',[125]),('orphaned_children',False),('error','read failed'),
-                  ('kill_sent',[125]),('timed_out',True),('cancelled',True),('term_sent',[999]),
+                  ('timed_out',True),('cancelled',True),('term_sent',[999]),
                   ('term_sent',[True]),('term_sent',[125,125]),('term_sent',[124]),
                   ('reaped',[]),('reaped',[{'pid':125,'status':15}]),
                   ('reaped',original['reaped']+[{'pid':125,'status':0}]),
@@ -4573,7 +4573,7 @@ class StructuralSupervisorCleanup(unittest.TestCase):
         self.assertEqual('FAIL', self.receipt['status'])
         self.assertFalse(self.result['complete'])
 
-    def test_kill_requires_unique_numeric_term_and_exact_reaped_sigkill(self):
+    def test_kill_requires_unique_numeric_term_and_reaped_term_or_kill(self):
         import signal
         original = copy.deepcopy(self.process)
         original['kill_sent'] = [125]
@@ -4581,7 +4581,9 @@ class StructuralSupervisorCleanup(unittest.TestCase):
         variants = [('kill_sent', value) for value in
                     (None, [True], [125.0], ['125'], [-1], [125, 125], [999], [124])]
         variants += [('term_sent', []), ('term_sent', [126]), ('remaining', [125])]
-        for status in (0, signal.SIGTERM, 127, None, True, 9.0):
+        # Prior SIGTERM negative is explicitly promoted to the positive owning case below.
+        # Other terminal signals and ordinary exits remain unsupported.
+        for status in (0, signal.SIGINT, signal.SIGPIPE, 127, None, True, 9.0):
             rows = copy.deepcopy(original['reaped'])
             rows[1]['status'] = status
             variants.append(('reaped', rows))
@@ -4594,6 +4596,71 @@ class StructuralSupervisorCleanup(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.reconcile()
                 self.assertEqual(before, self.state)
+
+    def test_reaped_term_after_accepted_kill_request_allows_launch_only(self):
+        # Real owned child: observe TERM exit without reaping, then request KILL.
+        # This proves request-success != cause-of-exit; it does not attribute round41.
+        import os, select, signal, time
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.write(write_fd, b'R')
+            os.close(write_fd)
+            while True:
+                signal.pause()
+        os.close(write_fd)
+        reaped = False
+        try:
+            self.assertTrue(select.select([read_fd], [], [], 2)[0], 'owned child not ready')
+            self.assertEqual(b'R', os.read(read_fd, 1))
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 2
+            observed = None
+            while time.monotonic() < deadline:
+                observed = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+                if observed is not None:
+                    break
+                time.sleep(.01)
+            self.assertIsNotNone(observed, 'TERM exit not observed within owning bound')
+            self.assertEqual((pid, os.CLD_KILLED, signal.SIGTERM),
+                             (observed.si_pid, observed.si_code, observed.si_status))
+            raw = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+            self.assertEqual('Z', raw[0])
+            os.kill(pid, signal.SIGKILL)  # Accepted for this unreaped exact owned zombie.
+            joined, status = os.waitpid(pid, 0)
+            reaped = True
+            self.assertEqual(pid, joined)
+            self.assertTrue(os.WIFSIGNALED(status))
+            self.assertEqual(signal.SIGTERM, os.WTERMSIG(status))
+            self.assertEqual(15, status)
+        finally:
+            os.close(read_fd)
+            if not reaped:
+                # Still our unreaped child: this PID cannot be reused before waitpid.
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                os.waitpid(pid, 0)
+        self.process['term_sent'] = [pid]
+        self.process['kill_sent'] = [pid]
+        self.process['reaped'][1] = {'pid':pid, 'status':status}
+        self.write_native()
+        original = {n:p.read_bytes() for n,p in self.paths.items()}
+        before_attempts = copy.deepcopy(self.state['attempts'])
+        before_failures = copy.deepcopy(self.state['failures'])
+        self.reconcile()
+        self.assertEqual(original, {n:p.read_bytes() for n,p in self.paths.items()})
+        self.assertEqual(before_attempts, self.state['attempts'])
+        self.assertEqual(before_failures, self.state['failures'])
+        self.assertEqual('FAIL', self.receipt['status'])
+        self.assertTrue(self.receipt['lingering_group'])
+        self.assertTrue(self.process['orphaned_children'])
+        self.assertFalse(self.result['complete'])
+        self.assertIsNone(c.full_pass_binding(self.state, self.gate))
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
 
     def test_valid_reaped_kill_still_refuses_a_current_live_root(self):
         import signal
@@ -5512,7 +5579,7 @@ class CleanupPrepareEvidence(unittest.TestCase):
     setUp = RelayStartupEvidence.setUp
     fixture = RelayStartupEvidence.fixture
 
-    def prepare_fixture(self):
+    def prepare_fixture(self, producer_head='abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077'):
         import hashlib
         receipt, owner, proof = self.fixture()
         (self.relay / 'startup-cleanup.json').unlink()
@@ -5559,7 +5626,7 @@ class CleanupPrepareEvidence(unittest.TestCase):
         (self.base/'.git/cloudbench-fleet-ownership').mkdir(parents=True,mode=0o700)
         scripts = self.base/'scripts'; scripts.mkdir()
         for name in ('run-bench-campaign.py','cloudbench-cleanup-tickets.py','run-bench','deploy_test_cloud.py'):
-            data = subprocess.check_output(['git','-C',str(ROOT),'show','abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077:scripts/'+name])
+            data = subprocess.check_output(['git','-C',str(ROOT),'show',producer_head+':scripts/'+name])
             (scripts/name).write_bytes(data)
         self.reseal()
         return receipt,owner,proof
@@ -5651,6 +5718,40 @@ class CleanupPrepareEvidence(unittest.TestCase):
             self.save(capture_path,original_capture);self.save(ready_path,original_ready);self.reseal()
         self.published=False
         with self.assertRaisesRegex(ValueError,'terminal publication'):self.validate_prepare_fixture(receipt,owner,proof)
+
+
+    def test_prepare_current_reviewed_pair_never_grants_credit(self):
+        receipt,owner,proof=self.prepare_fixture('436576b7b05aa7421c597733c3df4f71f6f40eb7')
+        before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertEqual([],entry['participants']);self.assertEqual([],entry['retained_services'])
+        self.assertEqual({},entry['native_audit_seals']);self.assertFalse(entry['credit_granted'])
+        self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_prepare_refuses_mixed_reviewed_pairs_and_any_altered_producer(self):
+        receipt,owner,proof=self.prepare_fixture()
+        names=('run-bench-campaign.py','cloudbench-cleanup-tickets.py','run-bench','deploy_test_cloud.py')
+        heads=('abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077','436576b7b05aa7421c597733c3df4f71f6f40eb7')
+        raw={head:{name:subprocess.check_output(['git','-C',str(ROOT),'show',head+':scripts/'+name])
+                   for name in names} for head in heads}
+        original={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        variants=[('old-campaign-new-tickets', {**raw[heads[0]],names[1]:raw[heads[1]][names[1]]}),
+                  ('new-campaign-old-tickets', {**raw[heads[0]],names[0]:raw[heads[1]][names[0]]})]
+        for head in heads:
+            for name in names:
+                variants.append((head[:5]+'-altered-'+name,{**raw[head],name:raw[head][name]+b'\n# changed producer\n'}))
+        for label,producer in variants:
+            with self.subTest(label=label):
+                try:
+                    for name,data in producer.items():(self.base/'scripts'/name).write_bytes(data)
+                    self.reseal()
+                    before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+                    with self.assertRaisesRegex(ValueError,'producer changed'):
+                        self.validate_prepare_fixture(receipt,owner,proof)
+                    self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+                finally:
+                    for p,data in original.items():p.write_bytes(data)
+                    self.reseal()
 
 
 class RecoveredNativeReceiptGuard(unittest.TestCase):

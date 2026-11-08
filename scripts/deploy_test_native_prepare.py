@@ -16,6 +16,14 @@ REVIEWED_SOURCES = {
 }
 
 
+# Reviewed complete producer combinations only; no per-file Cartesian acceptance.
+REVIEWED_SOURCE_SETS = (REVIEWED_SOURCES, {
+    **REVIEWED_SOURCES,
+    'run-bench-campaign.py': '8fc428d19f3052b54daf785741f66291e6ac42adef8320be6bb18e2c9900c6f9',
+    'cloudbench-cleanup-tickets.py': 'b67ac4790306e542a06b2ad607d88b9582c8173f2eecc37cdcffc3df991b4734',
+})
+
+
 def grant_path(root, budget):
     reserve = root / '.git/cloudbench-fleet-ownership'
     info = reserve.lstat()
@@ -39,11 +47,13 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
          and not proof.get('controller_log'), 'prepare cleanup only')
     head = receipt['source']['head']
     need(isinstance(head, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head), 'prepare full source')
-    for name, expected in REVIEWED_SOURCES.items():
-        original = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root),
-                                            'show', head + ':scripts/' + name])
-        need(hashlib.sha256(original).hexdigest() == expected
-             and bound(root / 'scripts' / name, historical_head=head) == original, 'prepare producer changed')
+    originals = {name: subprocess.check_output(
+        ['git', '--no-replace-objects', '-C', str(root), 'show', head + ':scripts/' + name])
+        for name in REVIEWED_SOURCES}
+    observed = {name: hashlib.sha256(raw).hexdigest() for name, raw in originals.items()}
+    need(any(observed == reviewed for reviewed in REVIEWED_SOURCE_SETS), 'prepare producer changed')
+    for name, original in originals.items():
+        need(bound(root / 'scripts' / name, historical_head=head) == original, 'prepare producer changed')
     campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
     need(proof.get('campaign') == str(campaign) and str(campaign) in cli_text
          and owner['native_cleanup_reference']['native_directory'] == str(campaign)

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+import runpy
 
 from benchmarks.cloudbench_campaign_workspace_test import copy_timeout_policy
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
@@ -22,6 +23,20 @@ ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__
 # control in cloudbench-cleanup-ticket-campaign.test.py, which disables it the
 # same way for inventory-only cases. Applied after each environment scrub.
 OFFLINE_WITHOUT_SHARED_RELAY = {"CLOUDBENCH_CAMPAIGN_SHARED_RELAY": "0"}
+
+
+
+def _campaign_cleanup_fixture(root):
+    """Real Git/helper identity and private accounting, never a producer success mock."""
+    fixture = runpy.run_path(str(ROOT / "scripts/tests/fixtures/campaign_cleanup_fixture.py"))
+    return fixture["CampaignCleanupFixture"](root, ROOT)
+
+
+def _campaign_cleanup_environment(cleanup, environment):
+    # Keep the test's fake native transport precedence; prepend only its private df.
+    return {**environment,
+            "PYTHONPATH": cleanup.env["PYTHONPATH"],
+            "PATH": str(cleanup.private / "bin") + os.pathsep + environment.get("PATH", "")}
 
 
 def assert_publication_process_retired(pid):
@@ -75,6 +90,7 @@ def test_campaign_inventory_retries_only_released_infra_without_restarting_peers
     """Exercise the real scheduler with owned child processes and terminal artifacts."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    cleanup = _campaign_cleanup_fixture(tmp_path)
     cli = scripts / "run-bench"
     cli.write_text(f"#!/bin/bash\nexec {shlex.quote(sys.executable)} {shlex.quote(str(tmp_path / 'child.py'))} \"$@\"\n")
     child = r'''
@@ -179,7 +195,11 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
     if failure == "infra-parent-owned":
         # A Hub-dispatched campaign (run-bench-hub-poller) leaves group publication to its parent.
         env["BENCHMARK_HUB_PARENT_RUN_ID"] = "fixture-parent"
-    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    env = _campaign_cleanup_environment(cleanup, env)
+    try:
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    finally:
+        cleanup.close()
     summaries = list((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json"))
     assert summaries, result.stdout + result.stderr
     summary = json.loads(summaries[0].read_text())
@@ -238,6 +258,7 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
             assert broken['status'] != 'passed' and summary['status'] != 'passed'
             assert broken['attempts'][0]['resources_released'] is True
             assert broken['attempts'][0]['lifecycle_verified'] is False
+
 
 
 @pytest.mark.parametrize('explicit_concurrency', (False, True))
@@ -350,6 +371,7 @@ def producer_source(root):
 def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False, native_read_delay=0, controlled_async_refresh=False):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    cleanup = _campaign_cleanup_fixture(tmp_path)
     (scripts / "lib").mkdir()
     if production_only:
         (scripts / "cloudbench-production-only-tasks.py").write_text("import sys; sys.exit(0)\n")
@@ -520,29 +542,34 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         env["FLY_BENCH_API_TOKEN"] = "offline-bench-token-selected-123456789"
         env["FLY_API_TOKEN"] = "offline-injected-token-unselected"
         env["FIXTURE_EXPECT_AUTH"] = env["FLY_BENCH_API_TOKEN"]
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
-            "--root",
-            str(tmp_path),
-            "--runs",
-            "1",
-            "--concurrency",
-            "2",
-            "--task",
-            "first",
-            "--task",
-            "second",
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=FIXTURE_HOST_GUARD_SECONDS,
-    )
+    env = _campaign_cleanup_environment(cleanup, env)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
+                "--root",
+                str(tmp_path),
+                "--runs",
+                "1",
+                "--concurrency",
+                "2",
+                "--task",
+                "first",
+                "--task",
+                "second",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=FIXTURE_HOST_GUARD_SECONDS,
+        )
+    finally:
+        cleanup.close()
     records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
     return result, records, summary, machines.stat().st_size
+
 
 
 def test_campaign_inventory_two_consumers_share_one_native_feed_and_leave_parent_owner_alive(tmp_path):
@@ -1653,6 +1680,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
     fixture = tmp_path / phase
     scripts = fixture / "scripts"
     scripts.mkdir(parents=True)
+    cleanup = _campaign_cleanup_fixture(fixture)
     uploader = fixture / "agents/benchmarks/hub_upload.py"
     uploader.parent.mkdir(parents=True)
     marker = fixture / "publication-owner.json"
@@ -1683,6 +1711,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
         FIXTURE_RELEASE=str(release),
         FIXTURE_ADMITTED=str(admitted),
     )
+    environment = _campaign_cleanup_environment(cleanup, environment)
     command = [
         sys.executable,
         str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
@@ -1734,6 +1763,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
                 process.wait()
             foreign.terminate()
             foreign.wait()
+            cleanup.close()
 
 
 @pytest.mark.parametrize(
@@ -1750,6 +1780,7 @@ def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publis
 
     fixture = tmp_path / phase
     (fixture / "scripts").mkdir(parents=True)
+    cleanup = _campaign_cleanup_fixture(fixture)
     uploader = fixture / "agents/benchmarks/hub_upload.py"
     uploader.parent.mkdir(parents=True)
     owner_path, cancelled_path = fixture / "owner.json", fixture / "cancel-observed"
@@ -1820,6 +1851,7 @@ def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publis
         FIXTURE_CANCELLED=str(cancelled_path),
         FIXTURE_ADMITTED=str(admitted),
     )
+    environment = _campaign_cleanup_environment(cleanup, environment)
     campaign = ROOT / "scripts/run-bench-campaign.py"
     completed_phase = phase not in ("starting", "final")
     if completed_phase:
@@ -1903,6 +1935,8 @@ def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publis
             server.shutdown()
             server.server_close()
             thread.join()
+            cleanup.close()
+
 
 
 @pytest.mark.parametrize("shared", (True, False))
@@ -3292,6 +3326,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
     if not hasattr(os, 'getpriority') or os.getpriority(os.PRIO_PROCESS, 0) != 0:
         pytest.skip('actual nice0 parent required for the scheduling contract')
     scripts = tmp_path/'scripts';scripts.mkdir()
+    cleanup = _campaign_cleanup_fixture(tmp_path)
     child = tmp_path/'child.py'
     child.write_text('import os,json,time,signal,sys\nfrom pathlib import Path\nr=Path(os.environ["PRIORITY_FIXTURE"])\npid=os.getpid()\nbirth=None\ntry:\n s=Path("/proc",str(pid),"stat").read_text();birth=s[s.rfind(")")+2:].split()[19]\nexcept OSError:pass\n(r/"child.json").write_text(json.dumps({"pid":pid,"parent":os.getppid(),"nice":os.getpriority(os.PRIO_PROCESS,0),"parent_nice":os.getpriority(os.PRIO_PROCESS,os.getppid()),"birth":birth,"sid":os.getsid(0),"parent_sid":os.getsid(os.getppid()),"pgid":os.getpgrp(),"tty":os.isatty(0),"autogroup":Path("/proc/self/autogroup").read_text().split()[0] if Path("/proc/self/autogroup").is_file() else None,"parent_autogroup":Path("/proc",str(os.getppid()),"autogroup").read_text().split()[0] if Path("/proc",str(os.getppid()),"autogroup").is_file() else None,"argv":sys.argv[1:]}))\ndef stop(*args):\n (r/"child-term").write_text(str(pid));sys.exit(0)\nsignal.signal(signal.SIGTERM,stop)\nif os.environ.get("PRIORITY_CANCEL")=="1":\n while True:time.sleep(.02)\n')
     (scripts/'run-bench').write_text('#!/bin/bash\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(child))+' "$@"\n')
@@ -3299,6 +3334,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
     env.update(PRIORITY_FIXTURE=str(tmp_path), CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY='0', CLOUDBENCH_CHILD_TERM_SECONDS='1')
     if setting is not None:env['CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE']='10' if setting in ('missing','unsupported','no-process-group','cancel10') else setting
     if setting=='cancel10':env['PRIORITY_CANCEL']='1'
+    env = _campaign_cleanup_environment(cleanup, env)
     launcher=tmp_path/'launcher.py'
     patch=''
     if setting=='missing':patch='shutil.which=lambda name:None\n'
@@ -3321,6 +3357,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
             process.wait(timeout=15)
         finally:
             if process.poll() is None:process.terminate();process.wait(timeout=5)
+            cleanup.close()
     if setting in ('invalid','','5','10.0','true','-1','missing','unsupported','no-process-group'):
         assert process.returncode!=0
         assert not (tmp_path/'child.json').exists()
@@ -3339,6 +3376,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
         assert job['controller_pid']==actual['pid']
         if sys.platform.startswith('linux'):assert actual['birth'] is not None
         if setting=='cancel10':assert (tmp_path/'child-term').read_text()==str(actual['pid'])
+
 
 
 

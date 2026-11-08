@@ -3,13 +3,14 @@ import { runTransactionWithRetry } from '../../providers/database';
 import { accountPermitted } from './repo.account';
 import { databaseNow } from './repo.clock';
 import { getNativePhoneTarget } from '../../providers/nativePhoneAttention';
-import { setupState, type SetupState } from '../../providers/phoneSetupState';
+import { setupState, configurationState, type SetupState } from '../../providers/phoneSetupState';
 import {
   bootstrapAuthorized,
   connectionDto,
   continuationAuthorized,
 } from '../../providers/phoneConnectionState';
 import { IPhoneError, type Transaction } from './types';
+import type { Agent, IPhoneLease } from '@prisma/client';
 
 export async function availability(userId: string, taskId: string) {
   return runTransactionWithRetry((tx) => availabilityInTransaction(tx, userId, taskId));
@@ -36,10 +37,18 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
   const state = setupState(device.setupEncrypted);
   const owner = await tx.user.findUnique({ where: { userId }, select: { phone: true } });
   if (state.expectedPhone !== (owner?.phone ?? null)) return disabled;
-  if (
-    connectionDto(device, state, true, false).status === 'ready' &&
-    (await configurationGenerationCurrent(tx, userId, state))
-  )
+  const active = await tx.iPhoneLease.findFirst({
+    where: {
+      userId,
+      agentId: agent.id,
+      browserTaskId: taskId,
+      status: 'ACTIVE',
+      releaseRequestedAt: null,
+    },
+  });
+  if (active && !currentBorrower(state, active, agent, taskId)) return disabled;
+  const producerCurrent = await configurationGenerationCurrent(tx, userId, state);
+  if (connectionDto(device, state, true, false).status === 'ready' && producerCurrent)
     return { enabled: true, source: 'ready' } as const;
   const first = await tx.message.findFirst({
     where: { agentId: agent.id, role: 'USER' },
@@ -59,6 +68,7 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
     )
   )
     return { enabled: true, source: 'bootstrap' } as const;
+  if (state.completedConfiguration && !producerCurrent) return disabled;
   const lease = await tx.iPhoneLease.findFirst({
     where: {
       deviceId: device.id,
@@ -69,15 +79,6 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
       releaseRequestedAt: null,
     },
   });
-  let pendingAuth = false;
-  if (lease?.controlOwner === 'user' && lease.attentionRequestId !== null) {
-    const attention = await tx.agentAttentionRequest.findFirst({
-      where: { id: lease.attentionRequestId, userId, agentId: agent.id, userResponse: null },
-      select: { metadata: true },
-    });
-    const target = getNativePhoneTarget(attention?.metadata);
-    pendingAuth = target?.leaseId === lease.id && target.browserTaskId === taskId;
-  }
   if (
     lease &&
     continuationAuthorized(state, {
@@ -88,12 +89,38 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
       firstExecutionRunId: agent.temporalFirstExecutionRunId ?? '',
       providerEpoch: device.providerEpoch,
       active:
-        pendingAuth ||
+        (await pendingNativeAuth(tx, lease, taskId)) ||
         (lease.leaseExpiresAt !== null && lease.leaseExpiresAt > (await databaseNow(tx))),
     })
   )
     return { enabled: true, source: 'continuation' } as const;
   return disabled;
+}
+
+async function pendingNativeAuth(tx: Transaction, lease: IPhoneLease | null, taskId: string) {
+  if (lease?.controlOwner !== 'user' || lease.attentionRequestId === null) return false;
+  const attention = await tx.agentAttentionRequest.findFirst({
+    where: {
+      id: lease.attentionRequestId,
+      userId: lease.userId,
+      agentId: lease.agentId,
+      userResponse: null,
+    },
+    select: { metadata: true },
+  });
+  const target = getNativePhoneTarget(attention?.metadata);
+  return target?.leaseId === lease.id && target.browserTaskId === taskId;
+}
+
+function currentBorrower(state: SetupState, lease: IPhoneLease, agent: Agent, taskId: string) {
+  const attempt = state.attempt;
+  return (
+    attempt?.leaseId === lease.id &&
+    attempt.taskId === taskId &&
+    attempt.agentId === agent.id &&
+    attempt.workflowId === (agent.temporalWorkflowId ?? agent.id) &&
+    attempt.firstExecutionRunId === agent.temporalFirstExecutionRunId
+  );
 }
 
 /** Ready configuration remains bound to the setup producer's real execution chain. */
@@ -102,8 +129,14 @@ export async function configurationGenerationCurrent(
   userId: string,
   state: SetupState
 ) {
+  state = configurationState(state);
   if (state.attempt?.firstExecutionRunId === undefined || state.attempt.firstExecutionRunId === '')
     return false;
+  // Hold the producer row through admission/stop commit, including when the
+  // current lease belongs to a different agent. Generation replacement and
+  // revocation both update this row and must serialize with this decision.
+  await tx.$queryRaw`SELECT id FROM "Agent" WHERE id = ${state.attempt.agentId}
+    AND "userId" = ${userId} AND "deletedAt" IS NULL FOR SHARE`;
   const producer = await tx.agent.findFirst({
     where: { id: state.attempt.agentId, userId, deletedAt: null },
     select: { temporalWorkflowId: true, temporalFirstExecutionRunId: true },

@@ -1,3 +1,6 @@
+import { syntheticConfiguration } from './iphone-control.synthetic-setup';
+import { authorizeSyntheticSetup } from './iphone-control.setup-fixtures';
+import { fixture } from './auth-assistance.native-fixtures';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -10,8 +13,10 @@ export const privacyCases: Case[] = [
     'unregistered user input cannot enter command receipts, status or task observations',
     async (h) => {
       const f = await h.fixture();
-      const context = await prisma.browserContext.create({
-        data: { userId: f.userId, contextId: randomUUID() },
+      const context = await prisma.browserContext.upsert({
+        where: { userId: f.userId },
+        create: { userId: f.userId, contextId: randomUUID() },
+        update: {},
       });
       const browser = await prisma.browserSession.create({
         data: { contextId: context.id, agentId: f.agentId, sessionId: randomUUID() },
@@ -20,6 +25,8 @@ export const privacyCases: Case[] = [
         where: { id: f.leaseId },
         data: { browserTaskId: browser.id },
       });
+      await syntheticConfiguration(f.userId, f.leaseId);
+      await authorizeSyntheticSetup(f);
       const takeover = await h.request(f.userId, `/leases/${f.leaseId}/control`, {
         actor: 'user',
         method: 'POST',
@@ -113,8 +120,10 @@ export const privacyCases: Case[] = [
     'private phase blocks model media but preserves owner PNG and explicit user resume',
     async (h) => {
       const f = await h.fixture();
-      const context = await prisma.browserContext.create({
-        data: { userId: f.userId, contextId: randomUUID() },
+      const context = await prisma.browserContext.upsert({
+        where: { userId: f.userId },
+        create: { userId: f.userId, contextId: randomUUID() },
+        update: {},
       });
       const browser = await prisma.browserSession.create({
         data: { contextId: context.id, agentId: f.agentId, sessionId: randomUUID() },
@@ -123,6 +132,8 @@ export const privacyCases: Case[] = [
         where: { id: f.leaseId },
         data: { browserTaskId: browser.id },
       });
+      await syntheticConfiguration(f.userId, f.leaseId);
+      await authorizeSyntheticSetup(f);
       await h.request(f.userId, `/leases/${f.leaseId}/control`, {
         actor: 'user',
         method: 'POST',
@@ -180,7 +191,8 @@ export const privacyCases: Case[] = [
   [
     'private vault survives release and successor lease and sanitizes legacy receipts',
     async (h) => {
-      const f = await h.fixture();
+      const f = await fixture(h);
+      await authorizeSyntheticSetup(f);
       const canary = `durable-${randomUUID()}`;
       await h.request(f.userId, `/leases/${f.leaseId}/control`, {
         actor: 'user',
@@ -243,6 +255,19 @@ export const privacyCases: Case[] = [
       const agent = await h.createAgent(f.userId);
       const next = await h.acquire(f.userId, agent.id);
       assert.equal(next.status, 'ACTIVE');
+      // Establish the successor's unrelated setup authority before testing privacy denial.
+      const context = await prisma.browserContext.findUniqueOrThrow({
+        where: { userId: f.userId },
+      });
+      const task = await prisma.browserSession.create({
+        data: { contextId: context.id, agentId: agent.id, sessionId: randomUUID() },
+      });
+      await prisma.iPhoneLease.update({
+        where: { id: next.id },
+        data: { browserTaskId: task.id },
+      });
+      await syntheticConfiguration(f.userId, next.id);
+      await authorizeSyntheticSetup({ ...f, agentId: agent.id });
       const denied = await h.request(f.userId, `/leases/${next.id}/operations`, {
         method: 'POST',
         body: { operationId: randomUUID(), operation: 'screen.text', args: {} },
@@ -340,7 +365,8 @@ export const privacyCases: Case[] = [
   [
     'fragmented private input and malformed envelopes fail closed',
     async (h) => {
-      const f = await h.fixture();
+      const f = await fixture(h);
+      await authorizeSyntheticSetup(f);
       await h.request(f.userId, `/leases/${f.leaseId}/control`, {
         actor: 'user',
         method: 'POST',

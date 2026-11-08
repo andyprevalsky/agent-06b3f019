@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { completedSyntheticSetup } from './iphone.synthetic-ready';
 import { createPhoneFixtureUser } from './iphone-test-user';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
@@ -416,6 +417,7 @@ test('browser task validates same agent and owning account', async () => {
   const session = await prisma.browserSession.create({
     data: { contextId: context.id, agentId: a.id, sessionId: `fixture-${randomUUID()}` },
   });
+  await completedSyntheticSetup(f, a.id, acquire, action);
   assert(
     (await acquire(f.userId, a.id, randomUUID(), session.id)).browserTaskId === session.id,
     'valid browser binding lost'
@@ -441,6 +443,7 @@ test('idempotency key cannot change its browser task association', async () => {
       })
     )
   );
+  await completedSyntheticSetup(f, a.id, acquire, action);
   const key = randomUUID();
   const original = await acquire(f.userId, a.id, key, sessions[0].id);
   const changed = await request('/leases', f.userId, 'POST', {

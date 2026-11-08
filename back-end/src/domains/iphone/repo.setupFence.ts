@@ -31,9 +31,11 @@ export async function setupCommitValid(
     state.attempt.revision === input.expectedRevision &&
     device.providerEpoch === command.providerEpoch &&
     device.providerState !== 'CLOSING' &&
-    !privacyState(device.privateInputEncrypted).active &&
-    (await availabilityInTransaction(tx, claim.lease.userId, claim.lease.browserTaskId!)).enabled;
+    !privacyState(device.privateInputEncrypted).active;
   try {
+    valid =
+      valid &&
+      (await availabilityInTransaction(tx, claim.lease.userId, claim.lease.browserTaskId!)).enabled;
     const { lease, agent } = await validateNativePhoneLease(
       tx,
       claim.lease.userId,

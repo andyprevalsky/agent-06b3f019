@@ -7582,7 +7582,14 @@ exit 143
         return
     receipt = json.loads(receipt_path.read_text())
     assert receipt["verified"] is False, receipt
-    assert receipt["verified_state"] == initial, receipt
+    assert receipt["verified_state"] == initial, {
+        "receipt": receipt,
+        "native_returncode": result.returncode,
+        "native_stdout": result.stdout,
+        "native_stderr": result.stderr,
+        "fake_calls": (fake / "calls").read_text(),
+        "elapsed_seconds": elapsed,
+    }
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
     if case == "stop-always-fails":
         # The owning deadline uses Bash SECONDS, whose integer ticks can reach

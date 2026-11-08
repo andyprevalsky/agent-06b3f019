@@ -5,6 +5,7 @@ import {
   sealSetup,
   setupIdentity,
   type SetupState,
+  configurationState,
 } from '../../providers/phoneSetupState';
 import type { Transaction, IPhoneDevice, IPhoneLease } from './types';
 import { verificationDto } from '../../providers/phoneSetupVerification';
@@ -12,26 +13,42 @@ import { databaseNow } from './repo.clock';
 import { configurationGenerationCurrent } from './repo.availability';
 
 export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneLease) {
+  const configuration = configurationState(state);
   const active =
     lease.status === 'ACTIVE' &&
     lease.releaseRequestedAt === null &&
     state.attempt?.leaseId === lease.id &&
     state.attempt.taskId === lease.browserTaskId;
-  const verification = verificationDto(state.verification, {
-    attemptId: state.attempt?.id,
-    profileRevision: state.profileRevision,
-    workflowId: state.attempt?.workflowId,
-    providerEpoch: device.providerEpoch,
-    expectedPhone: state.expectedPhone ?? null,
-    expectedGoogleIdentity: state.expectedGoogleIdentity,
-    allowGooglePasscodeException: state.allowGooglePasscodeException,
-    floorAt: state.attempt?.floorAt,
-    floorCursor: state.attempt?.floorCursor,
-  });
+  const verification = verificationDto(
+    configuration.verification,
+    {
+      attemptId: configuration.attempt?.id,
+      profileRevision: state.profileRevision,
+      workflowId: configuration.attempt?.workflowId,
+      providerEpoch: device.providerEpoch,
+      expectedPhone: state.expectedPhone ?? null,
+      expectedGoogleIdentity: state.expectedGoogleIdentity,
+      allowGooglePasscodeException: state.allowGooglePasscodeException,
+      floorAt: configuration.attempt?.floorAt,
+      floorCursor: configuration.attempt?.floorCursor,
+    },
+    {
+      value: state.verification,
+      context: {
+        attemptId: state.attempt?.id,
+        profileRevision: state.profileRevision,
+        workflowId: state.attempt?.workflowId,
+        providerEpoch: device.providerEpoch,
+        expectedPhone: state.expectedPhone ?? null,
+        floorAt: state.attempt?.floorAt,
+        floorCursor: state.attempt?.floorCursor,
+      },
+    }
+  );
   const required =
     !verification.configurationReady ||
     device.setupState !== 'ready' ||
-    state.verified?.profileRevision !== state.profileRevision ||
+    configuration.verified?.profileRevision !== state.profileRevision ||
     state.expectedAppleIdentity === undefined;
   return {
     required,
@@ -42,7 +59,7 @@ export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneL
     ...(active && state.allowGooglePasscodeException === true
       ? { googlePasscodeExceptionAllowed: true }
       : {}),
-    identityVerified: state.verified?.profileRevision === state.profileRevision,
+    identityVerified: configuration.verified?.profileRevision === state.profileRevision,
     ...(active && state.expectedGoogleIdentity !== undefined
       ? { expectedGoogleAccountIdentifier: state.expectedGoogleIdentity }
       : {}),
@@ -73,6 +90,11 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
       : null;
   const expectedPhone = owner?.phone ?? null;
   const generation = agent?.temporalWorkflowId ?? agent?.id;
+  const configured =
+    device.setupState === 'ready' &&
+    !setupDto(device, state, lease).required &&
+    state.expectedPhone === expectedPhone &&
+    (await configurationGenerationCurrent(tx, device.userId, state));
   if (
     lease.status === 'ACTIVE' &&
     lease.releaseRequestedAt === null &&
@@ -84,6 +106,13 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
       state.expectedPhone !== expectedPhone)
   ) {
     const now = await databaseNow(tx);
+    if (!configured) delete state.completedConfiguration;
+    if (configured && !state.completedConfiguration)
+      state.completedConfiguration = structuredClone({
+        attempt: state.attempt!,
+        verified: state.verified!,
+        verification: state.verification!,
+      });
     delete state.readinessAdmission;
     await captureReadiness(tx, device, state, lease, agent, generation, expectedPhone);
     if (state.expectedPhone !== expectedPhone) delete state.connection;
@@ -107,12 +136,11 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
         ? { reasonCode: 'configuration_unavailable' }
         : {}),
     };
-    const ready = false;
     device = await tx.iPhoneDevice.update({
       where: { id: device.id },
       data: {
         setupEncrypted: sealSetup(state),
-        setupState: ready
+        setupState: configured
           ? 'ready'
           : state.expectedAppleIdentity !== undefined
             ? 'in_progress'

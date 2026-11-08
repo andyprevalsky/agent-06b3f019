@@ -1,5 +1,10 @@
 import type { IPhoneDevice, Transaction } from './types';
-import { sealSetup, type SetupState, type SetupInput } from '../../providers/phoneSetupState';
+import {
+  sealSetup,
+  configurationState,
+  type SetupState,
+  type SetupInput,
+} from '../../providers/phoneSetupState';
 import {
   verificationDto,
   SETUP_REQUIREMENTS_VERSION,
@@ -16,6 +21,8 @@ export async function writeSetupOutcome(
   errorCode: string | null,
   evidenceDigest: string
 ) {
+  if (!(input.action === 'verify' && input.verificationTarget === 'runtime'))
+    delete state.completedConfiguration;
   state.claimRevision++;
   state.attempt!.revision = state.claimRevision;
   const target = input.verificationTarget ?? 'apple_account';
@@ -98,6 +105,7 @@ function outcomeReason(input: SetupInput, result: SetupOutcomeResult | null) {
 }
 
 function currentConfigurationReady(device: IPhoneDevice, state: SetupState, now: Date) {
+  state = configurationState(state);
   return verificationDto(state.verification, {
     attemptId: state.attempt!.id,
     profileRevision: state.profileRevision,

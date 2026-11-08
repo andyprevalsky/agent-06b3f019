@@ -44,16 +44,26 @@ export async function freshSetup(h: Harness, configureGoogle = true) {
     ).status,
     200
   );
+  await authorizeSyntheticSetup(f);
+  const state = await h.request(f.userId, `/interactions/${f.taskId}`);
+  return { ...f, identity, setup: state.data.setup as SetupDto };
+}
+/** Explicit trusted fixture creation, never a request-time or production permission repair. */
+export async function authorizeSyntheticSetup(f: {
+  userId: string;
+  deviceId: string;
+  agentId: string;
+}) {
   // Explicit trusted fixture bootstrap reservation, matching the normal connection authority.
   const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
   const configured = setupState(device.setupEncrypted);
   const owner = await prisma.agent.findUniqueOrThrow({ where: { id: f.agentId } });
-  const workflowId = owner.temporalWorkflowId ?? owner.id;
-  const firstRun = owner.temporalFirstExecutionRunId ?? randomUUID();
-  await prisma.agent.update({
-    where: { id: owner.id },
-    data: { temporalWorkflowId: workflowId, temporalFirstExecutionRunId: firstRun },
-  });
+  const workflowId = owner.temporalWorkflowId;
+  const firstRun = owner.temporalFirstExecutionRunId;
+  assert.ok(
+    workflowId && firstRun,
+    'Trusted fixture setup requires a published execution generation'
+  );
   configured.expectedPhone =
     (await prisma.user.findUniqueOrThrow({ where: { userId: f.userId } })).phone ?? undefined;
   configured.connection = {
@@ -86,8 +96,6 @@ export async function freshSetup(h: Harness, configureGoogle = true) {
     where: { id: device.id },
     data: { setupEncrypted: sealSetup(configured) },
   });
-  const state = await h.request(f.userId, `/interactions/${f.taskId}`);
-  return { ...f, identity, setup: state.data.setup as SetupDto };
 }
 export type SetupFixture = Awaited<ReturnType<typeof freshSetup>>;
 export async function observe(h: Harness, f: SetupFixture, setup = f.setup) {

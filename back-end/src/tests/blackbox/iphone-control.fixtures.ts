@@ -13,7 +13,11 @@ import type { SetupAgentLauncher } from '../../domains/iphone/service.connection
 import { phoneFixtureNumber } from './phone-fixture-users';
 import imessageRouter from '../../domains/imessage/routes';
 import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
-import { syntheticConfiguration } from './iphone-control.synthetic-setup';
+import {
+  syntheticConfiguration,
+  syntheticSetupContext,
+  createSyntheticControlAgent,
+} from './iphone-control.synthetic-setup';
 import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import userSettingsRouter from '../../domains/user-settings/routes';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
@@ -478,9 +482,7 @@ export class Harness {
   }
 
   async createAgent(userId: string) {
-    return prisma.agent.create({
-      data: { userId, status: 'ACTIVE', goal: 'Synthetic phone control blackbox' },
-    });
+    return createSyntheticControlAgent(userId);
   }
 
   async fixture(): Promise<Fixture> {
@@ -523,6 +525,7 @@ export class Harness {
     });
     const agent = await this.createAgent(userId);
     const lease = await this.acquire(userId, agent.id);
+    await syntheticConfiguration(userId, lease.id);
     return {
       phone,
       userId,
@@ -557,7 +560,7 @@ export class Harness {
   ): Promise<ApiResult> {
     const operationLease = /^\/leases\/([^/]+)\/operations$/.exec(path)?.[1];
     if (operationLease && options.actor !== 'user') {
-      const context = await syntheticConfiguration(userId, operationLease);
+      const context = await syntheticSetupContext(userId, operationLease);
       if (
         context &&
         options.actor !== 'user' &&

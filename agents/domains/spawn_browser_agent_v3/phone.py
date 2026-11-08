@@ -118,7 +118,7 @@ Follow setup in order: observe the current screen. Once legitimate OS controls
 are reachable, configure Portrait Orientation Lock before other settings/apps.
 If an existing blocking private authentication flow prevents those controls,
 finish only that legitimate authentication first, then configure portrait lock.
-Do not wait for configurationReady to gain legitimate access. Inspect an already
+Do not wait for configurationReady to sign in or gain legitimate access. Inspect an already
 signed-in Apple Account without signing out after portrait lock is verified.
 Read actual interaction.setup.verification: requirementsVersion, each target's
 checks/status/current scope, configurationReady, and operationalStatus. A durable
@@ -154,7 +154,7 @@ at that current evidenceCursor, then observe and verify again. Never reuse a hin
 after any intervening action. Verification never taps for you. Close Control
 Center and restore the original AssistiveTouch state, confirming its explicit
 Touch-parent value again. Do not blindly toggle switches or use operator coordinates.
-Public screen media remains unavailable. Portrait frames/dimensions, lock labels,
+Public screen media remains unavailable. A portrait frame alone, portrait dimensions, lock labels,
 static screenshots and unsupported or ambiguous layouts are not enabled-state proof.
 If the native route or original switch state cannot be established, keep readiness
 unconfirmed and report that precise blocker without abandoning the original task.
@@ -383,8 +383,6 @@ async def execute_phone(
             )
     if not all((user_id, agent_id, task_id)) or not (snapshot or {}).get("enabled"):
         return {"success": False, "error": "Phone unavailable for this decision"}
-    if not (await fetch_phone_availability(config, user_id, task_id, client=client))["enabled"]:
-        return {"success": False, "error": "Phone capability unavailable or revoked"}
     from browser_tools.schemas import validate_browser_tool_args
 
     try:
@@ -397,6 +395,8 @@ async def execute_phone(
         command_args = params.get("args", {})
         if set(command_args) != {"queueId"} or not isinstance(command_args["queueId"], str) or not command_args["queueId"].strip():
             return {"success": False, "error": "Approved message operation requires only its queueId"}
+    if not (await fetch_phone_availability(config, user_id, task_id, client=client))["enabled"]:
+        return {"success": False, "error": "Phone capability unavailable or revoked"}
     view = (snapshot or {}).get("interaction") or {}
     path = f"interactions/{quote(task_id, safe='')}"
     if params["mode"] == "setup":

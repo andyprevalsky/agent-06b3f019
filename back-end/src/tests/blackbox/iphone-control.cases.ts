@@ -1,3 +1,5 @@
+import { fixtureGenerationCases } from './iphone-control.fixture-generation.cases';
+import { continuityCases } from './iphone-control.continuity.cases';
 import { authLossCases } from './iphone-control.auth-loss.cases';
 import { portraitCases } from './iphone-control.portrait.cases';
 import { connectionCases } from './iphone-control.connection.cases';
@@ -70,6 +72,8 @@ async function queued(h: Harness, userId: string) {
   return waiter;
 }
 export const cases: Case[] = [
+  ...fixtureGenerationCases,
+  ...continuityCases,
   ...authLossCases,
   ...connectionCases,
   ...messageCases,

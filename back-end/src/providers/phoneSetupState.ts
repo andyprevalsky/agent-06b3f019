@@ -23,6 +23,11 @@ export interface SetupAttempt {
   };
 }
 export interface SetupState {
+  completedConfiguration?: {
+    attempt: SetupAttempt;
+    verified: { at: string; profileRevision: number };
+    verification: SetupChecks;
+  };
   connection?: PhoneConnectionReservation;
   readinessAdmission?: {
     leaseId: string;
@@ -64,6 +69,8 @@ export function setupState(encrypted: string | null): SetupState {
     if (
       !value ||
       value.version !== 1 ||
+      (value.completedConfiguration !== undefined &&
+        !validCompletedConfiguration(value.completedConfiguration)) ||
       (value.verification !== undefined && !validSetupChecks(value.verification)) ||
       (value.readinessAdmission !== undefined &&
         (!value.readinessAdmission ||
@@ -148,6 +155,39 @@ export function sealSetup(value: SetupState): string {
     throw new PhoneInteractionError(409, 'Phone setup state capacity reached');
   return sealPhoneValue(value);
 }
+
+function validCompletedConfiguration(value: NonNullable<SetupState['completedConfiguration']>) {
+  if (
+    !value ||
+    Object.keys(value).some((key) => !['attempt', 'verified', 'verification'].includes(key))
+  )
+    return false;
+  const attempt = value.attempt;
+  return Boolean(
+    attempt &&
+    ['id', 'leaseId', 'taskId', 'agentId', 'workflowId', 'firstExecutionRunId'].every(
+      (key) =>
+        typeof (attempt as unknown as Record<string, unknown>)[key] === 'string' &&
+        Boolean((attempt as unknown as Record<string, unknown>)[key])
+    ) &&
+    Number.isSafeInteger(attempt.revision) &&
+    attempt.revision >= 0 &&
+    Number.isSafeInteger(attempt.floorCursor) &&
+    attempt.floorCursor >= 0 &&
+    Number.isFinite(Date.parse(attempt.floorAt)) &&
+    value.verified &&
+    Number.isSafeInteger(value.verified.profileRevision) &&
+    value.verified.profileRevision >= 0 &&
+    Number.isFinite(Date.parse(value.verified.at)) &&
+    validSetupChecks(value.verification)
+  );
+}
+
+/** Read-only configuration projection; active command custody still uses state.attempt. */
+export function configurationState(state: SetupState): SetupState {
+  const completed = state.completedConfiguration;
+  return completed ? { ...state, ...completed, completedConfiguration: undefined } : state;
+}
 export function setupIdentity(leaseId: string, revision: number): string {
   return phoneCommandHash('setup-attempt', { leaseId, revision }, 'agent');
 }
@@ -159,6 +199,7 @@ export function setupAfterAttention(
 ): string | null {
   const state = setupState(encrypted);
   if (state.attempt?.leaseId !== leaseId) return encrypted;
+  delete state.completedConfiguration;
   state.attempt.floorCursor = cursor;
   state.attempt.floorAt = now.toISOString();
   return sealSetup(state);

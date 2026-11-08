@@ -5,6 +5,7 @@ import { setupDto } from './repo.setup';
 import type { Transaction, IPhoneDevice, IPhoneLease } from './types';
 import type { CommandClaim, CommandPayload } from './types.operations';
 import { databaseNow } from './repo.clock';
+import { availabilityInTransaction } from './repo.availability';
 
 export async function executionCustody(
   tx: Transaction,
@@ -13,6 +14,13 @@ export async function executionCustody(
   lease: IPhoneLease
 ): Promise<boolean> {
   if (claim.executionGeneration === undefined) return true;
+  if (
+    lease.browserTaskId !== null &&
+    !(await availabilityInTransaction(tx, lease.userId, lease.browserTaskId)).enabled
+  ) {
+    await rejectExecutionCustody(tx, claim);
+    return false;
+  }
   const agent = await tx.agent.findUnique({ where: { id: lease.agentId } });
   const state = setupState(device.setupEncrypted);
   const intent = openPhoneValue<CommandPayload>(claim.command.requestEncrypted);
@@ -29,6 +37,12 @@ export async function executionCustody(
         current?.workflowId === generation))
   )
     return true;
+  await rejectExecutionCustody(tx, claim);
+  return false;
+}
+
+/** Revocation is a terminal pre-execution rejection, never an abandoned active slot. */
+export async function rejectExecutionCustody(tx: Transaction, claim: CommandClaim) {
   await tx.iPhoneOperation.updateMany({
     where: { id: claim.command.id, state: 'CONNECTING' },
     data: {
@@ -43,5 +57,4 @@ export async function executionCustody(
       }),
     },
   });
-  return false;
 }

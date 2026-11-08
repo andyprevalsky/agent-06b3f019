@@ -1,7 +1,7 @@
 /** Public connection state is a projection of backend setup proofs, never a grant. */
 import { createHash } from 'node:crypto';
 import { verificationDto } from './phoneSetupVerification';
-import type { SetupState } from './phoneSetupState';
+import { configurationState, type SetupState } from './phoneSetupState';
 import { PhoneInteractionError } from './phoneInteractionError';
 
 export interface PhoneConnectionReservation {
@@ -57,6 +57,7 @@ export function connectionDto(
     connectionRevision: state?.claimRevision ?? 0,
   };
   if (!enabled || !device || !state) return { ...base, status: 'not_connected' };
+  state = configurationState(state);
   const verification = verificationDto(state.verification, {
     attemptId: state.attempt?.id,
     profileRevision: state.profileRevision,

@@ -65,6 +65,7 @@
     "@types/multer": "^2.0.0",
     "@types/node": "^22.7.4",
     "@types/node-cron": "^3.0.11",
+    "@types/pngjs": "6.0.5",
     "@types/ws": "^8.18.1",
     "@with-logic/fast-forward": "^0.1.13",
     "adm-zip": "^0.5.16",
@@ -100,7 +101,6 @@
   "devDependencies": {
     "@e2b/desktop": "^2.2.2",
     "@eslint/js": "^9.39.4",
-    "@types/pngjs": "6.0.5",
     "c8": "^11.0.0",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",

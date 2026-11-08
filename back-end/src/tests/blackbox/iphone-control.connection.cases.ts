@@ -10,6 +10,7 @@ export const connectionCases: Case[] = [
   [
     'normal Connect iPhone is owner authenticated, idempotent, generation fenced and revocable',
     async (h) => {
+      const providerCallsBefore = h.calls.length;
       const f = await h.fixture();
       await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' });
       const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
@@ -171,7 +172,7 @@ export const connectionCases: Case[] = [
       );
       assert.equal(
         h.calls.length,
-        0,
+        providerCallsBefore,
         'setup admission/verification control must not touch synthetic phone provider'
       );
     },

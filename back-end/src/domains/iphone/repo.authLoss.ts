@@ -253,6 +253,7 @@ async function commitAuthRevocation(
   if (state.attempt === undefined) return false;
   state.claimRevision++;
   delete state.verified;
+  delete state.completedConfiguration;
   delete state.connection;
   delete state.readinessAdmission;
   state.attempt.revision = state.claimRevision;

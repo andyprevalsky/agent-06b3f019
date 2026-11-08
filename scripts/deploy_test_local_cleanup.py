@@ -258,7 +258,10 @@ def structural_cleanup(state, receipt, proof):
          and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms + kills)
          and len(set(terms)) == len(terms) and len(set(kills)) == len(kills)
          and set(kills) <= set(terms)
-         and all(os.WIFSIGNALED(reaped[pid]) and os.WTERMSIG(reaped[pid]) == signal.SIGKILL for pid in kills), 'structural owned descendants not all reaped')
+         # kill_sent records accepted requests, not which signal won an exit race.
+         and all(os.WIFSIGNALED(reaped[pid])
+                 and os.WTERMSIG(reaped[pid]) in (signal.SIGTERM, signal.SIGKILL)
+                 for pid in kills), 'structural owned descendants not all reaped')
     quiet(root)
     return gate
 
