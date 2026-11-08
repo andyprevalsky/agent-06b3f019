@@ -53,6 +53,8 @@ export interface AgentMessageDeliveryResult {
   delivered: boolean;
   /** A code agent still starting accepted the message; it is its next turn once the CLI runs. */
   queued?: boolean;
+  /** `direct_hold`: queued while the user chats with that code agent directly (next turn after the hand back). */
+  queued_reason?: 'direct_hold';
   task_running?: boolean;
   /** The target had finished; this message started its next run. */
   woke?: boolean;

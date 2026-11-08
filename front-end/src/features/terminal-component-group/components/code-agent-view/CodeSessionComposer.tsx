@@ -7,18 +7,30 @@
  *                  ("claude-opus-5-5 · xhigh"): the live session's effective
  *                  setting, else its recorded CLI model.
  *                  [LIVE + catalog] pick the next turn's model · [ENDED] read-only
- *   speed toggle (SpeedToggle)   → the session's speed (fast ⇄ standard); live
- *                  sessions change the next turn's speed, ended ones read only
+ *   speed toggle (SpeedToggle)   → the session's exact speed (standard / fast —
+ *                  Codex's `priority` tier — / ultrafast, never the account's
+ *                  fast-vs-ultra preference); live sessions cycle the next turn's
+ *                  speed through the model's own speed ids, ended ones read only
+ *   newest run (c.liveTaskId)    → a resumed agent's catalog, usage and container
+ *                  are its newest run's, never the original task's
+ *   top-right corner (cornerStatus) → CodeContainerStatus (green awake, slow
+ *                  fade · orange stopped · red destroyed, tooltip) + the devbox
+ *                  usage bars (CodeResourcesIndicator, always shown; its popover
+ *                  holds the session's "Open app" preview link)
  *   nub          (never an empty strip) → ContextMeter: the latest model call's
  *                  prompt over the model's window (the tokens when the window is
  *                  not known yet) + the existing Agent settings gear, fed by this
  *                  code agent's own data (messages, tokens, sandbox cost, context)
  *   agents drawer (BackgroundAgentsBannerView, on top of the box) → the code
  *                  agent's own sub-agents (Claude's Task / Agent tool)
+ *   every run (c.messages)       → the drawer and the settings' message count read
+ *                  all runs of the spawn as this task (mergeCodeAgentRuns), so a
+ *                  resumed run's sub-agents and rows count too
  * Unknown values render nothing (no "unavailable" placeholder). A delivery ACK's
  * effective settings replace the catalog's.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { nextSpeedLevel, type SpeedLevel } from '@/lib/agentSpeed';
 import { API_BASE_WITH_PATH, getAuthHeaders } from '@/lib/api/client';
 import type { FilePointer } from '@/lib/api/types';
 import { useAgentContext, type Model } from '../../hooks';
@@ -30,6 +42,10 @@ import AgentSettingsDialog from '../AgentSettingsDialog';
 import { ContextMeter } from '../query-input/ContextMeter';
 import { QueryInfoMenu } from '../query-input/QueryInfoMenu';
 import { BackgroundAgentsBannerView } from '../background-agents/BackgroundAgentsBanner';
+import { CodeResourcesIndicator } from '../CodeResourcesIndicator';
+import { useCachedCodeAgent } from '../rose-sidebar/useRoseCodeAgents';
+import { CodeContainerStatus } from './CodeContainerStatus';
+import { codeContainerState } from './codeContainerState';
 import { codeAgentDetail } from './codeAgentDetail';
 import { buildCodeSubAgentPanelModel, type CodeSessionState } from './codeSubAgents';
 import type { CodeAgentConversation } from './useCodeAgentConversation';
@@ -45,6 +61,40 @@ interface Capabilities {
 }
 
 const noop = () => {};
+
+/** A session's reported speed → the toggle's level (Codex reports fast as `priority`). */
+const SPEED_LEVEL: Record<string, SpeedLevel> = {
+  standard: 'normal',
+  fast: 'fast',
+  priority: 'fast',
+  ultrafast: 'ultra',
+};
+
+/** The model's own speed id for a level, first listed wins (Codex's fast tier is `priority`). */
+const LEVEL_SPEED_IDS: Record<SpeedLevel, string[]> = {
+  normal: ['standard'],
+  fast: ['fast', 'priority'],
+  ultra: ['ultrafast'],
+};
+
+function speedIdFor(level: SpeedLevel, speeds: string[]): string | null {
+  const id = LEVEL_SPEED_IDS[level].find((candidate) => speeds.includes(candidate));
+  return id ?? (level === 'normal' ? 'standard' : null);
+}
+
+/** The next level after `level` the model supports, with its speed id (null: none other). */
+function nextSupportedSpeed(
+  level: SpeedLevel,
+  speeds: string[],
+): { level: SpeedLevel; id: string } | null {
+  let next = nextSpeedLevel(level);
+  while (next !== level) {
+    const id = speedIdFor(next, speeds);
+    if (id) return { level: next, id };
+    next = nextSpeedLevel(next);
+  }
+  return null;
+}
 
 /** The live session's catalog (null while unknown, ended or unreachable). */
 function useCapabilities(taskId: string, live: boolean): Capabilities | null {
@@ -82,16 +132,17 @@ export function CodeSessionComposer({
 }) {
   const [draft, setDraft] = useState(() => getCodeDraft(taskId) ?? { text: '', options: {} });
   const live = c.stateText === 'Running';
-  const { messages } = useAgentContext();
   const sessionState: CodeSessionState =
     c.chipState === 'completed' || c.chipState === 'failed' || c.chipState === 'paused'
       ? c.chipState
       : 'running';
   const subAgents = useMemo(
-    () => buildCodeSubAgentPanelModel(messages, taskId, sessionState),
-    [messages, taskId, sessionState],
+    () => buildCodeSubAgentPanelModel(c.messages, taskId, sessionState),
+    [c.messages, taskId, sessionState],
   );
-  const capabilities = useCapabilities(taskId, live);
+  // A resumed agent runs under a new task id: live state, catalog, usage and
+  // container all belong to that newest run (c.liveTaskId).
+  const capabilities = useCapabilities(c.liveTaskId, live);
   const { send, sending, error, effective } = turn;
   const update = (next: typeof draft) => {
     setCodeDraft(taskId, next);
@@ -115,7 +166,9 @@ export function CodeSessionComposer({
   const models: Model[] =
     capabilities?.models.map((item) => named(item.model, item.label)) ??
     (model ? [named(model, model)] : []);
-  const canChangeSpeed = !!choices && choices.speeds.includes('fast') && !sending;
+  const level = speed ? SPEED_LEVEL[speed] : undefined;
+  const nextSpeed = level && choices && !sending ? nextSupportedSpeed(level, choices.speeds) : null;
+  const container = codeContainerState(c.meta, useCachedCodeAgent(c.liveTaskId));
   const contextWindow = settings.contextWindow;
   const contextSize = settings.contextTokens ?? 0;
   const contextPercentage = contextWindow ? Math.min(100, (contextSize / contextWindow) * 100) : 0;
@@ -128,9 +181,9 @@ export function CodeSessionComposer({
         c,
         { ...settings, model, speed },
         new Date(0).toISOString(),
-        messages.filter((message) => message.metadata?.task_id === taskId).length,
+        c.messages.filter((message) => message.metadata?.task_id === taskId).length,
       ),
-    [taskId, owner.selectedAgentId, c, settings, model, speed, messages],
+    [taskId, owner.selectedAgentId, c, settings, model, speed],
   );
   const submit = async (attachments?: FilePointer[]) => {
     const delivered = await send(draft.text, {
@@ -160,18 +213,34 @@ export function CodeSessionComposer({
         showModelSelector={!!capabilities && !sending}
         onModelChange={(next) => update({ ...draft, options: { model: next } })}
         speedControl={
-          speed
+          level
             ? {
-                fastMode: speed !== 'standard',
-                onFastModeChange: canChangeSpeed
-                  ? (fast) =>
-                      update({
-                        ...draft,
-                        options: { ...draft.options, speed: fast ? 'fast' : 'standard' },
-                      })
+                fastMode: level !== 'normal',
+                level,
+                onLevelChange: nextSpeed
+                  ? () => update({ ...draft, options: { ...draft.options, speed: nextSpeed.id } })
                   : undefined,
               }
             : undefined
+        }
+        cornerStatus={
+          <>
+            <CodeContainerStatus state={container} />
+            <CodeResourcesIndicator
+              taskId={c.liveTaskId}
+              running={live}
+              persistent
+              preview={
+                c.meta?.preview_url
+                  ? {
+                      previewUrl: c.meta.preview_url,
+                      title: c.meta.title ?? null,
+                      provider: c.provider,
+                    }
+                  : undefined
+              }
+            />
+          </>
         }
         nub={
           <>

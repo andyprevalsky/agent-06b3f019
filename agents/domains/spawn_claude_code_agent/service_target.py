@@ -60,7 +60,11 @@ def cloud_target() -> CodeAgentTarget:
 
 
 def code_agent_metadata(target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """The ``metadata.code_agent`` keys this lane owns: ``target``, ``device_name``, ``folder``."""
+    """The ``metadata.code_agent`` keys this lane owns: ``target``, ``device_name``, ``folder``.
+
+    ``title`` (the spawn's task_name) rides along so a view opened without a
+    title (e.g. from a URL) still names the code agent.
+    """
     if not target:
         return {"target": CODE_TARGET_CLOUD}
     metadata: Dict[str, Any] = {"target": target.get("target") or CODE_TARGET_CLOUD}
@@ -68,6 +72,8 @@ def code_agent_metadata(target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         metadata["device_name"] = target["device_name"]
     if target.get("folder"):
         metadata["folder"] = target["folder"]
+    if target.get("title"):
+        metadata["title"] = target["title"]
     return metadata
 
 

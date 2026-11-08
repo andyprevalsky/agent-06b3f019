@@ -97,6 +97,7 @@ from helpers.background_agents import (
     is_background_started_metadata,
 )
 from helpers.generation_handoff import GenerationHandoffRequested
+from helpers.handle_tool_event import handle_tool_event
 from helpers.wait_condition_or_handoff import note_generation_handoff, wait_condition_or_generation_handoff
 from helpers.wait_wake import first_wake, record_wake, wait_baseline
 from loop.dag_executor import DagInterrupts
@@ -129,6 +130,7 @@ FINISHED_RECORD_KEYS = (
     "started_at",
     "finished_at",
     "wake_message_ids",
+    "code_provider",
 )
 MAX_SEEN_AGENT_MESSAGE_IDS = 200
 
@@ -273,6 +275,15 @@ class BackgroundAgentsMixin:
                     summary["child_workflow"] = record.get("agent_type") in CHILD_WORKFLOW_AGENT_TYPES
                     return summary
         return None
+
+    def _note_background_code_provider(self, task_id: str, provider: Any) -> None:
+        """Record the CLI a code task runs on its spawn record (wait_for targetTypes); idempotent."""
+        if provider not in ("claude", "codex"):
+            return
+        for source in (self._background_tasks, self._background_finished):
+            record = source.get(task_id)
+            if record is not None and record.get("agent_type") == "code":
+                record["code_provider"] = provider
 
     def _wake_background_waiters(self) -> None:
         self._background_wake_seq += 1
@@ -490,6 +501,19 @@ class BackgroundAgentsMixin:
                     "backgroundAgentType": agent_type,
                     "backgroundPath": record.get("path"),
                     "backgroundGoal": str(record.get("goal") or "")[:200],
+                    # What a person's later resume of this browser re-runs with when its
+                    # owner cannot (backend agentMessageResume.ts, a supervised fresh run).
+                    **(
+                        {
+                            "backgroundSpawnArgs": {
+                                key: args[key]
+                                for key in ("goal", "start_url", "output_schema", "attachments")
+                                if args.get(key) not in (None, "", [], {})
+                            }
+                        }
+                        if agent_type == "browser"
+                        else {}
+                    ),
                 },
             ),
             tool_call_id,
@@ -839,6 +863,9 @@ class BackgroundAgentsMixin:
         message_id: Optional[str],
         sender: Optional[str],
         continue_conversation: Optional[bool] = None,
+        by_user: bool = False,
+        user_attachments: Optional[List[Dict[str, Any]]] = None,
+        user_cli_settings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """send_message_to_agent to a finished explore/browser/code task: start its next run.
 
@@ -857,7 +884,7 @@ class BackgroundAgentsMixin:
         if message_id and message_id in (record.get("wake_message_ids") or []):
             return {"woke": True, "already_running": True}
         wake = record.get("wake")
-        refusal = background_message_refusal(record, continue_conversation)
+        refusal = background_message_refusal(record, continue_conversation, by_user=by_user)
         if refusal is not None:
             return {"woke": False, "reason": refusal}
         if record.get("agent_type") not in WAKEABLE_TASK_TYPES or not isinstance(wake, dict):
@@ -879,6 +906,12 @@ class BackgroundAgentsMixin:
         elif continue_conversation is True:
             # Code: the CLI resumes its own conversation; the message is its next turn.
             args["goal"] = message
+            if by_user and user_attachments:
+                # The files the owner attached to that typed turn (handler appends them).
+                args["_user_attachments"] = list(user_attachments)
+            if by_user and user_cli_settings:
+                # Its model / effort / speed: the resumed CLI's first turn runs on them.
+                args["_resume_cli_settings"] = dict(user_cli_settings)
         else:
             args["goal"] = build_background_wake_goal(
                 message=message,
@@ -916,29 +949,77 @@ class BackgroundAgentsMixin:
         """receive_agent_message for a finished own task (sent by another agent through the backend)."""
         address = data.get("wake_task_id")
         message = data.get("message")
+        from_user = data.get("from_user") is True
         if not isinstance(address, str) or not isinstance(message, str) or not message.strip():
+            if from_user and isinstance(address, str):
+                await self._post_user_resume_refusal(address.split(".run")[0], "the message was empty")
             return
         message_id = data.get("message_id")
         if isinstance(message_id, str) and message_id and message_id in self._seen_agent_message_ids:
             return  # a retried send re-signals the same row
         record = self._background_task_for_address(address)
         if record is None or record.get("child_workflow"):
+            if from_user:
+                # The person's turn must never wait on a wake that will not happen.
+                await self._post_user_resume_refusal(
+                    address.split(".run")[0], "its Rose agent no longer tracks this code agent"
+                )
             return
         continue_conversation = data.get("continue_conversation")
+        sender = data.get("from_agent_path") if isinstance(data.get("from_agent_path"), str) else None
+        if sender is None and data.get("from_user") is True:
+            sender = "the user"
         result = await self._wake_background_task(
             record["background_task_id"],
             message,
             message_id=message_id if isinstance(message_id, str) else None,
-            sender=data.get("from_agent_path") if isinstance(data.get("from_agent_path"), str) else None,
+            sender=sender,
             continue_conversation=continue_conversation if isinstance(continue_conversation, bool) else None,
+            # The owner typed in the code agent's own view (backend directChatResume.ts).
+            by_user=data.get("from_user") is True,
+            user_attachments=data.get("attachments") if isinstance(data.get("attachments"), list) else None,
+            user_cli_settings=data.get("cli_settings") if isinstance(data.get("cli_settings"), dict) else None,
         )
         if not result.get("woke"):
             # Refused (paused / killed / cost limit): the id stays unseen so a retry after the owner recovers wakes it.
             workflow.logger.warning(f"[background] did not wake {address}: {result.get('reason')}")
+            if data.get("from_user") is True and not result.get("already_running"):
+                await self._post_user_resume_refusal(record["background_task_id"], str(result.get("reason") or ""))
         elif isinstance(message_id, str) and message_id:
             # _wake_background_task is itself idempotent per message id (it changes state before its only await).
             self._seen_agent_message_ids.append(message_id)
             del self._seen_agent_message_ids[:-MAX_SEEN_AGENT_MESSAGE_IDS]
+
+    async def _post_user_resume_refusal(self, task_id: str, reason: str) -> None:
+        """The owner typed to a stopped code / browser agent and this workflow cannot start its next run.
+
+        A UI-only row on the spawn (excluded from every model context), labelled by
+        the task's type: the typed turn reads "Couldn't resume: <reason>" instead of waiting.
+        """
+        record = self._background_finished.get(task_id) or self._background_tasks.get(task_id) or {}
+        agent_type = record.get("agent_type")
+        tool_name, title = {
+            "browser": ("spawn_browser_agent", "Browser could not resume"),
+            "code": ("spawn_claude_code_agent", "Code agent could not resume"),
+        }.get(str(agent_type), ("spawn_agent", "Agent could not resume"))
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=title,
+                message=reason or "its Rose agent could not start it",
+                status=MessageStatus.ERROR,
+                metadata={
+                    "toolName": tool_name,
+                    "excludeFromModel": True,
+                    "codeAgentResume": "refused",
+                },
+            ),
+            agent_id=self.agent_id,
+            tool_call_id=task_id,
+            tool_name=tool_name,
+            execute_activity=workflow.execute_activity,
+            user_id=getattr(self, "user_id", None),
+        )
 
     async def _notification_recipient(self) -> str:
         """ "Task name" of a notification this agent receives: its own task path."""

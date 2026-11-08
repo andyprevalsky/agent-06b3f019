@@ -1217,9 +1217,17 @@ class SpawnAgentManager(ToolManager):
             code_tool_call["code_session_id"] = tool_call["code_session_id"]
         if tool_call.get("target"):
             code_tool_call["target"] = tool_call["target"]
+        if tool_call.get("task_name"):
+            # Stored on the code task row: the agents list shows it as the title.
+            code_tool_call["task_name"] = tool_call["task_name"]
         if tool_call.get("_fresh_conversation") is True:
             # Set only by a continue_conversation=false resume (workflows/background_agents.py).
             code_tool_call["_fresh_conversation"] = True
+        # Set only by a person's resume of this code agent (helpers RESUME_CONVERSATION_KEYS):
+        # the typed turn's files, the stopped session's CLI and the turn's model / effort / speed.
+        for key in ("_user_attachments", "_resume_code_provider", "_resume_cli_settings"):
+            if tool_call.get(key):
+                code_tool_call[key] = tool_call[key]
 
         manager = get_code_manager()
         async for event in manager.execute_tool(workflow_instance, code_tool_call, tool_call_id):

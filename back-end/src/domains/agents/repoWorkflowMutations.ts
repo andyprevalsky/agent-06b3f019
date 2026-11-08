@@ -1,3 +1,4 @@
+import { addResumeSpendLocked } from '../../providers/resumeReportedSpend';
 import type { Prisma } from './types';
 import { runTransactionWithRetry } from '../../providers/database';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
@@ -95,6 +96,14 @@ export async function updateAgentConfigMutation(
       generatedTitle !== undefined && accepted.title === null && accepted.parentAgentId === null
         ? { title: generatedTitle }
         : {};
+    // A tree-cost write stores its value plus the resume spend under the agent, under
+    // the Agent row lock (resumeReportedSpend.ts): a concurrent raise is never lost.
+    if (typeof data.treeCostCents === 'number') {
+      data = {
+        ...data,
+        treeCostCents: await addResumeSpendLocked(tx, agentId, data.treeCostCents),
+      };
+    }
     if (Object.keys(data).length > 0 || Object.keys(generatedTitleUpdate).length > 0) {
       const raisedCostLimit =
         (accepted.status === 'COST_LIMIT_REACHED' ||

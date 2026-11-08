@@ -20,6 +20,7 @@ interface CompletedAgentsDrawerProps {
   getChildren: (parentId: string) => TreeNode[];
   onNavigate: (agentId: string) => void;
   renderAfterNode?: (node: TreeNode, childPrefix: string) => ReactNode;
+  canNavigate?: (node: TreeNode) => boolean;
 }
 
 function completedSummary(nodes: TreeNode[]): string {
@@ -33,6 +34,7 @@ export function CompletedAgentsDrawer({
   getChildren,
   onNavigate,
   renderAfterNode,
+  canNavigate,
 }: CompletedAgentsDrawerProps) {
   const [open, setOpen] = useState(false);
   if (nodes.length === 0) return null;
@@ -61,6 +63,7 @@ export function CompletedAgentsDrawer({
             getChildren={getChildren}
             onNavigate={onNavigate}
             renderAfterNode={renderAfterNode}
+            canNavigate={canNavigate}
           />
         ))}
     </div>

@@ -22,6 +22,13 @@ fi
 DATABASE_URL="$LOCAL_URL" DIRECT_URL="$LOCAL_URL" PRISMA_LOCAL_PUSH_DRY_RUN=1 \
   bash "$SCRIPT" | grep -Fq 'validation passed'
 
+# A DB built by this wrapper alone must match the runners' schema: it applies
+# the runtime SQL hooks (trajectory triggers superseded after 20260929).
+grep -Fq 'apply-local-runtime-sql-hooks.sh' "$SCRIPT" || {
+  echo "prisma-local-push must apply the local runtime SQL hooks" >&2
+  exit 1
+}
+
 # Agents follow these docs literally. A bare `npx prisma db push` from back-end/
 # picks up back-end/.env's prod URLs and drops every index Prisma cannot model,
 # so instructions must route local pushes through the guarded wrapper instead.

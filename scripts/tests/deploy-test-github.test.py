@@ -1049,5 +1049,68 @@ class WorkflowMirrorCheckout(unittest.TestCase):
             self.assertIn('-c gc.autoDetach=false', script, 'mirror gc must not outlive the step')
 
 
+
+class GateSetupReleaseTools(unittest.TestCase):
+    """scripts/ci/deploy-gate-setup.sh flyctl + tunnel tools, executed with stand-in curl/sudo/tar.
+
+    PR #1826 (2026-11-08): GitHub's unauthenticated release downloads answered 504 for 15+ minutes
+    and the unauthenticated `--retry 3` installs failed every Blacksmith gate in "Prepare runner"
+    before a single test ran. Release binaries are fetched through the GitHub API with the job token,
+    retrying any error for minutes, and scripts/ci/release-tool.sh installs the dependency disk's
+    last good copy when the fetch still fails.
+    """
+
+    def run_block(self, tmp, calls, curl_fails=False):
+        text = (ROOT / 'scripts/ci/deploy-gate-setup.sh').read_text()
+        block = text[text.index('# Release binaries (flyctl'):text.index('step "dependency disk"')]
+        bin_dir = tmp / 'bin'
+        bin_dir.mkdir(exist_ok=True)
+        (tmp / 'deps').mkdir(exist_ok=True)  # the mounted dependency disk
+        api = json.dumps({'assets': [
+            {'name': 'flyctl_0.5.5_Linux_x86_64.tar.gz', 'url': 'https://api.github.com/assets/1'},
+            {'name': 'cloudflared-linux-amd64', 'url': 'https://api.github.com/assets/2'},
+        ]})
+        (tmp / 'api.json').write_text(api)
+        (bin_dir / 'curl').write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\x1f" "$@" >> ' + str(calls) + '\nprintf "\\n" >> ' + str(calls) + '\n'
+            + ('exit 22\n' if curl_fails else '')
+            + 'out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done\n'
+            'if [ -n "$out" ]; then printf "#!/bin/sh\\n" > "$out"; else cat ' + str(tmp / 'api.json') + '; fi\n')
+        (bin_dir / 'tar').write_text('#!/usr/bin/env bash\nprintf "#!/bin/sh\\n" > "$4/$5"\n')
+        (bin_dir / 'sudo').write_text('#!/usr/bin/env bash\n[ "$1" = bash ] && exit 0\n'
+                                      'case "$*" in *" /usr/local/bin/"*) exit 0;; esac\nexec "$@"\n')
+        for name in ('curl', 'tar', 'sudo'):
+            (bin_dir / name).chmod(0o755)
+        env = {'PATH': f'{bin_dir}:/usr/bin:/bin', 'HOME': str(tmp / 'home'), 'DEPS': str(tmp / 'deps'),
+               'GITHUB_PATH': str(tmp / 'ghpath'), 'FETCH_TOKEN': 'tok-123', 'RELEASE_TOOL_RETRY_SECONDS': '0'}
+        script = 'set -euo pipefail\nstep() { :; }\n' + block
+        return subprocess.run(['bash', '-c', script], cwd=ROOT, env=env, capture_output=True, text=True,
+                              timeout=60)
+
+    def test_release_tools_use_the_token_retry_for_minutes_and_fall_back_to_the_disk_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            calls = tmp / 'curl-calls'
+            first = self.run_block(tmp, calls)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            invocations = [line.split('\x1f')[:-1] for line in calls.read_text().splitlines()]
+            self.assertGreaterEqual(len(invocations), 4, invocations)  # API + asset, for flyctl and cloudflared
+            for args in invocations:
+                self.assertIn('Authorization: Bearer tok-123', args)
+                self.assertIn('--retry-all-errors', args)
+                self.assertGreaterEqual(int(args[args.index('--retry-max-time') + 1]), 120, args)
+                self.assertTrue(any(a.startswith('https://api.github.com/') for a in args), args)
+            self.assertTrue(any('https://api.github.com/repos/cloudflare/cloudflared/releases/latest' in args
+                                for args in invocations), invocations)
+            self.assertTrue((tmp / 'home/.fly/bin/flyctl').exists())
+            self.assertTrue((tmp / 'deps/release-tools/flyctl').exists())
+            # A later runner on the same dependency disk during an outage installs the last good copy.
+            calls.unlink()
+            (tmp / 'home/.fly/bin/flyctl').unlink()
+            second = self.run_block(tmp, calls, curl_fails=True)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("flyctl: installing the dependency disk's last good copy", second.stderr)
+            self.assertTrue((tmp / 'home/.fly/bin/flyctl').exists())
+
 if __name__ == '__main__':
     unittest.main()

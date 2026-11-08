@@ -29,6 +29,7 @@ import {
   expandBar,
   makeProject,
   mockProjectsApi,
+  resolvedLeft,
   roseBar,
   signedInUser,
 } from './rose-sidebar.fixtures';
@@ -143,8 +144,11 @@ describe('Rose left bar (flag on)', () => {
     unmount();
     renderBar();
     expect(roseBar()).toBeInTheDocument();
-    // No drag: the Rose bar has no resize handle (row 21).
-    expect(screen.queryByLabelText('Resize sidebar')).toBeNull();
+    // The Rose bar's own right-edge handle (drag to widen + pin; rose-sidebar-resize).
+    expect(within(roseBar()).getByLabelText('Resize sidebar')).toHaveAttribute(
+      'data-testid',
+      'rose-sidebar-resize-handle',
+    );
   });
 
   it('orders Back | Search, then the created projects with their agents, then the Home project last, divided', async () => {
@@ -440,7 +444,8 @@ describe('Rose left bar (flag on)', () => {
     await user.click(within(roseBar()).getByRole('button', { name: 'Biz health' }));
     const panel = screen.getByTestId('rose-app-panel');
     expect(panel).toHaveAttribute('data-variant', 'full');
-    expect(panel.style.left).toBe('64px');
+    // From the left bar's live offset: the unpinned bar's 64px here.
+    expect(resolvedLeft(panel)).toBe('64px');
     expect(panel.style.right).toBe('0px');
     expect(panel.style.width).toBe('');
     expect(screen.queryByTestId('app-drawer-resize-handle')).toBeNull();

@@ -70,3 +70,12 @@ export async function waitForChildReadiness(
     child.once('exit', onFailure);
   });
 }
+
+/** SIGKILL a local ws-server child; a child that already exited is not an error. */
+export function killChildQuietly(child: ChildProcess): void {
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // already dead
+  }
+}

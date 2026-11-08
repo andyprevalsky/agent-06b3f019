@@ -63,6 +63,11 @@ export interface RoseAppsValue {
   toggleApp: (app: RoseApp) => void;
   closeApp: () => void;
   openAgentBrowser: (agentId: string, taskId: string) => void;
+  /**
+   * Open Browser on an agent whose task id is unknown: its first registered tab,
+   * else no selection until that agent's tab registers (then it takes over).
+   */
+  openAgentBrowserTab: (agentId: string) => void;
   selectBrowserTab: (agentId: string | null, taskId?: string) => void;
   /** Open an agent in the main chat (Benchmarks panel rows). */
   openAgent: (agentId: string) => void;
