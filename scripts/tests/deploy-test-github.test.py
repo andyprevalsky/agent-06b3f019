@@ -363,7 +363,9 @@ class Executor(unittest.TestCase):
                     semantic_worker_processes=g.SEMANTIC_WORKER_PROCESSES, sample_memory=None,
                     abort_below_mb=None, executor='blacksmith')
         from types import SimpleNamespace
+        # Cloud smoke is selected, so gates refuse an unpushed HEAD; this fixture's HEAD is treated as pushed.
         with patch.object(g, 'list_selected', return_value=selection), \
+                patch.object(g, 'unpushed_smoke_refusal', return_value=None), \
                 patch.object(g, 'standard_template', standard), \
                 patch.object(g, 'check_capacity', lambda root, workers, proc=None: seen.append(
                     [w['gate'] for w in workers]) or {'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0,

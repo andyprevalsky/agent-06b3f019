@@ -806,7 +806,7 @@ apply_local_semantic_db_urls
 ISOLATED_BENCHMARKS_LIB="$ROOT_DIR/scripts/lib/isolated-benchmarks.sh"
 [ -f "$ISOLATED_BENCHMARKS_LIB" ] || fail "isolated benchmark liveness helper is missing"
 require_text "$RUNNER" 'if [[ "${1:-}" == "chat-lifecycle-latency" ]]; then' "local latency ratchet must gate on live isolated benchmark runs"
-require_text "$RUNNER" 'wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}" 30' "local latency ratchet must wait for isolated benchmark runs before measuring"
+require_text "$RUNNER" 'wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-900}" 30' "local latency ratchet must wait for isolated benchmark runs before measuring"
 wait_line=$(grep -n 'wait_for_isolated_benchmarks "$REPO_DIR"' "$RUNNER" | head -1 | cut -d: -f1)
 session_line=$(grep -n 'SEMANTIC_SESSION=$(cd "$REPO_DIR/back-end"' "$RUNNER" | head -1 | cut -d: -f1)
 [ -n "$wait_line" ] && [ -n "$session_line" ] && [ "$wait_line" -lt "$session_line" ] \
@@ -819,6 +819,10 @@ require_text "$RUNNER" 'python3 "$REPO_DIR/scripts/cloudbench_provider_headroom.
 quota_line=$(grep -n 'cloudbench_provider_headroom.py" cerebras-wait' "$RUNNER" | head -1 | cut -d: -f1)
 [ -n "$quota_line" ] && [ "$wait_line" -lt "$quota_line" ] && [ "$quota_line" -lt "$session_line" ] \
   || fail "shared Cerebras quota wait must run after the local benchmark wait and before the session"
+# 2026-11-08: a fail-closed hour-long quota wait held PR1784's semantic gate 70+ min.
+# The quota wait is bounded inside the 30 min gate deadline and advisory.
+require_text "$RUNNER" '--timeout-seconds "${SEMANTIC_CEREBRAS_WAIT_S:-300}" \' "the shared Cerebras quota wait must stay well inside the semantic gate deadline"
+require_text "$RUNNER" 'measuring the latency ratchet anyway' "a short or unreadable Cerebras quota must not fail the gate before the ratchet measures"
 
 . "$ISOLATED_BENCHMARKS_LIB"
 bench_repo="$(mktemp -d)"

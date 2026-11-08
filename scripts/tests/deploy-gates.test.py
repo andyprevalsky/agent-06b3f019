@@ -233,6 +233,15 @@ class Inventory(Fixture):
             self.assertEqual(str(self.root.resolve() / '.context/deploy-ledger-park'),
                              g.local_slot(self.root, 'agentcard-lifecycle', path, values)['env']['BENCHMARK_HISTORY_PARK_DIR'])
 
+    def test_semantic_stack_gets_its_measured_deadline_on_every_transport(self):
+        """2026-11-08: a semantic run blocked in its runner's hour-long waits held PR1784's round for 70+ min
+        under the 4 h default; its 72 passes had p99 23.1 min. Every other gate keeps the default."""
+        values = {'CONDUCTOR_WORKSPACE_NAME': 'w', 'CONDUCTOR_PORT': '21530'}
+        self.assertEqual(1800, g.remote_slot(self.root, 'semantic-stack')['timeout_seconds'])
+        self.assertEqual(1800, g.local_slot(self.root, 'semantic-stack', self.path('semantic-stack'), values)['timeout_seconds'])
+        for gate in ('deploy-command-structural', 'agents-coverage-blackbox', 'frontend-coverage-blackbox'):
+            self.assertEqual(g.GATE_DEADLINE_SECONDS, g.remote_slot(self.root, gate)['timeout_seconds'])
+
     def test_system_pg_is_carried_only_when_prepared_and_identity_is_required(self):
         self.system_pg = False
         slots = self.provision(['live-probes', 'backend-coverage-blackbox'])

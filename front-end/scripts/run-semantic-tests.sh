@@ -309,12 +309,17 @@ else
   # the 5s ratchet. Wait before generating the session so it cannot expire.
   if [[ "${1:-}" == "chat-lifecycle-latency" ]]; then
     . "$REPO_DIR/scripts/lib/isolated-benchmarks.sh"
-    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}" 30
+    # Both waits stay inside the semantic gate's 30 min deadline (scripts/deploy_gates.py
+    # GATE_DEADLINES): an hour-long wait held PR1784's round for 70+ min (2026-11-08).
+    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-900}" 30
     # That wait sees only this checkout. Production and every other devbox's
     # deploys spend the same Cerebras org quota, which only the provider's own
-    # rate-limit headers report: wait while a per-minute window is short.
+    # rate-limit headers report: wait while a per-minute window is short. The wait
+    # is advisory: a quota still short or unreadable after it is measured anyway,
+    # so the ratchet reports its real result instead of failing on the wait.
     python3 "$REPO_DIR/scripts/cloudbench_provider_headroom.py" cerebras-wait \
-      --timeout-seconds "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}"
+      --timeout-seconds "${SEMANTIC_CEREBRAS_WAIT_S:-300}" \
+      || echo "⚠️  Cerebras shared quota still short or unmeasured after ${SEMANTIC_CEREBRAS_WAIT_S:-300}s; measuring the latency ratchet anyway" >&2
   fi
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then

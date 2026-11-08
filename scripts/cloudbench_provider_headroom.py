@@ -67,7 +67,13 @@ Probe = Callable[[], "int | None"]
 
 
 class HeadroomUnavailable(RuntimeError):
-    """Live usage could not be read; the message never carries a credential."""
+    """Live usage could not be read; the message never carries a credential.
+
+    `retryable` is False when waiting cannot help (the provider rejected the credential)."""
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class HeadroomRefused(ValueError):
@@ -210,7 +216,9 @@ def cerebras_minute_windows(api_key: str, *, opener: Callable = _open,
     except (urllib.error.URLError, OSError, ValueError) as error:
         raise HeadroomUnavailable(f"Cerebras quota probe failed: {type(error).__name__}") from None
     if status not in (200, 429):
-        raise HeadroomUnavailable(f"Cerebras quota probe answered HTTP {status}")
+        # A rejected credential (401/403) reports nothing about headroom, and no amount of
+        # waiting changes it: PR1784's semantic gate polled a 403 for its whole hour (2026-11-08).
+        raise HeadroomUnavailable(f"Cerebras quota probe answered HTTP {status}", retryable=status >= 500)
     lowered = {str(name).lower(): value for name, value in (headers or {}).items()}
     windows = {}
     for name, value in lowered.items():
@@ -233,6 +241,9 @@ def wait_for_cerebras(api_key: str, *, reserve: Fraction, deadline: float, opene
         try:
             status, windows, retry_after = cerebras_minute_windows(api_key, opener=opener)
         except HeadroomUnavailable as error:
+            if not error.retryable:
+                print(f"FAIL: cannot measure the shared Cerebras quota: {error}", file=sys.stderr, flush=True)
+                return False
             short.append(str(error))
             pauses.append(POLL_SECONDS)
         else:
