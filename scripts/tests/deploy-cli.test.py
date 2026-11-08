@@ -361,6 +361,17 @@ class ReviewWait(Repo):
         args = d.parser().parse_args(['review-wait'])
         self.assertEqual((args.timeout, args.rate_limit_max_wait), (600, 3600))
 
+    def test_a_no_reviewable_paths_head_neither_waits_nor_rerequests(self):
+        d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'b' * 40})
+        latest = {'head': 'b' * 40, 'kind': 'no-reviewable-paths', 'status': 'completed', 'result': 'clean'}
+        with patch.object(d, 'review_state', return_value={'cycles': [latest]}), \
+             patch.object(d, 'run') as runner, patch.object(d, 'coderabbit_check') as check:
+            code, out, _ = self.call(d.cmd_review_wait, timeout=600, rate_limit_max_wait=3600)
+        self.assertEqual(code, 0)
+        self.assertIn('DEPLOY_REVIEW_WAIT no-reviewable-paths head=bbbbbbbbbbbb', out)
+        runner.assert_not_called()
+        check.assert_not_called()
+
     def test_a_failed_wait_propagates_without_reading_the_check(self):
         with patch.object(d, 'coderabbit_check') as check:
             d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'a' * 40})
@@ -404,14 +415,87 @@ class ReviewApprovalLedger(Repo):
         real = subprocess.run
         only_next = lambda argv, **kw: nxt if 'next' in argv else real(argv, **kw)
         with patch.object(d.subprocess, 'run', side_effect=only_next), patch.object(d, 'factory') as event, \
+             patch.object(d, 'no_reviewable_paths', return_value=None) as unreviewable, \
              patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
             code, out, _ = self.call(d.cmd_review_next, verification_approval='appr-1')
         self.assertEqual(code, 0, out)
+        unreviewable.assert_called_once_with(d.head(), pr=7)
         self.assertEqual(calls[0][1:], ['scripts/deploy_review_cycle.py', 'start', '--kind', 'verification',
                                         '--head', d.head(), '--verification-approval', 'appr-1'])
         self.assertEqual(calls[1], ['git', 'push', 'origin', 'HEAD'])
         self.assertEqual(calls[2], ['gh', 'pr', 'comment', '7', '--body', '@coderabbitai review'])
         event.assert_called_once_with('stage-start', 'code-review')
+
+    def test_review_next_records_an_excluded_only_batch_instead_of_requesting_a_review(self):
+        self.opened()
+        (self.root / 'notes.md').write_text('n\n')
+        sh('git', 'add', '.', cwd=self.root)
+        sh('git', 'commit', '-qm', 'docs', cwd=self.root)
+        calls = []
+        entry = {'kind': 'no-reviewable-paths', 'head': d.head(), 'report_row': 'Code Review | ➖ No reviewable paths'}
+        with patch.object(d, 'no_reviewable_paths', return_value=entry), patch.object(d, 'factory') as event, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_review_next, verification_approval=None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(calls, [['git', 'push', 'origin', 'HEAD']], 'no ledger start and no @coderabbitai request')
+        self.assertIn('review=no-reviewable-paths', out)
+        self.assertEqual(json.loads(d.PR_FILE.read_text())['head'], d.head())
+        event.assert_not_called()
+
+    def test_open_pr_on_an_existing_pr_skips_the_request_when_no_path_is_reviewable(self):
+        sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
+        viewed = subprocess.CompletedProcess([], 0, stdout='7\n', stderr='')
+        real = subprocess.run
+        only_view = lambda argv, **kw: viewed if argv[:3] == ['gh', 'pr', 'view'] else real(argv, **kw)
+        calls = []
+        entry = {'kind': 'no-reviewable-paths', 'head': d.head(), 'report_row': 'row'}
+        with patch.object(d.subprocess, 'run', side_effect=only_view), patch.object(d, 'factory') as event, \
+             patch.object(d, 'no_reviewable_paths', return_value=entry) as unreviewable, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_open_pr, title='t', body_file=None, restart=False)
+        self.assertEqual(code, 0, out)
+        unreviewable.assert_called_once_with(d.head(), pr='7', initial=True)
+        self.assertEqual(calls, [['git', 'push', '-u', 'origin', 'feature']])
+        self.assertIn('DEPLOY_OPEN_PR pr=7 head=', out)
+        self.assertIn('review=no-reviewable-paths', out)
+        event.assert_not_called()
+
+    def test_review_finish_on_a_no_reviewable_paths_head_is_already_closed(self):
+        latest = {'head': 'b' * 40, 'kind': 'no-reviewable-paths', 'status': 'completed'}
+        with patch.object(d, 'review_state', return_value={'cycles': [latest]}), \
+             patch.object(d, 'factory') as event, patch.object(d, 'run') as runner:
+            code, out, _ = self.call(d.cmd_review_finish, result='clean')
+        self.assertEqual(code, 0)
+        self.assertIn('result=no-reviewable-paths', out)
+        event.assert_not_called()
+        runner.assert_not_called()
+
+    def test_the_path_filter_decision_uses_the_real_ledger_against_origin_main(self):
+        source = Path(__file__).resolve().parents[2]
+        (self.root / 'scripts').mkdir()
+        (self.root / 'scripts' / 'deploy_review_cycle.py').write_text(
+            (source / 'scripts' / 'deploy_review_cycle.py').read_text())
+        (self.root / '.coderabbit.yaml').write_text((source / '.coderabbit.yaml').read_text())
+        sh('git', 'add', '.', cwd=self.root)
+        sh('git', 'commit', '-qm', 'tooling', cwd=self.root)
+        sh('git', 'push', '-q', 'origin', 'main', cwd=self.root)
+        sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
+        (self.root / 'docs').mkdir()
+        (self.root / 'docs' / 'note.md').write_text('n\n')
+        sh('git', 'add', '.', cwd=self.root)
+        sh('git', 'commit', '-qm', 'docs only', cwd=self.root)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            entry = d.no_reviewable_paths(d.head(), pr=7, initial=True)
+        self.assertEqual((entry['kind'], entry['head'], entry['changed_paths']),
+                         ('no-reviewable-paths', d.head(), ['docs/note.md']))
+        self.assertIn('Code Review | ➖ No reviewable paths', out.getvalue())
+        (self.root / 'app.py').write_text('x = 2\n')
+        sh('git', 'commit', '-qam', 'code', cwd=self.root)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(d.no_reviewable_paths(d.head(), pr=7))
+        self.assertIn('DEPLOY_REVIEW reviewable: 1 reviewable path(s): app.py', out.getvalue())
 
     def test_review_next_refusal_points_to_deferral_not_a_stop(self):
         self.opened()

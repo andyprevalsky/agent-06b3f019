@@ -156,34 +156,118 @@ def rate_limit_pause(headers, now: float) -> float:
     return 60.0
 
 
+READ_METHODS = ('GET', 'HEAD')
+READ_REPICK_SECONDS = 1500.0    # App installation tokens live an hour; re-pick the read member well before
+READ_REPICK_RETRY_SECONDS = 60.0  # a failed pick is not retried on every request
+READ_LOW_REMAINING = 200        # re-pick once the read member's own X-RateLimit-Remaining runs low
+
+
+def identity(token: str) -> str:
+    """A non-secret key for one credential: ETags and cached bodies are per identity."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def pick_read_member(root: Path) -> tuple[str, str] | None:
+    """(name, token) of the token-pool member with the most core quota, for READ-ONLY REST calls.
+
+    DEPLOY_GATE_GITHUB_POOL=0 keeps every read on the launch identity. Any pool failure does the same.
+    """
+    if os.environ.get('DEPLOY_GATE_GITHUB_POOL', '1') == '0':
+        return None
+    try:
+        import github_token_pool
+        member = github_token_pool.pick_member('core', repo_root=root, timeout=5.0)
+    except Exception as error:  # advisory: reads fall back to the launch identity
+        print(f'DEPLOY_GATE_GITHUB_POOL pick failed ({type(error).__name__}); reads use the launch token', flush=True)
+        return None
+    return (member.name, member.token) if member else None
+
+
 class GitHub:
-    def __init__(self, token: str, repo: str, deadline: float | None = None):
+    """REST client. Writes (POST cancel) always use `token`, the launch identity that pushed the tag.
+
+    Reads (GET) use the token-pool member with the most quota when a `read_picker` is given, then
+    retry with `token` when that member answers 401/403/404 (not authoritative: it may lack access)
+    or is itself rate limited. Only the launch identity's answer, or its rate-limit wait, is final.
+    """
+
+    def __init__(self, token: str, repo: str, deadline: float | None = None, read_picker=None):
         self.token, self.repo, self.etags, self.cache = token, repo, {}, {}
         self.rate_limited_seconds = 0.0  # time spent waiting out the shared REST quota, for the receipt
         self.deadline = deadline  # epoch the caller must be done by; a rate-limit wait never passes it
+        self.read_picker = read_picker
+        self.read_name, self.read_token, self.read_remaining = None, None, None
+        self.read_picked_at = self.read_attempted_at = float('-inf')
+        self.read_fallbacks = 0  # reads a pool member could not answer, retried with the launch token
+        self.served = identity(token)  # identity that produced the last response (selects the 304 cache)
+
+    def _read(self) -> str | None:
+        """The pool member's token for a read, re-picked when stale or low; None means use `token`."""
+        if self.read_picker is None:
+            return None
+        now = time.time()
+        stale = (self.read_token is None or now - self.read_picked_at >= READ_REPICK_SECONDS
+                 or (self.read_remaining is not None and self.read_remaining < READ_LOW_REMAINING))
+        if stale and now - self.read_attempted_at >= READ_REPICK_RETRY_SECONDS:
+            self.read_attempted_at = now
+            picked = self.read_picker()
+            if picked:
+                (self.read_name, self.read_token), self.read_picked_at, self.read_remaining = picked, now, None
+        return self.read_token if self.read_token and self.read_token != self.token else None
+
+    def tokens(self, method: str) -> list[str]:
+        read = self._read() if method in READ_METHODS else None
+        return [read, self.token] if read else [self.token]
+
+    def _note_quota(self, token: str, headers) -> None:
+        if token == self.read_token:
+            try:
+                self.read_remaining = int(headers.get('X-RateLimit-Remaining'))
+            except (AttributeError, TypeError, ValueError):
+                pass
 
     def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
-        req = urllib.request.Request(url, method=method, headers={
-            'Authorization': f'Bearer {self.token}', 'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rose-deploy-gates'})
-        if conditional and url in self.etags:
-            req.add_header('If-None-Match', self.etags[url])
         opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
-        for attempt in range(5):
+        tokens, index, attempt = self.tokens(method), 0, 0
+        while attempt < 5:
+            token = tokens[index]
+            key = identity(token)
+            req = urllib.request.Request(url, method=method, headers={
+                'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rose-deploy-gates'})
+            if conditional and (key, url) in self.etags:
+                req.add_header('If-None-Match', self.etags[(key, url)])
             try:
                 with opener.open(req, timeout=60) as response:
                     body = response.read()
+                    self.served = key
+                    self._note_quota(token, response.headers)
                     if conditional and response.headers.get('ETag'):
-                        self.etags[url] = response.headers['ETag']
-                        self.cache[url] = json.loads(body or b'null')
+                        self.etags[(key, url)] = response.headers['ETag']
+                        self.cache[(key, url)] = json.loads(body or b'null')
                     return response.status, response.headers, body
             except urllib.error.HTTPError as error:
-                if error.code == 304 and url in self.cache:
+                self.served = key
+                if error.code == 304 and (key, url) in self.cache:
                     return 304, error.headers, None
                 if error.code in (301, 302, 303, 307, 308) and not redirect:
                     return error.code, error.headers, b''
-                if error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower():
+                try:
+                    text = error.read().decode(errors='replace').lower()
+                except (AttributeError, OSError, ValueError):
+                    text = ''
+                limited = error.code in (403, 429) and 'rate limit' in text
+                if index + 1 < len(tokens) and (limited or error.code in (401, 403, 404)):
+                    # A pool member's 401/403/404 is not authoritative and its quota is not the launch
+                    # identity's: ask the launch token before treating this as GitHub's answer.
+                    index += 1
+                    self.read_fallbacks += 1
+                    if limited or error.code == 401:
+                        # Expired or drained: re-pick on the next read (one pick per such answer).
+                        self.read_picked_at = self.read_attempted_at = float('-inf')
+                    continue
+                if limited:
                     now = time.time()
                     pause = rate_limit_pause(error.headers, now)
                     if self.deadline is not None:
@@ -194,21 +278,25 @@ class GitHub:
                           f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + pause))})', flush=True)
                     self.rate_limited_seconds += pause
                     STOP.wait(pause)
+                    attempt += 1
+                    tokens, index = self.tokens(method), 0
                     continue
                 if error.code >= 500 and attempt < 4:
                     STOP.wait(2 ** attempt)
+                    attempt += 1
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError):
                 if attempt == 4:
                     raise
                 STOP.wait(2 ** attempt)
+                attempt += 1
         raise RuntimeError(f'GitHub API {method} {path} kept failing')
 
     def json(self, path: str, conditional: bool = False):
         status, _, body = self.request('GET', path, conditional=conditional)
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
-        return self.cache[url] if status == 304 else json.loads(body)
+        return self.cache[(self.served, url)] if status == 304 else json.loads(body)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -466,7 +554,7 @@ def launch(args) -> int:
         detail = error.stderr.decode(errors='replace')[-2000:] if isinstance(error, subprocess.CalledProcessError) else ''
         return finish(blocked(request, f'remote gate launch failed: {error} {detail}'.strip()))
     # Watching stops CANCEL_SECONDS early so a cancel still fits; a rate-limit wait keeps that window too.
-    gh = GitHub(token, repo, deadline=deadline)
+    gh = GitHub(token, repo, deadline=deadline, read_picker=lambda: pick_read_member(root))
     folder = result_path.parent / 'remote-artifact'
     try:
         channel = Channel(env_file_values(root))
@@ -482,6 +570,7 @@ def launch(args) -> int:
         return finish(blocked(request, str(error), receipt={'transport': TRANSPORT, 'tag': name}))
     kind, receipt = outcome['kind'], outcome.get('receipt') or {'transport': TRANSPORT, 'tag': name}
     receipt['rate_limited_seconds'] = gh.rate_limited_seconds
+    receipt.update(read_identity=gh.read_name, read_fallbacks=gh.read_fallbacks)  # names only, never tokens
     gh.deadline = started + args.deadline_seconds  # cancel, receipts and artifacts may use the reserved window
     if kind == 'never-started':
         delete_tag(root, token, repo, name)  # Nothing started that we can name; the tag alone owns no VM.

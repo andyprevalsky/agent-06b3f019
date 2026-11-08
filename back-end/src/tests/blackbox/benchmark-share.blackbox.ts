@@ -2,6 +2,8 @@
 
 /** A bearer link reads only its archived run, without an auth session. */
 import { createHmac, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { config } from 'dotenv';
 
 config();
@@ -28,6 +30,33 @@ async function expectStatus(url: string, status: number, shareToken?: string): P
     throw new Error(`${url.split('?')[0]}: expected ${status}, got ${response.status}`);
   }
   return response;
+}
+
+/**
+ * The local Hub's index lock is a per-database Postgres advisory lock, so a
+ * sibling coverage shard on another database sharing one Hub directory could
+ * overwrite this run out of the index (cleanup then 404s). Uploads must land in
+ * the runner's own artifact-scoped Hub directory, never the shared worktree one.
+ */
+function assertRunScopedHubStorage(runId: string): void {
+  const hubDir = process.env.BENCHMARK_HUB_LOCAL_DIR;
+  const artifactDir = process.env.BLACKBOX_TEST_ARTIFACT_DIR;
+  if (!hubDir || !artifactDir) {
+    throw new Error('runner must export BENCHMARK_HUB_LOCAL_DIR and BLACKBOX_TEST_ARTIFACT_DIR');
+  }
+  const relative = path.relative(path.resolve(artifactDir), path.resolve(hubDir));
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Hub directory ${hubDir} is not scoped to the run artifacts ${artifactDir}`);
+  }
+  if (!existsSync(path.join(hubDir, 'runs', `${runId}.json`))) {
+    throw new Error('backend did not store the upload in the run-scoped Hub directory');
+  }
+  const shared = path.resolve(
+    __dirname,
+    '../../../../.context/benchmark-hub/runs',
+    `${runId}.json`
+  );
+  if (existsSync(shared)) throw new Error('upload reached the shared worktree Hub directory');
 }
 
 async function main(): Promise<void> {
@@ -62,6 +91,7 @@ async function main(): Promise<void> {
   if (upload.status !== 201) throw new Error(`fixture upload failed: ${upload.status}`);
   let cleanupStatus = 0;
   try {
+    assertRunScopedHubStorage(runId);
     const now = Math.floor(Date.now() / 1000);
     const url = `${base}/api/benchmarks/shared-agent/${agentId}`;
     await expectStatus(url, 403);

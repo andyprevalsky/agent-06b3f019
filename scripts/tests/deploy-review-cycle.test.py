@@ -247,6 +247,161 @@ class ApprovedFinalVerificationTest(unittest.TestCase):
 
 
 
+class NoReviewablePathsTest(unittest.TestCase):
+    """A HEAD whose changed paths CodeRabbit's committed path filters all exclude spends no review request."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name) / "repo"
+        self.repo.mkdir()
+        self.state_path = Path(self.temp_dir.name) / ".context" / "deploy-review-cycle.json"
+        self.receipts = self.state_path.with_name(MODULE.RECEIPTS_NAME)
+        self.git("init", "-q", "-b", "main")
+        # The real config: the canonical filters must stay parseable by the ledger.
+        self.write(".coderabbit.yaml", (ROOT / ".coderabbit.yaml").read_text())
+        self.write("scripts/tool.py", "one\n")
+        self.write("scripts/tests/tool.test.py", "t1\n")
+        self.commit("base")
+        self.git("checkout", "-q", "-b", "feature")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    git = SyncInheritanceTest.git
+    write = SyncInheritanceTest.write
+    commit = SyncInheritanceTest.commit
+
+    def record(self, head: str, **kwargs) -> dict:
+        return MODULE.record_no_reviewable_paths(
+            self.state_path, head=head, repo=self.repo, receipts_path=self.receipts, **kwargs)
+
+    def reviewed(self, result: str = "clean") -> str:
+        self.write("scripts/tool.py", "one\nfeature\n")
+        head = self.commit("feature")
+        MODULE.start_cycle(self.state_path, head=head, kind="initial", reset=True)
+        MODULE.finish_cycle(self.state_path, head=head, result=result)
+        return head
+
+    def test_canonical_filters_exclude_tests_ledgers_and_docs_but_not_code(self) -> None:
+        include, exclude, _ = MODULE.path_filters(self.repo, "HEAD")
+        for name in ("scripts/tests/deploy-cli.test.py", "agents/tests/unit/test_x.py",
+                     "agents/benchmarks/history/task_attempts.jsonl", "docs/plans/a.md", "README.md",
+                     ".claude/commands/deploy.md", "back-end/src/x.blackbox.ts", "agents/x/__init__.py",
+                     "agents/config.py", "front-end/package-lock.json"):
+            self.assertFalse(MODULE.is_reviewable(name, include, exclude), name)
+        for name in ("scripts/deploy_cli.py", "agents/tools/x.py", "back-end/src/server.ts",
+                     "agents/tests/browser_tilion.blackbox.py", "agents/x/browser_tilion.blackbox.py",
+                     ".github/workflows/deploy.yml", ".github/notes.md"):
+            self.assertTrue(MODULE.is_reviewable(name, include, exclude), name)
+
+    def test_unsupported_glob_syntax_refuses_rather_than_guessing(self) -> None:
+        for pattern in ("src/{a,b}/**", "**/[ab].py", "+(a).py", "a//b", ""):
+            with self.subTest(pattern=pattern), self.assertRaises(MODULE.ReviewCycleError):
+                MODULE.glob_regex(pattern)
+
+    def test_tests_only_batch_after_a_clean_review_is_recorded_without_spending_a_cycle(self) -> None:
+        first = self.reviewed()
+        self.write("scripts/tests/tool.test.py", "t2\n")
+        self.write("agents/benchmarks/history/task_attempts.jsonl", "{}\n")
+        head = self.commit("ledger rows and a test")
+        entry = self.record(head, pr="7")
+        self.assertEqual((entry["kind"], entry["result"], entry["inherited_from"]),
+                         ("no-reviewable-paths", "clean", first))
+        self.assertEqual(entry["changed_paths"],
+                         ["agents/benchmarks/history/task_attempts.jsonl", "scripts/tests/tool.test.py"])
+        self.assertIn("No reviewable paths", entry["report_row"])
+        self.assertEqual(MODULE.require_mergeable(self.state_path, head=head)["head"], head)
+        entries = MODULE.read_state(self.state_path)["cycles"]
+        self.assertEqual(MODULE.next_cycle(entries)["number"], 2, "no review budget consumed")
+        receipt = json.loads(self.receipts.read_text().splitlines()[-1])
+        self.assertEqual((receipt["pr"], receipt["head"], receipt["disposition"]), ("7", head, "no-reviewable-paths"))
+        self.write("scripts/tool.py", "one\nfeature\nmore\n")
+        later = self.commit("real code")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "1 reviewable path"):
+            self.record(later)
+        self.assertEqual(MODULE.start_cycle(self.state_path, head=later, kind="incremental")["number"], 2)
+
+    def test_first_head_of_a_tests_only_branch_needs_no_initial_request(self) -> None:
+        self.write("scripts/tests/tool.test.py", "t2\n")
+        self.write("docs/plans/active/x.md", "plan\n")
+        head = self.commit("tests only")
+        entry = self.record(head, reset=True, base="main")
+        self.assertIsNone(entry["inherited_from"])
+        MODULE.require_mergeable(self.state_path, head=head)
+        self.assertEqual(MODULE.next_cycle(MODULE.read_state(self.state_path)["cycles"])["kind"], "initial")
+
+    def test_reviewable_or_unsafe_changes_request_the_review(self) -> None:
+        self.write("scripts/tool.py", "one\ncode\n")
+        head = self.commit("code")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "reviewable path.*scripts/tool.py"):
+            self.record(head, reset=True, base="main")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "needs --base"):
+            self.record(head, reset=True)
+        self.assertFalse(self.state_path.exists(), "a refusal records nothing")
+        self.reviewed()
+        cases = {
+            "config": ({".coderabbit.yaml": "reviews:\n  path_filters:\n    - '!**'\n"}, "coderabbit.yaml changed"),
+            "tilion": ({"agents/tests/browser_tilion.blackbox.py": "x\n"}, "reviewable path"),
+        }
+        base = self.git("rev-parse", "HEAD")
+        for name, (files, message) in cases.items():
+            with self.subTest(name=name):
+                self.git("checkout", "-q", "-B", f"case-{name}", base)
+                for path, text in files.items():
+                    self.write(path, text)
+                with self.assertRaisesRegex(MODULE.ReviewCycleError, message):
+                    self.record(self.commit(name))
+        self.git("checkout", "-q", "-B", "case-rename", base)
+        self.git("mv", "scripts/tool.py", "scripts/tests/tool_moved.test.py")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "scripts/tool.py"):
+            self.record(self.commit("move code into an excluded path"))
+        self.git("checkout", "-q", "-B", "case-unrelated", "main")
+        self.write("docs/x.md", "x\n")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "not an ancestor"):
+            self.record(self.commit("unrelated history"))
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "already the latest"):
+            self.record(base)
+
+    def test_findings_or_an_open_cycle_are_never_carried(self) -> None:
+        self.reviewed(result="findings")
+        self.write("docs/x.md", "x\n")
+        head = self.commit("docs")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "findings need a review cycle"):
+            self.record(head)
+        MODULE.start_cycle(self.state_path, head=head, kind="incremental")
+        self.write("docs/y.md", "y\n")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "still open"):
+            self.record(self.commit("more docs"))
+
+    def test_after_the_cap_an_excluded_only_batch_still_merges_without_an_override(self) -> None:
+        for index, (kind, result) in enumerate((("initial", "clean"), ("incremental", "findings"),
+                                                ("verification", "clean"))):
+            self.write("scripts/tool.py", f"v{index}\n")
+            head = self.commit(f"cycle {index}")
+            MODULE.start_cycle(self.state_path, head=head, kind=kind, reset=index == 0)
+            MODULE.finish_cycle(self.state_path, head=head, result=result)
+        self.write("scripts/tests/tool.test.py", "after cap\n")
+        head = self.commit("test fix")
+        self.record(head)
+        MODULE.require_mergeable(self.state_path, head=head)
+
+    def test_cli_prints_the_row_then_json_and_refusals_exit_nonzero(self) -> None:
+        self.write("docs/x.md", "x\n")
+        head = self.commit("docs")
+        argv = [sys.executable, str(ROOT / "scripts/deploy_review_cycle.py"), "--state", str(self.state_path),
+                "no-reviewable-paths", "--head", head, "--reset", "--base", "main", "--pr", "9"]
+        result = subprocess.run(argv, cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row, payload = result.stdout.splitlines()
+        self.assertTrue(row.startswith("Code Review | ➖ No reviewable paths | 1 changed path(s)"), row)
+        self.assertEqual(json.loads(payload)["head"], head)
+        self.write("scripts/tool.py", "code\n")
+        argv[argv.index(head)] = self.commit("code")
+        refused = subprocess.run(argv, cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((refused.returncode, refused.stdout), (1, ""))
+        self.assertIn("reviewable path(s): scripts/tool.py", refused.stderr)
+
+
 HEAD_A = "33d8cfbfed95812de3534a74bee0a0caa36f10fe"
 HEAD_B = "f602c1814b6f5fddbbdd71a3f22f6862807ea06c"
 HEAD_C = "da2dbd8b14e25c77dcd5d3b0df3fb42e27e7d9ea"

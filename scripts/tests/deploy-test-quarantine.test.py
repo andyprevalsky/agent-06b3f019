@@ -304,6 +304,47 @@ class ReleaseReport(unittest.TestCase):
         self.write_ledger(['QUARANTINED_PASS'] * 5, unit='other::test_unrelated', start=50)
         self.assertEqual(2, self.rows([attempts])['test_flaky_unit']['streak'])
 
+    def write_catalog(self, marker=None):
+        catalog = self.root / 'agents' / 'benchmarks' / 'tasks.json'
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_text(json.dumps([{'name': 'plain-smoke', 'prompt': 'p'},
+                                       {'name': 'cloud-smoke', 'prompt': 'p', 'quarantine': marker or dict(META)}],
+                                      indent=2))
+        return catalog
+
+    def test_smoke_task_markers_in_the_catalog_are_reported_with_their_streak(self):
+        self.write_catalog()
+        row = self.rows()['cloud-smoke']
+        self.assertEqual(('benchmark', 'agents/benchmarks/tasks.json', 7, REPAIR, 'never observed'),
+                         tuple(row[k] for k in ('lang', 'path', 'line', 'repair', 'status')))
+        self.assertNotIn('plain-smoke', self.rows())
+        # Smoke progress rows (unit = task name) land in the ledger like every other gate's.
+        lines = q.test_lines([('smoke', progress.row('cloud-smoke', 'QUARANTINED_PASS', at=self.epoch + i,
+                                                     quarantine=META)) for i in range(5)])['lines']
+        with self.ledger.open('a') as stream:
+            stream.write(json.dumps({'workflow': 'deploy', 'event': 'stage-finish', 'value': 'smoke',
+                                     'detail': {'tests': {'lines': lines}}}) + '\n')
+        self.assertEqual((5, True, 'ready to release'),
+                         tuple(self.rows()['cloud-smoke'][k] for k in ('streak', 'ready', 'status')))
+        self.write_ledger(['QUARANTINED_FAIL'], unit='cloud-smoke', start=100)
+        self.assertEqual((0, False), tuple(self.rows()['cloud-smoke'][k] for k in ('streak', 'ready')))
+
+    def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
+        self.write_catalog()
+        self.assertEqual({'cloud-smoke': META}, q.catalog_quarantines(self.root))
+        self.assertEqual({}, q.catalog_quarantines(self.root, ['plain-smoke']))
+        occurrence = {'gate': 'smoke', 'unit': 'cloud-smoke', 'source': {'head': 'a' * 40}}
+        recorded = q.validate_attribution(occurrence, {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1',
+                                                       'marker': 'agents/benchmarks/tasks.json',
+                                                       'repair_agent': REPAIR}, self.root)
+        self.assertEqual('agents/benchmarks/tasks.json', recorded['marker'])
+        for bad in ({**META, 'repair': 'https://boxes.dev/x'}, {**META, 'since': 'yesterday'},
+                    {k: v for k, v in META.items() if k != 'error'}, {**META, 'error': 'a\nb'}, ['x']):
+            with self.subTest(marker=bad):
+                self.write_catalog(bad)
+                with self.assertRaises(ValueError):
+                    q.catalog_quarantines(self.root)
+
     def test_cli_prints_the_table(self):
         self.write_ledger(['QUARANTINED_PASS'] * 5)
         out = subprocess.run([sys.executable, str(ROOT / 'scripts/test_quarantine.py'), 'report', '--root',

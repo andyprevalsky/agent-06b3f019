@@ -3,7 +3,8 @@
 
 A quarantined test carries its marker in its own definition (Python
 ``@quarantine(since=, repair=, error=, evidence=)`` from scripts/lib/test_quarantine.py,
-TypeScript ``quarantine(meta, fn)``). It still runs; its rows are QUARANTINED_FAIL or
+TypeScript ``quarantine(meta, fn)``, a smoke benchmark task's ``quarantine`` object in
+agents/benchmarks/tasks.json). It still runs; its rows are QUARANTINED_FAIL or
 QUARANTINED_PASS and never fail a gate. A non-quarantined unit that failed and passed
 its single rerun is FLAKY: it still needs /RCA attribution before merge.
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 import argparse
 import ast
 from datetime import datetime, timezone
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -40,6 +42,9 @@ DETAIL_LIMIT = 2000
 LINE_LIMIT = 160
 META_KEYS = ('since', 'repair', 'error', 'evidence')
 LEDGER = Path('agents/benchmarks/history/factory_events.jsonl')
+# Smoke benchmark tasks carry their marker as a `quarantine` object on their catalog entry.
+CATALOG = Path('agents/benchmarks/tasks.json')
+MARKER_MODULE = Path(__file__).resolve().parent / 'lib' / 'test_quarantine.py'
 LOCAL_EVENTS = Path('.context/factory-events.jsonl')
 STATE_DIR_ENV = 'DEPLOY_TEST_CYCLE_STATE_DIR'
 DEFAULT_STATE_DIR = Path('.context/deploy-pipeline')
@@ -252,12 +257,68 @@ def state_dir(root: Path) -> Path:
 
 # --- markers -------------------------------------------------------------------------------
 
+def _marker_module():
+    """scripts/lib/test_quarantine.py (the decorator's validator), loaded by path so this CLI never shadows it."""
+    name = 'test_quarantine'
+    module = sys.modules.get(name)
+    if module is not None and hasattr(module, 'validate_mapping'):
+        return module
+    spec = importlib.util.spec_from_file_location(name, MARKER_MODULE)
+    if spec is None or spec.loader is None:
+        raise ImportError(f'cannot load {MARKER_MODULE}')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def catalog_quarantines(root: Path, names: list[str] | None = None) -> dict[str, dict]:
+    """{task name: validated marker} for catalog tasks carrying `quarantine` (only `names` when given).
+
+    An invalid marker raises ValueError (QuarantineMetadataError): the smoke adapter refuses before launch.
+    """
+    path = root / CATALOG
+    if not path.is_file():
+        return {}
+    tasks = json.loads(path.read_text())
+    if not isinstance(tasks, list):
+        raise ValueError(f'{CATALOG} must be a JSON array of tasks')
+    wanted = None if names is None else set(names)
+    out = {}
+    for task in tasks:
+        if not isinstance(task, dict) or 'quarantine' not in task:
+            continue
+        name = task.get('name')
+        if wanted is None or name in wanted:
+            out[name] = _marker_module().validate_mapping(task['quarantine'], owner=str(name))
+    return out
+
+
 def _files(root: Path, paths: list[str] | None) -> list[str]:
     if paths is not None:
         return paths
     listed = subprocess.run(['git', 'ls-files', '-co', '--exclude-standard', '--', '*.py', '*.ts', '*.tsx'],
                             cwd=root, capture_output=True, text=True)
-    return [p for p in listed.stdout.splitlines() if not p.startswith(SCAN_EXCLUDE)]
+    files = [p for p in listed.stdout.splitlines() if not p.startswith(SCAN_EXCLUDE)]
+    return files + ([str(CATALOG)] if (root / CATALOG).is_file() else [])
+
+
+def _catalog_markers(rel: str, text: str) -> list[dict]:
+    """Benchmark task markers; the unit is the task name (the smoke gate's progress-row unit)."""
+    try:
+        tasks = json.loads(text)
+    except ValueError:
+        return []
+    found = []
+    for task in tasks if isinstance(tasks, list) else []:
+        meta = task.get('quarantine') if isinstance(task, dict) else None
+        if not isinstance(meta, dict) or not isinstance(task.get('name'), str):
+            continue
+        hit = re.search(r'"name"\s*:\s*' + re.escape(json.dumps(task['name'])), text)
+        found.append({'path': rel, 'line': text.count('\n', 0, hit.start()) + 1 if hit else 1,
+                      'name': task['name'], 'owner': None, 'lang': 'benchmark',
+                      **{k: meta.get(k) for k in META_KEYS}})
+    return found
 
 
 def _python_markers(rel: str, text: str) -> list[dict]:
@@ -319,9 +380,12 @@ def markers(root: Path, paths: list[str] | None = None) -> list[dict]:
             text = (root / rel).read_text(errors='replace')
         except OSError:
             continue
-        if 'quarantine(' not in text:
+        if Path(rel) == CATALOG:
+            found = _catalog_markers(rel, text)
+        elif 'quarantine(' not in text:
             continue
-        found = _python_markers(rel, text) if rel.endswith('.py') else _ts_markers(rel, text)
+        else:
+            found = _python_markers(rel, text) if rel.endswith('.py') else _ts_markers(rel, text)
         # A real marker carries all four values (the wrappers refuse anything less); usage examples do not.
         out.extend(m for m in found if all(isinstance(m.get(k), str) and m[k].strip() for k in META_KEYS))
     return out

@@ -178,6 +178,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
   - INTRODUCED: fix it in this deploy, no marker: `{"attribution": "INTRODUCED", "evidence": "<RCA>", "fix_commit": "<sha>"}`.
   - NOT_INTRODUCED: dispatch its repair `/goal` (`.claude/shared/deploy-failure-policy.md`), add the marker to the test with that thread URL as `repair`, the verbatim first error line, the failure evidence and today's date, then record `{"attribution": "NOT_INTRODUCED", "evidence": "<RCA>", "marker": "<test file>", "repair_agent": "<thread URL>"}`.
   - UNKNOWN keeps the merge blocked.
+- Smoke benchmark tasks: the marker is a `"quarantine": {"since", "repair", "error", "evidence"}` object on the task's `agents/benchmarks/tasks.json` entry (same rules; never change its prompt, evaluators, timeouts or pass criteria). Smoke still runs it once and reports `QUARANTINED_FAIL` / `QUARANTINED_PASS` (unit = task name). A non-quarantined task that natively FAILED/ERRORed is rerun once alone on the same ref (`FLAKY` on pass, else FAIL); SKIPPED (resource) and INFRA_ERROR outcomes keep their existing `/RCA` handling. NOT_INTRODUCED attribution names `agents/benchmarks/tasks.json` as `marker`.
 - Never add a marker to get green, or for a test without a NOT_INTRODUCED attribution.
 - Release: `python3 scripts/test_quarantine.py report` lists every marker with its consecutive passes from recorded results; any quarantined failure resets the count. At 5 it reads `ready to release`: remove that marker in this deploy.
 - Scorecard: copy the lines `python3 scripts/deploy_test_cycle.py report` prints, `Tests skipped (quarantined): N — F failed (non-blocking), P passed` and, when present, `Flaky (passed on rerun): ...`.
@@ -192,6 +193,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 - If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; fix security or prod-impacting ones, then ask the user how the fix is reviewed (the ledger refuses a 4th cycle).
 - A false-green or bot-posted request gets one `@coderabbitai full review` from the user's account.
 - Over 150 files: add the canonical path filters in a later stabilized commit; never weaken the review.
+- `open-pr`/`review-next` request nothing for a HEAD whose changed paths the `.coderabbit.yaml` path filters all exclude: the ledger records `no-reviewable-paths` (no cycle spent), carrying only a clean prior result.
 - Main moved after a clean final review: `deploy_review_cycle.py inherit-sync --head "$(git rev-parse HEAD)" --base origin/main`.
 - The Claude fallback review is disabled.
 

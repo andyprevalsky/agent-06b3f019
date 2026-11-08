@@ -2,7 +2,21 @@
 """Case-aware staged adapter over the existing isolated cloud benchmark CLI.
 
 Native failures remain failures until canonical /RCA grants an exception. This
-adapter neither retries nor launches the request's already-skipped tasks.
+adapter never launches the request's already-skipped tasks.
+
+Quarantine and rerun-once (scripts/deploy_test_quarantine.py, .claude/commands/deploy.md):
+
+    campaign(checks) ──> cases ─┬─ quarantined task (tasks.json `quarantine`): ran; FAIL/PASS is
+                                │    reported as a QUARANTINED_FAIL/QUARANTINED_PASS row and never blocks
+                                ├─ FAIL with native FAILED/ERROR, not quarantined, cleanup verified
+                                │    └─> ONE campaign(those tasks) on the same frozen ref
+                                │          PASS => FLAKY row (attempts 2; merge needs attribution)
+                                │          else => FAIL (first attempt's evidence + rerun evidence)
+                                └─ SKIPPED (compute-token/resource) and INFRA_ERROR keep their /RCA
+                                   resource/external-provider handling: never rerun
+
+Both campaigns are ordinary native runs, so each attempt reaches the benchmark history as it
+ran (a quarantined failure stays a failed attempt). A rerun never reruns.
 """
 import argparse
 from datetime import datetime
@@ -19,6 +33,8 @@ import time
 import cloudbench_provider_headroom as provider_headroom
 from cloudbench_execution_provenance import load_provenance, verify_code_binding
 from cloudbench_result import validate_run_document, validate_run_file
+import deploy_gate_progress as progress
+from deploy_test_quarantine import catalog_quarantines
 from deploy_test_cloud_refusal import SOURCE_DIFFERS, unpushed_reason
 from deploy_test_cycle import NAME, ROOT, read, source, write
 from deploy_test_process import cancellation_handlers, run_command
@@ -250,6 +266,62 @@ def capacity_admission_env(now, environ=os.environ):
     return {key: environ.get(key) or str(int(now) + GATE_DEADLINE_SECONDS)}
 
 
+# Native outcomes of an ordinary task failure. SKIPPED (compute-token exhaustion, the AgentCard release
+# stall) and INFRA_ERROR are classified by the cycle's resource/external-provider /RCA paths; never rerun.
+RERUN_OUTCOMES = frozenset({'FAILED', 'ERROR'})
+
+
+def rerun_candidates(cases, details, quarantines):
+    """Verified non-quarantined task failures eligible for the single same-source rerun."""
+    out = []
+    for name, verdict in cases.items():
+        task = (details.get(name) or {}).get('native_task') or {}
+        outcome = str(task.get('benchmark_status') or task.get('status') or '').upper()
+        if verdict == 'FAIL' and name not in quarantines and outcome in RERUN_OUTCOMES:
+            out.append(name)
+    return out
+
+
+def emit(name, status, *, detail='', log='', quarantine=None, attempts=None):
+    """One progress row (unit = task name) plus its TEST_QUARANTINE / TEST_FLAKY stdout line."""
+    value = progress.row(name, status, detail=detail, log=log, quarantine=quarantine, attempts=attempts)
+    print(progress.stdout_line(value), flush=True)
+    progress.report(name, status, detail=detail, log=log, quarantine=quarantine, attempts=attempts)
+    return value
+
+
+def launch(request, root, base, campaign_id, checks, env, guidance=''):
+    """One native campaign of `checks` under `base`; returns its collected attempt."""
+    runs = base / 'runs'
+    runs.mkdir(parents=True, exist_ok=False)
+    width = campaign_width(checks)
+    if width < 1:
+        raise ValueError('provider capacity cannot admit one smoke task')
+    campaign = base / 'campaigns' / campaign_id
+    env = {**env, 'CLOUDBENCH_RUNS_ROOT': str(runs),
+           'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name}
+    scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
+    argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
+    started = time.time()
+    with cancellation_handlers(), (base / 'cli.log').open('wb') as log:
+        if guidance:
+            print(guidance, file=sys.stderr, flush=True)
+            log.write((guidance + '\n').encode())
+            log.flush()
+        code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None, owned_lifecycle=True)
+    reason = None
+    try:
+        if timed_out or cancelled or lingering or source(root) != request['source']:
+            raise ValueError('cloud command interrupted or source changed')
+        cases, details, cleaned, fleet = collect_campaign(
+            {**request, 'checks': checks}, root, runs, campaign, started, code, width)
+    except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
+        cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
+        reason = str(error)
+    return {'cases': cases, 'details': details, 'cleaned': cleaned, 'fleet': fleet, 'code': code,
+            'argv': argv, 'reason': reason, 'log': str(base / 'cli.log'), 'started_at': started}
+
+
 def execute(request, root):
     """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
     checks, skipped = request['checks'], request.get('skips', {})
@@ -266,19 +338,11 @@ def execute(request, root):
         if directory.exists() or directory.is_symlink():
             raise ValueError('unpushed cloud source with an existing request namespace')
         raise SourceRefusal(unpushed_reason(request['source']['head']))
-    runs = directory / 'runs'
-    runs.mkdir(parents=True, exist_ok=False)
-    width = campaign_width(checks)
-    if width < 1:
-        raise ValueError('provider capacity cannot admit one smoke task')
-    campaign = directory / 'campaigns' / ('deploy-' + directory.name)
-    env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
-           'DEPLOY_NATIVE_HUB_JOIN': '1',
-           'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
+    # An invalid marker refuses here, before any resource is admitted (same rules as @quarantine).
+    quarantines = catalog_quarantines(root, checks)
+    env = {**os.environ, 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1', 'DEPLOY_NATIVE_HUB_JOIN': '1',
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root),
-           **capacity_admission_env(time.time())}
-    scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
-    argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
+           **capacity_admission_env(time.time())}  # one gate deadline, kept by the rerun
     catalog = root / 'agents/benchmarks/tasks.json'
     guidance = ''
     if catalog.is_file():
@@ -286,27 +350,44 @@ def execute(request, root):
                                      / 'agents/benchmarks/select_predeploy_benches.py'))
         guidance = selector['format_skip_eligibility'](
             selector['standing_skip_eligibility'](selector['load_tasks'](catalog), checks))
-    started = time.time()
-    with cancellation_handlers(), (directory / 'cli.log').open('wb') as log:
-        if guidance:
-            print(guidance, file=sys.stderr, flush=True)
-            log.write((guidance + '\n').encode())
-            log.flush()
-        code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None, owned_lifecycle=True)
-    reason = None
-    try:
-        if timed_out or cancelled or lingering or source(root) != request['source']:
-            raise ValueError('cloud command interrupted or source changed')
-        cases, details, cleaned, fleet = collect_campaign(
-            request, root, runs, campaign, started, code, width)
-    except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
-        cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
-        reason = str(error)
+    first = launch(request, root, directory, 'deploy-' + directory.name, checks, env, guidance)
+    cases, details, cleaned = dict(first['cases']), dict(first['details']), first['cleaned']
+    rerun = None
+    candidates = rerun_candidates(cases, details, quarantines) if cleaned and first['reason'] is None else []
+    second = None
+    if candidates:
+        try:
+            second = launch(request, root, directory / 'rerun', f'deploy-{directory.name}-rerun', candidates, env)
+        except (OSError, ValueError) as error:  # refused before launch (e.g. no provider capacity): stays FAIL
+            rerun = {'checks': candidates, 'executed': False, 'reason': str(error)}
+    if second is not None:
+        cleaned = cleaned and second['cleaned']
+        rerun = {'checks': candidates, 'executed': True, 'cleanup_complete': second['cleaned'],
+                 **{k: second[k] for k in ('cases', 'reason', 'fleet', 'code', 'argv', 'log', 'started_at')}}
+        for name in candidates:
+            # The first attempt's evidence stays the case's evidence; the rerun is attached to it.
+            details[name] = {**details.get(name, {}), 'rerun': second['details'].get(name, {})}
+            if second['cases'].get(name) == 'PASS':
+                cases[name] = 'PASS'
+                reason = str((details[name].get('native_task') or {}).get('failure_reason') or '')
+                emit(name, progress.FLAKY, detail=f'first attempt failed: {reason}', log=second['log'], attempts=2)
+    for name, meta in quarantines.items():
+        verdict = cases.get(name)
+        if verdict not in ('PASS', 'FAIL'):
+            continue  # an unverified quarantined task stays blocking: it is unknown, not a non-blocking failure
+        status = 'QUARANTINED_FAIL' if verdict == 'FAIL' else 'QUARANTINED_PASS'
+        task = (details.get(name) or {}).get('native_task') or {}
+        emit(name, status, detail=str(task.get('failure_reason') or '') if verdict == 'FAIL' else '',
+             log=first['log'], quarantine=meta)
+        details[name] = {**details.get(name, {}), 'quarantine': {'status': status, 'native_case': verdict, **meta}}
+        cases[name] = 'PASS'  # the quarantined task ran; its result never fails the gate
     result = {k: request[k] for k in ('token', 'source', 'gate')}
     result.update(cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
-                  cleanup_complete=cleaned, reused=False, native_exit=code, native_command=argv,
-                  evidence=details, reason=reason, fleet_directory=fleet,
-                  runner_log=str(directory / 'cli.log'), started_at=started, finished_at=time.time())
+                  cleanup_complete=cleaned, reused=False, native_exit=first['code'], native_command=first['argv'],
+                  evidence=details, reason=first['reason'], fleet_directory=first['fleet'],
+                  runner_log=first['log'], started_at=first['started_at'], finished_at=time.time())
+    if rerun is not None:
+        result['rerun'] = rerun
     write(directory / 'result.json', result)
     return result
 

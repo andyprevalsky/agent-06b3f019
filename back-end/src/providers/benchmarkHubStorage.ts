@@ -41,7 +41,13 @@ const committedPairs = new WeakMap<
 const backfillStamps = new WeakMap<Map<string, string | null>, string>();
 const remoteCache = new Map<string, { raw: string; etag: string }>();
 let parsedCatalog: { etag: string | null; value: OverlayCatalog } | undefined;
-const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+// The local-directory Hub serializes its index read-modify-write with a
+// Postgres advisory lock, which is scoped to one database. Backends on
+// different databases (parallel coverage shards, blackbox runs) must therefore
+// use different directories: test runners set BENCHMARK_HUB_LOCAL_DIR per run.
+const LOCAL_HUB_ROOT =
+  process.env.BENCHMARK_HUB_LOCAL_DIR ||
+  path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
 const isolatedRunId =
   process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
 if (

@@ -1116,17 +1116,23 @@ class CpuHeadroom(unittest.TestCase):
         self.assertEqual(60.0, result['waited_seconds'])
         self.assertIn('DEPLOY_GATES CPU WARNING: load 24.0 on 8 CPUs still exceeds 8 after 60 s', out)
 
-    def test_busiest_processes_ranks_by_cpu_share_from_proc(self):
+    def write_proc(self, pid, name, cpu_ticks):
+        folder = self.proc / pid
+        folder.mkdir(exist_ok=True)
+        fields = ['S', '1'] + ['0'] * 9 + [str(cpu_ticks), '0'] + ['0'] * 6 + ['0']
+        (folder / 'stat').write_text(f'{pid} ({name}) ' + ' '.join(fields))
+        (folder / 'cmdline').write_bytes(f'{name}\0--flag'.encode())
+
+    def test_busiest_processes_ranks_by_cpu_used_during_the_sample(self):
         ticks = os.sysconf('SC_CLK_TCK')
-        for pid, name, cpu_seconds, start_seconds in (('11', 'git', 180, 900), ('12', 'idle', 1, 0)):
-            folder = self.proc / pid
-            folder.mkdir()
-            fields = ['S', '1'] + ['0'] * 9 + [str(cpu_seconds * ticks), '0'] + ['0'] * 6 + [str(start_seconds * ticks)]
-            (folder / 'stat').write_text(f'{pid} ({name}) ' + ' '.join(fields))
-            (folder / 'cmdline').write_bytes(f'{name}\0--flag'.encode())
-        rows = g.busiest_processes(self.proc)
-        self.assertTrue(rows[0].startswith('pid 11 180% git --flag'), rows)
-        self.assertEqual(2, len(rows))
+        self.write_proc('11', 'repack', 0)
+        self.write_proc('12', 'daemon', 10_000 * ticks)  # huge lifetime total, idle now
+
+        def sleep(seconds):
+            self.write_proc('11', 'repack', int(1.8 * ticks * seconds))
+
+        rows = g.busiest_processes(self.proc, sleep=sleep)
+        self.assertEqual(['pid 11 180% repack --flag'], rows)
 
 if __name__ == '__main__':
     unittest.main()

@@ -103,6 +103,8 @@ BLACKSMITH_RUNNERS = {
     'canonical-seed-whatsapp-content': 'blacksmith-2vcpu-ubuntu-2404',
     'live-probes': 'blacksmith-2vcpu-ubuntu-2404',
     'e2b-smoke': 'blacksmith-2vcpu-ubuntu-2404',
+    # Loads every CPU while it reruns new/changed tests 5x (select_affected_tests.py --stability).
+    'new-test-stability': 'blacksmith-8vcpu-ubuntu-2404',
 }
 DEFAULT_BLACKSMITH_RUNNER = 'blacksmith-4vcpu-ubuntu-2404'  # a gate added before it is sized here
 # The workflow sets the system-Postgres mode, trusted identity and checkout paths at job level; each VM is
@@ -393,26 +395,34 @@ def wait_for_cpu_headroom(proc: Path = Path('/proc'), *, max_wait: float = CPU_H
     return {'load_per_cpu': round(load, 2), 'cpus': cpus, 'waited_seconds': waited, 'headroom': load <= threshold}
 
 
-def busiest_processes(proc: Path, limit: int = 6) -> list[str]:
-    """Top CPU consumers by cumulative CPU time since start (utime+stime over elapsed), from /proc."""
-    try:
-        ticks = os.sysconf('SC_CLK_TCK')
-        uptime = float((proc / 'uptime').read_text().split()[0])
-    except (OSError, ValueError):
-        return []
-    rows = []
+def _cpu_ticks(proc: Path) -> dict[str, tuple[int, str]]:
+    """pid -> (utime+stime ticks, command line) for every readable process."""
+    out = {}
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
         try:
             stat = (entry / 'stat').read_text()
             fields = stat[stat.rindex(')') + 2:].split()
-            elapsed = uptime - int(fields[19]) / ticks
-            share = (int(fields[11]) + int(fields[12])) / ticks / elapsed if elapsed > 0 else 0.0
             args = (entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()
+            out[entry.name] = (int(fields[11]) + int(fields[12]), args or stat[stat.index('(') + 1:stat.rindex(')')])
         except (OSError, ValueError, IndexError):
             continue
-        rows.append((share, entry.name, args or stat[stat.index('(') + 1:stat.rindex(')')]))
+    return out
+
+
+def busiest_processes(proc: Path, limit: int = 6, *, interval: float = 1.0, sleep=time.sleep) -> list[str]:
+    """Current top CPU consumers: CPU ticks used across a short sample, so a long-lived idle daemon
+    never outranks the process loading the box right now."""
+    try:
+        ticks = os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError):
+        return []
+    before = _cpu_ticks(proc)
+    sleep(interval)
+    after = _cpu_ticks(proc)
+    rows = [((used - before[pid][0]) / ticks / interval, pid, args)
+            for pid, (used, args) in after.items() if pid in before and used > before[pid][0]]
     rows.sort(reverse=True)
     return [f'pid {pid} {share * 100:.0f}% {args[:140]}' for share, pid, args in rows[:limit]]
 

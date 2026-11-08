@@ -729,6 +729,165 @@ class RestQuota(unittest.TestCase):
         self.assertEqual(polled, [True, True, True])
 
 
+class PoolReads(unittest.TestCase):
+    """Reads use the token-pool member with the most quota; writes keep the launch identity.
+
+    A pool member's 401/403/404 is not authoritative (it may lack access) and its rate limit is not the
+    launch identity's, so the read is retried with the launch token; that token's answer stays final.
+    """
+
+    def http_error(self, code, body=b'{}', headers=None):
+        from email.message import Message
+        message = Message()
+        for key, value in (headers or {}).items():
+            message[key] = value
+        return gh.urllib.error.HTTPError('https://api.github.com/x', code, 'x', message, io.BytesIO(body))
+
+    def client(self, behave, picks=(('GITHUB_APP', 'pool'),), now=1_000_000.0):
+        """A GitHub client whose transport calls behave(method, token, if_none_match) for every request."""
+        seen, pauses, queue = [], [], list(picks)
+
+        class Response:
+            def __init__(self, status, headers, body):
+                self.status, self.headers, self.body = status, headers, body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self.body
+
+        class Opener:
+            def open(self, req, timeout):
+                token = req.get_header('Authorization').removeprefix('Bearer ')
+                etag = req.get_header('If-none-match')
+                seen.append((req.get_method(), token, etag))
+                outcome = behave(req.get_method(), token, etag)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return Response(*outcome)
+
+        client = gh.GitHub('launch', 'acme/rose', read_picker=lambda: queue.pop(0) if queue else None)
+        patches = [patch.object(gh.urllib.request, 'build_opener', return_value=Opener()),
+                   patch.object(gh.time, 'time', return_value=now),
+                   patch.object(gh.STOP, 'wait', side_effect=pauses.append)]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        return client, seen, pauses
+
+    def ok(self, body=b'{"ok": 1}', headers=None):
+        return 200, dict(headers or {}), body
+
+    def test_reads_use_the_pool_member_and_writes_keep_the_launch_identity(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok())
+        client.request('GET', '/actions/runs/1')
+        client.request('POST', '/actions/runs/1/cancel')
+        self.assertEqual([('GET', 'pool', None), ('POST', 'launch', None)], seen)
+        self.assertEqual(('GITHUB_APP', 0), (client.read_name, client.read_fallbacks))
+
+    def test_a_pool_404_403_or_401_is_retried_with_the_launch_token_whose_404_is_final(self):
+        for code in (404, 403, 401):
+            client, seen, _ = self.client(
+                lambda method, token, etag, code=code: self.http_error(code) if token == 'pool' else self.ok())
+            self.assertEqual(200, client.request('GET', '/actions/runs/1/artifacts')[0])
+            self.assertEqual(['pool', 'launch'], [token for _, token, _ in seen], code)
+            self.assertEqual(1, client.read_fallbacks)
+        client, seen, _ = self.client(lambda method, token, etag: self.http_error(404))
+        with self.assertRaises(gh.urllib.error.HTTPError) as raised:
+            client.request('GET', '/actions/runs/1')
+        self.assertEqual(404, raised.exception.code)
+        self.assertEqual(['pool', 'launch'], [token for _, token, _ in seen])
+
+    def test_a_drained_pool_member_asks_the_launch_token_before_the_existing_reset_wait(self):
+        limit = b'{"message": "API rate limit exceeded"}'
+        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1000010'}
+        client, seen, pauses = self.client(
+            lambda method, token, etag: self.http_error(403, limit, reset) if token == 'pool' else self.ok())
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(200, client.request('GET', '/actions/runs/1')[0])
+        self.assertEqual(([], ['pool', 'launch']), (pauses, [token for _, token, _ in seen]))
+        # Both identities drained: the unchanged wait until X-RateLimit-Reset, then the pool member first again.
+        calls = []
+
+        def both(method, token, etag):
+            calls.append(token)
+            return self.http_error(403, limit, reset) if len(calls) <= 2 else self.ok()
+
+        client, seen, pauses = self.client(both, picks=(('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(200, client.request('GET', '/actions/runs/1')[0])
+        self.assertEqual([11.0], pauses)
+        self.assertEqual(11.0, client.rate_limited_seconds)
+        self.assertIn('DEPLOY_GATE_RATE_LIMITED waiting 11s', out.getvalue())
+        self.assertEqual(['pool', 'launch', 'pool2'], calls, 'the drained member is re-picked after the wait')
+
+    def test_etags_and_cached_bodies_are_per_identity_so_a_304_stays_free(self):
+        tags = {'pool': '"p"', 'launch': '"l"'}
+
+        def behave(method, token, etag):
+            if etag == tags[token]:
+                return self.http_error(304)
+            if etag is not None:
+                raise AssertionError(f'{token} was sent another identity\'s ETag')
+            return self.ok(json.dumps({'who': token}).encode(), {'ETag': tags[token]})
+
+        client, seen, _ = self.client(behave)
+        self.assertEqual({'who': 'pool'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual({'who': 'pool'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'pool', '"p"'), seen[-1])
+        client.read_token = 'launch'  # the pool now picks the launch identity: its own ETag, never the pool's
+        self.assertEqual({'who': 'launch'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'launch', None), seen[-1])
+        self.assertEqual({'who': 'launch'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'launch', '"l"'), seen[-1])
+
+    def test_the_read_member_is_re_picked_when_low_stale_or_rejected(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(headers={'X-RateLimit-Remaining': '50'}),
+                                      picks=(('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+        client.request('GET', '/a')
+        client.request('GET', '/b')  # remaining 50 < READ_LOW_REMAINING, but a re-pick waits a minute
+        self.assertEqual(['pool', 'pool'], [token for _, token, _ in seen])
+        client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+        client.request('GET', '/c')
+        self.assertEqual(('pool2', 'GITHUB_TOKEN_2'), (seen[-1][1], client.read_name))
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(), picks=(('A', 'pool'),))
+        client.request('GET', '/a')
+        client.read_picked_at -= gh.READ_REPICK_SECONDS
+        client.read_attempted_at -= gh.READ_REPICK_SECONDS
+        client.request('GET', '/b')  # stale, and the pool has nothing better: the old member stays
+        self.assertEqual(['pool', 'pool'], [token for _, token, _ in seen])
+
+    def test_no_picker_or_a_pick_of_the_launch_token_reads_with_the_launch_token(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(), picks=(('GITHUB_TOKEN', 'launch'),))
+        client.request('GET', '/a')
+        self.assertEqual([('GET', 'launch', None)], seen)
+        plain = gh.GitHub('launch', 'acme/rose')
+        self.assertEqual(['launch'], plain.tokens('GET'))
+
+    def test_pick_read_member_uses_core_quota_and_fails_open_to_the_launch_token(self):
+        import github_token_pool as pool
+        calls = []
+
+        def fake_pick(resource, repo_root=None, timeout=None):
+            calls.append((resource, repo_root))
+            return pool.Member('GITHUB_APP', 'pool')
+
+        with patch.object(pool, 'pick_member', fake_pick), patch.dict(os.environ, {'DEPLOY_GATE_GITHUB_POOL': '1'}):
+            self.assertEqual(('GITHUB_APP', 'pool'), gh.pick_read_member(ROOT))
+        self.assertEqual([('core', ROOT)], calls)
+        with patch.object(pool, 'pick_member', side_effect=RuntimeError('probe')), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertIsNone(gh.pick_read_member(ROOT))
+        self.assertNotIn('pool', out.getvalue().split('(')[0].lower().replace('deploy_gate_github_pool', ''))
+        with patch.object(pool, 'pick_member', fake_pick), patch.dict(os.environ, {'DEPLOY_GATE_GITHUB_POOL': '0'}):
+            self.assertIsNone(gh.pick_read_member(ROOT))
+        self.assertEqual(1, len(calls))
+
+
 class TagPush(unittest.TestCase):
     def test_a_transient_remote_rejection_is_retried_with_the_same_tag_object(self):
         calls = []

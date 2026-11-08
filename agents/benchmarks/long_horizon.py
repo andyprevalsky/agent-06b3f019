@@ -25,7 +25,9 @@ renames orphan pass history and latency baselines.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -148,6 +150,31 @@ IDEA_STATUSES = {"idea", "promoted", "rejected"}
 _HERE = Path(__file__).resolve().parent
 DEFAULT_CATALOG = _HERE / "tasks.json"
 DEFAULT_IDEA_BANK = _HERE / "long_horizon_ideas.json"
+# The in-definition quarantine marker shared with every Python test (stdlib only).
+_QUARANTINE_MARKER = _HERE.parents[1] / "scripts" / "lib" / "test_quarantine.py"
+
+
+def _quarantine_marker_module():
+    """scripts/lib/test_quarantine.py, the one validator for @quarantine and a task's `quarantine`."""
+    name = "test_quarantine"
+    module = sys.modules.get(name)
+    if module is not None and hasattr(module, "validate_mapping"):
+        return module
+    spec = importlib.util.spec_from_file_location(name, _QUARANTINE_MARKER)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {_QUARANTINE_MARKER}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_task_quarantine(raw: dict[str, Any], item_id: str) -> dict[str, str] | None:
+    """Optional `quarantine: {since, repair, error, evidence}`: the task still runs in deploy smoke,
+    its failure is non-blocking (QUARANTINED_FAIL). Same rules as the Python @quarantine marker."""
+    if "quarantine" not in raw:
+        return None
+    return _quarantine_marker_module().validate_mapping(raw["quarantine"], owner=item_id)
 
 
 @dataclass(frozen=True)
@@ -394,6 +421,7 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
         raise ValueError(f"{item_id}: harness must be one of {sorted(TASK_HARNESSES)}")
     if raw.get("bench") not in TASK_BENCHES:
         raise ValueError(f"{item_id}: bench must be declared explicitly, one of {sorted(TASK_BENCHES)}")
+    validate_task_quarantine(raw, item_id)
     min_steps = raw.get("min_steps")
     if min_steps is not None:
         if not isinstance(min_steps, dict) or not min_steps:

@@ -18,6 +18,10 @@ fixture failures as the gate's) give each child DEPLOY_GATE_QUARANTINE_PROGRESS 
 forward() only its valid QUARANTINED_* rows afterwards. DEPLOY_GATE_QUARANTINE_UNIT_PREFIX names
 the runner's unit (an agents blackbox domain, a structural suite) so ids read <prefix>::<case>.
 
+Smoke benchmark tasks carry the same four keys as a `quarantine` object on their
+agents/benchmarks/tasks.json entry (validate_mapping(); long_horizon.validate_catalog() and the
+deploy smoke adapter scripts/deploy_test_cloud.py refuse an invalid one). Their unit id is the task name.
+
 Unit id: the pytest node id under pytest, TestCase.id() under unittest, else the function's
 qualified name. Metadata is validated when the decorator is applied, so a marker without a
 valid date, boxes.dev repair thread, verbatim error line and evidence reference fails at import.
@@ -86,6 +90,18 @@ def validate(*, since: object, repair: object, error: object, evidence: object) 
     if problems:
         raise QuarantineMetadataError('@quarantine refused: ' + '; '.join(problems))
     return {'since': since, 'repair': repair, 'error': error.strip(), 'evidence': evidence.strip()}
+
+
+def validate_mapping(value: object, *, owner: str) -> dict[str, str]:
+    """A benchmark task's `quarantine` object in agents/benchmarks/tasks.json: exactly the four
+    decorator keys, validated by the same rules. `owner` (the task name) prefixes the refusal."""
+    keys = ('since', 'repair', 'error', 'evidence')
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise QuarantineMetadataError(f'{owner}: quarantine refused: must be an object with exactly the keys {keys}')
+    try:
+        return validate(**value)
+    except QuarantineMetadataError as error:
+        raise QuarantineMetadataError(f'{owner}: {error}') from None
 
 
 def _passthrough(exc: BaseException) -> bool:

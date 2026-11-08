@@ -4542,16 +4542,19 @@ class RelayStartupEvidence(unittest.TestCase):
     def test_native_adapter_requests_owned_supervision(self):
         import ast,contextlib,hashlib,time
         code=(self.target/'deploy_test_cloud.py').read_text()
-        function=next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='execute')
+        # execute() and the campaign helpers it calls (launch, rerun_candidates, emit, RERUN_OUTCOMES).
+        function=[n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name in
+                  {'execute','launch','rerun_candidates','emit'} or isinstance(n,ast.Assign)
+                  and any(getattr(t,'id',None)=='RERUN_OUTCOMES' for t in n.targets)]
         calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
         namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
-                       origin_fetchable=lambda _r,_h:True,
+                       origin_fetchable=lambda _r,_h:True,catalog_quarantines=lambda _r,_c:{},Path=Path,
                        campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
                        cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
                        capacity_admission_env=lambda _now:{'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH':'fixture'},
                        run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
                        collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
-        exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
+        exec(compile(ast.Module(body=function,type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
         namespace['execute'](requested,self.base)
         self.assertEqual(len(calls),1)
         self.assertIs(calls[0][1].get('owned_lifecycle'),True)

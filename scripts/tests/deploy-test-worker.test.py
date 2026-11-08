@@ -614,6 +614,113 @@ class Cloud(unittest.TestCase):
         self.assertEqual(dict.fromkeys(names,'PASS'),result['cases'])
         self.assertTrue(result['complete'])
 
+    # --- quarantine markers and the single same-source rerun -------------------------------------
+    QMETA={'since':'2026-11-01','repair':'https://boxes.dev/thread/thr_smoke1',
+           'error':'AssertionError: no receipt','evidence':'runs/smoke-1/run.json'}
+
+    def campaign(self,verdicts,outcome='FAILED'):
+        """A collect_campaign return value: verdicts per task, native outcome for the failures."""
+        details={n:{'native_task':{'name':n,'passed':v=='PASS','benchmark_status':'PASSED' if v=='PASS' else outcome,
+                                   'status':'COMPLETED' if v=='PASS' else outcome,
+                                   'failure_reason':None if v=='PASS' else f'{n} failed'},'path':f'/runs/{n}'}
+                 for n,v in verdicts.items()}
+        return dict(verdicts),details,True,'campaign'
+
+    def run_smoke(self,collected,catalog=None):
+        """execute() with the native CLI and collector replaced; returns result, launches, rows, stdout."""
+        if catalog is not None:
+            path=self.root/'agents/benchmarks/tasks.json';path.parent.mkdir(parents=True,exist_ok=True)
+            cycle.write(path,catalog)
+        rows=self.root/'progress.jsonl';rows.unlink(missing_ok=True);out=io.StringIO()
+        with patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',return_value=(1,False,False,False)) as launch, \
+             patch.object(self.cloud,'collect_campaign',side_effect=collected) as collect, \
+             patch.dict(os.environ,{'DEPLOY_GATE_PROGRESS':str(rows)}), contextlib.redirect_stdout(out):
+            self.launch=launch
+            result=self.cloud.execute(self.request,self.root)
+        import deploy_gate_progress as progress
+        return result,launch,collect,progress.read_new(rows)[0],out.getvalue()
+
+    def test_failed_smoke_task_passing_its_single_rerun_is_flaky_and_the_gate_passes(self):
+        result,launch,collect,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                       self.campaign({'failing':'PASS'})])
+        self.assertEqual(2,launch.call_count)
+        rerun=launch.call_args_list[1].args[0]
+        self.assertEqual(['bash','scripts/run-bench','failing'],rerun[:3])  # that task only, same frozen ref
+        self.assertEqual(['--ref','a'*40],rerun[-2:])
+        self.assertNotIn('passing',rerun)
+        self.assertEqual(['failing'],collect.call_args_list[1].args[0]['checks'])
+        env=launch.call_args_list[1].kwargs['env']
+        self.assertTrue(env['RUN_BENCH_CAMPAIGN_ID'].endswith('-rerun'))
+        self.assertNotEqual(launch.call_args_list[0].kwargs['env']['CLOUDBENCH_RUNS_ROOT'],env['CLOUDBENCH_RUNS_ROOT'])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # first attempt kept
+        self.assertEqual('PASSED',result['evidence']['failing']['rerun']['native_task']['benchmark_status'])
+        self.assertEqual([('failing','FLAKY',2)],[(r['unit'],r['status'],r.get('attempts')) for r in rows])
+        self.assertIn('TEST_FLAKY unit=failing attempts=2 attribution=REQUIRED',out)
+        from deploy_test_result import validate
+        self.assertEqual((result['cases'],True),validate(result,self.request,0))  # adapter exit 0 = gate pass
+        state={'source':self.request['source'],'flaky':[],'phase':'initial','round':1}
+        opened=cycle.open_flaky(state,{'name':'smoke','checks':self.request['checks']},rows,self.root/'flaky')
+        self.assertEqual([('failing','smoke/failing')],[(o['unit'],o['check']) for o,_ in opened])
+        import deploy_test_quarantine as quarantine
+        self.assertIn('lack /RCA attribution',quarantine.attribution_block(state['flaky']))  # merge refuses
+
+    def test_failed_smoke_task_failing_its_rerun_fails_and_is_never_run_a_third_time(self):
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                 self.campaign({'failing':'FAIL'})])
+        self.assertEqual(2,launch.call_count)
+        self.assertEqual({'passing':'PASS','failing':'FAIL'},result['cases'])
+        self.assertEqual('FAIL',result['rerun']['cases']['failing'])
+        self.assertEqual([],rows);self.assertNotIn('TEST_FLAKY',out)
+        from deploy_test_result import validate
+        self.assertEqual('FAIL',validate(result,self.request,1)[0]['failing'])
+
+    def test_resource_skip_and_infra_outcomes_keep_their_rca_handling_without_a_rerun(self):
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)])
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('rerun',result)
+                self.assertEqual([],rows)
+
+    def test_unverified_first_campaign_is_never_rerun(self):
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'FAIL'})
+        result,launch,_,_,_=self.run_smoke([(verdicts,details,False,fleet)])
+        self.assertEqual(1,launch.call_count);self.assertFalse(result['complete'])
+
+    def test_quarantined_smoke_task_runs_once_and_its_failure_is_non_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)},{'name':'passing'}]
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'})],catalog)
+        self.assertEqual(1,launch.call_count)  # still runs, never rerun
+        self.assertIn('failing',launch.call_args.args[0])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases']);self.assertTrue(result['complete'])
+        self.assertEqual([('failing','QUARANTINED_FAIL',self.QMETA)],[(r['unit'],r['status'],r['quarantine']) for r in rows])
+        self.assertEqual('failing failed',rows[0]['detail'])
+        self.assertIn(f"TEST_QUARANTINE status=QUARANTINED_FAIL unit=failing since=2026-11-01 repair={self.QMETA['repair']}",out)
+        self.assertEqual(('QUARANTINED_FAIL','FAIL'),tuple(result['evidence']['failing']['quarantine'][k] for k in ('status','native_case')))
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # failure preserved
+
+    def test_quarantined_smoke_task_pass_and_unverified_outcomes(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        _,_,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'PASS'})],catalog)
+        self.assertEqual([('failing','QUARANTINED_PASS')],[(r['unit'],r['status']) for r in rows])
+        shutil.rmtree(self.root/'.context')
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'UNVERIFIED'})
+        result,_,_,rows,_=self.run_smoke([(verdicts,details,True,fleet)],catalog)
+        self.assertEqual('UNVERIFIED',result['cases']['failing']);self.assertEqual([],rows)  # unknown still blocks
+
+    def test_invalid_task_quarantine_marker_is_refused_before_launch(self):
+        for bad in ({**self.QMETA,'repair':'https://example.com/x'},{k:v for k,v in self.QMETA.items() if k!='evidence'},
+                    {**self.QMETA,'since':'2026-13-01'},{**self.QMETA,'extra':'x'},'quarantined'):
+            with self.subTest(marker=bad):
+                with self.assertRaises(ValueError):
+                    self.run_smoke([],[{'name':'failing','quarantine':bad}])
+                self.launch.assert_not_called()
+                self.assertFalse((self.root/'.context/deploy-cloud').exists())  # nothing admitted
+
 
 class CloudCampaign(unittest.TestCase):
     def setUp(self):

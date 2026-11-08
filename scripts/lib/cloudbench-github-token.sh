@@ -42,8 +42,25 @@ cloudbench_github_token_from_env_file() {
   printf '%s' "$val"
 }
 
+# The token-pool member with the most core quota (GITHUB_TOKEN, GITHUB_TOKEN_2..9,
+# the org GitHub App, GITHUB_DISPATCH_TOKEN), for READ-ONLY use only. Prints
+# nothing when the pool is absent, disabled (CLOUDBENCH_GITHUB_TOKEN_POOL=0) or
+# has no usable member. Never prints anything but the token.
+cloudbench_github_token_pool_pick() {
+  local root="${1:-.}"
+  [ "${CLOUDBENCH_GITHUB_TOKEN_POOL:-1}" != "0" ] || return 1
+  [ -f "$root/scripts/github_token_pool.py" ] || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    (cd "$root" && timeout 60 python3 scripts/github_token_pool.py pick --resource core 2>/dev/null) || true
+  else
+    (cd "$root" && python3 scripts/github_token_pool.py pick --resource core 2>/dev/null) || true
+  fi
+}
+
 # Print the first usable token to stdout. Exit 1 when none can read the repo.
 # Optional $1 = repo root (default: cwd / CLOUDBENCH_REPO_ROOT).
+# Identity-ordered chain (Andy's user identity first): use it, or GITHUB_TOKEN
+# itself, for anything identity-bound. The pool is only its last resort.
 cloudbench_resolve_github_token() {
   local root="${1:-${CLOUDBENCH_REPO_ROOT:-$(pwd)}}"
   local candidate candidates=()
@@ -89,13 +106,45 @@ cloudbench_resolve_github_token() {
     fi
   done
   # Last resort: the token pool (adds the org GitHub App when every user-token
-  # candidate above shares one drained quota). Request-scoped use only.
-  if [ -f "$root/scripts/github_token_pool.py" ]; then
-    candidate="$(cd "$root" && python3 scripts/github_token_pool.py pick 2>/dev/null || true)"
+  # candidate above shares one drained quota). Request-scoped use only. The
+  # read resolver below already asked the pool, so it skips this second probe.
+  if [ "${_CLOUDBENCH_GITHUB_POOL_TRIED:-0}" != "1" ]; then
+    candidate="$(cloudbench_github_token_pool_pick "$root")"
     if [ -n "$candidate" ] && cloudbench_github_token_can_read_repo "$candidate"; then
       printf '%s' "$candidate"
       return 0
     fi
   fi
   return 1
+}
+
+# READ-ONLY resolver: private-repo fetch / ls-remote and REST GETs. Spends the
+# pool member with the most quota instead of every devbox draining Andy's one
+# 5,000/h user token. Order: request-scoped controller injection, then the pool
+# pick, then the identity chain above. Every candidate passes the same Contents
+# read. A pool member that cannot read the repo (a 404/403 from a machine
+# account or the App may only mean it lacks access) is not authoritative: the
+# identity chain (GITHUB_TOKEN and friends) still answers. Never use the result
+# for writes (push, tag, PR, dispatch, repo creation) or identity-bound calls,
+# and never persist it: an App installation token expires within an hour.
+cloudbench_resolve_github_read_token() {
+  local root="${1:-${CLOUDBENCH_REPO_ROOT:-$(pwd)}}"
+  local candidate injected=()
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+    candidate="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+    [ -n "$candidate" ] && injected+=("$candidate")
+  fi
+  [ -n "${CLOUDBENCH_GITHUB_TOKEN:-}" ] && injected+=("$CLOUDBENCH_GITHUB_TOKEN")
+  for candidate in "${injected[@]}"; do
+    if cloudbench_github_token_can_read_repo "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  candidate="$(cloudbench_github_token_pool_pick "$root")"
+  if [ -n "$candidate" ] && cloudbench_github_token_can_read_repo "$candidate"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  _CLOUDBENCH_GITHUB_POOL_TRIED=1 cloudbench_resolve_github_token "$root"
 }

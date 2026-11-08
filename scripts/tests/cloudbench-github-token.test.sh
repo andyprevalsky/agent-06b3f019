@@ -20,17 +20,21 @@ trap 'kill "${SERVER_PID:-}" 2>/dev/null || true; wait "${SERVER_PID:-}" 2>/dev/
 LIVE_DISPATCH="${GITHUB_DISPATCH_TOKEN:-}"
 GOOD_TOKEN="gho_test_dispatch_token_good_for_repo_read"
 BAD_TOKEN="github_pat_stale_token_that_must_not_win"
+POOL_TOKEN="ghs_test_pool_member_with_most_quota"
+POOL_NO_ACCESS_TOKEN="ghs_test_pool_member_without_repo_access"
 
-python3 - "$TMP" "$GOOD_TOKEN" <<'PY' &
+python3 - "$TMP" "$GOOD_TOKEN" "$POOL_TOKEN" "$POOL_NO_ACCESS_TOKEN" <<'PY' &
 import http.server, sys
 from pathlib import Path
-root, good = Path(sys.argv[1]), sys.argv[2]
+root, good, pool, no_access = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         auth = self.headers.get("Authorization", "")
-        if auth == f"Bearer {good}":
+        if auth in (f"Bearer {good}", f"Bearer {pool}"):
             body, code = b'{"ok":true}', 200
+        elif auth == f"Bearer {no_access}":
+            body, code = b'{"message":"Not Found"}', 404
         else:
             body, code = b'{"message":"Bad credentials"}', 401
         self.send_response(code)
@@ -102,6 +106,47 @@ rm -f "$TMP/repo/scripts/github_token_pool.py"
 grep -Fq 'scripts/github_token_pool.py pick' "$ROOT_DIR/scripts/run-bench-cloud" \
   || fail "run-bench-cloud resolve_github_token must fall back to the token pool pick"
 pass "resolver falls back to a validated token-pool pick when the user identity is drained"
+
+# ── 2c. Read-only resolver spends the pool member with the most quota ────────
+# Reads (fetch / ls-remote / REST GET) prefer the pool pick over Andy's user
+# token; the identity chain keeps its order for identity-bound callers. A pool
+# member that cannot read the repo (404) is not authoritative: the identity
+# chain still answers. The pool is probed once per resolution.
+pool_fake() {  # <token to print>
+  printf 'import sys\nopen(%s, "a").write(" ".join(sys.argv[1:]) + "\\n")\nprint("%s", end="")\n' \
+    "'$TMP/pool-calls'" "$1" >"$TMP/repo/scripts/github_token_pool.py"
+  : >"$TMP/pool-calls"
+}
+export GITHUB_DISPATCH_TOKEN="$GOOD_TOKEN"
+pool_fake "$POOL_TOKEN"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")" \
+  || fail "read resolver returned no token with a usable pool member"
+[ "$RESOLVED" = "$POOL_TOKEN" ] || fail "read resolver must prefer the pool member with the most quota"
+grep -qx 'pick --resource core' "$TMP/pool-calls" || fail "read resolver must pick by core (REST) quota"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo")" \
+  || fail "identity resolver lost its usable DISPATCH token"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "identity resolver must keep the user identity ahead of the pool"
+pool_fake "$POOL_NO_ACCESS_TOKEN"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")" \
+  || fail "a pool 404 must fall back to the identity chain, not fail the read"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "a pool member without repo access must not be returned"
+[ "$(wc -l <"$TMP/pool-calls")" -eq 1 ] || fail "read resolver probed the pool more than once"
+export CLOUDBENCH_GITHUB_TOKEN="$GOOD_TOKEN"
+pool_fake "$POOL_TOKEN"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "a usable request-scoped controller injection must still win"
+unset CLOUDBENCH_GITHUB_TOKEN
+RESOLVED="$(CLOUDBENCH_GITHUB_TOKEN_POOL=0 PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] && [ ! -s "$TMP/pool-calls" ] \
+  || fail "CLOUDBENCH_GITHUB_TOKEN_POOL=0 must keep reads on the identity chain without probing the pool"
+unset GITHUB_DISPATCH_TOKEN
+pool_fake "$POOL_NO_ACCESS_TOKEN"
+if PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo" >/dev/null 2>&1; then
+  fail "read resolver must fail closed when neither the pool nor the identity chain can read"
+fi
+[ "$(wc -l <"$TMP/pool-calls")" -eq 1 ] || fail "identity fallback re-probed the pool after the read resolver did"
+rm -f "$TMP/repo/scripts/github_token_pool.py" "$TMP/pool-calls"
+pass "read resolver prefers the validated pool pick; 404 falls back to the identity chain"
 
 # ── 3. refresh-deps injects controller token (static contract) ───────────────
 grep -Fq 'resolve_github_token' "$ROOT_DIR/scripts/run-bench-cloud" \
