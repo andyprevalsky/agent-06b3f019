@@ -57,7 +57,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - User questions and parent discussion never pause workers; stop one only on a user cancel, its own safety boundary or a coordinated reassignment.
 - Sub-agents batch routine status and notify the parent only on an actionable milestone, failure or blocker; compute refs and hashes before sending a handoff, never placeholders.
 - Report the first authentic infrastructure failure immediately (run, task, attempt, first failing boundary, evidence) and start its RCA without restarting or cancelling healthy work.
-- Benchmark and experiment iteration (hypothesis, triage of every error, one `/RCA` per cluster, rerun after verified fixes, batches) follows the one loop in `/descend`.
+- Benchmark and experiment iteration (hypothesis, one self-deduplicating `/RCA` per failure, rerun after verified fixes, batches) follows the one loop in `/descend`.
 - Outside `/deploy` and `/descend`, which own their sync points, merge the latest main about hourly with `/sync` through a sub-agent that preserves both sides' intent in conflicts.
 
 ## Workspaces
