@@ -55,10 +55,10 @@ async function main(): Promise<void> {
   // 2. A lock held on the shared database does not block the private database.
   const baseUrl = process.env.DATABASE_URL;
   assert.equal(nonLocalDatabaseReason(baseUrl), null, 'explicit local test database required');
-  const isolated = createIsolatedDatabase(baseUrl!);
   const holder = new PrismaClient({ datasources: { db: { url: baseUrl } } });
   // The engine's one-time TLS setenv must finish before another client reads process.env.
   await holder.$connect();
+  const isolated = createIsolatedDatabase(baseUrl!);
   const sameDatabase = new PrismaClient({ datasources: { db: { url: baseUrl } } });
   const privateDatabase = new PrismaClient({ datasources: { db: { url: isolated.url } } });
   try {
