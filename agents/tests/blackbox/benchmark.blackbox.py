@@ -6297,6 +6297,51 @@ async def test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_o
     assert calls == {"reads": 0, "recoveries": 0}
 
 
+async def test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error():
+    """PR #1781 deploy smoke (2026-11-08 05:17Z): one lifecycle read got AgentCard's transient 401,
+    the next read observed the exact release stall, and the idempotent abandon re-POST was still
+    in flight at the reconciliation deadline. The superseded read error must not veto the waiver
+    for the fresh exact-stall observation (it saved ERROR while cleanup printed the SKIP)."""
+    import pytest
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+
+    task = get_task_by_name("agent-payment-abandonment")
+    reads = {"count": 0}
+
+    async def read(_base, _aid):
+        reads["count"] += 1
+        if reads["count"] == 1:
+            raise RuntimeError(
+                'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP '
+                'list_transfers failed: Invalid or expired organization token"}'
+            )
+        return _agentcard_release_stall_lifecycle()
+
+    async def slow_recover(_base, _aid):
+        await asyncio.sleep(5)
+        raise AssertionError("the deadline must cancel the in-flight recovery")
+
+    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
+        with pytest.raises(RuntimeError) as caught:
+            await asyncio.wait_for(
+                bench._wait_for_expected_payment_lifecycle(
+                    "http://benchmark.invalid",
+                    "exact-owned-agent",
+                    task,
+                    _agentcard_release_stall_lifecycle(),
+                    timeout_seconds=0.3,
+                    poll_interval_seconds=0.01,
+                    fetch_lifecycle=read,
+                    recover_lifecycle=slow_recover,
+                    resume_pending_after_seconds=0.001,
+                ),
+                timeout=2,
+            )
+    assert reads["count"] == 2
+    assert isinstance(caught.value, bench.AgentCardReleaseStall), caught.value
+
+
 async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation():
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -26934,6 +26979,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_release_policy_fetch_cancel_strict",
         test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
+    )
+    await r.record_async(
+        "agentcard_release_policy_fresh_stall_after_recovered_read_error",
+        test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error,
     )
 
     await r.record_async(

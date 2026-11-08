@@ -3667,6 +3667,11 @@ async def _wait_for_expected_payment_lifecycle(
                         candidate_error = _validate_payment_lifecycle(
                             task, {"_benchmark": {"payment_lifecycle": candidate}}
                         )
+                        # This successful read supersedes any earlier failed one: a deadline
+                        # during the recovery POST below classifies this fresh snapshot.
+                        lifecycle, consecutive_fetch_errors, last_fetch_error = candidate, 0, None
+                        if candidate_error is not None:
+                            error = candidate_error
                         candidate_purchase = candidate.get("purchase") if isinstance(candidate, dict) else None
                         candidate_funding = candidate.get("walletFunding") if isinstance(candidate, dict) else None
                         candidate_status = (
