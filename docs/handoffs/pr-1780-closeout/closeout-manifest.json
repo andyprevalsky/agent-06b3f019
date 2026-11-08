@@ -35,7 +35,7 @@
  "followups": [
   "AgentCard sandbox release stall: card_6b5c4eb9c6b6b0528efe33ff closed, org transfer owt_776cb83d5cc4af7a253ba97e consumed, 4396 cents transferred, 0 released (agent 40c3f460-71c2-4eb5-b162-db63f24a191c)",
   "deploy tooling: deploy_test_local_cleanup has no reconcile proof for a fully reaped timed-out quick gate (lingering_group) -> forced a fresh gate cycle",
-  "deploy tooling: deletion-check idle daemon Codex app-server classification fixed in the follow-up deploy (RCA 2026-11-08-deletion-check-counted-daemon-idle-codex-app-server)"
+  "deploy tooling: deletion-check counted the daemon idle Codex app-server as live work; fixed by PR #1792 (cee8855e67), RCA 2026-11-08-deletion-check-counted-daemon-idle-codex-app-server"
  ],
  "format": "PR-CLOSEOUT-V1",
  "gate_cycles": {
