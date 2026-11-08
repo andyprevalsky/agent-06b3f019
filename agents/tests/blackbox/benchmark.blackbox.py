@@ -2878,7 +2878,7 @@ async def test_auto_reply_to_two_distinct_questions_is_not_a_duplicate_message()
     the run at 480 s of a 7,200 s budget. Each reply must identify the question
     it answers; a genuinely double-persisted reply must still be flagged.
     """
-    from context_validator import validate_context
+    from benchmarks.context_validator import validate_context
 
     q1 = "What discount should the Boxing and Muay Thai code apply?"
     q2 = "Please specify the discount amount and its duration."
