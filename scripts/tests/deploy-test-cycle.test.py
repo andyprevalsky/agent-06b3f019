@@ -5438,6 +5438,120 @@ class RelayStartupEvidence(unittest.TestCase):
         proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
         self.reseal();return receipt,owner,proof,fleet
 
+    def mixed_preallocation_fixture(self, graded_count=11):
+        import hashlib, shutil
+        from cloudbench_execution_provenance import build_config, build_task_matrix
+        receipt, owner, proof, original = self.preallocation_fixture()
+        seed = self.base / 'seed'; shutil.copytree(original, seed)
+        shutil.rmtree(original)
+        shutil.rmtree(self.base / '.git/cloudbench-fleet-audits' / ('c' * 32))
+        jobs, fleets = [], []
+        names = ['browser-smoke', 'zero-two'] + ['graded-' + str(i) for i in range(graded_count)]
+        for index, name in enumerate([*names, 'infra-probe']):
+            pid = 2100000000 + index
+            fleet = self.runs / ('20261106-090000-' + str(pid)); shutil.copytree(seed, fleet)
+            fleets.append(fleet); token = f'{index + 256:032x}'
+            audit = fleet / 'teardown-ownership'; (audit / 'source-audit').unlink()
+            meta = self.native.fields((audit / 'meta').read_bytes()); meta.update(fleet_owner_token=token, run_id=fleet.name)
+            (audit / 'meta').write_text(''.join(k+'='+str(v)+'\n' for k,v in meta.items()))
+            batch = fleet / '_batch'
+            self.save(batch / 'benches.json', [dict(name=name, mode='REAL')])
+            life = json.loads((batch / 'lifecycle.json').read_text())
+            life.update(fleet_owner_token=token, run_id=fleet.name, status='failed' if index < 2 else 'verified', controller_exit_code=1 if index < 2 else 0)
+            if index >= 2:
+                matrix = build_task_matrix([name + '=real'])
+                self.save(fleet / 'execution-task-matrix.json', matrix)
+                self.save(fleet / 'execution-provenance.json', dict(schema_version='cloudbench-execution-provenance-v1',
+                    base_sha=receipt['source']['head'], workspace_patch_sha256='none',
+                    config=build_config('cloudbench-fleet-config-v1', ['task_count=1', 'task_matrix_sha256='+matrix['sha256']]),
+                    controller_snapshot=dict(schema_version='cloudbench-controller-snapshot-v1', sha256='d'*64)))
+            self.save(batch / 'run.json', dict(run_id=fleet.name, controller_exit_code=life['controller_exit_code'],
+                status='failed' if index < 2 else 'passed', tasks=[dict(name=name, passed=index >= 2,
+                status='INFRA_ERROR' if index < 2 else 'PASSED', lifecycle_stage='released',
+                failure_reason='no current run artifact produced' if index < 2 else None)]))
+            self.save(batch / 'disposable-cleanup.json', dict(schema='disposable-cleanup-v1', owner=token,
+                guest_cleanup_missing=False, runtime_evidence_missing=False, successful_runtime_inferred=False))
+            canonical=self.base/'.git/cloudbench-fleet-audits'/token; shutil.copytree(audit,canonical)
+            seal=hashlib.sha256()
+            for path in sorted(audit.rglob('*'), key=lambda p:str(p.relative_to(audit))):
+                if path.is_file():
+                    for raw in [str(path.relative_to(audit)).encode(),path.read_bytes()]:seal.update(len(raw).to_bytes(8,'big'));seal.update(raw)
+            (audit/'source-audit').write_text('path='+str(canonical)+'\nsha256='+seal.hexdigest()+'\n')
+            life['audit_sha256']=seal.hexdigest(); self.save(batch/'lifecycle.json',life)
+            if index < len(names):
+                log=self.campaign/f'r001-j{index+1:04d}.log'
+                log.write_text(f'{self.base}/scripts/run-bench monitor {fleet}\nowner: {token}; private controller diagnostics stay in this run directory.\n')
+                jobs.append(dict(job_id=log.stem,task=name,run=1,attempt=1,attempts=[],
+                    status='cancelled' if index==0 else 'failed' if index==1 else 'passed',controller_exit_code=life['controller_exit_code'],
+                    controller_pid=pid,log=str(log),controller_command=['bash',str(self.base/'scripts/run-bench'),name,'--ref',receipt['source']['head'],'--foreground']))
+        shutil.rmtree(seed)
+        with (self.campaign/'r001-j0001.log').open('a') as stream:
+            stream.write(f'{self.base}/scripts/run-bench monitor {fleets[-1]}\n')
+        summary=json.loads((self.campaign/'summary.json').read_text()); summary.update(jobs=jobs,task_count=len(names),total_jobs=len(names),concurrency=len(names),peak_concurrency=len(names))
+        self.save(self.campaign/'summary.json',summary)
+        request_path=Path(receipt['log']).parent/'request.json';request=json.loads(request_path.read_text());request['checks']=names;request['skips']={k:{'kind':'historical-agentcard-no-retry-v1','disposition':'NO_RETRY_CUSTODY','source':receipt['source'], 'current_binding':{'source':receipt['source']},'current_execution':'UNVERIFIED','current_financial_state':'UNVERIFIED','credit':{'test_execution':False,'assertions':False,'financial_release':False}} for k in ('old-one','old-two')};self.save(request_path,request)
+        receipt['cases']={**dict.fromkeys(names,'UNVERIFIED'),**dict.fromkeys(request['skips'],'SKIP')};receipt['case_complete']=dict.fromkeys(receipt['cases'],False)
+        adapter_path=Path(receipt['worker_result']);adapter=json.loads(adapter_path.read_text())
+        adapter.update(checks=names,cases={name:'UNVERIFIED' if i<2 else 'PASS' for i,name in enumerate(names)},fleet_directory=str(self.campaign),
+            native_command=['bash','scripts/run-bench',*names,'--runs','1','--concurrency',str(len(names)),'--retry-infra','0','--ref',receipt['source']['head']])
+        self.save(adapter_path,adapter);reference=receipt['native_cleanup_reference'];reference.update(native_directory=str(self.campaign),result_sha256=c.sha_file(adapter_path))
+        proof.update(worker_result_sha256=reference['result_sha256'],layout='campaign-mixed-preallocation-v1')
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt);proof['receipt_sha256']=c.sha_file(Path(receipt['log']).parent/'receipt.json')
+        self.reseal();return receipt,owner,proof,fleets
+
+    def test_mixed_preallocation_cleanup_preserves_all_unverified_without_credit(self):
+        receipt,owner,proof,fleets=self.mixed_preallocation_fixture()
+        before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(14,len(result['participants']))
+        self.assertEqual(2,len(result['preallocation_source_authorities']))
+        self.assertEqual(['UNVERIFIED']*13+['SKIP']*2,list(receipt['cases'].values()))
+        self.assertEqual(11,list(c.read(Path(receipt['worker_result']))['cases'].values()).count('PASS'))
+        self.assertEqual(before,{p:p.read_bytes() for p in before})
+        for layout in ('campaign-v1','campaign-preallocation-v1'):
+            with self.assertRaises(ValueError): self.validate_fixture(receipt,owner,{**proof,'layout':layout})
+
+    def test_mixed_preallocation_refuses_ambiguous_artifacts_source_and_ownership(self):
+        import shutil
+        receipt,owner,proof,fleets=self.mixed_preallocation_fixture()
+        original={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        def edit(path, change):
+            value=c.read(path); change(value); self.save(path,value)
+        zero,normal=fleets[0],fleets[2]
+        def dangling():
+            for name in ('execution-provenance.json','execution-task-matrix.json'):
+                (zero/name).symlink_to(zero/'absent')
+        variants=[
+            ('one-sided provenance',lambda:c.write(zero/'execution-provenance.json',{})),
+            ('dangling provenance',dangling),
+            ('zero task artifact',lambda:c.write(zero/'browser-smoke/cloudbench-run.json',{})),
+            ('native agent',lambda:edit(zero/'_batch/run.json',lambda v:v['tasks'][0].update(agent_id='unexpected'))),
+            ('inferred runtime',lambda:edit(zero/'_batch/disposable-cleanup.json',lambda v:v.update(successful_runtime_inferred=True))),
+            ('invalid normal provenance',lambda:edit(normal/'execution-provenance.json',lambda v:v.update(base_sha='f'*40))),
+            ('normal missing provenance',lambda:(normal/'execution-provenance.json').unlink()),
+            ('foreign command',lambda:edit(self.campaign/'summary.json',lambda v:v['jobs'][0]['controller_command'].__setitem__(-2,'f'*40))),
+            ('foreign skip kind',lambda:edit(Path(receipt['log']).parent/'request.json',lambda v:v['skips']['old-one'].update(kind='waiver'))),
+            ('foreign skip source',lambda:edit(Path(receipt['log']).parent/'request.json',lambda v:v['skips']['old-one'].update(source={'head':'f'*40}))),
+            ('unaccounted participant',lambda:(self.runs/'unknown-owner').mkdir()),
+            ('unknown supervisor',lambda:edit(self.runs.parent/'cli.log.process.json',lambda v:v.update(quiescent=False))),
+            ('allocation omitted from audit',lambda:(zero/'teardown-ownership/owned-clones.ids').write_text('unreconciled')),
+        ]
+        for name, mutate in variants:
+            with self.subTest(case=name):
+                for path in list(self.base.rglob('*')):
+                    if path.is_symlink() or path.is_file() and path not in original: path.unlink()
+                unknown=self.runs/'unknown-owner'
+                if unknown.exists(): shutil.rmtree(unknown)
+                for path,raw in original.items(): path.write_bytes(raw)
+                mutate();self.reseal()
+                with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+
+    def test_mixed_preallocation_requires_a_graded_parent_not_just_a_canary(self):
+        receipt,owner,proof,fleet=self.mixed_preallocation_fixture(graded_count=0)
+        with self.assertRaisesRegex(ValueError,'requires both'):
+            self.validate_fixture(receipt,owner,proof)
+
     def pending_hub_fixture(self):
         receipt,owner,proof,fleet=self.preallocation_fixture()
         summary=json.loads((self.campaign/'summary.json').read_text())
