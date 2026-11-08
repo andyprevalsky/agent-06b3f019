@@ -57,7 +57,7 @@ aligned repairs (result-preserving real pause, actual final-answer evidence for
 all benchmarks, and bounded/retrievable tool results for main/explore/browser)
 are implemented and well tested, run the **same 60 with the same CLI in a
 benchmark sub-agent**. Align fixes one at a time, implement independent agreed
-fixes in parallel; see `/descend` for the retained behavior contracts. This is
+fixes in parallel; see `/descend` **RCA per failure** and **Fixes**. This is
 an explicit repeat of the original 20-task K=3 cohort, not Batch 2 or permission
 for the next 20. Preserve original settings, baseline grades and producer clocks;
 record the rerun separately. Existing backend-first, warm-source and admission
@@ -74,9 +74,10 @@ existing redaction/access controls; do not expand this into a new storage system
 
 Harness/eval candidates go only through main-chat approval, sorted by
 priority then affected-run count, showing **X of N**, overlapping memberships
-and the exact inline diff. Use `/descend`'s owning failure-clustering guidance
-for causal coverage and reference policy. Mocked causal checks, restored judge
-evidence and judge-only replays never become accepted benchmark outcomes.
+and the exact inline diff. Use `docs/root-cause-analysis.md` Step 4a (**Match
+proof to the claimed boundary**) for causal coverage and reference policy.
+Mocked causal checks, restored judge evidence and judge-only replays never
+become accepted benchmark outcomes.
 These scope rules override unrelated campaign profiles below.
 
 For the current user-requested five consecutive LIVE DAILY runs of fifty,

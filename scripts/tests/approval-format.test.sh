@@ -51,8 +51,8 @@ PY
 
 # The single shared approval template is one
 # fenced text block whose items lead with Before:/After:, followed by the
-# clickable Links list that the block itself cannot render. /descend routes to
-# that contract instead of maintaining competing copies of the template.
+# clickable Links list that the block itself cannot render. /descend's final
+# change review is /deploy's approval step, so it holds no copy of the template.
 python3 - "$FORMAT" "$DESCEND" <<'PY'
 import re
 import sys
@@ -290,8 +290,8 @@ require_text "$FORMAT" "Never cite a" \
   "golden references must be opened, not recalled"
 require_text "$FORMAT" '**Golden reference:** citation, or Environment triple' \
   "an approval without a golden reference must be invalid"
-require_text "$DESCEND" 'golden reference' \
-  "descend must require the shared golden-reference evidence"
+require_text "$DESCEND" 'golden-reference verdict and reviewer' \
+  "/descend must record each golden-reference verdict in its change ledger"
 require_text "$RCA" 'When the fix changes an approval-gated surface, the golden-reference check' \
   "RCA completion must record the golden-reference check for approval-gated fixes"
 require_text "$RCA_GUIDE" 'Run this step only when the fix changes an approval-gated surface' \
@@ -326,8 +326,8 @@ require_text "$APPROVAL_BATCH" 'if decision in {"approved", "grounded"}:' \
   "a grounded decision must cover the approval batch like an approval"
 require_text "$RCA" "Golden-reference adversarial review" \
   "/rca must review approval-gated fixes before stopping"
-require_text "$DESCEND" "Fix approved (golden review)" \
-  "/descend must let a GROUNDED review clear the harness-fix decision"
+require_text "$DESCEND" 'a GROUNDED golden review clears them' \
+  "/descend must let a GROUNDED review clear its guarded changes at /deploy's approval step"
 require_text "$ROOT_DIR/CLAUDE.md" "Golden-reference review precedes every approval request" \
   "CLAUDE.md must state the golden-reference review rule"
 require_text "$FORMAT" "Never invent a failing test." \
@@ -339,10 +339,8 @@ for command in "$DEPLOY" "$RCA" "$DESCEND"; do
   require_text "$command" ".claude/shared/approval-format.md" \
     "$(basename "$command") must reference the shared approval format"
 done
-for command in "$RCA" "$DESCEND"; do
-  require_text "$command" "Read it completely immediately before" \
-    "$(basename "$command") must reload the shared format at approval time"
-done
+require_text "$RCA" "Read it completely immediately before" \
+  "rca.md must reload the shared format at approval time"
 # deploy.md points at the shared format; the reload-at-approval-time rule for
 # /deploy is carried by the shared format itself, which names /deploy.
 require_text "$FORMAT" '`/RCA`, `/deploy`, and `/descend`. Read it completely immediately before' \
@@ -359,14 +357,14 @@ fi
 
 require_text "$STRUCTURAL_GATES" 'Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh"))' \
   "the shared approval format must stay cemented in the deploy structural gate registry"
-require_text "$DESCEND" 'main thread using `.claude/shared/approval-format.md`' \
-  "/descend approvals must route through the parent and canonical contract"
-require_text "$DESCEND" 'its seven' \
-  "/descend must preserve the complete shared approval sections"
-require_text "$DESCEND" 'List each member' \
-  "/descend approvals must preserve member-specific evidence"
-require_text "$DESCEND" 'Causal proof; outcome pending' \
-  "/descend must disclose staged approval's outstanding outcome proof"
+require_text "$DESCEND" 'then start `/deploy`, whose approval step is the only review' \
+  "/descend's only change review must be /deploy's approval step"
+require_text "$DESCEND" "\`/deploy\`'s approval step covers the hunks its guards flag" \
+  "/descend guarded changes must route through /deploy's approval packet"
+require_text "$DESCEND" 'every task-definition edit goes to the user with its cross-review evidence' \
+  "/descend task-definition edits must reach the user with their evidence"
+require_text "$DESCEND" 'A rejected change is reverted, then its tasks and the full slice are rerun before the deploy freeze' \
+  "/descend must revert a rejected change and rerun the slice before deploying"
 require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
   "/rca approval output must require the Evidence pack"
 require_text "$RCA" "## Autonomous fix-and-deploy default" \

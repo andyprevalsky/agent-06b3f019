@@ -81,10 +81,10 @@ Maintain the run (mandatory; this card is not a stopping point)
   work; never diagnose solely from a notification or discard an original failure.
 - Infra repairs need no human fix approval. Runtime/product and required deploy
   approvals are delivered in the main thread; workers return concrete packets
-  to the parent and wait only on their own gated action. Under /descend, do not
-  wait for an infra-zero run, all cluster RCAs or all decisions before continuing
-  a below 5% authorized next slice. Ready independent approval packets may be
-  delivered separately without waiting for a different cluster's answer.
+  to the parent and wait only on their own gated action. Under /descend, a batch
+  below 5% infra never waits for an infra-zero run; the next batch follows its
+  "Stopping conditions" and "Fixes", and guarded changes wait for its final
+  change review at /deploy's approval step.
 - Delegate /deploy to a separate sub-agent with an immutable full commit SHA
   captured at dispatch and an isolated checkout/worktree based on that checkpoint.
   Include reviewed intended dirty changes in the checkpoint, excluding secrets.

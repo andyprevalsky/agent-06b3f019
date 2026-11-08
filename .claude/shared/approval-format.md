@@ -404,7 +404,8 @@ the complete packet first; the reviewer reads the packet, not a summary.
 Scope: only the hunks inside the mandatory user-approval section, meaning the
 hunks a gate flagged for human approval (the deploy prompt, agent-behavior and
 trajectory-injection guards, Zod schema
-changes, `/RCA` or `/descend` harness-fix packets). Never ground the rest of
+changes, `/RCA` harness-fix packets; `/descend`'s final change review is
+`/deploy`'s approval step for guarded changes). Never ground the rest of
 the diff: ordinary code, tests and UI changes outside that scope need no
 golden citation and are not reviewed here.
 
@@ -444,10 +445,11 @@ golden citation and are not reviewed here.
 4. **`GROUNDED` clears the human gate.** The change passes every manual
    human-review gate for deploy (the `/deploy` prompt, agent-behavior and
    trajectory-injection guards, Zod schema
-   changes) and the `/RCA` or `/descend` harness-fix decision without reaching
+   changes, which includes `/descend`'s final change review) and the `/RCA`
+   harness-fix decision without reaching
    the user. Record the approval ID, snapshot, reviewer agent ID and verified
    citations where the human decision would have been recorded (`TEST_REPORT`,
-   PR body, `/descend` ledger), and list cleared approvals in the final
+   PR body, `/descend` change ledger), and list cleared approvals in the final
    handoff. Do not emit `approval-request` or `approval-decision` factory
    events for it; those measure human waits.
 5. **Otherwise the user decides.** Fix the findings and review again once if
