@@ -165,5 +165,11 @@
    "note": "72 local Template-box branches with commits on no remote, bundled with their tips"
   },
   "stash": "pre-existing stash 0e2ffe95 ('On andyprevalsky/rose-run-copy: pre-sync deploy retry and explore recovery work') bundled as refs/preserve/stash-0"
+ },
+ "deletion_readiness": {
+  "receipt": "docs/handoffs/pr-1760-closeout/deletion-readiness.json",
+  "open_items": 1,
+  "open_item": "live process 4102777: boxes.dev Codex app-server (/opt/devbox-tools/codex/... app-server --listen ws://127.0.0.1:38597), child of the boxes.dev sprite-daemon (pid 4099237), started 2026-11-07T14:35:40Z with this session, no child processes, one loopback connection from the daemon; platform-owned, holds no workspace state, not started by this deploy and not stopped by it (never kill processes you did not start). Every other record, branch, stash and ignored path has a verified disposition.",
+  "local_cleanup": "local worker clones /var/tmp/rdw (55 GB) retired after their evidence was archived; all heapfix-* systemd units inactive; retained loaded cloudbench fixture removed; Fly campaign Machines verified absent"
  }
 }
