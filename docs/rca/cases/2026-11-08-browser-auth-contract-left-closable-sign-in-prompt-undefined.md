@@ -102,7 +102,9 @@ and messages as recorded. It ran through scripts/replicate_llm_dump.py under
 3. The only change is the fixed Authentication contract line, and the replayed
    system message is byte-identical to `build_browser_use_system_prompt` on the
    fixed source. Result: 8/8 `click {"index":1610}`, the modal's Close button
-   (`EXPECTATION PASSED click:6`, exit 0).
+   (`EXPECTATION PASSED click:6`, exit 0). The scoped rewording that followed
+   golden review (snapshot 2, below) gave the same 8/8 click on [1610];
+   its replayed system message is also byte-identical to the fixed source.
 
 r3 replays do not discriminate either way. Its first post-modal call
 (28144a714978) mostly chose `screenshot` (6/8 baseline, 5/6 fixed; the other
@@ -158,34 +160,73 @@ our code. The modal was already present in e22.
 
 On branch rca/h-74-20261108, the shared actor Authentication contract
 (`agents/utils/browser_auth_contract.py`, new `DISMISSIBLE_AUTH_PROMPT_RULE`
-placed after the guest-first rule) adds:
+placed after the guest-first rule and before the member-price rule) adds:
 
-"A sign-in or sign-up prompt you can close or skip does not block the task.
-Closing it is not a login attempt: close it and continue as a guest.
-Authentication blocks the task only when the step you need still requires
-signing in after that."
+"A sign-in or sign-up prompt you can close or skip does not block the task,
+and closing it is not a login attempt. Unless you are signing in through
+steps 1-5 or signing up under the member-price rule below, close it and
+continue as a guest. Authentication blocks the task only when the step you
+need still requires signing in after that."
+
+The first snapshot (e1e337ba14) said "close it and continue as a guest"
+without that scoping. Its golden review (packet 18050349) returned
+NOT_GROUNDED: the unconditional guest instruction contradicted ladder steps
+2-3, which outrank guest step 6, and the member-price sign-up rule. The ready
+task `browser-auth-member-discount-purchase` shows the conflict. Its checkout
+gate (back-end/src/domains/auth-test-site/servicePagesShop.ts:136-158) is a
+skippable sign-in/sign-up page with "Continue as guest", and its grader
+requires a signup. The rule now defers to steps 1-5 and to the member-price
+rule. The regression also asserts that the member-price rule follows it.
 
 This is LLM-visible prompt text, so it needs golden review or approval
-before deploy. It also covers sibling cases: any site that shows a closable
-sign-in, sign-up or "save with an account" modal to guests (DoorDash home,
-OpenTable/retail account invitations) under a delegated goal that forbids
-login. A forced login (no close, or a step that still demands sign-in) still
-reaches step 8 unchanged. 10k-agent behavior: constant prompt text, no added
-calls, state or fan-in.
+before deploy. It also covers sibling cases: any site that shows guests a
+closable sign-in, sign-up or "save with an account" modal under a goal that
+forbids login. A forced login (no close control, or a step that still
+demands sign-in) still reaches step 8 unchanged. 10k-agent behavior:
+constant prompt text, no added calls, state or fan-in.
 
 Regression: `test_dismissible_sign_in_prompt_is_not_an_authentication_blocker`
 in agents/tests/blackbox/rose_browser_use.blackbox.py, registered in its
 run_all_tests (rose-browser-use domain). It fails on d49ef3c511 ("actor
 Authentication contract missing dismissible-prompt rule") and passes on the
-fix (5/5). `test_phone_off_matches_prephone_bytes` was re-pinned. Only the
+fix. `test_phone_off_matches_prephone_bytes` was re-pinned. Only the
 system/messages hashes changed, in both recovery modes; the tools hashes are
 unchanged. The rose-browser-use (125 passed) and prompt-invariants suites
-pass.
+pass. The browser-tilion, context-pointers and workflow suites passed on
+snapshot 1.
 
-Golden reference: none found. Searched hermes-agent/tools/browser_tool.py
-(:578 screenshot description, :686 CAPTCHA keywords only), openclaw/skills
-(no browser auth-wall guidance) and claude-code-src (no browser actor). No
-reference harness defines optional versus blocking sign-in prompts.
+Golden reference (each path:line opened):
+- openclaw/extensions/teams-meetings/src/transports/teams-meetings-status-prejoin-source.ts:157-160:
+  `loginRequired` holds only for a Microsoft login host, a tenant-only page,
+  or a sign-in control with no guest input and no join button. A sign-in
+  control next to a guest path is not "login required". This is the
+  strongest analog, and the change converges on it.
+- openclaw/src/meeting-bot/status-prejoin-fragments.ts:170-183: the bot
+  raises the login-required manual action only when `loginRequired`;
+  otherwise it clicks the guest join button. It continues as a guest unless
+  login is really required, and the change converges on that.
+- openclaw/extensions/browser/skills/browser-automation/SKILL.md:38-42 and
+  :158: stop for a page that needs login, but "Do not claim the browser is
+  not logged in just because the current page shows a permission or
+  onboarding dialog", and treat permission screens "as progress, not login
+  failure". Converges.
+- claude-code-src/src/utils/claudeInChrome/prompt.ts:22: "check for and
+  dismiss any existing dialogs before proceeding" (native JS dialogs).
+  Converges on dismiss-and-continue.
+- codex/codex-rs/prompts/templates/guardian/classifier_instructions.md:53,55:
+  only actions that sign in are sign-in actions, and clicks are judged by
+  "the actual interface ... and resulting effects". Converges on "closing it
+  is not a login attempt".
+- hermes-agent/tools/browser_use_cli.py:773-774: at "Login walls" never guess
+  credentials and stop and ask the user. A genuine wall still reaches step 8
+  unchanged.
+- kimi-code/packages/agent-core-v2/src/agent/tools/fetch-url/fetch-url.md:3:
+  a sign-in page that gates content is the login wall. Consistent; it has no
+  closable-prompt analog.
+- prime-agent/skills: no browser analog.
+The openclaw meeting analogs implement this as code over page text. Rose
+states it in the actor contract instead, because a string-matching
+classifier is forbidden here (CLAUDE.md 25b).
 
 Outcome proof is pending: the exact unchanged benchmark still has to be
 rerun on the fix, so the status stays open.

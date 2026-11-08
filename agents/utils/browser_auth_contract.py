@@ -7,9 +7,10 @@ EXHAUSTED_AUTH_OPTIONS_HANDOFF_RULE = 'When authentication still blocks the task
 
 
 DISMISSIBLE_AUTH_PROMPT_RULE = (
-    "A sign-in or sign-up prompt you can close or skip does not block the task. Closing it is not a "
-    "login attempt: close it and continue as a guest. Authentication blocks the task only when the "
-    "step you need still requires signing in after that."
+    "A sign-in or sign-up prompt you can close or skip does not block the task, and closing it is not a "
+    "login attempt. Unless you are signing in through steps 1-5 or signing up under the member-price rule "
+    "below, close it and continue as a guest. Authentication blocks the task only when the step you need "
+    "still requires signing in after that."
 )
 
 

@@ -502,13 +502,16 @@ def test_dismissible_sign_in_prompt_is_not_an_authentication_blocker():
     request_user_assistance_for_authentication before it shopped (agents da6804c7 and
     ac41b31f). The ladder said to try guest completion first but never said whether
     closing an optional prompt is a login attempt or leaves the guest path open. The
-    rule must reach the actor in both challenge-recovery modes and come before the
-    step-8 handoff rule.
+    rule must reach the actor in both challenge-recovery modes, come before the
+    step-8 handoff rule, and defer to ladder steps 1-5 and the member-price sign-up
+    rule (golden review of 18050349: an unconditional "continue as a guest" broke
+    browser-auth-member-discount-purchase).
     """
     rule = (
-        "- A sign-in or sign-up prompt you can close or skip does not block the task. Closing it is not a "
-        "login attempt: close it and continue as a guest. Authentication blocks the task only when the "
-        "step you need still requires signing in after that.\n"
+        "- A sign-in or sign-up prompt you can close or skip does not block the task, and closing it is not a "
+        "login attempt. Unless you are signing in through steps 1-5 or signing up under the member-price rule "
+        "below, close it and continue as a guest. Authentication blocks the task only when the step you need "
+        "still requires signing in after that.\n"
     )
     handoff = "- When authentication still blocks the task after steps 1-7 are exhausted or unavailable"
     for disable_recover in ("", "1"):
@@ -519,6 +522,11 @@ def test_dismissible_sign_in_prompt_is_not_an_authentication_blocker():
         auth = prompt[prompt.index("# Authentication") :]
         assert rule in auth, f"actor Authentication contract missing dismissible-prompt rule (disable={disable_recover!r})"
         assert auth.index(rule) < auth.index(handoff), "the rule must precede the step-8 handoff rule"
+        # The guest instruction must not outrank the ladder's sign-in steps or the
+        # member-price sign-up rule it names ("below"): browser-auth-member-discount-purchase
+        # skips a closable sign-in/sign-up gate only by signing up.
+        member = "- If members pay less than guests and membership is free, sign up with the minted account"
+        assert auth.index(rule) < auth.index(member), "the member-price rule the guest instruction defers to must follow it"
 
 
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
@@ -3112,12 +3120,13 @@ def test_phone_off_matches_prephone_bytes():
     72889c4389 reproduces the previous tools hash exactly.
     Re-pinned for H-74 (rca/h-74-20261108): the shared Authentication contract now
     states that a sign-in or sign-up prompt the agent can close or skip does not block
-    the task. Only the system/messages hashes changed in both modes; both tools hashes
-    are unchanged; d49ef3c511 reproduces the previous system/messages hashes exactly.
+    the task, deferring to ladder steps 1-5 and the member-price sign-up rule. Only the
+    system/messages hashes changed in both modes; both tools hashes are unchanged;
+    d49ef3c511 reproduces the previous system/messages hashes exactly.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('90483bb1d90dbd8371f4a44b63ab720ae21a0a0a65a38a2e016a2e1eb00d5735', '9f1642e66773c0a3654197c244cd6323a0b11162c78f3bb1faa8fb1ff037e252', '7ceafb4771c8f568a624555ce0c7ab3ff7c6460d7971f896f9a91e3801a0fe90'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', '5afa54b43c68ad1cc5bd31e360f98db029964e19b757ad83bba8aa6efff617cf', '7e2e89ccafb20a6b6926ba402fff3927905b5107bb9b6e888eaf97665022c4c3')}
+    expected = {'0': ('90483bb1d90dbd8371f4a44b63ab720ae21a0a0a65a38a2e016a2e1eb00d5735', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
