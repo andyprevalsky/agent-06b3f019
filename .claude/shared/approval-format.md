@@ -14,15 +14,21 @@ user; only the other verdicts reach the user.
 Use one approval ID per snapshot-scoped decision. Group hunks only when one
 decision necessarily covers them together. Include clickable file-and-line links
 for every code, prompt, instruction, test, configuration, or migration hunk in
-scope.
+scope; they are additive context in the Links list and never replace the
+content below.
 
-**Prompt / LLM-visible text approvals MUST paste the exact diff inline.** A
-`path:line` link alone is not enough for prompt, instruction, skill, command,
-tool-description, or other LLM-visible text. In Detail, inside the approval
-code block, show the precise unified diff or before/after text the human is
-approving — every added/removed line as `+`/`-` lines — so they can review it
-without opening the file. Saying "see the file" or linking the path without the
-diff body is invalid for prompt-scoped approvals.
+**Approvals MUST show the key visible strings, never code diffs.** The human
+judges the wording that ships, not the code around it. In Detail, inside the
+approval code block, quote every key user- or model-visible string the change
+adds, changes or removes: prompt, instruction, skill, command and
+tool-description text, tool results and errors, user-facing messages and
+handoff text, including text built at runtime. Format each for reading: the
+verbatim string, who sees it (the user or the model) and the conditions under
+which it appears (trigger, phase, call site). For schema or API changes, list
+the new or changed fields in plain English: name, type, required or optional,
+and what each means. Never paste a unified diff, code or `+`/`-` lines.
+Saying "see the file" or linking the path without the strings themselves is
+invalid.
 
 ## Presentation
 
@@ -96,7 +102,13 @@ Detail:
   <why the change is needed, first-bad boundary, unchanged test before/after>
   Snapshot: <approval snapshot ID or Git SHA>
   Scope: <path:line> — <hunk summary>   (one line per in-scope hunk)
-  <exact diff of every prompt / LLM-visible hunk, as +/- lines>
+  Key strings:
+    <New | Changed | Removed> · seen by <the user | the model> when
+      <condition: trigger, phase or call site>
+      "<the exact visible string, verbatim>"
+      Was: "<the previous wording>"   (Changed only)
+  Schema/API fields:
+    <field> — <type, required or optional>: <plain-English meaning>
 ────────────────────────────────────────────────────────────────
 Downstream:
   Severity: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <effect>
@@ -121,7 +133,7 @@ Rules:
   outside the block is clickable.
 - Hard-wrap prose inside the block at about 80 characters and indent
   continuation lines, so nothing scrolls sideways. Never reflow the task prompt
-  or diff lines; copy them verbatim.
+  or a quoted key string; copy them verbatim.
 - When block content itself contains three backticks, fence the block with
   four or more backticks so it cannot close early.
 - Every URL and file link must appear in the Links list. A link that exists
@@ -152,7 +164,7 @@ performed. Name the actual mechanism, such as runtime harness injection,
 prompt or schema editing, application logic, configuration, or an operational
 command, and what it changes. For runtime harness injection, say what enters
 the agent's context and where; identify synthetic context when injected.
-Describe the mechanism in plain language, keeping exact diffs and detailed
+Describe the mechanism in plain language, keeping the key strings and detailed
 implementation reasoning in Detail.
 
 ## TL;DR
@@ -243,13 +255,29 @@ Do not omit `Tests:`; a command list without saying what is asserted is invalid.
 
 **Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation, in one sentence>; this change <converges on it | diverges from it because <reason>>.
 
-Name the implementation in a reference harness that handles the same problem:
-`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, `codex/`, or
-`kimi-code/` (run
-`bash scripts/sync-reference-repos.sh` when a clone is missing). Cite a real
-`path:line` you opened in this session, one line per repo that has an analog,
-and say for each whether the proposed change moves Rose toward it. These
-harnesses are heavily tested, so the default fix is the one that brings Rose
+Name the implementation in a reference harness that handles the same problem
+(run `bash scripts/sync-reference-repos.sh` when a gitignored clone is
+missing). The references are read-only; never edit them:
+
+- `claude-code-src/` (vendored Claude Code source): prompts and agent loop;
+  lift its patterns liberally.
+- `openclaw/` (OpenClaw): tool layouts, system prompts and orchestration.
+- `hermes-agent/` (Nous Research): tool-calling and reasoning prompts.
+- `codex/` (OpenAI Codex CLI, Apache-2.0): terminal coding-agent harness;
+  prompts under `codex-rs/prompts/` and `codex-rs/core/*_prompt.md`.
+- `prime-agent/` (Prime Intellect, MIT): recursive-language-model harness with
+  one persistent Python REPL tool, every other tool or subagent a Python call,
+  plus self-edited memories and skills; system prompt layers under
+  `crates/pa-core/src/prompts/layers/`, skills under `skills/`, the kernel
+  under `prime-agent-runtime/src/rlm/`.
+- `kimi-code/` (Moonshot AI Kimi Code CLI, MIT): TypeScript terminal agent;
+  system prompt, overlays, reminders and tool descriptions are Markdown under
+  `packages/agent-core-v2/src/` (system prompt:
+  `app/agentProfileCatalog/system.md`).
+
+Cite a real `path:line` you opened in this session, one line per repo that has
+an analog, and say for each whether the proposed change moves Rose toward it.
+These harnesses are heavily tested, so the default fix is the one that brings Rose
 closer to them; a change that moves away from all of them must say why their
 approach does not fit. Look the references up before designing the fix, not
 after the request is questioned. When no reference repo has an analog, write
@@ -302,11 +330,18 @@ List the approval snapshot ID or Git SHA when the approval is snapshot-scoped.
 Then list the complete scope as `Scope:` lines in the block and as clickable
 file-and-line links in the Links list.
 
-When any in-scope hunk is prompt / LLM-visible text, also paste that hunk's
-**exact diff inline** in this section (unified diff or explicit before→after)
-inside the block. The human must be able to read the full approved text change
-in the approval message itself; file links are additive context, not a
-substitute for the diff.
+Next, list the **key strings** under `Key strings:` inside the block, one
+entry per visible string that is new, changed or removed: who sees it (the
+user or the model), the conditions under which it appears, the verbatim string
+in quotes and, for a changed string, its previous wording on a `Was:` line.
+Keep each string whole and readable; group strings that appear together under
+one condition. When a hunk changes a schema or API (Zod schema, tool
+parameters, request or response body, database field), list each new or
+changed field under `Schema/API fields:` in plain English: name, type, required
+or optional, and what it means. Write `Not applicable — <reason>` under either
+label when nothing of that kind changes. Never substitute a code diff, code
+excerpt or file link for these lists; the human must be able to decide from
+the approval message itself.
 
 ## Downstream Implications
 
@@ -355,10 +390,10 @@ link, **What failed:** task-framed sentence, concrete FE agent link, last-call
 rendered LLM dump, local-repro `Tests:` sentence plus steps and measured
 wall-clock, **Golden reference:** citation, or Environment triple (evaluators
 with how they are checked, fixtures, task prompt) is missing, or if it reaches
-the user without its **Golden review:** verdict. For prompt / LLM-visible
-text approvals it is also invalid if the
-exact diff body is omitted or replaced by a file link alone. `Not applicable — <reason>` counts as present; a blank field does
-not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
+the user without its **Golden review:** verdict. It is also invalid if its key
+strings or schema/API fields are omitted, replaced by a code diff, or replaced
+by a file link alone. `Not applicable — <reason>` counts as present; a blank
+field does not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
 approval ID and present all seven sections again.
 
 ## Golden-reference adversarial review
@@ -375,9 +410,10 @@ golden citation and are not reviewed here.
 
 1. **Reviewer.** Fire a fresh sub-agent that did not author the change. It
    inherits the parent's model, reasoning effort and speed (CLAUDE.md
-   Sub-agent delegation), works read-only in an existing checkout, and is told
-   to refute the grounding, not to confirm it. Give it the approval ID,
-   snapshot, exact diff of every in-scope hunk and the drafted packet.
+   Delegation and waiting), works read-only in an existing checkout, and is
+   told to refute the grounding, not to confirm it. Give it the approval ID,
+   snapshot, the in-scope hunks themselves (the reviewer reads the code; only
+   the human sees key strings instead) and the drafted packet.
 2. **Checks.** The reviewer must:
    - research at least the three most relevant open-source references for
      the hunk's mechanism itself, choosing by closeness to the change and
@@ -396,13 +432,13 @@ golden citation and are not reviewed here.
      comparable limits, and is no broader than the reference; an unexplained
      or weak divergence is ungrounded;
    - confirm that the packet is otherwise valid under this file and that the
-     change breaks no CLAUDE.md hard rule (reward hacking, runtime nudges,
-     string-matching classifiers, 10k-agent scaling). A reference doing it does
-     not override a repo rule.
+     change breaks no CLAUDE.md rule on reward hacking (25), runtime nudges
+     (25a), string-matching classifiers (25b) or 10k-agent scaling (28). A
+     reference doing it does not override a repo rule.
 3. **Verdict.** Return one verdict per approval ID: `GROUNDED` only when every
    hunk passes, otherwise `NOT_GROUNDED` with every blocking finding listed
    together. Operational approvals return `HUMAN_REQUIRED` after the packet
-   check: writing env vars or credentials, billing or spend beyond existing
+   check: rotating or revoking a credential, billing or spend beyond existing
    authorization, destructive or irreversible actions, explicit gate overrides,
    and benchmark definition, pass-criteria or timeout changes.
 4. **`GROUNDED` clears the human gate.** The change passes every manual

@@ -67,10 +67,10 @@ Read it completely immediately before composing the request. The automated
 production-alert mode remains non-interactive and therefore emits no chat
 approval request.
 
-**Prompt / LLM-visible text:** the approval message must paste the **exact
-diff inline** (unified diff or before→after with every added/removed line). A
-`path:line` link alone is incomplete — see the "MUST paste the exact diff
-inline" rule in `.claude/shared/approval-format.md`.
+**Prompt / LLM-visible text:** the approval message shows the key user- and
+model-visible strings that change, well formatted (New/Changed/Removed, who sees
+each and when), never a code diff; a `path:line` link alone is incomplete. See
+`.claude/shared/approval-format.md`.
 
 ## Independent deploy repair handoffs
 

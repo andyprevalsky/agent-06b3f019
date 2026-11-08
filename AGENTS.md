@@ -1,21 +1,23 @@
 # AGENTS.md
 
-**Read `CLAUDE.md` first — it is the source of truth** for architecture, dev/setup,
-testing, and the critical rules, and it is auto-loaded for every agent. Use the
-repo's own skills by default: the `.claude/commands/*` slash-commands (`/deploy`,
-`/RCA`, `/benchmark`, …) and the `docs/` guides they reference (e.g.
-`docs/root-cause-analysis.md`, `docs/testing.md`). Do not duplicate that guidance
-here.
+**Read `CLAUDE.md` first — it is the source of truth** for priorities, hard
+rules, testing, benchmarks and production, and it is auto-loaded for every
+Claude agent. Use the repo's own skills by default: the `.claude/commands/*`
+slash-commands (`/deploy`, `/RCA`, `/benchmark`, …) and the `docs/` guides they
+reference (e.g. `docs/root-cause-analysis.md`, `docs/testing.md`). Do not
+duplicate that guidance here.
 
-Fresh clones on Andy’s Mac: follow `CLAUDE.md` → **"Fresh clone setup (Andy’s
-Mac)"** for authoritative env-file locations, pinned toolchains, dependency
-installation, and isolated workspace/database setup. Do not substitute example
-env files for the complete local secrets.
+Before editing files under `front-end/`, `back-end/` or `agents/`, read that
+directory's `AGENTS.md` (a symlink to its `CLAUDE.md`).
 
-Cloud/Linux agents: see `CLAUDE.md` → **"Cursor Cloud / Linux dev environment"**
-(setup via `bash scripts/cloud-init.sh`, system Postgres, skip `mac-app`,
-injected-env-vars-override-`.env` gotchas, and which test suites need funded/live
-accounts).
+Setup on Andy’s Mac: `docs/setup-mac.md` (authoritative env-file locations,
+pinned toolchains, dependency reuse and isolated workspace databases). Do not
+substitute example env files for the complete local secrets.
+
+Cloud/Linux agents: run `bash scripts/cloud-init.sh`, then follow
+`docs/testing.md` and `CLAUDE.md` → **"Credentials and environment"** (skip
+`mac-app`, injected env vars override `.env`) and **"Database"** (system
+Postgres).
 
 ## Cursor Cloud specific instructions
 

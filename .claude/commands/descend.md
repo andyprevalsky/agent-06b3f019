@@ -16,7 +16,7 @@ display: 12-hour America/Los_Angeles time (PDT/PST by date), one status emoji,
 current-assignment tokens and rolling 15-minute tokens/min, LIFE at the far
 right and no UPD or progress wheels.
 Place blocking agents above the experiment history.
-Persist every user display correction in CLAUDE.md and the shared format.
+Persist every user display correction in `.claude/shared/report-display-format.md`.
 Report measured Machine states/costs, protected warm capacity and a concrete
 unblock action; planner maxima are not a reason to ask for more quota.
 
@@ -31,8 +31,9 @@ benchmark.md, rca.md, and deploy.md completely before starting. This file owns
 their orchestration, state, user-input gates, and response contract.
 
 Read `.claude/shared/benchmark-report-format.txt` as the single source for
-progress/final presentation. The iteration and stop policy below and in
-CLAUDE.md governs scheduling. Existing user
+progress/final presentation. The iteration and stop policy below governs
+scheduling: this command is the one experiment/iteration loop, and the root
+CLAUDE.md only points here. Existing user
 steering overrides defaults: persist the requested names, goal, substrate,
 budgets, concurrency and acceptance rules rather than importing another run's
 special profile. Invocation authorizes running the requested slice and repairing
@@ -42,6 +43,17 @@ Explicit user scheduling holds override automatic reruns and next-slice defaults
 For the resumed Polar campaign, retain `/benchmark`'s 20-task K=3, fastest-first
 comparable duration groups, 2-hour cap and user-go-before-next-20 scope; none of
 the repair, approval or continuation steps below grants a new batch launch.
+
+## Default batch schedule (user, October 20 and 27, 2026)
+
+- Run a slice in batches when its scheduled runs exceed 70 or the user asks for batches; an explicitly requested single wide launch keeps its one-launch rule below.
+- A batch is one `scripts/run-bench` launch; its size counts individual scheduled runs (task × `-k` copy), so it holds size ÷ `-k` distinct tasks, rounded down, and the size is never multiplied by `-k` again.
+- Start at 20 runs; after a completed batch with fewer than 5% confirmed infra failures over its original scheduled runs, grow the next batch by 10 runs, to at most 70; otherwise, or after an interrupted batch or unknown classification, keep the size.
+- Order all tasks once before the first batch, shortest effective timeout first (catalog timeout, then recorded runtime, then the CLI default; task name breaks ties), and keep similar timeouts together so one slow task does not hold the batch.
+- Keep a batch's task set for 5 iterations (one iteration is one batch run plus its fix round), adding the next unvisited tasks in order when the size grows; then rotate to the next unvisited tasks at the current size.
+- Launch each batch once with `--concurrency` equal to its run count, subject to native admission; record any forced split as an exception that keeps one logical batch and its fixed denominator.
+- Advance on this schedule without asking; wait for a user go only where the user asked for one, as in the resumed Polar campaign above.
+- Record iteration, task names, size in runs, `-k`, concurrency, infra count over original scheduled runs and the rotation cursor in state; never change a task, assertion, timeout or acceptance rule to fit a batch.
 
 ## Alignment and implementation (explicit user correction, October 21, 2026)
 
@@ -76,7 +88,7 @@ write new run evidence separately. This authorizes that repeat even though its
 slots already have accepted baseline results. It does not authorize Batch 2,
 the next 20 or a changed workload. Resolve actual integration, backend-first,
 warm-source and admission prerequisites; do not invent additional approval gates.
-The parent retains 10-minute and start/no-queue/end CLI scorecards.
+The parent retains 15-minute and start/no-queue/end CLI scorecards.
 
 ## The iteration loop
 
@@ -102,7 +114,7 @@ The parent retains 10-minute and start/no-queue/end CLI scorecards.
    before the next useful experiment. Human approval blocks only its scoped action.
 5. **Sleep when the critical owners are working and no useful independent work
    remains.** Operational monitors and workers continue. Wake for actionable
-   events or every **10 minutes**; inspect evidence, send the full scorecard,
+   events or every **15 minutes**; inspect evidence, send the full scorecard,
    act on stalls and increase parallelization where useful. Put a one-line
    cause **and corrective action** directly beneath every red progress row.
    If the same blocker persists without new causal evidence at the next check,
@@ -132,6 +144,24 @@ local fixes, and do not bypass shared state or authentication to obtain a run.
 Parent sleep, user questions and scorecard edits do not pause active workers.
 Preparing a command, passing a diagnostic and completing an evidence packet are
 substeps; they do not reset the overall RCA scope or establish outcome progress.
+
+Loop rules (consolidated from the root CLAUDE.md, November 8, 2026):
+
+- During `/deploy`, `.claude/shared/deploy-failure-policy.md` governs failure attribution, repair handoffs and external-provider exceptions wherever this loop's ownership or wait rules conflict; outside `/deploy` the loop is unchanged.
+- Before each experiment, name the hypothesis, the result that would distinguish it, its original bounds and the next decision; afterwards update the owning RCA from the observed result.
+- If an experiment passes without reproducing the reported failure, keep that failure open and choose a different discriminating check; never promote diagnostic completion into outcome progress or blindly retry the broad run.
+- Never hide failed attempts, weaken assertions or change acceptance criteria, and never claim an experiment tested a repair that is absent from its actual service path.
+- Supersede a live run as soon as a verified build with fixes it lacks is ready (copy its evidence, then TERM only its exact owner, keeping its attempts as cancelled), unless it deliberately tests a separate hypothesis or is a clean run whose hypothesis needs its remaining time; say when two variants run on purpose.
+- Unknown outcomes and cancellations without confirmed infra evidence do not count toward the 5% stop; keep confirmed infra evidence across logical cancellation, keep physical-attempt telemetry separate, fence the controller identity, and keep earlier erroneous stops (such as 1/1) as aborted runs, never retroactive passes.
+- Report the first authentic infrastructure failure immediately with its exact run/task/attempt, first failing boundary and original evidence, and start its RCA while healthy work continues; an early report authorizes no restart or broader cancellation.
+- Observer notifications, monitoring handoffs, failure capture, age-limited precheck reuse, precheck-before-fanout, generated operator limits and unique campaign identities follow `/benchmark`'s "Fleet capacity, prechecks and observers".
+- Never sleep more than 15 minutes at once; publish the current scorecard every 15 minutes even when unchanged, and never let event-driven wakeups or sub-agent messages postpone that deadline.
+- At each checkpoint name the critical path and ask "Can any remaining work be parallelized to speed up iteration?"; assign independent hypotheses, evidence analysis, regressions or reviews to available workers (one fix owner per cause, no competing edits or live experiments) and show the chosen speedup and assignments in the scorecard, or the constraint that forces serial work or that no concrete speedup was found.
+- Verified lack of milestone gain is a control signal and token burn alone is not progress; never reset scope, milestones or start times to hide a stall.
+- Between checkpoints, do not busy-poll, repeat unchanged reports, send status nudges or create audits just to stay active.
+- Stop a worker only when the user cancels its work, its own safety boundary requires it or a coordinated reassignment needs it.
+- Sub-agents batch routine status and notify the parent only on an actionable milestone, result, failure or blocker; compute refs and hashes before a handoff and never send placeholders.
+- Embed each reusable speed learning in the owning command, runbook or regression with its exact setup, source/service binding, scope and observed timing, and turn recurring manual steps into small supported commands; never leave it only in chat or private memory.
 
 ## Canonical human-approval format
 
@@ -163,7 +193,7 @@ and Downstream Implications sections or their code-block presentation.
 4. **Actively drive asynchronous work.** By default a sub-agent owns each run:
    launch, operational monitor, immediate infra-stop/error notifications,
    infra `/RCA` delegation, normal cleanup and the returned clustered results.
-   The parent posts only the CLI batch scorecard, every 10 minutes and on three
+   The parent posts only the CLI batch scorecard, every 15 minutes and on three
    transitions (tasks started, no more queued, run end), and acts on events.
    Check real output growth and liveness; parent sleep never pauses workers. Do not duplicate the monitor with parent-side busy polling.
    4a. **Measure progress from the work itself.** At five minutes with no
@@ -745,7 +775,7 @@ while the requested goal still has authorized work:
     else:
         sleep interruptibly; workers and operational monitors keep running
     on an actionable event: act without waiting for the scheduled checkpoint
-    every 10 minutes, on a fixed deadline, and on start / no-more-queued / end:
+    every 15 minutes, on a fixed deadline, and on start / no-more-queued / end:
         check evidence-backed milestones and publish the full scorecard
         put reason + specific action beneath every red progress row
         remove a wait, narrow/reassign a stall or add useful parallel work

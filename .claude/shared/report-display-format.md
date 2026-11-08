@@ -124,6 +124,10 @@ Recompute usage rates from the same-scope history on every render. Warming
 ends after 15 minutes of comparable history; never reuse cached rates.
 After publishing, atomically update the existing latest-card URL and fixed
 checkpoint fields together; do not create competing URL aliases.
+Refresh lifecycle labels from verified receipts: a completed export must not
+remain displayed as pending. For long batches keep fixed-cohort receipt counts
+and original clocks; a new rendering or reread of old evidence never creates a
+usage or outcome delta.
 
 ## Work versus waiting — all current and future agents
 
@@ -295,6 +299,11 @@ recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
   coverage. Preview light, dark and 360px layouts, then publish the standalone
   visual link. This overrides the diff-fence presentation for progress cards;
   it does not change exact approval packets or evidence payloads.
+- Publish every scorecard as HTML by default and put its Markdown visual link
+  alone in a final-answer paragraph so boxes.dev embeds the live card inline,
+  with readable text and a compact first view. Use text or code blocks only
+  when embedding is unavailable. Keep QA screenshots private; never send image
+  previews of the card.
 - Diff highlighting is only a fallback when rendered HTML is unavailable;
   explain that limitation instead of claiming emoji or prefixes colored text.
   Keep status markers for accessibility. Do not color an unknown result as

@@ -1,21 +1,27 @@
 ---
-description: "Scan the codebase and regenerate CLAUDE.md as a token-efficient table of contents. Idempotent — safe to run whenever the codebase changes."
+description: "Scan the codebase and refresh the root CLAUDE.md and the package CLAUDE.md files in place, keeping their structure and rule IDs. Idempotent — safe to run whenever the codebase changes."
 ---
 
 # Generate CLAUDE.md
 
-Scan the codebase and produce a concise, high-signal CLAUDE.md following harness engineering principles: "Give the agent a map, not a 1,000-page instruction manual."
+Scan the codebase and keep the instruction files concise, high-signal and accurate, following harness engineering principles: "Give the agent a map, not a 1,000-page instruction manual."
 
-**This skill is idempotent.** Running it again after codebase changes should produce an updated, accurate CLAUDE.md. It overwrites the existing CLAUDE.md entirely.
+The instruction files are:
+
+- **Root `CLAUDE.md`**: repo-wide rules only. A one-line purpose, the standing banners, a `Sections:` line, then the `##` sections it lists (Priorities, Communication, Never, Delegation and waiting, Workspaces, Testing, Benchmarks, Database, Agents and scale, LLM calls, Credentials and environment, Production, Repository, Where else to look). Every rule is one bullet on one line. There is no numbered list: a kept rule carries its stable ID in parentheses, for example `(rule 19)`, because other files cite it.
+- **Package `CLAUDE.md` files** (`front-end/CLAUDE.md`, `back-end/CLAUDE.md`, `agents/CLAUDE.md`, each with an `AGENTS.md` symlink beside it): rules and commands that apply only inside that package, including its test and coverage commands. A rule moved here from the root keeps its ID.
+- **Reference docs**: `docs/testing.md` for the testing guide, `docs/internal/*.md` for reference material (tables, API recipes), `docs/setup-mac.md` for Mac setup.
+
+**This skill is idempotent.** Running it again after codebase changes should produce updated, accurate files. It edits them in place: it never overwrites the root `CLAUDE.md` wholesale, never restructures its sections and never renumbers, reuses or drops a cited rule ID.
 
 ---
 
 ## Principles
 
-1. **Context is scarce.** Every line in CLAUDE.md competes with the task prompt for context window space. Target ~100-150 lines. If a section exceeds 10 lines, it probably belongs in a separate doc that CLAUDE.md points to.
+1. **Context is scarce.** Every line in the root CLAUDE.md competes with the task prompt for context window space. Keep it under 175 lines. Package-only detail belongs in that package's CLAUDE.md; long reference material belongs in a doc the file points to.
 2. **Table of contents, not encyclopedia.** Short pointers to deeper docs, skills, and code — not inline reproductions of their content.
 3. **Progressive disclosure.** CLAUDE.md tells the agent *where* to look. The agent reads the deeper doc *when it needs it*.
-4. **Skills are the playbook.** Don't duplicate skill instructions in CLAUDE.md. Reference the skill name and a 1-line description.
+4. **Skills are the playbook.** Don't duplicate skill instructions in CLAUDE.md; a one-line pointer to the skill is enough.
 5. **Mechanical enforcement over prose.** Prefer "ESLint enforces X (see `eslint.config.mjs`)" over a paragraph explaining X.
 6. **Guidelines over tutorials.** Bulleted rules the agent can scan in one pass. No multi-step tutorials (those belong in skills).
 
@@ -77,13 +83,20 @@ ls agents/tests/run_all_tests.py agents/tests/e2e/run_e2e_tests.py 2>/dev/null
 ls agents/benchmarks/run_benchmark.py 2>/dev/null
 ```
 
-### 1e. Existing CLAUDE.md
+### 1e. Existing instruction files
 
-Read the current `CLAUDE.md`. Identify:
-- Sections that are **concise and high-signal** → keep (possibly condense)
-- Sections that are **verbose inline docs** → extract to a reference doc under `docs/internal/` and replace with a pointer
-- Sections that **duplicate skill content** → replace with skill reference
-- Sections that are **stale or inaccurate** → drop or update
+Read the root `CLAUDE.md` and every package `CLAUDE.md`. For each bullet, identify whether it is:
+- **concise, repo-wide and accurate** → keep it where it is
+- **package-only** → move it to that package's CLAUDE.md, keeping its rule ID
+- **verbose reference material** → extract it to `docs/internal/<topic>.md` and leave a one-line pointer
+- **duplicate skill content** → replace it with a one-line skill pointer
+- **stale or inaccurate** → update it, or delete it only when nothing cites its rule ID (Step 4)
+
+Also list the text other files pin, so it survives unchanged (Step 4):
+
+```bash
+grep -rln 'CLAUDE.md' scripts/tests back-end/scripts back-end/src/tests 2>/dev/null
+```
 
 ### 1f. Plans and completed work
 
@@ -122,7 +135,7 @@ grep -i 'log' conductor.json 2>/dev/null
 grep -rn '\-logs\.\|\.log["\x27]' scripts/ back-end/src/ agents/ --include='*.ts' --include='*.sh' --include='*.py' --include='*.json' 2>/dev/null | grep -v node_modules | head -30
 ```
 
-Every log file path discovered MUST appear in the External Context table. Cross-check your final External Context table against this list — if a discovered log file is missing from the table, add it.
+Every log file path discovered MUST be reachable from the instruction files (Step 3). Cross-check against this list and add any discovered log file that is missing.
 
 **Query/debug scripts** — find utility scripts an agent might need:
 ```bash
@@ -138,18 +151,11 @@ find . -maxdepth 2 -name '.env' -o -name '.env.*' 2>/dev/null | grep -v node_mod
 
 ## Step 2: Extract verbose content to reference docs
 
-For any section in the current CLAUDE.md that exceeds ~10 lines of detailed content (tables, multi-step procedures, curl examples), extract it to a standalone doc.
+For any content in an instruction file that exceeds a few lines of detail (tables, multi-step procedures, curl examples), extract it to a standalone doc and leave a one-line pointer.
 
-**Extraction targets** (check if these exist in current CLAUDE.md and are verbose):
+**Already extracted** (keep the pointers; never inline these back): `docs/internal/llm-call-map.md` (LLM call map), `docs/internal/prod-logs.md` (prod logs), `docs/internal/rose-completions.md`, `docs/internal/prod-env-vars.md`, `docs/internal/planner-memory.md`, `docs/setup-mac.md`, `docs/testing.md`; agent testing lives in `/loop`, PR review in `/deploy`, benchmarks in `/benchmark`.
 
-| Current CLAUDE.md section | Extract to | Pointer in new CLAUDE.md |
-|---|---|---|
-| LLM Call Map (tables of call sites, token estimates, gates) | `docs/internal/llm-call-map.md` | "LLM call map: `docs/internal/llm-call-map.md`" |
-| Autonomous Agent Testing (multi-step loop) | Already in `/loop` skill | "Agent testing loop: `/loop`" |
-| Production Logs (Render API commands) | `docs/internal/prod-logs.md` | "Prod log access: `docs/internal/prod-logs.md`" |
-| CodeRabbit Review (step-by-step) | Already in `/deploy` skill | "PR review: handled by `/deploy`" |
-| Detailed benchmark instructions | Already in `/benchmark` skill | "Benchmarks: `/benchmark <task>`" |
-| Mac app release process (if verbose) | `docs/internal/mac-app-releases.md` | One-line summary + pointer |
+**Package detail** (commands, layer rules, test and coverage commands for one service) goes to that package's CLAUDE.md, not to `docs/internal/`.
 
 **Rules for extraction:**
 - Create `docs/internal/` if it doesn't exist
@@ -162,115 +168,94 @@ For any section in the current CLAUDE.md that exceeds ~10 lines of detailed cont
 Before creating a `docs/internal/` file for any topic, check if a skill (`.claude/commands/*.md`) already covers that content. To check:
 1. Read the skill descriptions gathered in Step 1b
 2. If a skill's description matches the topic (e.g., `/loop` covers agent testing, `/deploy` covers PR review, `/benchmark` covers benchmark instructions), **do NOT create an extracted doc for that topic**
-3. Do NOT reference the skill in CLAUDE.md either — skills are injected via system prompt and don't need to be listed
-4. Simply omit that topic from CLAUDE.md entirely. The content lives in the skill, the agent will find it when it needs it.
+3. At most keep a one-line pointer to the skill (root CLAUDE.md "Where else to look" lists the main ones)
+4. Otherwise omit that topic from CLAUDE.md. The content lives in the skill, the agent will find it when it needs it.
 
 Only extract to `docs/internal/` when the content is **reference material** (data tables, credentials, API commands) that no skill covers.
 
 ---
 
-## Step 3: Generate the new CLAUDE.md
+## Step 3: Update the files in place
 
-Write the new CLAUDE.md with exactly **4 sections**. Each section has a max line budget. No other top-level sections.
+### Root CLAUDE.md
 
-### Section 1: Identity (3-5 lines)
+Keep its exact shape:
 
-```markdown
-# <Project Name>
+- `# Rose Labs`, the one-line RWLH purpose and the all-caps banners stay first.
+- The `Sections:` line lists every `##` section in order; add or rename a section only when the user asks, and update that line with it.
+- Each rule is one bullet on one line, one or two short clauses. Never hard-wrap a rule: tests match pinned phrases line by line.
+- No numbered lists. A kept rule keeps its ID in parentheses (`(rule 0a)`, `(rules 1, 12, 19)`); never renumber an ID, reuse a deleted one or give a new rule a number just to have one.
+- Add a bullet to the section it belongs to; replace an outdated bullet rather than adding a second one beside it.
+- Repo-wide only: anything that applies only inside `front-end/`, `back-end/` or `agents/` goes to that package's file, and the root keeps at most a pointer.
+- No YAML frontmatter: a `rose-agent-spawn` frontmatter key in any CLAUDE.md or AGENTS.md changes agent spawn authorization (`back-end/src/providers/agentGraph/cliAccount.ts`).
 
-<1-line description of what this is>
-- Prod: <url>
-- API: <url>
-- Docs: <url>
-```
+### Package CLAUDE.md files
 
-### Section 2: Architecture (10-15 lines)
+For each of `front-end/`, `back-end/` and `agents/`:
 
-The directory tree (already concise in most projects). Include:
-- Top-level directory → tech stack → deploy target (1 line each)
-- Key entry points as a bullet list (file path only, no descriptions)
-- Schema source of truth pointer
+- Keep its entry points, layer rules, local commands, test and coverage commands, and rules moved from the root with their IDs.
+- Use the same one-line-per-rule bullets; group them under short `##` headings.
+- Keep its `AGENTS.md` a symlink to the `CLAUDE.md` beside it (`ln -s CLAUDE.md AGENTS.md`); never replace the link with a copy.
 
-### Section 3: External Context
+### What to include
 
-Pointers to logs, databases, APIs, and extracted reference docs — the "where to look" table. One line per resource, with the access command or file path.
-
-**This table MUST be built from Step 1i discovery results, not from memory or the old CLAUDE.md.** Every log file, query script, and config path found in Step 1i must have a row. Cross-check the final table against discovery output before writing.
-
-No fixed line budget — the table has as many rows as there are resources. Completeness matters more than brevity here.
-
-```markdown
-## External Context
-
-| Resource | Access |
-|---|---|
-| Backend logs | `back-end/backend-logs.log` |
-| Worker logs | `agents/navi-worker-log.txt` |
-| Frontend logs | `front-end/frontend-logs.log` |
-| Research logs | `research/research-logs.log` |
-| ... (every log file from discovery) | ... |
-| Prod logs (Render/ClickHouse/Fly/Supabase) | `docs/internal/prod-logs.md` |
-| DB schema | `back-end/prisma/schema.prisma` |
-| DB queries | `npx tsx back-end/scripts/query-db.ts` |
-| ... (every script/config from discovery) | ... |
-```
-
-### Section 4: Guidelines (30-45 lines)
-
-Bulleted rules — the "common mistakes" and "how we work" section. Each rule is 1-2 lines max. Group by category. Only include rules that an agent is likely to violate (not obvious things).
-
-This section absorbs everything: test commands, credentials, plans, architecture rules, deploy gotchas, and common mistakes. If it's a short rule or fact, it's a guideline bullet.
-
-Categories to include:
-- **Testing** — TDD loop, API changes require tests, which test commands to run for each service
-- **Architecture** — layer rules, provider boundaries, import direction
-- **Code quality** — no defensive fixes, search before implementing, no fallbacks
-- **Agent patterns** — Temporal determinism, activity idempotency, error handling
-- **Frontend** — state diagrams, no over-truncation
-- **Deploy** — mac app tag requirements, plan archival
-- **Logging** — what to log, format
-- **Plans** — where they live (`docs/plans/active/` and `docs/plans/completed/`), check completed plans before modifying files they touched
-- **Credentials** — minimum needed for local dev (test phone/OTP, API key, user ID, Supabase URL). No curl examples — those live in skills.
-
-Only include guidelines that are:
+Only include rules that are:
 1. Non-obvious (an agent wouldn't naturally do this)
 2. Learned from past mistakes (the user added them for a reason)
 3. Enforceable (the agent can check if it's following the rule)
 
-Drop guidelines that are:
-1. Already enforced mechanically (by ESLint, structural tests, CI)
+Drop or shorten rules that are:
+1. Already enforced mechanically (by ESLint, structural tests, CI), unless a pointer to the enforcing check helps
 2. Generic software engineering advice
-3. Too verbose (rewrite as 1 line)
+3. Too verbose (rewrite as one line)
 
-**Skills are NOT listed here.** They are already injected into every conversation via the system prompt. Do not duplicate them.
+Every log file and query script found in Step 1i must be reachable: listed in root "Repository" (local logs), the owning package file or a `docs/internal/` doc.
 
 ---
 
 ## Step 4: Verify
 
-After writing the new CLAUDE.md:
+After updating the files:
 
-1. **Line count check:**
+1. **Line count and shape check:**
    ```bash
-   wc -l CLAUDE.md
+   wc -l CLAUDE.md                          # must be under 175
+   grep -nE '^ *[0-9]+[a-z]?\. ' CLAUDE.md   # must print nothing: no numbered lists
    ```
-   Must be under 175 lines. If over, find sections that can be further compressed or extracted.
+   If over the budget, move package-only bullets to their package file or extract reference detail.
 
-2. **No broken pointers:** For every file path or doc reference in the new CLAUDE.md, verify the file exists:
+2. **No broken pointers:** For every file path in the root and package files, verify the file exists:
    ```bash
-   # Extract all file paths referenced and check each
-   grep -oE '`[a-zA-Z][a-zA-Z0-9/_.-]+\.(ts|py|json|md|yaml|log|txt|mjs)`' CLAUDE.md | tr -d '`' | while read f; do
-     [ -f "$f" ] || echo "MISSING: $f"
+   for doc in CLAUDE.md front-end/CLAUDE.md back-end/CLAUDE.md agents/CLAUDE.md; do
+     grep -oE '`[a-zA-Z][a-zA-Z0-9/_.-]+\.(ts|py|json|md|yaml|log|txt|mjs)`' "$doc" | tr -d '`' | while read f; do
+       [ -e "$f" ] || [ -e "$(dirname "$doc")/$f" ] || echo "MISSING in $doc: $f"
+     done
    done
    ```
    Fix any missing references (either create the extracted doc or remove the pointer).
 
-3. **No duplicated content:** Verify that extracted docs exist and contain the detailed content:
+3. **Cited rule IDs still exist:** every `rule N` cited elsewhere must still be defined in the root or a package file:
+   ```bash
+   git grep -hoE 'CLAUDE\.md rules? [0-9]+[a-z]?' -- . ':!docs/rca/cases' ':!docs/handoffs' ':!docs/plans/completed' | sort -u
+   grep -ohE '\(rules? [0-9a-z, ]+\)' CLAUDE.md */CLAUDE.md | sort -u
+   ```
+   Restore a cited rule that went missing, or update the citing file to the rule's new location.
+
+4. **Pinned text still passes:** run the tests that read CLAUDE.md (Step 1e), at least:
+   ```bash
+   bash scripts/tests/approval-format.test.sh
+   bash scripts/tests/descend-command.test.sh
+   bash scripts/tests/semantic-deploy-gate.test.sh
+   python3 scripts/tests/deploy-failure-policy.test.py
+   bash back-end/scripts/prisma-local-push.test.sh
+   ```
+
+5. **No duplicated content:** Verify that extracted docs exist and contain the detailed content:
    ```bash
    ls -la docs/internal/*.md 2>/dev/null
    ```
 
-4. **External Context completeness:** Re-run the log file discovery commands from Step 1i. For every log file path found, verify it has a row in the External Context table. If any are missing, add them and rewrite CLAUDE.md.
+6. **Resource completeness:** Re-run the log file discovery commands from Step 1i. For every log file path found, verify the root "Repository" section, a package file or a `docs/internal/` doc points to it. Add any that are missing.
 
 ---
 
@@ -278,33 +263,33 @@ After writing the new CLAUDE.md:
 
 **This step is critical. Run it exactly twice before proceeding to Step 6.**
 
-After the first pass generates the new CLAUDE.md, information will inevitably be lost. Some of that loss is intentional (verbose content moved to extracted docs, skill-covered content omitted). Some is accidental (useful pointers, conventions, or reference data silently dropped).
+After the first pass updates the files, information will inevitably be lost. Some of that loss is intentional (verbose content moved to extracted docs, skill-covered content omitted). Some is accidental (useful pointers, conventions, or reference data silently dropped).
 
 ### How to run each review pass:
 
-1. **Read the previous CLAUDE.md** (the version from before this skill ran — use `git show HEAD:CLAUDE.md` if already overwritten, or the copy you read in Step 1e).
+1. **Read the previous files** (the versions from before this skill ran — use `git show HEAD:CLAUDE.md` and `git show HEAD:<package>/CLAUDE.md`, or the copies you read in Step 1e).
 
-2. **Read the new CLAUDE.md** you just wrote.
+2. **Read the updated files** you just wrote.
 
 3. **Diff them mentally, section by section.** For every piece of information in the old version, classify it:
-   - **Kept** — present in the new CLAUDE.md (possibly condensed). No action.
+   - **Kept** — present in the root or a package CLAUDE.md (possibly condensed). No action.
    - **Extracted** — moved to a `docs/internal/` file. No action.
    - **Covered by skill** — a skill (`.claude/commands/*.md`) contains this content. No action.
-   - **Lost** — not in the new CLAUDE.md, not in any extracted doc, not in any skill. **Evaluate below.**
+   - **Lost** — not in any CLAUDE.md, extracted doc or skill. **Evaluate below.**
 
 4. **For each piece of lost information, ask:**
-   - Is this a **file path, URL, command, or convention** that an agent would need and can't discover by searching? → **Restore it** (as a 1-line guideline bullet or External Context row).
+   - Is this a **file path, URL, command, or convention** that an agent would need and can't discover by searching? → **Restore it** (as a one-line bullet in the root or package file).
    - Is this a **workflow or multi-step procedure** already in a skill? → Confirmed covered, leave it out.
    - Is this **discoverable from the codebase** (e.g., by reading `package.json`, running `ls`, grepping)? → Safe to drop.
    - Is this a **domain-specific convention or gotcha** (e.g., naming conventions, migration workflow, manual release triggers) that an agent wouldn't know without being told? → **Restore it.**
    - Is this **stale, redundant, or generic advice**? → Confirmed drop.
 
-5. **If any lost information should be restored**, add it to the new CLAUDE.md:
-   - File paths / URLs / commands → External Context table row
-   - Conventions / gotchas / rules → Guidelines bullet (1 line)
-   - Reference data (test files, env var names) → Guidelines bullet or External Context row
+5. **If any lost information should be restored**, add it as one-line bullets:
+   - Repo-wide rules, paths, URLs and commands → the matching root section
+   - Package-only rules and commands → that package's CLAUDE.md
+   - Reference data (tables, recipes) → the owning `docs/internal/` doc
 
-6. **After restoring, re-run the Step 4 verification checks** (line count, broken pointers, External Context completeness).
+6. **After restoring, re-run the Step 4 verification checks** (line count and shape, broken pointers, cited rule IDs, pinned text, resource completeness).
 
 ### Pass tracking
 
@@ -319,8 +304,8 @@ After both passes, compile a list of everything you **deliberately chose NOT to 
 ## Step 6: Report
 
 Output to the user:
-- Line count: before → after
-- Sections extracted to `docs/internal/` (list with line counts)
+- Line count of each file: before → after
+- Bullets moved between files and docs extracted to `docs/internal/` (list with line counts)
 - **Information deliberately dropped** (table format):
 
 ```markdown
@@ -332,10 +317,10 @@ Output to the user:
 
 The user should be able to review the "deliberately dropped" table and tell you to restore anything they disagree with.
 
-Only say **"CLAUDE.md regenerated"** if:
-- [ ] Under 150 lines
+Only say **"CLAUDE.md files refreshed"** if:
+- [ ] Root CLAUDE.md under 175 lines, one line per rule, no numbered list, section structure unchanged
+- [ ] Every cited rule ID still resolves, and the pinned-text tests pass
 - [ ] All file/doc references resolve to existing files
 - [ ] Extracted docs exist in `docs/internal/`
-- [ ] No verbose inline content (no section > 10 lines of detailed content)
 - [ ] Two information loss review passes completed
 - [ ] Deliberately-dropped table shown to user

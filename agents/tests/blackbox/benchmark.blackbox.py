@@ -24578,7 +24578,7 @@ def test_history_ledger_task_names_still_exist_in_catalog():
 
     Every task name ever recorded in the success ledger must still exist in
     tasks.json. If this fails, a task was renamed or deleted — restore the name
-    (CLAUDE.md "Eval Suite": task name is the cross-store primary key).
+    (CLAUDE.md "Benchmarks": task name is the cross-store primary key).
     """
     import json as _json
     from pathlib import Path
@@ -26953,6 +26953,19 @@ async def run_all_tests():
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
+    from benchmarks.select_predeploy_benches_test import (
+        test_catalog_validation_requires_ready_task_deploy_category,
+        test_selector_treats_explicit_deploy_opt_out_as_uncategorized,
+    )
+
+    r.record(
+        "catalog_requires_ready_task_deploy_category",
+        _with_tmp_path(test_catalog_validation_requires_ready_task_deploy_category),
+    )
+    r.record(
+        "predeploy_selector_explicit_deploy_opt_out",
+        _with_tmp_path(test_selector_treats_explicit_deploy_opt_out_as_uncategorized),
+    )
     r.record(
         "local_cleanup_preserves_run_id_observers",
         test_local_cleanup_does_not_signal_processes_that_only_mention_run_id,

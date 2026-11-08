@@ -168,7 +168,7 @@ Source: `/RCA` Step 5b, user instruction 2026-09-09.
 18. **Every fix lands a test in a consistently-run suite.** Behavior with no
     cemented test is assumed broken; a bug fixed without a regression test will
     silently return.
-    Source: CLAUDE.md rules 1–3.
+    Source: CLAUDE.md rules 1 and 2 (Testing); back-end/CLAUDE.md rule 3.
 
 19. **Semantic/browser failures are real failures.** Fix them; start the
     dependency you need. The only acceptable escalation is a third-party provider

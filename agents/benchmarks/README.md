@@ -4,7 +4,7 @@ Spawns real agents against prod or localhost, polls for completion, evaluates pa
 
 ## Eval Suite (the ONE catalog)
 
-`tasks.json` contains the ordinary suites, and the sibling `polar_tasks.json` contains Polar tasks. The shared catalog loader combines both for selection (see CLAUDE.md "Eval Suite"). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
+`tasks.json` contains the ordinary suites, and the sibling `polar_tasks.json` contains Polar tasks. The shared catalog loader combines both for selection (see CLAUDE.md "Benchmarks" and **Eval Suite operations** below). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
 
 **How evaluators pass/fail** (Layer 1 harness contract → Layer 2 `evaluators[]`,
 tree-aware semantic evidence, Blue Bottle worked example): see the `/benchmark`
@@ -24,7 +24,7 @@ scripts/run-bench eval --only test-mass-agent-run-0,browser-agent
 scripts/run-bench eval --bench rose-bench
 ```
 
-Every task runs on a **base-image fixture**: undeclared environments inherit `base:victoria-prod-sync-v1` (workspace prod-sync DB, `scripts/setup-db.sh`) at load time — registry + pg_dump freezer in `fixtures.py`. Every completed run — pass or fail — is recorded: full record in `runs/*.json`, one line per attempt in `history/task_attempts.jsonl` (`record_attempt`), full LLM trajectories in `.llm-dumps/<agent_id>/` (always-on locally).
+Every task runs on a **base-image fixture**: undeclared environments, and declared ones with empty `base_images`, inherit the canonical `base:victoria-prod-sync-v1` artifact shared by local and cloud runners (workspace prod-sync DB, `scripts/setup-db.sh`) at load time — registry + pg_dump freezer in `fixtures.py` (`ensure_base_image_snapshot()`). That base includes frozen WhatsApp history; compute tokens are refreshed as a live overlay after restore, and task `db_fixtures` are deltas on top of it. Every completed run — pass or fail — is recorded: full record in `runs/*.json`, one line per attempt in `history/task_attempts.jsonl` (`record_attempt`), full LLM trajectories in `.llm-dumps/<agent_id>/` (always-on locally).
 
 ### Live data fixtures (`environment.live_fixtures`)
 
@@ -50,6 +50,15 @@ Validated by `long_horizon.py:_validate_environment`: only names registered in `
 Task-specific DB deltas remain separate from the base image. The dedicated gate-user deltas are safe to pre-seed physically, but their declarations remain useful for reset/isolation. Plaid and user-data deltas use the regular benchmark user and must not be bundled into the shared base image because they would contaminate unrelated tasks.
 
 Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` benchmark entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
+
+**History stores** (one task `name` threads them all: definition → pass history → latency profile → run record):
+
+- **Attempts ledger** `history/task_attempts.jsonl`: one line per completed run, pass and fail (status, duration, cost, `failure_reason`), written by `timeout_history.py:record_attempt()`; the run-stats record (attempt counts, failure rates).
+- **Success ledger** `history/task_durations.jsonl`: one line per passing run keyed by `"task"`, read by `timeout_history.py` (`summary()` → p50/p95, derived timeouts); pass-only so failure durations cannot poison timeout derivation.
+- **Latency baselines** `history/span_durations.jsonl`: keyed by `"benchmark"` + `"span_key"`, read by `span_history.py` / `agent_latency.py` (p50/p90/p95, regression flags).
+- **Full run records** `runs/*.json`: per-run task results and merged logs keyed by `TaskResult.name` (`run_benchmark.py --compare A B`); local evidence, not committed.
+
+**Adding a deploy category:** set `deploy_category` (or a matching tag) to a known category; a new category must be added to `FLOOR_CATEGORIES` and/or `PATH_TRIGGERS` in `select_predeploy_benches.py` and to `KNOWN_DEPLOY_CATEGORIES` (the selector's `ValueError` lists the known ones). Set `deploy_canary: true` to prefer a task as its category's floor/path pick.
 
 ### Code bench (`code-bench-*`, plan C8)
 
@@ -194,9 +203,9 @@ with accepted LIVE latency. The existing stability wrapper's width-32 cap does
 not restrict this ordinary fleet; do not substitute smaller slices.
 
 Ordinary source-only runs reuse verified dependency images and completed
-snapshots. Before an image-build-to-fleet measurement, complete CLAUDE.md's
-**Fresh clone setup (Andy’s Mac)** dependency reuse and actual backend seed-cache
-import check before recording the image clock. An image-only publication needs
+snapshots. Before an image-build-to-fleet measurement, complete the dependency
+reuse and actual backend seed-cache import check in `.claude/commands/benchmark.md`
+(**Backend seed-cache import check**) before recording the image clock. An image-only publication needs
 no backend dependency check. For an explicitly requested cold build/push
 measurement, use
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
@@ -406,7 +415,12 @@ remains unchanged. Measure execution overlap from task start/terminal intervals 
 than the campaign’s active controller count.
 
 The controller regression command is `bash scripts/tests/cloudbench-multi-workstream.test.sh`.
-It requires native Linux for the real worker supervisor’s subreaping proof. On Mac,
+It requires native Linux for the real worker supervisor’s subreaping proof: run it
+on Linux at the reviewed source; Darwin rejection tests do not substitute for this
+mandatory lifecycle gate. Its permanent `cloudbench-fake-volume-contract.test.py`
+runs the actual fake provider writers through real snapshot admission, so keep
+positive volume sizes consistent with their Machine mounts before exercising
+ownership scenarios. On Mac,
 the command snapshots tracked scripts and the five real helper modules into private
 artifacts, then runs the same fixture with read-only source mounts and no container
 network. Its small committed Docker recipe pins Python3.11.9 and Node22.13.0; the
@@ -679,8 +693,17 @@ for msg in data['tasks'][0]['logs'].get('messages', []):
 
 ### Query Retained Worker Logs Directly
 
+Load credentials with python-dotenv (sourcing `agents/.env` in bash leaks a token fragment):
+
 ```bash
-cd agents && source .env
+cd agents && eval "$(venv/bin/python - <<'PY'
+import shlex
+from dotenv import dotenv_values
+env = dotenv_values(".env")
+for key in ("CLICKHOUSE_ENDPOINT", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD"):
+    print(f"export {key}={shlex.quote(env.get(key) or '')}")
+PY
+)"
 
 # Logs for one agent
 curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT" \
@@ -690,6 +713,15 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT" \
   --data-urlencode "query=SELECT timestamp, level, event, message, raw FROM observability.fly_logs WHERE parseDateTimeBestEffortOrNull(timestamp) > now() - INTERVAL 1 HOUR AND (level IN ('error','exception') OR raw ILIKE '%error%' OR raw ILIKE '%traceback%') ORDER BY ingested_at DESC LIMIT 100 FORMAT JSONEachRow"
 ```
+
+### Typical failure signatures
+
+- `peer closed connection` during streaming: provider stream dropped.
+- An LLM span marked `[NO-END]` in `agent_latency.py`: the call crashed or was cut off mid-stream.
+- Prisma `P2024`: connection-pool acquisition timeout (5 s × 3 retries on `db.findFirst`).
+- HTTP 429 from Anthropic on the `claude_token` path: rate limit; the client rotates or falls back to the waterfall.
+- `thinking.adaptive.effort: Extra inputs`: effort belongs in `output_config`, not `thinking`.
+- 0% cache hit on claudeAuth: compare `cache.prefix_fingerprint` across calls; differing hashes mean a different prefix and no cache reuse.
 
 ### How Log Collection Works
 
@@ -727,8 +759,10 @@ flyctl tokens create deploy -a navi-whisper-lux
 
 ## Operations Runbook
 
-Moved verbatim from `CLAUDE.md`. "This file" means these instructions;
-**Fresh clone setup** and the **Critical Rules** remain in `CLAUDE.md`.
+Moved verbatim from `CLAUDE.md`. "This file" means these instructions. Mac
+setup now lives in `docs/setup-mac.md`, the fleet seed-cache import check in
+`.claude/commands/benchmark.md`, and the numbered rules (cited as "rule N") in
+`CLAUDE.md`.
 
 ### Benchmarks and cloud fleet
 
@@ -1408,8 +1442,8 @@ minimal benign comment change in `agents/benchmarks/__init__.py` in its own
 checkout for each trial, record the resulting fetchable immutable ref, and build
 from that same checkout. This marker changes neither executable behavior nor the
 39 bootstrap/79 dependency inputs. Preserve any already-running control's source.
-Complete Fresh clone setup's backend import check before recording the image
-start clock. Use the supported uncached image build and exact-image activation
+Complete the backend seed-cache import check in `.claude/commands/benchmark.md`
+before recording the image start clock. Use the supported uncached image build and exact-image activation
 for every trial:
 
 ```bash

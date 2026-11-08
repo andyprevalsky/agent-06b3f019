@@ -34,8 +34,9 @@ const INJECTED_SESSION = process.env.SEMANTIC_SESSION ?? process.env.PROD_SESSIO
 export const HAS_INJECTED_SESSION = INJECTED_SESSION !== '';
 
 // Dev-only test credentials. The default key is the shared local-backend
-// dev key (also documented in CLAUDE.md "Test Credentials"); override via
-// env for CI or alternate environments.
+// dev key (also in .claude/commands/loop.md; CLAUDE.md "Credentials and
+// environment" holds the dev login and user id); override via env for CI or
+// alternate environments.
 export const TEST_API_KEY =
   process.env.TEST_API_KEY ?? 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
 export const TEST_USER_ID = process.env.TEST_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
@@ -235,7 +236,7 @@ export async function allowAuthEndpoints(context: BrowserContext): Promise<void>
 }
 
 export async function createAgent(goal: string, startPhase?: 'plan' | 'execute'): Promise<string> {
-  // Omit start_phase entirely to start in chat mode (per CLAUDE.md).
+  // Omit start_phase entirely to start in chat mode (per .claude/commands/loop.md).
   const body: Record<string, unknown> = { goal };
   if (startPhase) body.start_phase = startPhase;
   const userId = await resolveTestUserId();

@@ -24,7 +24,7 @@ QUEUED / IN_PROGRESS / COMPLETED, then PASS / HARNESS FAILURE / INFRA FAILURE.
 Preserve genuine agent failures, cancellations and unknown classifications
 separately; keep the infra threshold in a minor note. Include the latest three
 experiments, last-run age, recorded tokens/15-minute rate, LIFE and lifecycle
-coverage. Refresh on the 10-minute checkpoints and transitions below, without
+coverage. Refresh on the 15-minute checkpoints and transitions below, without
 resetting clocks or stopping ongoing work.
 Use the original scheduled denominator for the existing 5% infra stop policy,
 not completed attempts. Delegate issues with `/RCA` and `/deploy` only within
@@ -37,7 +37,7 @@ By default, a sub-agent owns each benchmark run: launch (or adoption of an
 already-launched run), operational monitoring, infra-failure `/RCA` delegation,
 exact-owner cleanup and the returned results with clustered failures. The main
 agent does not poll the run itself. It posts only the CLI-rendered batch
-scorecard, every **10 minutes** and on three transitions: tasks started, no more
+scorecard, every **15 minutes** and on three transitions: tasks started, no more
 queued, and run end (an infra early stop counts as the end). Approval requests
 for harness and eval fixes still go to the user from the main agent.
 
@@ -174,11 +174,25 @@ capacity, ownership, clocks and physical resource guards unchanged.
 Ordinary cloud runs automatically reuse verified completed dependency snapshots,
 including from fresh checkouts. Use `scripts/run-bench --help` and the Operations Runbook's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
+Before refreshing cloud dependency snapshots, resolve Python dependency changes
+against the complete `agents/requirements.txt` and run `python -m pip check`;
+an old pool fingerprint cannot certify the new environment.
 
-Before an image-build-to-fleet measurement, complete CLAUDE.md's **Fresh clone
-setup (Andy’s Mac)** dependency reuse and actual backend seed-cache import check
-before recording the image clock. The image-only publisher needs no backend
-dependency check.
+**Backend seed-cache import check.** Before a fleet run, and before recording
+the image clock of an image-build-to-fleet measurement, reuse a matching healthy
+dependency installation (Mac: `docs/setup-mac.md`), select the installed
+backend/frontend Node (22.13.0 verified), activate `agents/venv`, and run from
+the repository root:
+
+```bash
+(cd back-end && node --import tsx -e "require('./scripts/seed-dump-cache.ts'); console.log('backend seed-cache imports ready')")
+```
+
+It imports the canonical seed-cache producer through its installed TypeScript
+loader and dependency graph (either npm layout) without invoking the seed CLI,
+reading its env file, contacting R2 or starting a stack. Resolve a failure
+before starting the measurement; an image-only publication needs no backend
+check (RCA `2026-10-07-controller-worktree-omitted-hoisted-root-dependencies`).
 
 An explicitly requested uncached image measurement uses
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
@@ -325,6 +339,22 @@ retention, and local diagnostics.
 Do not start `scripts/run.sh` manually for local benchmark work unless the user
 explicitly asks for a shared existing stack. Use `--use-existing` only when
 services are already running and the user wants to reuse `.context/services.json`.
+
+### Fleet capacity, prechecks and observers
+
+- **Fly limits:** before asking the user for a cap, read the authenticated organization setting `machines_per_org_limit` (the fleet's provider-cap check does); app Machine counts are not organization totals.
+- **Ownership is not authority:** keep ownership matches, verified idle, reuse eligibility and qualified tasks as separate facts; ownership alone grants no reuse or cleanup authority, and retain-policy resources stay protected.
+- **No idle Machines after failure:** failed, cancelled or interrupted work must not leave unused Machines running; reconcile and stop verified idle owned task Machines as well as controllers, preserving their IDs, volumes, evidence and protected warm services.
+- **Reuse before allocating:** reuse eligible existing Machines first (fresh-only flags do not bypass reuse); create more only for measured unmet need after reuse with verified provider headroom. A limit error is not permission to retry creates; keep working on existing Machines or local gates and report the remaining allocation gap.
+- **Age-limited prechecks:** reuse one only from its normal successful producer with authenticated source/environment evidence, preserving its exact bytes and original timestamp (copying never refreshes its age); record origin and destination, keep normal expiry checks and rerun it when expired. A restored cache is not a new execution or proof of more capacity than the original check measured.
+- **Precheck before fanout:** where supported, run an already-required shared precheck through its normal producer before creating hundreds of controllers that would wait on it, and reuse its genuine result within the original TTL and deadline. If observed startup delay would consume the remaining TTL, run the normal precheck before fanout instead of restoring a near-expiry cache. This changes scheduling only: no new gate, fabricated pass or changed tasks/profiles.
+- **Generated operator limits:** bind them to the campaign's normal planner, selected profiles and observed baseline; recompute stale ones through that planner, keeping explicit user ceilings and native admission checks. Derived local defaults do not certify provider quota.
+- **Unique identities:** campaign and publication-group identities are unique across hosts and original epochs (a local PID is not); bind the namespace to the original epoch and native boot identity before publishing, test same-PID/different-host without a paid run, and repair the producer's namespace instead of weakening ownership checks or overwriting another run's membership.
+- **Observer notifications:** verify early stopping and parent notification separately (redirected output or an unattended sampler does not wake the parent). Reuse the one existing observer for idempotent first-failure, first verified shared-dependency failure and terminal notices; keep warnings out of terminal-attempt counts, keep the cancellation predicate, and pick the first failure from original physical attempts even when the logical member was cancelled.
+- **Monitoring handoffs:** a successor monitor is active only after its own owner receipt and first source-bound sample; report startup or exec failures immediately. When re-executing Python keep the absolute `sys.executable` as `argv[0]` (relocated interpreters lose the standard library), and repair only the observer setup, keeping one reader and the original clock.
+- **Failure capture:** capture canonical first-failure logs and stop receipts before rotating partial metadata; capture is complete only with a hash-bearing copy receipt for the exact file (startup log copies do not count). Test the sampler and copier that actually execute, including file/byte limits and late receipts.
+- **Exact-owner cancellation credentials:** cancellation reads browser provider credentials from the authoritative env files; the loader accepts a symlink to a regular env file, while cleanup evidence stays symlink-free. For an older controller that rejects linked env files, materialize private `0600` copies before retrying its exact-owner recovery.
+- **Gates through Machine exec:** activate `agents/venv` and prepend the installed Node 22 bin directory; the default PATH can select Node 20, which cannot run the hermetic TypeScript seed fixture.
 
 ---
 

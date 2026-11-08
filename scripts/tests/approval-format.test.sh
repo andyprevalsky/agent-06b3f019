@@ -197,12 +197,25 @@ require_text "$FORMAT" "reproduction command that failed before the change and n
   "Detail must name the unchanged failing-then-passing test"
 require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
-require_text "$FORMAT" "Prompt / LLM-visible text approvals MUST paste the exact diff inline" \
-  "prompt approvals must require the exact diff body inline, not only a file link"
+require_text "$FORMAT" "Approvals MUST show the key visible strings, never code diffs." \
+  "approvals must show the key user- and model-visible strings instead of code diffs"
+require_text "$FORMAT" "which it appears (trigger, phase, call site)" \
+  "each key string must state the conditions under which it appears"
+require_text "$FORMAT" "the new or changed fields in plain English" \
+  "schema and API changes must be listed as plain-English fields"
+require_text "$FORMAT" "  Key strings:" \
+  "the approval block's Detail must carry the key strings"
+require_text "$FORMAT" "  Schema/API fields:" \
+  "the approval block's Detail must carry the schema/API field list"
 require_text "$FORMAT" "Saying \"see the file\" or linking the path without the" \
-  "prompt approvals must forbid link-only presentation of LLM-visible text"
-require_text "$FORMAT" "exact diff body is omitted or replaced by a file link" \
-  "invalidation rules must reject prompt approvals that omit the inline diff"
+  "approvals must forbid link-only presentation of visible text"
+require_text "$FORMAT" "strings or schema/API fields are omitted, replaced by a code diff, or replaced" \
+  "invalidation rules must reject approvals that omit the key strings or show a code diff"
+for superseded in "paste the exact diff" "exact diff inline" "as +/- lines"; do
+  if grep -Fq -- "$superseded" "$FORMAT"; then
+    fail "approval format must not require code diffs (found: $superseded)"
+  fi
+done
 require_text "$FORMAT" '**What failed:** When <the agent doing the task goal>' \
   "approval requests must frame the failure inside the agent's task"
 require_text "$FORMAT" 'the LLM called `<tool>` to <attempt>' \
@@ -334,8 +347,15 @@ done
 # /deploy is carried by the shared format itself, which names /deploy.
 require_text "$FORMAT" '`/RCA`, `/deploy`, and `/descend`. Read it completely immediately before' \
   "the shared format must require /deploy to reload it at approval time"
-require_text "$DEPLOY" 'send one packet in `.claude/shared/approval-format.md` format, pasting the exact diff inline' \
-  "/deploy must send approval packets in the shared format with the exact diff inline"
+require_text "$DEPLOY" 'send one packet in `.claude/shared/approval-format.md` format, showing the key user- and model-visible strings that change' \
+  "/deploy must send approval packets in the shared format with the key visible strings"
+require_text "$DEPLOY" 'a plain list of schema or API fields; never code diffs or file pointers' \
+  "/deploy approval packets must list schema/API fields and never show code diffs"
+require_text "$DEPLOY" 'Collect every approval request into that one packet after `freeze` and send it once, at the start of the deploy' \
+  "/deploy must batch every approval request into one packet at the start of the deploy"
+if grep -Fq "pasting the exact diff" "$DEPLOY"; then
+  fail "/deploy must not ask for pasted code diffs in approval packets"
+fi
 
 require_text "$STRUCTURAL_GATES" 'Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh"))' \
   "the shared approval format must stay cemented in the deploy structural gate registry"
