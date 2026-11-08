@@ -1,0 +1,22 @@
+{
+  "counts": {
+    "branch": {
+      "found": 1832,
+      "never_merged": 1526,
+      "superseded_pre_merge": 306
+    },
+    "hub": {
+      "found": 25215,
+      "unbound": 18053,
+      "duplicate": 7151,
+      "never_merged": 9,
+      "superseded_pre_merge": 2
+    }
+  },
+  "gaps": {
+    "hub rows without a verdict (infra/queued/error)": 5732,
+    "hub rows without a duration or timestamp": 2119
+  },
+  "attempts": 0,
+  "durations": 0
+}

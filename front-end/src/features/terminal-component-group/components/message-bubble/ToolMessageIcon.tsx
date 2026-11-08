@@ -1,10 +1,10 @@
 /**
  * The leading 16x16 icon shown on a tool card. Uses:
- *   - ThinkingAnimation for "thought" tools in progress,
+ *   - the lightbulb for "thought" rows (live or finished), like any tool icon,
  *   - the x402 / Claude Code lockup icons for their tool families,
  *   - or a generic lucide icon resolved from `toolIcons`.
  */
-import { Wrench } from 'lucide-react';
+import { Lightbulb, Wrench } from 'lucide-react';
 import CodexIcon from '@/assets/codex-color.svg';
 import { cn } from '@/lib/utils';
 import type { CodeProvider } from '../../types';
@@ -15,7 +15,6 @@ import {
   isClaudeCodeTool,
   claudeCodeIconSrc,
 } from '@/lib/toolIcons';
-import ThinkingAnimation from '@/components/ThinkingAnimation';
 
 interface ToolMessageIconProps {
   isThought: boolean;
@@ -35,17 +34,7 @@ export function ToolMessageIcon({
   codeProvider,
 }: ToolMessageIconProps) {
   if (isThought) {
-    return status === 'IN_PROGRESS' ? (
-      <ThinkingAnimation
-        dataUrl="/thinking_animations.txt"
-        autoplay
-        loop
-        className="w-4 h-4 flex-shrink-0"
-        style={{ width: '16px', height: '16px' }}
-      />
-    ) : (
-      <div className="h-4 w-4 flex-shrink-0" />
-    );
+    return <Lightbulb className="h-4 w-4 flex-shrink-0 text-muted-foreground" />;
   }
 
   if (toolName && isX402Tool(toolName)) {

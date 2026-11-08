@@ -579,14 +579,19 @@ export const E2B_HOME = '/home/user';
 
 /**
  * E2B: restore `workspace` into the sandbox HOME and return the ws-server env
- * (no-op without a project). A restore that throws kills the sandbox: no DB
- * row exists yet, so nothing else could ever close it.
+ * (no-op without a project). A restore that throws releases the sandbox
+ * through the caller's `releaseAfterFailure`: a one-shot sandbox is killed (no
+ * task row exists yet, so nothing else could ever close it), while a persistent
+ * code session's sandbox is paused so the retry can resume its work.
  */
-export async function restoreSandboxProject(
+export async function restoreSandboxProject<
+  S extends E2bSandboxLike & { kill(): Promise<unknown> },
+>(
   sessionId: string,
-  sandbox: E2bSandboxLike & { kill(): Promise<unknown> },
+  sandbox: S,
   workspace: ProjectWorkspace | null,
-  startedFromSnapshot = false
+  startedFromSnapshot = false,
+  releaseAfterFailure: (held: S) => Promise<unknown>
 ): Promise<{ envs: Record<string, string> | null; report: ProjectRestoreReport | null }> {
   if (!workspace) return { envs: null, report: null };
   registerWorkspaceExecutor(sessionId, e2bWorkspaceExecutor(sandbox, E2B_HOME));
@@ -597,7 +602,11 @@ export async function restoreSandboxProject(
       report,
     };
   } catch (err) {
-    await sandbox.kill().catch(() => undefined);
+    log.warn('Project restore failed; releasing the sandbox', {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await releaseAfterFailure(sandbox);
     throw err;
   }
 }

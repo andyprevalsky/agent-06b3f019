@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "8ddc9a0190a443a7879a984da587a032",
+   "native_result": "FAIL",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "a48ed602ffa33b395a78f134350d779ba70446b6",
+    "digest": "f3d53ee4842e9ece6b58be656255a834c946b78152268d4f2d0566dc69a4cc6c"
+   },
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); native row SKIPPED under the standing release-stall policy",
+   "evidence": "Gate: NOT_INTRODUCED. Exact standing AgentCard release stall: card card_25b3c3dab6a91bc4f83d0ee1 CLOSED balance 0, org transfer owt_de03be5e354112ab6c6066a4 consumed releasedCents=0. This PR does not touch payments. Unreleased funds stay a followup. Native receipt: /home/boxes/rose/.context/deploy-cloud/28c1eddb63446fcd1d77b6c1bdcc35a8d9c8587fdc39a7cdf4e187261b0852d3/runs/20261108-022106-3624840/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "96bb97202f0259525adc8975c2731247b4b7708b066a2775cd0ff77e119fecf6",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_de03be5e354112ab6c6066a4\", \"cardId\": \"card_25b3c3dab6a91bc4f83d0ee1\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 978c4fa1-3cf5-452a-8679-a705425bbd53 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "evidence": "native SKIPPED row agent-payment-abandonment, transfer owt_de03be5e354112ab6c6066a4 consumed releasedCents=0",
+    "confirmed_at": 1794106358.439448
+   }
+  }
+ ]
+}

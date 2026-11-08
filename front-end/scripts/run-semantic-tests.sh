@@ -442,6 +442,11 @@ if [[ -n "${SEMANTIC_NATIVE_REPORT_PREFIX:-}" ]]; then
   SEMANTIC_OUTPUT_ARGS=("--output=${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts")
 fi
 
+# Preserve native evidence output and upstream live gate progress together.
+if [[ -n "${DEPLOY_GATE_PROGRESS:-}" ]]; then
+  SEMANTIC_REPORTERS="$SEMANTIC_REPORTERS,./src/tests/gate-progress/playwrightReporter.ts"
+fi
+
 if [[ $# -eq 0 ]]; then
   PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"})
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then

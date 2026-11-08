@@ -191,40 +191,45 @@ for (const provider of ['claude', 'codex'] as const) {
       timeout: 60_000,
     });
     const view = page.getByTestId('code-agent-view');
-    const slot = view.getByTestId('code-work-slot');
-    const history = slot.getByTestId('code-work-activities');
+    const slot = view.getByTestId('trajectory-work-group');
+    const header = slot.locator(':scope > button');
+    const history = slot.getByTestId('trajectory-work-history');
+    const entries = history.getByTestId('trajectory-history-entry');
+    const pageOf = (position: string) => history.getByText(position, { exact: true });
     await expect(slot).toHaveCount(1);
     await expect(slot).toHaveAttribute('data-state', 'running');
-    // A running turn is the compact Working fold: its steps (thoughts included)
-    // appear only once the fold is expanded.
-    await expect(slot.getByRole('button', { expanded: false })).toContainText('Working');
-    await expect(history.locator('[data-message-id]')).toHaveCount(0);
+    // A running turn is one row: its latest activity and elapsed time. Its steps
+    // (thoughts included) appear only once the row is expanded.
+    await expect(header).toContainText('Run echo command-29');
+    await expect(header).toHaveAttribute('aria-expanded', 'false');
+    await expect(history).toHaveCount(0);
     await expect(page.getByTestId('query-input-layer').locator('textarea')).toBeVisible();
-    await slot.getByRole('button', { expanded: false }).click();
+    await header.click();
     // 30 deduped steps, 20 a page (the trajectory work groups' pager); opening a
-    // running fold lands on its latest page.
-    const pager = slot.getByRole('navigation', { name: 'Work history pages' });
-    await expect(pager.getByRole('status')).toHaveText('2 / 2');
-    await expect(history.locator('[data-message-id]')).toHaveCount(10);
-    await pager.getByRole('button', { name: 'Previous activities' }).click();
-    await expect(pager.getByRole('status')).toHaveText('1 / 2');
-    await expect(history.locator('[data-message-id]')).toHaveCount(20);
+    // running row lands on its latest page.
+    await expect(pageOf('2 / 2')).toBeVisible();
+    await expect(entries).toHaveCount(10);
+    await history.getByRole('button', { name: 'Previous activities' }).click();
+    await expect(pageOf('1 / 2')).toBeVisible();
+    await expect(entries).toHaveCount(20);
     completed = true;
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(slot).toHaveCount(1);
     await expect(slot).toHaveAttribute('data-state', 'completed');
-    await expect(slot.getByRole('button')).toContainText('Worked for 57.7s');
-    await expect(slot.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
+    // The root transcript's work group times its activities (first step to last), not the turn record.
+    await expect(header).toContainText('Worked for 56.7s');
+    await expect(header).toContainText('30 activities');
+    await expect(header).toHaveAttribute('aria-expanded', 'false');
     await expect(view.getByText(FINAL, { exact: true })).toBeVisible();
     await expect(slot.getByText(FINAL, { exact: true })).toHaveCount(0);
-    await slot.getByRole('button', { expanded: false }).click();
-    await expect(pager.getByRole('status')).toHaveText('1 / 2');
-    await expect(history.locator('[data-message-id]')).toHaveCount(20);
-    await pager.getByRole('button', { name: 'Next activities' }).click();
-    await expect(pager.getByRole('status')).toHaveText('2 / 2');
-    await expect(history.locator('[data-message-id]')).toHaveCount(10);
-    await slot.getByRole('button', { expanded: true }).click();
-    await expect(history).toBeHidden();
+    await header.click();
+    await expect(pageOf('1 / 2')).toBeVisible();
+    await expect(entries).toHaveCount(20);
+    await history.getByRole('button', { name: 'Next activities' }).click();
+    await expect(pageOf('2 / 2')).toBeVisible();
+    await expect(entries).toHaveCount(10);
+    await header.click();
+    await expect(history).toHaveCount(0);
     expect(hasUncaughtErrors(rec)).toEqual([]);
   });
 }

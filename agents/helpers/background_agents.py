@@ -227,14 +227,26 @@ RESUME_CONVERSATION_KEYS = frozenset({"_resume_paused_conversation", "_fresh_con
 def background_message_refusal(record: Dict[str, Any], continue_conversation: Optional[bool]) -> Optional[str]:
     """Why send_message_to_agent cannot deliver to this own background task (None when it can).
 
-    Reads the task's structured type and status only. Running tasks and explore
-    tasks are always deliverable.
+    Reads the task's structured type, status and foreground flag only. Running
+    tasks and background explore tasks are always deliverable; a finished
+    foreground spawn never is (its result already is the spawn call's result).
     """
     agent_type = record.get("agent_type")
     status = record.get("status")
+    address = record.get("path") or record.get("address") or "that agent"
+    if record.get("foreground") and status != "running":
+        resume = (
+            " To continue in its code session and branch, spawn a new code agent with the code_session_id "
+            "from its result."
+            if agent_type == "code"
+            else ""
+        )
+        return (
+            f"{address} is a {status} foreground {agent_type} agent: its result is the result of the spawn_agent "
+            f"call that ran it, and it takes no more messages. Spawn a new {agent_type} agent for new work.{resume}"
+        )
     if agent_type not in RESUMABLE_TASK_TYPES:
         return None
-    address = record.get("path") or record.get("address") or "that agent"
     if status in FINISHED_TASK_STATUSES:
         return (
             f"{address} is a {status} {agent_type} agent; completed browser and code agents cannot be "

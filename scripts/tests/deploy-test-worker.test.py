@@ -159,6 +159,34 @@ class Worker(unittest.TestCase):
         self.assertTrue(result['complete'])
         self.assertEqual(1,result['evidence']['first']['native_exit'])
 
+    def test_each_case_reports_progress_as_it_finishes_and_runners_get_the_case(self):
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        runner = ("import os,sys; sys.path.insert(0,%r); import deploy_gate_progress as p; "
+                  "assert os.environ[p.CASE_ENV]=='first'; p.report('t1','FAIL',detail='boom'); raise SystemExit(1)"
+                  % str(Path(worker.__file__).resolve().parent))
+        self.recipe['cases']['first']['command'] = [sys.executable, '-c', runner]
+        target = self.root / '.context' / 'progress.jsonl'
+        with patch.dict(os.environ, {progress.ENV: str(target)}):
+            result = worker.execute(self.request, self.root)
+        self.assertEqual({'first': 'FAIL', 'second': 'PASS'}, result['cases'])  # the verdict is unchanged
+        rows, _ = progress.read_new(target)
+        self.assertEqual([('test', 'first', 't1', 'FAIL'), ('case', 'first', 'first', 'FAIL'),
+                          ('case', 'second', 'second', 'PASS')],
+                         [(r['scope'], r['case'], r['unit'], r['status']) for r in rows])
+        self.assertIn('boom', rows[0]['detail'])
+        self.assertEqual(result['evidence']['first']['log'], rows[1]['log'])
+
+    def test_without_a_coordinator_progress_path_rows_land_beside_the_worker_evidence(self):
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        environ = {k: v for k, v in os.environ.items() if k != progress.ENV}
+        with patch.dict(os.environ, environ, clear=True):
+            result = worker.execute(self.request, self.root)
+        folder = Path(result['evidence']['first']['log']).parent
+        rows, _ = progress.read_new(folder / 'progress.jsonl')
+        self.assertEqual(['first', 'second'], [r['unit'] for r in rows])
+
     def test_aggregate_failure_cannot_prove_all_constituents_completed(self):
         self.recipe['cases']['first']['aggregate']=True
         result=worker.execute(self.request,self.root)
@@ -1809,6 +1837,78 @@ class LocalController(unittest.TestCase):
                 if 'row' in locals() and Path(row['fixture_tmp']).exists():
                     shutil.rmtree(row['fixture_tmp'])
 
+    def test_each_case_reports_one_live_progress_row_without_changing_the_result(self):
+        """DEPLOY_GATE_PROGRESS gets one suite row per case the moment it finishes:
+        the passing case only finishes after it sees the failing case's FAIL row.
+        Exit code and output match a run without the variable, which writes nothing."""
+        progress_env, watch_env = 'DEPLOY_GATE_PROGRESS', 'CONTROLLER_PROGRESS_FIXTURE_WATCH'
+        waiter = (
+            "import json, os, sys, time\n"
+            f"if os.environ.get({progress_env!r}):\n"
+            "    sys.exit(7)\n"
+            f"watch = os.environ.get({watch_env!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while watch and time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+            "    except (OSError, ValueError):\n"
+            "        rows = []\n"
+            "    if any(row['unit'] == 'fails' and row['status'] == 'FAIL' for row in rows):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    if watch:\n"
+            "        sys.exit(9)\n"
+            "print('waiter done')\n"
+        )
+        cases = [
+            ('fails', shlex.join([sys.executable, '-c', "print('controller-fail-marker'); raise SystemExit(1)"])),
+            ('waiter', shlex.join([sys.executable, '-c', waiter])),
+        ]
+        with tempfile.TemporaryDirectory(prefix='controller-progress-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            progress = root / 'gate' / 'progress.jsonl'
+            progress.parent.mkdir()
+
+            def run(extra):
+                env = {key: value for key, value in os.environ.items() if key not in (progress_env, watch_env)}
+                env.update(extra)
+                stdout = io.StringIO()
+                umask = os.umask(0o022)
+                os.umask(umask)
+                argv = ['run-cloudbench-controller-local.py', '--root', str(root), '--max-workers', '2']
+                try:
+                    with patch.dict(os.environ, env, clear=True), patch.object(local_runner, 'CASES', cases), \
+                            patch.object(local_runner, 'source', lambda _root: {'head': 'fixture'}), \
+                            patch.object(sys, 'argv', argv), contextlib.redirect_stdout(stdout):
+                        code = local_runner.main()
+                finally:
+                    os.umask(umask)
+                lines = ['GATE_NATIVE_ARTIFACTS' if line.startswith('GATE_NATIVE_ARTIFACTS ') else line
+                         for line in stdout.getvalue().splitlines()]
+                return code, sorted(lines)
+
+            try:
+                reported = run({progress_env: str(progress), 'DEPLOY_GATE_CASE': 'cloudbench-controller',
+                                watch_env: str(progress)})
+                unset = run({})
+                self.assertEqual(reported[0], 1, reported)
+                self.assertEqual(reported, unset, 'reporting changed the exit code or output')
+                self.assertEqual(list(root.rglob('*.jsonl')), [progress], 'an unset variable wrote a progress file')
+                rows = [json.loads(line) for line in progress.read_text().splitlines()]
+                self.assertEqual([(row['unit'], row['status']) for row in rows], [('fails', 'FAIL'), ('waiter', 'PASS')])
+                self.assertEqual({(row['scope'], row['case']) for row in rows}, {('suite', 'cloudbench-controller')})
+                self.assertIn('controller-fail-marker', rows[0]['detail'])
+                self.assertEqual(rows[1]['detail'], '')
+                for row in rows:
+                    self.assertTrue(row['log'].endswith('/' + row['unit'] + '.log'), row)
+                    self.assertTrue(Path(row['log']).is_file(), row)
+            finally:
+                for result in root.glob('.context/cloudbench-local/*/result.json'):
+                    for case in json.loads(result.read_text())['cases']:
+                        if case.get('fixture_tmp') and Path(case['fixture_tmp']).exists():
+                            shutil.rmtree(case['fixture_tmp'])
+
     # The twelve cloud-benchmark controller suites the staged `cloudbench-controller` gate runs (the former
     # deploy.md Step 4cb inventory, preserved in .claude/commands/DEPRECATED_deploy.md at L1408). The concise
     # deploy.md no longer lists them: scripts/run-cloudbench-controller-local.py CASES is the executing
@@ -2782,6 +2882,37 @@ class GenericLifecycle(unittest.TestCase):
         self.assertEqual(marker.read_text(), 'done')
 
 
+class SupervisorOrphanSettle(unittest.TestCase):
+    """A suite child that is merely finishing when the suite exits is not an orphan; one that stays alive still is.
+
+    Seen on the PR #1744 deploy: a structural suite passed (exit 0) while one fixture child was still winding down, so
+    the supervisor flagged it, the receipt became UNVERIFIED with a lingering owner and no recovery path remained."""
+
+    SCRIPTS = (ROOT / 'scripts/deploy_test_supervisor.py', ROOT / 'scripts/cloudbench-local-supervisor.py')
+
+    def supervise(self, script, grandchild_seconds):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = Path(tmp) / 'receipt.json'
+            code = ("import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(%s)'],"
+                    "start_new_session=True)" % grandchild_seconds)
+            result = subprocess.run([sys.executable, str(script), '--receipt', str(receipt), '--', sys.executable, '-c', code],
+                                    capture_output=True, text=True, timeout=60)
+            return result.returncode, json.loads(receipt.read_text())
+
+    def test_a_child_that_exits_within_the_settle_window_is_not_orphaned(self):
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                returncode, process = self.supervise(script, 0.4)
+                self.assertEqual((returncode, process['native_exit'], process['orphaned_children'], process['quiescent']),
+                                 (0, 0, False, True))
+                self.assertEqual(process['term_sent'], [])
+
+    def test_a_child_that_outlives_the_suite_is_still_orphaned_and_terminated(self):
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                returncode, process = self.supervise(script, 30)
+                self.assertEqual((returncode, process['orphaned_children'], process['quiescent']), (78, True, True))
+                self.assertEqual(len(process['term_sent']), 1)
 # A benchmarks/local.py stand-in that leads the case's group (run-bench execs it) and
 # keeps draining its runner/stack past the worker's ten-second TERM grace until the
 # test releases it. Its markers are replaced atomically (no torn reads under load).

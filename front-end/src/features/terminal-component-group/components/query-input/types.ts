@@ -81,6 +81,13 @@ export interface QueryInputProps {
   directChannel?: boolean;
   draftKey?: string;
   sessionControls?: React.ReactNode;
+  /**
+   * The speed toggle's state when the caller owns it (the code-agent view: its
+   * session's speed). Without onFastModeChange the toggle only shows the state.
+   */
+  speedControl?: { fastMode: boolean; onFastModeChange?: (enabled: boolean) => void };
+  /** Rose Desktop nub content for a direct channel (the code-agent view's working settings). */
+  nub?: React.ReactNode;
 }
 
 export const DEFAULT_DRIP_STYLES: DripStyles = {

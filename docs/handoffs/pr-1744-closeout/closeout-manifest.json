@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "pr": 1744,
+  "merge_commit": "8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9",
+  "gated_source": "3e3e0ce58eb996869afd63a1a1fba08a0b0239c5",
+  "synced_head_merged": "f431ff44b9316c0efeba05c2a379da51925f4be9",
+  "source_digest": "246998d1b559b991fe6267ad0dfd7382551e020cf2a49cfc7683d7c89aa49f36",
+  "outcome": "blocked (Fly cutover, workflow-migration and production semantic deferred and UNVERIFIED: deploy-agents.yml disabled_manually by the owner hold)",
+  "override": {
+    "gate": "exact-head staged verification (verify --require-staged --expect-head) for the final sync",
+    "approval": "user: merge the records-only sync without rerunning gates",
+    "delta_files": 28,
+    "delta": "22 docs/handoffs/pr-1747-closeout/**, 3 agents/benchmarks/history/*.jsonl, 2 docs/rca/cases/*, docs/rca/INDEX.md (reindexed)",
+    "risk": "merged head not itself gate-verified; delta is docs/records only"
+  },
+  "production": {
+    "render": "PASS: Render serves the merged backend (live)",
+    "fly": "FAIL: Fly lane blocked (production exit 1): exact deploy-agents.yml run for 8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9 did not start within 600s; do not dispatch produc",
+    "vercel": "PASS: Vercel deployment 7627737684 success",
+    "mac-release": "PASS: release-mac-app run 42418837413 success",
+    "wmh": "SKIPPED-not-applicable: no WMH path change",
+    "backend-probes": "PASS: /health + /api/agents 200, endpoint smoke passed, Render log clean",
+    "workflow-migration": "BLOCKED: dependency fly did not pass",
+    "agentcard": "FAIL: run-bench agent-payment-production-abandonment exited 1; AgentCard release stall not qualified: task status/benchmark_status is not SKIPPED (record 20261107_222",
+    "semantic": "BLOCKED: dependency fly did not pass"
+  },
+  "external_provider": {
+    "agentcard": "AgentCard/Stripe: credential or billing change only the user can make (production Stripe fixture is test-mode; live KYC cardholder needed)"
+  },
+  "archives": {
+    "core": {
+      "key_prefix": "devbox-closeout-private/pr1744-3e3e0ce58e-core/",
+      "manifest_object": "devbox-closeout-private/pr1744-3e3e0ce58e-core/manifest.json",
+      "manifest_object_sha256": "054d68d6ed37ac46ccf79156f47912e3d1baa0193512be665e047c8355c1c9a1",
+      "archive_sha256": "a92df5c15278ed2c679bd6be2fbefecf3ffe15b70afa3e5c33a29a3214ee79a0",
+      "archive_size_bytes": 909977677,
+      "parts": 14,
+      "files": 100258
+    },
+    "cloud": {
+      "key_prefix": "devbox-closeout-private/pr1744-3e3e0ce58e-cloud/",
+      "manifest_object": "devbox-closeout-private/pr1744-3e3e0ce58e-cloud/manifest.json",
+      "manifest_object_sha256": "a752967845cf69ab4690cb4ed83aa5ca549539f63bd8487312be7ef887f1a516",
+      "archive_sha256": "50b7b6a29b6d587678f6993f62d765546ab0d4561ee91214eb5812bf9c5e5de0",
+      "archive_size_bytes": 1231762629,
+      "parts": 19,
+      "files": 7229
+    },
+    "extra": {
+      "key_prefix": "devbox-closeout-private/pr1744-3e3e0ce58e-extra/",
+      "manifest_object": "devbox-closeout-private/pr1744-3e3e0ce58e-extra/manifest.json",
+      "manifest_object_sha256": "35cc0f50564f40c852c36b9930bb1e9313a3d29ba7ddd18a4d435f675699b2d9",
+      "archive_sha256": "41cf7da84e035385f3727469352a6c810b09ef03f414df21a0172c79aac489c7",
+      "archive_size_bytes": 2171971,
+      "parts": 1,
+      "files": 14
+    }
+  },
+  "e2b": {
+    "grid_templates": "8 rebuilt and verified (gh 2.103.3)",
+    "deleted_test_templates": [
+      "claude-code-gh-test-1106",
+      "codex-code-gh-test-1106",
+      "claude-code-gh-test-1107",
+      "codex-code-gh-test-1107"
+    ]
+  },
+  "ledger": "13 final smoke rows (campaign deploy-e2877d04) + 1 production AgentCard row appended to agents/benchmarks/history/task_attempts.jsonl; 13 pass rows to task_durations.jsonl"
+}

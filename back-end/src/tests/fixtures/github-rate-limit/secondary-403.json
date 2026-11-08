@@ -1,0 +1,9 @@
+{
+  "source": "Real GitHub response body and status, from production Render logs (component GitHub, 'Failed to create repo', repoName agent-a78a8121, log timestamp 2026-10-28T01:29:49.480Z): POST https://api.github.com/user/repos with the production token. The backend logged status and body (errorBody) but not the response headers.",
+  "documentation": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit: 'If you exceed a secondary rate limit, you will receive a 403 or 429 response and an error message that indicates that you exceeded a secondary rate limit. If the retry-after response header is present, you should not retry your request until after that many seconds has elapsed. ... Otherwise, wait for at least one minute before retrying.'",
+  "headers_note": "Headers were not logged. Only content-type is served, copied from the real primary capture (primary-403.json). The capture carries no retry-after, which GitHub documents as 'wait for at least one minute'.",
+  "status_line": "HTTP/2 403",
+  "status": 403,
+  "headers": [["content-type", "application/json; charset=utf-8"]],
+  "body": "{\"message\":\"You have exceeded a secondary rate limit and have been temporarily blocked from content creation. Please retry your request again later. For more on scraping GitHub and how it may affect your rights, please review our Terms of Service (https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) If you reach out to GitHub Support for help, please include the request ID 2EFA:224FB:45FD738:E60F52F:6AE1500D and timestamp 2026-10-28 01:29:49 UTC.\",\"documentation_url\":\"/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits\",\"status\":\"403\"}"
+}

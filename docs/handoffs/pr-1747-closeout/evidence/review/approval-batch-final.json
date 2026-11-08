@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "head": "ad8ddd0bbd2b3e3d35f3a2c49491e6b86d85332d",
+  "base_ref": "origin/main",
+  "merge_base": "b365bf8bd69346f872e5e2cb7218872155ca294d",
+  "frozen_at": "2026-11-07T18:00:20Z",
+  "guards": {
+    "prompt-approval": [
+      "agents/tools/prompts/spawn_agent.py",
+      "agents/utils/prompts.py",
+      "agents/utils/tool_schemas.py",
+      "docs/rca/cases/2026-11-06-project-placement-never-reached-agent-prompts.md"
+    ],
+    "agent-behavior-approval": [
+      "agents/workflows/agent_workflow.py"
+    ],
+    "llm-trajectory-injection-approval": []
+  },
+  "files": {
+    "agents/tools/prompts/spawn_agent.py": "460b3c0dc475526cdc554498bfe0f0469fc04605d2374e1908872faa55c78fbe",
+    "agents/utils/prompts.py": "a536677846114e4eb2e07a98f3d21e5b83bbbe4470a68eda28dc75a3ec070a0f",
+    "agents/utils/tool_schemas.py": "570463b5eae7844dc3946c620e291ea8fea00b0f6448b6e05d4fffa57439be62",
+    "agents/workflows/agent_workflow.py": "5b3b8c919c99376376f0f546a2ac27796184598c5c4a84c9ddb8bbeed6188122",
+    "docs/rca/cases/2026-11-06-project-placement-never-reached-agent-prompts.md": "7c4a23e119970a5711799a54620509f7f61b28d84d0240fe6db0521b8b93ac15"
+  },
+  "decision": "grounded",
+  "decided_at": "2026-11-07T18:00:24Z",
+  "evidence": "v3-project-context-recovery fresh sub-agent GROUNDED at a1bcaa0988; the added/removed lines of all five approval-scoped files re-verified identical to that snapshot at ad8ddd0bbd after the origin/main sync and the review-fix batch (none of the fixes touches an approval-scoped file). Own verification, not a second independent review."
+}

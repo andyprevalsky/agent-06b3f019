@@ -2,6 +2,8 @@
  * Blackbox: the iOS blur lab is inert without ?blurlab=1 and, when active,
  * its toggles apply and revert the expected styles.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
@@ -87,5 +89,47 @@ describe('blur lab', () => {
     fireEvent.click(screen.getByTestId('blurlab-report'));
     expect(screen.getByTestId('blurlab-report-output').textContent).toContain('div#fake-top');
     bar.remove();
+  });
+
+  it('presets set status-bar meta and an opaque unfiltered cover layer', () => {
+    render(<BlurLab />);
+    fireEvent.click(screen.getByText(/Blur lab/));
+    fireEvent.click(screen.getByTestId('blurlab-preset-A'));
+    const meta = document.querySelector<HTMLMetaElement>(
+      'meta[name="apple-mobile-web-app-status-bar-style"]',
+    )!;
+    expect(meta.content).toBe('black-translucent');
+    const css = document.head.querySelector('style[data-blurlab="cover-layer"]')!.textContent!;
+    expect(css).toContain('background-color:hsl(var(--background))');
+    expect(css).toContain('backdrop-filter:none');
+    expect(css).not.toMatch(/gradient|opacity|blur\(/);
+    expect(document.getElementById('blurlab-cover')).not.toBeNull();
+    expect(window.localStorage.getItem('rose.blurlab.preset')).toBe('A');
+    fireEvent.click(screen.getByTestId('blurlab-preset-B'));
+    expect(meta.content).toBe('default');
+    expect(document.getElementById('blurlab-cover')).toBeNull();
+    window.localStorage.clear();
+  });
+
+  it('index.html pre-paint script applies a saved preset A to the status-bar meta', () => {
+    const html = readFileSync(resolve(__dirname, '../../../index.html'), 'utf8');
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+      .map((m) => m[1])
+      .find((body) => body.includes('rose.blurlab.preset'))!;
+    window.localStorage.setItem('rose.blurlab.preset', 'A');
+    new Function(script)();
+    expect(
+      document
+        .querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')!
+        .getAttribute('content'),
+    ).toBe('black-translucent');
+    window.localStorage.clear();
+  });
+
+  it('stays reachable after relaunch while a preset is saved', () => {
+    window.localStorage.setItem('rose.blurlab.preset', 'A');
+    expect(shouldActivateBlurLab()).toBe(true);
+    window.localStorage.clear();
+    expect(shouldActivateBlurLab()).toBe(false);
   });
 });
