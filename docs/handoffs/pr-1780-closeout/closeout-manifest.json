@@ -35,8 +35,7 @@
  "followups": [
   "AgentCard sandbox release stall: card_6b5c4eb9c6b6b0528efe33ff closed, org transfer owt_776cb83d5cc4af7a253ba97e consumed, 4396 cents transferred, 0 released (agent 40c3f460-71c2-4eb5-b162-db63f24a191c)",
   "deploy tooling: deploy_test_local_cleanup has no reconcile proof for a fully reaped timed-out quick gate (lingering_group) -> forced a fresh gate cycle",
-  "deploy tooling: deletion-check counts the boxes daemon codex app-server (/opt/devbox-tools/codex/..., ppid sprite-daemon, no codex thread on the devbox) as live work; PR #1760 closeout hit the same",
-  "ledger: cloud batch rows for agentless static tasks are not loadable by BenchmarkRun.load"
+  "deploy tooling: deletion-check idle daemon Codex app-server classification fixed in the follow-up deploy (RCA 2026-11-08-deletion-check-counted-daemon-idle-codex-app-server)"
  ],
  "format": "PR-CLOSEOUT-V1",
  "gate_cycles": {
@@ -170,7 +169,7 @@
   }
  },
  "ledger": {
-  "gap": "batch 20261108-021034-807949 (browser-auth-saved-password-retry, browser-doordash-food-plan-grocery-cart-reauth: PASSED, no agent/cost/duration) cannot load into TaskResult; not recorded",
+  "excluded": "batch 20261108-021034-807949 (browser-auth-saved-password-retry, browser-doordash-food-plan-grocery-cart-reauth) are infra probes: the guest logged \"infra probe: skipping run_benchmark.py; emitting synthetic pass artifacts\" (infra_probe=true, no agent), so they are not benchmark attempts and correctly stay out of the ledger",
   "source": "BenchmarkRun.load(_batch/run.json)._record_history() for the deploy smoke campaign deploy-19eeb99134b7...",
   "task_attempts_rows": 12,
   "task_durations_rows": 3

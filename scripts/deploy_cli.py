@@ -480,6 +480,39 @@ def is_harness_process(exe: str | None, argv: str = '') -> bool:
     return under(exe, '/opt/devbox-runtime') and f'{DAEMON_DIR}/' in argv
 
 
+def proc_stat(pid: int) -> list[str]:
+    """/proc/<pid>/stat fields after the command name: [0] state, [1] ppid, [19] starttime (field 22)."""
+    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+
+
+def is_daemon_process(pid: int) -> bool:
+    try:
+        argv = Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+        return under(os.readlink(f'/proc/{pid}/exe'), '/opt/devbox-runtime') and f'{DAEMON_DIR}/' in argv
+    except OSError:
+        return False
+
+
+def is_idle_default_codex_server(pid: int) -> bool:
+    """The devbox daemon's own default Codex app-server while no Codex session exists on this box.
+
+    The daemon starts it in the project checkout and records it in codex-default-app-server.json; it is live work
+    only while it hosts a session. Exact identity (pid and kernel start time, so a reused pid never matches), a daemon
+    parent and an existing, empty codex-sessions directory are all required; anything unreadable keeps it blocking.
+    """
+    daemon = Path(DAEMON_DIR)
+    try:
+        record = json.loads((daemon / 'codex-default-app-server.json').read_text())
+        stat = proc_stat(pid)
+        sessions = daemon / 'codex-sessions'
+        return (type(record.get('pid')) is int and record['pid'] == pid
+                and str(record.get('statStartTime')) == stat[19]
+                and is_daemon_process(int(stat[1]))
+                and sessions.is_dir() and not sessions.is_symlink() and not any(sessions.iterdir()))
+    except (OSError, ValueError, IndexError, AttributeError):
+        return False
+
+
 def live_processes(root: Path) -> list[dict]:
     found, mine, proc = [], own_pids(), Path('/proc')
     if not proc.is_dir():
@@ -494,7 +527,7 @@ def live_processes(root: Path) -> list[dict]:
             continue
         if cwd == root or root in cwd.parents:
             try:
-                if is_harness_process(os.readlink(entry / 'exe'), argv):
+                if is_harness_process(os.readlink(entry / 'exe'), argv) or is_idle_default_codex_server(int(entry.name)):
                     continue
             except OSError:
                 pass

@@ -571,6 +571,38 @@ class DeletionCheck(Repo):
         self.assertIn(child.pid, [p['pid'] for p in found])
         self.assertNotIn(os.getpid(), [p['pid'] for p in found])
 
+    @unittest.skipUnless(Path('/proc/self/cwd').exists(), 'needs Linux /proc')
+    def test_the_daemons_idle_default_codex_server_does_not_block_but_a_session_does(self):
+        # PR #1760 and #1780 closeouts stayed NOT_READY only because the boxes.dev daemon's default Codex app-server
+        # (started in the checkout at boot, no Codex thread on the box) counted as live work.
+        child = subprocess.Popen(['sleep', '30'], cwd=self.root)
+        try:
+            daemon = self.root.parent / 'daemon-state'
+            (daemon / 'codex-sessions').mkdir(parents=True)
+            start = d.proc_stat(child.pid)[19]
+            record = daemon / 'codex-default-app-server.json'
+            parent = {child.pid: os.getpid()}
+            with patch.object(d, 'DAEMON_DIR', str(daemon)), \
+                    patch.object(d, 'is_daemon_process', side_effect=lambda pid: pid in parent.values()):
+                def blocking():
+                    return child.pid in [p['pid'] for p in d.live_processes(self.root.resolve())]
+                self.assertTrue(blocking())  # no daemon record
+                record.write_text(json.dumps({'pid': child.pid, 'statStartTime': start}))
+                self.assertFalse(blocking())  # exactly the recorded idle default server
+                (daemon / 'codex-sessions' / 'session-1').write_text('{}')
+                self.assertTrue(blocking())  # it hosts a Codex session: live work
+                (daemon / 'codex-sessions' / 'session-1').unlink()
+                record.write_text(json.dumps({'pid': child.pid, 'statStartTime': str(int(start) + 1)}))
+                self.assertTrue(blocking())  # a reused pid with another start time
+                record.write_text(json.dumps({'pid': child.pid + 1, 'statStartTime': start}))
+                self.assertTrue(blocking())  # a different process
+                record.write_text(json.dumps({'pid': child.pid, 'statStartTime': start}))
+                parent.clear()
+                self.assertTrue(blocking())  # not started by the daemon
+        finally:
+            child.terminate()
+            child.wait()
+
 
 class Dispatch(unittest.TestCase):
     def test_gates_and_production_delegate_their_arguments(self):
