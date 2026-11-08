@@ -30,29 +30,35 @@ status: fixed
 ## Problem
 
 `backend-coverage-blackbox` failed on Blacksmith with `FAIL workflow-queue-admission-postgres.test.ts (1948ms)`,
-an empty per-file log and no assertion output. Memory was plentiful (59.7 GB free) and 191 local runs had passed.
-The unit runner recorded neither the child's exit code nor its signal: a signalled child became a bare 128, so
-the failure could not be classified.
+an empty per-file log and no assertion output. The handoff reported 59.7 GB of memory free and 191 passing local
+runs. The unit runner recorded neither the child's exit code nor its signal: a signalled child became a bare 128,
+so the failure could not be classified. That means the CI failure's signal was never observed; SIGSEGV below is
+what the same test does when reproduced locally.
 
 ## Diagnosis
 
 Running the unchanged test in a loop, on a private database like the runner uses, with core dumps enabled
-reproduced the exact signature: SIGSEGV after 1755 ms with 0 bytes of output, 1 in 1,500 runs. A minimal script
-creating two clients then running one query crashed 3 times in about 2,850 runs.
+reproduced a matching signature: SIGSEGV after 1755 ms with 0 bytes of output, 1 in 1,500 runs. A minimal script
+creating two clients then running one query crashed 3 times in about 2,850 runs (stopped by hand, so that count
+comes from the last failing run index).
 
-The cores agree. The main thread is in `getenv` under `node::RealEnvStore::Get`, reached from a second client's
-startup (`PRISMA_QUERY_ENGINE_BINARY` in the unit test's core). One core caught the writer directly: an engine
-thread inside `__add_to_environ("SSL_CERT_DIR", ...)`, with `__environ[0]` holding garbage.
+Backtraces were taken from two of the four cores. In both, the main thread is in `getenv` under
+`node::RealEnvStore::Get`; the unit test's core shows it reading `PRISMA_QUERY_ENGINE_BINARY`. The core from the
+minimal script also caught the writer directly: an engine thread inside `__add_to_environ("SSL_CERT_DIR", ...)`,
+with `__environ[0]` holding garbage. The unit test's core shows neither that writer thread nor a corrupt
+`__environ[0]`. That the reader is a second client's startup is inferred from the Prisma runtime's engine-path
+lookup and from the fix's result, not from a stack frame.
 
-The Prisma 5.22 library engine runs `openssl-probe` once per process on its first connect and `setenv`s
-`SSL_CERT_FILE` and `SSL_CERT_DIR` from an engine thread. Adding a new variable makes glibc reallocate `environ`,
+The Prisma 5.22 library engine carries openssl-probe's path table and sets `SSL_CERT_FILE` and `SSL_CERT_DIR`
+during its first connect, from an engine thread (`$connect` resolves with both set, per the regression test;
+that this happens once per process is expected but untested). Adding a new variable makes glibc reallocate `environ`,
 so a concurrent `getenv` on the main thread reads freed memory. A second client's construction reads
 `process.env` during its asynchronous engine load, which overlaps the first client's first connect whenever
 both clients exist before that connect finishes.
 
 Earlier notes attribute the 2026-10-09 and 2026-11-07 seed-local crashes to the same race; their cores were not
-re-examined here. Those notes also say a `connectThenOpen` fix landed through PR #1783, but that code is not on
-main and PR #1783 is unrelated.
+re-examined here. `connectThenOpen`, which applies the same ordering to `seed-local`, merged through PR #1783
+shortly before this fix.
 
 ## Solution
 
@@ -68,13 +74,15 @@ resolves only after the engine's write on Linux and pins connect-first order in 
 PrismaClient; `unit-test-child-exit.test.ts` checks real signalled and non-zero children; `coverage-script.test.ts`
 pins the runner wiring.
 
-Evidence after the fix: the two-client repro with connect-first order had 0 SIGSEGV in 10,000 runs (one unrelated
-run excluded because `prisma generate` rewrote the client mid-run), and the exact test had 0 failures in 1,500
-runs. At a 1-in-1,500 rate those 1,500 clean runs alone are weak evidence; the 10,000-run repro and the
-deterministic probe carry the proof. The Blacksmith gate passed on both tested heads.
+Evidence after the fix: the two-client repro with connect-first order had 0 SIGSEGV in 9,999 completed runs (a
+tenth-thousandth run was excluded: it failed with `PrismaClient is not a constructor` as `prisma generate` rewrote
+the client), and the exact test had 0 failures in 1,500 runs. At a 1-in-1,500 rate those 1,500 clean runs alone are
+weak evidence, and they ran at 5 workers where the baseline used 7; the repro and the deterministic probe carry the
+proof. The Blacksmith gate passed on both tested heads once GitHub downloads worked (a first attempt on the earlier
+head never ran its tests because of a GitHub 504).
 
 Still exposed, not changed here: any other process that starts two Prisma clients, namely the backend's own
-startup (`providers/database.ts` plus `demoCacheStore.ts`), `seed-local`, and multi-client blackbox processes.
+startup (`providers/database.ts` plus `demoCacheStore.ts`) and multi-client blackbox processes.
 
 ## Human feedback
 
