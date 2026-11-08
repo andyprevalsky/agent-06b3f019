@@ -10,6 +10,7 @@ first_bad_boundary: deploy_test_cycle refresh applies same-deploy selection pres
 symptoms:
   - "DEPLOY_CYCLE BLOCKED: repair cannot silently remove originally selected checks"
   - "historical custody: original sandbox native bytes missing or changed"
+  - "KeyError: 'id'"
 tags:
   - deploy
   - custody
@@ -82,7 +83,15 @@ provider timestamp comes from the donor. Every selected current peer runs.
 Exact replay revalidates the current source, environment, fingerprints, complete
 protected history and projections. Normal guard/admission/verify also reject
 lost transferred identities. Duplicate raw failure aliases and changed pending
-wrappers fail before publication. The operation makes no provider calls and
+wrappers fail before publication. The first full native structural sweep also exposed `KeyError: 'id'` in the new
+raw identity counter when an unrelated focused-test metadata row had no id.
+Gate: INTRODUCED by the transfer extension at 8e3fca1b12cd. The existing unchanged
+Worker.test_focused_worker_recipe_never_replaces_the_full_failed_gate reproduced
+that error locally and passed after counting only present identities. Protected
+identity alias detection remains strict. This failure and its full native log
+are retained with the repair evidence.
+
+The operation makes no provider calls and
 never restores live ownership claims or executes historical worker requests.
 The CLI flow is documented in docs/deploy-test-cycle.md and the regression stays
 in the existing deploy-test-cycle structural suite. The work scales with the

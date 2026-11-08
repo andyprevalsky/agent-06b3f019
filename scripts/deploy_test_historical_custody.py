@@ -44,7 +44,8 @@ def known(state, root=None):
              and len(set(ids)) == len(ids), 'invalid transferred failure identities')
         indexed.update(ids)
     for f in state.get('failures', []):
-        counts[f['id']] = counts.get(f['id'], 0) + 1
+        if 'id' in f:
+            counts[f['id']] = counts.get(f['id'], 0) + 1
         row = (f.get('worker_evidence') or {}).get('native_task') or {}
         if f.get('check', '').split('/', 1)[-1] != row.get('name'):
             continue
