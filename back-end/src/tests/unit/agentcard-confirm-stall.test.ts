@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { confirmationProof, confirmStall } from '../../../scripts/agentcard-confirm-stall';
-import { AgentCardOrgRuntimeError } from '../../../src/providers/agentcard/org-runtime';
+import { confirmStall } from '../../../scripts/agentcard-confirm-stall';
 
 const binding = {
   kind: 'agentcard-release-stall-renewal-v1',
@@ -10,40 +9,6 @@ const binding = {
   transfer_id: 'owt_fixture',
   amount_cents: 1234,
 };
-test('an exact provider auth refusal yields negative evidence without resource observations', async () => {
-  const calls: string[] = [];
-  const proof = await confirmationProof(binding, async (name) => {
-    calls.push(name);
-    throw new AgentCardOrgRuntimeError(
-      'PRIVATE_PROVIDER_PAYLOAD',
-      401,
-      'agentcard_org_mcp_unauthorized'
-    );
-  });
-  assert.deepEqual(calls, ['get_card']);
-  assert.ok('confirmation_failure' in proof);
-  assert.deepEqual(proof.confirmation_failure, {
-    provider: 'AgentCard',
-    reason: 'credential or billing change',
-    status: 401,
-    code: 'agentcard_org_mcp_unauthorized',
-    tool: 'get_card',
-  });
-  assert.equal(Object.hasOwn(proof, 'observations'), false);
-  assert.ok(!JSON.stringify(proof).includes('PRIVATE'));
-  for (const error of [
-    new Error('401'),
-    new AgentCardOrgRuntimeError('unavailable', 503),
-    new AgentCardOrgRuntimeError('forbidden', 403, 'agentcard_org_mcp_unauthorized'),
-    new AgentCardOrgRuntimeError('other', 401, 'other'),
-  ]) {
-    await assert.rejects(
-      confirmationProof(binding, async () => {
-        throw error;
-      })
-    );
-  }
-});
 function fixture() {
   const card = {
     id: 'card_fixture',

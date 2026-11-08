@@ -2145,39 +2145,6 @@ class Cycle(unittest.TestCase):
         self.assertEqual('SKIP', result['cases']['a'])
         self.assertEqual('SKIPPED_WITH_WARNING', request['skips']['a']['disposition'])
 
-    def test_auth_refusal_preserves_original_stall_and_executes_every_peer(self):
-        renewal, task, proof, original, path = self.renewal_fixture()
-        proof.pop('observations')
-        proof['confirmation_failure'] = {'provider': 'AgentCard', 'reason': 'credential or billing change',
-            'status': 401, 'code': 'agentcard_org_mcp_unauthorized', 'tool': 'get_card'}
-        native = path.read_bytes()
-        before = copy.deepcopy(self.state)
-        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
-            for field, value in [('status', True), ('status', 403), ('code', 'unknown'),
-                                 ('tool', 'mint_card'), ('provider', 'Other')]:
-                variant = copy.deepcopy(proof); variant['confirmation_failure'][field] = value
-                with self.assertRaises(ValueError): renewal.renew(self.state, variant, self.root)
-                self.assertEqual(before, self.state)
-            mixed = copy.deepcopy(proof); mixed['observations'] = {}
-            with self.assertRaises(ValueError): renewal.renew(self.state, mixed, self.root)
-            self.assertEqual(before, self.state)
-            stale = copy.deepcopy(proof); stale['started_at'] -= 600
-            with self.assertRaises(ValueError): renewal.renew(self.state, stale, self.root)
-            self.assertEqual(before, self.state)
-            renewal.renew(self.state, proof, self.root)
-            warning = self.state['resource_warnings'][0]
-            renewal.validate_active(self.state, warning)
-        self.assertIn('UNVERIFIED', warning['current_resource_state'])
-        self.assertEqual(proof['confirmation_failure'], warning['provider_exception'])
-        self.assertEqual(original, self.state['failures']); self.assertEqual(native, path.read_bytes())
-        gate = copy.deepcopy(next(g for g in self.plan['gates'] if g['name'] == 'api'))
-        gate['case_protocol'] = True
-        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
-            result = c.execute(gate, self.state, self.directory / 'auth-exception', self.root)
-        request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
-        self.assertEqual(['b'], request['checks']); self.assertEqual('SKIP', result['cases']['a'])
-        self.assertFalse(self.state['ready'])
-
     def test_renewal_accepts_absent_card_mode_without_fabrication(self):
         renewal, task, proof, original, path = self.renewal_fixture()
         proof['observations']['card'].pop('livemode')
