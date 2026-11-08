@@ -236,6 +236,97 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
+IMPORT_KIND = 'historical-agentcard-custody-import-v1'
+
+
+def donor_rows(donor_path, index_path, donor_sha256, index_sha256, root):
+    """Validate an explicit pinned archive's complete index, never its execution ledger."""
+    import deploy_test_cycle as c
+    for path, expected in ((donor_path, donor_sha256), (index_path, index_sha256)):
+        need(path.is_file() and not path.is_symlink() and path.resolve() == path
+             and re.fullmatch('[0-9a-f]{64}', expected or '')
+             and c.sha_file(path) == expected, 'donor provenance changed')
+    donor, index = c.read(donor_path), c.read(index_path)
+    need(index.get('format') == 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1'
+         and index.get('files', {}).get(str(root / '.context/deploy-pipeline/cycle.json')) == donor_sha256,
+         'donor snapshot not in pinned contents manifest')
+    history, active = donor.get('historical_custody_history', []), donor.get('historical_no_retry_custody', [])
+    need(history and active, 'empty donor custody index')
+    ids = [r['original_failure']['id'] for r in history]
+    active_ids = [r['original_failure']['id'] for r in active]
+    need(len(set(ids)) == len(ids) == len(active_ids) == len(set(active_ids))
+         and set(ids) == set(active_ids), 'partial or duplicate donor custody index')
+    # Validate donor discovery unchanged, including negative observations. Only
+    # the indexed obligations are admitted; the entire donor stays evidence.
+    need(not any(donor.get(k) for k in ('pending', 'running', 'live_failures', 'resume_phase')),
+         'active or pending donor snapshot')
+    found = known(donor, root)
+    need(set(found) == set(ids), 'partial donor custody discovery')
+    need(len([f for f in donor['failures'] if f['id'] in ids]) == len(ids),
+         'duplicate donor indexed failure')
+    need(donor['source'] == donor['plan']['source']
+         and c.digest(donor['plan']) == donor['plan_digest'], 'donor plan changed')
+    old_binding = {k: donor[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+    pending_ids = [p['id'] for p in donor.get('pending_post_merge', []) if p['id'] in ids]
+    need(len(pending_ids) == len(set(pending_ids)), 'duplicate donor pending authority')
+    rows = []
+    for saved in history:
+        row = historical(donor, found[saved['original_failure']['id']], root)
+        need(row == saved, 'donor indexed native record changed')
+        matches = [r for r in active if r['original_failure']['id'] == saved['original_failure']['id']]
+        expected = dict(kind=KIND, disposition=DISPOSITION, **row, current_binding=old_binding,
+                        current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+                        credit={'test_execution': False, 'assertions': False, 'financial_release': False})
+        need(matches == [expected], 'donor active custody record changed')
+        rows.append(row)
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({r[key] for r in rows}) == len(rows), 'borrowed donor resource identity')
+    return donor, found, rows
+
+
+def import_proof(state, donor_path, index_path, donor_sha256, index_sha256, root):
+    """Read-only proposal for a pristine, frozen full current cycle."""
+    import deploy_test_cycle as c
+    need(state == c.initialize(state['plan'], root), 'custody import requires pristine fresh state')
+    donor, found, rows = donor_rows(donor_path, index_path, donor_sha256, index_sha256, root)
+    gates = {g['name']: g for g in state['plan']['gates']}
+    for row in rows:
+        f = row['original_failure']
+        need(f['gate'] in gates and gates[f['gate']].get('case_protocol') is True
+             and f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'protected donor task removed')
+    return {'kind': IMPORT_KIND, 'before_state_sha256': c.digest(state),
+            'current_binding': binding(state['plan'], root),
+            'donor': {'state_path': str(donor_path), 'state_sha256': donor_sha256,
+                      'index_path': str(index_path), 'index_sha256': index_sha256,
+                      'state_digest': c.digest(donor)},
+            'cases': rows, 'failures': [copy.deepcopy(found[r['original_failure']['id']]) for r in rows],
+            'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', [])
+                                   if p['id'] in found]}
+
+
+def import_history(state, donor_path, index_path, donor_sha256, index_sha256, proof, root):
+    """Atomic in-memory history-only admission; caller publishes one ordinary state write."""
+    import deploy_test_cycle as c
+    provenance = state.get('historical_custody_import')
+    if provenance is not None:
+        # Rebuild from the pristine current baseline, never from donor READY.
+        baseline = c.initialize(state['plan'], root)
+    else:
+        baseline = state
+    expected = import_proof(baseline, donor_path, index_path, donor_sha256, index_sha256, root)
+    need(proof == expected, 'custody import proof differs from exact donor/current binding')
+    candidate = copy.deepcopy(baseline)
+    candidate['failures'] = copy.deepcopy(proof['failures'])
+    candidate['pending_post_merge'] = copy.deepcopy(proof['pending_post_merge'])
+    apply(candidate, proof['cases'], root)
+    candidate['historical_custody_import'] = copy.deepcopy(proof)
+    verify(candidate, root)
+    if provenance is not None:
+        need(state == candidate, 'custody import replay requires exact pristine imported state')
+        return
+    state.clear(); state.update(candidate)
+
+
 def identical_inputs_binding(state, root):
     """Validate an old FULL receipt during refresh, without rebinding its native source."""
     import deploy_test_cycle as c
@@ -274,6 +365,7 @@ def qualifications(state, gate, root, *, current=None):
 
 def guard(state, gate, root, legacy=None, *, current=None):
     """No fallback allocation when a known historical obligation loses its proof."""
+    verify_import_origin(state, root)
     legacy = {} if legacy is None else legacy
     custody = qualifications(state, gate, root, current=current)
     for f in known(state, root).values():
@@ -288,6 +380,7 @@ def guard(state, gate, root, legacy=None, *, current=None):
 
 def verify(state, root):
     import deploy_test_cycle as c
+    verify_import_origin(state, root)
     if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
         return
     gates = {g['name']: g for g in state['plan']['gates']}
@@ -298,10 +391,29 @@ def verify(state, root):
         guard(state, gate, root, c.reuse_qualifications(state, gate, include_custody=False, root=root))
 
 
+def verify_import_origin(state, root):
+    """Keep the explicit donor provenance bound during normal verification/admission."""
+    if 'historical_custody_import' not in state:
+        return
+    proof = state['historical_custody_import']
+    need(isinstance(proof, dict) and proof.get('kind') == IMPORT_KIND, 'malformed retained import provenance')
+    origin = proof.get('donor')
+    need(isinstance(origin, dict), 'malformed retained donor provenance')
+    donor, found, rows = donor_rows(Path(origin['state_path']), Path(origin['index_path']),
+                                   origin['state_sha256'], origin['index_sha256'], root)
+    import deploy_test_cycle as c
+    need(proof['kind'] == IMPORT_KIND and origin['state_digest'] == c.digest(donor)
+         and proof['cases'] == rows
+         and proof['failures'] == [found[r['original_failure']['id']] for r in rows]
+         and proof['pending_post_merge'] == [p for p in donor.get('pending_post_merge', []) if p['id'] in found]
+         and all(r in state.get('historical_custody_history', []) for r in rows),
+         'custody import provenance/index changed')
+
+
 def state_identity(state):
     import deploy_test_cycle as c
     return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
-                    'historical_no_retry_custody', 'historical_custody_history')})
+                    'historical_no_retry_custody', 'historical_custody_history', 'historical_custody_import')})
 
 
 def admission(request, root):

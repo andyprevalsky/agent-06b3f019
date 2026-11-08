@@ -164,16 +164,27 @@ production selection logic still use their original paths. Matching is limited
 to the three fixed singleton names, leaving unrelated sentinel state alone.
 The callback helper restores delegates even if scope cleanup throws.
 
-The permanent `code-session-inspect-isolation.blackbox.ts` replays a competing
+The permanent regression in `code-session-inspect.blackbox.ts` replays a competing
 Codex row through the real Prisma read boundary in a child process, then runs
 the existing C15 test unchanged. The replay never writes a competing global
-Codex fixture. Its owning fixture is
+Codex fixture. It lives in the existing inspection domain, preserving the
+original domain inventory and shard assignment. Its owning replay fixture is
 `code-session-inspect-cooldown.fixture.ts`. From `back-end`, the identical
 pre/post command was:
 
 ```
 BLACKBOX_TEST_CONCURRENCY=4 BLACKBOX_TEST_CASE_CONCURRENCY=30 npm run test:blackbox -- code-session-inspect-isolation
 ```
+
+This initial fail/pass command used a separate replay domain during reduction;
+the identical test callback was then consolidated into the existing inspection
+domain so permanent regression coverage does not shift domain shard assignment.
+Final proof used the identical command on both fixture versions:
+`BLACKBOX_TEST_CONCURRENCY=4 BLACKBOX_TEST_CASE_CONCURRENCY=30 npm run test:blackbox -- code-session-inspect`.
+The original fixture plus the final regression failed with the same C15
+`usage_limited`/`answered` assertion at line 596 (8458 ms domain, exit 1).
+The repaired fixture passed all eight tests, including original C15 and the
+competing-cooldown replay (9234 ms domain, exit 0).
 
 Before: exit 1; original C15 failed at line 596, actual `usage_limited`, expected
 `answered` (568.97 ms C15 body; 1537.02 ms enclosing regression). After:
@@ -198,8 +209,12 @@ Golden reference: not applicable (no approval-gated hunk).
 
 The assigned repair retains responsibility for the original full sharded
 coverage command, merge, production verification, cleanup and deploy scorecard.
-Focused proof above is causal evidence only; native gate and deploy receipts
-provide outcome proof. The two historical AgentCard cases remain no-retry
+The first full original command exited 0: 249/249 domains, all 374 unit
+files, the isolated FPS probe, merged coverage thresholds and trailing teardown
+passed (statements/lines 90.48%, branches 82.93%, functions 93.18%). That run
+began before regression consolidation and stabilization, so the final frozen
+snapshot still requires its ordinary full deployment gate. Focused proof above
+is causal evidence; native gate and deploy receipts provide outcome proof. The two historical AgentCard cases remain no-retry
 obligations with current financial state UNVERIFIED; this test repair grants
 no authority to mint, reclaim, retry, release or reissue them. Freedom and
 protected instructions are preserved.

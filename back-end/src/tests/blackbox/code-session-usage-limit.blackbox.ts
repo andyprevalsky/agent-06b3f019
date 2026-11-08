@@ -161,30 +161,36 @@ before(async () => {
 });
 
 after(async () => {
-  for (const [key, value] of [
-    ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
-    ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
-    ['ANTHROPIC_API_KEY', saved.anthropic],
-    ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeKey],
-    ['OPENROUTER_API_KEY', saved.openrouter],
-    ['GPT_API_KEY', saved.gpt],
-    ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
-    ['AZURE_FOUNDRY_ENDPOINT', saved.foundryEndpoint],
-    ['AZURE_FOUNDRY_API_KEY', saved.foundryKey],
-    ['CODEX_AZURE_FOUNDRY_HOST', saved.codexAzureHost],
-  ] as const) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  try {
+    for (const [key, value] of [
+      ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
+      ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
+      ['ANTHROPIC_API_KEY', saved.anthropic],
+      ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeKey],
+      ['OPENROUTER_API_KEY', saved.openrouter],
+      ['GPT_API_KEY', saved.gpt],
+      ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
+      ['AZURE_FOUNDRY_ENDPOINT', saved.foundryEndpoint],
+      ['AZURE_FOUNDRY_API_KEY', saved.foundryKey],
+      ['CODEX_AZURE_FOUNDRY_HOST', saved.codexAzureHost],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    Object.assign(Sandbox, original);
+    await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
+    await prisma.codeSession.deleteMany({ where: { userId } });
+    await prisma.integration.deleteMany({ where: { id: { in: createdIntegrations } } });
+    await prisma.agent.deleteMany({ where: { userId } });
+    await prisma.user.deleteMany({ where: { userId } });
+    rmSync(fixtureDir, { recursive: true, force: true });
+  } finally {
+    try {
+      await restoreCooldowns?.();
+    } finally {
+      await prisma.$disconnect();
+    }
   }
-  Object.assign(Sandbox, original);
-  await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
-  await prisma.codeSession.deleteMany({ where: { userId } });
-  await prisma.integration.deleteMany({ where: { id: { in: createdIntegrations } } });
-  await prisma.agent.deleteMany({ where: { userId } });
-  await prisma.user.deleteMany({ where: { userId } });
-  rmSync(fixtureDir, { recursive: true, force: true });
-  await restoreCooldowns?.();
-  await prisma.$disconnect();
 });
 
 // First, before the cases below leave pooled subscriptions of their own behind.
