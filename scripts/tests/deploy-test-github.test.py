@@ -477,6 +477,27 @@ class Launcher(unittest.TestCase):
             self.assertEqual(result['evidence']['c']['remote_log'], gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log')
             self.assertEqual(result['evidence']['d']['log'], '/etc/passwd')
 
+    def test_capped_bundle_keeps_server_logs_before_bulk_coverage_json(self):
+        # The PR #1762 shard-2 artifact dropped its 10 MB server log: 3,000 raw V8
+        # and replay-cache JSON files, each smaller, had filled the 400 MB budget first.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            coverage = root / 'back-end/coverage'
+            coverage.mkdir(parents=True)
+            (coverage / 'server-shard2.log').write_bytes(b'l' * 1000)
+            raw = root / '.context/test-runs/backend-coverage-failed-x/raw-v8'
+            raw.mkdir(parents=True)
+            for index in range(10):
+                (raw / f'coverage-{index}.json').write_bytes(b'j' * 300)
+            out.mkdir()
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'BUNDLE_TOTAL_BYTES', 2000), \
+                    patch.object(gh, 'publish_done'):
+                gh.remote_bundle(type('Args', (), {'out': out})())
+            self.assertTrue((out / 'artifact/files/back-end/coverage/server-shard2.log').is_file())
+            skipped = {row['path'] for row in json.loads((out / 'artifact/bundle.json').read_text())['skipped']}
+            self.assertNotIn('back-end/coverage/server-shard2.log', skipped)
+            self.assertEqual(len(skipped), 7)  # 1000 B of log, then three 300 B JSON files fit
+
     def test_run_lookup_matches_the_tag_and_reports_a_rejected_workflow(self):
         head, name = 'd' * 40, 'deploy-gates/4vcpu/g-1'
 
@@ -672,6 +693,73 @@ class TagPush(unittest.TestCase):
                           else ('b' * 40 + '\trefs/tags/x') if a[0] == 'ls-remote' else ''):
             with self.assertRaises(ValueError):
                 gh.push_tag(ROOT, 't', 'o/r', 'x', b'tag')
+
+
+class WorkflowMirrorCheckout(unittest.TestCase):
+    """deploy-gates.yml "Check out the frozen commit", executed from the workflow text itself.
+
+    PR #1787 run 42440778292: the restored sticky-disk mirror kept a commit-graph chain naming a
+    deleted graph file, so every git command in the job's --shared clone printed "warning: unable to
+    find all commit-graph files" and original600's exact-stderr check failed. The step must rebuild
+    such a chain before cloning, and run any gc in the foreground.
+    """
+    STEP = '      - name: Check out the frozen commit\n'
+
+    def step_script(self, mirror_root, url):
+        text = (ROOT / '.github/workflows/deploy-gates.yml').read_text()
+        body = text[text.index(self.STEP):]
+        body = body[:body.index('\n      - name:', 1)]
+        lines = body.split('        run: |\n', 1)[1].splitlines()
+        script = '\n'.join(line[10:] for line in lines) + '\n'
+        for old, new in (('sudo chown "$(id -u):$(id -g)" /home/runner/rose-git-mirror', ':'),
+                         ('/home/runner/rose-git-mirror', mirror_root),
+                         ('url="https://github.com/${GITHUB_REPOSITORY}.git"', 'url=' + url)):
+            self.assertIn(old, script, 'workflow checkout step drifted from this fixture')
+            script = script.replace(old, new)
+        return script
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+    def test_restored_broken_commit_graph_chain_is_rebuilt_before_the_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            origin, ws = tmp / 'origin', tmp / 'ws'
+            ws.mkdir()
+            self.git('init', '-q', '--initial-branch=main', str(origin))
+            for i in range(3):
+                (origin / 'f').write_text(str(i))
+                self.git('add', 'f', cwd=origin)
+                self.git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', str(i), cwd=origin)
+            self.git('tag', 'deploy-gates/8vcpu/x', cwd=origin)
+            env = {**os.environ, 'FETCH_TOKEN': 't', 'GITHUB_REF': 'refs/tags/deploy-gates/8vcpu/x',
+                   'GITHUB_WORKSPACE': str(ws), 'GIT_CONFIG_NOSYSTEM': '1', 'HOME': str(tmp)}
+            script = self.step_script(str(tmp / 'disk'), origin.as_uri())
+
+            def run():
+                return subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True, timeout=120)
+            first = run()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            mirror = tmp / 'disk/rose.git'
+            # The saved snapshot: a split chain whose base graph file is gone.
+            for i in range(3, 5):
+                (origin / 'f').write_text(str(i))
+                self.git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qam', str(i), cwd=origin)
+                self.git('-C', str(mirror), 'fetch', '-q', origin.as_uri(), '+refs/heads/main:refs/heads/main')
+                self.git('-C', str(mirror), 'commit-graph', 'write', '--reachable', '--split')
+            graphs = mirror / 'objects/info/commit-graphs'
+            base = (graphs / 'commit-graph-chain').read_text().split()[0]
+            (graphs / f'graph-{base}.graph').unlink()
+            broken = subprocess.run(['git', '-C', str(mirror), 'log', '-1'], capture_output=True, text=True)
+            self.assertIn('unable to find all commit-graph files', broken.stderr, 'fixture did not break the chain')
+            second = run()
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertNotIn('commit-graph', second.stderr)
+            self.assertIn('mirror commit-graph rebuilt', second.stdout)
+            log = subprocess.run(['git', '-C', str(ws), 'log', '-1', '--format=%H'], capture_output=True, text=True)
+            self.assertEqual(log.stderr, '')
+            self.assertEqual(log.stdout.strip(), self.git('rev-parse', 'deploy-gates/8vcpu/x^{commit}', cwd=origin).stdout.strip())
+            self.assertIn('-c gc.autoDetach=false', script, 'mirror gc must not outlive the step')
 
 
 if __name__ == '__main__':

@@ -2563,6 +2563,102 @@ async def test_cancelled_unknown_create_stays_fail_closed():
         await bench._finalize_owned_cloud_batch('http://offline.invalid',[row],{})
 
 
+async def _run_real_task_failing_before_graded_create(mode,task_name="rootless-setup-task"):
+    """Drive the actual task runner to an exception before (or during) root creation."""
+    from contextlib import ExitStack
+    task=bench.BenchmarkTask(name=task_name,title="Rootless setup",prompt="Buy it",timeout_seconds=10,is_chat_mode=False,expected_tools=[],tags=[],price_limit_cents=0,requires_browser_agent=False,requires_claude_code=False,attachment=None,approval_handling=None,start_phase="execute")
+    setup_429=('Failed to prepare-residual benchmark AgentCard setup: 429 {"error":"AgentCard Organization MCP rate limit exceeded",'
+               '"code":"agentcard_org_mcp_rate_limited","retryAfterSeconds":null}')
+    owned=[]
+    async def prepare(*args):
+        if mode=="setup":raise RuntimeError(setup_429)
+    async def apply(*args):
+        if mode!="first_run_create":return None
+        await bench._run_auth_test_site_first_run(task,"http://localhost:1",{"siteId":"owned-site"},"Create account")
+    async def create(*args):
+        # The POST was issued; its response (and any allocated root id) was lost.
+        raise RuntimeError("create response lost")
+    async def codex(*args,**kwargs):
+        raise RuntimeError("codex create response lost")
+    async def empty(*args,**kwargs):return []
+    targets=[
+        patch.object(bench,"_validate_task_target"),patch.object(bench,"_effective_harness",return_value="codex" if mode=="codex" else "rose"),
+        patch.object(bench,"_check_codex_harness_credentials",AsyncMock(return_value=True)),
+        patch("benchmarks.codex_runner.run_codex_task",codex),
+        patch.object(bench,"_run_user_id_override_for_task",return_value=None),
+        patch.object(bench,"_apply_live_fixtures",empty),patch.object(bench,"_apply_memory_fixtures",empty),
+        patch.object(bench,"prepare_sandbox_payment_residual",prepare),patch.object(bench,"_agentcard_setup_fixture_action",return_value=None),
+        patch.object(bench,"_apply_auth_test_site",apply),patch.object(bench,"_release_auth_test_site",AsyncMock()),
+        patch.object(bench,"_restore_live_fixture_scenarios_async",empty),
+        patch.object(bench,"create_agent",create),patch.object(bench,"_api_headers",AsyncMock(return_value={})),
+        patch.object(bench,"ensure_payment_lifecycle_cleanup",AsyncMock(return_value=None)),
+        patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",None))),
+    ]
+    with ExitStack() as stack:
+        for target in targets:stack.enter_context(target)
+        return await bench.run_single_task("http://localhost:1",task,on_agent_created=lambda name,aid:owned.append(aid)),owned
+
+
+@async_case
+async def test_rootless_setup_failure_keeps_its_task_verdict_instead_of_unknown_creation():
+    """2026-11-08 smoke: a prepare-residual 429 raised before any create_agent call.
+
+    The task never issued a root creation request, so its custody proves zero
+    allocation. Finalization must keep the ordinary ERROR verdict instead of
+    raising the unknown-creation infra failure that cancelled every smoke job.
+    """
+    row,owned=await _run_real_task_failing_before_graded_create("setup")
+    assert owned==[] and row.agent_id=="" and row.owned_roots==[]
+    assert row.graded_root_creation_outcome=="not_started" and row.root_creation_attempted is False
+    assert row.status==row.benchmark_status=="ERROR" and row.passed is False
+    assert "agentcard_org_mcp_rate_limited" in row.failure_reason
+    with patch.object(cleanup,"exact_root_sessions",side_effect=AssertionError("no root may be queried")):
+        await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{})
+    assert row.status==row.benchmark_status=="ERROR" and "prepare-residual" in row.failure_reason
+    # The proof is exact: any sign that a root might exist stays fail-closed.
+    for key,value in [("root_creation_attempted",None),("root_creation_attempted",True),
+                      ("graded_root_creation_outcome","unknown"),("passed",True),
+                      ("owned_roots",[{"root_agent_id":ROOT}])]:
+        changed=copy.deepcopy(row);setattr(changed,key,value)
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch("http://offline.invalid",[changed],{})
+    with pytest.raises(RuntimeError):
+        await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{row.name:[ROOT]})
+
+
+@async_case
+async def test_lost_create_response_before_graded_creation_stays_unknown():
+    """A first-run fixture or Codex create whose response was lost may own a root."""
+    for mode in ("first_run_create","codex"):
+        row,owned=await _run_real_task_failing_before_graded_create(mode)
+        assert owned==[] and row.agent_id=="" and row.status=="ERROR"
+        assert row.root_creation_attempted is True, mode
+        with pytest.raises(RuntimeError,match="unknown root creation outcome"):
+            await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{})
+
+
+@async_case
+async def test_composite_stage_with_lost_create_keeps_the_outer_task_unknown():
+    """A composite (minted-account) runner creates roots through nested run_single_task stages.
+
+    A stage whose create response was lost marks only its own nested custody unless the mark
+    reaches the enclosing task; the composite row would then look rootless and its possibly
+    allocated root would never be cleaned up.
+    """
+    async def composite(base_url,task,keep_failed_agents,on_agent_created=None):
+        inner=bench.BenchmarkTask(name="rootless-setup-task",title="Stage",prompt="Post",timeout_seconds=10,is_chat_mode=False,expected_tools=[],tags=[],price_limit_cents=0,requires_browser_agent=False,requires_claude_code=False,attachment=None,approval_handling=None,start_phase="execute")
+        stage=await bench.run_single_task(base_url,inner,on_agent_created=on_agent_created)
+        assert stage.agent_id=="" and stage.root_creation_attempted is True
+        return bench.TaskResult(name=task.name,passed=False,agent_id="",status="FAILED",benchmark_status="FAILED",
+                                progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,failure_reason=stage.failure_reason)
+    with patch.object(bench,"run_minted_agent_account_task",composite):
+        row,owned=await _run_real_task_failing_before_graded_create("first_create",task_name=bench.MINTED_AGENT_ACCOUNT_X_TASK_NAME)
+    assert owned==[] and row.agent_id=="" and row.owned_roots==[]
+    assert row.root_creation_attempted is True
+    with pytest.raises(RuntimeError,match="unknown root creation outcome"):
+        await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{})
+
+
 @async_case
 async def test_cancelled_inbox_waiters_are_proven_never_admitted():
     await _cancelled_queue_owning_case()

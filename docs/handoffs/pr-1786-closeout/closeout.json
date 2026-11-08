@@ -1,0 +1,16 @@
+{
+ "pr": 1786,
+ "merged_sha": "fdf1accd943462dfd0f933a55aec09b15d0a4dba",
+ "reviewed_head": "e684eefae6bf19005a6cb4dd4f450b6e38018ede",
+ "purpose": "repair goal for the PR #1762 deploy failure backend-coverage-blackbox / blackbox:browser-session: the provider-lifecycle fixture's fixed 10 s windows now start only after each forked tsx worker reports ready (import graph loaded + prisma connected); timeout value and assertions unchanged",
+ "assigned_test": "backend-coverage-blackbox shard 1 blackbox:browser-session PASS in every deploy sweep (final: attempt 13 on e684eefae6) and locally under npm run test:coverage:sharded (shard 1 125/125)",
+ "repro": "buggy fixture 3/3 FAIL under 3 CPU spinners/core ('join FAILED ms=10000', provider lifecycle fixture timed out); fixed 6/6 PASS under the same load",
+ "gates": "16 selected; DEPLOY_GATES PASS on e684eefae6 after 4 syncs with a busy main (generated docs/rca/INDEX.md conflicts). Final sweep: 15 gates PASS, smoke 11/13 PASS + agent-payment-abandonment AgentCard release-stall resource skip + agent-payment-idempotent-abandonment NOT_INTRODUCED timeout dispatched post-merge. Earlier rounds: treasury-rails standing skip (AgentCard list_transfers rate limit) renewed on changed inputs; quick backend-structural timeout under VM CPU steal; smoke INFRA STOP from AgentCard org throttling; typescript stale prisma client after sync (regenerated, re-executed)",
+ "review": "CodeRabbit skipped every cycle (path filters exclude tests/docs); adversarial sub-agent review stood in (cycle 1 findings fixed in 34fd7d036, cycle 2 CLEAN); later syncs inherit-sync clean",
+ "production": {"lanes": "render:PASS, backend-probes:PASS, semantic:PASS (actions run 42464822357)", "result": "PASS"},
+ "post_merge_repairs": [
+  {"failure": "smoke/agent-payment-idempotent-abandonment (verifier pointer resolution 401)", "thread": "https://boxes.dev/thread/thr_df5c767b8c3b47758bb9d82723d30eb4", "devbox": "9143590e-7b07-4f68-8055-6e4186584dce", "folder": "Bugs"},
+  {"failure": "smoke AgentCard payment-fixture infra stop (no fleet-wide AgentCard admission)", "thread": "https://boxes.dev/thread/thr_d238e27781224d58bbf46d25ea22ce1f", "devbox": "72610562-5463-4814-bbf7-263372116ef2", "folder": "Bugs"}
+ ],
+ "retained_cloud_resources": {"note": "attempt-4 smoke (campaign 604a576a) cancelled by INFRA STOP left 8 owned task Machines whose exact-owner recovery refuses (unsealed runtime evidence); stopped and verified STOPPED 2026-11-08T04:02Z (86e32dbe900158 re-stopped after a recovery retry), volumes retained as evidence for the AgentCard repair owner", "app": "navi-whisper-lux-bench", "machines": ["83ddde1b62e368","8239d2b7642208","865950be416478","83e202b7496728","83dd3deb697158","80ee41df651d08","86e32dbe900158","845003f269d3d8"], "volumes": ["vol_re1lqxpqmepj5o14","vol_4ql11xgx9gdwy78r","vol_491j5zp53xq7ee5r","vol_vxmpqojq2073okn4","vol_r1jd7ke7ll5lklzr","vol_v3g8xo6xg1zx8gw4","vol_r1jd7ke7j75e26zr","vol_vwn9opwz56720y8v"], "ownership_records": ".git/cloudbench-fleet-ownership (13 tokens, run 20261108-034502-*)", "retire_with": "scripts/run-bench reclaim-stopped --app navi-whisper-lux-bench (plan verified to target exactly these 8 with every other Machine protected)"}
+}

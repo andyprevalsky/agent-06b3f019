@@ -1,0 +1,91 @@
+{
+  "format": "PR-CLOSEOUT-V1",
+  "pr": 1777,
+  "merged_sha": "839396e48ec4bbe0a654ee34ea1e6df05bef08d6",
+  "reviewed_head": "9be947e7a45f4839296531143b2b56fd97d1b303",
+  "assignment": {
+    "test": "smoke/agent-payment-idempotent-abandonment",
+    "exact_error": "Timeout after 904s (task timeout=900s) | Agent status: PAUSED (expected COMPLETED)",
+    "originating": {
+      "pr": 1760,
+      "merge": "cdb8ce580a3e66dd27fed4558094b3bd7befc797",
+      "failed_source": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+      "devbox": "aa460e55-b828-4b5f-b63d-4d582a3e308b",
+      "failed_run": "hub run 20261107-195305-1001621-m7373978ab185 agent ce9d2ae6-c109-435d-bea4-c5fb1e5c1f1c"
+    },
+    "repair_devbox": "a20355fa-fcd1-4a35-aa43-d4f1f20b9064",
+    "repair_thread": "https://boxes.dev/thread/thr_82ea6e4547cf49c1ae2fa5d5906baa20",
+    "folder": "Bugs",
+    "root_cause": "ActionHistory.get_entries() re-projected every entry through the private-entry media policy; after the card was typed, omit_media stripped the typed HTTP(S) image_url fields from the earlier request_payment_card params/receipt, so the browser verifier could never verify the image-URL descriptors the root demanded and returned 50% six times until the 900 s timeout paused the agent (PAUSED = harness timeout teardown).",
+    "fix": "keep_receipt_image_urls helper restores receipt image URLs through the active redactor in the action projection, the activity return projection and ActionHistory._model_visible_entry",
+    "rca_case": "docs/rca/cases/2026-11-07-verifier-history-stripped-card-receipt-image-urls-after-private-entry.md",
+    "proof": {
+      "regression": "spawn-browser-agent-v3 blackbox verifier_history_keeps_card_receipt_image_urls_after_private_entry: red on cdb8ce580 ('verifier lost request image_url ...Aurora+Notebook'), green on fix",
+      "affected_domains": "spawn-browser-agent-v3, request-payment-card, purchase-approval, request-user-approval, browser-tilion: 5 passed, 0 failed",
+      "local_outcome_gate": {
+        "buggy": "cdb8ce580 agent 2d25a74f (hub run 99cd48b0) PASS by model variance; verifier receipt image_url count 3 before card entry -> 0 after",
+        "fixed": "1b4748e347 agent 52c26100 (hub run da81d3dc) PASS 382.5 s; 3 image URLs after card entry"
+      },
+      "deploy_smoke_cloud": [
+        "c6385ef9 campaign a69521d4: PASS (agent 39e5e54b)",
+        "739d480e campaign e243a7c4: PASS",
+        "9be947e7 campaign 3cd670ed: cancelled by INFRA STOP (AgentCard org 401 flap on agent-payment-abandonment)",
+        "9be947e7 campaign 11e16121 (final cycle): PASS"
+      ]
+    }
+  },
+  "also_shipped": [
+    "fix(purchases): reuse-only mint provider read failures typed via toPurchaseBoundaryError (cluster from hub run 20261107-201518 agent 6a4eea22); docs/rca/cases/2026-11-08-reuse-only-mint-provider-read-failure-returned-untyped-500.md (status mitigated, trigger unconfirmed)",
+    "cherry-pick 1c44682df3 semantic gate without a public tunnel (identical to main #1778)"
+  ],
+  "review": "CodeRabbit usage spending cap on every window 00:35-03:04Z; deploy_review_cycle.py skip --reason usage-cap on 739d480e and 9be947e7 (merged unreviewed by CodeRabbit); substitute read-only adversarial review: no blocking findings",
+  "gate_cycles": {
+    "02e32fc": "quick backend-structural FAIL (RCA archive schema in new case) -> fixed in c6385ef9",
+    "c6385ef": "semantic-stack UNVERIFIED (ERR_NGROK_334 shared rose-rose.ngrok.app), agents-coverage UNVERIFIED (browser-tilion webauthn NotSupportedError, open case 2026-10-28-webauthn-document-service-disconnect-unresolved); reexecute: agents-coverage PASS, semantic-stack UNVERIFIED again -> cherry-picked #1778 fix",
+    "739d480": "all gates PASS; smoke agent-payment-abandonment resource_skip agentcard_release_stall; READY; merge refused CONFLICTING (docs/rca/INDEX.md) -> sync",
+    "9be947e-stale": "daemon added GITHUB_APP_* to managed env mid-run -> stale, re-init",
+    "9be947e-infrastop": "smoke INFRA STOP 1/18: AgentCard org MCP 401 'Invalid or expired organization token' flap ~6 s; cancelled-campaign native owner blocked reexecute -> re-init",
+    "9be947e-final": "16 gates PASS; smoke 17 PASS + agent-payment-abandonment native SKIPPED resource_skip agentcard_release_stall -> READY, merged"
+  },
+  "production": {
+    "render": "PASS",
+    "backend-probes": "PASS",
+    "fly": "BLOCKED: Deploy Agents to Fly.io is disabled_manually (owner's standing hold, 2026-11-07); not dispatched",
+    "workflow-migration": "BLOCKED (depends on fly)",
+    "semantic": "BLOCKED (depends on fly)",
+    "agentcard": "FAIL: stripeHold.livemode must be true (prod payer fixture is test-mode; needs a KYC-passed live cardholder only the user can provide); live org transfer owt_6dc7385cf21724583c652d34 consumed 100 cents, released 0",
+    "vercel": "SKIPPED-not-applicable",
+    "mac-release": "SKIPPED-not-applicable",
+    "wmh": "SKIPPED-not-applicable",
+    "outcome": "blocked"
+  },
+  "handoffs": [
+    {
+      "failure": "smoke/agent-payment-abandonment INFRA ERROR: AgentCard Organization MCP 401 'Invalid or expired organization token' (agentcard_org_mcp_unauthorized) during abandon, hub run 20261108-041743-3156927-m547c38d72f0c",
+      "repair_thread": "ph76spe3bj2f84xm06wa6xfqkn8hty7y",
+      "repair_devbox": "5208e9f9-029e-4d6c-9b9e-eb72a90b9310",
+      "folder": "Bugs",
+      "settings": "claude-opus-5-5 high standard (requested; platform does not report effective effort)"
+    }
+  ],
+  "followups": [
+    "Fly hold: after the owner lifts it run scripts/deploy production --sha 839396e48ec4bbe0a654ee34ea1e6df05bef08d6 --lanes fly,workflow-migration,semantic; until then the agents fix is not live on prod workers",
+    "AgentCard unreleased funds: sandbox release stalls on agent-payment-abandonment (4396 cents each, campaigns a69521d4, e243a7c4, 11e16121) and the live production transfer owt_6dc7385cf21724583c652d34 (100 cents)",
+    "AgentCard production lane needs a KYC-passed live cardholder (memory prod-payment-fixture-test-mode)",
+    "browser-tilion multiplexer_arms_webauthn_popups NotSupportedError recurred on Blacksmith (open case 2026-10-28-webauthn-document-service-disconnect-unresolved)",
+    "verifier receipt shows merchant as '{{secret:card_name}} Test Payment' because the card name equals the merchant prefix (noted in the RCA case)",
+    "review N2: agentcard-user-mcp.ts includes raw get_card_details text in a 502 message",
+    "deploy tooling: deploy merge's verify hashes the systemd unit environment (MEMORY_PRESSURE_WATCH) so it must run in an identically named unit"
+  ],
+  "archives": {
+    "core": "devbox-closeout-private/pr1777-839396e4/20261108-core.tar.gz.aesgcm",
+    "cloud": "devbox-closeout-private/pr1777-839396e4/20261108-cloud.tar.gz.aesgcm"
+  },
+  "deletion_readiness": {
+    "receipt": "docs/handoffs/pr-1777-closeout/deletion-readiness.json",
+    "status": "NOT_READY",
+    "open": 1,
+    "open_item": "live process: this Claude session (/opt/devbox-tools/claude/.../claude -p, cwd /home/boxes/rose) running the closeout; ends with the session",
+    "owned_cleanup": "complete: gate/production systemd units exited; orphaned monitor tails stopped by exact PID; own flyctl agent 224928 stopped; worktrees retired (outcome-gate buggy/fixed, mint sub-agent; ~11 GB reclaimed); scratch DB victoria_rca_idem_reuse dropped; managed investigator thread archived; 0 Fly machines carry this deploy's campaign ids; every local-only ref bound to a private archive"
+  }
+}

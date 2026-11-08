@@ -471,10 +471,14 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     }
     throwForGate(record, result, fundsSource === 'company_flow');
     const cardId = requiredString(field(record, ['card_id', 'cardId', 'id']), 'card_id');
-    const details = await this.getDetails(cardId);
+    // ONE retry deadline for every read after create_card, so the details read, its status
+    // fallback and the transfer-visibility poll cannot each arm a fresh rate-limit/auth-flap budget
+    // and push a created card's mint past the caller's HTTP timeout.
+    const postCreateDeadlineAtMs = orgRetryDeadlineAtMs();
+    const details = await this.getDetails(cardId, postCreateDeadlineAtMs);
     let transferId = companyTransferId(record, resultText(result));
     if (fundsSource === 'company_flow' && transferId === undefined) {
-      transferId = await this.findCompanyTransferId(cardId);
+      transferId = await this.findCompanyTransferId(cardId, postCreateDeadlineAtMs);
       if (transferId === undefined) {
         throw new AgentCardProviderError(
           'AgentCard company funding is in progress',
@@ -553,7 +557,10 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     );
   }
 
-  private async findCompanyTransferId(cardId: string): Promise<string | undefined> {
+  private async findCompanyTransferId(
+    cardId: string,
+    retryDeadlineAtMs: number
+  ): Promise<string | undefined> {
     // Each attempt costs TWO organization-MCP reads, so the old fixed 500ms cadence spent 40
     // requests of the org-wide 120-per-minute window on a single mint. Exponential backoff waits
     // for exactly as long overall while issuing 12.
@@ -561,8 +568,8 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     const observations = waits.length + 1;
     // ONE rate-limit retry budget for the WHOLE visibility poll. The org runtime's budget bounds a
     // single `callTool`, so re-arming it per read would let these 12 reads accumulate 12 budgets
-    // (12 x 30s = 360s) and turn a ~10s poll into a multi-minute mint.
-    const retryDeadlineAtMs = orgRetryDeadlineAtMs();
+    // (12 x 30s = 360s) and turn a ~10s poll into a multi-minute mint. The mint passes the budget
+    // it already shares with its details read.
     for (let attempt = 1; attempt <= observations; attempt += 1) {
       let observedTransferCount = 0;
       for (const args of [{ status: 'consumed', limit: 100 }, { limit: 100 }]) {
@@ -600,9 +607,9 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     return undefined;
   }
 
-  async getDetails(cardId: string): Promise<CardProviderDetailsResult> {
+  async getDetails(cardId: string, deadlineAtMs?: number): Promise<CardProviderDetailsResult> {
     if (cardId.trim() === '') throw new AgentCardProviderError('cardId is required');
-    const result = await this.toolCaller('get_card_details', { card_id: cardId });
+    const result = await this.toolCaller('get_card_details', { card_id: cardId }, deadlineAtMs);
     const record = resultRecord(result);
     throwForGate(record, result);
     // The org MCP now redacts credentials from structuredContent.message and
@@ -630,7 +637,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       .map((candidate) => candidate?.toUpperCase())
       .find((candidate) => candidate !== undefined && knownCardStatuses.has(candidate));
     if (status === undefined) {
-      const cardResult = await this.toolCaller('get_card', { card_id: cardId });
+      const cardResult = await this.toolCaller('get_card', { card_id: cardId }, deadlineAtMs);
       const cardRecord = resultRecord(cardResult);
       throwForGate(cardRecord, cardResult);
       status = optionalString(asRecord(cardRecord.card) ?? cardRecord, ['status']);
