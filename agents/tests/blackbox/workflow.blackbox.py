@@ -1627,6 +1627,128 @@ async def _test_poll_exhaustion_ends_agent_failed(env) -> None:
     assert (result or {}).get("reason") == "workflow_error", f"unexpected terminal result: {result}"
 
 
+# A real wall-clock interval in which an unanswered question must stay open. The
+# time-skipping server does not advance workflow timers while the client only
+# signals/queries, so the 15-minute SMS fallback cannot end the wait here.
+QUESTION_SETTLE_SECONDS = 1.0
+
+
+async def _run_question_wait_scenario(env, agent_id: str, *, start_signal: Optional[str], before_reply) -> Dict:
+    """Root asks one send_message_to_user question; observe when its wait ends.
+
+    ``start_signal`` (a receive_user_response value) is delivered with the start,
+    before the first poll, so the model has read it when it asks. ``before_reply``
+    runs while the question is open; the user's reply follows.
+    """
+    question = "What discount should the Boxing and Muay Thai code apply, and should it cover the first month?"
+    reply = "Please do not ask me anymore questions. Use 10% off the first month."
+    CUTOVER_MESSAGES[agent_id] = []
+    CUTOVER_LLM_SCRIPTS[agent_id] = [[{"tool": "send_message_to_user", "message": question, "is_question": True}]]
+    WORKFLOW_ENV_ACTIVITY_COUNTS.pop(agent_id, None)
+
+    def question_rows(status: str) -> List[Dict[str, Any]]:
+        return [
+            row
+            for row in CUTOVER_MESSAGES[agent_id]
+            if row["metadata"].get("toolName") == "send_message_to_user" and row["metadata"].get("toolStatus") == status
+        ]
+
+    async def until(predicate, timeout: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if predicate():
+                return True
+            await asyncio.sleep(0.02)
+        return predicate()
+
+    async def settle(handle) -> None:
+        # Each query completes after a workflow task, then real time passes.
+        await handle.query(AgentWorkflow.get_status)
+        await asyncio.sleep(QUESTION_SETTLE_SECONDS)
+        await handle.query(AgentWorkflow.get_status)
+
+    start_kwargs: Dict[str, Any] = {}
+    if start_signal is not None:
+        start_kwargs = {"start_signal": "receive_user_response", "start_signal_args": [start_signal]}
+    handle = await env.client.start_workflow(
+        AgentWorkflow.run,
+        args=[
+            agent_id,
+            "user-test-1",
+            "Build the boxing gym client signup site",
+            "rose-labs/rose-1-flash",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+        ],
+        id=_next_wf_id("question-wait"),
+        task_queue=TASK_QUEUE,
+        **start_kwargs,
+    )
+    try:
+        asked = await until(lambda: bool(question_rows("IN_PROGRESS")), 30)
+        assert asked, f"the scripted question was never asked: {CUTOVER_MESSAGES[agent_id]}"
+        polls_before_question = WORKFLOW_ENV_ACTIVITY_COUNTS.get(agent_id, {}).get("poll_new_messages", 0)
+        assert polls_before_question >= 1, "the question's LLM turn must follow a poll"
+        await settle(handle)
+        observed = {"finished_before_reply": [dict(row) for row in question_rows("FINISHED")]}
+        if before_reply is not None:
+            await before_reply(handle)
+            await settle(handle)
+        observed["finished_after_other_signals"] = [dict(row) for row in question_rows("FINISHED")]
+        await handle.signal(AgentWorkflow.receive_user_response, reply)
+        await until(lambda: bool(question_rows("FINISHED")), 30)
+        observed["finished_after_reply"] = [dict(row) for row in question_rows("FINISHED")]
+        return observed
+    finally:
+        await _cancel_workflow(handle)
+        CUTOVER_MESSAGES.pop(agent_id, None)
+        CUTOVER_LLM_SCRIPTS.pop(agent_id, None)
+        CUTOVER_LLM_QUEUES.pop(agent_id, None)
+
+
+def _assert_question_answered_only_by_reply(observed: Dict, cause: str) -> None:
+    assert observed["finished_before_reply"] == [], (
+        f"send_message_to_user returned {[row['metadata'].get('title') for row in observed['finished_before_reply']]} "
+        f"with no reply: {cause} satisfied the question's wait"
+    )
+    assert observed["finished_after_other_signals"] == [], (
+        f"send_message_to_user returned {[row['metadata'].get('title') for row in observed['finished_after_other_signals']]} "
+        f"with no reply: {cause} satisfied the question's wait"
+    )
+    finished = observed["finished_after_reply"]
+    assert len(finished) == 1, f"the user's reply must complete the question exactly once: {finished}"
+    assert finished[0]["metadata"].get("title") == "User response received", finished[0]["metadata"]
+
+
+async def _test_question_ignores_user_message_read_before_it(env) -> None:
+    """A user message the model already read never answers a later question (H-72).
+
+    Epoch22 build-boxing-payment r3 (agent 1ead79ec): the attachment post's empty
+    receive_user_response at 02:14:12 set _has_new_messages and nothing cleared
+    it. The root's first question at 02:21:55 returned "User response received"
+    after 213 ms with no reply, so the agent asked again.
+    """
+    observed = await _run_question_wait_scenario(
+        env, "agent-question-stale-user-signal-h72", start_signal="", before_reply=None
+    )
+    _assert_question_answered_only_by_reply(observed, "the pre-question user-message signal")
+
+
+async def _test_question_ignores_agent_message_while_open(env) -> None:
+    """Another agent's message is not the user's reply (H-72 sibling); the reply still is."""
+
+    async def agent_message(handle) -> None:
+        await handle.signal(
+            AgentWorkflow.receive_agent_message,
+            {"message_id": "agent-msg-h72", "from_agent_id": "child-h72", "from_agent_path": "/root/research"},
+        )
+
+    observed = await _run_question_wait_scenario(
+        env, "agent-question-agent-message-h72", start_signal=None, before_reply=agent_message
+    )
+    _assert_question_answered_only_by_reply(observed, "an agent message")
+
+
 async def _run_all_workflow_tests() -> List[tuple]:
     """Run all workflow tests inside one WorkflowEnvironment.
 
@@ -1744,6 +1866,17 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 results.append((name, None))
             except Exception as e:
                 results.append((name, e))
+
+            # --- tests: a question's wait ends only on a user reply the model has not read (H-72) ---
+            for name, question_test in (
+                ("wf_question_ignores_user_message_read_before_it", _test_question_ignores_user_message_read_before_it),
+                ("wf_question_ignores_agent_message_while_open", _test_question_ignores_agent_message_while_open),
+            ):
+                try:
+                    await question_test(env)
+                    results.append((name, None))
+                except Exception as e:
+                    results.append((name, e))
 
             # --- test: pause/resume ---
             name = "wf_pause_resume"
