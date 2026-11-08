@@ -6172,6 +6172,48 @@ class RelayStartupEvidence(unittest.TestCase):
 
 
 
+    def test_preallocation_declared_skip_projection_retains_all_native_unknown_facts(self):
+        import hashlib
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        path=Path(receipt['log']).parent/'request.json';request=json.loads(path.read_text())
+        names=['agent-payment-test-shop','agent-payment-setup-resume','agent-payment-idempotent-abandonment',
+               'agent-payment-abandonment','agent-payment-new-user-journey']
+        request['skips']={name:{'disposition':'user / overridden','source':request['source']}for name in names}
+        self.save(path,request)
+        receipt['cases']={**receipt['cases'],**dict.fromkeys(names,'SKIP')}
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest();self.reseal()
+        before={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted']);self.assertFalse(receipt['complete'])
+        self.assertEqual(receipt['cases'],{'browser-smoke':'UNVERIFIED',**dict.fromkeys(names,'SKIP')})
+        self.assertEqual(json.loads(Path(receipt['worker_result']).read_text())['cases'],{'browser-smoke':'UNVERIFIED'})
+        self.assertEqual(before,{p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()})
+
+    def test_preallocation_mixed_projection_refuses_wrong_skip_and_active_outcomes(self):
+        import hashlib
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        folder=Path(receipt['log']).parent;request=json.loads((folder/'request.json').read_text())
+        request['skips']={'agent-payment-test-shop':{'source':request['source'],'disposition':'user / overridden'}}
+        self.save(folder/'request.json',request);receipt['cases']['agent-payment-test-shop']='SKIP'
+        def seal():
+            self.save(folder/'receipt.json',receipt)
+            proof['receipt_sha256']=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest();self.reseal()
+        seal();self.validate_fixture(receipt,owner,proof)
+        original=copy.deepcopy(receipt['cases'])
+        for cases in [dict(original,**{'agent-payment-test-shop':'PASS'}),dict(original,**{'agent-payment-test-shop':'UNVERIFIED'}),
+                      {'browser-smoke':'UNVERIFIED'},dict(original,extra='SKIP'),
+                      {'browser-smoke':'PASS','agent-payment-test-shop':'SKIP'}]:
+            receipt['cases']=cases;seal()
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+        receipt['cases']=original
+        for skips in [None,[],['agent-payment-test-shop'],{},
+                      {'browser-smoke':{}}, {'not-declared-in-receipt':{}}]:
+            request['skips']=skips;self.save(folder/'request.json',request);seal()
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+
+
+
 class CleanupPrepareEvidence(unittest.TestCase):
     """Original zero-start ticket refusal keeps execution UNKNOWN and proof closure exact."""
     setUp = RelayStartupEvidence.setUp

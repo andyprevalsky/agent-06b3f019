@@ -750,9 +750,13 @@ def validate(receipt, owner, proof):
         for path in publication:
             bound(path)
         if preallocation:
+            skips = request.get('skips')
+            need(isinstance(skips, dict) and not set(checks).intersection(skips),
+                 'preallocation active/skip inventory')
+            expected_cases = {**dict.fromkeys(checks, 'UNVERIFIED'), **dict.fromkeys(skips, 'SKIP')}
             need(summary['status'] in {'failed','cancelled'} and not proof.get('purpose')
                  and not proof.get('recovered_runtime') and not summary.get('workspace_binding')
-                 and receipt['cases']==dict.fromkeys(checks,'UNVERIFIED'),
+                 and receipt['cases']==expected_cases,
                  'preallocation outcomes')
             supervision=preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound)
             if pending_hubs:
