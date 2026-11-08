@@ -114,7 +114,7 @@
     "database_count": 17,
     "final_cutoff_refresh_required": false,
     "globals_dump_included": true,
-    "latest_read_only_cutoff_check": "2026-11-08T08:53:18.209718+00:00",
+    "latest_read_only_cutoff_check": "2026-11-08T09:18:26.428537+00:00",
     "manifest_sha256": "f37ad633d3b0057e3c055966cccaeef5908234f893682374eddfdbe130258eb5",
     "native_custom_dumps": 17,
     "per_database_consistent_snapshots": true,
@@ -143,7 +143,13 @@
       "failure_report_occurrence": "production-agentcard-8b90d7eb3705-43838a70",
       "finished_at": "2026-11-08T08:11:32Z",
       "handoff_evidence_sha256": "a52a0b57b6a9aad476e9916adb28abb76940a7e7794afa6f2a0b0c2a0bf90283",
+      "latest_prerequisite_limit": "Owned live customers have no saved funding card; dedicated holder KYC pending and verified holder shared. No safe authorized automated prerequisite change.",
+      "latest_repair_goal_state": "blocked",
+      "latest_repair_pr_head": "22aee96f0d0a",
+      "latest_repair_pr_status": "unmerged",
+      "latest_repair_production_result": "FAIL; original happy-path acceptance not passed",
       "native_exit": 1,
+      "native_goal_was_active_at_delivery": true,
       "native_record_sha256": "778c29d01bf819110870a0ba569b716041d25dda80d20c39490f46268902f261",
       "native_result": "FAIL",
       "owner_public_thread": "thr_97890370dd214e6fa02ed9f1697f481d",
@@ -250,6 +256,15 @@
     "records_commit": "PENDING_PARENT_COMMIT",
     "records_pr": "PENDING_PARENT_RECORDS_PR"
   },
+  "readiness_classifier_repair": {
+    "bugs_folder_verified": true,
+    "independent_devbox": "7a41cd23-5268-42c1-a5c8-85858fddf58b",
+    "native_goal_tools": "Unavailable in owner Claude harness; explicit autonomous repair-through-deploy accepted and running",
+    "owner": "ph75q9cp0yak89wec46tpnjcvd8hr80e",
+    "pr": 1821,
+    "root_guard_waived": false,
+    "status": "in qualification; current root native check still NOT_READY"
+  },
   "records_publication": "This records-only follow-up; native readiness requires committed exact receipt and merged publication.",
   "recovery_tools": {
     "existing_managed_key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
@@ -289,7 +304,7 @@
     },
     "supplement_verified": true
   },
-  "status": "PRODUCTION_VERIFIED_WITH_RETAINED_FAILURES_FINAL_ARCHIVE_AND_RECORDS_PENDING",
+  "status": "PRIVATE_PRESERVATION_VERIFIED_NATIVE_READINESS_PENDING",
   "validated_source": "63f16ee80fd8511c7d35e2525daf375060b71d20",
   "worker_deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71"
 }
