@@ -23,6 +23,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from condition_wait import wait_until
 import deploy_gates as g
 import deploy_test_plan as p
 from deploy_test_bindings import generate
@@ -963,6 +965,7 @@ class Channel:
     def __init__(self, env, client=None):
         pass
     def get(self, name, leaf):
+        note(op='channel-get', leaf=leaf)  # the observable "launcher is watching its channel" signal
         mode = os.environ['FAKE_MODE']
         if leaf == 'started.json' and mode != 'silent':
             return json.dumps({'transport': gh.TRANSPORT, 'run_id': RUN, 'url': 'u', 'tag': name}).encode()
@@ -1058,19 +1061,15 @@ class LauncherStopTest(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def launched(self, proc):
-        """Wait until the fake tag push happened (the remote run now exists), never on a fixed sleep."""
-        end = time.monotonic() + 30
-        while not any(r['op'] == 'push' for r in self.rows()):
+        """Wait until the tag push happened (the remote run exists) and the launcher polls its channel."""
+        def watching():
             self.assertIsNone(proc.poll(), 'launcher exited before launching')
-            self.assertLess(time.monotonic(), end, 'launcher never pushed its tag')
-            time.sleep(0.05)
-        time.sleep(0.3)  # a few channel polls: the launcher is now watching
+            ops = [r['op'] for r in self.rows()]
+            return 'push' in ops and ops[ops.index('push'):].count('channel-get') >= 2
+        wait_until(watching, timeout=30, description='launcher pushed its tag and polls its channel')
 
     def wait_result(self, seconds=20):
-        end = time.monotonic() + seconds
-        while not self.result.exists():
-            self.assertLess(time.monotonic(), end, 'launcher wrote no receipt')
-            time.sleep(0.05)
+        wait_until(self.result.exists, timeout=seconds, description='launcher receipt')
         return json.loads(self.result.read_text())
 
     def assert_cancelled_once(self, result, cause):
@@ -1206,6 +1205,9 @@ class WorkflowMirrorCheckout(unittest.TestCase):
             self.assertEqual(log.stderr, '')
             self.assertEqual(log.stdout.strip(), self.git('rev-parse', 'deploy-gates/8vcpu/x^{commit}', cwd=origin).stdout.strip())
             self.assertIn('-c gc.autoDetach=false', script, 'mirror gc must not outlive the step')
+            # Git 2.47+ starts `maintenance run --auto --detach` from fetch; it rewrites the split
+            # commit-graph after the --shared clone chained onto it (hunt round 10, original600).
+            self.assertIn('-c maintenance.autoDetach=false', script, 'mirror maintenance must not outlive the step')
 
 
 if __name__ == '__main__':
