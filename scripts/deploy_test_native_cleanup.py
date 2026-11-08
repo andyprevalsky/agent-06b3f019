@@ -11,6 +11,31 @@ import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
+# A fleet's own _batch/run.json carries every message and log of its run: a mass-agent record was
+# 98 MB on 2026-11-07, beyond the 64 MiB receipt cap, so its verified cleanup could never be bound
+# and every later smoke launch was refused. Run records get their own, still finite, cap.
+RUN_RECORD_MAX_BYTES = 512 * 1024 * 1024
+
+
+def fleet_git_common(root):
+    """run-bench-fleet's GIT_COMMON_DIR, which holds both FLEET_AUDIT_ROOT and FLEET_OWNERSHIP_ROOT. A linked
+    worktree's .git is a file, so <root>/.git/cloudbench-fleet-* never existed for a deploy worktree: audits
+    could not be bound and a retained ownership registry was invisible (2026-11-07)."""
+    dot = Path(root) / '.git'
+    if dot.is_dir():
+        return dot
+    out = subprocess.run(['git', '-C', str(root), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                         capture_output=True, text=True, timeout=30)
+    need(out.returncode == 0 and out.stdout.strip(), 'git common directory')
+    return Path(out.stdout.strip())
+
+
+def fleet_audit_root(root):
+    return fleet_git_common(root) / 'cloudbench-fleet-audits'
+
+
+def fleet_ownership_root(root):
+    return fleet_git_common(root) / 'cloudbench-fleet-ownership'
 
 
 def need(value, message):
@@ -154,12 +179,12 @@ def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, docu
 def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
     owner = life['fleet_owner_token']
-    audit = root / '.git/cloudbench-fleet-audits' / owner
+    audit = fleet_audit_root(root) / owner
     meta = fields(bound(audit / 'meta'))
     need(meta.get('fleet_owner_token') == owner and meta.get('run_id') == fleet.name
          and meta.get('workspace_root') == str(root), 'isolated audit identity')
     tree(audit)
-    registry = root / '.git/cloudbench-fleet-ownership' / owner
+    registry = fleet_ownership_root(root) / owner
     if registry.exists():
         registered = fields(bound(registry / 'meta'))
         need(all(registered.get(k) == meta.get(k) for k in ('fleet_owner_token', 'run_id', 'workspace_root', 'app'))
@@ -242,7 +267,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     need(link and link['ref'] == receipt['source']['head']
          and link['owner'] == life['fleet_owner_token'], 'failed canary source/owner linkage')
     owner = life['fleet_owner_token']
-    local, canonical = fleet / 'teardown-ownership', root / '.git/cloudbench-fleet-audits' / owner
+    local, canonical = fleet / 'teardown-ownership', fleet_audit_root(root) / owner
     seal = tree(local)
     need(tree(canonical) == seal and life['audit_sha256'] == seal
          and fields(bound(local / 'source-audit')) == {'path': str(canonical), 'sha256': seal}, 'canary audit seal')
@@ -252,7 +277,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
          and meta.get('workspace_root') == str(root), 'canary provider release')
     epoch = float(bound(canonical / 'provider-teardown-verified.epoch'))
     need(finite(epoch) and receipt['started_at'] <= epoch <= proof['confirmed_at'], 'canary release clock')
-    registry = root / '.git/cloudbench-fleet-ownership' / owner
+    registry = fleet_ownership_root(root) / owner
     need(not registry.exists() and not registry.is_symlink(), 'canary registry retained')
     ids = bound(canonical / 'owned-clones.ids').decode().splitlines()
     names = bound(canonical / 'owned-clones.names').decode().splitlines()
@@ -605,17 +630,17 @@ def validate(receipt, owner, proof):
     bindings, used = proof['files'], set()
     need(isinstance(bindings, dict), 'missing file bindings')
 
-    def bound(path):
+    def bound(path, limit=MAX_RECEIPT_BYTES):
         path = Path(path)
         need(path.is_absolute() and path.resolve() == path and path.is_file() and not path.is_symlink(), 'noncanonical proof file')
-        need(path.stat().st_size <= MAX_RECEIPT_BYTES, 'proof file too large')
+        need(path.stat().st_size <= limit, 'proof file too large')
         raw = path.read_bytes()
         need(bindings.get(str(path)) == hashlib.sha256(raw).hexdigest(), 'file hash mismatch: ' + str(path))
         used.add(str(path))
         return raw
 
-    def document(path):
-        value = json.loads(bound(path))
+    def document(path, limit=MAX_RECEIPT_BYTES):
+        value = json.loads(bound(path, limit))
         need(isinstance(value, dict), 'expected object')
         return value
 
@@ -792,7 +817,7 @@ def validate(receipt, owner, proof):
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
-        run = document(fleet / '_batch/run.json')  # Bind original outcomes without regrading them.
+        run = document(fleet / '_batch/run.json', RUN_RECORD_MAX_BYTES)  # Bind original outcomes without regrading them.
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
@@ -829,7 +854,7 @@ def validate(receipt, owner, proof):
             excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree))
             continue
         audit = fleet / 'teardown-ownership'
-        canonical = root / '.git/cloudbench-fleet-audits' / owner_token
+        canonical = fleet_audit_root(root) / owner_token
         binding = fields(bound(audit / 'source-audit'))
         seal = tree(audit)
         need(binding == {'path': str(canonical), 'sha256': seal}
@@ -842,7 +867,7 @@ def validate(receipt, owner, proof):
              and meta.get('workspace_root') == str(root), 'native provider release')
         release = float(bound(audit / 'provider-teardown-verified.epoch'))
         need(finite(release) and adapter['started_at'] <= release <= confirmed, 'release epoch')
-        registry = root / '.git/cloudbench-fleet-ownership' / owner_token
+        registry = fleet_ownership_root(root) / owner_token
         need(not registry.exists() and not registry.is_symlink(), 'fleet registry still retained')
         ids = bound(audit / 'owned-clones.ids').decode().splitlines()
         names = bound(audit / 'owned-clones.names').decode().splitlines()

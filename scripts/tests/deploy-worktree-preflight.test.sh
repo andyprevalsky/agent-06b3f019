@@ -1133,6 +1133,23 @@ PATH="$prisma_bin:$PATH" FAKE_PRISMA_STATE="$prisma_state" bash "$ENSURE_PRISMA"
   || fail "a fresh client owned by another checkout must be regenerated locally: $(cat "$TMP_ROOT/prisma-owned.out")"
 expect_eq "$(cat "$prisma_state/generate-calls")" "$prisma_fixture/back-end" "ownership before freshness: the foreign client is regenerated locally"
 grep -q "resolves outside this checkout" "$TMP_ROOT/prisma-owned.out" || fail "the foreign client must be reported before regeneration"
+# 2026-11-07: a worktree whose whole node_modules linked into another checkout
+# (no .prisma link of its own) made prisma generate rewrite that checkout's
+# client before the post-generation check refused. Refuse before generating.
+prisma_linked="$TMP_ROOT/prisma-linked"
+mkdir -p "$prisma_linked/back-end/scripts"
+: >"$prisma_linked/back-end/scripts/assert-prisma-client-current.mjs"
+ln -s "$(dirname "$prisma_elsewhere")" "$prisma_linked/node_modules"
+prisma_linked="$(cd "$prisma_linked" && pwd -P)"
+rm -f "$prisma_state/fresh" "$prisma_state/generate-calls" "$prisma_state/resolved-after"
+printf '%s' "$prisma_elsewhere/client/default.js" >"$prisma_state/resolved"
+touch "$prisma_elsewhere/client/marker"
+! PATH="$prisma_bin:$PATH" FAKE_PRISMA_STATE="$prisma_state" bash "$ENSURE_PRISMA" "$prisma_linked" \
+    >"$TMP_ROOT/prisma-linked.out" 2>&1 || fail "a node_modules linked into another checkout must be refused"
+[ ! -e "$prisma_state/generate-calls" ] || fail "prisma generate must never run through a node_modules owned by another checkout"
+grep -q "node_modules resolves outside this checkout" "$TMP_ROOT/prisma-linked.out" \
+  || fail "the refusal must name the linked node_modules: $(cat "$TMP_ROOT/prisma-linked.out")"
+[ -f "$prisma_elsewhere/client/marker" ] || fail "the other checkout's client must be left untouched"
 echo "PASS: dependency hydration regenerates a stale Prisma client inside the worktree"
 
 
