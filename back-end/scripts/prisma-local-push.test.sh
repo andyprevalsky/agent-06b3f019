@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/prisma-local-push.sh
 LOCAL_URL=postgresql://postgres:postgres@localhost:5432/test
 REMOTE_URL=postgresql://postgres:postgres@db.example.com:5432/prod
+# Scratch database names the EXIT trap drops; never inherit them from the caller's environment.
+unset SCRATCH_DB PUSH_DB OWNER_DB
 
 if DATABASE_URL="$REMOTE_URL" DIRECT_URL="$LOCAL_URL" PRISMA_LOCAL_PUSH_DRY_RUN=1 \
   bash "$SCRIPT" >/dev/null 2>&1; then
@@ -298,7 +300,10 @@ if can_create_scratch_db; then
   OWNER_DB="message_owner_backfill_test_$$"
   OWNER_URL="postgresql://postgres:postgres@localhost:5432/$OWNER_DB"
   psql "$ADMIN_URL" -qc "CREATE DATABASE $OWNER_DB" >/dev/null
-  trap 'psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS ${SCRATCH_DB:-none}" >/dev/null 2>&1 || true; psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $OWNER_DB" >/dev/null 2>&1 || true' EXIT
+  # Replaces the earlier EXIT trap, so it must drop every scratch database created so far.
+  trap 'for db in ${SCRATCH_DB:-} ${PUSH_DB:-} $OWNER_DB; do
+          psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $db" >/dev/null 2>&1 || true
+        done' EXIT
   bash "$BACKFILL" "$OWNER_URL" >/dev/null
   psql "$OWNER_URL" -v ON_ERROR_STOP=1 -q >/dev/null <<'SQL'
 CREATE TABLE "Person" (id text PRIMARY KEY, "userId" text NOT NULL);
