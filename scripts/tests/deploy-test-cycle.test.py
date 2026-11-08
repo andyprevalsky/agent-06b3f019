@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real staged coordinator; no provider, database, or app processes."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import copy
 import json
 import os
@@ -16,6 +17,57 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 import deploy_gate_progress as progress
+import deploy_test_process
+
+production_process_entries = deploy_test_process.process_entries
+
+
+@contextmanager
+def unrelated_unreadable_process():
+    """A same-user non-dumpable process outside this test's tree, like the runner's pid 211414 (PR #1762)."""
+    grandchild = ("import ctypes,os,sys;ctypes.CDLL(None).prctl(4,0,0,0,0);"
+                  "print(os.getpid(),flush=True);sys.stdin.read()")
+    launcher = subprocess.Popen([sys.executable, '-c', 'import subprocess,sys;subprocess.Popen('
+                                 f'[sys.executable,"-c",{grandchild!r}],start_new_session=True)'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        pid = int(launcher.stdout.readline())
+        launcher.wait(timeout=10)  # the re-parented grandchild leaves this process tree
+        yield pid
+    finally:
+        launcher.stdin.close()  # EOF ends the grandchild; nothing is signalled
+        launcher.stdout.close()
+        launcher.wait(timeout=10)
+
+
+def own_process_entries():
+    """This test process and its descendants: the only processes a test here can create or own.
+
+    quiet() and namespace_quiet() refuse any same-user process they cannot read, which is the real
+    safety check. Unrelated host processes (a sibling suite's non-dumpable fixture, a runner's
+    (sd-pam)) are outside every fixture, so the suite scans only its own process tree.
+    """
+    children = {}
+    for process in Path('/proc').iterdir():
+        try:
+            parent = int((process / 'stat').read_text().rsplit(') ', 1)[1].split()[1]) if process.name.isdigit() else None
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # exited mid-scan
+        if parent is not None:
+            children.setdefault(parent, []).append(int(process.name))
+    owned, frontier = [], [os.getpid()]
+    while frontier:
+        pid = frontier.pop()
+        owned.append(Path('/proc', str(pid)))
+        frontier.extend(children.get(pid, ()))
+    return iter(owned)
+
+
+def setUpModule():
+    hermetic = patch.object(deploy_test_process, 'process_entries', own_process_entries)
+    hermetic.start()
+    unittest.addModuleCleanup(hermetic.stop)
+
 
 class Cycle(unittest.TestCase):
     def custody_fixture(self):
@@ -4992,6 +5044,21 @@ class InterruptedLocalRecovery(unittest.TestCase):
         path=self.paths['output.log.process.json'];path.write_bytes(raw['output.log.process.json']+b' ')
         with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_unrelated_unreadable_host_process_refuses_production_scan_only(self):
+        # PR #1762 Blacksmith failure: pid 211414, a same-user process outside this suite whose cwd stayed
+        # unreadable, refused this class's reconcile ("worker root process 211414 is unverifiable").
+        with unrelated_unreadable_process() as pid:
+            self.assertIn(pid, {int(p.name) for p in production_process_entries()})
+            self.assertNotIn(pid, {int(p.name) for p in own_process_entries()})
+            before=copy.deepcopy(self.state)
+            with patch.object(deploy_test_process,'process_entries',production_process_entries), \
+                    self.assertRaisesRegex(ValueError,r'worker root process \d+ is unverifiable'):
+                self.reconcile()
+            self.assertEqual(before,self.state)
+            self.reconcile()
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
     def test_original_exclusions_stay_skip_without_test_or_cleanup_credit(self):
         name='standing-original-exclusion'
         self.recipe['cases'][name]={'command':['true']}
@@ -5325,14 +5392,17 @@ class RelayStartupEvidence(unittest.TestCase):
         pid=capture['agent']['pid'];socket=capture['socket']
         native=self.base/'native';native.mkdir()
         bootstrap=native/'bootstrap.log';(native/'agent-logs').mkdir();agent=native/'agent-logs/123.log'
-        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
         when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
         stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
-        payload=('ok '+json.dumps({'PID':pid,'Version':'0.5.5'})+'\n').encode()
-        raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
-        import json as json_module
-        quoted=json_module.dumps(raw)
-        agent.write_text(f'{stamp} srv OK {pid}\n{stamp} #1 -> ({len(raw)}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        def native_logs(logged):
+            # Re-encode the length-prefixed PING frame for each PID: a text replace of a PID with a different
+            # digit count breaks the frame length and refuses on framing before the identity under test.
+            payload=('ok '+json.dumps({'PID':logged,'Version':'0.5.5'})+'\n').encode()
+            quoted=json.dumps((len(payload).to_bytes(2,'little')+payload).decode('latin1'))
+            return (f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {logged}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n',
+                    f'{stamp} srv OK {logged}\n{stamp} #1 -> ({len(payload)+2}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        original_bootstrap,original_agent=native_logs(pid)
+        bootstrap.write_text(original_bootstrap);agent.write_text(original_agent)
         proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent),'timezone':'UTC'};self.reseal()
         result=self.validate_fixture(receipt,owner,proof)
         self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
@@ -5348,14 +5418,14 @@ class RelayStartupEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'bootstrap binding'):self.validate_fixture(receipt,owner,proof)
         foreign.unlink();proof['fly_native_logs']=saved_logs;self.reseal()
         prior=agent.read_text()
-        for mutation,reason in [(prior.replace(str(pid),str(os.getpid())),'bootstrap|PING|shutdown'),
+        for mutation,reason in [(native_logs(os.getpid())[1],'bootstrap|PING|shutdown'),
                                 (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
                                 (prior.replace(socket,'/foreign/socket'),'shutdown chain')]:
             agent.write_text(mutation);self.reseal()
             with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
         agent.write_text(prior);self.reseal()
-        live=bootstrap.read_text().replace(str(pid),str(os.getpid()))
-        bootstrap.write_text(live);agent.write_text(prior.replace(str(pid),str(os.getpid())));self.reseal()
+        live_bootstrap,live_agent=native_logs(os.getpid())
+        bootstrap.write_text(live_bootstrap);agent.write_text(live_agent);self.reseal()
         with self.assertRaisesRegex(ValueError,'PID present'):self.validate_fixture(receipt,owner,proof)
 
     def test_startup_reconciliation_rejects_missing_or_live_or_dispatched_evidence(self):
