@@ -17,14 +17,15 @@ tags:
   - agent-payment-idempotent-abandonment
   - browser-verifier
   - action-history
-  - request_payment_card
+  - request-payment-card
   - private-entry
-  - image_url
+  - image-url
   - smoke
 sources:
-  - PR #1760 smoke campaign 71ff959741b9, run 20261107-195305-1001621-m7373978ab185, agent ce9d2ae6-c109-435d-bea4-c5fb1e5c1f1c (Benchmark Hub GET /api/benchmarks/runs/<run>/agents/<agent>; copy in .context/rca-idem-abandon/)
-  - Same signature, local run af499e5b-b45c-492c-a27b-1eea0aa7f206, agent 119bdfb6-aba0-4fe8-a7ee-bce01171ce44 (five 50% verdicts citing image URLs)
-  - Related cases docs/rca/cases/2026-10-20-payment-approval-finalizer-discards-recorded-receipt.md and docs/rca/cases/2026-10-22-receipt-image-provenance-limited-to-current-page.md
+  - hub run 20261107-195305-1001621-m7373978ab185 — PR #1760 smoke campaign 71ff959741b9, run 20261107-195305-1001621-m7373978ab185, agent ce9d2ae6-c109-435d-bea4-c5fb1e5c1f1c (Benchmark Hub GET /api/benchmarks/runs/<run>/agents/<agent>; copy in .context/rca-idem-abandon/)
+  - agent 119bdfb6-aba0-4fe8-a7ee-bce01171ce44 (hub run af499e5b-b45c-492c-a27b-1eea0aa7f206; same signature, five 50% verdicts citing image URLs)
+  - commit 2209d9df6a (2026-10-14, added image_url to the private-entry omission list)
+  - PR #1777 (fix); related cases 2026-10-20-payment-approval-finalizer-discards-recorded-receipt and 2026-10-22-receipt-image-provenance-limited-to-current-page
 repro: agents tests/blackbox/spawn_browser_agent_v3.blackbox.py test_verifier_history_keeps_card_receipt_image_urls_after_private_entry (python scripts/run_blackbox_tests.py spawn-browser-agent-v3)
 status: fixed
 ---
@@ -79,7 +80,7 @@ Gate: NOT_INTRODUCED for PR #1760: `git diff f4d2b5baa5 cdb8ce580a -- agents/`
 is empty. The `image_url` key entered the private-entry omission list in
 2209d9df6a (2026-10-14, private tool credential refs).
 
-## Fix
+## Solution
 
 One helper, `keep_receipt_image_urls`, in `agents/browser_tools/dom_service.py`
 restores a receipt's HTTP(S) `image_url` strings onto its projection, still
@@ -90,7 +91,7 @@ projection (`model_visible_action_result`), the activity-return projection
 result. Arbitrary `media`, rasters and `data:image/` payloads stay withheld
 after private entry.
 
-## Proof
+### Proof
 
 Regression `verifier_history_keeps_card_receipt_image_urls_after_private_entry`
 (spawn-browser-agent-v3 blackbox) builds the real verifier context from a real
@@ -117,10 +118,18 @@ Adjacent observation, not addressed here: in both runs the verifier's receipt
 shows the merchant as `{{secret:card_name}} Test Payment` because the issued
 card's name equals the merchant prefix and is masked as a secret value.
 
-## Problem class
+### Problem class
 
 Logical inconsistency in harness contracts: a privacy policy applied lazily on
 read rewrote history that was already recorded, so two consumers of one
 receipt disagreed. Projections of recorded evidence must not change after the
 fact; typed operational fields belong to the record, not to the page media
 policy.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+When a browser verifier rejects at 50% for evidence the agent insists it has, diff the verifier's action-history projection against the agent's own tool message for the same step: a privacy projection applied on every read can rewrite already-recorded receipts.
