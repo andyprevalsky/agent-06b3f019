@@ -103,7 +103,8 @@ class Fixture(unittest.TestCase):
                            ('standard_template', standard),
                            ('factory_event', lambda root, *event: self.events.append(event)),
                            ('check_capacity', lambda root, workers, proc=None: {
-                               'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0})):
+                               'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0}),
+                           ('wait_for_cpu_headroom', lambda *args, **kwargs: {'headroom': True})):
             patcher = patch.object(g, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1068,6 +1069,64 @@ class RunMemory(Fixture):
         self.assertEqual(2, code)
         self.assertEqual(['init', 'begin', 'finish'], self.sampler.events)
 
+
+
+
+class CpuHeadroom(unittest.TestCase):
+    """Host gates wait (bounded) for CPU headroom instead of starting on a saturated shared box."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name)
+        (self.proc / 'uptime').write_text('1000.0 0.0\n')
+        self.now = [0.0]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_wait(self, loads, **kwargs):
+        sequence = iter(loads)
+
+        def load(proc):
+            return next(sequence), 8
+
+        def sleep(seconds):
+            self.now[0] += seconds
+
+        out = io.StringIO()
+        with patch.object(g, 'load_per_cpu', load), redirect_stdout(out):
+            result = g.wait_for_cpu_headroom(self.proc, clock=lambda: self.now[0], sleep=sleep, **kwargs)
+        return result, out.getvalue()
+
+    def test_idle_host_starts_immediately_without_output(self):
+        result, out = self.run_wait([0.4])
+        self.assertEqual({'load_per_cpu': 0.4, 'cpus': 8, 'waited_seconds': 0.0, 'headroom': True}, result)
+        self.assertEqual('', out)
+
+    def test_saturated_host_waits_until_load_drops(self):
+        result, out = self.run_wait([2.2, 1.6, 0.9], poll=15)
+        self.assertTrue(result['headroom'])
+        self.assertEqual(30.0, result['waited_seconds'])
+        self.assertIn('DEPLOY_GATES CPU wait: load 17.6 on 8 CPUs exceeds 8', out)
+        self.assertNotIn('WARNING', out)
+
+    def test_wait_is_bounded_and_then_starts_with_a_warning(self):
+        result, out = self.run_wait([3.0] * 100, max_wait=60, poll=15)
+        self.assertFalse(result['headroom'])
+        self.assertEqual(60.0, result['waited_seconds'])
+        self.assertIn('DEPLOY_GATES CPU WARNING: load 24.0 on 8 CPUs still exceeds 8 after 60 s', out)
+
+    def test_busiest_processes_ranks_by_cpu_share_from_proc(self):
+        ticks = os.sysconf('SC_CLK_TCK')
+        for pid, name, cpu_seconds, start_seconds in (('11', 'git', 180, 900), ('12', 'idle', 1, 0)):
+            folder = self.proc / pid
+            folder.mkdir()
+            fields = ['S', '1'] + ['0'] * 9 + [str(cpu_seconds * ticks), '0'] + ['0'] * 6 + [str(start_seconds * ticks)]
+            (folder / 'stat').write_text(f'{pid} ({name}) ' + ' '.join(fields))
+            (folder / 'cmdline').write_bytes(f'{name}\0--flag'.encode())
+        rows = g.busiest_processes(self.proc)
+        self.assertTrue(rows[0].startswith('pid 11 180% git --flag'), rows)
+        self.assertEqual(2, len(rows))
 
 if __name__ == '__main__':
     unittest.main()

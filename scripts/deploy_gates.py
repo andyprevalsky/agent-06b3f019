@@ -353,6 +353,70 @@ def check_capacity(root: Path, workers: list[dict], proc: Path = Path('/proc')) 
     return report
 
 
+# Quick gates run on this host under fixed per-gate deadlines (120 s by default). Another thread's
+# load on a shared box (a repack, a CPU-burner stability check, a local benchmark) has failed them
+# with timeouts on unchanged source. Wait, bounded, until the 1-minute load average leaves headroom
+# instead of starting them on a saturated host; the deadlines themselves never change.
+CPU_HEADROOM_LOAD_PER_CPU = 1.0
+CPU_HEADROOM_MAX_WAIT_SECONDS = 600
+CPU_HEADROOM_POLL_SECONDS = 15
+
+
+def load_per_cpu(proc: Path = Path('/proc')) -> tuple[float, int]:
+    cpus = os.cpu_count() or 1
+    return float((proc / 'loadavg').read_text().split()[0]) / cpus, cpus
+
+
+def wait_for_cpu_headroom(proc: Path = Path('/proc'), *, max_wait: float = CPU_HEADROOM_MAX_WAIT_SECONDS,
+                          threshold: float = CPU_HEADROOM_LOAD_PER_CPU, poll: float = CPU_HEADROOM_POLL_SECONDS,
+                          clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Wait until load1/CPU <= threshold or max_wait passes. Never stops or kills anything; on expiry the
+    gates start anyway with a warning naming the busiest processes, so the owner of that load can act."""
+    started = clock()
+    load, cpus = load_per_cpu(proc)
+    announced = False
+    while load > threshold and clock() - started < max_wait:
+        if not announced:
+            print(f'DEPLOY_GATES CPU wait: load {load * cpus:.1f} on {cpus} CPUs exceeds {threshold * cpus:.0f}; '
+                  f'waiting up to {max_wait:.0f} s before starting host gates. Busiest processes '
+                  '(stop only ones you own):', flush=True)
+            for line in busiest_processes(proc):
+                print('    ' + line, flush=True)
+            announced = True
+        sleep(poll)
+        load, cpus = load_per_cpu(proc)
+    waited = round(clock() - started, 1)
+    if load > threshold:
+        print(f'DEPLOY_GATES CPU WARNING: load {load * cpus:.1f} on {cpus} CPUs still exceeds '
+              f'{threshold * cpus:.0f} after {waited:.0f} s; host gates start on a saturated box and a timeout '
+              'there is host load until shown otherwise', flush=True)
+    return {'load_per_cpu': round(load, 2), 'cpus': cpus, 'waited_seconds': waited, 'headroom': load <= threshold}
+
+
+def busiest_processes(proc: Path, limit: int = 6) -> list[str]:
+    """Top CPU consumers by cumulative CPU time since start (utime+stime over elapsed), from /proc."""
+    try:
+        ticks = os.sysconf('SC_CLK_TCK')
+        uptime = float((proc / 'uptime').read_text().split()[0])
+    except (OSError, ValueError):
+        return []
+    rows = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / 'stat').read_text()
+            fields = stat[stat.rindex(')') + 2:].split()
+            elapsed = uptime - int(fields[19]) / ticks
+            share = (int(fields[11]) + int(fields[12])) / ticks / elapsed if elapsed > 0 else 0.0
+            args = (entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()
+        except (OSError, ValueError, IndexError):
+            continue
+        rows.append((share, entry.name, args or stat[stat.index('(') + 1:stat.rindex(')')]))
+    rows.sort(reverse=True)
+    return [f'pid {pid} {share * 100:.0f}% {args[:140]}' for share, pid, args in rows[:limit]]
+
+
 def layout(root: Path, head: str, needs_worker: list[str], executor: str = 'local') -> list[dict]:
     if executor not in EXECUTORS:
         raise Blocked('workers', f'unknown executor {executor!r}')
@@ -756,6 +820,8 @@ def run(args, root: Path) -> int:
             print(f"DEPLOY_GATES CAPACITY ok: need {capacity['memory_mb']} MB available (have "
                   f"{capacity['available_mb']:.0f}), {capacity['disk_mb'] / 1024:.1f} GB disk (have "
                   f"{capacity['free_disk_mb'] / 1024:.1f})")
+        if not args.dry_run:
+            wait_for_cpu_headroom()
         if sampler is not None:
             sampler.set_roots({w['gate']: Path(w['path']) for w in workers if w['mode'] in ('create', 'reuse')})
         py = sys.executable
