@@ -169,6 +169,8 @@ class AdapterPassesGateDeadline(unittest.TestCase):
                 campaign_width=lambda _c: 1, hashlib=hashlib, os=os, time=time, sys=sys,
                 cancellation_handlers=contextlib.nullcontext, write=lambda *_a: None,
                 shared_canary_env=lambda _r: {}, capacity_admission_env=self.adapter.capacity_admission_env,
+                # The adapter refuses an unpushed source first (9b9a4771b0); this fixture's head is pushed.
+                origin_fetchable=lambda *_a: True,
                 run_command=lambda *a, **k: (calls.append((a, k)) or (1, False, False, False)),
                 collect_campaign=lambda *_a: ({"browser-smoke": "UNVERIFIED"}, {}, False, "fixture"))
             exec(compile(ast.Module(body=[function], type_ignores=[]), str(ADAPTER), "exec"), namespace)
