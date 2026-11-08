@@ -74,4 +74,17 @@ grep -q 'cloudflared is required for isolated benchmark public tunnels' "$ROOT/s
   || fail "run.sh no longer refuses a missing cloudflared, so the setup may not treat it as optional"
 pass=$((pass + 1))
 
+# setup-uv is the other GitHub Releases download: a failure there falls back to PyPI.
+workflow="$ROOT/.github/workflows/deploy-gates.yml"
+python3 - "$workflow" <<'PY' || fail "deploy-gates.yml lacks the setup-uv PyPI fallback"
+import re, sys
+text = open(sys.argv[1]).read()
+step = re.search(r"- uses: astral-sh/setup-uv@v\d+\n((?:        .*\n)+)", text)
+assert step and "id: setup-uv" in step.group(1) and "continue-on-error: true" in step.group(1), "setup-uv is fatal"
+fallback = text[step.end():].split("\n      - ", 2)[1]
+assert "if: steps.setup-uv.outcome == 'failure'" in fallback, "no fallback condition"
+assert "pip install" in fallback and " uv" in fallback and "GITHUB_PATH" in fallback, "fallback does not install uv"
+PY
+pass=$((pass + 1))
+
 echo "RESULTS: $pass passed, 0 failed"
