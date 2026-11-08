@@ -1,5 +1,5 @@
 ---
-description: "Run a benchmark slice on the cloud fleet in batches, start one self-deduplicating /RCA per failed task, iterate until the slice is green, then /deploy with one final change review."
+description: "Run a benchmark slice on the cloud fleet in batches, start one self-deduplicating /RCA per failed task, iterate until the slice reaches a 95% pass rate, then /deploy with one final change review."
 argument-hint: "<slice> — first N polar tasks | daily | pre-deploy | rose-bench | polar-bench | incomplete | explicit task names"
 ---
 
@@ -9,7 +9,7 @@ The one benchmark and experiment iteration loop. Read `/benchmark`, `/rca` and `
 
 ## Done
 
-Every original task passes every `-k` copy in one full-slice run; then start `/deploy`, whose approval step is the only review (**Final change review**). Infra-only or consecutive-slice goals use the user's own acceptance rule; never add another gate. Start the descent with `/goal` on the slice being all green.
+One full-slice run reaches a 95% pass rate (passing copies over scored copies, every task at every `-k` copy); then start `/deploy`, whose approval step is the only review (**Final change review**). Infra-only or consecutive-slice goals use the user's own acceptance rule; never add another gate. Start the descent with `/goal` on the slice reaching 95%.
 
 ## Process
 
@@ -24,7 +24,7 @@ Every original task passes every `-k` copy in one full-slice run; then start `/d
 | 7 | `RCA_FAILURES` | Start one `/RCA` per failed task as it fails; RCAs dedupe themselves | gap: `scripts/descend handoff <task>` |
 | 8 | `ITERATION_RETRO` | Name the slowest step and apply one speedup, or record why none exists | `python3 scripts/descend_step_log.py report --slice $SLICE --task-count $N --lane main --window 5` |
 | 9 | `NEXT_BATCH_OR_ROTATION` | When fixes are applied or time-boxed, go back to 3 | — |
-| 10 | `RERUN_FULL_SLICE` | Once every task passed in its batches, run the whole slice as one launch; any failure returns to 7 | `scripts/run-bench <all tasks...> -k K --concurrency N` |
+| 10 | `RERUN_FULL_SLICE` | Once the batches have covered every task and pass at 95% or more, run the whole slice as one launch; below 95% returns to 7 | `scripts/run-bench <all tasks...> -k K --concurrency N` |
 | 11 | `FINAL_CHANGE_REVIEW` | Start `/deploy`; its approval step reviews the guarded changes | `/deploy` |
 | 12 | `DONE` / `BLOCKED` | Transition, then close the clock with verified counts | `python3 scripts/descend_step_log.py transition --step DONE ...` then `finish --status completed --run-terminal --detail scheduled_total=N --detail infra_failed=N` |
 
@@ -94,7 +94,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 ## Final change review
 
 - Only guarded changes are reviewed: `/deploy`'s approval step covers the hunks its guards flag (a GROUNDED golden review clears them), and every task-definition edit goes to the user with its cross-review evidence.
-- A rejected change is reverted, then its tasks and the full slice are rerun before the deploy freeze; repeat repair if green is lost.
+- A rejected change is reverted, then its tasks and the full slice are rerun before the deploy freeze; repeat repair if the slice drops below 95%.
 - Quarantined tasks are listed in the same packet with their provider evidence.
 
 ## State and timing
