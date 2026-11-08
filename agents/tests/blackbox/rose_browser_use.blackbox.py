@@ -233,9 +233,12 @@ def test_recover_from_challenge_contract_stays_in_the_delegated_browser_session(
     assert "recover_from_challenge" in tools, sorted(tools)
     recover = tools["recover_from_challenge"]
     description = recover["description"]
-    assert "Recovery is part of your current browser session" in description, description
+    assert (
+        "Recovery replaces this browser's machine in place: you stay the same browser agent on the same "
+        "task, with no new browser agent and no second session."
+    ) in description, description
     assert "same browser agent on the same task" in description, description
-    assert "never starts another browser agent or a second browser session" in description, description
+    assert "with no new browser agent and no second session" in description, description
     assert "Successful recovery returns this session to the current URL" in description, description
     sent_text = [description] + [
         str(prop.get("description") or "")
@@ -3117,10 +3120,14 @@ def test_phone_off_matches_prephone_bytes():
     the task, deferring to ladder steps 1-5 and the member-price sign-up rule. Only the
     system/messages hashes changed in both modes; both tools hashes are unchanged;
     d49ef3c511 reproduces the previous system/messages hashes exactly.
+    Re-pinned for the approved H-31 sentence (owner review, 2026-11-08): the
+    recover_from_challenge description now says "Recovery replaces this browser's machine
+    in place: you stay the same browser agent on the same task, with no new browser agent
+    and no second session." Only the recovery-enabled ('0') tools hash changed.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('6a18701dd89abac7e771cead9969ee579a6d89ad9731fa6b87a0b8d724c2a3f7', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('0c887ab8bc94d9b802719e69fd413fef69125ca60fd8567ef7612cb258f8dedf', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
+    expected = {'0': ('7094c75916d9e157c3aa1d60f23d0a202a8392782de99648d1f0322eba0caa99', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('0c887ab8bc94d9b802719e69fd413fef69125ca60fd8567ef7612cb258f8dedf', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

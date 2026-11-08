@@ -262,9 +262,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     "recover_from_challenge": {
         "description": (
             "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
-            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Recovery is part "
-            "of your current browser session: you stay the same browser agent on the same task, and it never "
-            "starts another browser agent or a second browser session. Do not use when "
+            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Recovery replaces "
+            "this browser's machine in place: you stay the same browser agent on the same task, with no new "
+            "browser agent and no second session. Do not use when "
             "an alternate path can complete the goal without clearing this blocker. Do not drag sliders, "
             "click verify buttons, or otherwise try to solve the widget yourself. Never use for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "

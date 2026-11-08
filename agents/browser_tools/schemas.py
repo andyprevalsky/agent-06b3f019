@@ -520,8 +520,9 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 class RecoverFromChallengeBrowserTool(BaseModel):
     """Relatively expensive staged recovery to force-open a blocked page or service.
 
-    It stays inside the current browser session and task; it can move that session
-    to a different browser/IP configuration (network exit).
+    Recovery replaces this browser's machine in place: you stay the same browser agent
+    on the same task, with no new browser agent and no second session. It can move the
+    browser to a different browser/IP configuration (network exit).
     """
 
     tool: Literal["recover_from_challenge"]
