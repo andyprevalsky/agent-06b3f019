@@ -78,7 +78,18 @@ folder-only inventory.
 
 Use existing park_pending_tool/take_tool_resume to carry the original call,
 reply mark, pinned inline view, SMS sent state and absolute fallback deadline.
-The original chip stays open. AgentWorkflow already resumes parked calls before
+The original chip stays open. The existing continuation snapshot now also
+carries the bounded wake sequence/history, context mark and a monotonic
+last-user-message sequence. A user-only high-water mark answers the question
+without depending on unrelated notifications retaining its event in the50-entry
+log. Fresh adversarial review caught both flaws in the first candidate: mark1
+compared against reset seq1 loses a reply;50 unrelated notifications evict a
+real unread reply. Registered roundtrip, real-Temporal nonzero-baseline and
+handler log-eviction cases each failed before these corrections and pass after.
+The real-Temporal first-candidate run failed `the user's reply must complete
+the question exactly once: []`; the new continuation-state assertion failed
+`continuation reset the reply sequence`. No first-candidate result is presented
+as coverage of the corrected bytes. AgentWorkflow already resumes parked calls before
 its next model turn. Re-entry skips initial publication and notification, waits
 for the original real reply, then finishes the same call. Both handoff catches
 are unified; no string classifier, new polling, shared cache or UI workaround.

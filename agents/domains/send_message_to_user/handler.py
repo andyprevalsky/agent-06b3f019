@@ -45,7 +45,7 @@ from helpers.generation_handoff import (
     take_tool_resume,
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
-from helpers.wait_wake import first_wake, wait_baseline
+from helpers.wait_wake import has_user_message_since, wait_baseline
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
@@ -60,9 +60,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 
 logger = structlog.get_logger()
-
-# Only the user's own message answers a question.
-QUESTION_REPLY_WAKE_KINDS = frozenset({"user_message"})
 
 
 class SendMessageToUserManager(ToolManager):
@@ -88,7 +85,7 @@ class SendMessageToUserManager(ToolManager):
         reply_mark = resume["reply_mark"] if resume is not None else wait_baseline(workflow_instance)
 
         def _replied() -> bool:
-            return first_wake(workflow_instance, reply_mark, QUESTION_REPLY_WAKE_KINDS) is not None
+            return has_user_message_since(workflow_instance, reply_mark)
 
         # ── 0. Validate ──
         result = validate_tool_call(tool_call)
@@ -127,7 +124,9 @@ class SendMessageToUserManager(ToolManager):
                 title="Attn: User" if is_question else "FYI for User",
                 message=message,
                 status=initial_status,
-                metadata=build_attention_metadata(message, is_question, is_waiting=is_question, inline_view=inline_view),
+                metadata=build_attention_metadata(
+                    message, is_question, is_waiting=is_question, inline_view=inline_view
+                ),
             )
 
         if not is_question:
@@ -184,7 +183,9 @@ class SendMessageToUserManager(ToolManager):
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)),
+                        **wmh_activity_timeout_options(
+                            world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)
+                        ),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
                     sms_sent = True
@@ -225,7 +226,9 @@ class SendMessageToUserManager(ToolManager):
                         await workflow.execute_activity(
                             notify_sms_event_activity,
                             args=notification_args,
-                            **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)),
+                            **wmh_activity_timeout_options(
+                                world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)
+                            ),
                             retry_policy=RetryPolicy(maximum_attempts=3),
                         )
                         sms_sent = True
@@ -249,18 +252,24 @@ class SendMessageToUserManager(ToolManager):
                         title="❌ Error waiting for response",
                         message=str(e),
                         status=MessageStatus.ERROR,
-                        metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
+                        metadata=build_attention_metadata(
+                            message, is_question, is_waiting=True, inline_view=inline_view
+                        ),
                     )
                     return
 
         except GenerationHandoffRequested as exc:
-            if park_pending_tool(workflow_instance, tool_call_id, {
-                "reply_mark": reply_mark,
-                "inline_view": inline_view,
-                "agent_source": agent_source,
-                "sms_sent": sms_sent,
-                "fallback_deadline": fallback_deadline.isoformat(),
-            }):
+            if park_pending_tool(
+                workflow_instance,
+                tool_call_id,
+                {
+                    "reply_mark": reply_mark,
+                    "inline_view": inline_view,
+                    "agent_source": agent_source,
+                    "sms_sent": sms_sent,
+                    "fallback_deadline": fallback_deadline.isoformat(),
+                },
+            ):
                 raise GenerationHandoffRequested(exc.task_queue, parked=True) from exc
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -287,9 +296,7 @@ class SendMessageToUserManager(ToolManager):
         )
 
 
-async def _resolve_inline_view(
-    workflow_instance: Any, raw: Any
-) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+async def _resolve_inline_view(workflow_instance: Any, raw: Any) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Validate `inline_view` and pin it to the user's active published version.
 
     Inline views are a Rose Desktop feature (utils.rose_desktop): for every other
