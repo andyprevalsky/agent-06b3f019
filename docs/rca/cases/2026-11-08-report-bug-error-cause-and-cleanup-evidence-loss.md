@@ -137,6 +137,20 @@ No provider or production records were changed to make the test pass.
 
 ## Human feedback
 
+During forced main synchronization, main's independent custody-transfer API
+(commit `8e3fca1b12cdaab9636b2eae4e23e225d1261fc4`, PR #1830) became the
+authoritative shared `build()`/`adopt()` contract. The approved donor-SHA import
+route delegates to it, retaining its hash/canonical-path envelope while sharing
+persistent no-remint identities, pending-repair and donor-owner validation.
+This integration concerns custody admission, separately from the report-bug
+fetch cause. Existing cycle history and native source bindings remain intact;
+the integration grants no execution, financial-release or retry credit.
+The same three non-live regression assertions fail against the pre-bridge
+`9d2c1d970` custody module and pass with the shared contract: erased active/history
+rows still block allocation, altered pending wrappers refuse admission, and an
+unrelated retained donor owner blocks import. All 31 owning historical,
+renewal and import regressions pass; the real cycle was not replayed or migrated.
+
 The user required preserving concurrency, assertions, deadlines and cleanup;
 forbade guessing which fetch failed or assuming provider, credits, auth or storage
 causes; required an actual reproduction and the original command to pass; and

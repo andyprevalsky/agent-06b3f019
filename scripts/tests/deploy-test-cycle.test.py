@@ -357,6 +357,31 @@ class Cycle(unittest.TestCase):
             h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=approved)
         self.assertEqual(before, fresh)
 
+    def test_historical_import_persistent_guard_rejects_erased_active_history(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        proof = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        for key in ('failures', 'historical_no_retry_custody', 'historical_custody_history'):
+            fresh[key] = []
+        gate = next(g for g in fresh['plan']['gates'] if g['name'] == 'api')
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.guard(fresh, gate, self.root)
+
+    def test_historical_import_rejects_unrelated_retained_donor_owner(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        altered = c.read(donor)
+        gate = next(g['name'] for g in altered['plan']['gates'] if g['name'] != 'api')
+        altered['attempts'].append(dict(phase='final', results=[dict(gate=gate, status='FAIL',
+            complete=False, lingering_group=True, cleanup_owner={'request_token': 'unrelated-owner'})]))
+        self.assertEqual([gate], c.retained_owners(altered, [g['name'] for g in altered['plan']['gates']]))
+        c.write(donor, altered)
+        before = copy.deepcopy(fresh)
+        with self.assertRaisesRegex(ValueError, 'active/unknown coordinator'):
+            h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=c.sha_file(donor))
+        self.assertEqual(before, fresh)
+
     def test_historical_import_retains_native_absence_and_collision_guards(self):
         import deploy_test_historical_custody as h
         fresh, donor = self.historical_import_fixture()

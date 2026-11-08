@@ -495,6 +495,10 @@ removing custody/history rows cannot erase those obligations. Existing legacy
 import metadata is not replayable over a cycle that already has attempts;
 preserve that cycle and route any metadata migration through its owner rather
 than resetting or importing it again.
+The shared `build()`/`adopt()` contract came from main commit
+`8e3fca1b12cdaab9636b2eae4e23e225d1261fc4`, integrated in PR #1830. The
+approved-SHA interface is a compatibility envelope around that contract,
+not a second transfer validator.
 `--historical-no-retry-proof` is accepted by same-cycle `refresh` and the
 donor-plan `import-historical-no-retry` flow below; supplying it to `init` fails
 instead of silently losing custody.
