@@ -160,6 +160,32 @@ signup wait has the same stale-latch shape. A poll run from a signal handler
 during the asking LLM turn (`_receive_rejection_schema_feedback`) can move the
 snapshot past an unread reply, as for `wait_for`.
 
+## November 8 continuation and retention correction
+
+PR1859 integrates the original H72 repair with the independently observed
+[generation-handoff duplicate-question case](2026-11-08-question-wait-completed-on-generation-handoff.md).
+Review of that combined boundary exposed two limitations in the original
+event-log solution: a continuation reset the wake sequence while retaining the
+question's reply baseline, and 50 unrelated notifications could evict an unread
+user event. The original same-workflow tests did not cover either condition.
+
+The corrected implementation persists the bounded wake state and context mark
+through the existing continuation snapshot. A monotonic last-user-message wake
+sequence preserves user progress independently of bounded event retention;
+`has_user_message_since` compares that progress with the original asking turn.
+The real-Temporal cutover regression starts with a nonzero baseline and proves
+the same question completes once after a real reply. The owning handler and
+continuation-roundtrip tests also cover eviction and a reply before snapshot.
+These tests failed before the corrections and pass on the reviewed combined
+source. The snapshot-scoped independent review
+`QUESTION-CONTINUATION-20261108-V2` is GROUNDED; the first candidate's verdict
+remains NOT_GROUNDED. The H72 owner removed its separate deploy copy so PR1859
+owns the combined repair. Original H72 observations and test results above
+describe their original snapshot, not these additional boundaries.
+
+The user-only progress check is constant time; the existing wake log remains
+bounded at 50 entries. Other tools' event-log consumers are unchanged.
+
 ## Human feedback
 
 None recorded.

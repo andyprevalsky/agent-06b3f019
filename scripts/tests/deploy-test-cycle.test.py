@@ -1058,6 +1058,187 @@ class Cycle(unittest.TestCase):
             with self.assertRaises(ValueError):
                 c.reconcile(state, receipt['token'], proof)
 
+    def legacy_custody_refusal_fixture(self):
+        import hashlib
+        import deploy_test_historical_custody as h
+        refusal, _, state, receipt, proof = self.source_refusal_fixture()
+        policies = {}
+        for name in ('deploy_test_cloud.py', 'deploy_test_cycle.py', 'deploy_test_process.py',
+                     'deploy_test_historical_custody.py', 'cloudbench_execution_provenance.py', 'cloudbench_result.py'):
+            path = self.root / 'scripts' / name
+            if not path.exists(): path.write_text('# audited legacy fixture: ' + name)
+            policies['scripts/' + name] = (hashlib.sha256(path.read_bytes()).hexdigest(),)
+        subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
+                        'commit','-qm','legacy custody producer'],check=True)
+        folder=self.root/'.context/deploy-final/attempts/2/initial/smoke'; folder.mkdir(parents=True)
+        receipt.update(source=c.source(self.root),log=str(folder/'output.log'),stderr_log=str(folder/'stderr.log'))
+        state['source']=receipt['source']; state['plan']['source']=receipt['source']
+        state['plan_digest']=c.digest(state['plan']); state['input_fingerprints']['smoke']=c.digest({'input':'smoke'})
+        receipt['execution_binding'].update(environment=state['environment'],input_fingerprint=state['input_fingerprints']['smoke'])
+        gate=state['plan']['gates'][-1]
+        gate.update(worker='cloud-smoke-worker',case_protocol=True,quick=False)
+        state['plan_digest']=c.digest(state['plan'])
+        receipt['execution_binding']['contract_digest']=c.digest(gate)
+        locator=folder.parents[3]/'cycle.json'
+        request={k:receipt[k] for k in ('token','source','gate')}
+        request.update(checks=state['plan']['gates'][-1]['checks'],skips={},phase='initial',custody_state=str(locator),
+                       custody_state_sha256=h.state_identity(state),custody_runtime={'agents/.env':c.digest({'runtime':'fixture'})},custody_child_environment=c.digest({'child':'env'}))
+        c.write(folder/'request.json',request); c.write(folder/'receipt.json',receipt)
+        (folder/'output.log').write_bytes(b'DEPLOY_CLOUD BLOCKED: historical custody: missing canonical custody locator\n')
+        (folder/'stderr.log').write_bytes(b''); c.write(locator,state)
+        snapshot=self.root/'.context/proof/parent-cycle.json'; c.write(snapshot,state)
+        proof.update(files={str(p):c.sha_file(p) for p in [*folder.iterdir(),snapshot]},legacy_state_snapshot=str(snapshot))
+        for name,value in [('LEGACY_CUSTODY_HEAD',receipt['source']['head']),('LEGACY_CUSTODY_POLICIES',policies)]:
+            patcher=patch.object(refusal,name,value,create=True);patcher.start();self.addCleanup(patcher.stop)
+        capture=dict(source=receipt['source'],token=receipt['token'],locator=str(locator),
+                     request_sha256=c.sha_file(folder/'request.json'),receipt_sha256=c.sha_file(folder/'receipt.json'))
+        patcher=patch.object(refusal,'LEGACY_CUSTODY_CAPTURE',capture,create=True)
+        patcher.start();self.addCleanup(patcher.stop)
+        return refusal,state,receipt,proof
+
+    def test_legacy_custody_refusal_retirement_preserves_receipt_and_is_idempotent(self):
+        refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
+        before=copy.deepcopy(state); raw={p:Path(p).read_bytes() for p in proof['files']}
+        self.assertEqual(c.retained_owners(state,['smoke']),['smoke'])
+        c.reconcile(state,receipt['token'],proof)
+        self.assertEqual(c.retained_owners(state,['smoke']),[])
+        accepted=copy.deepcopy(state);c.reconcile(state,receipt['token'],proof);self.assertEqual(state,accepted)
+        self.assertEqual({k:v for k,v in state.items() if k!='reconciled_owners'},before)
+        self.assertEqual(raw,{p:Path(p).read_bytes() for p in proof['files']})
+        entry,=state['reconciled_owners'].values()
+        self.assertFalse(entry['credit_granted']);self.assertFalse(entry['financial_cleanup_credit'])
+        self.assertEqual(set(receipt['cases'].values()),{'UNVERIFIED'})
+        self.assertFalse((Path(receipt['log']).parent/'result.json').exists())
+
+    def test_legacy_custody_refusal_survives_real_refresh_without_relaxing_execution_contract(self):
+        refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
+        c.reconcile(state,receipt['token'],proof)
+        original=copy.deepcopy(receipt);old=copy.deepcopy(state['plan'])
+        (self.root/'code').write_text('new frozen source')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
+                        'commit','-qm','new source'],check=True)
+        new=copy.deepcopy(old);new['source']=c.source(self.root)
+        new['gates'][-1]['selection_evidence']=['new infrastructure input']
+        c.refresh(state,old,new,self.root)
+        self.assertEqual(c.retained_owners(state,['smoke']),[])
+        locator=Path(receipt['log']).parent.parents[3]/'cycle.json'
+        c.write(locator,state)
+        self.assertEqual(c.retained_owners(state,['smoke']),[])
+        self.assertEqual(c.latest_receipts(state)['smoke'],original)
+        for field,value in [('command',receipt['command']+['--extra']),('checks',['one']),
+                            ('timeout_seconds',9),('native_cloud',False)]:
+            changed=copy.deepcopy(state);changed['plan']['gates'][-1][field]=value
+            self.assertEqual(c.retained_owners(changed,['smoke']),['smoke'])
+
+    def test_legacy_custody_refusal_rejects_resealed_capture(self):
+        refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
+        folder=Path(receipt['log']).parent;locator=folder.parents[3]/'cycle.json'
+        originals={p:Path(p).read_bytes() for p in [*proof['files'],str(locator)]}
+        for field,value in [('source',{'head':receipt['source']['head'],'digest':'f'*64}),
+                            ('custody_runtime',{}),('custody_child_environment','0'*64)]:
+            candidate=copy.deepcopy(state);claim=copy.deepcopy(proof)
+            request=c.read(folder/'request.json');request[field]=value
+            if field=='source':
+                candidate['source']=value;candidate['plan']['source']=value
+                candidate['attempts'][-1]['results'][0]['source']=value
+                candidate['plan_digest']=c.digest(candidate['plan'])
+                c.write(folder/'receipt.json',candidate['attempts'][-1]['results'][0])
+                import deploy_test_historical_custody as h
+                request['custody_state_sha256']=h.state_identity(candidate)
+                c.write(Path(claim['legacy_state_snapshot']),candidate);c.write(locator,candidate)
+            c.write(folder/'request.json',request)
+            claim['files']={p:c.sha_file(p) for p in claim['files']}
+            with self.assertRaises(ValueError):c.reconcile(candidate,receipt['token'],claim)
+            for p,raw in originals.items():Path(p).write_bytes(raw)
+
+    def test_legacy_custody_refusal_requires_finite_typed_timestamps(self):
+        refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
+        for value in (False,True,float('inf'),float('-inf'),float('nan'),0,-1):
+            claim={**proof,'confirmed_at':value}
+            with self.assertRaises(ValueError):c.reconcile(state,receipt['token'],claim)
+        folder=Path(receipt['log']).parent;locator=folder.parents[3]/'cycle.json'
+        raw={p:Path(p).read_bytes() for p in [*proof['files'],str(locator)]}
+        for field in ('started_at','finished_at'):
+            for value in (False,float('-inf'),float('nan')):
+                candidate=copy.deepcopy(state);candidate['attempts'][-1]['results'][0][field]=value
+                # Deliberately corrupt historical JSON, bypassing the strict producer writer.
+                (folder/'receipt.json').write_text(json.dumps(candidate['attempts'][-1]['results'][0]))
+                Path(proof['legacy_state_snapshot']).write_text(json.dumps(candidate));locator.write_text(json.dumps(candidate))
+                claim=copy.deepcopy(proof);claim['files']={p:c.sha_file(p) for p in claim['files']}
+                capture={**refusal.LEGACY_CUSTODY_CAPTURE,'receipt_sha256':c.sha_file(folder/'receipt.json')}
+                with patch.object(refusal,'LEGACY_CUSTODY_CAPTURE',capture):
+                    with self.assertRaises(ValueError):c.reconcile(candidate,receipt['token'],claim)
+                for p,data in raw.items():Path(p).write_bytes(data)
+
+    def test_legacy_custody_refusal_rejects_forged_identity_environment_and_credit(self):
+        refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
+        folder=Path(receipt['log']).parent;raw={p:Path(p).read_bytes() for p in proof['files']}
+        locator=folder.parents[3]/'cycle.json';raw[str(locator)]=locator.read_bytes()
+        def check(change,reseal=False):
+            candidate,claim=copy.deepcopy(state),copy.deepcopy(proof);change(candidate,claim)
+            if reseal:claim['files']={p:c.sha_file(p) for p in claim['files']}
+            with self.assertRaises(ValueError):c.reconcile(candidate,receipt['token'],claim)
+            for p,data in raw.items():Path(p).write_bytes(data)
+        def request_change(**changes):
+            def change(s,p):
+                request=c.read(folder/'request.json');request.update(changes);c.write(folder/'request.json',request)
+            return change
+        for change in (lambda s,p:p.update(request_token='b'*32),lambda s,p:p.update(credit_granted=True),
+                       lambda s,p:p.update(financial_cleanup_credit=True),lambda s,p:p['files'].update({receipt['log']:'0'*64}),
+                       lambda s,p:s['attempts'][-1]['results'][0].update(source={'head':'f'*40,'digest':'f'*64}),
+                       lambda s,p:s['attempts'][-1]['results'][0].update(status='PASS'),
+                       lambda s,p:s['attempts'][-1]['results'][0].update(cases={'one':'PASS','two':'PASS'}),
+                       lambda s,p:s['plan']['gates'][-1]['command'].append('--extra')):check(change)
+        for changes in ({'token':'b'*32},{'source':{'head':'f'*40,'digest':'f'*64}},
+                        {'custody_state':str(self.root/'.context/other/cycle.json')},
+                        {'custody_state_sha256':'0'*64},{'checks':['one']},
+                        {'custody_child_environment':'not-a-hash'},{'custody_runtime':{'agents/.env':'bad'}}):
+            check(request_change(**changes),True)
+        def change_snapshot(s,p):
+            snapshot=c.read(Path(p['legacy_state_snapshot']));snapshot['environment']='0'*64
+            c.write(Path(p['legacy_state_snapshot']),snapshot)
+        check(change_snapshot,True)
+        def change_live_parent(s,p):
+            parent=c.read(locator);parent['attempts'][-1]['results'][0]['token']='b'*32;c.write(locator,parent)
+        check(change_live_parent)
+        def other_error(s,p):Path(receipt['log']).write_bytes(b'DEPLOY_CLOUD BLOCKED: arbitrary error\n')
+        check(other_error,True)
+        with patch.dict(refusal.LEGACY_CUSTODY_POLICIES,{'scripts/deploy_test_cloud.py':('0'*64,)}):
+            with self.assertRaisesRegex(ValueError,'unaudited producer'):c.reconcile(state,receipt['token'],proof)
+
+    def test_legacy_custody_refusal_rejects_present_namespace_adapter_symlink_and_live_holder(self):
+        import hashlib
+        refusal,state,receipt,proof=self.legacy_custody_refusal_fixture()
+        namespace=self.root/'.context/deploy-cloud'/hashlib.sha256(receipt['token'].encode()).hexdigest()
+        namespace.mkdir(parents=True)
+        with self.assertRaises(ValueError):c.reconcile(state,receipt['token'],proof)
+        namespace.rmdir();result=Path(receipt['log']).parent/'result.json';result.write_text('{}')
+        with self.assertRaises(ValueError):c.reconcile(state,receipt['token'],proof)
+        result.unlink();snapshot=Path(proof['legacy_state_snapshot']);original=snapshot.with_suffix('.original')
+        snapshot.rename(original);snapshot.symlink_to(original)
+        with self.assertRaises(ValueError):c.reconcile(state,receipt['token'],proof)
+        snapshot.unlink();original.rename(snapshot)
+        for held in (receipt['log'], proof['legacy_state_snapshot']):
+            holder=subprocess.Popen([sys.executable,'-c',
+                'import sys;f=open(sys.argv[1]);print("ready",flush=True);sys.stdin.read()',held],
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+            try:
+                self.assertEqual(holder.stdout.readline().strip(),'ready')
+                with self.assertRaisesRegex(ValueError,'holder|writer'):c.reconcile(state,receipt['token'],proof)
+            finally:
+                holder.stdin.close();holder.wait(timeout=10);holder.stdout.close()
+        participant=subprocess.Popen([sys.executable,'-c',
+            'import sys;print("ready",flush=True);sys.stdin.read()',str(namespace)],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(participant.stdout.readline().strip(),'ready')
+            with self.assertRaisesRegex(ValueError,'namespace.*consumer'):
+                c.reconcile(state,receipt['token'],proof)
+        finally:
+            participant.stdin.close();participant.wait(timeout=10);participant.stdout.close()
+
     def test_explicit_cloud_source_refusal_has_no_owner_and_no_test_credit(self):
         import deploy_test_cloud_refusal as refusal
         gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
