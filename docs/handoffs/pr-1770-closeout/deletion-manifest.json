@@ -748,5 +748,13 @@
     "independent_restore_verified": true,
     "late_evidence": "Records-only Git commit and published self-contained final HTML retain later review/READY proof",
     "sha256": "5d87aa5f2c2e523678814c73232751d921bdf7eeab44493e920e841218694698"
+  },
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "archive": "devbox-closeouts/pr-1770/historical-stash-0e2ffe95-v1.enc",
+    "disposition": "archived",
+    "durable_main_base": "648f74b9c947c42edfdd41a066b7d868c7ec81d1",
+    "independent_recovery_verified": true,
+    "sha256": "7a14a2ccb316435ffd91e07a96a33226f5f4dec7b2cafd2d18be56636423bb11",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
   }
 }

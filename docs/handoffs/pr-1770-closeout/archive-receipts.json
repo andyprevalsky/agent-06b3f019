@@ -70,6 +70,20 @@
       "original_bytes": 107781,
       "manifest_sha256": "0f2654debda099d59b8a92f0a7daf66eb1e5069b30cf9f58367fdae389c74b6c",
       "full_readback_verified": true
+    },
+    "historical_stash": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeouts/pr-1770/historical-stash-0e2ffe95-v1.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "7a14a2ccb316435ffd91e07a96a33226f5f4dec7b2cafd2d18be56636423bb11",
+      "gzip_sha256": "9df15e3841f64a589b83e0423ff1bb8c55105deafa17837bcc17130985bbf2a0",
+      "stored_bytes": 36623,
+      "frames": 1,
+      "files": 2,
+      "original_bytes": 36134,
+      "manifest_sha256": "5f2ce5d452aea52e8985f57379b851a21e51e6ec1c426f385fa4bf2f51362888",
+      "full_readback_verified": true
     }
   },
   "independent_core_restore": {
@@ -125,5 +139,54 @@
     "receipt_sha256": "9a8f950cdf2664c9b3d053cd7fe680255f73cd29194be2f82e151e2d6351ed24"
   },
   "renderer_independent_restore_files": 4,
-  "renderer_sha256": "712b81666f57fb0d6b37d353e0634901fe2101d1335c7f6c2f618182bbd9761b"
+  "renderer_sha256": "712b81666f57fb0d6b37d353e0634901fe2101d1335c7f6c2f618182bbd9761b",
+  "historical_stash_restore": {
+    "format": "PR1770-HISTORICAL-STASH-RESTORE-V1",
+    "observed_at": "2026-11-08T11:51:05.482680+00:00",
+    "archive_ref": "refs/archive/pr1770/stash-0e2ffe95",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+    "parents": [
+      "648f74b9c947c42edfdd41a066b7d868c7ec81d1",
+      "c69aeeaad23d45d3f37acc488e5dab8bda0b9693",
+      "0f07a840af0111faf7364be74bf2cd95cf5a9adb"
+    ],
+    "durable_main_base": "648f74b9c947c42edfdd41a066b7d868c7ec81d1",
+    "independent_clone_main": "25ccb03bd89dce9c490121cca3928a0a6151c7b3",
+    "independent_repository": "/home/boxes/pr1770-preservation/independent-main-recovery.git",
+    "used_previously_verified_independent_remote_main_clone": true,
+    "full_clone_attempt": "Refused by missing preexisting promisor blob; no full-clone claim",
+    "tip_absent_before_bundle_import": true,
+    "used_existing_object_alternates": false,
+    "fresh_remote_main_history_clone": false,
+    "baseline_is_partial_promisor_clone": true,
+    "bundle_sha256": "313395db956b43e8f343daff71cffa6a62670523804ead58ccee0a84372a8b42",
+    "bundle_verify_exit": 0,
+    "fsck_full_strict_exit": 0,
+    "all_stash_and_parent_tree_contents_read": [
+      {
+        "commit": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+        "all_file_blobs_read_by_git_archive": true,
+        "exit_code": 0
+      },
+      {
+        "commit": "648f74b9c947c42edfdd41a066b7d868c7ec81d1",
+        "all_file_blobs_read_by_git_archive": true,
+        "exit_code": 0
+      },
+      {
+        "commit": "c69aeeaad23d45d3f37acc488e5dab8bda0b9693",
+        "all_file_blobs_read_by_git_archive": true,
+        "exit_code": 0
+      },
+      {
+        "commit": "0f07a840af0111faf7364be74bf2cd95cf5a9adb",
+        "all_file_blobs_read_by_git_archive": true,
+        "exit_code": 0
+      }
+    ],
+    "encrypted_full_readback_verified": true,
+    "decrypted_full_restore_verified": true,
+    "stash_unchanged": true,
+    "archive_receipt": "/home/boxes/pr1770-preservation/historical-stash-0e2ffe95-receipt.json"
+  }
 }

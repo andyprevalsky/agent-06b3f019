@@ -171,5 +171,24 @@
   ],
   "review": "CodeRabbit exact-head usage-cap skip, merged unreviewed by CodeRabbit",
   "freedom": "Preserved; no blocking/network/service change",
-  "postmerge_followup": "PR1784 coordinator owns planned alternate-state-dir admission/typed-negative followup; not counted as dispatched goal"
+  "postmerge_followup": "PR1784 coordinator owns planned alternate-state-dir admission/typed-negative followup; not counted as dispatched goal",
+  "supporting_tooling_delivery": {
+    "headRefOid": "ea9ea83637cf3f98a2b222dab05aecdd56867d06",
+    "mergeCommit": {
+      "oid": "62b3f578582f963c04f77389f0529bbcb76ed39f"
+    },
+    "mergedAt": "2026-11-08T11:50:12Z",
+    "number": 1832,
+    "state": "MERGED",
+    "url": "https://github.com/Rose-Ai-Labs/rose/pull/1832",
+    "validation": {
+      "suite": "python3 scripts/tests/deploy-cli.test.py",
+      "tests": 50,
+      "result": "PASS",
+      "seconds": 3.238,
+      "owning_regression": "unchanged live_processes test FAIL before, PASS after",
+      "code_review": "Independent exact-diff approved; CodeRabbit spending-cap skip",
+      "scope": "CLI tooling only under /push; no application or production PASS credit"
+    }
+  }
 }
