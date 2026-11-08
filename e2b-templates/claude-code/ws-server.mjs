@@ -1773,6 +1773,7 @@ async function deliverNativeTurn(msg) {
   const turn = startNativeTurn();
   pendingTurns += 1;
   try {
+    if (turnText !== text) markGoalDelivered();
     await new Promise((resolve, reject) => {
       cliChild.stdin.write(
         userMessageLine(
@@ -2050,9 +2051,29 @@ const DEFAULT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json";
 const GOAL_CONDITION_MAX_CHARS = 4000;
 // The handoff the current goal ends by writing (null: the task had no schema).
 let goalHandoffPath = null;
-// When the current goal was accepted: only a handoff written after it counts
-// (a close that failed to consume an earlier one can leave it behind).
-let goalStartedAtMs = 0;
+// When the current goal's turn reached the CLI: only a handoff written after
+// it counts. Accepting a goal also moves any handoff still on disk aside (a
+// close that failed to consume it), keeping it for inspection.
+let goalStartedAtMs = Infinity;
+let goalPendingDelivery = false;
+
+function retireStaleHandoff(path) {
+  if (!existsSync(path)) return;
+  try {
+    renameSync(path, `${path}.superseded-${Date.now()}`);
+  } catch (error) {
+    log("warn", "Could not move a stale handoff aside", {
+      error: error.message,
+    });
+  }
+}
+
+/** Called as the goal turn is written to the CLI's stdin. */
+function markGoalDelivered() {
+  if (!goalPendingDelivery) return;
+  goalPendingDelivery = false;
+  goalStartedAtMs = Date.now();
+}
 
 function goalHandoffWritten() {
   if (!goalHandoffPath) return false;
@@ -2109,7 +2130,9 @@ function goalTurnText(rawTask, note = "") {
       task = `${split.task}${HANDOFF_SCHEMA_PREFIX}${split.handoffPath}:\n${split.schema}`;
     }
     goalHandoffPath = split.handoffPath;
-    goalStartedAtMs = Date.now();
+    retireStaleHandoff(goalHandoffPath);
+    goalStartedAtMs = Infinity;
+    goalPendingDelivery = true;
   }
   // A new spawn's goal reaches a live CLI already headed "Task:" (backend
   // attachLiveCodeCli); the first task is headed here.
@@ -2322,6 +2345,7 @@ async function runClaudeCli(startupReport = null) {
     if (!cliStdinOpen) return;
     pendingTurns = 1;
     startNativeTurn();
+    markGoalDelivered();
     child.stdin.write(prompt);
     resolveTaskPrompt();
   } catch (error) {

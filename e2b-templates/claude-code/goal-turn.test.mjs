@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -124,8 +125,10 @@ async function runGoal({
     // A previous spawn's handoff that its close failed to consume.
     mkdirSync(dirname(handoffFile), { recursive: true });
     writeFileSync(handoffFile, "{}");
-    const hourAgo = new Date(Date.now() - 3_600_000);
-    utimesSync(handoffFile, hourAgo, hourAgo);
+    if (staleHandoff !== "fresh") {
+      const hourAgo = new Date(Date.now() - 3_600_000);
+      utimesSync(handoffFile, hourAgo, hourAgo);
+    }
   }
   const env = {
     ...process.env,
@@ -233,4 +236,19 @@ test("a handoff left before the goal started never hands a held session back", a
     expectExit: false,
   });
   assert.ok(!log.includes("goal handoff written"), log);
+});
+
+test("a leftover handoff with a current timestamp is moved aside and never hands the session back", async () => {
+  const { log, handoffFile } = await runGoal({
+    task: "Do it.",
+    handoffOnTurn: 0,
+    steer: "use the auto updater",
+    staleHandoff: "fresh",
+    expectExit: false,
+  });
+  assert.ok(!log.includes("goal handoff written"), log);
+  const kept = readdirSync(dirname(handoffFile)).filter((n) =>
+    n.startsWith("handoff.json.superseded-"),
+  );
+  assert.equal(kept.length, 1, "the leftover handoff is kept, not deleted");
 });
