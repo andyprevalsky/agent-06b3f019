@@ -5,7 +5,8 @@
  *   retire ──► delete artifacts, manifest last ──► markRetired
  *     a failed manifest read or artifact delete keeps the manifest (the only
  *     index of the artifact keys) and the session, so a later retire finishes;
- *   TTL sweep ──► one session that keeps failing never stops the others.
+ *   TTL sweep ──► one session that keeps failing never stops the others;
+ *     a session with a live lease (an attached spawn) is never swept.
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -18,6 +19,7 @@ import { checkpointKey } from '../../providers/codeSessions/artifactStore';
 import {
   checkpointCodeSession,
   retireCodeSession,
+  sweepAllExpiredCodeSessions,
   sweepExpiredCodeSessions,
 } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
@@ -140,6 +142,49 @@ export function registerCheckpointDeletionCases(ctx: CheckpointDeletionContext):
       } finally {
         rmSync(blocked, { recursive: true, force: true });
       }
+    });
+  });
+
+  test('the TTL sweep never retires a session whose lease is live, only once the lease has lapsed', async (t) => {
+    // Keepalives renew the lease and lastActiveAt only every ~2 minutes; a short
+    // CODE_SESSION_TTL_DAYS must not let a sweep kill a running task's sandbox
+    // between two keepalives.
+    const killed: string[] = [];
+    t.mock.method(Sandbox, 'kill', async (id: string) => {
+      killed.push(id);
+      return true;
+    });
+    await withUser(async (userId) => {
+      const owner = randomUUID();
+      const make = (leaseExpiresAt: Date | null, sandboxId: string) =>
+        prisma.codeSession.create({
+          data: {
+            userId,
+            rootAgentId: owner,
+            ownerAgentId: owner,
+            repoKey: `ttl-lease-${randomUUID()}`,
+            state: 'ACTIVE',
+            leaseOwner: leaseExpiresAt === null ? null : 'tool:ttl-lease',
+            leaseExpiresAt,
+            sandboxKind: 'e2b',
+            sandboxId,
+            lastActiveAt: new Date(Date.now() - 40 * DAY_MS),
+          },
+        });
+      const leased = await make(
+        new Date(Date.now() + 30 * 60 * 1000),
+        `sb-ttl-leased-${randomUUID()}`
+      );
+      const lapsed = await make(new Date(Date.now() - 60 * 1000), `sb-ttl-lapsed-${randomUUID()}`);
+      const idle = await make(null, `sb-ttl-idle-${randomUUID()}`);
+      await sweepAllExpiredCodeSessions(500);
+      const stateOf = async (id: string) =>
+        (await prisma.codeSession.findUniqueOrThrow({ where: { id } })).state;
+      assert.equal(await stateOf(leased.id), 'ACTIVE', 'a live lease protects a running task');
+      assert.ok(!killed.includes(leased.sandboxId ?? ''), 'the leased sandbox is never killed');
+      assert.equal(await stateOf(lapsed.id), 'RETIRED', 'a lapsed lease no longer protects it');
+      assert.equal(await stateOf(idle.id), 'RETIRED', 'an unleased expired session is retired');
+      assert.ok(killed.includes(lapsed.sandboxId ?? '') && killed.includes(idle.sandboxId ?? ''));
     });
   });
 }

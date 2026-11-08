@@ -22,18 +22,32 @@ import type { UsePriceLimitEditResult } from './usePriceLimitEdit';
 interface MetricsSectionProps {
   agent: AgentDetail;
   priceLimitEdit: UsePriceLimitEditResult;
+  /** Real window of a code agent's model; absent for a Rose agent (restart threshold applies). */
+  contextWindow?: number;
 }
 
-export default function MetricsSection({ agent, priceLimitEdit }: MetricsSectionProps) {
+/** A Rose agent is measured against its restart threshold; a code agent against its real window. */
+function contextUsage(agent: AgentDetail, models: unknown, contextWindow: number | undefined) {
+  const modelsList = Array.isArray(models) ? models : [];
+  const restartThreshold =
+    contextWindow ?? Math.round(getModelContextWindow(agent.model, modelsList) * 0.8);
+  return {
+    restartThreshold,
+    contextPercentage: Math.min(100, (agent.context_size / restartThreshold) * 100),
+  };
+}
+
+export default function MetricsSection({
+  agent,
+  priceLimitEdit,
+  contextWindow,
+}: MetricsSectionProps) {
   const [copiedAgentId, setCopiedAgentId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState(false);
   const { models } = useAppData();
   const { user: authUser } = useAuth();
 
-  const modelsList = Array.isArray(models) ? models : [];
-  const maxWindow = getModelContextWindow(agent.model, modelsList);
-  const restartThreshold = Math.round(maxWindow * 0.8);
-  const contextPercentage = Math.min(100, (agent.context_size / restartThreshold) * 100);
+  const { restartThreshold, contextPercentage } = contextUsage(agent, models, contextWindow);
 
   const totalTokensIn = (agent.tokens_in || 0) + (agent.tool_tokens_in || 0);
   const totalTokensOut = (agent.tokens_out || 0) + (agent.tool_tokens_out || 0);

@@ -96,6 +96,48 @@ async def test_claude_code_session_create_mock():
     )
 
 
+async def test_session_create_outwaits_a_slow_backend_and_heartbeats():
+    """A create the backend needs minutes for completes in one attempt (RCA
+    2026-11-06-code-spawn-create-retry-duplicated-sessions): its 60 s read timed
+    out at 150 s, the activity retried, and the retries started 3 tasks.
+
+    The client read outlasts the backend's own create budget (the shared E2B
+    create slot waits up to 15 min, plus the start itself) and the activity
+    heartbeats while it waits, so the heartbeat timeout never starts a second
+    attempt beside it.
+    """
+    import httpx
+
+    import domains.spawn_claude_code_agent.repo as repo
+
+    seen: dict = {}
+
+    async def slow_backend(request):
+        seen["timeout"] = request.extensions.get("timeout")
+        await asyncio.sleep(0.35)
+        return httpx.Response(
+            200,
+            json={"success": True, "task_id": "task-slow", "sandbox_id": "sb-slow", "ws_url": "wss://x"},
+        )
+
+    setup_mock_fn(slow_backend)
+    beats: list = []
+    try:
+        with (
+            patch.object(repo, "CODE_SESSION_CREATE_HEARTBEAT_S", 0.05),
+            patch.object(repo, "safe_heartbeat", lambda message, *details: beats.append(message)),
+        ):
+            data = await repo.create_e2b_session(agent_id="agent-slow", goal="status", user_id="u-1")
+    finally:
+        teardown_mock()
+    assert data["task_id"] == "task-slow"
+    read_timeout = (seen["timeout"] or {}).get("read")
+    # Backend bound: 15 min create-slot wait + the 150 s start observed in prod.
+    assert read_timeout is not None and read_timeout >= 15 * 60 + 150, seen["timeout"]
+    assert len(beats) >= 3, beats
+    assert set(beats) == {"Starting the code-agent sandbox"}, beats
+
+
 async def test_claude_code_session_health_mock():
     """Mock verifies Claude Code session health endpoint."""
     _setup()
@@ -3805,6 +3847,10 @@ async def _run_all_tests():
     print("spawn-claude-code-agent blackbox tests:")
     r = BlackboxResult()
     await r.record_async("session_create_mock", test_claude_code_session_create_mock)
+    await r.record_async(
+        "session_create_outwaits_slow_backend_and_heartbeats",
+        test_session_create_outwaits_a_slow_backend_and_heartbeats,
+    )
     await r.record_async("session_health_mock", test_claude_code_session_health_mock)
     # pure helpers
     r.record("terminal_fatal_ignores_banner_text", test_terminal_fatal_ignores_banner_text)
@@ -4328,6 +4374,18 @@ def test_format_code_events_transcript_reports_project_startup():
         "[Claude] Project startup (Rose): ok in 12.3s",
         "[Claude] Project startup (Rose): failed (exit 3) in 0.4s",
         "[Claude] Project startup (Rose): timed out after 120s",
+    ]
+
+    # The Codex ws-server emits the same event stamped provider "codex".
+    codex = format_code_events_transcript(
+        [
+            {"type": "project_startup", "provider": "codex", "status": "ok", "project": "Rose", "durationMs": 2000},
+            {"type": "project_startup", "provider": "codex", "status": "failed", "project": "Rose", "exitCode": 1},
+        ]
+    )
+    assert codex.splitlines() == [
+        "[Codex] Project startup (Rose): ok in 2.0s",
+        "[Codex] Project startup (Rose): failed (exit 1)",
     ]
 
 

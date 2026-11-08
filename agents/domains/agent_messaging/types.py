@@ -14,5 +14,6 @@ class AgentMessageDelivery(TypedDict, total=False):
     delivered: bool
     message_id: Optional[str]
     task_running: Optional[bool]
+    queued: bool  # a code agent still starting accepted it: its next turn once the CLI runs
     error: str
     status: int

@@ -136,6 +136,13 @@ PATH_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         r"|(^|/)back-end/src/providers/agentTools/display|(^|/)agents/benchmarks/display_check",
         ("display",),
     ),
+    (
+        r"(^|/)back-end/src/providers/(codeSessions/|e2b[A-Za-z]*\.ts)"
+        r"|(^|/)back-end/src/domains/(code-sessions|projects)/"
+        r"|(^|/)e2b-templates/(claude|codex)-code/"
+        r"|(^|/)agents/benchmarks/code_agent",
+        ("claude-code",),
+    ),
     (r"claude.?code|claude_code", ("claude-code",)),
     (r"(^|/)agents/(loop|workflows|helpers|activities)/", ("harness",)),
     (r"(^|/)agents/tools/", ("harness",)),

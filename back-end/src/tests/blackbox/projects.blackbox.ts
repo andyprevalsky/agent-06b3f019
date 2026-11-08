@@ -50,6 +50,7 @@ import {
 } from '../../domains/projects/roseProject';
 import { listProjects, updateProject } from '../../domains/projects/service';
 import { decryptCredentialEnvelope } from '../../providers/claudeCredentials';
+import { loadRouterProjectContext } from '../../providers/chat/projectContext';
 import { prisma } from '../../providers/database';
 import { registerRoseStartupUpgradeCases } from './projects-rose-startup-upgrade.cases';
 
@@ -404,6 +405,39 @@ test('agents: project_id on create, inherited by sub-agents, listed, cleared on 
     where: { id: explicitHome.data.agent_id as string },
   });
   assert(explicitRow.projectId === null, 'explicit null keeps the sub-agent in Home');
+
+  // V2 (RCA 2026-11-06): the detail read carries the project summary workers render.
+  const configured = await call(`/api/projects/${project.id}`, {
+    method: 'PUT',
+    auth: s.token,
+    body: { defaultBranch: 'develop', repoUrl: 'https://github.com/acme/app' },
+  });
+  expectStatus(configured, 200, 'configure project repo');
+  const summary = {
+    name: 'Agents',
+    repo_url: 'https://github.com/acme/app',
+    default_branch: 'develop',
+  };
+  for (const [agentId, expected, label] of [
+    [rootId, summary, 'placed root'],
+    [child.data.agent_id as string, summary, 'inheriting sub-agent'],
+    [home.data.agent_id as string, null, 'Home agent'],
+    [explicitHome.data.agent_id as string, null, 'explicit Home sub-agent'],
+  ] as const) {
+    const detail = await call(`/api/agents/${agentId}`, { headers: apiKeyHeaders(s.userId) });
+    expectStatus(detail, 200, `detail ${label}`);
+    const got = (detail.data.agent as { project: unknown }).project;
+    assert(
+      JSON.stringify(got) === JSON.stringify(expected),
+      `${label} project ${JSON.stringify(got)}`
+    );
+  }
+  const routerContext = await loadRouterProjectContext(rootId);
+  assert(
+    routerContext.includes('"Agents" (GitHub repo acme/app, default branch develop)'),
+    `router project context ${routerContext}`
+  );
+  assert((await loadRouterProjectContext(home.data.agent_id as string)) === '', 'Home router');
 
   const list = await call('/api/agents', { headers: apiKeyHeaders(s.userId) });
   expectStatus(list, 200, 'list agents');

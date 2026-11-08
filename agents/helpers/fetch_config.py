@@ -79,6 +79,8 @@ async def fetch_agent_config(agent_id: str) -> Dict:
                 "write_lock_enabled",
                 agent.get("writeLockEnabled", True),
             ),  # Write lock for browser actions (default: True)
+            # {name, repo_url, default_branch} of the agent's project; None = Home.
+            "project": agent.get("project"),
         }
 
         logger.info(

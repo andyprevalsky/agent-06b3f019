@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "pr": 1747,
+  "merge_commit": "37f705cd8dd490845af863fa808a2fb0d3b0d7c6",
+  "gated_source": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+  "source_digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a",
+  "production": {
+    "render": "PASS",
+    "backend-probes": "PASS",
+    "agentcard": "SKIPPED-elected (live-mode Stripe fixture needs KYC; standing user decision 2026-11-06)",
+    "fly": "BLOCKED: workflow deploy-agents.yml disabled_manually since 2026-11-07T18:32:58Z (first managed deployment hold); not re-enabled",
+    "workflow-migration": "NOT RUN (depends on fly)",
+    "semantic": "NOT RUN (refused: Fly gate not open)"
+  },
+  "archives": {
+    "core": {
+      "key": "devbox-closeout-private/pr1747-02eb65acf1/20261107T202353Z-core.tar.gz.aesgcm",
+      "ciphertext_sha256": "0ee53ae2a716bf1ef2aeb2fdffb688ce0cfd2fd3d2091a76e7c03504bfeca1b3",
+      "files": 32641,
+      "original_bytes": 1640384886,
+      "stored_bytes": 435266756
+    },
+    "cloud": {
+      "key": "devbox-closeout-private/pr1747-02eb65acf1/20261107T202353Z-cloud.tar.gz.aesgcm",
+      "ciphertext_sha256": "a9019116dc3b295822a1e4cc081095183457c614e19ad7befaa4d99d52048a15",
+      "files": 5558,
+      "original_bytes": 5532713465,
+      "stored_bytes": 1397276433
+    },
+    "final": {
+      "key": "devbox-closeout-private/pr1747-02eb65acf1/20261107T202353Z-final.tar.gz.aesgcm",
+      "ciphertext_sha256": "afaf08c7b03ba2007bb51adb820dedae2b01c9b3c0ee30ff112f28b453d3e2da",
+      "files": 8998,
+      "original_bytes": 193161552,
+      "stored_bytes": 60650587
+    },
+    "devlogs": {
+      "key": "devbox-closeout-private/pr1747-02eb65acf1/20261107T202353Z-devlogs.tar.gz.aesgcm",
+      "ciphertext_sha256": "f326241406ee0f6dfae96ecaa3bb3f3204b040e1226d3e7051c411c7ca22c6af",
+      "files": 2745,
+      "original_bytes": 219021810,
+      "stored_bytes": 30012565
+    }
+  },
+  "ledger": "14 attempt rows + 13 duration rows for the final smoke campaign (hub:cloud-fleet), committed in the records PR",
+  "followups": [
+    "lift/consume the Fly hold then run scripts/deploy production --lanes fly,workflow-migration,semantic",
+    "peer_refreshed_snapshot one-second slack + deterministic test",
+    "Blacksmith semantic-stack shared ngrok domain",
+    "AgentCard sandbox release stall funds (4396 cents per smoke round)"
+  ],
+  "decision": "User kept the Fly hold (2026-11-07 after the scorecard): fly, workflow-migration and semantic deferred to the managed worker deployment and UNVERIFIED; workflow not re-enabled; recorded outcome stays blocked."
+}

@@ -5,7 +5,7 @@
  * running and absent with the flag off.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { CodeAgentWaitStatus } from '@/features/terminal-component-group/components/CodeAgentWaitStatus';
@@ -162,6 +162,8 @@ describe('row 44: root status line under the chips', () => {
       </WithAgent>,
     );
     const line = screen.getByTestId('code-agent-wait-status');
+    // The code-agent row folds into its work group: open it, then the line follows it.
+    fireEvent.click(within(screen.getByTestId('trajectory-work-group')).getAllByRole('button')[0]);
     const chip = screen.getByTestId('code-agent-chip');
     expect(chip.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     root.unmount();

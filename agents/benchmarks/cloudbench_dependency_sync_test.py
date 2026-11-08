@@ -25844,36 +25844,37 @@ reserve_worker_machine_slot test-worker
     assert result.returncode == 0, result.stderr
 
 
-def test_worker_capacity_reservation_uses_the_startup_guard_machine_ceiling() -> None:
-    """Autoscaler worker clones and the startup guard admit against one default ceiling.
+def test_worker_capacity_reservation_uses_the_startup_admission_ceiling_by_default(
+    tmp_path: Path,
+) -> None:
+    """A dynamic worker clone is admitted against the same Machine ceiling as the primaries.
 
-    2026-11-07: reserve_worker_machine_slot kept its own 56 default after the startup guard
-    moved to 300, so mass-agent's mandatory autoscaler was refused at 66 app Machines.
+    PR 1747 smoke (2026-11-07): 14 primaries were admitted (default 300) but
+    reserve_worker_machine_slot still defaulted to 56, so test-mass-agent-run-0's worker clone
+    was denied at "61 app Machines + 0 reserved + 1 requested > ceiling 56" and the fleet
+    exited 1 although the task itself passed.
     """
     fleet = fleet_source_text()
-    defaults = set(re.findall(r"CLOUDBENCH_APP_MACHINE_CEILING:-(\d+)\}", fleet))
-    assert defaults == {"300"}, f"every Machine-ceiling default must agree: {defaults}"
+    defaults = set(re.findall(r"CLOUDBENCH_APP_MACHINE_CEILING:-(\d+)", fleet))
+    assert defaults == {"300"}, f"fleet ceiling defaults drifted apart: {sorted(defaults)}"
     reserve_worker = _extract_fleet_function(fleet, "reserve_worker_machine_slot() {")
+    ceiling_file = tmp_path / "ceiling"
     script = f"""set -u
+unset CLOUDBENCH_APP_MACHINE_CEILING CLOUDBENCH_CAMPAIGN_INVENTORY_DIR SNAPSHOT_LOOP_PID
 APP=fixture-bench-app
-unset CLOUDBENCH_APP_MACHINE_CEILING
 FLY() {{
-  python3 -c 'import json; print(json.dumps([{{"id": "m%d" % i, "state": "started"}} for i in range(66)]))'
+  python3 -c 'import json; print(json.dumps([{{"id": str(i), "state": "started"}} for i in range(61)]))'
 }}
-capacity_reserve_slots() {{ printf 'ceiling=%s current=%s\\n' "$4" "$6" >&2; printf '%s\\n' 'OK 0 0 67 0'; }}
+capacity_reserve_slots() {{ printf '%s' "$4" > {shlex.quote(str(ceiling_file))}; printf '%s\n' 'OK 0 0 62 0'; }}
 {reserve_worker}
 reserve_worker_machine_slot test-worker
 """
     result = subprocess.run(
-        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=10,
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
     )
 
     assert result.returncode == 0, result.stderr
-    assert "ceiling=300 current=66" in result.stderr, result.stderr
+    assert ceiling_file.read_text() == "300"
 
 
 def test_pool_shape_normalization_unexports_full_provider_inventory_buffers(
@@ -28832,6 +28833,7 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
             "warm_deps_preflight() {",
             "hydrate_warm_deps_state() {",
             "warm_deps_recorded_state() {",
+            "list_donor_snapshots() {",
         )
     )
     script = f"""set -uo pipefail

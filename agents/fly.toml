@@ -16,7 +16,9 @@ kill_timeout = "5m"
   dockerfile = "Dockerfile"
 
 [env]
-  BROWSER_PROVIDER = "kernel"
+  # Fallback for code paths that carry no per-session provider (the backend picks the provider per
+  # browser session; Render runs tilion). Andy chose Tilion everywhere on 2026-11-06.
+  BROWSER_PROVIDER = "tilion"
 
   # Python configuration
   PYTHONUNBUFFERED = "1"

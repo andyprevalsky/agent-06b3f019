@@ -1164,6 +1164,33 @@ def test_code_bench_evaluator_proofs_are_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_code_agent_checks_are_in_permanent_gate():
+    """code-agent-rose-repo checks (agents/benchmarks/code_agent_checks_test.py).
+
+    Startup-time phases parse from the worker and backend log lines, the check
+    fails closed (no spawn, no CLI ready, no project checkout, over budget), every
+    code_agent_* check is registered and dispatched, and the task stays on the
+    predeploy floor for both surfaces.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(repo_root / "agents/benchmarks/code_agent_checks_test.py"),
+            str(repo_root / "agents/benchmarks/declared_evaluators_run_all_test.py"),
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -25762,6 +25789,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_disposable_volume_ownership_is_in_permanent_gate", "disposable_volume_ownership_permanent_gate"),
         ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
         ("test_code_bench_evaluator_proofs_are_in_permanent_gate", "code_bench_evaluator_proofs_permanent_gate"),
+        ("test_code_agent_checks_are_in_permanent_gate", "code_agent_checks_permanent_gate"),
         ("test_sms_runner_scoring_contract_is_in_permanent_gate", "sms_runner_scoring_contract_permanent_gate"),
         ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
@@ -26828,6 +26856,16 @@ async def run_all_tests():
         "test_display_root_inline_html_page_is_read",
     ):
         await r.record_async(name, getattr(display_check_tests, name))
+    from benchmarks import thinking_rows_check_tests
+
+    for name in (
+        "test_thinking_rows_measured_root_and_code_agent_pass",
+        "test_thinking_rows_without_recorded_generation_fail",
+        "test_thinking_rows_required_only_on_evidence_of_thinking",
+        "test_thinking_rows_without_evidence_or_rows_are_an_explicit_na",
+        "test_thinking_rows_cli_crash_is_a_failure_not_an_exception",
+    ):
+        r.record(name, getattr(thinking_rows_check_tests, name))
     r.record(
         "archived_diagnostic_projection_requires_authenticated_bindings",
         test_archived_diagnostic_projection_requires_authenticated_bindings,
@@ -27023,6 +27061,7 @@ async def run_all_tests():
             ("disposable_volume_ownership_permanent_gate", test_disposable_volume_ownership_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
             ("code_bench_evaluator_proofs_permanent_gate", test_code_bench_evaluator_proofs_are_in_permanent_gate),
+            ("code_agent_checks_permanent_gate", test_code_agent_checks_are_in_permanent_gate),
             ("sms_runner_scoring_contract_permanent_gate", test_sms_runner_scoring_contract_is_in_permanent_gate),
             (
                 "live_query_proof_zero_spend_admission",

@@ -56,6 +56,8 @@ Production's `GITHUB_TOKEN` and every stack's `back-end/.env` hold the same pers
 - `github-agent-repo` blackbox: lazy, single, persisted and granted create; project trees skipped.
 - `agents-boundary` now asserts that a chat agent creates no repo.
 
+**Follow-up 2026-11-06:** the Retry-After block above was wired into `createGithubRepo` only, so every other GitHub call on the code-agent path (merge facts, access check, publish, clone/fetch) still treated a 403/429 as an ordinary answer. The guardrail failed because the lesson was applied at one call site, not at a shared boundary. See `2026-11-06-github-rate-limit-treated-as-ordinary-answer-on-shared-token`, which moves classification, the process-wide block and the bounded wait into `githubRateLimit.ts`.
+
 **At 10,000 agents:** creates scale with trees that run code, not with chats. They are bounded by the global pacer and the account limit, without per-user caps. Beyond ~480/h the remedy is more creation identities (a GitHub App installation), not faster creates.
 
 **Retention, not changed here:** the account holds 50,000 public repos and nothing deletes them. Deleting is destructive, so a retention policy needs Andy's decision. The bulk of these repos are orphans from non-production stacks.

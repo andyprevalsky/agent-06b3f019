@@ -10,6 +10,8 @@ export interface AgentSettingsDialogProps {
   onDelete?: () => void;
   /** 'nub' = bare white gear with an instant tooltip on the Rose Desktop tab. */
   variant?: 'icon' | 'nub';
+  /** The model's real context window (a code agent): Context Usage is measured against it, not the Rose restart threshold. */
+  contextWindow?: number;
 }
 
 /** Which trigger edge the panel aligns to: 'start' = left (opens rightward). */

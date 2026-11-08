@@ -1,17 +1,22 @@
 /**
  * Blackbox: a Rose → code-agent message delivered as an a2a row renders once
  * (agentGraphSendService: the received row names its CLI turn, code_turn_id), in
- * the code-agent view (folded into the turn it started) and in the chip transcript
- * (unframed; Rose's goal reads "Rose →", never "You").
+ * the code-agent view (folded into the root transcript's "Worked for …" history
+ * as a comms activity, unframed) and never in the root transcript's code-agent
+ * row (one plain row: no transcript under it). Rose's goal is the view's user
+ * prompt, never "You →".
  */
 import { createElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 
-import { CodeSessionMessages } from '@/features/terminal-component-group/components/code-agent-view/CodeSessionMessages';
+import { CodeAgentConversationView } from '@/features/terminal-component-group/components/code-agent-view/CodeAgentConversationView';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
+import type { Message } from '@/lib/api';
+import { codeSessionMessages } from '@/features/terminal-component-group/hooks/codeSessionMessages';
 
 import {
+  ROOT_AGENT_ID,
   WithAgent,
   a2aTimelineMessage,
   chipMessage,
@@ -43,6 +48,46 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }));
 
+/** The code-agent view of task-1 (read-only: no query box) over the owner's rows. */
+function renderCodeView(messages: Message[]) {
+  renderWithProviders(
+    createElement(
+      WithAgent,
+      { messages },
+      createElement(CodeAgentConversationView, {
+        codeAgent: {
+          taskId: 'task-1',
+          ownerAgentId: ROOT_AGENT_ID,
+          provider: 'codex',
+          title: 'Chart BTC',
+          status: 'COMPLETED',
+        },
+        readOnlyMessage: 'read only',
+      }),
+    ),
+    { roseDesktop: true },
+  );
+  return screen.getByTestId('code-agent-view');
+}
+
+/** Expand every "Worked for …" row of the view; returns their histories. */
+async function expandWork(view: HTMLElement): Promise<HTMLElement[]> {
+  const groups = within(view).getAllByTestId('trajectory-work-group');
+  for (const group of groups) {
+    const toggle = within(group).getAllByRole('button')[0];
+    if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle);
+  }
+  await waitFor(() =>
+    expect(within(view).getAllByTestId('trajectory-work-history')).toHaveLength(groups.length),
+  );
+  return within(view).getAllByTestId('trajectory-work-history');
+}
+
+const a2aRows = (scope: HTMLElement) =>
+  within(scope)
+    .queryAllByTestId('a2a-row')
+    .map((r) => [r.getAttribute('data-a2a-direction'), r.textContent]);
+
 beforeEach(() => {
   resetCodeAgentLocalState();
   fetchSession.mockClear();
@@ -50,7 +95,7 @@ beforeEach(() => {
 });
 
 describe('Rose → code-agent delivery renders once', () => {
-  it('a real rose-agents send session: routing tool, canonical rows and mirror fold into the turn', () => {
+  it('a real rose-agents send session: routing tool, canonical rows and mirror fold into the work', async () => {
     // agentGraphSendService shape: Codex runs `rose-agents send parent …`; the backend
     // writes the canonical agent_message row (plus a replayed mirror with the same
     // a2a.message_id), then Rose's reply arrives as a received row.
@@ -112,42 +157,95 @@ describe('Rose → code-agent delivery renders once', () => {
       mirror,
       reply,
     ];
-    renderWithProviders(
-      createElement(
-        WithAgent,
-        { messages },
-        createElement(CodeSessionMessages, {
-          c: { provider: 'codex', chipState: 'completed', meta: null } as unknown as Parameters<
-            typeof CodeSessionMessages
-          >[0]['c'],
-          taskId: 'task-1',
-          echoes: [],
-        }),
-      ),
-    );
-    const transcript = screen.getByTestId('code-agent-transcript');
-    expect(within(transcript).queryByTestId('agent-exchange-group')).toBeNull();
-    expect(within(transcript).queryByText(/Agents coordinating/)).toBeNull();
+    // The projection: one comms row per [from, to, message_id] (the mirror folds
+    // away), direction from this code agent, and no framed copy of the delivered turn.
+    const projected = codeSessionMessages({
+      messages,
+      taskId: 'task-1',
+      ownerAgentId: ROOT_AGENT_ID,
+      provider: 'codex',
+      sessionState: 'completed',
+      sessionEndedAt: null,
+      echoes: [],
+    });
     expect(
-      within(transcript).getByText('Chart BTC').closest('[data-message-role="USER"]'),
+      projected.flatMap((m) => {
+        const a2a = m.metadata?.a2a as { direction?: string; text?: string } | undefined;
+        return a2a ? [[a2a.direction, a2a.text]] : [];
+      }),
+    ).toEqual([
+      ['sent', 'Chart pushed to main.'],
+      ['received', 'Thanks, close the session.'],
+    ]);
+    expect(projected.some((m) => m.message_id === 'a2a-1-mirror')).toBe(false);
+    expect(projected.filter((m) => m.role === 'USER').map((m) => m.text)).toEqual(['Chart BTC']);
+    const view = renderCodeView(messages);
+    expect(within(view).queryByTestId('agent-exchange-group')).toBeNull();
+    expect(within(view).queryByText(/Agents coordinating/)).toBeNull();
+    // Rose's initial goal is the view's user prompt.
+    expect(
+      within(view).getByText('Chart BTC').closest('[data-message-role="USER"]'),
     ).not.toBeNull();
-    expect(within(transcript).queryByTestId('a2a-row')).toBeNull();
-    // Codex's send folds into turn one; Rose's reply starts turn two (its CLI turn).
-    const [one, two] = within(transcript).getAllByTestId('code-work-slot');
-    fireEvent.click(within(one).getByRole('button', { name: /Worked/ }));
-    fireEvent.click(within(two).getByRole('button', { name: /Work/ }));
-    const row = (slot: HTMLElement) =>
-      within(slot)
-        .getAllByTestId('a2a-row')
-        .map((r) => [r.getAttribute('data-a2a-direction'), r.textContent]);
-    expect(row(one)).toEqual([['sent', 'Codex → RoseChart pushed to main.']]);
-    expect(row(two)).toEqual([['received', 'Rose → CodexThanks, close the session.']]);
+    // Coordination is never top-level: no a2a row until the work is expanded.
+    expect(within(view).queryByTestId('a2a-row')).toBeNull();
+    // The routing tool, Codex's send and Rose's reply (its CLI turn) fold into the
+    // "Worked for …" work, in order; the replayed mirror folds away.
+    const histories = await expandWork(view);
+    const rows = histories.flatMap(a2aRows);
+    expect(rows).toEqual([
+      ['sent', 'Codex → RoseChart pushed to main.'],
+      ['received', 'Rose → CodexThanks, close the session.'],
+    ]);
+    const all = histories.map((h) => h.textContent).join('\n');
+    expect(all).toContain('rose-agents send parent');
+    expect(all.indexOf('rose-agents send parent')).toBeLessThan(all.indexOf('Chart pushed'));
     // One copy only: the framed native record never renders.
     expect(screen.queryByText(/Message from Root agent/)).toBeNull();
     expect(screen.getAllByText('Thanks, close the session.')).toHaveLength(1);
   });
 
-  it('the chip transcript shows a Rose → Codex message once, unframed, and the goal as Rose', () => {
+  it('the view shows a Rose → Codex message once, unframed; the goal is the user prompt, never "You"', async () => {
+    const reply = a2aTimelineMessage('received', 'Thanks, close the session.', 'a2a-2');
+    (reply.metadata as Record<string, unknown>).code_turn_id = 'a2a-77c1';
+    const messages = [
+      chipMessage({ state: 'completed', ended_at: '2026-10-20T12:01:00.000Z' }),
+      eventsMessage([
+        {
+          id: 'goal',
+          seq: 0,
+          type: 'message',
+          role: 'user',
+          sender: 'agent',
+          text: 'Chart BTC',
+          ts: '2026-10-20T12:00:01.000Z',
+        },
+        {
+          id: 'turn:a2a-77c1',
+          seq: 1,
+          type: 'message',
+          role: 'user',
+          sender: 'agent',
+          client_message_id: 'a2a-77c1',
+          text: FRAMED_REPLY,
+          ts: '2026-10-20T12:00:30.000Z',
+        },
+      ]),
+      reply,
+    ];
+    const view = renderCodeView(messages);
+    expect(
+      within(view).getByText('Chart BTC').closest('[data-message-role="USER"]'),
+    ).not.toBeNull();
+    const histories = await expandWork(view);
+    expect(histories.flatMap(a2aRows)).toEqual([
+      ['received', 'Rose → CodexThanks, close the session.'],
+    ]);
+    expect(within(view).queryByText(/Message from Root agent/)).toBeNull();
+    expect(within(view).getAllByText(/Thanks, close the session\./)).toHaveLength(1);
+    expect(view.textContent).not.toMatch(/You → Codex/);
+  });
+
+  it('the root transcript row carries no transcript: neither the goal nor the delivered message', () => {
     const reply = a2aTimelineMessage('received', 'Thanks, close the session.', 'a2a-2');
     (reply.metadata as Record<string, unknown>).code_turn_id = 'a2a-77c1';
     renderChip([
@@ -175,10 +273,9 @@ describe('Rose → code-agent delivery renders once', () => {
       ]),
       reply,
     ]);
-    const transcript = screen.getByTestId('code-agent-transcript');
-    expect(within(transcript).queryByText(/Message from Root agent/)).toBeNull();
-    expect(within(transcript).getAllByText(/Thanks, close the session\./)).toHaveLength(1);
-    expect(within(transcript).queryByText(/You → Codex/)).toBeNull();
-    expect(transcript).toHaveTextContent('Rose → Codex: Chart BTC');
+    const row = screen.getByTestId('code-agent-chip');
+    expect(screen.queryByTestId('code-agent-transcript')).toBeNull();
+    expect(row.textContent).not.toMatch(/Chart BTC|Thanks, close the session|Message from Root/);
+    expect(screen.queryByTestId('a2a-row')).toBeNull();
   });
 });

@@ -14,6 +14,7 @@ import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claud
 import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
 import { markPaused, type CodeSessionRow } from './codeSessions/store';
+import { forgetStartupTurns } from './codeSessions/startupTurns';
 import { resolveMergeFacts, type CodeSessionMergeFacts } from './codeSessions/mergeFacts';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
@@ -180,6 +181,13 @@ export async function closeClaudeCodeSession(
     codeSession !== null &&
     codeSession.state !== 'RETIRED' &&
     (await ownsCodeSessionSandbox(session, codeSession));
+
+  if (ownsSandbox && codeSession?.leaseOwner?.startsWith('tool:') === true) {
+    // The task's startup row (messages queued before it existed) is spent.
+    await forgetStartupTurns(codeSession.leaseOwner).catch((error: unknown) => {
+      log.warn('Dropping the startup message row failed', { taskId, error: String(error) });
+    });
+  }
 
   if (codeSession !== null && session.status === 'CLOSED') {
     // Retried close: the session was already checkpointed and paused.

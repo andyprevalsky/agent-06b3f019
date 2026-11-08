@@ -1,0 +1,57 @@
+{
+ "failures": [
+  {
+   "id": "4b2c5457347d48969f90f918d9cd78b2",
+   "check": "smoke/agent-payment-idempotent-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "agent-payment-idempotent-abandonment timed out: 'Timeout after 904s (task timeout=900s)', agent PAUSED (expected COMPLETED) waiting on an attention/wait_for request that never resumed.",
+   "evidence": "cloud run 71ff9597.../runs/20261107-195305-1001621/agent-payment-idempotent-abandonment (run.json, remote-logs); agent ce9d2ae6-c109-435d-bea4-c5fb1e5c1f1c. Same source ddfe9f288 passed this task in the two earlier smoke campaigns (5be7f288 at 17:29Z and c15d7c8d at ~19:00Z); the PR diff touches only the report-bug blackbox fixture, the test-only fetch-replay cache keying and docs.",
+   "post_merge": {
+    "test": "smoke/agent-payment-idempotent-abandonment",
+    "command": [
+     "/home/boxes/rose/agents/venv/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "AgentCard idempotent abandonment smoke task: agent pauses on an attention/wait_for request and never completes within the 900 s task budget on the cloud fleet; preserve the task, assertions and timeout.",
+    "error": "Timeout after 904s (task timeout=900s) | Investigate: python agents/benchmarks/agent_latency.py ce9d2ae6-c109-435d-bea4-c5fb1e5c1f1c | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: PAUSED (expected COMPLETED)",
+    "source": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "evidence": "PR #1760 deploy smoke campaign 71ff959741b9 run 20261107-195305-1001621 (preserved in the PR #1760 closeout archive); agent ce9d2ae6-c109-435d-bea4-c5fb1e5c1f1c"
+   }
+  },
+  {
+   "id": "d7301f56703745f6ac8b4a2bb0ef9d2b",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "Standing AgentCard sandbox release stall: closed card (balanceCents 0), org transfer consumed with releasedCents=0, purchase HELD, walletFunding RECLAIMING; natively SKIPPED, never PASS; unreleased 4396 cents stay a followup.",
+   "evidence": "smoke result.json evidence row for agent-payment-abandonment (native SKIPPED, receipt sha 7572d2cf0bdd3e38f84716c7820d0fada5ed2cb7877cb7740be3bd022b1baccc)",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "7572d2cf0bdd3e38f84716c7820d0fada5ed2cb7877cb7740be3bd022b1baccc",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_e1a635161cb8d10d7e5adda2\", \"cardId\": \"card_2c1f0580aaa8592ba15bb250\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 68941b50-5a79-403c-8bac-f64415742333 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard (sandbox)",
+    "evidence": "orgTransfer status=consumed releasedCents=0 on a CLOSED zero-balance card; docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md",
+    "confirmed_at": 1794082755.0633914
+   }
+  }
+ ]
+}

@@ -2736,6 +2736,37 @@ class GenericLifecycle(unittest.TestCase):
         self.assertEqual(marker.read_text(), 'done')
 
 
+class SupervisorOrphanSettle(unittest.TestCase):
+    """A suite child that is merely finishing when the suite exits is not an orphan; one that stays alive still is.
+
+    Seen on the PR #1744 deploy: a structural suite passed (exit 0) while one fixture child was still winding down, so
+    the supervisor flagged it, the receipt became UNVERIFIED with a lingering owner and no recovery path remained."""
+
+    SCRIPTS = (ROOT / 'scripts/deploy_test_supervisor.py', ROOT / 'scripts/cloudbench-local-supervisor.py')
+
+    def supervise(self, script, grandchild_seconds):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = Path(tmp) / 'receipt.json'
+            code = ("import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(%s)'],"
+                    "start_new_session=True)" % grandchild_seconds)
+            result = subprocess.run([sys.executable, str(script), '--receipt', str(receipt), '--', sys.executable, '-c', code],
+                                    capture_output=True, text=True, timeout=60)
+            return result.returncode, json.loads(receipt.read_text())
+
+    def test_a_child_that_exits_within_the_settle_window_is_not_orphaned(self):
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                returncode, process = self.supervise(script, 0.4)
+                self.assertEqual((returncode, process['native_exit'], process['orphaned_children'], process['quiescent']),
+                                 (0, 0, False, True))
+                self.assertEqual(process['term_sent'], [])
+
+    def test_a_child_that_outlives_the_suite_is_still_orphaned_and_terminated(self):
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                returncode, process = self.supervise(script, 30)
+                self.assertEqual((returncode, process['orphaned_children'], process['quiescent']), (78, True, True))
+                self.assertEqual(len(process['term_sent']), 1)
 # A benchmarks/local.py stand-in that leads the case's group (run-bench execs it) and
 # keeps draining its runner/stack past the worker's ten-second TERM grace until the
 # test releases it. Its markers are replaced atomically (no torn reads under load).

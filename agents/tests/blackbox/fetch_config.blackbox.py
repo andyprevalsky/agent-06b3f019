@@ -13,12 +13,13 @@ from _test_utils import (
 )
 
 
-def _setup():
+def _setup(**agent_overrides):
     setup_mock({
         "/api/agents/": {
             "status": 200,
             "json": {
                 "agent": {
+                    **agent_overrides,
                     "id": "agent-1",
                     "model": "rose-1-flash",
                     "reasoning_max_tokens": 256,
@@ -66,11 +67,24 @@ async def test_boundary():
     )
 
 
+async def test_project_summary_passes_through():
+    """The agent's project summary reaches the workflow; a Home agent (or older backend) gets None."""
+    project = {"name": "Rose", "repo_url": "https://github.com/Rose-Ai-Labs/rose", "default_branch": "main"}
+    from helpers.fetch_config import fetch_agent_config
+
+    for overrides, expected in (({"project": project}, project), ({"project": None}, None), ({}, None)):
+        _setup(**overrides)
+        with patch("temporalio.activity.heartbeat"):
+            result = await fetch_agent_config("agent-1")
+        assert result["project"] == expected, (overrides, result.get("project"))
+
+
 async def run_all_tests():
     print("fetch-config blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_happy_path)
     await r.record_async("boundary", test_boundary)
+    await r.record_async("project_summary_passes_through", test_project_summary_passes_through)
     teardown_mock()
     return r.all_passed
 
