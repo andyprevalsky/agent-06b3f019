@@ -8567,3 +8567,4 @@
 {"task": "spawn-sub-agents", "duration_seconds": 168.4, "cost_cents": 2.0, "timestamp": "2026-11-08T07:59:19+00:00", "agent_id": "cd3fd79c-4eef-4b20-8ae1-80531d0f2e44"}
 {"task": "background-agent-message-smoke", "duration_seconds": 92.0, "cost_cents": 2.0, "timestamp": "2026-11-08T07:59:19+00:00", "agent_id": "9ec5589e-ca92-4757-8e61-e02617dd6d64"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 132.8, "cost_cents": 2.0, "timestamp": "2026-11-08T07:59:19+00:00", "agent_id": "4927c917-cfc2-4e37-9061-4199f8a807c8"}
+{"task": "browser-doordash-food-plan-grocery-cart-reauth", "duration_seconds": 0.0, "cost_cents": 0.0, "timestamp": "2026-11-08T09:16:46+00:00", "agent_id": "", "backfill_source": "hub:cloud-fleet"}

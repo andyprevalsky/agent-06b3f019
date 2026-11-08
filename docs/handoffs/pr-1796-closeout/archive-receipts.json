@@ -217,6 +217,31 @@
      "plain_bytes": 42515300
     }
    ]
+  },
+  "extra": {
+   "name": "extra",
+   "format": "PR1796-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1796-dd330764/extra.tar.gz.aesgcm",
+   "frame_bytes": 67108864,
+   "base": "/",
+   "paths": [
+    "var/tmp/agc401/benchwt/.context",
+    "var/tmp/agc401/solo-bench.log"
+   ],
+   "gzip_sha256": "47fc5c9709801ca9972a1b7fae9c8c124f3d8f49c9ed0c2a1b0e8cfb61c7936e",
+   "gzip_bytes": 47071967,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/extra.tar.gz.aesgcm.part0000",
+     "sha256": "bf03e587c04d81a2ab4c08722f376d84f3caabe6f77fa4ade7920c9c178c7600",
+     "plain_bytes": 47071967
+    }
+   ]
   }
  }
 }
