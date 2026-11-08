@@ -26,6 +26,7 @@ Usage:
   scripts/select_affected_tests.py --base A --head B     # a commit range
   scripts/select_affected_tests.py --changed-file path   # explicit list
   scripts/select_affected_tests.py --check               # mapping self-check
+  scripts/select_affected_tests.py --stability           # new/changed tests: 5 consecutive runs under CPU load
   ... --format json|report|lane:<name>
 """
 
@@ -34,11 +35,15 @@ from __future__ import annotations
 import argparse
 import ast
 import fnmatch
+import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -999,6 +1004,190 @@ class Selector:
         return missing
 
 
+# ------------------------------------------------------ new-test stability ---
+# CLAUDE.md: "New tests must pass five consecutive runs with unchanged test code
+# before being finalized." An idle devbox hides load-sensitive flakes (CPU steal,
+# delayed /proc readability, background Git maintenance on Blacksmith runners),
+# so every run executes while this process holds nproc busy CPU workers that it
+# starts and reaps by their exact PIDs. The digest of every unit root must be
+# identical before and after the runs; any change makes the result UNVERIFIED.
+
+STABILITY_RUNS = 5
+STABILITY_RUN_TIMEOUT_SECONDS = 1200
+STABILITY_LOAD_LOOP = (
+    "import os, sys\n"
+    "parent = int(sys.argv[1])\n"
+    "while os.getppid() == parent:\n"
+    "    pass\n"
+)
+# Lanes whose units the check can run with their owning runner. Backend lanes need
+# the isolated blackbox runner/database (direct unit runs default to the PROD DB);
+# mac-app needs Darwin. Those units are reported UNSUPPORTED, never PASS.
+STABILITY_LANES = ("deploy-structural-gates", "cloudbench-controller", "agents-pytest", "agents-blackbox",
+                   "frontend-vitest")
+
+
+def new_test_units(changed: list[str], lanes: dict[str, Lane] | None = None) -> list[Unit]:
+    """Units whose own test files were added or changed (deleted files excluded)."""
+    lanes = lanes if lanes is not None else discover_lanes()
+    tests = {path for path in changed if is_test_file(path) and (ROOT / path).is_file()}
+    units = []
+    for lane in lanes.values():
+        for unit in lane.units:
+            if tests & set(unit.roots):
+                units.append(unit)
+    return units
+
+
+def stability_command(unit: Unit) -> tuple[list[str], Path] | None:
+    python = ROOT / "agents" / "venv" / "bin" / "python"
+    agents_python = str(python) if python.exists() else sys.executable
+    if unit.lane == "deploy-structural-gates":
+        for name, args in _structural_gates():
+            if name == unit.name and args:
+                return list(args), ROOT
+        return None
+    if unit.lane == "cloudbench-controller":
+        return unit.name.split(), ROOT
+    if unit.lane == "agents-pytest":
+        return [agents_python, "-m", "pytest", "-q", str(PurePosixPath(unit.name).relative_to("agents"))], ROOT / "agents"
+    if unit.lane == "agents-blackbox":
+        return [agents_python, "scripts/run_blackbox_tests.py", unit.name], ROOT / "agents"
+    if unit.lane == "frontend-vitest":
+        return ["npx", "vitest", "run", str(PurePosixPath(unit.name).relative_to("front-end"))], ROOT / "front-end"
+    return None
+
+
+def _roots_digest(units: list[Unit]) -> str:
+    digest = hashlib.sha256()
+    for root in sorted({r for unit in units for r in unit.roots}):
+        digest.update(root.encode() + b"\0")
+        try:
+            digest.update((ROOT / root).read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+class CpuLoad:
+    """Busy CPU workers owned by exact PID: started on enter, reaped on exit.
+
+    stress-ng (bounded by --timeout) is used when installed; otherwise Python
+    busy loops that also exit by themselves if this process dies.
+    """
+
+    def __init__(self, workers: int, bound_seconds: int) -> None:
+        self.workers = workers
+        self.bound_seconds = bound_seconds
+        self.procs: list[subprocess.Popen] = []
+        self.tool = ""
+
+    def __enter__(self) -> "CpuLoad":
+        if self.workers <= 0:
+            return self
+        quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        stress = shutil.which("stress-ng")
+        try:
+            if stress:
+                self.tool = "stress-ng"
+                self.procs.append(subprocess.Popen(
+                    [stress, "--cpu", str(self.workers), "--timeout", f"{self.bound_seconds}s", "--quiet"], **quiet))
+            else:
+                self.tool = "python-busy-loop"
+                for _ in range(self.workers):
+                    self.procs.append(subprocess.Popen(
+                        [sys.executable, "-c", STABILITY_LOAD_LOOP, str(os.getpid())], **quiet))
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    @property
+    def pids(self) -> list[int]:
+        return [proc.pid for proc in self.procs]
+
+    def alive(self) -> bool:
+        return self.workers <= 0 or (bool(self.procs) and all(proc.poll() is None for proc in self.procs))
+
+    def __exit__(self, *_exc: object) -> None:
+        for proc in self.procs:
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in self.procs:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+def _run_once(command: list[str], cwd: Path, log: Path, timeout: float) -> tuple[int | None, float]:
+    started = time.monotonic()
+    with log.open("wb") as handle:
+        proc = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=handle,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code: int | None = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            code = None
+        finally:
+            # The run owns exactly its own session; reap any descendants left behind.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait()
+    return code, round(time.monotonic() - started, 2)
+
+
+def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: int | None = None,
+                  timeout: float = STABILITY_RUN_TIMEOUT_SECONDS, log_root: Path | None = None) -> dict:
+    if runs < STABILITY_RUNS:
+        raise ValueError(f"the new-test rule requires at least {STABILITY_RUNS} consecutive runs")
+    workers = (os.cpu_count() or 1) if load_workers is None else load_workers
+    log_root = log_root or ROOT / ".context" / "new-test-stability" / time.strftime("%Y%m%dT%H%M%S")
+    log_root.mkdir(parents=True, exist_ok=True)
+    before = _roots_digest(units)
+    results: dict[str, dict] = {}
+    runnable = []
+    for unit in units:
+        key = f"{unit.lane}:{unit.name}"
+        planned = stability_command(unit) if unit.lane in STABILITY_LANES else None
+        if planned is None:
+            results[key] = {"status": "UNSUPPORTED", "reason": f"lane {unit.lane} has no stability runner here"}
+        else:
+            runnable.append((key, *planned))
+    bound = int(timeout * runs * max(1, len(runnable)) + 60)
+    with CpuLoad(workers, bound) as load:
+        for index, (key, command, cwd) in enumerate(runnable):
+            attempts = []
+            status = "PASS"
+            for run in range(1, runs + 1):
+                log = log_root / f"{index:03d}-run{run}.log"
+                code, seconds = _run_once(command, cwd, log, timeout)
+                loaded = load.alive()
+                attempts.append({"run": run, "exit": code, "seconds": seconds, "log": str(log), "loaded": loaded})
+                if not loaded:
+                    status = "UNVERIFIED"
+                    break
+                if code != 0:
+                    status = "FAIL"
+                    break
+            results[key] = {"status": status, "command": command, "cwd": str(cwd), "attempts": attempts,
+                            "consecutive_passes": sum(1 for a in attempts if a["exit"] == 0)}
+        load_record = {"workers": workers, "tool": load.tool, "pids": load.pids}
+    after = _roots_digest(units)
+    if before != after:
+        for row in results.values():
+            if row["status"] == "PASS":
+                row.update(status="UNVERIFIED", reason="test code changed during the stability runs")
+    statuses = {row["status"] for row in results.values()}
+    overall = "FAIL" if "FAIL" in statuses else ("UNVERIFIED" if statuses - {"PASS"} else "PASS")
+    return {"status": overall, "runs": runs, "load": load_record, "digest_before": before,
+            "digest_after": after, "units": results, "logs": str(log_root)}
+
+
 # ------------------------------------------------------------------- cli ---
 
 def changed_files(base: str | None, head: str | None) -> list[str]:
@@ -1050,7 +1239,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", default="report")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--rev", help="map the tree of this revision instead of the worktree (history replay)")
+    parser.add_argument("--stability", action="store_true",
+                        help="run every added/changed test unit --stability-runs consecutive times under CPU load")
+    parser.add_argument("--stability-runs", type=int, default=STABILITY_RUNS)
+    parser.add_argument("--load-workers", type=int, help="busy CPU workers during the runs (default: nproc)")
+    parser.add_argument("--stability-timeout", type=float, default=STABILITY_RUN_TIMEOUT_SECONDS,
+                        help="per-run seconds (the suite's own deadline still applies inside)")
     args = parser.parse_args(argv)
+    if args.stability:
+        if args.stability_runs < STABILITY_RUNS:
+            parser.error(f"--stability-runs must be at least {STABILITY_RUNS}")
+        if args.load_workers is not None and args.load_workers < 1:
+            parser.error("--load-workers must be positive; the check always runs under load")
+        changed = list(args.changed_file)
+        if args.changed_files_from:
+            changed += [line.strip() for line in Path(args.changed_files_from).read_text().splitlines() if line.strip()]
+        if not changed:
+            changed = changed_files(args.base, args.head)
+        units = new_test_units(changed)
+        if not units:
+            print("new-test stability: no added or changed test units")
+            return 0
+        report = run_stability(units, args.stability_runs, args.load_workers, args.stability_timeout)
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            load = report["load"]
+            print(f"new-test stability: {report['status']} ({report['runs']} consecutive runs, "
+                  f"{load['workers']} {load['tool']} load workers, logs {report['logs']})")
+            for key, row in report["units"].items():
+                passes = row.get("consecutive_passes", 0)
+                print(f"  {row['status']:11s} {key} {passes}/{report['runs']} {row.get('reason', '')}".rstrip())
+        return {"PASS": 0, "FAIL": 1}.get(report["status"], 2)
     if args.rev:
         global SRC
         SRC = Source(args.rev)

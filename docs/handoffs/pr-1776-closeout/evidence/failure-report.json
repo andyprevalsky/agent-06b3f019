@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "8c761cea56ad4e20bc0fbfe9f5650068",
+   "check": "smoke/agent-payment-abandonment",
+   "source": {
+    "head": "002e9277d86f636c0bca582f305f354de8bc617b",
+    "digest": "c2f3ebfa63763ba677dc1d13dfbcacd48b9667efc041dec63b68e8a153709db7"
+   },
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "AgentCard sandbox abandonment lifecycle: card CLOSED with balanceCents=0, org transfer owt_866fb49949f77a36490032bf consumed with releasedCents=0, purchase HELD, walletFunding RECLAIMING -- the exact standing AgentCard release stall (docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md). Natively SKIPPED, never PASS; this PR only changes the deploy-tooling /proc scanner and its test.",
+   "evidence": "/home/boxes/rose/.context/deploy-cloud/619ada95eebcc5ec0eee9caf674e28b2df1f07f810771e4d36990a114b4fa250/runs/20261108-005753-1060579/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "receipt_sha256": "a3b7b7a23497907a49ba9184a580221c50404050f2d4b3571b886491e125b16a",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_866fb49949f77a36490032bf\", \"cardId\": \"card_3f7dbde9570e8175f0bf58f8\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 374661b0-1227-4db5-8c64-5f0e0c7ab944 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "evidence": "/home/boxes/rose/.context/deploy-cloud/619ada95eebcc5ec0eee9caf674e28b2df1f07f810771e4d36990a114b4fa250/runs/20261108-005753-1060579/agent-payment-abandonment/cloudbench-run.json (agent 374661b0-1227-4db5-8c64-5f0e0c7ab944): agentcard_release_stall_lifecycle card CLOSED balance 0, orgTransfer consumed releasedCents=0, purchase HELD, walletFunding RECLAIMING",
+    "confirmed_at": 1794101401.8218627
+   }
+  }
+ ]
+}

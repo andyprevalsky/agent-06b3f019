@@ -1,12 +1,11 @@
 import { createLogger } from '../../providers/logger';
 import {
-  githubApiTokenCandidates,
   LINEAR_ANDY_NAMES,
   LINEAR_API_KEY,
   LINEAR_GRAPHQL_URL,
   LINEAR_TAMARA_NAMES,
 } from './config';
-import { type DatedValue, fetchGithubItems } from './githubCommits';
+import { type DatedValue, fetchGithubItems, githubApiTokenCandidates } from './githubCommits';
 import { findPeriodIndex } from './time';
 import type {
   AdminHealthPeriod,

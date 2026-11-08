@@ -188,6 +188,95 @@ def check_extraction_precision(selector: sat.Selector) -> None:
                   f"edges.json: {sample} still selects the {len(expected)} unit(s) reading {target}")
 
 
+def check_new_test_stability() -> None:
+    """The five-consecutive-run rule for new tests: every run under owned CPU load."""
+    import os
+    import tempfile
+    import time
+
+    with tempfile.TemporaryDirectory(prefix="new-test-stability-") as tmp:
+        work = Path(tmp)
+        lanes = {"deploy-structural-gates": sat.Lane("deploy-structural-gates", [
+            sat.Unit("deploy-structural-gates", "fixture", ["scripts/tests/fixture.test.py", "scripts/helper.py"])])}
+        real = work / "real.test.py"
+        real.write_text("x")
+        original_root = sat.ROOT
+        sat.ROOT = work
+        try:
+            (work / "scripts/tests").mkdir(parents=True)
+            (work / "scripts/tests/fixture.test.py").write_text("x")
+            picked = sat.new_test_units(["scripts/tests/fixture.test.py"], lanes)
+            check([u.name for u in picked] == ["fixture"], "stability: a changed test file selects its own unit")
+            check(sat.new_test_units(["scripts/helper.py"], lanes) == [],
+                  "stability: a changed non-test root is not a new test")
+            check(sat.new_test_units(["scripts/tests/deleted.test.py"], lanes) == [],
+                  "stability: a deleted test file selects nothing")
+        finally:
+            sat.ROOT = original_root
+
+        def unit(script: Path, *args: str) -> "sat.Unit":
+            return sat.Unit("cloudbench-controller", " ".join([sys.executable, str(script), *args]), [str(script)])
+
+        observe = work / "observe.py"
+        observe.write_text(
+            "import subprocess, sys\n"
+            "rows = subprocess.run(['ps', '-eo', 'ppid=,args='], capture_output=True, text=True).stdout\n"
+            "n = sum(1 for r in rows.splitlines() if r.split(None, 1)[0] == sys.argv[1] and 'os.getppid() == parent' in r)\n"
+            "open(sys.argv[2], 'a').write(f'{n}\\n')\n"
+        )
+        seen = work / "seen.txt"
+        report = sat.run_stability([unit(observe, str(os.getpid()), str(seen))], load_workers=3, timeout=60,
+                                   log_root=work / "logs-pass")
+        counts = seen.read_text().split()
+        check(report["status"] == "PASS" and counts == ["3"] * 5,
+              f"stability: five consecutive passes, each with exactly 3 owned load workers running ({counts})")
+        time.sleep(0.2)
+        leaked = []
+        for pid in report["load"]["pids"]:
+            try:
+                os.kill(pid, 0)
+                leaked.append(pid)
+            except ProcessLookupError:
+                pass
+        check(len(report["load"]["pids"]) == 3 and not leaked, f"stability: every load worker reaped by exact PID ({leaked})")
+
+        flaky = work / "flaky.py"
+        flaky.write_text("import sys\nfrom pathlib import Path\np = Path(sys.argv[1])\nn = int(p.read_text() or 0) + 1 "
+                         "if p.exists() else 1\np.write_text(str(n))\nsys.exit(1 if n == 3 else 0)\n")
+        report = sat.run_stability([unit(flaky, str(work / "count"))], load_workers=1, timeout=60,
+                                   log_root=work / "logs-flaky")
+        row = next(iter(report["units"].values()))
+        check(report["status"] == "FAIL" and row["consecutive_passes"] == 2 and len(row["attempts"]) == 3,
+              "stability: a third-run failure fails the check and stops the streak")
+
+        mutate = work / "mutate.py"
+        mutate.write_text("import sys\nopen(sys.argv[0], 'a').write('\\n')\n")
+        report = sat.run_stability([unit(mutate)], load_workers=1, timeout=60, log_root=work / "logs-mutate")
+        check(report["status"] == "UNVERIFIED", "stability: test code changed during the runs is UNVERIFIED, not PASS")
+
+        hang = work / "hang.py"
+        hang.write_text("import time\ntime.sleep(60)\n")
+        report = sat.run_stability([unit(hang)], load_workers=1, timeout=1, log_root=work / "logs-hang")
+        row = next(iter(report["units"].values()))
+        check(report["status"] == "FAIL" and row["attempts"][0]["exit"] is None, "stability: a timed-out run fails")
+
+        report = sat.run_stability([sat.Unit("backend-unit", "x.test.ts", [str(real)])], load_workers=1,
+                                   log_root=work / "logs-unsupported")
+        check(report["status"] == "UNVERIFIED" and next(iter(report["units"].values()))["status"] == "UNSUPPORTED",
+              "stability: a lane without a runner is UNSUPPORTED, never PASS")
+
+        with sat.CpuLoad(1, 60) as load:
+            alive = load.alive()
+            load.procs[0].terminate()
+            load.procs[0].wait()
+            check(alive and not load.alive(), "stability: a dead load worker means the run was not under load")
+        try:
+            sat.run_stability([], runs=4, load_workers=1, log_root=work / "logs-short")
+            check(False, "stability: fewer than five runs is refused")
+        except ValueError:
+            check(True, "stability: fewer than five runs is refused")
+
+
 def main() -> int:
     check_coverage_map_dependency_preflight()
     selector = sat.Selector()
@@ -249,6 +338,7 @@ def main() -> int:
     check(sel.all_lanes, "changing the selector itself runs everything")
 
     check_extraction_precision(selector)
+    check_new_test_stability()
 
     print(f"select-affected-tests: {len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0

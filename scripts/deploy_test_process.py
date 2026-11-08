@@ -23,8 +23,23 @@ def scan_same_user_processes(inspect, refuse, grace=2.0):
     keeps our real uid). Re-observe it for up to `grace` seconds: skip it only once it exits or its
     real or effective uid is another user's (a sudo that keeps our real uid but runs as root is
     skipped exactly as the first look skips it); one that stays unreadable under our own credentials
-    goes to refuse(pid), never assumed quiet.
+    goes to refuse(pid), never assumed quiet. The one exception is positive evidence: this uid's own
+    systemd service manager (`systemd --user` and its `(sd-pam)` helper) runs in
+    user@<uid>.service/init.scope with our uid but is permanently unreadable (non-dumpable), so a
+    process the kernel places in that scope, when the scanner itself is not there, is not a worker's.
     """
+    def systemd_cgroups(path):
+        # "<id>:<controllers>:<path>" per hierarchy; the unified (v2) and name=systemd (v1) ones carry units.
+        rows = (row.split(':', 2) for row in Path(path).read_text().splitlines())
+        return {row[2] for row in rows if len(row) == 3 and row[1] in ('', 'name=systemd')}
+    own_cgroups = systemd_cgroups('/proc/self/cgroup')
+    manager_scope = f'/user@{os.getuid()}.service/init.scope'
+
+    def service_manager(process):
+        # /proc/<pid>/cgroup stays readable when cwd/fd are not.
+        units = systemd_cgroups(process / 'cgroup')
+        return bool(units) and not units & own_cgroups and all(unit.endswith(manager_scope) for unit in units)
+
     def foreign(process):
         for line in (process / 'status').read_text().splitlines():
             if line.startswith('Uid:'):
@@ -47,7 +62,7 @@ def scan_same_user_processes(inspect, refuse, grace=2.0):
             except PermissionError:
                 unreadable = True
                 try:
-                    if foreign(process):
+                    if foreign(process) or service_manager(process):
                         break
                 except (FileNotFoundError, ProcessLookupError):
                     break

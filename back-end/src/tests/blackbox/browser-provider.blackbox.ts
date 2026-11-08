@@ -59,6 +59,8 @@ import {
 } from '../../providers/browser/browserUse';
 
 const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
+// Real-internet Kernel/Steel/Tilion cases: deploy live-probe stage browser-provider-live only.
+const LIVE_PROVIDERS = process.env.BROWSER_PROVIDER_LIVE === '1';
 const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
@@ -586,26 +588,25 @@ async function main(): Promise<void> {
   if (browserUseFlagBeforeContractTests === undefined)
     delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
   else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = browserUseFlagBeforeContractTests;
-  if (process.env.TEST_BASE_URL && gateOverridden(KERNEL_RESIDENTIAL_LIVE_OVERRIDE)) {
+  if (LIVE_PROVIDERS && !process.env.TEST_BASE_URL) {
+    failed++;
+    console.error('FAIL live provider cases: BROWSER_PROVIDER_LIVE=1 requires TEST_BASE_URL');
+  } else if (LIVE_PROVIDERS && gateOverridden(KERNEL_RESIDENTIAL_LIVE_OVERRIDE)) {
     logOverriddenLiveCase(
       'live Kernel provider parity',
       KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
       'Kernel residential proxy unavailable'
     );
-  } else {
-    const parity = await runSteelAwareParity(
-      runLiveProviderParity,
-      Boolean(process.env.TEST_BASE_URL)
-    );
+  } else if (LIVE_PROVIDERS) {
+    const parity = await runSteelAwareParity(runLiveProviderParity, true);
     failed += parity.failed;
     steelPersistenceSkipped = parity.skipped;
-  }
-
-  failed += await runLiveCrossProviderCases();
+  } else console.log('Live provider cases run in the browser-provider-live deploy probe.');
+  if (LIVE_PROVIDERS) failed += await runLiveCrossProviderCases();
 
   if (failed > 0) process.exit(1);
   console.log(
-    `\nPassed ${tests.length + (process.env.TEST_BASE_URL && !steelPersistenceSkipped ? 1 : 0)} browser provider test(s).${steelPersistenceSkipped ? ' Steel profile-persistence live operation SKIPPED; parity is incomplete.' : ''}`
+    `\nPassed ${tests.length + (LIVE_PROVIDERS && !steelPersistenceSkipped ? 1 : 0)} browser provider test(s).${steelPersistenceSkipped ? ' Steel profile-persistence live operation SKIPPED; parity is incomplete.' : ''}`
   );
 }
 

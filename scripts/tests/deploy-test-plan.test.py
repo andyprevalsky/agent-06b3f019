@@ -1166,5 +1166,42 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
+    def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):
+        # The Blacksmith failure (SHA 7b243b4ec, InterruptedCardRecovery / StructuralSupervisorCleanup): the
+        # runner's `systemd --user` and `(sd-pam)` share our uid but are permanently non-dumpable, so cwd/fd
+        # answer EACCES for the whole grace window. The kernel places exactly those two processes in
+        # user@<uid>.service/init.scope. A real sealed child is the fixture; only its cgroup row is pinned.
+        scope = f'/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service/init.scope'
+        real_read_text = Path.read_text
+
+        def scan_in(child, cgroup, own=None):
+            def read_text(path, *args, **kwargs):
+                if str(path) == f'/proc/{child.pid}/cgroup':
+                    return cgroup
+                if own is not None and str(path) == '/proc/self/cgroup':
+                    return own
+                return real_read_text(path, *args, **kwargs)
+            self.sleeps.clear()
+            with patch.object(Path, 'read_text', read_text):
+                self.scan()
+
+        manager = self.child('sealed')
+        scan_in(manager, f'0::{scope}\n')
+        self.assertFalse(self.sleeps, 'the service manager is skipped on evidence, not after the grace window')
+        scan_in(manager, f'12:name=systemd:{scope}\n3:cpu,cpuacct:/\n')  # cgroup v1 hybrid
+        for name, cgroup, own in (
+                ('another uid manager', f'0::/user.slice/user-0.slice/user@{os.getuid() + 1}.service/init.scope\n', None),
+                ('a user unit, not the manager', f'0::{scope[:-len("init.scope")]}app.slice/run-u1.service\n', None),
+                ('scanner shares the scope', f'0::{scope}\n', f'0::{scope}\n'),
+                ('no systemd hierarchy', '3:cpu,cpuacct:/\n', None)):
+            # When the scanner shares the scope, a real manager on this host is refused first, as it must be.
+            named = r'process \d+ is' if own else r'process %d is' % manager.pid
+            with self.subTest(name), self.assertRaisesRegex(ValueError, named + ' unverifiable'):
+                scan_in(manager, cgroup, own)
+        self.reap(manager)
+        worker = self.child('open', cwd=self.namespace)  # readable: inspected exactly as before, never skipped
+        with self.assertRaisesRegex(ValueError, 'live consumer'):
+            scan_in(worker, f'0::{scope}\n')
+
 
 if __name__=='__main__':unittest.main()
