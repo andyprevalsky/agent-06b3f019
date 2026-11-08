@@ -477,6 +477,27 @@ class Launcher(unittest.TestCase):
             self.assertEqual(result['evidence']['c']['remote_log'], gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log')
             self.assertEqual(result['evidence']['d']['log'], '/etc/passwd')
 
+    def test_capped_bundle_keeps_server_logs_before_bulk_coverage_json(self):
+        # The PR #1762 shard-2 artifact dropped its 10 MB server log: 3,000 raw V8
+        # and replay-cache JSON files, each smaller, had filled the 400 MB budget first.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            coverage = root / 'back-end/coverage'
+            coverage.mkdir(parents=True)
+            (coverage / 'server-shard2.log').write_bytes(b'l' * 1000)
+            raw = root / '.context/test-runs/backend-coverage-failed-x/raw-v8'
+            raw.mkdir(parents=True)
+            for index in range(10):
+                (raw / f'coverage-{index}.json').write_bytes(b'j' * 300)
+            out.mkdir()
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'BUNDLE_TOTAL_BYTES', 2000), \
+                    patch.object(gh, 'publish_done'):
+                gh.remote_bundle(type('Args', (), {'out': out})())
+            self.assertTrue((out / 'artifact/files/back-end/coverage/server-shard2.log').is_file())
+            skipped = {row['path'] for row in json.loads((out / 'artifact/bundle.json').read_text())['skipped']}
+            self.assertNotIn('back-end/coverage/server-shard2.log', skipped)
+            self.assertEqual(len(skipped), 7)  # 1000 B of log, then three 300 B JSON files fit
+
     def test_run_lookup_matches_the_tag_and_reports_a_rejected_workflow(self):
         head, name = 'd' * 40, 'deploy-gates/4vcpu/g-1'
 
@@ -581,6 +602,72 @@ class ResultChannel(unittest.TestCase):
                 patch.object(gh.STOP, 'wait'):
             self.assertEqual(gh.watch_channel(NoGitHub(), silent, 'h', name, gh.time.time() + 60, 0)['kind'],
                              'never-started')
+
+
+    def test_vm_streams_only_complete_progress_rows_and_survives_upload_errors(self):
+        channel, name = self.channel(), 'deploy-gates/4vcpu/g-1'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'progress.jsonl'
+            gh.progress.report('t1', 'FAIL', path=path)
+            with path.open('ab') as stream:
+                stream.write(b'{"v":1,"partial')
+            streamer = gh.ProgressStreamer(channel, name, path)
+            streamer.flush()
+            self.assertEqual(1, len(gh.progress.parse(channel.get(name, 'progress.jsonl'))))
+            self.assertTrue(channel.get(name, 'progress.jsonl').endswith(b'\n'))
+            broken = gh.ProgressStreamer(type('Broken', (), {'put': lambda *a: 1 / 0})(), name, path)
+            with redirect_stdout(io.StringIO()) as out:
+                broken.flush()
+                broken.flush()
+            self.assertEqual(1, out.getvalue().count('DEPLOY_GATE_PROGRESS upload failed'))
+
+    def test_coordinator_mirrors_each_new_progress_row_once_before_the_result(self):
+        channel, name = self.channel(), 'deploy-gates/4vcpu/g-1'
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / 'progress.jsonl'
+            mirror = gh.ProgressMirror(str(local))
+            row = (json.dumps(gh.progress.row('t1', 'FAIL')) + '\n').encode()
+            channel.put(name, 'progress.jsonl', row + b'{"v":1')
+            self.assertEqual(len(row), mirror.pull(channel, name))
+            self.assertEqual(0, mirror.pull(channel, name))  # nothing new; a partial line waits
+            second = (json.dumps(gh.progress.row('t2', 'FAIL')) + '\n').encode()
+            channel.put(name, 'progress.jsonl', row + second)
+            mirror.pull(channel, name)
+            self.assertEqual(['t1', 't2'], [r['unit'] for r in gh.progress.read_new(local)[0]])
+            self.assertEqual(0, gh.ProgressMirror(None).pull(channel, name))
+
+            final = gh.ProgressMirror(str(Path(tmp) / 'final.jsonl'))
+            channel.put(name, 'started.json', json.dumps({'run_id': 5, 'url': 'u'}).encode())
+            channel.put(name, 'done.json', json.dumps({'run_id': 5, 'objects': {}, 'at': 1}).encode())
+            with redirect_stdout(io.StringIO()):
+                gh.watch_channel(None, channel, 'h', name, gh.time.time() + 60, 0, final)
+            self.assertEqual(['t1', 't2'], [r['unit'] for r in gh.progress.read_new(final.path)[0]])
+
+    def test_remote_run_streams_a_failing_test_while_the_worker_is_still_running(self):
+        channel, name = self.channel(), 'deploy-gates/4vcpu/g-1'
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / 'timing.json').write_text('{}')
+            (out / 'worker_script').write_text('deploy_test_worker.py')
+            (out / 'request.json').write_text(json.dumps({'token': 't'}))
+            seen_while_running = []
+
+            def fake_run(argv, **kwargs):
+                if argv[0] == 'bash':
+                    return subprocess.CompletedProcess(argv, 0)
+                gh.progress.report('t1', 'FAIL', path=kwargs['env'][gh.progress.ENV])
+                deadline = gh.time.time() + 5
+                while channel.get(name, 'progress.jsonl') is None and gh.time.time() < deadline:
+                    gh.time.sleep(0.02)
+                seen_while_running.append(channel.get(name, 'progress.jsonl') is not None)
+                return subprocess.CompletedProcess(argv, 1)
+
+            with patch.dict(os.environ, {'GITHUB_REF_NAME': name}), patch.object(gh, 'Channel', return_value=channel), \
+                    patch.object(gh, 'env_file_values', return_value={}), patch.object(gh, 'STREAM_SECONDS', 0.02), \
+                    patch.object(gh.subprocess, 'run', side_effect=fake_run), redirect_stdout(io.StringIO()):
+                self.assertEqual(0, gh.remote_run(type('Args', (), {'out': out})()))
+            self.assertEqual([True], seen_while_running)
+            self.assertEqual(1, json.loads((out / 'timing.json').read_text())['worker_exit'])
 
 
 class TagPush(unittest.TestCase):

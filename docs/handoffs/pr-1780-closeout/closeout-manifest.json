@@ -1,0 +1,302 @@
+{
+ "archives": {
+  "cloud": "devbox-closeout-private/pr1780-a252579c/20261108-cloud.tar.gz.aesgcm",
+  "core": "devbox-closeout-private/pr1780-a252579c/20261108-core.tar.gz.aesgcm"
+ },
+ "assignment": {
+  "fix": "disable_auto_maintenance(): maintenance.auto=false, gc.auto=0 in every fixture repository config after git init",
+  "originating": {
+   "devbox": "aa460e55-b828-4b5f-b63d-4d582a3e308b",
+   "failed_source": "6e347fb7f9aa64c98e2c5257de93903da8b7db6e",
+   "merge": "cdb8ce580a3e66dd27fed4558094b3bd7befc797",
+   "pr": 1760
+  },
+  "proof": {
+   "deploy_command_structural_blacksmith": "PASS (original600-portable-operator suite PASS) attempt 2/initial on bad9cf510a17",
+   "natural_repro_git_2_55": "old fixture 2/25 fail, fixed 25/25 pass",
+   "regression": "trace2 no maintenance child: fails old (git 2.43, 2.55), passes fixed",
+   "suite_5x_final_code_git_2_55": "5/5 OK (226,280,179,216,192 s)",
+   "widened_window_repro": "old 4/5 fail with gate leftover set, fixed 10/10 pass"
+  },
+  "rca_case": "docs/rca/cases/2026-11-07-sharded-routing-fixture-cleanup-enotempty-git.md",
+  "repair_devbox": "d0298795-b355-425c-a129-067332652c5c",
+  "repair_thread": "https://boxes.dev/thread/thr_6298dce767764c43b8344c82c23dd467",
+  "root_cause": "Git >=2.47 detached auto-maintenance (geometric repack, 2+ loose objects in .git/objects/17) started by the fixture commit outlived the waited command and recreated .git/objects/info/packs during shutil.rmtree",
+  "test": "scripts/tests/original600-portable-operator.test.py RunBenchShardedRouting.test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once"
+ },
+ "deletion_readiness": {
+  "evidence": "ppid 4173640 = /home/boxes/.devbox/daemon/bundle/sprite-daemon.mjs (boxes.dev daemon); started 2026-11-08T00:43:22Z at devbox boot; the only thread on devbox d0298795 is this Claude thread ph7en6ghgt50j82tf2hz08akgd8hv6mb, so no Codex session uses it; platform infrastructure, not signalled",
+  "open": 1,
+  "open_item": "live process 4177674: /opt/devbox-tools/codex/.../codex app-server, cwd /home/boxes/rose",
+  "owned_cleanup": "complete: all deploy lanes, monitors and services owned by this thread ended; local-only branch and stash archived in core; every ignored path has a disposition",
+  "receipt": "docs/handoffs/pr-1780-closeout/deletion-readiness.json",
+  "status": "NOT_READY"
+ },
+ "followups": [
+  "AgentCard sandbox release stall: card_6b5c4eb9c6b6b0528efe33ff closed, org transfer owt_776cb83d5cc4af7a253ba97e consumed, 4396 cents transferred, 0 released (agent 40c3f460-71c2-4eb5-b162-db63f24a191c)",
+  "deploy tooling: deploy_test_local_cleanup has no reconcile proof for a fully reaped timed-out quick gate (lingering_group) -> forced a fresh gate cycle",
+  "deploy tooling: deletion-check counted the daemon idle Codex app-server as live work; fixed by PR #1792 (cee8855e67), RCA 2026-11-08-deletion-check-counted-daemon-idle-codex-app-server"
+ ],
+ "format": "PR-CLOSEOUT-V1",
+ "gate_cycles": {
+  "cycle1": ".context/deploy-pipeline.cycle1-quick-timeout-20261108T0145Z: backend-structural quick timeout (120.8 s, owner CPU load); alone 55.8 s PASS; triage INTRODUCED+focus accepted but run refused: no reconcile proof kind for a timed-out quick gate -> fresh cycle on same source",
+  "cycle2": "all 14 gates; smoke agent-payment-abandonment native SKIPPED (AgentCard release stall) triaged resource_skip agentcard_release_stall -> DEPLOY_GATES PASS gates=14 resource_warnings=1"
+ },
+ "gates": {
+  "agents-coverage-blackbox": {
+   "attempt": "2/initial",
+   "cases": {
+    "agents-coverage-blackbox": "PASS"
+   },
+   "seconds": 695.5,
+   "status": "PASS"
+  },
+  "backend-structural": {
+   "attempt": "1/quick",
+   "cases": {
+    "backend-structural": "PASS"
+   },
+   "seconds": 57.6,
+   "status": "PASS"
+  },
+  "canonical-seed-whatsapp-content": {
+   "attempt": "2/initial",
+   "cases": {
+    "canonical-seed-whatsapp-content": "PASS"
+   },
+   "seconds": 133.9,
+   "status": "PASS"
+  },
+  "cloudbench-controller": {
+   "attempt": "2/initial",
+   "cases": {
+    "cloudbench-controller": "PASS"
+   },
+   "seconds": 1331.0,
+   "status": "PASS"
+  },
+  "deploy-command-structural": {
+   "attempt": "2/initial",
+   "cases": {
+    "deploy-command-structural": "PASS"
+   },
+   "seconds": 572.4,
+   "status": "PASS"
+  },
+  "e2b-smoke": {
+   "attempt": "2/initial",
+   "cases": {
+    "e2b-smoke": "PASS"
+   },
+   "seconds": 97.8,
+   "status": "PASS"
+  },
+  "eslint": {
+   "attempt": "1/quick",
+   "cases": {
+    "eslint": "PASS"
+   },
+   "seconds": 0.3,
+   "status": "PASS"
+  },
+  "format": {
+   "attempt": "1/quick",
+   "cases": {
+    "format": "PASS"
+   },
+   "seconds": 0.3,
+   "status": "PASS"
+  },
+  "live-probes": {
+   "attempt": "2/initial",
+   "cases": {
+    "live-probes": "PASS"
+   },
+   "seconds": 99.0,
+   "status": "PASS"
+  },
+  "seed-cache-decision": {
+   "attempt": "2/initial",
+   "cases": {
+    "seed-cache-decision": "PASS"
+   },
+   "seconds": 52.1,
+   "status": "PASS"
+  },
+  "seed-memory-ratchet": {
+   "attempt": "2/initial",
+   "cases": {
+    "seed-memory-ratchet": "PASS"
+   },
+   "seconds": 114.0,
+   "status": "PASS"
+  },
+  "semantic-stack": {
+   "attempt": "2/initial",
+   "cases": {
+    "semantic-stack": "PASS"
+   },
+   "seconds": 1101.7,
+   "status": "PASS"
+  },
+  "smoke": {
+   "attempt": "2/initial",
+   "cases": {
+    "agent-payment-abandonment": "FAIL",
+    "agent-payment-idempotent-abandonment": "PASS",
+    "agent-payment-new-user-journey": "PASS",
+    "agent-payment-setup-resume": "PASS",
+    "agent-payment-test-shop": "PASS",
+    "background-agent-message-smoke": "PASS",
+    "browser-biometrics-webdecoy": "PASS",
+    "browser-smoke": "PASS",
+    "chat-mode": "PASS",
+    "claude-code-agent": "PASS",
+    "parallel-tool-calls": "PASS",
+    "spawn-sub-agents": "PASS",
+    "test-mass-agent-run-0": "PASS"
+   },
+   "seconds": 1715.8,
+   "status": "FAIL"
+  },
+  "typescript": {
+   "attempt": "1/quick",
+   "cases": {
+    "typescript": "PASS"
+   },
+   "seconds": 12.6,
+   "status": "PASS"
+  }
+ },
+ "ledger": {
+  "excluded": "batch 20261108-021034-807949 (browser-auth-saved-password-retry, browser-doordash-food-plan-grocery-cart-reauth) are infra probes: the guest logged \"infra probe: skipping run_benchmark.py; emitting synthetic pass artifacts\" (infra_probe=true, no agent), so they are not benchmark attempts and correctly stay out of the ledger",
+  "source": "BenchmarkRun.load(_batch/run.json)._record_history() for the deploy smoke campaign deploy-19eeb99134b7...",
+  "task_attempts_rows": 12,
+  "task_durations_rows": 3
+ },
+ "merged_sha": "a252579c3a5f7bc3f78478db5dec231e857a05fd",
+ "pr": 1780,
+ "production": {
+  "changed_files": 3,
+  "finished_at": "2026-11-08T02:48:36Z",
+  "lanes": {
+   "agentcard": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   },
+   "backend-probes": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "no back-end change",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   },
+   "fly": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "no agent runtime or deploy-agents.yml change",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   },
+   "mac-release": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #1780 without MAC-APP-RELEASE)",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   },
+   "render": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   },
+   "semantic": {
+    "applicable": true,
+    "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha a252579c3a5f7bc3f78478db5dec231e857a05fd --state-dir /home/boxes/rose/.context/deploy-pipeline && /home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha a252579c3a5f7bc3f78478db5dec231e857a05fd --state-dir /home/boxes/rose/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+    "depends_on": [],
+    "exit_code": 0,
+    "finished_at": "2026-11-08T02:48:36Z",
+    "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/semantic.log",
+    "reason": "chat-lifecycle-ratchet run 42439648086 success",
+    "started_at": "2026-11-08T02:42:10Z",
+    "status": "PASS"
+   },
+   "vercel": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "no front-end/ change",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   },
+   "wmh": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "no WMH path change",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   },
+   "workflow-migration": {
+    "applicable": false,
+    "command": null,
+    "depends_on": [],
+    "exit_code": null,
+    "finished_at": null,
+    "log": null,
+    "reason": "no agent cutover",
+    "started_at": null,
+    "status": "SKIPPED-not-applicable"
+   }
+  },
+  "pr": 1780,
+  "schema_version": 1,
+  "selected": [
+   "render",
+   "fly",
+   "vercel",
+   "mac-release",
+   "wmh",
+   "backend-probes",
+   "workflow-migration",
+   "agentcard",
+   "semantic"
+  ],
+  "sha": "a252579c3a5f7bc3f78478db5dec231e857a05fd",
+  "started_at": "2026-11-08T02:42:10Z",
+  "status": "PASS"
+ },
+ "review": "CodeRabbit skipped (path filters exclude **/tests/** and docs/**); independent adversarial review; cycle 1 closed clean",
+ "reviewed_head": "bad9cf510a1717b3ae618dd056b0897e5cb8435d"
+}
