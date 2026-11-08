@@ -7254,11 +7254,6 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and r.stop_metadata.get("runner") == "sms"
         and r.stop_metadata.get("owned_cleanup_verified") is True
     ]
-    rootless_precreation = [r for r in results
-        if not r.agent_id and not getattr(r, 'owned_roots', None) and r.status == 'ERROR'
-        and getattr(r, 'graded_root_creation_outcome', None) == 'not_started'
-        and isinstance(getattr(r, 'stop_metadata', None), dict)
-        and r.stop_metadata.get('root_creation_attempted') is False]
     rootless_credentials = [r for r in results if any(r is proof for proof in never_admitted_results)
         and not r.agent_id and not getattr(r, "owned_roots", None) and not getattr(r, "logs", None)
         and not live_ids.get(r.name) and r.status == r.benchmark_status == "SKIPPED" and r.passed is False
@@ -7283,14 +7278,14 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and getattr(r, "root_creation_attempted", None) is False]
     if len(rootless_queued) + len(rootless_credentials) != len(never_admitted_results):
         failures.append("invalid coordinator nonadmission proof")
-    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and r not in rootless_precreation and not any(r is proof for proof in rootless_queued)
+    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and not any(r is proof for proof in rootless_queued)
            and not any(r is proof for proof in rootless_setup)
            and not (getattr(r, "graded_root_creation_outcome", None) == "not_started"
                     and getattr(r, "owned_roots", None)) for r in results) or any(
                         getattr(r, "graded_root_creation_outcome", None) == "unknown" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials, *rootless_precreation, *rootless_setup]
+        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials, *rootless_setup]
         if failures or not rootless or any(not any(r is proof for proof in rootless) for r in results):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return

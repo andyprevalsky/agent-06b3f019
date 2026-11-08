@@ -273,6 +273,7 @@ async def test_batch_cleanup_accepts_only_proven_precreation_failure():
         return TaskResult(name='browser-auth-doordash-cloud-iphone', passed=False, agent_id='', status='ERROR', progress_score=0, duration_seconds=0, cost_cents=0, message_count=0, failure_reason='fixture failed', stop_metadata=metadata)
     proven = result({'root_creation_attempted': False})
     proven.graded_root_creation_outcome = 'not_started'
+    proven.root_creation_attempted = False
     await runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [proven], {})
     for metadata in ({}, {'root_creation_attempted': True}):
         with pytest.raises(RuntimeError, match='unknown root creation'):
