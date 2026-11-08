@@ -63,8 +63,15 @@ def collect_fleet(request, root, fleet, started, native_exit):
         raise ValueError('invalid native teardown audit')
     audit = dict(audit_rows)
     release = float((fleet / 'teardown-ownership/provider-teardown-verified.epoch').read_text())
+    # A failed mandatory autoscaler fails its run but not the verified release of
+    # its resources; the fleet seals both facts (PR #1760 smoke, 2026-11-07).
+    autoscaler_failed = lifecycle.get('autoscaler_failed_benches')
+    autoscaler_only = (lifecycle.get('status') == 'failed' and lifecycle.get('cleanup_verified') is True
+                       and native_exit == 1 and isinstance(autoscaler_failed, list) and autoscaler_failed
+                       and set(autoscaler_failed) <= set(request['checks']))
     if (type(lifecycle.get('version')) is not int or lifecycle['version'] != 1
-            or lifecycle.get('status') != 'verified' or lifecycle.get('run_id') != fleet.name
+            or (lifecycle.get('status') != 'verified' and not autoscaler_only)
+            or lifecycle.get('run_id') != fleet.name
             or lifecycle.get('workspace_root') != str(root)
             or type(lifecycle.get('controller_exit_code')) is not int
             or lifecycle.get('controller_exit_code') != native_exit
@@ -93,17 +100,39 @@ def collect_fleet(request, root, fleet, started, native_exit):
             outcome = str(task.get('benchmark_status') or task.get('status') or '').upper()
             if not math.isfinite(finish) or finish < started or task.get('cleanup_failure'):
                 raise ValueError('unverified native task or task cleanup')
+            # Hash before any verdict: an unreadable record must stay UNVERIFIED, never a bare PASS.
+            details[name] = {'native_task': {k: task.get(k) for k in ('name','status','benchmark_status','passed','failure_reason','agent_id')}, 'path': str(child),
+                             'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
             if task.get('passed') is True and outcome == 'PASSED':
                 cases[name] = 'PASS'
             elif task.get('passed') is False and outcome in {'FAILED', 'ERROR', 'INFRA_ERROR', 'SKIPPED'}:
                 cases[name] = 'FAIL'
-            details[name] = {'native_task': {k: task.get(k) for k in ('name','status','benchmark_status','passed','failure_reason','agent_id')}, 'path': str(child),
-                             'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
         except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
             details[name] = {'unverified': str(error), 'path': str(child)}
+    for name in autoscaler_failed if autoscaler_only else ():
+        if cases[name] == 'PASS':
+            cases[name] = 'FAIL'
+        if cases[name] == 'FAIL':
+            details[name]['mandatory_autoscaler_failure'] = autoscaler_reason(fleet / name)
     if native_exit != 0 and all(v == 'PASS' for v in cases.values()):
         cases = dict.fromkeys(cases, 'UNVERIFIED')
     return cases, details, True, str(fleet)
+
+
+def autoscaler_reason(directory):
+    """The native autoscaler's own first-line reason, or an explicit evidence gap."""
+    for leaf in ('autoscaler.failed', 'autoscaler.acceptance-failed'):
+        path = directory / leaf
+        try:
+            if path.is_file() and not path.is_symlink():
+                with path.open(errors='replace') as stream:
+                    reason = stream.readline(4096).strip()
+                if reason:
+                    return reason
+        except OSError:
+            # The verified FAIL and cleanup stand; only its explanation is missing.
+            return f'mandatory autoscaler failed; {leaf} unreadable'
+    return 'mandatory autoscaler failed; see the fleet controller log'
 
 
 def campaign_width(checks, deadline=None):
@@ -338,8 +367,11 @@ def execute(request, root):
         if directory.exists() or directory.is_symlink():
             raise ValueError('unpushed cloud source with an existing request namespace')
         raise SourceRefusal(unpushed_reason(request['source']['head']))
+    from deploy_test_historical_custody import admission
+    admission(request, root)
     # An invalid marker refuses here, before any resource is admitted (same rules as @quarantine).
     quarantines = catalog_quarantines(root, checks)
+    # launch() owns each campaign's runs root, width check and campaign id (first run and rerun).
     env = {**os.environ, 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1', 'DEPLOY_NATIVE_HUB_JOIN': '1',
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root),
            **capacity_admission_env(time.time())}  # one gate deadline, kept by the rerun

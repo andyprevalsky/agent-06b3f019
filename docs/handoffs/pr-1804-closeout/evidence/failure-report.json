@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "9d86659075a3465f8515ca964581335d",
+   "check": "smoke/agent-payment-abandonment",
+   "source": {
+    "head": "04b4d4a5f4f4e1f7b19918ea0693fb2d2a5ca716",
+    "digest": "a0f5a1177ae86ca5e2fc27ac519b1c4d0a635b081e327b2827bb6ab4d8589f18"
+   },
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "AgentCard sandbox abandonment lifecycle hit the exact standing release stall (card CLOSED balance 0, org transfer consumed, releasedCents=0, purchase HELD); natively SKIPPED, never PASS. This PR changes only the deploy-gates workflow checkout step and a worker-capacity test.",
+   "evidence": "/home/boxes/rose/.context/deploy-cloud/babdb0c1ec092b3c7ae5835f12befaa20e3af57176b67c6f0498e9d3189d2541/runs/20261108-081710-2020378/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "receipt_sha256": "d6d422240307014dbd43bad3b4d39b98719ae462747ccde5b9742ef685c1db72",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_a249b10ac4b56d827f86c5d1\", \"cardId\": \"card_1301461cfb12e74130ecb2ab\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 0c763320-34c3-42c1-ba66-d4dcd2923c07 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "evidence": "/home/boxes/rose/.context/deploy-cloud/babdb0c1ec092b3c7ae5835f12befaa20e3af57176b67c6f0498e9d3189d2541/runs/20261108-081710-2020378/agent-payment-abandonment/cloudbench-run.json (agent 0c763320-34c3-42c1-ba66-d4dcd2923c07): native SKIPPED agentcard release stall",
+    "confirmed_at": 1794127294.5862074
+   }
+  }
+ ]
+}

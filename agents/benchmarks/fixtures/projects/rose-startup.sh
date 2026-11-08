@@ -161,6 +161,25 @@ py_deps() {
   say "py: ready in $((SECONDS - began))s"
 }
 
+reference_metadata() {
+  local dir repair=0 saved=0 rc=0 record=prompt-review/REF_SHAS.txt
+  # Old snapshots stripped .git from reference sources. Repair existing trees;
+  # a session without reference sources has no metadata to migrate.
+  for dir in openclaw hermes-agent codex prime-agent kimi-code; do
+    if [ -d "$dir" ] && [ ! -e "$dir/.git" ]; then repair=1; break; fi
+  done
+  [ "$repair" = 1 ] || return 0
+  say "refs: restoring reference git metadata..."
+  if [ -f "$record" ]; then
+    cp -p "$record" "$ROSE_TMP/ref-record" || return 1
+    saved=1
+  fi
+  bash scripts/sync-reference-repos.sh || rc=$?
+  # The source pins are unchanged; keep the caller's exact tracked tip record.
+  if [ "$saved" = 1 ]; then cp -p "$ROSE_TMP/ref-record" "$record" || return 1; fi
+  return "$rc"
+}
+
 # Run one step with its output line-prefixed; its status lands in $ROSE_TMP/<name>.
 step() {
   local name="$1"
@@ -172,10 +191,11 @@ step() {
 
 step js js_deps &
 step py py_deps &
+step refs reference_metadata &
 wait
 
 failed=""
-for name in js py; do
+for name in js py refs; do
   [ "$(cat "$ROSE_TMP/$name" 2>/dev/null)" = 0 ] || failed="$failed $name"
 done
 

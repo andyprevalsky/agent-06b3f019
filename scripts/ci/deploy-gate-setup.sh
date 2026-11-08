@@ -20,35 +20,6 @@ if [ "${1:-}" = "--release" ]; then
   exit 0
 fi
 
-# Every external download a gate VM makes on every run is a single point of failure for the whole
-# round: hunt round 7 (2026-11-08) lost 11 of 12 gates to four GitHub Releases 504s (cloudflared), and
-# round 8 lost all 11 remote gates to astral-sh/setup-uv's GitHub download (504). uv, flyctl, ngrok
-# and cloudflared live in $TOOLS on the sticky dependency disk and are fetched only when missing, with
-# retries that ride out a short outage; uv's package cache lives there too (`uv run --with boto3`).
-TOOLS="$DEPS/tools"
-sudo mkdir -p "$TOOLS"
-sudo chown "$(id -u):$(id -g)" "$DEPS" "$TOOLS"
-export PATH="$TOOLS:$PATH" UV_CACHE_DIR="$DEPS/uv-cache"
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "$TOOLS" >> "$GITHUB_PATH"
-  echo "UV_CACHE_DIR=$UV_CACHE_DIR" >> "$GITHUB_ENV"
-fi
-fetch() {  # fetch <url> <output>: bounded retries on any error, then fail the step
-  curl -fsSL --connect-timeout 10 --retry 6 --retry-all-errors --retry-delay 5 --retry-max-time 180 -o "$2" "$1"
-}
-
-step "uv"
-if [ ! -x "$TOOLS/uv" ]; then
-  if fetch https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz "$TOOLS/.uv.tgz"; then
-    tar -xzf "$TOOLS/.uv.tgz" -C "$TOOLS" --strip-components=1 uv-x86_64-unknown-linux-gnu/uv
-    rm -f "$TOOLS/.uv.tgz"
-  else  # GitHub Releases down: the same binary from PyPI (a different CDN)
-    python3 -m pip install --quiet --disable-pip-version-check --target "$TOOLS/.uv-pypi" uv \
-      && ln -sf "$TOOLS/.uv-pypi/bin/uv" "$TOOLS/uv"
-  fi
-fi
-"$TOOLS/uv" --version >/dev/null || { echo "uv unavailable" >&2; exit 1; }
-
 step "env files"
 [ -n "${DEPLOY_GATE_ENV_BUNDLE:-}" ] || { echo "DEPLOY_GATE_ENV_BUNDLE secret is missing" >&2; exit 1; }
 # Unpacked outside the checkout: anything untracked inside it would change the frozen source digest.
@@ -100,43 +71,35 @@ for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
-# flyctl, ngrok and cloudflared serve only the gates that drive Fly or a public tunnel. Hunt round 9:
-# fly.io/install.sh and GitHub Releases both returned 504s for minutes, and a fatal install failed
-# every gate of the round, including the many that never call them. A missing optional tool is now a
-# loud warning naming it; a gate that needs it fails at first use with "command not found: <tool>".
 step "flyctl"
-MISSING_TOOLS=()
-if [ ! -x "$TOOLS/flyctl" ]; then
-  for attempt in 1 2 3; do
-    fetch https://fly.io/install.sh "$TOOLS/.fly-install.sh" \
-      && FLYCTL_INSTALL="$TOOLS/.fly" sh "$TOOLS/.fly-install.sh" >/dev/null \
-      && ln -sf "$TOOLS/.fly/bin/flyctl" "$TOOLS/flyctl" && break
-    echo "flyctl install attempt $attempt failed" >&2; sleep 10
-  done
-fi
-"$TOOLS/flyctl" version >/dev/null 2>&1 || { rm -f "$TOOLS/flyctl"; MISSING_TOOLS+=(flyctl); }
+# flyctl and cloudflared come from GitHub Releases; scripts/ci/release-tool.sh keeps the last good
+# copy of each on the dependency disk, so a Releases outage does not fail the gate.
+sudo chown "$(id -u):$(id -g)" "$DEPS"
+export RELEASE_TOOL_CACHE="$DEPS/release-tools"
+. scripts/ci/release-tool.sh
+install_flyctl() { curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null; }
+command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] \
+  || release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl
+echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "tunnel tools"
 # run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
 # the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
-# $TOOLS is first on PATH here and (via GITHUB_PATH) in every later step.
-if ! command -v ngrok >/dev/null; then
-  NGROK_INSTALL_DIR="$TOOLS" bash scripts/cloudbench-install-ngrok.sh >/dev/null \
-    || { sleep 15; NGROK_INSTALL_DIR="$TOOLS" bash scripts/cloudbench-install-ngrok.sh >/dev/null; } \
-    || MISSING_TOOLS+=(ngrok)
-fi
-if ! command -v cloudflared >/dev/null; then
-  if fetch https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 "$TOOLS/.cloudflared"; then
-    install -m 0755 "$TOOLS/.cloudflared" "$TOOLS/cloudflared"
-  else
-    MISSING_TOOLS+=(cloudflared)
-  fi
-  rm -f "$TOOLS/.cloudflared"
-fi
+sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
+install_cloudflared() {
+  local tmp status=0
+  tmp="$(mktemp)"
+  curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    && sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared || status=$?
+  rm -f "$tmp"
+  return "$status"
+}
+# Only run.sh's public-tunnel fallback uses cloudflared, and it refuses explicitly when it is missing,
+# so an outage costs at most two attempts here instead of failing gates that never open a tunnel.
+command -v cloudflared >/dev/null \
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared \
+  || echo "⚠️ cloudflared unavailable; run.sh refuses any public tunnel that needs it" >&2
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
-if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
-  echo "::warning::DEPLOY_GATE_TOOLS_UNAVAILABLE ${MISSING_TOOLS[*]}: their download hosts failed after retries; a gate that needs them fails at first use" >&2
-fi
 
 step "dependency disk"
 sudo chown "$(id -u):$(id -g)" "$DEPS"

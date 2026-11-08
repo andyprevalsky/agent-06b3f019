@@ -1,0 +1,12 @@
+DEPLOY_PRODUCTION START sha=79a43f600a31 changed=11 lanes=agentcard,semantic
+[semantic] PIPELINE_SEMANTIC dispatched workflow=chat-lifecycle-ratchet.yml ref=main source_sha=79a43f600a3162ff9a8aeb7783e1e1fa82c6671e at=2026-11-08T08:23:05Z
+[semantic] PIPELINE_SEMANTIC run=42462705568 url=https://github.com/Rose-Ai-Labs/rose/actions/runs/42462705568 head_sha=79a43f600a3162ff9a8aeb7783e1e1fa82c6671e source_sha=79a43f600a3162ff9a8aeb7783e1e1fa82c6671e created=2026-11-08T08:23:06Z
+[semantic] PIPELINE_SEMANTIC status=blocked exit=1 gh run view 42462705568 failed: HTTP 403: API rate limit exceeded for user ID 25310436. If you reach out to GitHub Support for help, please include the request ID A4F0:295D51:37F349:68BAE2:6AF03177 and timestamp 2026-11-08 08:23:19 UTC. For more on scraping GitHub and how it may affect your rights, please review our Terms of Service (https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) (https://api.github.com/repos/Rose-Ai-Labs/rose/actions/runs/42462705568/jobs?per_page=100)
+[semantic] SEMANTIC_LANE_END 2026-11-08T08:23:19Z exit=1
+[semantic] FAIL: production-semantic exited 1 (run 42462705568)
+[agentcard]     🔥 INFRA ERRORS (2 total across tree):
+[agentcard]     🔥 INFRA ERRORS (10 total across tree):
+[agentcard]     🔥 INFRA ERRORS (20 total across tree):
+[agentcard]     🔥 INFRA ERRORS (20 total across tree):
+[agentcard]     ❌ agent-payment-production-abandonment: ERROR - RuntimeError: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.stripeHold.livemode must be true for a production lifecycle; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={"status": "CLOSED", "balanceCents": 0}, orgTransfer={"id": "owt_c2b13f07dbdf80924a592e78", "cardId": "card_0c3718a71719dbbedc9f8b00", "status": "consumed", "transferredCents": 100, "releasedCents": 0}
+DEPLOY_PRODUCTION FAIL sha=79a43f600a31 failed=agentcard,semantic not-run=- lanes=agentcard:FAIL,semantic:FAIL report=/home/boxes/rose/.context/deploy-pipeline/production-lanes.json

@@ -1,0 +1,41 @@
+{
+ "archives": {
+  "cloud": {
+   "bucket": "trace-archive",
+   "ciphertext_sha256": "b174e753bd597341600bc15aa8aef9772cdaef127e587375b50aa1d7a1144637",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "files": 4904,
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "frames": 110,
+   "full_readback_verified": true,
+   "gzip_sha256": "0233dd97e5675aaba461b116058cfdd5a7d6fd57b1640e2ef612bc452ef8ca6f",
+   "key": "devbox-closeout-private/pr1790-34c48f60/20261108-cloud.tar.gz.aesgcm",
+   "manifest_sha256": "c6a2d21db2306f21b1e4b5ec4b12731533dfbd8b04d418fc5614db3c348d5118",
+   "original_bytes": 3691702205,
+   "separate_process_verify": {
+    "authenticated_original_files": 4904,
+    "key": "devbox-closeout-private/pr1790-34c48f60/20261108-cloud.tar.gz.aesgcm"
+   },
+   "stored_bytes": 918941857
+  },
+  "core": {
+   "bucket": "trace-archive",
+   "ciphertext_sha256": "11bfbd166ca6341985c6ac74a1c62e254e654192ddcfbbe3bf7ed4748a3d12fc",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "files": 13896,
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "frames": 17,
+   "full_readback_verified": true,
+   "gzip_sha256": "24b91792f72fec3948ccd105d3dd9b9cc9a4f92e57eef1abe095c4f227cf0f6a",
+   "key": "devbox-closeout-private/pr1790-34c48f60/20261108-core.tar.gz.aesgcm",
+   "manifest_sha256": "7d14f113a0e6659f345948bd01454348c535e9b66d44c366c14a15997a0bf6fe",
+   "original_bytes": 346463225,
+   "separate_process_verify": {
+    "authenticated_original_files": 13896,
+    "key": "devbox-closeout-private/pr1790-34c48f60/20261108-core.tar.gz.aesgcm"
+   },
+   "stored_bytes": 137732347
+  }
+ },
+ "restore": "agents/venv/bin/python docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt <receipt.json> --destination <empty dir>"
+}

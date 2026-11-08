@@ -1,0 +1,10 @@
+{
+  "check": "smoke (13-task deploy campaign)",
+  "source": "34fd7d036b165e235a02a05197a4ddc00f6bc46e",
+  "native_result": "UNVERIFIED (campaign INFRA STOP 1/13 at r001-j0009; 12 cancelled)",
+  "attribution": "NOT_INTRODUCED",
+  "first_bad_boundary": "guest setup-benchmark-payment.ts (scripts/cloudbench-run.sh:1452) -> AgentCardOrgRuntime list_cardholders 'Invalid or expired organization token' interleaved with 'API key rate limit exceeded' on the shared bench AgentCard org credential, 03:55:12-03:55:31Z, all 5 payment guests",
+  "evidence": "runs/20261108-034502-1644314/agent-payment-setup-resume/remote-logs/cloudbench-driver.log:129-143; -1644312 :132-135; -1644316 :132-136; -1644323 :132-141 (one list_cardholders success at 03:55:15); -1644326 :570-573,:636-637. Guests used staged env digest a1b38a3069a6 (not the rewritten local .env). Same 5 tasks passed together at 23:32, 00:27, 00:57Z.",
+  "cause": "Transient third-party AgentCard throttling amplified by harness gap: payment slot lock is per-guest /tmp (run_benchmark.py:17212), pre-barrier fixture takes no lock, org-runtime auth retry gives up in ~2s (org-runtime.ts:40,:196).",
+  "followup": "post-merge repair: fleet-wide AgentCard admission + bounded retry on invalid-token-after-rate-limit, with regressions in agentcard-org-runtime.test.ts and cloudbench fleet tests."
+}

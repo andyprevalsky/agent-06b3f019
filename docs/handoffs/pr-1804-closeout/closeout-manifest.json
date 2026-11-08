@@ -1,0 +1,181 @@
+{
+ "schema_version": 1,
+ "pr": 1804,
+ "merge_commit": "99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2",
+ "gated_source": "04b4d4a5f4f4e1f7b19918ea0693fb2d2a5ca716",
+ "source_digest": "a0f5a1177ae86ca5e2fc27ac519b1c4d0a635b081e327b2827bb6ab4d8589f18",
+ "outcome": "completed (AgentCard production lane: recorded external-provider exception, credential or billing change only the user can make)",
+ "purpose": "reliability follow-up to the PR #1776 test repair /goal: the two sibling flakes that failed the same deploy-command-structural gate (PR #1787 attempt 2, Blacksmith run 42440778292)",
+ "fixes": {
+  "mirror_commit_graph": "deploy-gates.yml rebuilds a broken sticky-disk mirror commit-graph chain (verify --shallow before/after fetch) and runs gc in the foreground; regression WorkflowMirrorCheckout (deploy-test-github)",
+  "worker_capacity_loop": "control_boundary_reached() reads the autoscaler exit once; regression test_autoscaler_runtime_handoff_capacity_exit_boundary_reads_exit_once"
+ },
+ "repro": {
+  "commit_graph": "job log of run 42440778292 shows the warning on the first git log after checkout (evidence/blacksmith-run-42440778292-job.log.gz); local shared-clone fixture fails on the old step, passes on the new (5/5)",
+  "worker_capacity": "timing-only 4 ms Popen.poll() delay: 3/3 fail before (autoscaler-exited-before-control-boundary incl. inventory_missing_machine), 3/3 pass after"
+ },
+ "gates": {
+  "result": "DEPLOY_GATES PASS head=04b4d4a5f4f4 gates=16 (verify bound-staged)",
+  "deploy_command_structural": "PASS on both rounds of this PR (attempt1 and attempt2)",
+  "attempt1": "smoke infra stop: agent-payment-abandonment payment finalization hit AgentCard org MCP list_transfers 401 'Invalid or expired organization token' (run_benchmark: owned cloud evidence finalization failed); the guest then reported root cleanup not confirmed, the controller's guest cleanup request failed (HTTP 000) and shutdown was not delivered (job r001-j0011). Machine 862e77ae461618 destroyed; volume vol_vxmpp6dq59xzm8j4 pending_destroy (DELETE accepted, unattached). The smoke receipt kept a native cleanup owner, so the cycle was re-initialised on the same source.",
+  "resource_warnings": [
+   "smoke/agent-payment-abandonment: exact AgentCard release stall, natively SKIPPED (agent 0c763320-34c3-42c1-ba66-d4dcd2923c07)"
+  ],
+  "new_checkout_step_live": "seed-cache-decision run 42457526919 and canonical-seed-whatsapp-content run 42457526804 logs: mirror fetched, no commit-graph warning"
+ },
+ "review": {
+  "cycles": 1,
+  "cycle1": "clean (CodeRabbit: no actionable comments)"
+ },
+ "production": {
+  "schema_version": 1,
+  "sha": "99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2",
+  "pr": 1804,
+  "status": "FAIL",
+  "started_at": "2026-11-08T08:42:42Z",
+  "finished_at": "2026-11-08T08:59:39Z",
+  "changed_files": 3,
+  "selected": [
+   "render",
+   "fly",
+   "vercel",
+   "mac-release",
+   "wmh",
+   "backend-probes",
+   "workflow-migration",
+   "agentcard",
+   "semantic"
+  ],
+  "lanes": {
+   "render": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "fly": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no agent runtime or deploy-agents.yml change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "vercel": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no front-end/ change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "mac-release": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #1804 without MAC-APP-RELEASE)",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "wmh": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no WMH path change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "backend-probes": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no back-end change",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "workflow-migration": {
+    "status": "SKIPPED-not-applicable",
+    "reason": "no agent cutover",
+    "applicable": false,
+    "depends_on": [],
+    "started_at": null,
+    "finished_at": null,
+    "exit_code": null,
+    "command": null,
+    "log": null
+   },
+   "agentcard": {
+    "status": "FAIL",
+    "reason": "run-bench agent-payment-production-abandonment exited 1; AgentCard release stall not qualified: task status/benchmark_status is not SKIPPED (record 20261108_085928_3955532c-56f2-4330-9e57-7b994d8ddd5a_agent-payment-production-abandonment.json)",
+    "applicable": true,
+    "depends_on": [],
+    "started_at": "2026-11-08T08:42:42Z",
+    "finished_at": "2026-11-08T08:59:39Z",
+    "exit_code": 1,
+    "command": "PATH=/home/boxes/rose/agents/venv/bin:$PATH VIRTUAL_ENV=/home/boxes/rose/agents/venv scripts/run-bench agent-payment-production-abandonment",
+    "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/agentcard.log"
+   },
+   "semantic": {
+    "status": "PASS",
+    "reason": "chat-lifecycle-ratchet run 42464080989 success",
+    "applicable": true,
+    "depends_on": [],
+    "started_at": "2026-11-08T08:42:42Z",
+    "finished_at": "2026-11-08T08:48:37Z",
+    "exit_code": 0,
+    "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha 99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2 --state-dir /home/boxes/rose/.context/deploy-pipeline && /home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2 --state-dir /home/boxes/rose/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+    "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/semantic.log"
+   }
+  }
+ },
+ "external_provider_exceptions": [
+  {
+   "lane": "agentcard",
+   "provider": "AgentCard/Stripe",
+   "reason": "credential or billing change",
+   "evidence": "agent-payment-production-abandonment: 'payment_lifecycle.stripeHold.livemode must be true for a production lifecycle' - prod payer fixture is test-mode; needs a KYC-passed live AgentCard cardholder only the user can provide (same as PR #1777 and earlier); live org transfer owt_b0f5b8f303545f032455f2f8 consumed 100 cents, released 0 (open liability)",
+   "native_result": "FAIL (never PASS)"
+  }
+ ],
+ "ledger": "13 cloud smoke rows (group deploy-babdb0c1...) + 12 duration rows via hub_ledger_row, plus the production AgentCard attempt row written by the lane",
+ "archives": [
+  {
+   "name": "pr1804-closeout-final-core",
+   "key_prefix": "devbox-closeout-private/pr1804-closeout-final-core/",
+   "archive_sha256": "5d31e0f602c5862b2a9914e844d3604d69ba9dd076d642ea26ae0d7475cc0f3c",
+   "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
+   "parts": 40,
+   "files": 56742
+  },
+  {
+   "name": "pr1804-closeout-extra",
+   "key_prefix": "devbox-closeout-private/pr1804-closeout-extra/",
+   "archive_sha256": "cb42780e4b76e94d240eed1435ad472af965091752ce725c37b2553b25e1c052",
+   "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
+   "parts": 1,
+   "files": 6,
+   "verified_note": "verified by closeout_archive.py verify (run interactively; the receipt's verified field is written only after full readback); no separate log file"
+  }
+ ],
+ "outcome_record": "factory outcome 'completed' for run 20261108-070509-1005569 was emitted by `scripts/deploy finish` (Process step 15) at 2026-11-08T09:00:35Z, before deletion readiness (step 16); the deletion check reached READY only after this records PR and its main-generated receipt (see the closeout's final receipt)."
+}

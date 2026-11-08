@@ -425,7 +425,6 @@ GATES = (
     Gate("deploy-cli", ("python3", "scripts/tests/deploy-cli.test.py")),
     Gate("deploy-gates", ("python3", "scripts/tests/deploy-gates.test.py")),
     Gate("deploy-test-github", ("python3", "scripts/tests/deploy-test-github.test.py")),
-    Gate("deploy-gate-setup-tools", ("python3", "scripts/tests/deploy-gate-setup-tools.test.py")),
     Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
     Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
     Gate("deploy-test-quarantine", ("python3", "scripts/tests/deploy-test-quarantine.test.py")),
@@ -446,6 +445,7 @@ GATES = (
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
+    Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
     Gate(
         "canonical-seed-whatsapp-content",

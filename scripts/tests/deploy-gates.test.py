@@ -19,6 +19,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import deploy_gates as g
 UNPUSHED_SMOKE_REFUSAL = g.unpushed_smoke_refusal  # the real check; Run patches g's copy
+UNPATCHED_REFRESH = g.refresh_prisma_client  # the real refresh; Run patches g's copy
 from deploy_test_cycle import digest
 
 PORTS = {'backend-coverage-blackbox': 20000, 'frontend-coverage-blackbox': 20510,
@@ -364,12 +365,16 @@ class Run(Fixture):
         self.codes, self.streamed, self.plan = {}, [], {'gates': [{'name': 'format'}], 'source': {'head': self.head}}
         self.state = self.root / '.context/deploy-pipeline'
         self.selected_with, self.watchers = [], []
-        self.pushed = []
+        self.pushed, self.prisma = [], []
         for name, fake in (('list_selected', self.fake_list_selected), ('stream', self.fake_stream),
-                           ('unpushed_smoke_refusal', lambda root, head: self.pushed.append(head))):
+                           ('unpushed_smoke_refusal', lambda root, head: self.pushed.append(head)),
+                           ('refresh_prisma_client', self.fake_refresh_prisma)):
             patcher = patch.object(g, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def fake_refresh_prisma(self, root):
+        self.prisma.append((root, list(self.streamed)))
 
     def kind(self, argv):
         name = Path(argv[1]).name
@@ -502,6 +507,38 @@ class Run(Fixture):
                 self.assertFalse(self.path('live-probes').exists())
                 for name in ('inventory.json', 'inventory.candidate.json', 'plan.json', 'cycle.json'):
                     self.assertFalse((self.state / name).exists(), name)
+
+    def test_prisma_client_is_refreshed_before_the_plan_and_cycle(self):
+        # PR #1784 / PR #1770: a sync pulled main's CodeSession.closingTaskId and the quick typescript gate
+        # failed TS2353 against the checkout's stale generated client.
+        code, out = self.go()
+        self.assertEqual(0, code, out)
+        self.assertEqual([(self.root.resolve(), [])], self.prisma)  # before any planner/cycle command
+        self.prisma.clear()
+        shutil.rmtree(self.state, ignore_errors=True)
+        self.streamed = []
+        code, _ = self.go(dry_run=True)
+        self.assertEqual((0, []), (code, self.prisma))  # a dry run changes nothing
+
+    def test_prisma_refresh_failure_blocks_before_workers_plan_or_cycle(self):
+        reason = "scripts/ensure-prisma-client.sh exited 1; this checkout's Prisma client may not match it"
+        with patch.object(g, 'refresh_prisma_client', side_effect=g.Blocked('prisma', reason)):
+            code, out = self.go()
+        self.assertEqual(2, code)
+        self.assertEqual(f'DEPLOY_GATES BLOCKED head={self.head[:12]} stage=prisma exit=2: {reason}',
+                         out.strip().splitlines()[-1])
+        self.assertEqual([], self.streamed + self.calls)
+        for name in ('inventory.json', 'plan.json', 'cycle.json'):
+            self.assertFalse((self.state / name).exists(), name)
+
+    def test_refresh_prisma_client_runs_the_canonical_script_in_this_checkout(self):
+        with patch.object(g.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as runner:
+            UNPATCHED_REFRESH(self.root)
+        runner.assert_called_once_with(['bash', str(self.root / 'scripts/ensure-prisma-client.sh'), str(self.root)],
+                                       cwd=self.root)
+        with patch.object(g.subprocess, 'run', return_value=subprocess.CompletedProcess([], 3)):
+            with self.assertRaisesRegex(g.Blocked, 'exited 3'):
+                UNPATCHED_REFRESH(self.root)
 
     def test_pushed_check_runs_only_when_smoke_is_selected(self):
         code, _ = self.go()
@@ -1017,7 +1054,8 @@ class RunMemory(Fixture):
 
         self.abort_on = None
         for name, fake in (('list_selected', lambda root, base, template: self.selection),
-                           ('stream', self.fake_stream), ('MemorySampler', FakeSampler)):
+                           ('stream', self.fake_stream), ('MemorySampler', FakeSampler),
+                           ('refresh_prisma_client', lambda root: None)):
             patcher = patch.object(g, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)

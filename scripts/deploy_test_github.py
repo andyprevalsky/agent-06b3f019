@@ -57,6 +57,10 @@ CHANNEL_POLL_SECONDS = 15.0     # R2 GETs: no GitHub quota
 LIVENESS_SECONDS = 600.0        # one REST status read per gate every 10 min
 STREAM_SECONDS = 5.0            # VM -> R2 progress uploads while the worker runs
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
+# After TERM/INT/HUP or parent exit: find, cancel and confirm the launched run inside the owning
+# supervisor's 10 s TERM grace (deploy_test_supervisor.TERM_GRACE_SECONDS), then write the receipt.
+STOP_CANCEL_SECONDS = 7.0
+PARENT_POLL_SECONDS = 1.0
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PUSH_ATTEMPTS = 4
 MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -64,8 +68,27 @@ BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 BUNDLE_TOTAL_BYTES = 400 * 1024 * 1024
 BUNDLE_SKIP = {'seed-cache', 'tsbuildinfo', 'frontend-builds', 'experiential-venv', 'node_modules'}
 SERVICE_LOGS = ('back-end/backend-logs.log', 'agents/navi-worker-log.txt', 'front-end/frontend-logs.log')
+BUNDLE_SUMMARIES = ('summary.json', 'manifest.json')  # small run indexes RCA reads first
 LOG_TREES = ('back-end/coverage', 'front-end/coverage', 'agents/coverage', 'front-end/test-results')
 STOP = threading.Event()
+STOPPED = {'at': None, 'cause': None}
+
+
+def request_stop(cause: str) -> None:
+    if STOPPED['at'] is None:
+        STOPPED.update(at=time.time(), cause=cause)
+    STOP.set()
+
+
+def stop_bound() -> float:
+    return (STOPPED['at'] or time.time()) + STOP_CANCEL_SECONDS
+
+
+def watch_parent(parent: int) -> None:
+    """A launcher whose supervisor/cycle died (SIGKILL, OOM) still cancels the run it launched."""
+    while not STOP.wait(PARENT_POLL_SECONDS):
+        if os.getppid() != parent:
+            request_stop('parent exited')
 
 
 # ---------------------------------------------------------------- shared helpers
@@ -200,6 +223,7 @@ class GitHub:
         self.read_picked_at = self.read_attempted_at = float('-inf')
         self.read_fallbacks = 0  # reads a pool member could not answer, retried with the launch token
         self.served = identity(token)  # identity that produced the last response (selects the 304 cache)
+        self.until = None  # epoch every request must finish by (the stop-cancel bound); None: 60 s per request
 
     def _read(self) -> str | None:
         """The pool member's token for a read, re-picked when stale or low; None means use `token`."""
@@ -231,6 +255,8 @@ class GitHub:
         opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
         tokens, index, attempt = self.tokens(method), 0, 0
         while attempt < 5:
+            if self.until is not None and time.time() >= self.until:
+                raise urllib.error.URLError(f'stop-cancel bound exhausted before {method} {path}')
             token = tokens[index]
             key = identity(token)
             req = urllib.request.Request(url, method=method, headers={
@@ -239,7 +265,8 @@ class GitHub:
             if conditional and (key, url) in self.etags:
                 req.add_header('If-None-Match', self.etags[(key, url)])
             try:
-                with opener.open(req, timeout=60) as response:
+                timeout = 60.0 if self.until is None else max(0.5, min(60.0, self.until - time.time()))
+                with opener.open(req, timeout=timeout) as response:
                     body = response.read()
                     self.served = key
                     self._note_quota(token, response.headers)
@@ -407,13 +434,14 @@ class WorkflowRejected(Exception):
     """GitHub refused the workflow file at this commit; the run never owned a VM."""
 
 
-def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
+def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float, stopping: bool = False) -> dict | None:
     # Filter by path, not the by-filename endpoint: that 404s until the workflow is on the default branch.
     # head_branch is the tag for a tag push; the small filtered list rarely changes, so most polls are 304s.
     path = f'/actions/runs?event=push&head_sha={head}&branch={urllib.parse.quote(name, safe="")}&per_page=20'
     unnamed = f'/actions/runs?event=push&head_sha={head}&per_page=20'
     rejected_since = None
-    while time.time() < deadline and not STOP.is_set():
+    # `stopping`: the tag was pushed before the stop, so its run may exist although nothing named it yet.
+    while time.time() < deadline and (stopping or not STOP.is_set()):
         mine = [r for r in gh.json(path, conditional=True).get('workflow_runs', [])
                 if r.get('path') == WORKFLOW_PATH and r.get('head_branch') == name]
         if mine:
@@ -426,8 +454,25 @@ def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -
             rejected_since = rejected_since or time.time()
             if time.time() - rejected_since > 30:
                 raise WorkflowRejected(f"GitHub rejected {WORKFLOW_PATH} at {head}: {invalid[0].get('html_url')}")
-        STOP.wait(START_POLL_SECONDS)
+        if stopping:
+            time.sleep(min(1.0, max(0.0, deadline - time.time())))
+        else:
+            STOP.wait(START_POLL_SECONDS)
     return None
+
+
+def launched_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
+    """find_run, then (once stopped) one bounded lookup of the run this tag push started."""
+    run = find_run(gh, head, name, deadline, pushed)
+    if run is None and STOP.is_set():
+        gh.until = stop_bound()
+        try:
+            run = find_run(gh, head, name, gh.until, pushed, stopping=True)
+        except (WorkflowRejected, urllib.error.URLError, RuntimeError, OSError):
+            run = None
+        finally:
+            gh.until = None
+    return run
 
 
 def iso_epoch(value: str | None) -> float:
@@ -443,18 +488,20 @@ def wait_run(gh: GitHub, run_id: int, deadline: float) -> dict:
         STOP.wait(min(POLL_SECONDS, max(1.0, deadline - time.time())))
 
 
-def cancel_run(gh: GitHub, run_id: int) -> dict:
+def cancel_run(gh: GitHub, run_id: int, end: float | None = None, note: dict | None = None) -> dict:
     try:
         gh.request('POST', f'/actions/runs/{run_id}/cancel')
     except urllib.error.HTTPError as error:
         if error.code != 409:  # 409: already completed
             raise
-    end = time.time() + CANCEL_SECONDS
+    if note is not None:
+        note['cancel_requested_at'] = time.time()
+    end = time.time() + CANCEL_SECONDS if end is None else end
     while time.time() < end:
         run = gh.json(f'/actions/runs/{run_id}', conditional=True)  # a 5 s poll; unchanged reads are free 304s
         if run.get('status') == 'completed':
             return run
-        time.sleep(5)
+        time.sleep(max(0.0, min(5.0, end - time.time())))
     return gh.json(f'/actions/runs/{run_id}')
 
 
@@ -530,7 +577,8 @@ def launch(args) -> int:
     started = time.time()
     deadline = started + args.deadline_seconds - CANCEL_SECONDS
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda *_: STOP.set())
+        signal.signal(sig, lambda number, _frame: request_stop(signal.Signals(number).name))
+    threading.Thread(target=watch_parent, args=(os.getppid(),), daemon=True).start()
 
     def finish(result: dict) -> int:
         result.setdefault('remote', {})
@@ -572,13 +620,24 @@ def launch(args) -> int:
     receipt['rate_limited_seconds'] = gh.rate_limited_seconds
     receipt.update(read_identity=gh.read_name, read_fallbacks=gh.read_fallbacks)  # names only, never tokens
     gh.deadline = started + args.deadline_seconds  # cancel, receipts and artifacts may use the reserved window
+    if STOP.is_set():
+        receipt['stop_cause'] = STOPPED['cause']
     if kind == 'never-started':
         delete_tag(root, token, repo, name)  # Nothing started that we can name; the tag alone owns no VM.
+        if STOP.is_set():
+            receipt['run_lookup'] = f'no run named {name} within the stop-cancel bound'
         reason = 'cancelled before the remote run started' if STOP.is_set() else 'deploy-gates workflow run never started'
         return finish(blocked(request, reason, receipt=receipt))
     if kind == 'unfinished':
         reason = 'cancelled' if STOP.is_set() else 'existing gate deadline exhausted'
-        run = cancel_run(gh, receipt['run_id'])
+        end = stop_bound() if STOP.is_set() else None
+        gh.until = end  # stopped: every cancel request fits the supervisor's TERM grace
+        try:
+            run = cancel_run(gh, receipt['run_id'], end, note=receipt)
+        except (urllib.error.URLError, RuntimeError, OSError) as error:  # best effort: the owner is retained
+            run = {}
+            receipt['cancel_error'] = f'{type(error).__name__}: {error}'[:300]
+        gh.until = None
         confirmed = run.get('status') == 'completed'
         receipt.update(status=run.get('status'), conclusion=run.get('conclusion'))
         if confirmed:
@@ -623,7 +682,7 @@ def launch(args) -> int:
 
 
 def watch_rest(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict:
-    run = find_run(gh, head, name, min(deadline, time.time() + START_SECONDS), pushed)
+    run = launched_run(gh, head, name, min(deadline, time.time() + START_SECONDS), pushed)
     if run is None:
         return {'kind': 'never-started'}
     print(f'DEPLOY_GATE_REMOTE_RUN {run["html_url"]}', flush=True)
@@ -689,6 +748,8 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
                 # Silent channel: a rejected workflow, a setup failure before the env bundle, or no runner yet.
                 run = find_run(gh, head, name, time.time() + 30, pushed)
                 if run is None:
+                    if STOP.is_set():
+                        break  # stopped mid-lookup: the bounded lookup below still names the run
                     return {'kind': 'never-started'}
                 receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
                 print(f"DEPLOY_GATE_REMOTE_RUN {receipt['url']}", flush=True)
@@ -705,7 +766,7 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
                     return {'kind': 'rest', 'receipt': job_receipt(gh, run)}
         STOP.wait(START_POLL_SECONDS if receipt is None else CHANNEL_POLL_SECONDS)
     if receipt is None:
-        run = find_run(gh, head, name, time.time() + 30, pushed)
+        run = launched_run(gh, head, name, time.time() + 30, pushed)
         if run is None:
             return {'kind': 'never-started'}
         receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
@@ -803,6 +864,17 @@ def remote_run(args) -> int:
     return 0  # The verdict is result.json; a failing gate still uploads its evidence and caches.
 
 
+def bundle_priority(path: Path, evidence: frozenset) -> tuple:
+    """Order files for the capped artifact: the gate's named evidence and every log first.
+
+    Smallest-first alone let thousands of raw V8 and replay-cache JSON files fill the
+    400 MB budget, so the 10 MB backend server log of a failed coverage shard was the
+    file dropped (docs/rca/cases/2026-11-08-grep-regex-safety-blocked-event-loop.md).
+    """
+    text = str(path) in evidence or path.suffix in ('.log', '.txt') or path.name in BUNDLE_SUMMARIES
+    return (0 if text else 1, path.stat().st_size, str(path))
+
+
 def remote_bundle(args) -> int:
     out = args.out
     artifact = out / 'artifact'
@@ -816,6 +888,7 @@ def remote_bundle(args) -> int:
         for row in (json.loads((out / 'result.json').read_text()).get('evidence') or {}).values():
             if isinstance(row, dict):
                 paths.update(v for k, v in row.items() if isinstance(v, str) and v.startswith(str(root) + '/'))
+    evidence = frozenset(paths)
     # Everything a gate leaves for RCA: its .context state and logs plus the stack's service logs.
     # Caches and dependency trees stay behind; per-file and total caps bound the artifact.
     if (root / '.context').is_dir():
@@ -829,7 +902,7 @@ def remote_bundle(args) -> int:
             paths.update(str(p) for p in (root / rel).rglob('*')
                          if p.is_file() and not p.is_symlink() and p.suffix in ('.log', '.json', '.txt'))
     total, skipped = 0, []
-    for raw in sorted(paths, key=lambda p: (Path(p).stat().st_size, p)):
+    for raw in sorted(paths, key=lambda p: bundle_priority(Path(p), evidence)):
         path = Path(raw)
         if not path.is_file() or root not in path.resolve().parents:
             continue

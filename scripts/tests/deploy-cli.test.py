@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -569,6 +570,59 @@ class HarnessProcesses(unittest.TestCase):
                           ('/opt/devbox-tools/codex/versions/0.166.0/bin/codex', ''),
                           ('/opt/devbox-runtime/node/current/bin/node', 'node /home/boxes/rose/back-end/src/server.js')):
             self.assertFalse(d.is_harness_process(exe, argv), (exe, argv))
+
+
+class IdleDaemonCodexServer(unittest.TestCase):
+    """2026-11-08 (PR #1778 closeout): the daemon's idle codex app-server kept every devbox NOT_READY."""
+    EXE = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/bin/codex'
+    ARGV = f'{EXE} app-server --listen ws://127.0.0.1:33351 --enable goals'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name) / 'proc'
+        self.sessions = Path(self.tmp.name) / 'sessions'
+        self.sessions.mkdir(parents=True)
+        (self.proc).mkdir()
+        (self.proc / 'stat').write_text(f'cpu 1 2 3\nbtime {int(time.time()) - 1000}\n')
+        tick = os.sysconf('SC_CLK_TCK')
+        self.add(10, 1, f'/opt/devbox-runtime/node/current/bin/node {d.DAEMON_DIR}/bundle/sprite-daemon.mjs', 1)
+        self.add(20, 10, self.ARGV, 500 * tick)  # started 500 s ago
+        self.old = self.sessions / '2026' / 'old.jsonl'
+        self.old.parent.mkdir()
+        self.old.write_text('{}')
+        os.utime(self.old, (time.time() - 900, time.time() - 900))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add(self, pid, ppid, argv, start):
+        folder = self.proc / str(pid)
+        folder.mkdir()
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + f' {start} 0\n')
+        (folder / 'cmdline').write_bytes(argv.replace(' ', '\0').encode())
+
+    def idle(self, exe=EXE, argv=ARGV):
+        return d.idle_daemon_codex_server(20, exe, argv, self.proc, self.sessions)
+
+    def test_idle_daemon_server_is_not_live_work(self):
+        self.assertTrue(self.idle())
+
+    def test_running_child_blocks(self):
+        self.add(30, 20, 'bash -lc npm test', 1)
+        self.assertFalse(self.idle())
+
+    def test_session_rollout_since_start_blocks(self):
+        (self.sessions / '2026' / 'new.jsonl').write_text('{}')
+        self.assertFalse(self.idle())
+
+    def test_not_parented_by_the_daemon_blocks(self):
+        (self.proc / '10' / 'cmdline').write_bytes(b'bash\0-l')
+        self.assertFalse(self.idle())
+
+    def test_other_codex_commands_and_lookalikes_block(self):
+        self.assertFalse(self.idle(argv=f'{self.EXE} exec --cd /home/boxes/rose'))
+        self.assertFalse(self.idle(exe='/home/boxes/bin/codex'))
+        self.assertFalse(self.idle(exe=None))
 
 
 class DeletionCheck(Repo):
