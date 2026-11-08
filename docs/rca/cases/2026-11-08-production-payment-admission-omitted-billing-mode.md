@@ -76,7 +76,7 @@ existing subscription read plus its admission predicate is the narrow repair.
 At 10k agents this remains constant indexed work per usage request, with no new
 query, polling, shared lock, subscription or provider request.
 
-Before/after commands (unchanged test hashes retained privately):
+Before/after commands (logs and unchanged test hashes retained privately):
 `cd agents && venv/bin/python scripts/run_blackbox_tests.py production-payment-admission`
 failed 2/5 before and passed 5/5 after. Test-mode and missing-mode reached the
 allocation POST before; all-live and sandbox controls remained admissible.
@@ -90,6 +90,36 @@ Golden reference: not applicable (no approval-gated hunk). The exact original
 production payment task is expressly forbidden from being rerun; local causal
 proof must not be called production task outcome proof. Deployment and allowed
 production verification remain pending at this case's creation.
+
+### Independent adversarial review and resolution
+
+The independent reviewer confirmed native boundaries and source attribution and
+raised two P2 findings. The original review remains retained privately.
+
+First, Prettier changed final backend test bytes after its initial paired proof.
+The final formatted file was replayed against an isolated copy of the baseline
+credits service and the current service: exit1 then exit0 with identical SHA256
+51b9cacd148c5cf727419d09b0550a0e93afe9d4e94fc5305b6be9faa6d8a16b.
+Original logs and the original hash manifest remain intact.
+
+Second, preflight alone did not enforce the later purchase snapshot. The owning
+purchases-stripe-snapshot blackbox was extended before that repair. With real
+local Prisma and canonical Stripe SDK clients directed only to loopback, a false
+production purchase was issued on the old code (missing expected rejection),
+while the all-live control passed. The identical test passes after a guard at
+resolveAndIssuePurchaseCard, before Stripe, admin or card issuance, requires the
+persisted production identity's purchase mode to be literal true. The guard also
+covers resumed purchases through that boundary. Generic sandbox identities remain
+permitted. A live snapshot stays live after Subscription switches to false;
+the all-live control issues exactly one fake card and every captured Stripe
+request uses the live fixture account. No added query or lock is needed. Existing
+financial cleanup paths and known allocations were not executed or changed.
+
+Changes before snapshot creation are rejected; changes afterward cannot alter
+immutable purchase ownership. This does not assert an incident race, identify
+the historical writer or claim production recovery. Credits GET can grant its
+existing invite allowance; zero runner allocation writes is not a claim that
+this API makes no database writes.
 
 ## Human feedback
 

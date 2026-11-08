@@ -1,5 +1,6 @@
 import { type CardProvider } from '../../providers/card-provider';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
 import { isAdminUser } from '../../utils/adminAccess';
 import { benchmarkForceCustomerPurchasePath } from './config';
 import {
@@ -29,6 +30,18 @@ export async function resolveAndIssuePurchaseCard(
   cardProvider?: CardProvider,
   walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult> {
+  // Admission can precede this immutable snapshot by minutes. A production probe
+  // must never fund a live card from a test-mode purchase, including a resume.
+  if (
+    purchase.userId === BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID &&
+    purchase.stripeLivemode !== true
+  ) {
+    throw new PurchaseError(
+      'Production payment requires a live Stripe billing snapshot',
+      402,
+      'production_payment_billing_mode'
+    );
+  }
   // A resumed purchase already holds a wallet-funding claim; only a fresh purchase transitions to
   // CHARGING here (a resume re-enters mid-flight). Mirrors the non-admin path below.
   // Benchmark-only: BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH keeps isAdminUser() true for
