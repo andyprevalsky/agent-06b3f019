@@ -4601,14 +4601,19 @@ def _validate_tool_count_expectations(
     return None
 
 
-async def post_message(base_url: str, agent_id: str, message: str) -> bool:
+async def post_message(
+    base_url: str, agent_id: str, message: str, metadata: Optional[dict[str, Any]] = None
+) -> bool:
     """POST /api/agents/:id/messages — send a user message (unblocks send_message_to_user waits)."""
     headers = await _api_headers()
+    body: dict[str, Any] = {"message": message, "role": "USER"}
+    if metadata:
+        body["metadata"] = metadata
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{base_url}/api/agents/{agent_id}/messages",
             headers=headers,
-            json={"message": message, "role": "USER"},
+            json=body,
         )
         return resp.status_code in (200, 201)
 
@@ -5140,7 +5145,7 @@ async def _poll_agent(
     prev_root_message_count = 0
     approvals_triggered = 0
     approvals_resolved = 0
-    replied_waiting_msgs: set = set()  # track isWaitingForUser messages we've already replied to
+    replied_waiting_msgs: set = set()  # questions (toolCallId, else row id) already auto-replied to
     last_tree_poll = 0.0  # timestamp of last tree-level poll
     last_progress_print = 0.0  # timestamp of last progress log
     last_tree_stats: dict = {}  # cached tree stats
@@ -5694,6 +5699,10 @@ async def _poll_agent(
         # Auto-reply to send_message_to_user questions (isWaitingForUser)
         # These block the workflow until a user message is posted back.
         # The flag can be at metadata.isWaitingForUser OR metadata.sendMessageToUser.isWaitingForUser
+        # One reply per question: key on the question's toolCallId (its waiting
+        # state may be persisted on more than one row) and stamp the reply with
+        # the question it answers, so replies to distinct questions are distinct
+        # rows while a double-persisted reply still trips no_duplicate_messages.
         for m in messages:
             meta = m.get("metadata", {})
             if not isinstance(meta, dict):
@@ -5702,8 +5711,9 @@ async def _poll_agent(
             is_waiting = meta.get("isWaitingForUser") or (
                 isinstance(meta.get("sendMessageToUser"), dict) and meta["sendMessageToUser"].get("isWaitingForUser")
             )
-            if is_waiting and msg_id and msg_id not in replied_waiting_msgs:
-                replied_waiting_msgs.add(msg_id)
+            question_key = meta.get("toolCallId") or msg_id
+            if is_waiting and question_key and question_key not in replied_waiting_msgs:
+                replied_waiting_msgs.add(question_key)
                 question = (m.get("text") or m.get("message") or "")[:200]
                 print(f"    💬 Agent asked a question: {question}")
                 print("    → Auto-replying to unblock workflow")
@@ -5714,6 +5724,7 @@ async def _poll_agent(
                         "Please do not ask me anymore questions. I trust your judgment, intuition, "
                         "and ability to make reasonable assumptions. Please proceed with the task. "
                         "All files have been uploaded as attachments and should be available in your context.",
+                        metadata={"benchmarkAutoReply": {"toolCallId": question_key, "questionMessageId": msg_id}},
                     )
                 except Exception as e:
                     print(f"    ⚠ Auto-reply failed: {e}")

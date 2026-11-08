@@ -2801,6 +2801,148 @@ async def test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence():
     assert [row["agent_id"] for row in evidence["active_chain"]] == ["root", "out", "d1"]
 
 
+def _auto_reply_question_row(message_id: str, tool_call_id: str, text: str, *, waiting: bool, title: str, status: str):
+    """A send_message_to_user row exactly as the handler persists it (H-69 incident shape)."""
+    return {
+        "message_id": message_id,
+        "role": "TOOL",
+        "text": text,
+        "timestamp": f"2026-11-08T02:21:{55 + len(message_id) % 4}.000Z",
+        "metadata": {
+            "attentionMessage": text,
+            "isUserAttentionMessage": True,
+            "phase": "PLAN",
+            "sendMessageToUser": {"attentionKind": "question", "isQuestion": True, "isWaitingForUser": waiting},
+            "title": title,
+            "toolCallId": tool_call_id,
+            "toolName": "send_message_to_user",
+            "toolStatus": status,
+        },
+    }
+
+
+async def _poll_with_scripted_questions(script):
+    """Run the real _poll_agent against a scripted backend that stores harness posts.
+
+    ``script(rows, posts)`` returns the agent status after mutating the stored
+    rows for this poll; posts are the harness's auto-replies persisted the way
+    POST /api/agents/:id/messages persists them (text plus body metadata).
+    """
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("build-boxing-payment")
+    rows: list[dict] = [
+        {"message_id": "goal", "role": "USER", "text": "Build my dad's signup site", "metadata": {}, "timestamp": "2026-11-08T02:14:10.000Z"}
+    ]
+    posts: list[dict] = []
+
+    async def fake_get_agent(_base, _aid):
+        status = script(rows, posts)
+        return {"agent": {"agent_id": "root", "status": status}, "messages": copy.deepcopy(rows)}
+
+    async def fake_post(_base, _aid, message, metadata=None):
+        row = {
+            "message_id": f"reply-{len(posts) + 1}",
+            "role": "USER",
+            "text": message,
+            "metadata": copy.deepcopy(metadata) if metadata is not None else None,
+            "timestamp": f"2026-11-08T02:22:0{len(posts) * 5}.000Z",
+        }
+        posts.append(row)
+        rows.append(row)
+        return True
+
+    empty_stats = {
+        "agent_count": 0, "total_messages": 0, "total_cost_cents": 0, "active_count": 0, "failed_count": 0,
+        "tree_tokens_in": 0, "tree_tokens_out": 0, "error_agents": [], "all_agents": [],
+    }
+    with (
+        patch.object(bench, "get_agent", side_effect=fake_get_agent),
+        patch.object(bench, "get_attention_requests", AsyncMock(return_value=[])),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench, "post_message", side_effect=fake_post),
+        patch.object(bench, "POLL_INTERVAL", 0),
+        patch.object(bench, "_fetch_tree_stats", AsyncMock(return_value=empty_stats)),
+    ):
+        _data, _triggered, _resolved, failure = await bench._poll_agent("http://x", "root", task, None, {})
+    return rows, posts, failure
+
+
+async def test_auto_reply_to_two_distinct_questions_is_not_a_duplicate_message():
+    """H-69 (e22 build-boxing-payment r3): two questions → two harness replies, not a dual-write.
+
+    The root asked the user twice (distinct send_message_to_user toolCallIds).
+    The harness answered each with the same canned text and no provenance, so
+    no_duplicate_messages read its own second reply as a dual-write and failed
+    the run at 480 s of a 7,200 s budget. Each reply must identify the question
+    it answers; a genuinely double-persisted reply must still be flagged.
+    """
+    from context_validator import validate_context
+
+    q1 = "What discount should the Boxing and Muay Thai code apply?"
+    q2 = "Please specify the discount amount and its duration."
+
+    def script(rows, posts):
+        ids = {row["message_id"] for row in rows}
+        if "q1" not in ids:
+            rows.append(_auto_reply_question_row("q1", "tc-q1", q1, waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if len(posts) >= 1 and "q2" not in ids:
+            rows.append(_auto_reply_question_row("q1-done", "tc-q1", q1, waiting=False, title="User response received", status="FINISHED"))
+            rows.append(_auto_reply_question_row("q2", "tc-q2", q2, waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if len(posts) >= 2 and "q2-done" not in ids:
+            rows.append(_auto_reply_question_row("q2-done", "tc-q2", q2, waiting=False, title="User response received", status="FINISHED"))
+            return "ACTIVE"
+        return "COMPLETED" if "q2-done" in ids else "ACTIVE"
+
+    rows, posts, failure = await _poll_with_scripted_questions(script)
+
+    assert len(posts) == 2, f"one auto-reply per question expected, got {len(posts)}"
+    assert posts[0]["text"] == posts[1]["text"], "the canned reply text itself is unchanged"
+    assert failure is None or "no_duplicate_messages" not in failure, failure
+    duplicate_errors = [v for v in validate_context(rows) if v.rule == "no_duplicate_messages" and v.severity == "error"]
+    assert not duplicate_errors, duplicate_errors
+    # Each reply names the question it answers.
+    answered = [((p["metadata"] or {}).get("benchmarkAutoReply") or {}).get("toolCallId") for p in posts]
+    assert answered == ["tc-q1", "tc-q2"], answered
+    # The validator still catches a real dual-write of one reply.
+    dual_write = copy.deepcopy(posts[0]) | {"message_id": "reply-1-copy", "timestamp": "2026-11-08T02:22:30.000Z"}
+    flagged = [v for v in validate_context([*rows, dual_write]) if v.rule == "no_duplicate_messages" and v.severity == "error"]
+    assert flagged, "a double-persisted harness reply must still be a no_duplicate_messages error"
+
+
+async def test_auto_reply_answers_each_question_once_when_its_wait_is_re_emitted():
+    """The auto-reply is keyed by the question (toolCallId), not by the row id.
+
+    A question's waiting state can be persisted on more than one row (the
+    deploy-handoff 'Waiting for reply' row keeps isWaitingForUser=True for the
+    same toolCallId). Answering per row posted a second canned reply to one
+    question, leaving a stray user message for the next wait to consume.
+    """
+
+    def script(rows, posts):
+        ids = {row["message_id"] for row in rows}
+        if "q1" not in ids:
+            rows.append(_auto_reply_question_row("q1", "tc-q1", "Which plan?", waiting=True, title="Attn: User", status="IN_PROGRESS"))
+            return "ACTIVE"
+        if "q1-handoff" not in ids:
+            rows.append(
+                _auto_reply_question_row(
+                    "q1-handoff", "tc-q1", "new code version deployed, retry this tool",
+                    waiting=True, title="Waiting for reply", status="FINISHED",
+                )
+            )
+            return "ACTIVE"
+        return "COMPLETED"
+
+    _rows, posts, failure = await _poll_with_scripted_questions(script)
+
+    assert failure is None, failure
+    assert len(posts) == 1, f"one auto-reply per question expected, got {[p['message_id'] for p in posts]}"
+
+
 def test_tree_feedback_routing_static_checks_grade_routing_and_signatures():
     """Routing checks require outreach delivery, research precision, and corrected drafts."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -28278,6 +28420,14 @@ async def run_all_tests():
     await r.record_async(
         "mid_run_feedback_depth_trigger_poll_loop",
         test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence,
+    )
+    await r.record_async(
+        "auto_reply_to_two_distinct_questions_is_not_a_duplicate_message",
+        test_auto_reply_to_two_distinct_questions_is_not_a_duplicate_message,
+    )
+    await r.record_async(
+        "auto_reply_answers_each_question_once_when_its_wait_is_re_emitted",
+        test_auto_reply_answers_each_question_once_when_its_wait_is_re_emitted,
     )
     r.record(
         "fly_infra_detector_ignores_placeholders",
