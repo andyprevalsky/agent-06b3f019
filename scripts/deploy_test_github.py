@@ -606,6 +606,17 @@ def remote_run(args) -> int:
     return 0  # The verdict is result.json; a failing gate still uploads its evidence and caches.
 
 
+def bundle_priority(path: Path, evidence: frozenset) -> tuple:
+    """Order files for the capped artifact: the gate's named evidence and every log first.
+
+    Smallest-first alone let thousands of raw V8 and replay-cache JSON files fill the
+    400 MB budget, so the 10 MB backend server log of a failed coverage shard was the
+    file dropped (docs/rca/cases/2026-11-08-grep-regex-safety-blocked-event-loop.md).
+    """
+    text = str(path) in evidence or path.suffix in ('.log', '.txt')
+    return (0 if text else 1, path.stat().st_size, str(path))
+
+
 def remote_bundle(args) -> int:
     out = args.out
     artifact = out / 'artifact'
@@ -619,6 +630,7 @@ def remote_bundle(args) -> int:
         for row in (json.loads((out / 'result.json').read_text()).get('evidence') or {}).values():
             if isinstance(row, dict):
                 paths.update(v for k, v in row.items() if isinstance(v, str) and v.startswith(str(root) + '/'))
+    evidence = frozenset(paths)
     # Everything a gate leaves for RCA: its .context state and logs plus the stack's service logs.
     # Caches and dependency trees stay behind; per-file and total caps bound the artifact.
     if (root / '.context').is_dir():
@@ -632,7 +644,7 @@ def remote_bundle(args) -> int:
             paths.update(str(p) for p in (root / rel).rglob('*')
                          if p.is_file() and not p.is_symlink() and p.suffix in ('.log', '.json', '.txt'))
     total, skipped = 0, []
-    for raw in sorted(paths, key=lambda p: (Path(p).stat().st_size, p)):
+    for raw in sorted(paths, key=lambda p: bundle_priority(Path(p), evidence)):
         path = Path(raw)
         if not path.is_file() or root not in path.resolve().parents:
             continue

@@ -4,10 +4,17 @@
  * User/model-supplied regex flows into Postgres `~`, whose backtracking engine
  * will not honor statement_timeout mid-match — so a catastrophic pattern is a
  * DoS. And JS `RegExp` (used for validation) accepts constructs Postgres ARE
- * does not. These pure helpers gate and normalize the pattern before it runs.
+ * does not. These helpers gate and normalize the pattern before it runs.
+ *
+ * The analyzer runs off the event loop: recheck's `check` uses its native agent
+ * subprocess (or a worker thread), while `checkSync` parks the main thread on
+ * Atomics.wait for up to the whole deadline. One shared backend serves every
+ * agent's grep, so a synchronous 1 s analysis froze all requests; concurrent
+ * greps stacked those freezes into a 6.7 s outage that dropped keep-alive
+ * sockets (docs/rca/cases/2026-11-08-grep-regex-safety-blocked-event-loop.md).
  */
 
-import { checkSync } from 'recheck';
+import { check } from 'recheck';
 
 import { isClearlyAtMostQuadraticPattern } from './regexSafetyProof';
 
@@ -58,7 +65,11 @@ function isClearlyLinearPattern(source: string): boolean {
   return true;
 }
 
-type PatternAnalyzer = typeof checkSync;
+type PatternAnalyzer = (
+  source: string,
+  flags: string,
+  params: { timeout: number }
+) => ReturnType<typeof check>;
 type PatternSafetyControl = number | PatternAnalyzer;
 
 /**
@@ -66,18 +77,18 @@ type PatternSafetyControl = number | PatternAnalyzer;
  * (exponential, or polynomial degree > 2). Quadratic patterns like
  * `meeting.*tomorrow` stay allowed so we don't nerf realistic queries.
  */
-export function checkPatternSafety(
+export async function checkPatternSafety(
   source: string,
   flags: string,
   control: PatternSafetyControl = RECHECK_TIMEOUT_MS
-): PatternSafety {
+): Promise<PatternSafety> {
   if (source.length > MAX_PATTERN_LENGTH) {
     return {
       ok: false,
       reason: `Pattern too long (${source.length} chars, max ${MAX_PATTERN_LENGTH}).`,
     };
   }
-  const analyze = typeof control === 'function' ? control : checkSync;
+  const analyze: PatternAnalyzer = typeof control === 'function' ? control : check;
   const timeoutMs = typeof control === 'number' ? control : RECHECK_TIMEOUT_MS;
   // An explicitly supplied analyzer is a test seam for fail-closed behavior,
   // so it must run even when the pattern is in the locally proven subset.
@@ -88,15 +99,15 @@ export function checkPatternSafety(
   ) {
     return { ok: true };
   }
-  // Retries share one wall-clock deadline. Each checkSync invocation otherwise
+  // Retries share one wall-clock deadline. Each analyzer invocation otherwise
   // starts a fresh timeout, which would multiply request-path latency by the
   // retry count under load.
   const deadlineAt = Date.now() + timeoutMs;
-  const runAnalyzer = () => {
+  const runAnalyzer = async () => {
     const remainingMs = deadlineAt - Date.now();
     if (remainingMs <= 0) return null;
     try {
-      return analyze(source, flags, { timeout: remainingMs });
+      return await analyze(source, flags, { timeout: remainingMs });
     } catch {
       return null;
     }
@@ -105,12 +116,12 @@ export function checkPatternSafety(
   // shared deadline or accepting an unclassified pattern. A third unknown
   // still fail-closes — the guard exists to keep catastrophic regex out of
   // Postgres.
-  let diagnostics = runAnalyzer();
+  let diagnostics = await runAnalyzer();
   if (diagnostics === null || diagnostics.status === 'unknown') {
-    diagnostics = runAnalyzer();
+    diagnostics = await runAnalyzer();
   }
   if (diagnostics === null || diagnostics.status === 'unknown') {
-    diagnostics = runAnalyzer();
+    diagnostics = await runAnalyzer();
   }
   if (diagnostics === null || diagnostics.status === 'unknown') {
     return unclassifiedPatternRejection();
