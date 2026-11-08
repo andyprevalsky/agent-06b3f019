@@ -1,9 +1,12 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react-swc';
 import path from 'path';
+import { gateProgressVitestPlugin } from './src/tests/gate-progress/vitestReporter.ts';
 
 export default defineConfig({
-  plugins: [react()],
+  // The deploy gate's progress plugin appends a live FAIL-row reporter to the reporters
+  // Vitest resolves (defaults unchanged), only when the gate worker names a progress file.
+  plugins: [react(), ...(process.env.DEPLOY_GATE_PROGRESS ? [gateProgressVitestPlugin()] : [])],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

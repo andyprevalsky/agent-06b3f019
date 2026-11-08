@@ -16,22 +16,28 @@ OWNED_DRAIN_SECONDS = 13.0
 
 
 
+def process_entries():
+    """Every /proc/<pid> entry: the scan's population. Tests narrow it to processes they created."""
+    return (process for process in Path('/proc').iterdir() if process.name.isdigit())
+
+
 def scan_same_user_processes(inspect, refuse, grace=2.0):
     """Call inspect(process) for each /proc entry owned by this euid; never signals anything.
 
     A same-user process can turn unreadable mid-scan (non-dumpable, or exec of a setuid binary that
     keeps our real uid). Re-observe it for up to `grace` seconds: skip it only once it exits or its
-    real uid is another user's; one that stays unreadable goes to refuse(pid), never assumed quiet.
+    real or effective uid is another user's (a sudo that keeps our real uid but runs as root is
+    skipped exactly as the first look skips it); one that stays unreadable under our own credentials
+    goes to refuse(pid), never assumed quiet.
     """
-    def real_uid(process):
+    def foreign(process):
         for line in (process / 'status').read_text().splitlines():
             if line.startswith('Uid:'):
-                return int(line.split()[1])
+                real, effective = map(int, line.split()[1:3])
+                return real != os.getuid() or effective != os.geteuid()
         raise PermissionError(f'{process}: no Uid line')
 
-    for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
+    for process in process_entries():
         deadline, unreadable = time.monotonic() + grace, False
         while True:
             try:
@@ -44,7 +50,7 @@ def scan_same_user_processes(inspect, refuse, grace=2.0):
             except PermissionError:
                 unreadable = True
                 try:
-                    if real_uid(process) != os.getuid():
+                    if foreign(process):
                         break
                 except (FileNotFoundError, ProcessLookupError):
                     break

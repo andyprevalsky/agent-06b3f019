@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -271,11 +272,15 @@ class Sync(Repo):
 
 
 class ReviewWait(Repo):
-    def wait(self, wait_code, check):
+    def wait(self, wait_code, check, *, max_wait=3600):
+        """``wait_code``/``check`` may be lists: one entry per waiter run / check read, in order."""
         d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'a' * 40})
+        codes = wait_code if isinstance(wait_code, list) else None
+        checks = check if isinstance(check, list) else None
         with patch.object(d, 'review_state', return_value={'cycles': [{'head': 'b' * 40}]}), \
-             patch.object(d, 'run', return_value=wait_code) as runner, patch.object(d, 'coderabbit_check', return_value=check):
-            return (*self.call(d.cmd_review_wait, timeout=600), runner)
+             patch.object(d, 'run', side_effect=codes, return_value=wait_code) as runner, \
+             patch.object(d, 'coderabbit_check', side_effect=checks, return_value=check):
+            return (*self.call(d.cmd_review_wait, timeout=600, rate_limit_max_wait=max_wait), runner)
 
     def test_a_delivered_review_passes(self):
         code, out, _, runner = self.wait(0, ('success', 'Review completed'))
@@ -311,6 +316,51 @@ class ReviewWait(Repo):
         none = subprocess.CompletedProcess([], 0, stdout='\t\n', stderr='')
         with patch.object(d.subprocess, 'run', return_value=none):
             self.assertEqual(('', ''), d.coderabbit_check('c' * 40))
+
+    def test_a_rate_limited_check_waits_out_the_window_and_rerequests_once(self):
+        code, out, _, runner = self.wait([0, 0], [('neutral', 'Review rate limited'), ('success', 'Finished')])
+        self.assertEqual(code, 0)
+        self.assertIn('DEPLOY_REVIEW_WAIT delivered head=bbbbbbbbbbbb', out)
+        self.assertEqual(runner.call_count, 2)
+        first, second = (call.args[0] for call in runner.call_args_list)
+        self.assertNotIn('--after-rate-limit', first)
+        self.assertEqual(second[:len(first)], first, 'the re-request waits on the same PR and exact HEAD')
+        self.assertEqual(second[len(first):], ['--after-rate-limit', '--rate-limit-max-wait', '3600',
+                                               '--receipt-dir', str(d.CONTEXT)])
+
+    def test_review_limit_reached_is_a_quota_window_too(self):
+        code, _, _, runner = self.wait([0, 0], [('neutral', 'Review limit reached'), ('success', 'Finished')])
+        self.assertEqual((code, runner.call_count), (0, 2))
+
+    def test_no_parseable_window_keeps_the_exit_3_message_and_posts_nothing(self):
+        code, _, err, runner = self.wait([0, 3], ('neutral', 'Review rate limited'))
+        self.assertEqual((code, runner.call_count), (3, 2))
+        self.assertIn('NOT-A-REVIEW: CodeRabbit check is "neutral" (Review rate limited)', err)
+        self.assertIn('deploy_review_cycle.py skip', err)
+
+    def test_a_second_rate_limit_after_the_one_rerequest_is_not_rerequested_again(self):
+        code, _, err, runner = self.wait([0, 0], [('neutral', 'Review rate limited')] * 2)
+        self.assertEqual((code, runner.call_count), (3, 2))
+        self.assertIn('NOT-A-REVIEW', err)
+
+    def test_a_non_rate_limited_neutral_is_never_rerequested(self):
+        for check in (('neutral', 'Review skipped'), ('', ''), ('error', 'gh failed: API rate limited'),
+                      ('failure', 'Failed')):
+            with self.subTest(check=check):
+                code, _, _, runner = self.wait(0, check)
+                self.assertEqual((code, runner.call_count), (3, 1))
+
+    def test_a_zero_max_wait_disables_the_rerequest(self):
+        code, _, _, runner = self.wait(0, ('neutral', 'Review rate limited'), max_wait=0)
+        self.assertEqual((code, runner.call_count), (3, 1))
+
+    def test_an_unsuccessful_wait_is_returned_unless_it_was_the_quota(self):
+        code, _, _, runner = self.wait(1, ('failure', 'Failed'))
+        self.assertEqual((code, runner.call_count), (1, 1))
+
+    def test_review_wait_parser_defaults_to_a_bounded_window(self):
+        args = d.parser().parse_args(['review-wait'])
+        self.assertEqual((args.timeout, args.rate_limit_max_wait), (600, 3600))
 
     def test_a_failed_wait_propagates_without_reading_the_check(self):
         with patch.object(d, 'coderabbit_check') as check:
@@ -436,6 +486,130 @@ class HarnessProcesses(unittest.TestCase):
                           ('/opt/devbox-tools/codex/versions/0.166.0/bin/codex', ''),
                           ('/opt/devbox-runtime/node/current/bin/node', 'node /home/boxes/rose/back-end/src/server.js')):
             self.assertFalse(d.is_harness_process(exe, argv), (exe, argv))
+
+
+class CurrentCodeModeHost(unittest.TestCase):
+    EXE = '/opt/devbox-tools/codex/versions/test/vendor/bin/codex-code-mode-host'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.proc = Path(self.tmp.name) / 'proc'
+        self.root = Path(self.tmp.name) / 'checkout'
+        self.root.mkdir()
+        self.add(900, 1, str(Path(self.EXE).with_name('codex')))
+        self.add(123, 900, self.EXE)
+
+    def add(self, pid, ppid, exe):
+        folder = self.proc / str(pid)
+        (folder / 'task' / str(pid)).mkdir(parents=True)
+        (folder / 'task' / str(pid) / 'children').write_text('')
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + ' 100 0\n')
+        (folder / 'cmdline').write_bytes(exe.encode() + b'\0')
+        (folder / 'cwd').symlink_to(self.root)
+        (folder / 'exe').symlink_to(exe)
+
+    def live(self):
+        with patch.object(d, 'own_pids', return_value={900}), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            return {row['pid'] for row in d.live_processes(self.root)}
+
+    def test_current_managed_code_host_is_harness_but_foreign_host_is_live(self):
+        self.assertNotIn(123, self.live())
+        with patch.object(d, 'own_pids', return_value=set()), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            self.assertIn(123, {row['pid'] for row in d.live_processes(self.root)})
+
+    def test_full_agents_unmanaged_hosts_and_non_sibling_parents_stay_live(self):
+        for exe in ('/usr/bin/node', '/tmp/codex-code-mode-host', self.EXE.replace('-code-mode-host', ''),
+                    '/opt/devbox-tools/codex-evil/bin/codex-code-mode-host'):
+            with self.subTest(exe=exe):
+                link = self.proc / '123' / 'exe'
+                link.unlink()
+                link.symlink_to(exe)
+                self.assertIn(123, self.live())
+        link.unlink()
+        link.symlink_to(self.EXE)
+        parent = self.proc / '900' / 'exe'
+        parent.unlink()
+        parent.symlink_to('/opt/devbox-tools/codex/versions/other/bin/codex')
+        self.assertIn(123, self.live())
+
+    def test_child_of_nonleader_thread_or_unknown_task_blocks(self):
+        thread = self.proc / '123' / 'task' / '124'
+        thread.mkdir()
+        (thread / 'children').write_text('456')
+        self.assertIn(123, self.live())
+        (thread / 'children').unlink()
+        self.assertIn(123, self.live())
+
+    def test_pid_reuse_or_changing_parent_identity_refuses_exemption(self):
+        original = d.stat_fields
+        for changed_pid in (123, 900):
+            calls = 0
+            def changing(proc, pid):
+                nonlocal calls
+                row = original(proc, pid)
+                if pid == changed_pid:
+                    calls += 1
+                    if calls > 1:
+                        row[19] = str(100 + calls)
+                return row
+            with self.subTest(pid=changed_pid), patch.object(d, 'stat_fields', side_effect=changing):
+                self.assertIn(123, self.live())
+
+
+class IdleDaemonCodexServer(unittest.TestCase):
+    """2026-11-08 (PR #1778 closeout): the daemon's idle codex app-server kept every devbox NOT_READY."""
+    EXE = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/bin/codex'
+    ARGV = f'{EXE} app-server --listen ws://127.0.0.1:33351 --enable goals'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name) / 'proc'
+        self.sessions = Path(self.tmp.name) / 'sessions'
+        self.sessions.mkdir(parents=True)
+        (self.proc).mkdir()
+        (self.proc / 'stat').write_text(f'cpu 1 2 3\nbtime {int(time.time()) - 1000}\n')
+        tick = os.sysconf('SC_CLK_TCK')
+        self.add(10, 1, f'/opt/devbox-runtime/node/current/bin/node {d.DAEMON_DIR}/bundle/sprite-daemon.mjs', 1)
+        self.add(20, 10, self.ARGV, 500 * tick)  # started 500 s ago
+        self.old = self.sessions / '2026' / 'old.jsonl'
+        self.old.parent.mkdir()
+        self.old.write_text('{}')
+        os.utime(self.old, (time.time() - 900, time.time() - 900))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add(self, pid, ppid, argv, start):
+        folder = self.proc / str(pid)
+        folder.mkdir()
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + f' {start} 0\n')
+        (folder / 'cmdline').write_bytes(argv.replace(' ', '\0').encode())
+
+    def idle(self, exe=EXE, argv=ARGV):
+        return d.idle_daemon_codex_server(20, exe, argv, self.proc, self.sessions)
+
+    def test_idle_daemon_server_is_not_live_work(self):
+        self.assertTrue(self.idle())
+
+    def test_running_child_blocks(self):
+        self.add(30, 20, 'bash -lc npm test', 1)
+        self.assertFalse(self.idle())
+
+    def test_session_rollout_since_start_blocks(self):
+        (self.sessions / '2026' / 'new.jsonl').write_text('{}')
+        self.assertFalse(self.idle())
+
+    def test_not_parented_by_the_daemon_blocks(self):
+        (self.proc / '10' / 'cmdline').write_bytes(b'bash\0-l')
+        self.assertFalse(self.idle())
+
+    def test_other_codex_commands_and_lookalikes_block(self):
+        self.assertFalse(self.idle(argv=f'{self.EXE} exec --cd /home/boxes/rose'))
+        self.assertFalse(self.idle(exe='/home/boxes/bin/codex'))
+        self.assertFalse(self.idle(exe=None))
 
 
 class DeletionCheck(Repo):

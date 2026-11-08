@@ -1,6 +1,7 @@
 /**
- * Fixtures for the Rose Desktop app view suites (a code-agent chip's live
- * preview card → the full-screen app view). Wire shapes follow the A1 backend
+ * Fixtures for the Rose Desktop app view suites (the root transcript's
+ * code-agent row → its code-agent view → the devbox usage popover's "Open app" link → the full-screen
+ * app view). Wire shapes follow the A1 backend
  * (feat/rose-user-ui @ 7826a2a6b) and the L-APPS2 handoff (d0a33fefa):
  *
  *   metadata.code_agent { task_id, provider, preview_url, title, … } on the spawn row
@@ -12,6 +13,7 @@
  */
 import { act, fireEvent, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
+import { expect } from 'vitest';
 
 import { Toaster } from '@/components/ui/toaster';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
@@ -188,22 +190,55 @@ export function renderTerminal() {
   );
 }
 
-/** Open agent-001 in the real Terminal and return its code-agent chip. */
-export async function openAgentWithChip(): Promise<HTMLElement> {
-  renderTerminal();
-  fireEvent.click(await screen.findByTestId('rose-agent-row-agent-001'));
+/**
+ * The code-agent row in the root transcript: it folds into a "Worked for …"
+ * work group; expand the group that holds it (its first button) and return it.
+ */
+export async function findCodeAgentRow(): Promise<HTMLElement> {
+  const groups = await screen.findAllByTestId('trajectory-work-group');
+  for (const group of groups) {
+    const toggle = within(group).getAllByRole('button')[0];
+    if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle);
+  }
   return await screen.findByTestId('code-agent-chip');
 }
 
-/** Chip → its "Open app" button → the full-screen app view. */
-export async function openAppView(): Promise<HTMLElement> {
-  const chip = await openAgentWithChip();
-  fireEvent.click(await within(chip).findByRole('button', { name: 'Open app' }));
+/** Open agent-001 in the real Terminal and return its code-agent row. */
+export async function openAgentWithChip(): Promise<HTMLElement> {
+  renderTerminal();
+  fireEvent.click(await screen.findByTestId('rose-agent-row-agent-001'));
+  return await findCodeAgentRow();
+}
+
+/** Code-agent row → its code-agent view (the row has no "Open app" of its own). */
+export async function openCodeAgentViewFromRow(row: HTMLElement): Promise<HTMLElement> {
+  expect(within(row).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
+  fireEvent.click(row);
+  return await screen.findByTestId('code-agent-view');
+}
+
+/** Open the view's devbox usage popover (CodeResourcesIndicator) and return it. */
+export async function openUsagePopover(view: HTMLElement): Promise<HTMLElement> {
+  fireEvent.click(await within(view).findByTestId('code-resources'));
+  return await screen.findByTestId('code-resources-popover');
+}
+
+/** Code-agent view → its devbox usage popover → the "Open app" link → the full-screen app view. */
+export async function openAppFromCodeAgentView(view: HTMLElement): Promise<HTMLElement> {
+  const popover = await openUsagePopover(view);
+  fireEvent.click(within(popover).getByRole('button', { name: 'Open app' }));
   return await screen.findByTestId('app-view-screen');
 }
 
+/** Row → code-agent view → usage popover → "Open app" → the full-screen app view. */
+export async function openAppView(): Promise<HTMLElement> {
+  const row = await openAgentWithChip();
+  return await openAppFromCodeAgentView(await openCodeAgentViewFromRow(row));
+}
+
+/** Escape as the browser delivers it: at the focused element, bubbling to document and window. */
 export function pressEscape() {
   act(() => {
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
   });
 }

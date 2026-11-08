@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Mapping, Sequence
@@ -56,6 +56,33 @@ def gate_environment() -> dict[str, str]:
     if venv_runs_the_gates():
         env["PATH"] = f"{VENV_BIN}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+# Live per-suite rows for the gate's worker (scripts/deploy_gate_progress.py).
+# Only this runner writes them: its suites run without the variable, so a suite
+# that exercises this runner with failing fixture gates cannot report those
+# fixtures as failures of the real gate.
+PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
+
+
+def report_progress(suite: str, status: str, *, detail: str = "", log: str = "") -> None:
+    """Append one suite row to the worker's progress file, if it named one.
+
+    Advisory: without the variable nothing is imported or written, and a
+    missing helper or unwritable file never changes the result or output.
+    """
+    if not os.environ.get(PROGRESS_ENV):
+        return
+    scripts = str(Path(__file__).resolve().parent)
+    try:
+        sys.path.insert(0, scripts)
+        try:
+            import deploy_gate_progress
+        finally:
+            sys.path.remove(scripts)
+        deploy_gate_progress.report(suite, status, scope="suite", detail=detail, log=log)
+    except (ImportError, OSError, ValueError):
+        return
 
 
 SIGNAL_GRACE_SECONDS = 1.0
@@ -153,6 +180,7 @@ class Job:
             env[SHARD_ENV] = f"{self.shard}/{self.gate.shards}"
         else:
             env.pop(SHARD_ENV, None)
+        env.pop(PROGRESS_ENV, None)
         return env
 
 
@@ -303,7 +331,9 @@ GATES = (
     Gate("deploy-gates", ("python3", "scripts/tests/deploy-gates.test.py")),
     Gate("deploy-test-github", ("python3", "scripts/tests/deploy-test-github.test.py")),
     Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
+    Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
     Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
+    Gate("mac-app-release-drift", ("bash", "scripts/tests/mac-app-release-drift.test.sh")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",
@@ -318,6 +348,7 @@ GATES = (
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
+    Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
     Gate(
         "canonical-seed-whatsapp-content",
@@ -338,6 +369,10 @@ GATES = (
     Gate(
         "benchmark-history-backfill",
         ("python3", "scripts/tests/benchmark-history-backfill.test.py"),
+    ),
+    Gate(
+        "concurrent-pr-shared-paths",
+        ("python3", "scripts/tests/concurrent-pr-shared-paths.test.py"),
     ),
     Gate(
         "cloudbench-full-selection",
@@ -364,6 +399,11 @@ GATES = (
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
+    Gate(
+        "cloudbench-cross-devbox-admission",
+        ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
+    ),
+    Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -570,6 +610,9 @@ GATES = (
         "agents-blackbox-registration",
         ("python3", "agents/tests/structural/structural_test_registration.py"),
     ),
+    # Scripts rank GITHUB_TOKEN, GITHUB_TOKEN_2..9 and GITHUB_DISPATCH_TOKEN by
+    # remaining quota; one shared user token was drained twice in an hour.
+    Gate("github-token-pool", ("python3", "scripts/tests/github-token-pool.test.py")),
 )
 
 
@@ -667,6 +710,10 @@ def run_gates(
     running: list[RunningGate] = []
     results: dict[str, tuple[int, float, str]] = {}
     timed_out: set[str] = set()
+    # Jobs still to finish per suite, and suites whose progress row is written:
+    # a suite fails with its first failed shard and passes with its last shard.
+    unfinished = Counter(job.gate.name for job in jobs)
+    reported: set[str] = set()
     received_signal = 0
 
     def forward(signum: int, _frame: object) -> None:
@@ -743,6 +790,16 @@ def run_gates(
                         file=sys.stderr,
                         flush=True,
                     )
+                    suite = item.gate.gate.name
+                    unfinished[suite] -= 1
+                    if suite not in reported and (exit_code != 0 or not unfinished[suite]):
+                        reported.add(suite)
+                        report_progress(
+                            suite,
+                            "PASS" if exit_code == 0 else "FAIL",
+                            detail="" if exit_code == 0 else rendered,
+                            log=str(item.output_path) if exit_code != 0 or not item.gate.shard else "",
+                        )
                     if exit_code != 0 and item.gate.gate.name in previously_failed:
                         repeated_failure = item.gate.label
 

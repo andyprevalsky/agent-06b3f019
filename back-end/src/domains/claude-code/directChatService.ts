@@ -102,6 +102,12 @@ function deliveryError(delivery: TurnDelivery): DirectChatError {
         'CODE_SESSION_CLOSED',
         'This code session has finished. Ask Rose to continue the work.'
       );
+    case 'session_starting':
+      return new DirectChatError(
+        409,
+        'CODE_SESSION_STARTING',
+        'The code agent is still starting. Send your message again in a moment.'
+      );
     case 'provider_unsupported':
       return new DirectChatError(
         409,

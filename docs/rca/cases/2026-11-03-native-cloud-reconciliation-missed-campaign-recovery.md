@@ -282,3 +282,50 @@ final source/environment refresh. No old result, exclusion, failure, retained Hu
 or financial record is rewritten, and no execution or cleanup PASS is granted.
 Evidence: `.context/rca-browser-4f77/isolated-renewal-refusal-4a062/` and
 `.context/rca-browser-4f77/isolated-renewal-rca-4a062/`.
+
+## November 8 recurrence: mixed graded and preallocation-failed parents
+
+PR #1770's round-17 smoke request on source
+`7df366f750b44cc53abea9dc0ffb2167e637b3b5` ended with eleven native
+task passes, one pre-task failure and one native cancellation. The immutable
+outer receipt retained thirteen active UNVERIFIED cases plus two historical
+NO_RETRY_CUSTODY exclusions. The two failed parents had sealed zero-resource
+audits and no task execution provenance or task matrix; the eleven graded
+parents and linked task-free canary had both. All fourteen original participants
+were accounted for. No native result, time, missing flag or financial record
+was rewritten.
+
+The normal campaign layout required provenance for every parent, while the
+preallocation layout required every parent to have zero allocation. Neither
+could describe this authentic mixture. The adapter correctly retained
+complete=false and cleanup_complete=false; native passes cannot be spliced
+into a new positive full-gate receipt. Search terms were `mixed campaign
+preallocation native cleanup provenance` and the literal unsupported-layout
+refusal. This extends the existing campaign evidence contract, rather than
+creating a task or resource exception.
+
+The explicit campaign-mixed-preallocation-v1 layout derives each branch from
+bound native artifacts. Both provenance files require the unchanged normal
+validation; both absent, including no dangling symlink, require captured
+controller-command/source authority and the existing strict zero-allocation
+release predicate. One-sided evidence, unexpected task artifacts, resources,
+foreign identity or live ownership refuses. Both parent classes and all fourteen
+participants, full supervisor/registry/audit/publication/Hub/inventory closure
+are mandatory. Original exclusions remain bound to the request and grant no
+new execution, assertion or financial credit.
+
+The unchanged mixed-case regression first refused the unsupported layout and
+then passed with the new verifier. A private replay of the actual request bound
+627 original files, fourteen participants and two zero-allocation parents.
+Deep-copy reconciliation changed only ownership metadata, preserving every
+original case and all source/results bytes. The ordinary public reconcile
+entrypoint remains the only route used for actual cycle mutation. This proof
+permits future launch custody only; historical thirteen UNVERIFIED observations
+and both separate 4396-cent sandbox obligations remain unchanged.
+
+The final owning coordinator suite passed 219 tests in 59.242 seconds.
+Independent review rehashed all 627 files and approved the final verifier.
+The public reconcile action then recorded only the retained-owner qualification
+on the original source plan; all thirteen pending observations, native grades,
+raw complete/cleanup flags and two historical exclusions remain unchanged.
+A fresh whole-gate execution is still required for positive execution credit.

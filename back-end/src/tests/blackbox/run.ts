@@ -10,11 +10,15 @@
  *   npx tsx src/tests/blackbox/run.ts --concurrency=6               # cap concurrency
  *   BLACKBOX_TEST_CASE_CONCURRENCY=30 npx tsx src/tests/blackbox/run.ts agents
  *   npx tsx src/tests/blackbox/run.ts --list                        # list available domains
+ *
+ * With DEPLOY_GATE_PROGRESS set, each finished domain appends one `scope: "domain"` row to that
+ * JSONL file (src/tests/helpers/gateProgress.ts); concurrent shards share the file safely.
  */
 import { mkdirSync, readdirSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve, dirname, join } from 'path';
+import { reportGateProgress } from '../helpers/gateProgress';
 
 function readEnv(...names: string[]): string | undefined {
   for (const name of names) {
@@ -273,6 +277,12 @@ async function runScheduledDomain(
 ): Promise<Result | undefined> {
   if (abortScheduling) return undefined;
   const result = await runDomain(domain, workerIndex);
+  // Live deploy-gate progress: one row the moment the domain settles, so a failure is
+  // reported while sibling domains and shards are still running (no-op when unset).
+  reportGateProgress(domain, result.passed ? 'PASS' : 'FAIL', {
+    scope: 'domain',
+    detail: result.passed ? '' : result.output,
+  });
   if (!result.passed && priorityDomainNames.has(domain)) {
     process.stdout.write(
       `PRIORITY FAILURE: ${domain} failed again ${Date.now() - runnerStartedAt}ms after start\n`

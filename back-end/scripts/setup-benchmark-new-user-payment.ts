@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import {
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
+  waitOutBenchmarkOrgBackpressure,
 } from '../src/providers/agentcard/benchmark-float';
 
 dotenv.config();
@@ -20,8 +21,11 @@ async function main(): Promise<void> {
     if (subscription) {
       throw new Error('New-user payment fixture must begin without a subscription');
     }
-    const cardholderId = await resolveBenchmarkCardholderId();
-    await ensureBenchmarkOrgCardholder(cardholderId);
+    const cardholderId = await waitOutBenchmarkOrgBackpressure(async () => {
+      const resolvedId = await resolveBenchmarkCardholderId();
+      await ensureBenchmarkOrgCardholder(resolvedId);
+      return resolvedId;
+    });
     await prisma.integration.upsert({
       where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
       create: {

@@ -27,6 +27,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_TARGET_LOCAL,
     E2B_CAPACITY_EXHAUSTED_CODE,
+    GITHUB_RATE_LIMITED_CODE,
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from domains.spawn_claude_code_agent.service import (
@@ -226,6 +227,11 @@ def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError
 def _e2b_capacity_exhausted(error: BaseException) -> Optional[ApplicationError]:
     """E2B's concurrent-sandbox limit refusal: a hard failure, never a soft retry hint."""
     return _typed_application_error(error, E2B_CAPACITY_EXHAUSTED_CODE)
+
+
+def _github_rate_limited(error: BaseException) -> Optional[ApplicationError]:
+    """GitHub's rate limit stopped session create: a hard failure carrying the reset time."""
+    return _typed_application_error(error, GITHUB_RATE_LIMITED_CODE)
 
 
 def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
@@ -643,7 +649,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                                     )
                             soft = (
                                 None
-                                if _local_target_unavailable(e) is not None or _e2b_capacity_exhausted(e) is not None
+                                if _local_target_unavailable(e) is not None
+                                or _e2b_capacity_exhausted(e) is not None
+                                or _github_rate_limited(e) is not None
                                 else _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
                             )
                             if soft is not None:
@@ -875,6 +883,29 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "code_provider": code_provider,
                         "error_code": E2B_CAPACITY_EXHAUSTED_CODE,
                         "code_agent": _failed_code_agent(target_info, capacity.message),
+                    },
+                )
+                return
+
+            github_limited = _github_rate_limited(e)
+            if github_limited is not None:
+                # GitHub is rate limited: fail the tool now with the backend's exact
+                # message, which names the reset time, instead of retrying into the limit.
+                logger.error(
+                    "[ClaudeCode] GitHub rate limit stopped session create; failing the tool call",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=github_limited.message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": GITHUB_RATE_LIMITED_CODE,
+                        "code_agent": _failed_code_agent(target_info, github_limited.message),
                     },
                 )
                 return

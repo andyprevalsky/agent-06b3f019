@@ -1,0 +1,26 @@
+{
+ "name": "pr1775-79a43f600a-core",
+ "key_prefix": "devbox-closeout-private/pr1775-79a43f600a-core/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "b64e9da7733f06b6e0f62dc1447d4afd6da5ff62eb20f6784e6015e5bf0f026f",
+ "archive_size_bytes": 4620383017,
+ "parts": 69,
+ "chunk_size": 67108864,
+ "members": [
+  "/home/boxes/rose/.context",
+  "/home/boxes/rose/agents/.context",
+  "/home/boxes/rose/agents/benchmarks/runs/20261108_084002_63f4693d-5f34-4980-ab08-ed0dac27d3f9_agent-payment-production-abandonment.json",
+  "/home/boxes/rose/agents/navi-worker-log.txt",
+  "/home/boxes/rose/back-end/backend-logs.log",
+  "/home/boxes/rose/front-end/frontend-logs.log",
+  "/home/boxes/rose/hub-poller-logs.log",
+  "/home/boxes/rose/agents/providers/fast_cache",
+  "/home/boxes/rose/package-lock.json",
+  "/var/tmp/smoke-repair/closeout/pr1775-unpushed.bundle"
+ ],
+ "files": 88958,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}

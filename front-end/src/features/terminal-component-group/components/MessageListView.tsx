@@ -191,17 +191,6 @@ function TrajectoryItems({
       compressWork={compressWork}
       workStatus={agent?.status}
       workEndedAt={agent?.updated_at}
-      activityIndicator={
-        thinkingVisible && (
-          <ThinkingIndicators
-            visible={thinkingVisible}
-            compact
-            streaming={streaming}
-            streamingTokenCount={thinkingTokenCount(metrics, subAgentId)}
-            animatedTokenCount={props.animatedTokenCount}
-          />
-        )
-      }
       filteredMessages={liveMessages}
       webSearchGrouping={webSearchGrouping}
       currentAnimatingId={animation.currentAnimatingId}

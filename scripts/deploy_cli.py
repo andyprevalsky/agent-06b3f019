@@ -271,14 +271,33 @@ def coderabbit_check(sha: str) -> tuple[str, str]:
     return conclusion.lower(), title
 
 
+# The same check titles deploy_review_cycle.skip accepts as CodeRabbit's quota.
+RATE_LIMITED_CHECK = re.compile(r'rate limited|review limit', re.IGNORECASE)
+
+
 def cmd_review_wait(args: argparse.Namespace) -> int:
     pr = read_json(PR_FILE, 'open-pr')['pr']
     review_head = review_state()['cycles'][-1]['head']
-    if code := run(['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
-                    '--timeout', str(args.timeout), '--poll', '5']):
+    waiter = ['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
+              '--timeout', str(args.timeout), '--poll', '5']
+    code = run(waiter)
+    if code not in (0, 1):
         return code
     # The waiter treats a finished neutral check as success; a finished check is not a delivered review.
     conclusion, title = coderabbit_check(review_head)
+    if conclusion not in ('success', 'error') and RATE_LIMITED_CHECK.search(title) and args.rate_limit_max_wait > 0:
+        # CodeRabbit's quota is per account, so parallel deploys rate-limit each other. The waiter waits out
+        # the window its exact-HEAD comment names, posts one receipted re-request and waits again; exit 3
+        # means it could not do so safely and posted nothing.
+        rerequested = run([*waiter, '--after-rate-limit', '--rate-limit-max-wait', str(args.rate_limit_max_wait),
+                           '--receipt-dir', str(CONTEXT)])
+        if rerequested not in (0, 1, 3):
+            return rerequested
+        if rerequested != 3:
+            code = rerequested
+            conclusion, title = coderabbit_check(review_head)
+    if code:
+        return code
     if conclusion != 'success':
         print(f'DEPLOY_REVIEW_WAIT NOT-A-REVIEW: CodeRabbit check is "{conclusion or "missing"}"'
               f'{f" ({title})" if title else ""} on {review_head[:12]}. Read its comment: for a quota limit, '
@@ -511,10 +530,104 @@ def is_harness_process(exe: str | None, argv: str = '') -> bool:
     return under(exe, '/opt/devbox-runtime') and f'{DAEMON_DIR}/' in argv
 
 
+CODEX_SERVER_PREFIX = '/opt/devbox-tools/codex/'
+CODEX_SESSIONS = Path.home() / '.codex' / 'sessions'
+
+
+def stat_fields(proc: Path, pid: int) -> list[str] | None:
+    """/proc/<pid>/stat fields after the parenthesised comm: [0] state, [1] ppid, [19] starttime."""
+    try:
+        return (proc / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+    except (OSError, IndexError):
+        return None
+
+
+def parent_map(proc: Path) -> dict[int, int]:
+    """pid -> ppid for every readable process."""
+    parents = {}
+    for entry in proc.iterdir():
+        if entry.name.isdigit() and (row := stat_fields(proc, int(entry.name))):
+            parents[int(entry.name)] = int(row[1])
+    return parents
+
+
+def current_code_mode_host(pid: int, exe: str | None, proc: Path, mine: set[int],
+                           parents: dict[int, int]) -> bool:
+    """Recognize the current managed Codex parent's tool host, without exempting other agents.
+
+    This is an owned harness classification, not proof that an in-memory tool call is idle.
+    Any OS child, unreadable thread or changing process identity keeps it live work.
+    """
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or Path(exe).name != 'codex-code-mode-host':
+        return False
+    if pid in parents.values():
+        return False
+
+    def identity():
+        fields = stat_fields(proc, pid)
+        if not fields or len(fields) < 20 or int(fields[1]) not in mine:
+            return None
+        parent = proc / fields[1]
+        parent_fields = stat_fields(proc, int(fields[1]))
+        if not parent_fields or len(parent_fields) < 20:
+            return None
+        if os.readlink(parent / 'exe') != str(Path(exe).with_name('codex')):
+            return None
+        if os.readlink(proc / str(pid) / 'exe') != exe:
+            return None
+        threads = sorted((proc / str(pid) / 'task').iterdir())
+        if not threads or any(not thread.name.isdigit() or (thread / 'children').read_text().strip()
+                              for thread in threads):
+            return None
+        return fields[1], fields[19], parent_fields[19], tuple(thread.name for thread in threads)
+
+    try:
+        first = identity()
+        return first is not None and first == identity()
+    except (OSError, ValueError):
+        return False
+
+
+def idle_daemon_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc'),
+                             sessions: Path = CODEX_SESSIONS, parents: dict[int, int] | None = None) -> bool:
+    """The devbox daemon's shared `codex app-server`, started in the agent's cwd, serving no Codex session.
+
+    It is held ready for Codex threads and holds no workspace state while idle. It stays live work, and keeps
+    blocking deletion, the moment it runs anything (any child process) or a Codex session has written a
+    rollout since it started. A codex binary not parented by the daemon is never exempt.
+    """
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or 'app-server' not in argv.split():
+        return False
+    fields = stat_fields(proc, pid)
+    if not fields or len(fields) < 20:
+        return False
+    try:
+        daemon = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+    except OSError:
+        return False
+    if f'{DAEMON_DIR}/' not in daemon:
+        return False
+    if pid in (parent_map(proc) if parents is None else parents).values():
+        return False
+    try:
+        btime = next(int(line.split()[1]) for line in (proc / 'stat').read_text().splitlines() if line.startswith('btime '))
+        started = btime + int(fields[19]) / os.sysconf('SC_CLK_TCK')
+    except (OSError, StopIteration, ValueError):
+        return False
+    if sessions.is_dir():
+        try:
+            if any(path.is_file() and path.stat().st_mtime >= started for path in sessions.rglob('*')):
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def live_processes(root: Path) -> list[dict]:
     found, mine, proc = [], own_pids(), Path('/proc')
     if not proc.is_dir():
         return [{'pid': None, 'reason': '/proc unavailable; process ownership unverified'}]
+    parents = parent_map(proc)
     for entry in proc.iterdir():
         if not entry.name.isdigit() or int(entry.name) in mine:
             continue
@@ -525,7 +638,10 @@ def live_processes(root: Path) -> list[dict]:
             continue
         if cwd == root or root in cwd.parents:
             try:
-                if is_harness_process(os.readlink(entry / 'exe'), argv):
+                exe = os.readlink(entry / 'exe')
+                if (is_harness_process(exe, argv)
+                        or current_code_mode_host(int(entry.name), exe, proc, mine, parents)
+                        or idle_daemon_codex_server(int(entry.name), exe, argv, proc, parents=parents)):
                     continue
             except OSError:
                 pass
@@ -673,6 +789,8 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser('gates', help='run every selected gate in parallel (scripts/deploy_gates.py)', add_help=False)
     waited = sub.add_parser('review-wait', help='wait for CodeRabbit on the open cycle head')
     waited.add_argument('--timeout', type=int, default=600)
+    waited.add_argument('--rate-limit-max-wait', type=int, default=3600,
+                        help='longest CodeRabbit quota window to wait out before one re-request (0: never re-request)')
     ended = sub.add_parser('review-finish', help='close the open review cycle and its timing boundary')
     ended.add_argument('--result', choices=['clean', 'findings'], required=True)
     nxt = sub.add_parser('review-next', help='open the next bounded review cycle on the pushed stabilization batch')

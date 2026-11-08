@@ -1,7 +1,9 @@
 """Per-task timeout derivation from historical pass data.
 
 History is persisted as JSONL in `agents/benchmarks/history/task_durations.jsonl`
-(tracked in git with merge=union). Each line is one passed task:
+plus per-writer shards `task_durations.<YYYYMMDD>.<branch>.jsonl` (see
+`history_ledger.py`: each branch appends only to its own shard, so concurrent
+PRs never edit one shared file). Each line is one passed task:
 
     {"task": "chat-mode", "duration_seconds": 45.2, "cost_cents": 12.3,
      "timestamp": "2026-04-16T15:30:00Z", "agent_id": "..."}
@@ -20,6 +22,18 @@ import math
 import os
 from datetime import datetime, timezone
 from typing import List, Optional
+
+try:
+    from benchmarks import history_ledger
+except ImportError:  # loaded by file path: run as a script, or through importlib by a tool
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "benchmark_history_ledger", os.path.join(os.path.dirname(os.path.realpath(__file__)), "history_ledger.py")
+    )
+    assert _spec and _spec.loader
+    history_ledger = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(history_ledger)
 
 HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "task_durations.jsonl")
@@ -48,10 +62,11 @@ CEIL_SECONDS = 900
 
 def _write_target(ledger_path: str) -> str:
     """Where a new row of ``ledger_path`` is appended: the parked copy of that
-    ledger when PARK_DIR_ENV names a directory, otherwise the ledger itself."""
+    ledger when PARK_DIR_ENV names a directory, otherwise this writer's shard of
+    a canonical ledger (an explicitly named scratch ledger is used as is)."""
     park = os.environ.get(PARK_DIR_ENV, "").strip()
     if not park:
-        return ledger_path
+        return history_ledger.append_target(ledger_path)
     return os.path.join(park, os.path.basename(ledger_path))
 
 
@@ -220,24 +235,21 @@ def record_attempt(
 
 
 def _load_durations(task_name: str) -> List[float]:
-    """Read all duration_seconds values for this task from history."""
-    if not os.path.exists(HISTORY_FILE):
-        return []
+    """Read all duration_seconds values for this task from history (base + shards)."""
     durations: List[float] = []
-    with open(HISTORY_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("task") != task_name:
-                continue
-            d = entry.get("duration_seconds")
-            if isinstance(d, (int, float)) and d > 0:
-                durations.append(float(d))
+    for line in history_ledger.read_lines(HISTORY_FILE):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("task") != task_name:
+            continue
+        d = entry.get("duration_seconds")
+        if isinstance(d, (int, float)) and d > 0:
+            durations.append(float(d))
     return durations
 
 

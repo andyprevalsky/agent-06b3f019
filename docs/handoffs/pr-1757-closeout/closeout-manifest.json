@@ -38,7 +38,7 @@
  },
  "validation": {
   "final_cycle": "ready on d3a8bd2f: quick + 11 gates. Fresh cycle initial sweep PASS except backend browser-session (local test-backend ReadTimeout, NOT_INTRODUCED), whose owner rerun on an idle box passed 251/251.",
-  "superseded_cycle": "first d3a8bd2f cycle final sweep (archived as .context/deploy-pipeline-r1-d3a8bd2f-archived): 4 NOT_INTRODUCED load and infra flakes. cloudbench multi-workstream hub-stub EADDRINUSE; semantic-deploy fixture zombie kill -0; smoke INFRA STOP after one guest's seed-local compute-token sync crashed with empty stderr; report-bug Supabase signed-URL fetch failed. The smoke receipt kept an unreconciled cleanup owner, so the cycle was archived and re-initialized.",
+  "superseded_cycle": "first d3a8bd2f cycle final sweep (archived as .context/deploy-pipeline-r1-d3a8bd2f-archived): 4 NOT_INTRODUCED load and infra flakes. cloudbench multi-workstream hub-stub EADDRINUSE; semantic-deploy fixture zombie kill -0; smoke INFRA STOP after one guest's seed-local compute-token sync crashed with empty stderr; report-bug Supabase signed-URL fetch failed. The smoke receipt kept an unreconciled cleanup owner, so the cycle was archived and re-initialized. CORRECTION 2026-11-08: that re-initialization bypassed the retained-owner guard and left six Machines started for about 22.5 hours; see deletion-readiness.json resource_correction.",
   "omitted": "frontend-coverage-blackbox and agentcard-lifecycle: not selected (no trigger). mac-app coverage: platform-unavailable, unverified."
  },
  "production": {
@@ -58,7 +58,9 @@
   "cloudbench-multi-workstream hub_stub probe-then-bind race (EADDRINUSE under host load)",
   "semantic-deploy-gate cleanup_bench_fixtures kill -0 on a not-yet-reaped zombie",
   "agent_link_server.py leaked after every smoke campaign (passed and cancelled), TERMed manually",
-  "worker headroom: root fetch_child_terminal_result dispatch lag up to 29.6s on the fixed guest (non-fatal); the RCA's infra option stays open"
+  "worker headroom: root fetch_child_terminal_result dispatch lag up to 29.6s on the fixed guest (non-fatal); the RCA's infra option stays open",
+  "Unverified payment from the cancelled smoke run: purchase 2bbd1e62-496a-464a-95c4-7730831bf569, 4396 cents, CLEARED, no reclaim, livemode not recorded (deletion-readiness.json resource_correction)",
+  "Four retained local owner records refused by --recover-stale-owner (sealed runtime evidence absent); user decision on retirement"
  ],
  "archives": {
   "rca": {
@@ -99,6 +101,19 @@
    "files": 11472,
    "original_bytes": 1650827692,
    "manifest_sha256": "961e01400ab435efdda16fcc6d353e8738fb8c9ea780ed2b309b5ad91e8d09aa"
+  },
+  "owner_recovery": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1757-89906b0f3/owner-recovery-evidence.tar.gz.aesgcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "c44f7105327808245e434aed1b9250a65aadb1573b7dcc662244eb3a47843d26",
+   "gzip_sha256": "eaed364276724b2a06a238fc5c8d793ae2a3dc6320d8fd0e43eaf390223e8b64",
+   "stored_bytes": 186755251,
+   "frames": 23,
+   "original_bytes": 568759451,
+   "manifest_sha256": "15742141af044e3b0e3040cdceb6afe8a443b8e4574dbeaf22be91fb3fe6c450",
+   "files": 322
   }
  },
  "original_failure_archive": "devbox-closeout-private/pr1752-818f3669/mass-agent-spawn-agent-error-run.tar.gz.aesgcm (owned by the PR1752 closeout)",
@@ -108,6 +123,7 @@
   "archived_cloud": ".context/fleet/runs (d18703e43 cloud rerun) and .context/deploy-cloud/9d4da342 (first deploy smoke)",
   "archived_final": ".context/deploy-pipeline (final), .context/deploy-pipeline-r1-d3a8bd2f-archived, .context/deploy-cloud/714d48a0 (INFRA-stopped) and 66281ab6 (final), deploy-runs, review/approval ledgers, factory-events, /var/tmp/rdw worker receipts/logs/coverage summaries, production logs",
   "reproducible": "/var/tmp/rdw worker checkouts (clones of d3a8bd2f), raw V8 coverage and test-runs scratch (rerun backend-coverage-blackbox at d3a8bd2f), experiential-venv, node_modules/venv symlinks, py-spy tool venv",
-  "secrets": "agents/.env, back-end/.env, front-end/.env and .context/pr1634-archive-recovery.env are project-managed (boxes managed env / escrow per docs/handoffs/pr-1739-closeout/RECOVERY.md); never archived or committed"
+  "secrets": "agents/.env, back-end/.env, front-end/.env and .context/pr1634-archive-recovery.env are project-managed (boxes managed env / escrow per docs/handoffs/pr-1739-closeout/RECOVERY.md); never archived or committed",
+  "archived_owner_recovery": "2026-11-08 recovery logs, exact-owner ownership and audit records for nine owners, native Machine list, and the 714d48a0 evidence recaptured from the guests"
  }
 }

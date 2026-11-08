@@ -1,0 +1,175 @@
+{
+ "schema_version": 1,
+ "pr": 1760,
+ "title": "fix(backend-tests): stop report-bug blackbox fixture from compounding shard-server heap",
+ "assignment": "Test repair for the PR #1749 deploy: backend-coverage-blackbox shard-2 server heap OOM driven by the report-bug blackbox fixture (docs/handoffs/backend-blackbox-heap-growth/GOAL.md, originating merge 3e770c9e1, originating devbox ed7a3716).",
+ "merge_commit": "cdb8ce580a3e66dd27fed4558094b3bd7befc797",
+ "gated_source": "6e347fb7f9aa64c98e2c5257de93903da8b7db6e",
+ "branch_commits": {
+  "098ecbc28": "NonBlockingFileCache in-memory maps keyed by request-key sha256 (originating RCA patch)",
+  "feedd46f6": "report-bug fixtures seeded via Prisma, hard-deleted, no live chat",
+  "8cc6df20b": "capture-token model-call check and fixture-history check",
+  "7c092b611": "deploy-test-cycle InterruptedLocalRecovery footprint reservation (superseded by main's 2026-11-05 fix at sync)",
+  "ddfe9f288": "merge origin/main (sync 1)",
+  "c9d4f587b": "merge origin/main (sync 2; RCA records moved to this follow-up)",
+  "6e347fb7f": "existing-stack DB name from manifest; purge only marked fixtures (CodeRabbit cycle 2)"
+ },
+ "assigned_fix": {
+  "test": "backend-coverage-blackbox (npm run test:coverage:sharded) shard 2",
+  "proof": [
+   "report-bug blackbox pre-fix 13/15 (72 model calls; 9 agents/29 trajectory rows left), post-fix 15/15, five consecutive runs (three times as the test changed)",
+   "NonBlockingFileCache unit case fails on main ('mem retained a 1000043-character request key') and passes with the patch",
+   "standalone npm run test:coverage:sharded on a persistent DB: exit 0, merged coverage 90.32% lines, peak shard server RSS 1.38 GB (originating box: 4.67 GB watchdog kill then OOM)",
+   "backend-coverage-blackbox PASS in every staged sweep: 8cc6df20b (local initial), 7c092b611 (local final, cycle v1 attempt 7), ddfe9f288, c9d4f587b, 6e347fb7f (Blacksmith)"
+  ]
+ },
+ "rca_cases": [
+  "docs/rca/cases/2026-11-07-report-bug-fixture-live-chat-compounds-persistent-shard-history.md",
+  "docs/rca/cases/2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range.md (concurrent occurrence appended)"
+ ],
+ "review": {
+  "coderabbit": "cycle 1 7c092b611 clean (8cc6df20b usage-capped and superseded, closed unavailable); cycle 2 c9d4f587b two Major findings (both fixed in 6e347fb7f); cycle 3 6e347fb7f full review clean ('No actionable issue remains')",
+  "graphide": "skipped: free review quota exhausted",
+  "adversarial_rca_review": "sub-agent NOT PASS with 7 points; regression strengthened, evidence and follow-ups recorded"
+ },
+ "staged_cycle": {
+  "final": "6e347fb7f: 16/16 gates PASS (DEPLOY_GATES PASS); smoke final 12/12 with agent-payment-abandonment SKIPPED_WITH_WARNING (AgentCard release stall)",
+  "superseded_cycles": "v1 (old tooling, 7c092b611 ready), v2a/v3/v4/v5/v6/v7 archived in the core archive with their failures",
+  "not_introduced_failures_rerun_as_assigned_repairs": [
+   "deploy-test-cycle port-footprint collision (fixed by main 2026-11-05 case)",
+   "cloudbench multi-workstream readiness active-retry under load",
+   "semantic-stack shared rose-rose.ngrok.app on Blacksmith",
+   "smoke mass-agent autoscaler capacity (59>56) making the gate UNVERIFIED",
+   "deploy-test-cycle StructuralSupervisorCleanup foreign-uid /proc",
+   "original600-portable-operator fixture cleanup race",
+   "agent-payment-idempotent-abandonment PAUSED timeout"
+  ]
+ },
+ "production": {
+  "render": "PASS live cdb8ce5",
+  "backend_probes": "PASS 15/15, log clean",
+  "semantic": "PASS run 42428038896",
+  "fly": "SKIPPED-not-applicable",
+  "vercel": "SKIPPED-not-applicable",
+  "mac_release": "SKIPPED-not-applicable",
+  "agentcard": "SKIPPED-not-applicable",
+  "mac_local_acceptance": "SKIPPED: no Mac available (owner has 0 LocalDevice rows, read-only prod query 2026-11-08T00:11Z)"
+ },
+ "delegated": {
+  "cloudbench readiness active-retry under load": "https://boxes.dev/thread/ph70qhszthmfepmddray9w0ph18hv40n (devbox 209929ad, Bugs)",
+  "semantic-stack shared ngrok domain": "https://boxes.dev/thread/ph75q9cp0yak89wec46tpnjcvd8hr80e (devbox 7a41cd23, Bugs)",
+  "structural foreign-uid /proc": "https://boxes.dev/thread/ph72wrxaecjxkm0hmpjkzvj2p58hrsgj (devbox 7317fb9e, Bugs)",
+  "smoke autoscaler capacity": "https://boxes.dev/thread/ph7frj3j2xrcv5btj42h850vfx8hsr4e (devbox 3acb6d3e, Bugs)",
+  "agent-payment-idempotent-abandonment": "https://boxes.dev/thread/ph727172vj96dbnye3js6qpdxn8hre62 (devbox a20355fa, Bugs)",
+  "original600-portable-operator fixture cleanup race": "https://boxes.dev/thread/ph7en6ghgt50j82tf2hz08akgd8hv6mb (devbox d0298795, Bugs)"
+ },
+ "external_provider": {
+  "CodeRabbit": "usage spending cap twice (8cc6df20b, c9d4f587b first request); real reviews obtained at the reopened windows",
+  "Graphide": "free review quota exhausted"
+ },
+ "followups": [
+  "AgentCard sandbox release stall: agent-payment-abandonment unreleased 4396 cents per run (standing warning policy)",
+  "grep result character bound (trajectory grep rows up to 1.07 MB in production) \u2014 memory grep-result-char-bound-followup",
+  "fetchCapture captures[].requestBody unbounded for the test server's lifetime"
+ ],
+ "preservation": {
+  "archives": {
+   "core": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-core.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "98b6d78c86dd8374c4bf8a3642b2f23c1a59c95a4d39f0afbeb85f46a580da77",
+    "gzip_sha256": "e1b6eccde6aa8751a929d344aed6170fcdd80167ddee92b5cd99711748a9d0c2",
+    "stored_bytes": 437594044,
+    "frames": 53,
+    "files": 46745,
+    "original_bytes": 2024084798,
+    "manifest_sha256": "d2437dd30f43061ca62dbc0986f309a032684927b6547c462057989d183d807d",
+    "full_readback_verified": true
+   },
+   "workers": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-workers.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "f9bc2f1e6f51e862336affa8539118f68d651f7f935398eb18aa55fddc42600a",
+    "gzip_sha256": "1a1636e3e5a07f3bdccc5699f66ff0744b9555207e7b1a1fb10aa12e8696427b",
+    "stored_bytes": 410746611,
+    "frames": 49,
+    "files": 26580,
+    "original_bytes": 914386844,
+    "manifest_sha256": "a5a1bc2286dbaeb7265c1f10bfea7822561f7ba4024f2c8b863741493f522e5a",
+    "full_readback_verified": true
+   },
+   "cloud": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-cloud.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "f3b27b1c34175b57eedbb4ab2fefee78ab0dd06dca38d37ad88a555ab47add28",
+    "gzip_sha256": "e4c88d19add768b3d22158b33183474926ec565cef781dc57740c6b2b15e8c38",
+    "stored_bytes": 3434770405,
+    "frames": 410,
+    "files": 11924,
+    "original_bytes": 13110427982,
+    "manifest_sha256": "ed4996794351007ce6334b32903b775a585ab477a1aec929eb49c2c92b29dc97",
+    "full_readback_verified": true
+   },
+   "refs": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-refs.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "af364c096b2e603b222536785a7dfc05c37b5eaabc67901826c03941b771be58",
+    "gzip_sha256": "677129e6eec0a66bf34fcdd4b356ebfbbd3df144be510e78d4f6ffebd378e8ae",
+    "stored_bytes": 1005199736,
+    "frames": 120,
+    "files": 2,
+    "original_bytes": 1008139011,
+    "manifest_sha256": "c70337b74717bb4f584dff48f98c43e5d7200bfc4e9687a9261c3241e9b46bad",
+    "full_readback_verified": true
+   },
+   "extra": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-extra.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "21eed19fe65231e70d1ec3fbcc54f958a530b1a4995d36d57ac30f5e8ba56ae3",
+    "gzip_sha256": "644fc1675499e0597a24f6f56e83e3e400c2cf6b08027657d4c38456f5c0c8b4",
+    "stored_bytes": 13432193,
+    "frames": 2,
+    "files": 3713,
+    "original_bytes": 78937982,
+    "manifest_sha256": "b29e1c5d419ea5326cf921ca51c5625cb76ac45a7f56b0d5011c040197a95f3e",
+    "full_readback_verified": true
+   },
+   "stash": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-stash.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "562f596da66469012ae65a795329df8964f22e9ce77c4422e48432aabe5b0b67",
+    "gzip_sha256": "e4ff2aec6b41d296d532d725e7bd12fce8ac189674da0906ba4f5740cd853d86",
+    "stored_bytes": 975750960,
+    "frames": 117,
+    "files": 1,
+    "original_bytes": 977428367,
+    "manifest_sha256": "6d791de2a386e1468d3e15ce7fd7691dc9bfa1e15d5380f23810478467eea349",
+    "full_readback_verified": true
+   }
+  },
+  "branches": {
+   "count": 72,
+   "archive": "refs",
+   "note": "72 local Template-box branches with commits on no remote, bundled with their tips"
+  },
+  "stash": "pre-existing stash 0e2ffe95 ('On andyprevalsky/rose-run-copy: pre-sync deploy retry and explore recovery work') bundled as refs/preserve/stash-0"
+ },
+ "deletion_readiness": {
+  "receipt": "docs/handoffs/pr-1760-closeout/deletion-readiness.json",
+  "open_items": 1,
+  "open_item": "live process 4102777: boxes.dev Codex app-server (/opt/devbox-tools/codex/... app-server --listen ws://127.0.0.1:38597), child of the boxes.dev sprite-daemon (pid 4099237), started 2026-11-07T14:35:40Z with this session, no child processes, one loopback connection from the daemon; platform-owned, holds no workspace state, not started by this deploy and not stopped by it (never kill processes you did not start). Every other record, branch, stash and ignored path has a verified disposition.",
+  "local_cleanup": "local worker clones /var/tmp/rdw (55 GB) retired after their evidence was archived; all heapfix-* systemd units inactive; retained loaded cloudbench fixture removed; Fly campaign Machines verified absent"
+ }
+}

@@ -36,7 +36,7 @@ import { fiatPullEnabled, resolveFiatSource } from '../../providers/agentcard/or
 import {
   UNUSED_MINT_RECLAIM_DEADLINE_MS,
   classifyUnusedMintTransfer,
-  unusedMintSettleOutcome,
+  waitForUnusedMintSettled,
   type MintTransferObservation,
 } from '../../providers/agentcard/unused-mint-settle';
 import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
@@ -128,73 +128,25 @@ async function readCardTransfer(cardId: string): Promise<CardTransfer | undefine
 /**
  * Wait until THIS card's unused mint transfer reaches a terminal release state.
  *
- * `recover_funds` is called each poll as an accelerator (AgentCard often flips the mint transfer
- * to `reclaimed` only after residual is pulled). A foreign cardholder's recover_funds yield is
- * NEVER treated as success — that false-passed the old wait while THIS transfer stayed
- * `consumed`, then the follow-up poll stopped calling recover_funds and timed out.
- *
- * Auto-reclaim without residual (transfer flips while recover answers insufficient_headroom) is
- * still accepted via the transfer observation alone. When the in-run wait runs out this returns
- * the latest observation instead of failing: a reclaim can legitimately take up to a day.
+ * Each poll nudges only THIS card's cardholder, coalescing on a recovery already in flight
+ * (another deploy shares the sandbox org and the benchmark cardholder), then reads THIS card's
+ * transfer — the only success signal. A recovery yield is never success; that false-passed the
+ * old wait while THIS transfer stayed `consumed`. See waitForUnusedMintSettled.
  */
-async function waitForUnusedMintSettled(
+async function waitForCardSettled(
   cardId: string,
-  minReleasedCents: number,
-  timeoutMs = 240_000
+  cardholderId: string,
+  minReleasedCents: number
 ): Promise<CardTransfer | undefined> {
-  const deadline = Date.now() + timeoutMs;
-  let attempt = 0;
-  let last: CardTransfer | undefined;
-  // A residual can be recovered while THIS transfer never flips. Keep every attempt's sweep yield
-  // and the provider's own transfer row so a timeout shows which side stalled.
-  const sweepYields: string[] = [];
-  for (;;) {
-    attempt += 1;
-    try {
-      const sweep = await recoverAllCardholderResiduals(callOrgTool);
-      if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
-        sweepYields.push(
-          `#${attempt} settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)}`
-        );
-      }
-      const transfer = await readCardTransfer(cardId);
-      if (transfer !== undefined) last = transfer;
-      const outcome = unusedMintSettleOutcome(transfer, minReleasedCents);
-      if (outcome.done) {
-        assert.ok(transfer !== undefined, `no org-wallet transfer found for ${cardId}`);
-        if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
-          console.log(
-            `  (transfer ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
-              `recover_funds also yielded settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)})`
-          );
-        } else {
-          console.log(
-            `  (transfer already ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
-              `recover_funds not needed)`
-          );
-        }
-        return transfer;
-      }
-      if (Date.now() >= deadline) {
-        console.warn(
-          `  unused mint not reclaimed within the in-run wait (${attempt} attempts); provider row ` +
-            `for ${cardId}: ${JSON.stringify(last?.raw ?? null)}` +
-            `; recover_funds yields: ${sweepYields.join(', ') || 'none'}`
-        );
-        return last;
-      }
-    } catch (error) {
-      if (!isTransientOrgMcpPollError(error)) throw error;
-      if (Date.now() >= deadline) throw error;
-      if (attempt % 3 === 0)
-        console.log(`  (MCP poll timed out, retrying settle wait, attempt ${attempt})`);
-      await sleep(8_000);
-      continue;
-    }
-    if (attempt % 3 === 0)
-      console.log(`  (still waiting for release to settle, attempt ${attempt})`);
-    await sleep(8_000);
-  }
+  return waitForUnusedMintSettled<CardTransfer>({
+    cardholderId,
+    minReleasedCents,
+    callOrgTool,
+    readTransfer: () => readCardTransfer(cardId),
+    isTransientError: isTransientOrgMcpPollError,
+    describe: (transfer) => `for ${cardId}: ${JSON.stringify(transfer?.raw ?? null)}`,
+    report: (line) => console.log(line),
+  });
 }
 
 function record(name: string): void {
@@ -442,9 +394,9 @@ async function main(): Promise<void> {
           : undefined;
       const transfer = pendingMint
         ? await observePendingUnusedMint(ledgerPath, pendingMint, () =>
-            waitForUnusedMintSettled(cardId, mintCents)
+            waitForCardSettled(cardId, cardholderId, mintCents)
           )
-        : await waitForUnusedMintSettled(cardId, mintCents);
+        : await waitForCardSettled(cardId, cardholderId, mintCents);
       assert.ok(transfer !== undefined, `no company-wallet transfer listed for ${cardId}`);
       assert.ok(
         transfer.transferredCents >= 0 && transfer.transferredCents <= mintCents,

@@ -72,22 +72,33 @@ sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
 step "flyctl"
-for attempt in 1 2 3; do
-  command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] && break
-  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || { echo "flyctl install attempt $attempt failed" >&2; sleep 5; }
-done
-[ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
+# flyctl and cloudflared come from GitHub Releases; scripts/ci/release-tool.sh keeps the last good
+# copy of each on the dependency disk, so a Releases outage does not fail the gate.
+sudo chown "$(id -u):$(id -g)" "$DEPS"
+export RELEASE_TOOL_CACHE="$DEPS/release-tools"
+. scripts/ci/release-tool.sh
+install_flyctl() { curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null; }
+command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] \
+  || release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "tunnel tools"
 # run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
 # the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
 sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
-if ! command -v cloudflared >/dev/null; then
+install_cloudflared() {
+  local tmp status=0
   tmp="$(mktemp)"
-  curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-  sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared && rm -f "$tmp"
-fi
+  curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    && sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared || status=$?
+  rm -f "$tmp"
+  return "$status"
+}
+# Only run.sh's public-tunnel fallback uses cloudflared, and it refuses explicitly when it is missing,
+# so an outage costs at most two attempts here instead of failing gates that never open a tunnel.
+command -v cloudflared >/dev/null \
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared \
+  || echo "⚠️ cloudflared unavailable; run.sh refuses any public tunnel that needs it" >&2
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
 
 step "dependency disk"

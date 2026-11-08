@@ -35,6 +35,18 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+def _history_ledger():
+    """agents/benchmarks/history_ledger.py: a ledger is its base file plus per-writer shards."""
+    import importlib.util
+
+    source = Path(__file__).resolve().parents[1] / "agents" / "benchmarks" / "history_ledger.py"
+    spec = importlib.util.spec_from_file_location("benchmark_history_ledger", source)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 TIMEOUT_S = 60
 SECONDS_PER_MONTH = 30.4375 * 86400
 LEDGER = Path(__file__).resolve().parent.parent / "agents/benchmarks/history/task_attempts.jsonl"
@@ -102,7 +114,7 @@ def lantern_cost(env: dict, start: str | datetime, end: str | datetime) -> dict:
         monthly = 0.0
     usd = round(monthly * (end - start).total_seconds() / SECONDS_PER_MONTH, 2)
     prod = prod_calls(env, start, end)
-    bench = bench_calls(LEDGER.read_text().splitlines() if LEDGER.exists() else [], start, end)
+    bench = bench_calls(_history_ledger().read_lines(LEDGER), start, end)  # base + per-writer shards
     prod_text = (
         f"prod {prod['calls']} Lantern calls ({prod['failures']} failed)" if prod is not None
         else "prod calls unavailable (ClickHouse)"

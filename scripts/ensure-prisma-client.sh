@@ -44,6 +44,23 @@ case "$resolved" in
     echo "🔧 The Prisma client resolves outside this checkout ($resolved); generating a local one"
     ;;
 esac
+# A dependency tree (or its @prisma) linked into another checkout would make
+# the de-linking below and `prisma generate` rewrite that checkout's client
+# before the post-generation check can refuse it: refuse first, name the fix.
+for tree in node_modules back-end/node_modules; do
+  [ -e "$tree/@prisma" ] || [ -e "$tree/.prisma" ] || continue
+  for dir in "$tree" "$tree/@prisma"; do
+    [ -e "$dir" ] || continue
+    target="$(readlink -f "$dir")"
+    case "$target" in
+      "$CHECKOUT"/*) ;;
+      *)
+        echo "❌ $dir resolves outside this checkout ($target), so prisma generate would rewrite that checkout's client. Give this checkout a private $tree (link each entry, but copy .prisma and @prisma), then prepare it again." >&2
+        exit 1
+        ;;
+    esac
+  done
+done
 # `prisma generate` writes beside the @prisma/client package it resolves. A
 # node_modules/.prisma linked into another checkout would make it rewrite that
 # checkout's client (and any live stack there): give this checkout its own.
