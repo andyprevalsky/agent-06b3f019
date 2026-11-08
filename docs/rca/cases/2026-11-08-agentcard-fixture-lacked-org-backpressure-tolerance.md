@@ -96,6 +96,10 @@ cross-machine lease would be speculative and would not cover other lanes sharing
 Fixture-only change: 10k-agent behaviour is unaffected, and at most 4 passes of 5-6 reads per guest are
 spent, 30 s apart.
 
+Outcome: deploy smoke campaign `deploy-60fcfad4` on the fixed source passed 14 of 15 jobs, including every payment fixture
+guest and `agent-payment-setup-resume`; the remaining job (`agent-payment-abandonment`) is the standing AgentCard release
+stall, recorded as a skip and never a pass. Status stays `mitigated`: the provider 401/throttle's origin is unexplained.
+
 Golden reference: not applicable (no approval-gated hunk).
 
 ## Human feedback
