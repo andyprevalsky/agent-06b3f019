@@ -480,66 +480,67 @@ def is_harness_process(exe: str | None, argv: str = '') -> bool:
     return under(exe, '/opt/devbox-runtime') and f'{DAEMON_DIR}/' in argv
 
 
-def proc_stat(pid: int) -> list[str]:
-    """/proc/<pid>/stat fields after the command name: [0] state, [1] ppid, [19] starttime (field 22)."""
-    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+CODEX_SERVER_PREFIX = '/opt/devbox-tools/codex/'
+CODEX_SESSIONS = Path.home() / '.codex' / 'sessions'
 
 
-def is_daemon_process(pid: int) -> bool:
+def stat_fields(proc: Path, pid: int) -> list[str] | None:
+    """/proc/<pid>/stat fields after the parenthesised comm: [0] state, [1] ppid, [19] starttime."""
     try:
-        argv = Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
-        return under(os.readlink(f'/proc/{pid}/exe'), '/opt/devbox-runtime') and f'{DAEMON_DIR}/' in argv
+        return (proc / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+    except (OSError, IndexError):
+        return None
+
+
+def parent_map(proc: Path) -> dict[int, int]:
+    """pid -> ppid for every readable process."""
+    parents = {}
+    for entry in proc.iterdir():
+        if entry.name.isdigit() and (row := stat_fields(proc, int(entry.name))):
+            parents[int(entry.name)] = int(row[1])
+    return parents
+
+
+def idle_daemon_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc'),
+                             sessions: Path = CODEX_SESSIONS, parents: dict[int, int] | None = None) -> bool:
+    """The devbox daemon's shared `codex app-server`, started in the agent's cwd, serving no Codex session.
+
+    It is held ready for Codex threads and holds no workspace state while idle. It stays live work, and keeps
+    blocking deletion, the moment it runs anything (any child process) or a Codex session has written a
+    rollout since it started. A codex binary not parented by the daemon is never exempt.
+    """
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or 'app-server' not in argv.split():
+        return False
+    fields = stat_fields(proc, pid)
+    if not fields or len(fields) < 20:
+        return False
+    try:
+        daemon = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
     except OSError:
         return False
-
-
-def codex_threads_on_this_devbox() -> list | None:
-    """Unarchived Codex threads the platform lists for this devbox; None when that cannot be established.
-
-    Managed Codex threads run inside the daemon's default app-server and are tracked only in daemon memory, so the
-    platform thread list (not a marker directory) is the authoritative record of whether that server hosts work.
-    """
-    try:
-        instance = json.loads((Path(DAEMON_DIR) / 'config.json').read_text())['controlAuth']['instanceId']
-        listed = subprocess.run(['dvb-onbox', 'threads', 'list', '--scope', 'project', '--all', '--json'],
-                                capture_output=True, text=True, timeout=60)
-        payload = json.loads(listed.stdout) if listed.returncode == 0 else {}
-        complete = payload.get('ok') is True and (payload.get('pagination') or {}).get('complete') is True
-        threads = payload.get('threads') if complete else None  # a partial listing never reads as "no Codex threads"
-    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
-        return None
-    if not isinstance(instance, str) or not instance or not isinstance(threads, list):
-        return None
-    return [t for t in threads if isinstance(t, dict) and t.get('devboxId') == instance
-            and t.get('agent') == 'codex' and not t.get('archived')]
-
-
-def is_idle_default_codex_server(pid: int) -> bool:
-    """The devbox daemon's own default Codex app-server while no Codex thread or session exists on this box.
-
-    The daemon starts it in the project checkout and records it in codex-default-app-server.json; it is live work
-    while it hosts any thread. Exact identity (pid and kernel start time, so a reused pid never matches), a daemon
-    parent, an existing empty codex-sessions directory (terminal-wrapper sessions) and a platform thread list with no
-    unarchived Codex thread on this devbox are all required; anything unreadable keeps it blocking.
-    """
-    daemon = Path(DAEMON_DIR)
-    try:
-        record = json.loads((daemon / 'codex-default-app-server.json').read_text())
-        stat = proc_stat(pid)
-        sessions = daemon / 'codex-sessions'
-        identified = (type(record.get('pid')) is int and record['pid'] == pid
-                      and str(record.get('statStartTime')) == stat[19]
-                      and is_daemon_process(int(stat[1]))
-                      and sessions.is_dir() and not sessions.is_symlink() and not any(sessions.iterdir()))
-    except (OSError, ValueError, IndexError, AttributeError):
+    if f'{DAEMON_DIR}/' not in daemon:
         return False
-    return identified and codex_threads_on_this_devbox() == []
+    if pid in (parent_map(proc) if parents is None else parents).values():
+        return False
+    try:
+        btime = next(int(line.split()[1]) for line in (proc / 'stat').read_text().splitlines() if line.startswith('btime '))
+        started = btime + int(fields[19]) / os.sysconf('SC_CLK_TCK')
+    except (OSError, StopIteration, ValueError):
+        return False
+    if sessions.is_dir():
+        try:
+            if any(path.is_file() and path.stat().st_mtime >= started for path in sessions.rglob('*')):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def live_processes(root: Path) -> list[dict]:
     found, mine, proc = [], own_pids(), Path('/proc')
     if not proc.is_dir():
         return [{'pid': None, 'reason': '/proc unavailable; process ownership unverified'}]
+    parents = parent_map(proc)
     for entry in proc.iterdir():
         if not entry.name.isdigit() or int(entry.name) in mine:
             continue
@@ -550,7 +551,9 @@ def live_processes(root: Path) -> list[dict]:
             continue
         if cwd == root or root in cwd.parents:
             try:
-                if is_harness_process(os.readlink(entry / 'exe'), argv) or is_idle_default_codex_server(int(entry.name)):
+                exe = os.readlink(entry / 'exe')
+                if is_harness_process(exe, argv) or idle_daemon_codex_server(int(entry.name), exe, argv, proc,
+                                                                             parents=parents):
                     continue
             except OSError:
                 pass

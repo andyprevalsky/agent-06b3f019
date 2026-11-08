@@ -6,7 +6,7 @@ surface: harness
 component: deploy-cli-deletion-check
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: scripts/deploy_cli.py live_processes — any process whose cwd is in the checkout blocks unless is_harness_process matched; the daemon's default Codex app-server matched neither the daemon-helper rule nor any idle-service rule
+first_bad_boundary: scripts/deploy_cli.py live_processes — any process whose cwd is in the checkout blocked unless is_harness_process matched; the daemon's shared Codex app-server matched no rule
 symptoms:
   - "OPEN  live process 4177674 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server"
   - "DEPLOY_DELETION_CHECK NOT_READY open=1"
@@ -19,7 +19,8 @@ tags:
 sources:
   - PR #1760 closeout deletion-readiness.json (NOT_READY, sole item pid 4102777 codex app-server)
   - PR #1780 closeout deletion-readiness.json (NOT_READY, sole item pid 4177674 codex app-server)
-repro: python3 scripts/tests/deploy-cli.test.py DeletionCheck.test_the_daemons_idle_default_codex_server_does_not_block_but_any_codex_work_does
+  - PR #1792 (fix merged as cee8855e67, commit 658922b99c)
+repro: python3 scripts/tests/deploy-cli.test.py IdleDaemonCodexServer
 status: fixed
 ---
 
@@ -50,33 +51,31 @@ The fixed version returns `[]` with the same daemon state.
 
 ## Solution
 
-`is_idle_default_codex_server(pid)` in `scripts/deploy_cli.py` excludes the process only when every check passes:
-- **Identity.** The daemon record names exactly this pid with the same kernel start time, so a reused pid never matches.
-- **Parent.** Its parent is the devbox daemon.
-- **Terminal sessions.** `codex-sessions/`, the terminal wrapper's marker directory, exists, is not a symlink and is
-  empty.
-- **Platform thread list.** `dvb-onbox threads list --scope project --all --json` returns a complete listing
-  (`ok: true`, `pagination.complete: true`) with no unarchived Codex thread on this devbox. The devbox id is
-  `controlAuth.instanceId` from the daemon `config.json`, and only that field is read.
+Fixed by PR #1792 (commit 658922b99c, merged as cee8855e67), which another workspace landed while this RCA's own
+version was in review. PR #1790 then dropped its duplicate implementation in favour of the merged one, so the repo
+keeps a single mechanism.
 
-Any read, parse or command failure keeps the process blocking. Archived threads have no active turn, so excluding them
-cannot hide work.
+`idle_daemon_codex_server()` in `scripts/deploy_cli.py` exempts a process only when all of these hold:
+- it is a `/opt/devbox-tools/codex/...` `app-server`;
+- its parent's cmdline is the devbox daemon;
+- it has no child process;
+- no Codex session rollout under `~/.codex/sessions` has been written since its kernel start time.
 
-A first version trusted the empty `codex-sessions/` directory. Independent review of the daemon bundle showed that
-only the terminal wrapper writes that directory. Managed Codex threads run inside this same app-server and are tracked
-only in daemon memory, so a managed thread waiting on the model would have been hidden. The platform thread list
-closes that gap.
+Any other Codex process, or this one running a turn, still blocks. The regression is `IdleDaemonCodexServer` in
+`scripts/tests/deploy-cli.test.py`, in the deploy structural gate `deploy-cli`.
 
-The regression lives in `scripts/tests/deploy-cli.test.py`, which runs in the deploy structural gate `deploy-cli`.
-`DeletionCheck.test_the_daemons_idle_default_codex_server_does_not_block_but_any_codex_work_does` covers the idle case
-plus every blocking case: no record, an unreadable or incomplete record, a Codex thread present, the list unavailable,
-a terminal session, a missing or symlinked sessions directory, a reused pid, a different pid, a non-daemon parent and
-the real daemon-parent check. `test_codex_threads_on_this_devbox_reads_the_platform_list_for_this_instance_only` drives
-the filter through a stub `dvb-onbox`, covering other devboxes, archived and Claude threads, and partial or failed
-listings.
+Verified on the PR #1780 host: main's `live_processes(/home/boxes/rose)` no longer reports pid 4177674, and
+`idle_daemon_codex_server(4177674, ...)` returns True.
 
-The cost is O(1) file reads per checkout process. Only the one recorded server can trigger the single platform list
-call. Nothing scales with agent count.
+Design note from the parallel attempt, for future changes here: the daemon's `~/.devbox/daemon/codex-sessions/`
+directory is not a session record. Independent review of the daemon bundle showed that only the terminal wrapper
+writes it. Managed Codex threads run inside the shared app-server and are tracked in daemon memory, so a check based on
+that directory would hide a managed thread waiting on the model. The merged fix uses Codex's own rollout files and the
+server's children, which a managed turn produces. The platform thread list
+(`dvb-onbox threads list --scope project --all`, filtered by the daemon `config.json` `controlAuth.instanceId`) is an
+authoritative alternative if rollouts ever stop being written at turn start.
+
+Cost is O(1) /proc and directory reads per checkout process, plus one parent map. Nothing scales with agent count.
 
 ## Human feedback
 

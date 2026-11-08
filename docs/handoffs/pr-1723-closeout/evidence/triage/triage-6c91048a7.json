@@ -1,0 +1,40 @@
+{
+ "failures": [
+  {
+   "id": "4326eae5a3304ee5b40ca2ed0824aa3f",
+   "native_result": "FAIL",
+   "check": "backend-coverage-blackbox/blackbox:treasury-rails",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/var/tmp/deploy-workers/backend-coverage"
+   ],
+   "source": {
+    "head": "6c91048a7e42e25d322a6e91ec82b471a92c621c",
+    "digest": "5a8b07df1e3a388b94d02a5d027a7c1cb91597ed66fdec9af1ad455814e311e2"
+   },
+   "attribution": "NOT_INTRODUCED",
+   "description": "blackbox:treasury-rails: 11 earlier unused mints older than the 24h reclaim deadline are still not returned to the pool",
+   "evidence": "Gate: NOT_INTRODUCED. The probe lists unused mints recorded in /home/boxes/.cache/rose-labs/treasury-rails-pending-mints.jsonl that are 42.0h-64.8h old, past the 24.0h reclaim deadline, with provider row null. This PR does not touch treasury, cards or mints. Standing user instruction 2026-10-29: treasury failures are SKIPPED, reported as warnings and never block a deploy; no treasury or financial record is mutated, reclaimed or deleted. Native log: /var/tmp/deploy-workers/backend-coverage/back-end/coverage/blackbox-run-shard2/treasury-rails.log",
+   "standing_policy": {
+    "name": "treasury-failures-skip-and-warn-2026-10-29",
+    "reason": "treasury-rails blackbox: unused mint(s) never returned to the pool past the 24h reclaim deadline; pending obligations stay visible",
+    "affected_records": [
+     "card_066facfe4950b32b091314e0",
+     "card_520310f8adbdaac4cfd922f6",
+     "card_557224c4c38b6de93d58c117",
+     "card_60421d128e5ec66a7f3ecaec",
+     "card_6a82b4bae63534e14fd924d8",
+     "card_7c7907f68ef95ca82b934a1f",
+     "card_a168beb8d81ea47c902b82b1",
+     "card_ce07094b78330dec35387fcf",
+     "card_dedc46034f8bdfa2a9805b64",
+     "card_ecb5d51046c73a522c209284",
+     "card_ff268c77729c647ea62bc38e"
+    ],
+    "evidence_at": 1794072841.6762242
+   }
+  }
+ ]
+}

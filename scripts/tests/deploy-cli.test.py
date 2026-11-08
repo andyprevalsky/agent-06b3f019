@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -438,6 +439,59 @@ class HarnessProcesses(unittest.TestCase):
             self.assertFalse(d.is_harness_process(exe, argv), (exe, argv))
 
 
+class IdleDaemonCodexServer(unittest.TestCase):
+    """2026-11-08 (PR #1778 closeout): the daemon's idle codex app-server kept every devbox NOT_READY."""
+    EXE = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/bin/codex'
+    ARGV = f'{EXE} app-server --listen ws://127.0.0.1:33351 --enable goals'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name) / 'proc'
+        self.sessions = Path(self.tmp.name) / 'sessions'
+        self.sessions.mkdir(parents=True)
+        (self.proc).mkdir()
+        (self.proc / 'stat').write_text(f'cpu 1 2 3\nbtime {int(time.time()) - 1000}\n')
+        tick = os.sysconf('SC_CLK_TCK')
+        self.add(10, 1, f'/opt/devbox-runtime/node/current/bin/node {d.DAEMON_DIR}/bundle/sprite-daemon.mjs', 1)
+        self.add(20, 10, self.ARGV, 500 * tick)  # started 500 s ago
+        self.old = self.sessions / '2026' / 'old.jsonl'
+        self.old.parent.mkdir()
+        self.old.write_text('{}')
+        os.utime(self.old, (time.time() - 900, time.time() - 900))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add(self, pid, ppid, argv, start):
+        folder = self.proc / str(pid)
+        folder.mkdir()
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + f' {start} 0\n')
+        (folder / 'cmdline').write_bytes(argv.replace(' ', '\0').encode())
+
+    def idle(self, exe=EXE, argv=ARGV):
+        return d.idle_daemon_codex_server(20, exe, argv, self.proc, self.sessions)
+
+    def test_idle_daemon_server_is_not_live_work(self):
+        self.assertTrue(self.idle())
+
+    def test_running_child_blocks(self):
+        self.add(30, 20, 'bash -lc npm test', 1)
+        self.assertFalse(self.idle())
+
+    def test_session_rollout_since_start_blocks(self):
+        (self.sessions / '2026' / 'new.jsonl').write_text('{}')
+        self.assertFalse(self.idle())
+
+    def test_not_parented_by_the_daemon_blocks(self):
+        (self.proc / '10' / 'cmdline').write_bytes(b'bash\0-l')
+        self.assertFalse(self.idle())
+
+    def test_other_codex_commands_and_lookalikes_block(self):
+        self.assertFalse(self.idle(argv=f'{self.EXE} exec --cd /home/boxes/rose'))
+        self.assertFalse(self.idle(exe='/home/boxes/bin/codex'))
+        self.assertFalse(self.idle(exe=None))
+
+
 class DeletionCheck(Repo):
     def test_ready_only_when_every_ignored_path_has_a_disposition(self):
         (self.root / 'node_modules').mkdir()
@@ -570,85 +624,6 @@ class DeletionCheck(Repo):
             child.wait()
         self.assertIn(child.pid, [p['pid'] for p in found])
         self.assertNotIn(os.getpid(), [p['pid'] for p in found])
-
-    @unittest.skipUnless(Path('/proc/self/cwd').exists(), 'needs Linux /proc')
-    def test_the_daemons_idle_default_codex_server_does_not_block_but_any_codex_work_does(self):
-        # PR #1760 and #1780 closeouts stayed NOT_READY only because the boxes.dev daemon's default Codex app-server
-        # (started in the checkout at boot, no Codex thread on the box) counted as live work.
-        child = subprocess.Popen(['sleep', '30'], cwd=self.root)
-        try:
-            daemon = self.root.parent / 'daemon-state'
-            sessions = daemon / 'codex-sessions'
-            sessions.mkdir(parents=True)
-            start = d.proc_stat(child.pid)[19]
-            record = daemon / 'codex-default-app-server.json'
-            parent, threads = {child.pid: os.getpid()}, {'value': []}
-            with patch.object(d, 'DAEMON_DIR', str(daemon)), \
-                    patch.object(d, 'is_daemon_process', side_effect=lambda pid: pid in parent.values()), \
-                    patch.object(d, 'codex_threads_on_this_devbox', side_effect=lambda: threads['value']):
-                def blocking():
-                    return child.pid in [p['pid'] for p in d.live_processes(self.root.resolve())]
-                self.assertTrue(blocking())  # no daemon record
-                record.write_text('{not json')
-                self.assertTrue(blocking())  # unreadable record
-                record.write_text(json.dumps({'pid': child.pid}))
-                self.assertTrue(blocking())  # record without a start time
-                record.write_text(json.dumps({'pid': child.pid, 'statStartTime': start}))
-                self.assertFalse(blocking())  # exactly the recorded server, no Codex thread or session
-                threads['value'] = [{'agent': 'codex', 'devboxId': 'x'}]
-                self.assertTrue(blocking())  # a managed Codex thread runs on it
-                threads['value'] = None
-                self.assertTrue(blocking())  # the platform thread list is unavailable
-                threads['value'] = []
-                (sessions / 'active.1.json').write_text('{}')
-                self.assertTrue(blocking())  # a terminal-wrapper Codex session
-                (sessions / 'active.1.json').unlink()
-                sessions.rmdir()
-                self.assertTrue(blocking())  # no sessions directory
-                (daemon / 'elsewhere').mkdir()
-                sessions.symlink_to(daemon / 'elsewhere')
-                self.assertTrue(blocking())  # a symlinked sessions directory
-                sessions.unlink()
-                sessions.mkdir()
-                record.write_text(json.dumps({'pid': child.pid, 'statStartTime': str(int(start) + 1)}))
-                self.assertTrue(blocking())  # a reused pid with another start time
-                record.write_text(json.dumps({'pid': child.pid + 1, 'statStartTime': start}))
-                self.assertTrue(blocking())  # a different process
-                record.write_text(json.dumps({'pid': child.pid, 'statStartTime': start}))
-                parent.clear()
-                self.assertTrue(blocking())  # not started by the daemon
-            self.assertFalse(d.is_daemon_process(os.getpid()))  # the real check rejects an ordinary process
-        finally:
-            child.terminate()
-            child.wait()
-
-    def test_codex_threads_on_this_devbox_reads_the_platform_list_for_this_instance_only(self):
-        daemon, bin_dir = self.root.parent / 'daemon-cfg', self.root.parent / 'bin'
-        daemon.mkdir()
-        bin_dir.mkdir()
-        (daemon / 'config.json').write_text(json.dumps({'controlAuth': {'instanceId': 'box-1'}}))
-        listing = bin_dir / 'listing.json'
-        stub = bin_dir / 'dvb-onbox'
-        stub.write_text(f'#!/bin/sh\ncat {listing}\n')
-        stub.chmod(0o755)
-        mine = {'agent': 'codex', 'devboxId': 'box-1', 'archived': False}
-        def listed(threads, ok=True, complete=True):
-            listing.write_text(json.dumps({'ok': ok, 'pagination': {'complete': complete}, 'threads': threads}))
-        listed([mine, {'agent': 'claude', 'devboxId': 'box-1'}, {'agent': 'codex', 'devboxId': 'box-2'},
-                {'agent': 'codex', 'devboxId': 'box-1', 'archived': True}])
-        with patch.object(d, 'DAEMON_DIR', str(daemon)), \
-                patch.dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}"):
-            self.assertEqual(d.codex_threads_on_this_devbox(), [mine])
-            listed([{'agent': 'claude', 'devboxId': 'box-1'}])
-            self.assertEqual(d.codex_threads_on_this_devbox(), [])
-            listed([], complete=False)
-            self.assertIsNone(d.codex_threads_on_this_devbox())  # a partial listing
-            listed([], ok=False)
-            self.assertIsNone(d.codex_threads_on_this_devbox())
-            listing.write_text('not json')
-            self.assertIsNone(d.codex_threads_on_this_devbox())
-            (daemon / 'config.json').write_text('{}')
-            self.assertIsNone(d.codex_threads_on_this_devbox())
 
 
 class Dispatch(unittest.TestCase):
