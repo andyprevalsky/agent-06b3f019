@@ -254,3 +254,35 @@ with the rollout verification rather than substituting this focused pass.
 The full registered `python scripts/run_blackbox_tests.py benchmark` rerun is
 GREEN in 217.6 seconds, including this exact six-case wrapper regression.
 Log: `.context/phone-harness/isolation-checker-normal-green.log`.
+
+## Registered interrupt-fixture recurrence — November 8, 2026
+
+The independent full agents gate on `0f23c8707` retained two Python failures
+(182 passed): `test_interrupt_of_exclusive_serial_task_admits_no_queued_task`
+and `test_interrupt_of_sequential_task_admits_no_queued_task`. Both reached
+`asyncio.gather` with the interrupt fixture's cancel-only `SimpleNamespace`
+instead of the real runtime ticker task. The unchanged companion fixture did
+not represent the producer's already implemented cancel-and-await contract.
+This is an introduced fixture integration defect, not a reason to remove the
+producer's await or relax its terminal nonadmission assertions.
+
+The exact two existing tests were copied without modification into an isolated
+fixture scope against the actual `0f23c8707` producer. Under the canonical native
+supervisor they reproduced both identical `TypeError` failures in 3.70 seconds.
+Creating the ticker as a real task inside the scenario's running event loop,
+then requiring it to be cancelled, made the identical command pass both tests
+in 1.59 seconds. Every original queued-task, CANCELLED-row and nonadmission-proof
+assertion and both ten-second bounds remain unchanged. No product, task,
+provider, prompt, financial or production-environment behavior changed.
+
+The original full native failure and both supervised owning runs are retained
+under `.context/rca-google400/round54-final-source/ticker-fixture-owning/` and
+`agents49-readonly-rca.json`. The full agents gate still requires ordinary final
+source validation; this focused result grants no deploy or physical-phone credit.
+The separate coordinator exit143 remains unattributed, with its original missing
+outer receipts and native outcomes preserved by the negative-only recovery.
+
+After canonical integration, the complete existing owning file passed all five
+tests in 2.75 seconds under the native supervisor, with quiescent cleanup and
+no orphans. The RCA archive validated all 1,625 cases. Normal final-source full
+validation remains a separate required gate.
