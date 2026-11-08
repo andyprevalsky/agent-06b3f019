@@ -5475,6 +5475,9 @@ class RelayStartupEvidence(unittest.TestCase):
         with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={'native_hub_owner_retired':retired_hub}),\
              patch.object(self.native.subprocess,'check_output',side_effect=lambda args,**kwargs:
                  original_check_output(args,**kwargs) if args[0]=='ps' else
+                 original_check_output(['git','--no-replace-objects','-C',str(ROOT),'show',
+                     '4df680391347ed9671734c9d8a6a067b279f2b5d:'+args[-1].split(':',1)[1]]) if proof.get('layout')=='campaign-dispatch-refusal-v1'
+                    and args[-1].split(':',1)[-1] in {'scripts/run-bench','scripts/run-bench-fleet','scripts/lib/cloudbench-env.sh','scripts/run-bench-campaign.py'} else
                  b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
                  (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else b'original-campaign'):
             state={'plan':{'gates':[{'name':'smoke','native_cloud':True}]},
@@ -5488,6 +5491,70 @@ class RelayStartupEvidence(unittest.TestCase):
                 occurrence=receipt['token']
             self.native.reconcile(state,occurrence,proof)
             return next(iter(state['reconciled_owners'].values()))
+
+    def dispatch_fixture(self):
+        import time
+        receipt,owner,proof=self.fixture()
+        proof['layout']='campaign-dispatch-refusal-v1'
+        adapter=json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(complete=False,cleanup_complete=False,reused=False)
+        self.save(Path(receipt['worker_result']),adapter)
+        owner['native_cleanup_reference']['result_sha256']=c.sha_file(receipt['worker_result'])
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof.update(receipt_sha256=c.sha_file(Path(receipt['log']).parent/'receipt.json'),
+                     worker_result_sha256=c.sha_file(receipt['worker_result']))
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary.update(peak_concurrency=1,shared_inventory_failed=False)
+        job=summary['jobs'][0]
+        authority=json.loads((self.relay/'authority.private.json').read_text())
+        job.update(status='failed',controller_pid=int(authority['inventory_owner']['pid']),controller_exit_code=1,
+                   started_at=summary['started_at'],finished_at=summary['finished_at'],
+                   controller_command=['bash',str(self.base/'scripts/run-bench'),job['task'],
+                                       '--ref',receipt['source']['head'],'--foreground'])
+        self.save(self.campaign/'summary.json',summary)
+        Path(job['log']).write_text('FATAL: requested benchmark commit '+receipt['source']['head']+
+            ' is not fetchable from origin and local patch shipping is disabled\n')
+        broker=json.loads((self.relay/'broker-owner.json').read_text())
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        ready=dict(authority_sha256=c.sha_file(self.relay/'authority.private.json'),agent=capture['agent'],
+                   pid=broker['pid'],birth=broker['birth'],socket='/tmp/cb-relay-abcdefgh/control.sock')
+        self.save(self.relay/'ready.json',ready)
+        self.save(self.relay/'serve.once.json',ready)
+        (self.relay/'broker.private.log').write_text('{"stopped": true}')
+        (self.relay/'startup-cleanup.json').unlink()
+        proof['confirmed_at']=time.time()
+        self.reseal()
+        return receipt,owner,proof
+
+    def test_source_refusal_retirement_retains_unverified_outcomes_and_no_financial_credit(self):
+        receipt,owner,proof=self.dispatch_fixture()
+        original=copy.deepcopy(receipt)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertEqual(receipt,original)
+        self.assertFalse(result['credit_granted'])
+        self.assertFalse(result['financial_cleanup_credit'])
+        self.assertEqual(result['participants'],[])
+
+    def test_source_refusal_refuses_other_errors_resources_and_ownership(self):
+        for mutation in ('foreign-error','successful-child','retry','cleanup-pending','native-participant','live-child','changed-evidence'):
+            with self.subTest(mutation=mutation):
+                # Each fixture has its own namespace; the proof must not inherit a peer's closure.
+                with tempfile.TemporaryDirectory(prefix='dispatch-negative-') as temporary:
+                    self.base=Path(temporary)
+                    receipt,owner,proof=self.dispatch_fixture()
+                    summary_path=self.campaign/'summary.json'
+                    summary=json.loads(summary_path.read_text())
+                    job=summary['jobs'][0]
+                    if mutation=='foreign-error':Path(job['log']).write_text('provider failed\n')
+                    elif mutation=='successful-child':job['controller_exit_code']=0
+                    elif mutation=='retry':job['attempt']=2
+                    elif mutation=='cleanup-pending':summary['shared_transport_cleanup_pending']=True
+                    elif mutation=='native-participant':(self.runs/'unexpected-fleet').mkdir()
+                    elif mutation=='live-child':job['controller_pid']=os.getpid()
+                    elif mutation=='changed-evidence':Path(job['log']).write_text(Path(job['log']).read_text()+'changed\n')
+                    self.save(summary_path,summary)
+                    if mutation!='changed-evidence':self.reseal()
+                    with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
 
     def test_native_adapter_requests_owned_supervision(self):
         import ast,contextlib,hashlib,time

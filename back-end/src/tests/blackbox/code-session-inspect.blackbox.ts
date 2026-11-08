@@ -47,7 +47,7 @@ import {
   setCodeInspectSandboxFactoryForTests,
 } from '../../providers/codeSessions/inspect';
 import { fakeInspectCli } from './code-session-inspect.fake-cli';
-import { isolateFundedKeyCooldowns } from './funded-key-cooldown.support';
+import { beginIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 config();
 
@@ -91,7 +91,9 @@ const savedEnv = new Map<string, string | undefined>(
 );
 const originalConnect = Sandbox.connect.bind(Sandbox);
 let liveConnects = 0;
-let restoreCooldowns: (() => Promise<void>) | undefined;
+// The hermetic CLIs own private funded-key cooldowns for the whole fixture lifecycle.
+// Parallel suites continue reading and writing their real shared rows.
+let finishFundedCooldownIsolation: (() => Promise<void>) | null = null;
 
 const FAKE_CLI = fakeInspectCli({ cliLog, modeFile, realGit });
 
@@ -244,9 +246,7 @@ async function http(method: string, path: string, userId: string, body?: unknown
 }
 
 before(async () => {
-  // These in-process inspections use fake funded keys. Give every provider's
-  // cooldown a private lifetime; sibling domains own the real singleton rows.
-  restoreCooldowns = await isolateFundedKeyCooldowns();
+  finishFundedCooldownIsolation = await beginIsolatedFundedKeyCooldowns();
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = storageDir;
   // Fake funded keys; no decryption key, so no stored credential is ever decrypted.
@@ -289,18 +289,24 @@ before(async () => {
 });
 
 after(async () => {
-  setCodeInspectSandboxFactoryForTests(null);
-  await restoreCooldowns?.();
-  (Sandbox as unknown as { connect: typeof originalConnect }).connect = originalConnect;
-  for (const [key, value] of savedEnv) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  try {
+    setCodeInspectSandboxFactoryForTests(null);
+    (Sandbox as unknown as { connect: typeof originalConnect }).connect = originalConnect;
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await prisma.codeSession.deleteMany({ where: { userId: { in: [userA, userB] } } });
+    await prisma.agent.deleteMany({ where: { userId: { in: [userA, userB] } } });
+    await prisma.user.deleteMany({ where: { userId: { in: [userA, userB] } } });
+    rmSync(fixtureDir, { recursive: true, force: true });
+  } finally {
+    try {
+      await finishFundedCooldownIsolation?.();
+    } finally {
+      await prisma.$disconnect();
+    }
   }
-  await prisma.codeSession.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  await prisma.agent.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  await prisma.user.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  rmSync(fixtureDir, { recursive: true, force: true });
-  await prisma.$disconnect();
 });
 
 test('an inspection restores the latest checkpoint into its own sandbox and answers with verified citations; the live session is untouched', async () => {

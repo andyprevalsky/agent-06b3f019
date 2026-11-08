@@ -56,7 +56,7 @@ function sharedCooldownName(args: unknown[]): string | undefined {
  * minutes. A case that asserts which provider served a request must not inherit
  * those marks, and its resets must not delete a mark another case is asserting.
  */
-export async function isolateFundedKeyCooldowns(): Promise<() => Promise<void>> {
+export async function beginIsolatedFundedKeyCooldowns(): Promise<() => Promise<void>> {
   const integration = prisma.integration as unknown as IntegrationCooldownDelegate;
   const shared: IntegrationCooldownDelegate = {
     findUnique: integration.findUnique,
@@ -90,7 +90,10 @@ export async function isolateFundedKeyCooldowns(): Promise<() => Promise<void>> 
     __clearGptApiKeyCooldownCache();
     await __resetAnthropicApiKeyCooldown();
   };
-  const restore = async (): Promise<void> => {
+  let finished = false;
+  const finish = async (): Promise<void> => {
+    if (finished) return;
+    finished = true;
     try {
       await resetCaches();
     } finally {
@@ -101,22 +104,23 @@ export async function isolateFundedKeyCooldowns(): Promise<() => Promise<void>> 
   };
   try {
     await resetCaches();
+    return finish;
   } catch (error) {
-    integration.findUnique = shared.findUnique;
-    integration.upsert = shared.upsert;
-    integration.deleteMany = shared.deleteMany;
+    await finish();
     throw error;
   }
-  return restore;
 }
+
+/** Retain the lifecycle name used by other isolated blackbox fixtures. */
+export { beginIsolatedFundedKeyCooldowns as isolateFundedKeyCooldowns };
 
 /** Callback form for suites without before/after lifecycle hooks. */
 export async function withIsolatedFundedKeyCooldowns<T>(run: () => Promise<T>): Promise<T> {
-  const restore = await isolateFundedKeyCooldowns();
+  const finish = await beginIsolatedFundedKeyCooldowns();
   try {
     return await run();
   } finally {
-    await restore();
+    await finish();
   }
 }
 
