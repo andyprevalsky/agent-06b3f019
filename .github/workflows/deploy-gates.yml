@@ -89,7 +89,18 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # setup-uv downloads uv from GitHub Releases, which answered 504 for 30+ minutes on 2026-11-08.
+      # PyPI publishes the same uv wheels, so an outage there falls back instead of failing the gate.
       - uses: astral-sh/setup-uv@v6
+        id: setup-uv
+        continue-on-error: true
+
+      - name: Install uv from PyPI (GitHub Releases unavailable)
+        if: steps.setup-uv.outcome == 'failure'
+        run: |
+          python3 -m pip install --quiet --user --break-system-packages uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/uv" --version
 
       # Dependencies live on a sticky disk keyed by every manifest/lockfile and toolchain version
       # (actions/cache is ref-scoped, and every gate run is a new tag). The setup script bind-mounts

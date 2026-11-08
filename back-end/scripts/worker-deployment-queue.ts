@@ -2,7 +2,8 @@
 import { verifyWorkerDeploymentNativePollers } from '../src/providers/workerDeploymentPollers';
 /** Serialized durable worker deploys. Native actions belong only to the owned child. */
 import { readFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import path from 'node:path';
 import type { WorkerDeploymentStage } from '../src/providers/workerDeploymentQueue';
 import {
   abortWorkerDeployment,
@@ -14,6 +15,11 @@ import {
   enqueueWorkerDeployment,
   readWorkerDeployment,
   readWorkerDeploymentHead,
+  readWorkerDeploymentLive,
+  readWorkerDeploymentQueue,
+  recordWorkerDeploymentAncestry,
+  resolveWorkerDeployment,
+  supersedeQueuedWorkerDeployments,
   prepareWorkerDeployment,
   transitionWorkerDeployment,
   recordWorkerDeploymentFailure,
@@ -42,7 +48,76 @@ const required = (flag: string) => {
 };
 const input = () => JSON.parse(readFileSync(required('--plan'), 'utf8'));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
+// The controller's own checkout. Only a real `git merge-base --is-ancestor`
+// success proves containment; a shallow/missing commit is unknown, never proof.
+// CI opts into one GitHub compare call per unknown pair involving its own job.
+const ancestryRepository =
+  process.env.WORKER_DEPLOYMENT_ANCESTRY_REPOSITORY || path.resolve(__dirname, '..', '..');
+const SHA = /^[a-f0-9]{40}$/;
+function provesAncestor(ancestor: string, descendant: string, remote: boolean): string | null {
+  if (!SHA.test(ancestor) || !SHA.test(descendant)) return null;
+  const git = spawnSync(
+    'git',
+    ['-C', ancestryRepository, 'merge-base', '--is-ancestor', ancestor, descendant],
+    { env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' }, stdio: 'ignore', timeout: 30_000 }
+  );
+  if (git.status === 0) return 'git merge-base --is-ancestor';
+  const repository = process.env.GITHUB_REPOSITORY ?? '';
+  if (
+    !remote ||
+    process.env.WORKER_DEPLOYMENT_ANCESTRY_GITHUB !== '1' ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)
+  )
+    return null;
+  // compare/BASE...HEAD status "ahead"/"identical": BASE is an ancestor of HEAD.
+  const compare = spawnSync(
+    'gh',
+    ['api', `repos/${repository}/compare/${ancestor}...${descendant}`, '--jq', '.status'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 }
+  );
+  return compare.status === 0 && ['ahead', 'identical'].includes(compare.stdout.trim())
+    ? 'github compare'
+    : null;
+}
+const MAX_ANCESTRY_CANDIDATES = 16;
+/** Record which queued jobs and live release our checkout proves containment for (best effort). */
+async function recordOwnAncestry(jobId: string): Promise<void> {
+  try {
+    const own = await readWorkerDeployment(jobId);
+    const queue = await readWorkerDeploymentQueue(own.identity.app);
+    const index = queue.findIndex((job) => job.jobId === jobId);
+    if (index < 0) return;
+    const live = await readWorkerDeploymentLive(own.identity.app);
+    const candidates = [
+      ...(live ? [live] : []),
+      ...queue.slice(Math.max(0, index - MAX_ANCESTRY_CANDIDATES), index),
+      own,
+    ];
+    const proven: Array<{ ancestor: string; descendant: string; proof: string }> = [];
+    for (const ancestor of candidates)
+      for (const descendant of candidates) {
+        if (ancestor.identity.sourceCommit === descendant.identity.sourceCommit) continue;
+        const proof = provesAncestor(
+          ancestor.identity.sourceCommit,
+          descendant.identity.sourceCommit,
+          ancestor.jobId === jobId || descendant.jobId === jobId
+        );
+        if (proof) proven.push({ ancestor: ancestor.jobId, descendant: descendant.jobId, proof });
+      }
+    let recorded = 0;
+    for (const fact of proven)
+      recorded += await recordWorkerDeploymentAncestry(
+        fact.descendant,
+        [fact.ancestor],
+        fact.proof
+      );
+    if (proven.length)
+      emit({ requestedJobId: jobId, ancestryProven: proven, ancestryRecorded: recorded });
+  } catch (error) {
+    // Without a durable fact the queue keeps plain FIFO or refuses a possible rollback.
+    emit({ requestedJobId: jobId, ancestryProven: [], ancestryError: String(error).slice(0, 500) });
+  }
+}
 async function runChild(
   jobId: string,
   command: string[],
@@ -152,14 +227,23 @@ async function runQueue(jobId: string): Promise<void> {
   };
   process.once('SIGTERM', interrupt);
   process.once('SIGINT', interrupt);
-  while ((await readWorkerDeployment(jobId)).stage !== 'SUCCEEDED') {
+  const coalesce = !options.includes('--allow-abort');
+  if (coalesce) await recordOwnAncestry(jobId);
+  // A SUPERSEDED job is carried by its descendant: wait for (and help run) that cutover.
+  while ((await resolveWorkerDeployment(jobId)).resolved.stage !== 'SUCCEEDED') {
     if (interrupted) throw new Error('Deployment controller interrupted while waiting');
-    if ((await readWorkerDeployment(jobId)).stage === 'ABORTED') {
+    const { resolved } = await resolveWorkerDeployment(jobId);
+    if (resolved.stage === 'ABORTED') {
+      if (resolved.jobId !== jobId)
+        throw new Error(`Descendant deployment ${resolved.jobId} carrying ${jobId} is ABORTED`);
       if (options.includes('--allow-abort')) {
         emit(await readWorkerDeployment(jobId));
         return;
       }
-      throw new Error('Requested deployment is ABORTED');
+      const why = (resolved.evidence.ABORTED as { message?: unknown } | undefined)?.message;
+      throw new Error(
+        `Requested deployment is ABORTED${typeof why === 'string' ? `: ${why}` : ''}`
+      );
     }
     let lease;
     try {
@@ -177,8 +261,19 @@ async function runQueue(jobId: string): Promise<void> {
     }
     try {
       if (interrupted) throw new Error('Deployment controller interrupted before native admission');
-      const head = await readWorkerDeploymentHead(requested.identity.app);
+      let head = await readWorkerDeploymentHead(requested.identity.app);
       if (!head) continue;
+      if (coalesce) {
+        const coalesced = await supersedeQueuedWorkerDeployments(
+          requested.identity.app,
+          lease.ownerId
+        );
+        if (coalesced) {
+          emit({ requestedJobId: jobId, coalesced: true, ...coalesced });
+          head = await readWorkerDeploymentHead(requested.identity.app);
+          if (!head) continue;
+        }
+      }
       if (options.includes('--allow-abort') && head.jobId !== jobId) {
         emit({
           waiting: true,
@@ -236,7 +331,17 @@ async function runQueue(jobId: string): Promise<void> {
   }
   process.off('SIGTERM', interrupt);
   process.off('SIGINT', interrupt);
-  emit(await readWorkerDeployment(jobId));
+  const { requested: final, resolved, chain } = await resolveWorkerDeployment(jobId);
+  if (final.stage === 'SUPERSEDED')
+    emit({
+      requestedJobId: jobId,
+      verifiedByDescendantCutover: true,
+      descendantJobId: resolved.jobId,
+      descendantSourceCommit: resolved.identity.sourceCommit,
+      descendantStage: resolved.stage,
+      chain,
+    });
+  emit(final);
 }
 async function main(): Promise<void> {
   switch (argv[0]) {
@@ -245,6 +350,9 @@ async function main(): Promise<void> {
       break;
     case 'read':
       emit(await readWorkerDeployment(required('--job-id')));
+      break;
+    case 'resolve':
+      emit(await resolveWorkerDeployment(required('--job-id')));
       break;
     case 'abandon':
       emit(
@@ -332,7 +440,7 @@ async function main(): Promise<void> {
       await runQueue(required('--job-id'));
       break;
     default:
-      throw new Error('Expected enqueue/read/head/prepare/stage/fail/release/run');
+      throw new Error('Expected enqueue/read/resolve/head/prepare/stage/fail/release/run');
   }
 }
 main()

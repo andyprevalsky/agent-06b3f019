@@ -55,9 +55,14 @@ def applicable(changed: list[str], labels: list[str] | None = None) -> set[str]:
 class Fake:
     """Injected IO: records every command, gh call, HTTP request and output line."""
 
-    def __init__(self, root: Path, changed: list[str], *, handler=None, http=None, gh=None, gh_exists=True):
+    def __init__(self, root: Path, changed: list[str], *, handler=None, http=None, gh=None, gh_exists=True,
+                 descendants=(), unknown=(), fetch_learns=False):
         self.root, self.changed, self.handler, self.http, self.gh = root, changed, handler, http, gh
         self.gh_exists = gh_exists
+        # `git merge-base --is-ancestor SHA <x>`: 0 for x in descendants, 128 for x in unknown (until a fetch of
+        # origin main learns it when fetch_learns), else 1.
+        self.descendants, self.unknown, self.fetch_learns = set(descendants), set(unknown), fetch_learns
+        self.git: list[list[str]] = []
         self.runs: list[tuple[list[str], Path, dict]] = []
         self.factory: list[tuple[str, str]] = []
         self.requests: list[tuple[str, dict]] = []
@@ -82,6 +87,17 @@ class Fake:
             return 0, ''.join(f'{p}\n' for p in self.changed), ''
         if argv[:2] == ['git', 'show']:
             return 0, '2026-11-05T10:00:00-08:00\n', ''
+        if argv[:2] in (['git', 'merge-base'], ['git', 'fetch']):
+            with self.lock:
+                self.git.append(list(argv))
+            if argv[1] == 'fetch':
+                if self.fetch_learns:
+                    self.unknown.clear()
+                return 0, '', ''
+            assert argv[2:4] == ['--is-ancestor', SHA], argv
+            if argv[4] in self.unknown:
+                return 128, '', f'fatal: Not a valid commit name {argv[4]}'
+            return (0 if argv[4] in self.descendants else 1), '', ''
         if argv[0] == 'bash' and argv[1].endswith('mac-app-release-decision'):
             with self.lock:
                 self.decisions.append(env.get('MAC_APP_RELEASE_LABEL'))
@@ -480,7 +496,108 @@ class VercelTest(Base):
                                                           [{'state': state}]]))
             passed, reason, _code = dp.lane_vercel(self.ctx(fake))
             self.assertFalse(passed)
-            self.assertEqual(reason, f'Vercel deployment 9 {state}')
+            # An inactive deployment that cannot be ordered against newer production deployments stays a failure.
+            self.assertEqual(reason, f'Vercel deployment 9 {state}' if state != 'inactive' else
+                             'Vercel deployment 9 inactive; it names no environment/created_at, so no newer production '
+                             'deployment is verifiable')
+            self.assertNotIsInstance(reason, dp.Descendant)
+
+    NEWER, OLDER, OTHER = 'c' * 40, 'd' * 40, 'e' * 40
+    BOT = {'login': 'vercel[bot]'}
+
+    def superseded(self, environment: dict, statuses: dict):
+        """gh fake: ours (9) is inactive; `environment` maps poll -> deployment rows of the Production environment and
+        `statuses` maps deployment id -> its statuses (a list of per-poll answers, the last one repeating)."""
+        polls = {'env': 0}
+        mine = {'id': 9, 'sha': SHA, 'environment': 'Production', 'created_at': '2026-11-05T18:00:00Z', 'creator': self.BOT}
+
+        def gh(args):
+            path = args[1]
+            if f'deployments?sha={SHA}' in path:
+                return 0, json.dumps([mine]), ''
+            if 'deployments?environment=Production&per_page=30' in path:
+                rows = environment[min(polls['env'], len(environment) - 1)]
+                polls['env'] += 1
+                return 0, json.dumps(rows + [mine]), ''
+            match = re.search(r'deployments/(\d+)/statuses', path)
+            assert match, args
+            answers = statuses[int(match.group(1))]
+            return 0, json.dumps(answers.pop(0) if len(answers) > 1 else answers[0]), ''
+        return gh
+
+    def row(self, ident: int, sha: str, created: str) -> dict:
+        return {'id': ident, 'sha': sha, 'environment': 'Production', 'created_at': created, 'creator': self.BOT}
+
+    def test_inactive_verified_by_live_descendant(self) -> None:
+        """A newer main merge's production deployment succeeded and deactivated ours: the newest successful one
+        (11, past a newer one still building) is a descendant of the merge, so the lane passes BY DESCENDANT."""
+        environment = [[self.row(12, self.OTHER, '2026-11-05T18:09:00Z'), self.row(11, self.NEWER, '2026-11-05T18:05:00Z'),
+                        self.row(5, self.OLDER, '2026-11-05T17:00:00Z')]]
+        statuses = {9: [[{'state': 'inactive'}, {'state': 'success'}]], 12: [[{'state': 'in_progress'}]],
+                    11: [[{'state': 'success'}]], 5: [[{'state': 'inactive'}]]}
+        fake = Fake(self.root, [], gh=self.superseded(environment, statuses), descendants={self.NEWER, self.OTHER})
+        passed, reason, code = dp.lane_vercel(self.ctx(fake))
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertEqual(reason, f'verified by descendant {self.NEWER}: Vercel deployment 9 inactive; Production '
+                                 f'deployment 11 for {self.NEWER[:12]} (a descendant of {SHA[:12]}) success')
+        self.assertEqual(fake.git, [['git', 'merge-base', '--is-ancestor', SHA, self.NEWER]])
+
+    def test_inactive_refuses_a_live_non_descendant(self) -> None:
+        environment = [[self.row(11, self.OLDER, '2026-11-05T18:05:00Z')]]
+        fake = Fake(self.root, [], gh=self.superseded(environment, {9: [[{'state': 'inactive'}]],
+                                                                   11: [[{'state': 'success'}]]}))
+        self.assertEqual(dp.lane_vercel(self.ctx(fake)), (
+            False, f'Vercel deployment 9 inactive; the live Production deployment 11 is {self.OLDER[:12]}, not a '
+                   f'descendant of {SHA[:12]}', 1))
+
+    def test_inactive_refuses_without_a_newer_success(self) -> None:
+        """Only an older success or a failed newer deployment: never accepted."""
+        environment = [[self.row(12, self.NEWER, '2026-11-05T18:05:00Z'), self.row(5, self.OLDER, '2026-11-05T17:00:00Z')]]
+        fake = Fake(self.root, [], gh=self.superseded(environment, {9: [[{'state': 'inactive'}]],
+                                                                   12: [[{'state': 'failure'}]],
+                                                                   5: [[{'state': 'success'}]]}),
+                    descendants={self.NEWER})
+        self.assertEqual(dp.lane_vercel(self.ctx(fake)), (
+            False, 'Vercel deployment 9 inactive and no newer successful Production deployment exists', 1))
+        self.assertEqual(fake.git, [])
+
+    def test_inactive_waits_for_a_building_descendant(self) -> None:
+        """Newer deployment still building: keep polling (bounded), then verify it once it succeeds; a commit this
+        checkout does not know yet is fetched from origin main once."""
+        environment = [[self.row(12, self.NEWER, '2026-11-05T18:05:00Z')]]
+        statuses = {9: [[{'state': 'inactive'}]], 12: [[{'state': 'in_progress'}], [{'state': 'success'}]]}
+        fake = Fake(self.root, [], gh=self.superseded(environment, statuses), descendants={self.NEWER},
+                    unknown={self.NEWER}, fetch_learns=True)
+        passed, reason, _code = dp.lane_vercel(self.ctx(fake))
+        self.assertTrue(passed)
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertTrue(reason.startswith(f'verified by descendant {self.NEWER}: '), reason)
+        self.assertEqual(fake.sleeps, [10.0])
+        self.assertEqual([argv[1] for argv in fake.git], ['merge-base', 'fetch', 'merge-base'])
+        unknown = Fake(self.root, [], gh=self.superseded(environment, {9: [[{'state': 'inactive'}]],
+                                                                      12: [[{'state': 'success'}]]}),
+                       unknown={self.NEWER})
+        passed, reason, _code = dp.lane_vercel(self.ctx(unknown), attempts=1)
+        self.assertFalse(passed)
+        self.assertIn('did not bring', reason)  # an unverifiable ancestry is a missed poll, never a pass
+        self.assertIn(f'git merge-base --is-ancestor {SHA[:12]} {self.NEWER[:12]} failed', '\n'.join(unknown.lines))
+
+    def test_descendant_lane_is_recorded_distinctly_and_satisfies_dependents(self) -> None:
+        """The scheduler records PASS-verified-by-descendant (never PASS), dependents run and the verdict names it."""
+        reason = dp.Descendant(f'verified by descendant {self.NEWER}: Vercel deployment 9 inactive')
+        fake = Fake(self.root, ['front-end/src/tests/blackbox/a.blackbox.ts'])
+        code = self.main(fake, lane_funcs={'vercel': lambda ctx: (True, reason, 0),
+                                           'semantic': lambda ctx: (True, 'semantic ok', 0)})
+        self.assertEqual(code, 0)
+        lanes = self.report()['lanes']
+        self.assertEqual(lanes['vercel']['status'], dp.DESCENDANT)
+        self.assertNotEqual(dp.DESCENDANT, dp.PASS)
+        self.assertEqual(lanes['vercel']['reason'], str(reason))
+        self.assertEqual(lanes['semantic']['status'], dp.PASS)
+        self.assertIn('vercel:PASS-verified-by-descendant', fake.lines[-1])
+        self.assertIn(f'descendant=vercel:{json.dumps(str(reason))}', fake.lines[-1])
+        self.assertIn(('production-finish', 'vercel'), fake.factory)
 
     def test_bounded_wait(self) -> None:
         fake = Fake(self.root, [], gh=self.gh_script([[]]))
@@ -494,6 +611,23 @@ class VercelTest(Base):
         self.assertEqual(dp.vercel_decide([{'state': 'queued'}]), ('pending', 'queued'))
         self.assertEqual(dp.vercel_decide([{'state': 'success'}]), ('success', 'success'))
         self.assertEqual(dp.vercel_decide([{'state': 'inactive'}]), ('failed', 'inactive'))
+
+
+class RenderLaneTest(Base):
+    def test_render_lane_reports_verified_by_descendant_distinctly(self) -> None:
+        live = 'c' * 40
+        self.write_production(render={'status': 'verified-by-descendant', 'live_commit': live, 'verified_by_descendant': {
+            'reason': 'merged-deploy-canceled-live-descendant', 'detail': f'live deploy dep-v3 serves {live[:9]}'}})
+        fake = Fake(self.root, [])
+        passed, reason, code = dp.lane_render(self.ctx(fake))
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertEqual(reason, f'verified by descendant {live}: merged-deploy-canceled-live-descendant (live deploy '
+                                 f'dep-v3 serves {live[:9]}); not an exact-SHA deploy')
+        self.write_production(render={'status': 'live'})
+        passed, reason, code = dp.lane_render(self.ctx(Fake(self.root, [])))
+        self.assertEqual((passed, reason, code), (True, 'Render serves the merged backend (live)', 0))
+        self.assertNotIsInstance(reason, dp.Descendant)
 
 
 class BackendProbesTest(Base):
@@ -729,7 +863,7 @@ class AgentCardStallTest(Base):
         benchmarks = self.root / 'agents' / 'benchmarks'
         self.runs = benchmarks / 'runs'
         self.runs.mkdir(parents=True)
-        for name in ('select_predeploy_benches.py', 'tasks.json'):  # the real catalog, bound through ctx.root
+        for name in ('select_predeploy_benches.py', 'history_ledger.py', 'tasks.json'):  # the real catalog, bound through ctx.root
             (benchmarks / name).symlink_to(ROOT / 'agents' / 'benchmarks' / name)
 
     def execute(self, record, *, code: int = 0, lines=None, environ: dict | None = None, rel: str | None = None):
@@ -955,7 +1089,8 @@ class AgentCardStallTest(Base):
         self.assertEqual(self.main(fake, '--skip-agentcard', 'why', lane_funcs=fake_lanes({}, order, lock)), 0)
         self.assertEqual(self.lane()['status'], dp.ELECTED)
         self.assertNotEqual(dp.ELECTED, dp.STALL)
-        self.assertEqual(set(dp.SATISFIED), {dp.PASS, dp.ELECTED, dp.STALL})
+        self.assertEqual(set(dp.SATISFIED), {dp.PASS, dp.ELECTED, dp.STALL, dp.DESCENDANT})
+        self.assertEqual(len({dp.PASS, dp.ELECTED, dp.STALL, dp.DESCENDANT}), 4)
         self.assertNotIn('stall=', fake.lines[-1])
 
     def test_dry_run_is_unchanged_by_the_stall_qualification(self) -> None:
@@ -1094,6 +1229,81 @@ class OtherLanesTest(Base):
         self.assertEqual(dp.lane_mac_release(ctx), (True, 'release-mac-app run 3 success', 0))
         self.assertEqual(fake.runs[0][0], [str(dp.DEVBOX_GH), 'run', 'watch', '3', '--exit-status'])
         self.assertEqual(fake.sleeps, [10.0])
+
+    NEWER, OLDER = 'c' * 40, 'd' * 40
+
+    def mac_fake(self, rows: list[dict], views: dict, watch: dict, descendants=()) -> Fake:
+        """release-mac-app runs `rows` (every poll), `gh run view <id>` answers and `gh run watch <id>` exit codes."""
+        def gh(args):
+            if args[:2] == ['run', 'list']:
+                return 0, json.dumps(rows), ''
+            if args[:2] == ['run', 'view']:
+                return 0, json.dumps(views[args[2]]), ''
+            raise AssertionError(args)
+        return Fake(self.root, [], gh=gh, handler=lambda argv, cwd, env, on_line: watch[argv[3]],
+                    descendants=descendants)
+
+    def mac_ctx(self, fake: Fake) -> dp.Ctx:
+        ctx = self.ctx(fake, gh=str(dp.DEVBOX_GH))
+        ctx.plan = dp.plan_lanes([], [], {'ship': 'true', 'reason': 'label', 'label': 'true'})
+        return ctx
+
+    def run_row(self, ident: int, sha: str, created: str, tag: str, status: str = 'in_progress',
+                conclusion: str = '') -> dict:
+        return {'databaseId': ident, 'headSha': sha, 'createdAt': created, 'headBranch': tag, 'status': status,
+                'conclusion': conclusion}
+
+    def test_mac_release_cancelled_run_verified_by_descendant(self) -> None:
+        """The merge's pending release was cancelled by a newer tag (release-mac-app concurrency): the newer
+        descendant release succeeding verifies it BY DESCENDANT, never as the exact run."""
+        rows = [self.run_row(4, self.NEWER, '2026-11-05T18:10:00Z', 'v1.0.10'),
+                self.run_row(3, SHA, '2026-11-05T18:01:00Z', 'v1.0.9', 'completed', 'cancelled')]
+        fake = self.mac_fake(rows, {'3': {'status': 'completed', 'conclusion': 'cancelled'}}, {'3': 1, '4': 0},
+                             descendants={self.NEWER})
+        passed, reason, code = dp.lane_mac_release(self.mac_ctx(fake))
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertEqual(reason, f'verified by descendant {self.NEWER}: release-mac-app run 3 for {SHA[:12]} was '
+                                 f'cancelled; release-mac-app run 4 (v1.0.10) for {self.NEWER[:12]} success')
+        self.assertEqual([argv[3] for argv, _cwd, _env in fake.runs], ['3', '4'])
+
+    def test_mac_release_without_a_tag_adopts_the_descendant_release(self) -> None:
+        """auto-tag's pending run for the merge was replaced, so no release run for it exists; the descendant's
+        release (created after the merge) carries it."""
+        rows = [self.run_row(4, self.NEWER, '2026-11-05T18:10:00Z', 'v1.0.10'),
+                self.run_row(2, self.OLDER, '2026-11-05T17:00:00Z', 'v1.0.8', 'completed', 'success')]
+        fake = self.mac_fake(rows, {}, {'4': 0}, descendants={self.NEWER, self.OLDER})
+        passed, reason, code = dp.lane_mac_release(self.mac_ctx(fake))
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertEqual(reason, f'verified by descendant {self.NEWER}: no release-mac-app run for {SHA[:12]} was '
+                                 f'created (its auto-tag was superseded); release-mac-app run 4 (v1.0.10) for '
+                                 f'{self.NEWER[:12]} success')
+        self.assertEqual(fake.sleeps, [])
+
+    def test_mac_release_refuses_non_descendant_failed_and_unrelated_runs(self) -> None:
+        cancelled = {'3': {'status': 'completed', 'conclusion': 'cancelled'}}
+        exact = self.run_row(3, SHA, '2026-11-05T18:01:00Z', 'v1.0.9', 'completed', 'cancelled')
+        # Cancelled, and the only later release is not a descendant of the merge.
+        fake = self.mac_fake([self.run_row(4, self.OLDER, '2026-11-05T18:10:00Z', 'v1.0.10'), exact], cancelled,
+                             {'3': 1})
+        self.assertEqual(dp.lane_mac_release(self.mac_ctx(fake)), (
+            False, f'release-mac-app run 3 for {SHA[:12]} was cancelled and no later release run of a descendant of '
+                   'it exists', 1))
+        # Cancelled, and the descendant release that replaced it failed: never accepted.
+        fake = self.mac_fake([self.run_row(4, self.NEWER, '2026-11-05T18:10:00Z', 'v1.0.10'), exact],
+                             {**cancelled, '4': {'status': 'completed', 'conclusion': 'failure'}}, {'3': 1, '4': 1},
+                             descendants={self.NEWER})
+        self.assertEqual(dp.lane_mac_release(self.mac_ctx(fake)), (
+            False, f'release-mac-app run 3 for {SHA[:12]} was cancelled; descendant release run 4 for '
+                   f'{self.NEWER[:12]} failed (exit 1)', 1))
+        # The exact run FAILED (not cancelled): a successful descendant never rescues it.
+        fake = self.mac_fake([self.run_row(4, self.NEWER, '2026-11-05T18:10:00Z', 'v1.0.10', 'completed', 'success'),
+                              self.run_row(3, SHA, '2026-11-05T18:01:00Z', 'v1.0.9')],
+                             {'3': {'status': 'completed', 'conclusion': 'failure'}}, {'3': 1, '4': 0},
+                             descendants={self.NEWER})
+        self.assertEqual(dp.lane_mac_release(self.mac_ctx(fake)), (False, 'release-mac-app run 3 failed (exit 1)', 1))
+        self.assertEqual([argv[3] for argv, _cwd, _env in fake.runs], ['3'])
 
     def test_mac_release_label_lookup_failure_fails_closed(self) -> None:
         fake = Fake(self.root, ['docs/a.mdx'], gh=lambda args: (1, '', 'HTTP 401 Bad credentials'))

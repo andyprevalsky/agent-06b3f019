@@ -17,7 +17,7 @@ ROOT = Path(os.environ.get('CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST', Path(__file__
 # import closure in agents/benchmarks (catalog caps, floors and the history reader).
 TIMEOUT_POLICY_SCRIPT = 'cloudbench-timeout-policy.py'
 TIMEOUT_POLICY_MODULES = ('__init__.py', 'benchmark_tasks.py', 'fixtures.py', 'live_fixtures.py',
-                          'polar_catalog.py', 'timeout_history.py')
+                          'polar_catalog.py', 'timeout_history.py', 'history_ledger.py')
 
 
 def copy_timeout_policy(source):
