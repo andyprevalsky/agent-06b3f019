@@ -5097,7 +5097,8 @@ class RelayStartupEvidence(unittest.TestCase):
         with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={'native_hub_owner_retired':retired_hub}),\
              patch.object(self.native.subprocess,'check_output',side_effect=lambda args,**kwargs:
                  original_check_output(args,**kwargs) if args[0]=='ps' else
-                 (ROOT/args[-1].split(':',1)[1]).read_bytes() if proof.get('layout')=='campaign-dispatch-refusal-v1'
+                 original_check_output(['git','--no-replace-objects','-C',str(ROOT),'show',
+                     '4df680391347ed9671734c9d8a6a067b279f2b5d:'+args[-1].split(':',1)[1]]) if proof.get('layout')=='campaign-dispatch-refusal-v1'
                     and args[-1].split(':',1)[-1] in {'scripts/run-bench','scripts/run-bench-fleet','scripts/lib/cloudbench-env.sh','scripts/run-bench-campaign.py'} else
                  b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
                  (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else b'original-campaign'):
