@@ -24,6 +24,14 @@
   "root_cause": "Git >=2.47 detached auto-maintenance (geometric repack, 2+ loose objects in .git/objects/17) started by the fixture commit outlived the waited command and recreated .git/objects/info/packs during shutil.rmtree",
   "test": "scripts/tests/original600-portable-operator.test.py RunBenchShardedRouting.test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once"
  },
+ "deletion_readiness": {
+  "evidence": "ppid 4173640 = /home/boxes/.devbox/daemon/bundle/sprite-daemon.mjs (boxes.dev daemon); started 2026-11-08T00:43:22Z at devbox boot; the only thread on devbox d0298795 is this Claude thread ph7en6ghgt50j82tf2hz08akgd8hv6mb, so no Codex session uses it; platform infrastructure, not signalled",
+  "open": 1,
+  "open_item": "live process 4177674: /opt/devbox-tools/codex/.../codex app-server, cwd /home/boxes/rose",
+  "owned_cleanup": "complete: all deploy lanes, monitors and services owned by this thread ended; local-only branch and stash archived in core; every ignored path has a disposition",
+  "receipt": "docs/handoffs/pr-1780-closeout/deletion-readiness.json",
+  "status": "NOT_READY"
+ },
  "followups": [
   "AgentCard sandbox release stall: card_6b5c4eb9c6b6b0528efe33ff closed, org transfer owt_776cb83d5cc4af7a253ba97e consumed, 4396 cents transferred, 0 released (agent 40c3f460-71c2-4eb5-b162-db63f24a191c)",
   "deploy tooling: deploy_test_local_cleanup has no reconcile proof for a fully reaped timed-out quick gate (lingering_group) -> forced a fresh gate cycle",
