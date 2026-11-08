@@ -7226,6 +7226,56 @@ confirm_guest_shutdown
     assert not list(tmp_path.glob("*.tmp*")), "a temporary receipt leaked"
 
 
+@pytest.mark.parametrize("case", ["second-try-answers", "never-answers"])
+def test_guest_shutdown_request_retries_a_relay_transport_error_within_the_deadline(
+    tmp_path: Path, case: str
+) -> None:
+    """2026-11-08 (PR1784): one 3 s POST through the shared relay (10 s connect budget) got HTTP 000
+    from a healthy guest and turned a passing task into exit 125. A transport error retries, bounded."""
+    source = CLOUD_SCRIPT.read_text()
+    functions = [_extract_fleet_function(source, "confirm_guest_shutdown() {")]
+    if "publish_guest_shutdown_delivery_receipt() {" in source:
+        functions.append(_extract_fleet_function(source, "publish_guest_shutdown_delivery_receipt() {"))
+    posts = tmp_path / "posts"
+    answer = "204" if case == "second-try-answers" else "000"
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+OUT_DIR={shlex.quote(str(tmp_path))}
+FLEET_MACHINE_ID={_NATIVE_STOP_MACHINE}
+RUN_LOG_TOKEN={_NATIVE_STOP_OWNER}-3
+CLOUDBENCH_FLEET_RUN_ID=20261108-042041-2844772
+TASKS_CSV=bench-owned
+CLOUDBENCH_INFRA_PROBE=0
+FINISHED=0
+LOCAL_STATUS_PORT=61001
+STATUS_PROXY_PID=$$
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+CLOUDBENCH_CHILD_TERM_SECONDS=20
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+sleep() {{ :; }}
+curl() {{
+  case " $* " in
+    *" POST "*) echo x >> {shlex.quote(str(posts))}
+      if [ "$(wc -l < {shlex.quote(str(posts))})" -ge 2 ]; then printf {answer}; else printf 000; fi ;;
+    *) printf 204 ;;
+  esac
+}}
+{chr(10).join(functions)}
+confirm_guest_shutdown
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    attempts = len(posts.read_text().splitlines())
+    if case == "second-try-answers":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert attempts == 2
+        assert (tmp_path / "guest-shutdown.confirmed").read_text().strip() == "20261108-042041-2844772"
+    else:
+        assert result.returncode != 0
+        assert attempts == 3, "transport-error retries must stay bounded"
+        assert "guest cleanup request failed (HTTP 000)" in result.stderr
+        assert not (tmp_path / "guest-shutdown.confirmed").exists()
+
+
 @pytest.mark.parametrize("phase", ["during-post", "during-health-poll"])
 def test_guest_shutdown_child_confirmation_receipt_survives_term_during_delivery(
     tmp_path: Path,

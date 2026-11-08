@@ -4722,9 +4722,22 @@ confirm_guest_shutdown() {
     trap 'deferred_signal="${deferred_signal:-HUP}"' HUP
     trap 'deferred_signal="${deferred_signal:-INT}"' INT
     trap 'deferred_signal="${deferred_signal:-TERM}"' TERM
-    status_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
-        -X POST -H "Authorization: Bearer ${CLOUDBENCH_BARRIER_TOKEN:-}" \
-        "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
+    # A transport error (no HTTP answer through the shared relay) retries within the deadline: the
+    # relay itself allows 10 s to connect to the guest (cloudbench-shared-relay.py), so one 3 s try
+    # expired against a healthy guest and turned PR1784's passing agent-payment-test-shop into exit
+    # 125 (2026-11-08). /shutdown records one run-scoped request, so a repeat is idempotent; any HTTP
+    # answer ends the retries and keeps the 202/204/409 handling below unchanged.
+    local shutdown_attempt=0
+    while :; do
+        shutdown_attempt=$((shutdown_attempt + 1))
+        status_code="$(curl --noproxy '*' -sS --max-time "${CLOUDBENCH_GUEST_SHUTDOWN_REQUEST_SECONDS:-12}" \
+            -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${CLOUDBENCH_BARRIER_TOKEN:-}" \
+            "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
+        case "$status_code" in ''|000) ;; *) break ;; esac
+        [ "$shutdown_attempt" -lt 3 ] && [ "$SECONDS" -lt "$deadline" ] || break
+        echo "⚠️  guest shutdown request got no HTTP answer (attempt $shutdown_attempt/3); retrying" >&2
+        sleep 1
+    done
     case "$status_code" in
         # Only 202/204 mean the guest recorded the request and is stopping its
         # benchmark. Its status server also answers 409 when nothing was
