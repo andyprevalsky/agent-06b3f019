@@ -84,6 +84,20 @@
       "original_bytes": 36134,
       "manifest_sha256": "5f2ce5d452aea52e8985f57379b851a21e51e6ec1c426f385fa4bf2f51362888",
       "full_readback_verified": true
+    },
+    "final_tooling_renderer": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeouts/pr-1770/final-tooling-renderer-v2.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "819ab0aeb7f49b94fadb5097face5e3ca32efaeba5b6ba07ccec306907f17238",
+      "gzip_sha256": "6bccc4a3773ecf044277ffdb7cbf50013f50aa83290aba97fed3ce5d54bfdd13",
+      "stored_bytes": 29084,
+      "frames": 1,
+      "files": 6,
+      "original_bytes": 78640,
+      "manifest_sha256": "ae2e034e807d6e372884de70ce676f47da074f3e072a6ce8bea5565dcd7543c2",
+      "full_readback_verified": true
     }
   },
   "independent_core_restore": {
@@ -188,5 +202,12 @@
     "decrypted_full_restore_verified": true,
     "stash_unchanged": true,
     "archive_receipt": "/home/boxes/pr1770-preservation/historical-stash-0e2ffe95-receipt.json"
+  },
+  "final_tooling_renderer_restore": {
+    "format": "PR1770-FINAL-TOOLING-RENDERER-RESTORE-V1",
+    "receipt_sha256": "807321977832f1f66a779c49b34d9609c11d01a6303ea625a014a1be8d14a4cd",
+    "empty_destination_restore": true,
+    "all_files_hash_equal": true,
+    "files": 6
   }
 }
