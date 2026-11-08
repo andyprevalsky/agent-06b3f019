@@ -203,6 +203,8 @@ export async function createLocalDeviceCodeSession(
     /** Caller-asserted owner; must match the agent's owner. */
     expectedUserId?: string;
     deviceId?: string;
+    /** The spawn's task_name, stored on the task row (the agents list title). */
+    taskName?: string | null;
   },
   hub: LocalDeviceHub = localDeviceHub()
 ): Promise<LocalDeviceSessionResult> {
@@ -268,6 +270,7 @@ export async function createLocalDeviceCodeSession(
         sandboxId,
         streamUrl: wsUrl,
         goal: params.goal,
+        taskName: params.taskName ?? null,
         status: 'ACTIVE',
         claudeTokenSource,
         claudeTokenIntegrationId: integrationId,
@@ -303,6 +306,7 @@ export async function createLocalCodeSessionResponse(params: {
   provider: LocalCodeProvider;
   expectedUserId?: string;
   deviceId?: string;
+  taskName?: string | null;
 }): Promise<{
   task_id: string;
   sandbox_id: string;

@@ -11,6 +11,8 @@
  *
  * BROWSER TAB (only meaningful while [BROWSER]):
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
+ *   [ANY] --openAgentBrowserTab(agent) (task id unknown)--> [AGENT(agent's first tab)],
+ *     else no selection + pending switch: the agent's tab takes over when it registers
  *   [AGENT(id, taskId)] --click Root tab--> [ROOT]
  *   selectedAgentId changes | Browser opens --> [AGENT(selected)] if it has a
  *     browser tab, else [NO_SESSION] (an agent is selected) or [ROOT] (Home).
@@ -39,8 +41,11 @@
  * Research/Careers/Download links give way to the app icons) and
  * --rose-app-icons-inset (px the top-right icon row occupies, so the account
  * rail sits left of it). Panels overlay the content: there is no right bar and
- * no content inset (UI ledger row 66). Panels portal to <body>; they mount on
- * first open (lazy) and stay mounted afterwards so they can slide out.
+ * no content inset (UI ledger row 66). The drawer width clamp subtracts the
+ * live left-bar offset (--rose-bar-offset, re-read on ROSE_BAR_OFFSET_EVENT),
+ * so a pinned bar plus a right panel still leaves CHAT_MIN_WIDTH for the chat.
+ * Panels portal to <body>; they mount on first open (lazy) and stay mounted
+ * afterwards so they can slide out.
  */
 
 import {
@@ -54,7 +59,13 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import type { Agent } from '../../hooks';
-import { appIconsInset, clampDrawerWidth, defaultDrawerWidth } from './roseAppsLayout';
+import {
+  appIconsInset,
+  clampDrawerWidth,
+  defaultDrawerWidth,
+  readLeftBarOffset,
+} from './roseAppsLayout';
+import { ROSE_BAR_OFFSET_EVENT } from '../rose-sidebar/roseSidebarLayout';
 import { ROSE_APP_ICON_COUNT } from './roseAppCatalog';
 import { RoseAppDrawers } from './RoseAppDrawers';
 import {
@@ -150,12 +161,23 @@ function useDrawerWidthState() {
   const [viewport, setViewport] = useState(() =>
     typeof window === 'undefined' ? 1440 : window.innerWidth,
   );
+  // A pinned Rose bar pushes the chat right; the panel clamp keeps CHAT_MIN_WIDTH beside it.
+  const [leftOffset, setLeftOffset] = useState(readLeftBarOffset);
   useEffect(() => {
     const onResize = () => setViewport(window.innerWidth);
+    const onBarOffset = () => setLeftOffset(readLeftBarOffset());
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    window.addEventListener(ROSE_BAR_OFFSET_EVENT, onBarOffset);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener(ROSE_BAR_OFFSET_EVENT, onBarOffset);
+    };
   }, []);
-  const drawerWidth = clampDrawerWidth(width ?? defaultDrawerWidth(viewport), viewport);
+  const drawerWidth = clampDrawerWidth(
+    width ?? defaultDrawerWidth(viewport, leftOffset),
+    viewport,
+    leftOffset,
+  );
   const setDrawerWidth = useCallback((next: number) => setWidth(next), []);
   return { drawerWidth, setDrawerWidth };
 }
@@ -275,6 +297,17 @@ export function RoseAppsProvider({
     [focusTask],
   );
 
+  // Task id unknown (a dock row of another agent's browser task): never invent a
+  // tab for it; select the agent's real tab, or wait for it to register.
+  const openAgentBrowserTab = useCallback((agentId: string) => {
+    setBrowserMode('remote');
+    const tab = tabsRef.current.find((t) => t.agentId === agentId);
+    pendingSwitchRef.current = tab ? null : agentId;
+    setBrowserRootChosen(false);
+    setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
+    setOpenApp('browser');
+  }, []);
+
   const selectBrowserTab = useCallback(
     (agentId: string | null, taskId?: string) => {
       const tab = tabsRef.current.find(
@@ -330,6 +363,7 @@ export function RoseAppsProvider({
       toggleApp,
       closeApp,
       openAgentBrowser,
+      openAgentBrowserTab,
       selectBrowserTab,
       openAgent,
       onLogout,
@@ -361,6 +395,7 @@ export function RoseAppsProvider({
       toggleApp,
       closeApp,
       openAgentBrowser,
+      openAgentBrowserTab,
       selectBrowserTab,
       openAgent,
       onLogout,

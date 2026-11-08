@@ -469,6 +469,8 @@ export async function createLocalClaudeCodeSession(params: {
   projectWorkspace?: ProjectWorkspace | null;
   claudeTokenSource: string | null;
   claudeTokenIntegrationId: string | null;
+  /** The spawn's task_name, stored on the task row (the agents list title). */
+  taskName?: string | null;
 }): Promise<{
   wsUrl: string;
   taskId: string;
@@ -579,6 +581,7 @@ export async function createLocalClaudeCodeSession(params: {
         sandboxId,
         streamUrl: wsUrl,
         goal,
+        taskName: params.taskName ?? null,
         status: 'ACTIVE',
         claudeTokenSource: params.claudeTokenSource ?? 'local_fallback',
         claudeTokenIntegrationId: params.claudeTokenIntegrationId,

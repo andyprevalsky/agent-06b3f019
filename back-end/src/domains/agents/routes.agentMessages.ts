@@ -14,7 +14,9 @@ import {
   agentMessageSchema,
   agentTreeQuerySchema,
   resolveAddressQuerySchema,
+  undeliveredCodeTurnsSchema,
 } from './types';
+import { reportUndeliveredCodeTurns } from './agentCodeTurnUndelivered';
 import * as a2aService from './agentToAgentService';
 import { getAgentTreeView } from './agentTreeService';
 import { killAgentByAddress } from './agentToAgentControlService';
@@ -48,6 +50,33 @@ router.post(
       res.status(201).json(result);
     } catch (error) {
       handleRouteError(res, error, 'Failed to send agent message', { agent_id: req.params.id });
+    }
+  })
+);
+
+// POST /:id/code-turns-undelivered (agent workers only): agent turns a code
+// session accepted and lost when it ended; their senders are told (idempotent).
+router.post(
+  '/:id/code-turns-undelivered',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      if (req.isInternal !== true) {
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
+      const body = undeliveredCodeTurnsSchema.parse(req.body);
+      const result = await reportUndeliveredCodeTurns({
+        ownerAgentId: req.params.id,
+        sessionId: body.session_id,
+        turnIds: body.turn_ids,
+        reason: body.reason,
+      });
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to report undelivered code turns', {
+        agent_id: req.params.id,
+      });
     }
   })
 );

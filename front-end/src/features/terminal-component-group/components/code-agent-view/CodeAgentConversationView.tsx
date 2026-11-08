@@ -7,10 +7,10 @@
  *                 the selected agent): its goal and the person's turns as user
  *                 messages, every tool / thought row folded into "Worked for …",
  *                 the answer after it. Running: the live work row + thinking.
- *   devbox usage → CodeResourcesIndicator (CPU · memory · disk) while it runs
- *   preview      → an "Open app" link inside that same devbox usage popover when
- *                  the session has a dev-server preview_url (opens the full-screen
- *                  app view); no floating link
+ *   devbox usage + container dot → the query box's top-right corner
+ *                  (CodeSessionComposer cornerStatus): always shown, never floating
+ *                  over the transcript; the "Open app" preview link lives in that
+ *                  usage popover
  *   failed      → the backend's failure text (FailureBox) · paused → PausedNote
  *   query box   → CodeSessionComposer (QueryInput: model chip, speed toggle, nub
  *                 with the session's context usage, direct delivery)
@@ -34,7 +34,6 @@ import { CodeSessionComposer } from './CodeSessionComposer';
 import { FailureBox, PausedNote } from '../codeAgentChip.desktop';
 import { PinnedQuestionMount } from '../PinnedQuestion';
 import { useCodeAgentView, type OpenCodeAgent } from './codeAgentViewState';
-import { CodeResourcesIndicator } from '../CodeResourcesIndicator';
 import { CodeAgentContextProvider } from './CodeAgentContext';
 import { useCodeAgentConversation } from './useCodeAgentConversation';
 
@@ -67,14 +66,13 @@ export function CodeAgentConversationView({
   const { taskId } = codeAgent;
   const c = useCodeAgentConversation(codeAgent);
   const { messages } = useAgentContext();
-  const settings = useMemo(() => codeSessionSettings(messages, taskId), [messages, taskId]);
+  const settings = useMemo(() => codeSessionSettings(c.messages, taskId), [c.messages, taskId]);
   const turn = useDirectTurn(taskId, c.toolCallId);
   const [handledApprovals, setHandledApprovals] = useState<Set<string>>(() => new Set());
   const pending = derivePendingApproval(
     messages.filter((message) => messageRequester(message.metadata)?.task_id === taskId),
   );
   const approval = pending && !handledApprovals.has(pending.attentionRequestId) ? pending : null;
-  const running = c.stateText === 'Running';
   useEscapeToClose(useCodeAgentView()?.close ?? NOOP);
   return (
     <>
@@ -88,23 +86,6 @@ export function CodeAgentConversationView({
           aria-label={`${c.label}: ${c.title}`}
           className="relative z-20 mx-auto max-w-4xl text-foreground dark:text-[#ecece8]"
         >
-          {(running || c.meta?.preview_url) && (
-            <div className="flex items-center justify-end gap-3 pb-2">
-              <CodeResourcesIndicator
-                taskId={taskId}
-                running={running}
-                preview={
-                  c.meta?.preview_url
-                    ? {
-                        previewUrl: c.meta.preview_url,
-                        title: c.meta.title ?? null,
-                        provider: c.provider,
-                      }
-                    : undefined
-                }
-              />
-            </div>
-          )}
           {c.meta && c.chipState === 'failed' && (
             <FailureBox meta={c.meta} fallback={c.vm.failureMessage} flush />
           )}

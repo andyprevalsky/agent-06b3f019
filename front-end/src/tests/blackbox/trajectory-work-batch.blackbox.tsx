@@ -198,16 +198,43 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('3.0s');
     expect(renderMessage.mock.calls.length).toBe(rendersWhenOpened);
   });
+  it('stays on the newest page while open as a running batch crosses a multiple of 50', () => {
+    const batch = (n: number) =>
+      group(Array.from({ length: n }, (_, i) => activity('read_file', `grow-${i}`, start + i)));
+    const show = (m: { message_id: string }) => <span>{m.message_id}</span>;
+    const view = render(<TrajectoryWorkGroup group={batch(100)} renderMessage={show} />);
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+    expect(screen.getByText('grow-99')).toBeInTheDocument();
+    view.rerender(<TrajectoryWorkGroup group={batch(101)} renderMessage={show} />);
+    // A new third page appeared; the open view follows it (the 50 newest: 51–100).
+    expect(screen.getByText('3 / 3')).toBeInTheDocument();
+    expect(screen.getByText('grow-100')).toBeInTheDocument();
+    expect(screen.getByText('grow-51')).toBeInTheDocument();
+    expect(screen.queryByText('grow-50')).toBeNull();
+    // An older page stays one page back from the newest: pages count back from
+    // the newest activity, so its rows slide by one as each new activity lands.
+    fireEvent.click(screen.getByRole('button', { name: 'Previous activities' }));
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    expect(screen.getByText('grow-1')).toBeInTheDocument();
+    expect(screen.getByText('grow-50')).toBeInTheDocument();
+    view.rerender(<TrajectoryWorkGroup group={batch(102)} renderMessage={show} />);
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    expect(screen.queryByText('grow-1')).toBeNull();
+    expect(screen.getByText('grow-2')).toBeInTheDocument();
+    expect(screen.getByText('grow-51')).toBeInTheDocument();
+  });
   it('opens a long running batch on its latest page and names the history it controls', () => {
-    const messages = Array.from({ length: 45 }, (_, i) =>
+    const messages = Array.from({ length: 120 }, (_, i) =>
       activity('read_file', `long-${i}`, start + i),
     );
     render(<TrajectoryWorkGroup group={group(messages)} renderMessage={() => null} />);
     const toggle = screen.getByRole('button');
     expect(toggle).not.toHaveAttribute('aria-controls');
     fireEvent.click(toggle);
+    // 50 a page, anchored at the newest: the latest page holds the 50 most recent.
     expect(screen.getByText('3 / 3')).toBeInTheDocument();
-    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(5);
+    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(50);
     expect(toggle).toHaveAttribute(
       'aria-controls',
       screen.getByTestId('trajectory-work-history').id,

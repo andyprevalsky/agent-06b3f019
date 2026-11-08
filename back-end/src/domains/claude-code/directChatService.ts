@@ -11,6 +11,17 @@
  *     └─► createMessage(TOOL, action_type=user_direct_turn, deterministic id)
  *            → per-agent realtime INSERT on the owning agent's channel
  *
+ * A STOPPED code agent (its session paused, completed or failed) resumes
+ * instead of refusing the turn (directChatResume.ts):
+ *
+ *   sendDirectTurn ── session not ACTIVE
+ *     ├─ a later run of the same spawn is live → deliver there (above)
+ *     └─ resumeStoppedCodeAgent → `queued`: the owner's wake (owner running,
+ *        background task) or CodeAgentResumeWorkflow (owner finished/paused,
+ *        foreground spawn); a turn sent while one starts queues behind it.
+ *     The FE reads the resume progress from the next run's own rows
+ *     (claude_code_started / a failure row), never from a timer.
+ *
  * The CLI's output streams back over the session's own ws (FE live terminal
  * + the monitoring activity), so the exchange lands in the code agent's
  * trajectory and in the spawn tool's result the root agent reads. The row is
@@ -31,22 +42,29 @@ import {
   type CodeTurnSettings,
 } from '../../providers/codeSessionTurns';
 import * as repo from './repo';
-import { prepareDirectTurnAttachments, type DirectAttachment } from './directChatAttachments';
+import {
+  DirectChatError,
+  directTurnMetadata,
+  liveRunOfSpawn,
+  persistedTurnResult,
+  restartStalledResume,
+  type OwnedSession,
+  type ResumeParams,
+  liveSession,
+  resumeStoppedCodeAgent,
+  type DirectTurnResult,
+  type LiveSession,
+} from './directChatResume';
+import {
+  prepareDirectTurnAttachments,
+  type DirectAttachment,
+} from '../../providers/codeSessions/directTurnAttachments';
 
 const log = createLogger('ClaudeCodeDirectChat');
 
-export class DirectChatError extends Error {
-  constructor(
-    public readonly httpStatus: number,
-    public readonly code: string,
-    message: string
-  ) {
-    super(message);
-    this.name = 'DirectChatError';
-  }
-}
+export { DirectChatError, type DirectTurnResult };
 
-async function requireOwnedLiveSession(
+async function requireOwnedSession(
   agentId: string | undefined,
   taskId: string,
   userId: string | undefined
@@ -63,18 +81,27 @@ async function requireOwnedLiveSession(
   const agent =
     session === null || (agentId !== undefined && session.agentId !== agentId)
       ? null
-      : await repo.findAgentById(session.agentId);
+      : await repo.findLiveAgentById(session.agentId);
   if (session === null || agent === null || agent.userId !== userId) {
     throw new DirectChatError(404, 'CODE_SESSION_NOT_FOUND', 'Code session not found');
   }
-  if (session.status !== 'ACTIVE' || session.streamUrl === null || session.streamUrl === '') {
+  return session;
+}
+
+async function requireOwnedLiveSession(
+  agentId: string | undefined,
+  taskId: string,
+  userId: string | undefined
+): Promise<LiveSession> {
+  const live = liveSession(await requireOwnedSession(agentId, taskId, userId));
+  if (live === null) {
     throw new DirectChatError(
       409,
       'CODE_SESSION_CLOSED',
       'This code session has finished. Ask Rose to continue the work.'
     );
   }
-  return { ...session, streamUrl: session.streamUrl };
+  return live;
 }
 
 function deliveryError(delivery: TurnDelivery): DirectChatError {
@@ -123,15 +150,78 @@ function deliveryError(delivery: TurnDelivery): DirectChatError {
   }
 }
 
-export interface DirectTurnResult {
-  status: 'delivered' | 'duplicate';
-  message_id: string;
-  task_id: string;
-  agent_id: string;
-  code_provider: 'claude' | 'codex';
-  effective_settings?: CodeTurnSettings;
-  delivery_mode?: 'steer' | 'start';
-  turn_id?: string;
+/** The turn's attachments staged for the CLI, or the user-facing refusal. */
+function directTurnAttachments(attachments: DirectAttachment[] | undefined, userId?: string) {
+  return prepareDirectTurnAttachments(attachments, userId ?? '').catch((error: unknown) => {
+    if (
+      error instanceof Error &&
+      ['INVALID_ATTACHMENT', 'ATTACHMENTS_TOO_LARGE'].includes(error.message)
+    ) {
+      throw new DirectChatError(400, error.message, 'Could not accept these attachments');
+    }
+    throw new DirectChatError(
+      502,
+      'ATTACHMENTS_UNAVAILABLE',
+      'Could not load attachments; your message was not sent'
+    );
+  });
+}
+
+/** The spawn tool call is the chip's (server-side): a client-sent value may only match it. */
+function spawnToolCallId(chip: string | null, sent: string | undefined): string | undefined {
+  if (sent !== undefined && sent !== chip) {
+    throw new DirectChatError(400, 'INVALID_TOOL_CALL', 'This turn names another code agent');
+  }
+  return chip ?? undefined;
+}
+
+/**
+ * The session a turn addresses, its chip (CLI + spawn tool call) and, for a
+ * resend of an already persisted turn, that turn's result.
+ */
+async function turnTarget(params: {
+  agentId?: string;
+  taskId: string;
+  userId: string | undefined;
+  clientMessageId: string;
+  toolCallId?: string;
+}) {
+  const owned = await requireOwnedSession(params.agentId, params.taskId, params.userId);
+  // The chip row names the CLI (Claude Code or Codex share this table) and the
+  // spawn tool call the UI groups the code agent's rows under.
+  const chip = await repo.findCodeSessionChip(owned.agentId, params.taskId);
+  const toolCallId = spawnToolCallId(chip.toolCallId, params.toolCallId);
+  const find = repo.findDirectTurnRow;
+  const resent = await persistedTurnResult(
+    owned,
+    chip.provider,
+    toolCallId,
+    params.clientMessageId,
+    find
+  );
+  return { owned, chip, toolCallId, resent };
+}
+
+/** A resend: the persisted turn's result; a resume that never started is started again. */
+async function finishResend(
+  params: Omit<ResumeParams, 'session' | 'toolCallId' | 'provider' | 'userId'> & {
+    userId: string | undefined;
+  },
+  owned: OwnedSession,
+  provider: 'claude' | 'codex',
+  toolCallId: string | undefined,
+  resent: { result: DirectTurnResult; at: Date }
+): Promise<DirectTurnResult> {
+  if (resent.result.resuming === true) {
+    const resume = { ...params, session: owned, toolCallId, provider, userId: params.userId ?? '' };
+    await restartStalledResume(resume, resent.at).catch((error: unknown) => {
+      log.warn('Restarting a stalled code agent resume failed', {
+        taskId: owned.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  return resent.result;
 }
 
 export async function sendDirectTurn(params: {
@@ -145,30 +235,24 @@ export async function sendDirectTurn(params: {
   settings?: CodeTurnSettings;
   toolCallId?: string;
 }): Promise<DirectTurnResult> {
-  const { taskId, userId, clientMessageId, text } = params;
-  const session = await requireOwnedLiveSession(params.agentId, taskId, userId);
-  // The chip row names the CLI (Claude Code or Codex share this table) and the
-  // spawn tool call the UI groups the code agent's rows under.
-  const chip = await repo.findCodeSessionChip(session.agentId, taskId);
-  const toolCallId = params.toolCallId ?? chip.toolCallId ?? undefined;
-
+  const { userId, clientMessageId, text } = params;
+  const { owned, chip, toolCallId, resent } = await turnTarget(params);
+  if (resent !== null) return finishResend(params, owned, chip.provider, toolCallId, resent);
+  let session = liveSession(owned) ?? (await liveRunOfSpawn(owned, toolCallId));
+  if (session === null) {
+    const resumed = await resumeStoppedCodeAgent({
+      ...params,
+      session: owned,
+      toolCallId,
+      provider: chip.provider,
+      userId: userId ?? '',
+    });
+    if (!('live' in resumed)) return resumed;
+    session = resumed.live;
+  }
+  const taskId = session.id;
   const metadata = directTurnMetadata(taskId, clientMessageId, chip.provider, toolCallId);
-
-  const attachments = await prepareDirectTurnAttachments(params.attachments, userId ?? '').catch(
-    (error: unknown) => {
-      if (
-        error instanceof Error &&
-        ['INVALID_ATTACHMENT', 'ATTACHMENTS_TOO_LARGE'].includes(error.message)
-      ) {
-        throw new DirectChatError(400, error.message, 'Could not accept these attachments');
-      }
-      throw new DirectChatError(
-        502,
-        'ATTACHMENTS_UNAVAILABLE',
-        'Could not load attachments; your message was not sent'
-      );
-    }
-  );
+  const attachments = await directTurnAttachments(params.attachments, userId);
   const startedAt = Date.now();
   const delivery = await deliverUserTurnToCodeSession({
     wsUrl: session.streamUrl,
@@ -266,26 +350,4 @@ export async function getDirectChatCapabilities(params: {
       'Could not confirm code session capabilities'
     );
   }
-}
-
-function directTurnMetadata(
-  taskId: string,
-  clientMessageId: string,
-  provider: string,
-  toolCallId: string | undefined
-): Record<string, unknown> {
-  return {
-    toolName: 'spawn_claude_code_agent',
-    title: 'You',
-    task_id: taskId,
-    action_type: 'user_direct_turn',
-    code_provider: provider,
-    // Child-scoped like the chip's progress rows: visible in the code agent's
-    // trajectory and tree grep, not replayed into the root planner mid-run.
-    subAgentId: taskId,
-    direct_turn_id: clientMessageId,
-    isDirectCodeTurn: true,
-    idempotencyKey: `code-turn:${taskId}:${clientMessageId}`,
-    ...(toolCallId !== undefined ? { toolCallId } : {}),
-  };
 }

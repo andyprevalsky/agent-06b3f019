@@ -177,7 +177,7 @@ export const rootWithBrowserTask = (status: string) =>
     ],
   });
 
-export function dockElement(messages: Message[], onNavigate = vi.fn()) {
+export function dockElement(messages: Message[], onNavigate: (agentId: string) => void = vi.fn()) {
   // Production mounts the dock inside the selected agent's AgentProvider.
   return (
     <AgentContext.Provider value={makeAgentCtx({ selectedAgentId: 'root-1', messages })}>

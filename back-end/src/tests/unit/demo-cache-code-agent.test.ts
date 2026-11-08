@@ -31,8 +31,9 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'utf8'
   );
   assert.ok(
+    // The resumed turn's settings (options.cliSettings) override the tier defaults.
     e2bProvider.includes(
-      "const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId);"
+      "const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId, options.cliSettings);"
     ),
     'backend must pick the Claude Code model from the shared tier table (codeAgentModels.ts)'
   );

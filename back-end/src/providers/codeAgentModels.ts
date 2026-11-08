@@ -152,13 +152,49 @@ export function codexCodeSettingsEnvs(settings: CodeAgentSettings): Record<strin
   };
 }
 
+/**
+ * Model / effort / speed the person picked for a resuming turn
+ * (claude-code-session create `cli_settings`): they replace the agent tier's
+ * values for that run, so the first resumed turn runs on them.
+ */
+export interface CodeCliSettingsOverride {
+  model?: string;
+  reasoning_effort?: string;
+  speed?: string;
+}
+
+export function cliSettingsEnvOverrides(
+  provider: 'claude' | 'codex',
+  override: CodeCliSettingsOverride | null | undefined
+): Record<string, string> {
+  if (!override) return {};
+  const keys =
+    provider === 'claude'
+      ? { model: 'CLAUDE_CODE_MODEL', effort: 'CLAUDE_CODE_EFFORT', speed: 'CLAUDE_CODE_SPEED' }
+      : { model: 'CODEX_MODEL', effort: 'CODEX_REASONING_EFFORT', speed: 'CODEX_SPEED' };
+  const envs: Record<string, string> = {};
+  if (override.model) envs[keys.model] = override.model;
+  if (override.reasoning_effort) envs[keys.effort] = override.reasoning_effort;
+  if (override.speed) {
+    // Claude has no ultrafast/priority tier: any non-standard pick is fast mode.
+    envs[keys.speed] =
+      provider === 'claude'
+        ? override.speed === 'standard'
+          ? 'standard'
+          : 'fast'
+        : override.speed;
+  }
+  return envs;
+}
+
 /** The spawning agent's settings and the provider's sandbox env for them. */
 export async function codeAgentCliEnvs(
   provider: 'claude' | 'codex',
-  agentId: string | null | undefined
+  agentId: string | null | undefined,
+  override?: CodeCliSettingsOverride | null
 ): Promise<{ settings: CodeAgentSettings; envs: Record<string, string> }> {
   const settings = await codeAgentSettingsForAgent(agentId);
   const envs =
     provider === 'claude' ? claudeCodeSettingsEnvs(settings) : codexCodeSettingsEnvs(settings);
-  return { settings, envs };
+  return { settings, envs: { ...envs, ...cliSettingsEnvOverrides(provider, override) } };
 }

@@ -49,6 +49,7 @@ import {
 } from './store';
 import {
   CODE_SANDBOX_IDLE_TIMEOUT_MS,
+  CodeSessionHeldError,
   CodeSessionPauseUnconfirmedError,
 } from '../e2bCodeSessionSandbox';
 import {
@@ -80,6 +81,10 @@ export function codeSessionHttpError(
   }
   if (error instanceof CodeSessionBusyError) {
     return { status: 409, body: { error: error.message, code: 'CODE_SESSION_BUSY' } };
+  }
+  if (error instanceof CodeSessionHeldError) {
+    // Retryable: the spawn attaches once the user hands the live CLI back.
+    return { status: 409, body: { error: error.message, code: 'CODE_SESSION_HELD' } };
   }
   if (error instanceof E2BSandboxCapacityError) {
     return { status: error.statusCode, body: { error: error.message, code: error.code } };

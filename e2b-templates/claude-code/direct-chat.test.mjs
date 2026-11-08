@@ -532,3 +532,83 @@ test("Claude cold start: the first turn waits for a slow CLI initialize instead 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A Rose agent's message to a code agent the user is chatting with directly is
+// held (`queued`, never refused) and written once after the hand back, even when
+// the user retakes the hold while that released turn waits in the delivery chain
+// behind the user's own turn (a settings change awaiting the CLI).
+test("agent turns held during a direct chat survive a hold retaken mid-release and are written once", async () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "ws-server.mjs"),
+    "utf8",
+  );
+  const slice = (from, to) =>
+    source.slice(source.indexOf(from), source.indexOf(to));
+  const code = [
+    slice(
+      "function clearDirectHoldTimer()",
+      "function onCliTurnResult(message)",
+    ),
+    slice(
+      "async function deliverTurnOnce(id, msg)",
+      "function handleHandBack(msg)",
+    ),
+  ].join("\n");
+  const result = await vm.runInNewContext(
+    `(async()=>{
+    let activeTurn=null,pendingTurns=0,directHold=false,directHoldTimer=null;
+    let exitAnnounced=false,cliStdinOpen=true,controlSerial=Promise.resolve(),turnSeq=0;
+    const deliveredTurnIds=new Map(),pendingDeliveries=new Map(),queuedTurnAcks=new Map();
+    const heldAgentTurns=[],startupTurnQueue=[],events=[],written=[],eventBuffer=[];
+    const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000,MAX_STARTUP_TURNS=20,MAX_HELD_AGENT_TURNS=50;
+    const tokenMatches=()=>true,turnAck=(id,status,reason)=>({type:"user_turn_ack",id,status,...(reason?{reason}:{})});
+    const nativeInitialization=null,taskPromptReady=Promise.resolve(),effectiveSettings={model:"test"};
+    const cliChild={stdin:{write(line,cb){written.push(line);cb();},end(){}}};
+    let releaseSettings;const settingsGate=new Promise(r=>{releaseSettings=r;});
+    const applyTurnSettings=async(settings)=>{if(settings)await settingsGate;};
+    const stageTurnAttachments=()=>[],userMessageLine=text=>text;
+    const startNativeTurn=()=>(activeTurn={id:"turn-"+(++turnSeq)}),endNativeTurn=()=>{activeTurn=null;};
+    const appendEvent=e=>events.push(e),appendOutput=()=>{},log=()=>{};
+    ${code}
+    const turn=(id,sender,extra={})=>deliverTurnOnce(id,{id,token:"ok",text:id,sender,...extra});
+    const tick=()=>new Promise(r=>setTimeout(r,0));
+    const u1=await turn("u1","user");
+    const a1=await turn("a1","agent");
+    const a1retry=await turn("a1","agent");
+    // The user's next turn changes settings and waits on the CLI; the user hands back meanwhile.
+    const u2=turn("u2","user",{settings:{model:"other"}});
+    await tick();
+    releaseDirectHold("handed_back");
+    await tick();
+    releaseSettings();
+    const u2ack=await u2;
+    for(let i=0;i<5;i++)await tick();
+    const duringSecondHold={written:[...written],held:heldAgentTurns.map(t=>t.id),directHold,
+      retry:await turn("a1","agent")};
+    releaseDirectHold("handed_back");
+    for(let i=0;i<5;i++)await tick();
+    const late=await turn("a1","agent");
+    return JSON.stringify({u1,a1,a1retry,u2ack,duringSecondHold,written,late,
+      undelivered:events.filter(e=>e.type==="user_turn_undelivered"),
+      queuedEvents:events.filter(e=>e.type==="user_turn_queued").length});
+  })()`,
+    { setTimeout },
+  );
+  const outcome = JSON.parse(result);
+  assert.equal(outcome.u1.status, "delivered");
+  assert.deepEqual(
+    [outcome.a1.status, outcome.a1.reason],
+    ["queued", "direct_hold"],
+  );
+  assert.equal(outcome.a1retry.status, "queued");
+  assert.equal(outcome.u2ack.status, "delivered");
+  // u2 retook the hold, so a1 is held again: not written, not reported lost.
+  assert.deepEqual(outcome.duringSecondHold.written, ["u1", "u2"]);
+  assert.deepEqual(outcome.duringSecondHold.held, ["a1"]);
+  assert.equal(outcome.duringSecondHold.directHold, true);
+  assert.equal(outcome.duringSecondHold.retry.status, "queued");
+  // After the second hand back it is written exactly once, after both user turns.
+  assert.deepEqual(outcome.written, ["u1", "u2", "a1"]);
+  assert.equal(outcome.late.status, "duplicate");
+  assert.deepEqual(outcome.undelivered, []);
+});

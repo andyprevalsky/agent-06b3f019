@@ -373,6 +373,54 @@ async def test_wait_for_agents_is_how_a_background_notification_is_awaited():
         _status, result = await asyncio.wait_for(waiter, 2)
     assert address in result, result
     assert len(_notifications(harness)) == 1
+    # The work row names the target by task name and carries its type (the FE icon).
+    waits = [r["metadata"] for r in harness.rows if r["metadata"].get("waitForMode") == "agents"]
+    assert waits, harness.rows
+    assert all(m.get("targetNames") == ["tokyo"] for m in waits), waits
+    assert all(m.get("targetTypes") == ["explore"] for m in waits), waits
+
+
+async def test_wait_for_names_a_code_agent_by_its_cli():
+    """A code task's record keeps its CLI, so wait_for sends targetTypes 'code:<provider>'.
+
+    Unknown or unrecorded providers stay 'code'; the note survives the finished-record compaction.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from domains.wait_for.handler import _resolve_wait_target, _wait_target_type
+    from workflows.background_agents import FINISHED_RECORD_KEYS
+
+    harness = _Harness()
+    with _workflow_env(harness), patch.object(temporal_workflow, "now", lambda: _BASE):
+        wf = _workflow(harness)
+        wf._execute_tool = _gated_executor(wf, harness, asyncio.Event())
+        args = {
+            "type": "code",
+            "task_name": "find_update_card",
+            "goal": "Find the update card.",
+            "output_schema": FOREGROUND_SCHEMA,
+        }
+        started = await wf._execute_tool_once("spawn_agent", args, "toolu_code")
+        address = started["address"]
+        target, error = await _resolve_wait_target(wf, address)
+        assert error is None and _wait_target_type(target) == "code", target
+        wf._note_background_code_provider("toolu_code", "gpt")  # not a CLI: ignored
+        wf._note_background_code_provider("toolu_code", "codex")
+        wf._note_background_code_provider("toolu_code", "codex")  # idempotent
+        target, _ = await _resolve_wait_target(wf, address)
+        assert _wait_target_type(target) == "code:codex", target
+        assert "code_provider" in FINISHED_RECORD_KEYS
+        # Unknown type (failed tree read / path-only fallback) is None, never a guessed kind.
+        assert _wait_target_type({"address": "/root/x", "path": "/root/x"}) is None
+        assert _wait_target_type({"agent_type": ""}) is None
+        assert _wait_target_type({"agent_type": "agent"}) == "general_purpose"
+        assert _wait_target_type({"agent_type": "for_each"}) == "general_purpose"
+        explore = await wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_ex")
+        wf._note_background_code_provider("toolu_ex", "claude")  # only code records carry a CLI
+        target, _ = await _resolve_wait_target(wf, explore["address"])
+        assert _wait_target_type(target) == "explore", target
+        for handle in list(wf._background_handles.values()):
+            handle.cancel()
 
 
 async def test_verifier_evidence_ends_with_pending_background_status():
@@ -2796,6 +2844,7 @@ async def run_all_tests():
         "wait_for_agents_awaits_background_notification",
         test_wait_for_agents_is_how_a_background_notification_is_awaited,
     )
+    await r.record_async("wait_for_names_code_agent_cli", test_wait_for_names_a_code_agent_by_its_cli)
     await r.record_async(
         "verifier_evidence_ends_with_pending_status", test_verifier_evidence_ends_with_pending_background_status
     )

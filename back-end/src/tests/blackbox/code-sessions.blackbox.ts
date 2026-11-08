@@ -58,6 +58,7 @@ import { registerSpawnReplayCases } from './code-sessions-spawn-replay.cases';
 import { registerWsStartupCases } from './code-sessions-ws-startup.cases';
 import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cases';
 import { registerCodeSessionLiveResumeCases } from './code-sessions-live-resume.cases';
+import { registerCodeSessionHeldAttachCases } from './code-sessions-held-attach.cases';
 import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
 import { registerCheckpointDeletionCases } from './code-sessions-checkpoint-deletion.cases';
 import { registerCheckpointSizeCases } from './code-sessions-checkpoint-size.cases';
@@ -616,6 +617,14 @@ registerCodeSessionLifecycleCases({
   restoreConnect: () => patchConnect(originalConnect),
 });
 registerCodeSessionLiveResumeCases({
+  userA,
+  fixtureDir,
+  seedWorkspace,
+  fakeSandbox,
+  patchConnect,
+  restoreConnect: () => patchConnect(originalConnect),
+});
+registerCodeSessionHeldAttachCases({
   userA,
   fixtureDir,
   seedWorkspace,

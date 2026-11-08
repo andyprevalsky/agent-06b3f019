@@ -1,12 +1,28 @@
 /**
  * Right-aligned USER bubble with optional inline attachment row.
  *
+ * A person's message that resumed a stopped agent shows its time and the resume
+ * state beneath it (codeAgentResume.ts), from real rows only:
+ *   code agent (metadata.codeAgentResume, precomputed by the code-agent view):
+ *     "Resuming…" → "Starting container…" → "Delivered" | "Couldn't resume: <reason>"
+ *   paused browser (metadata.browserResume): "Resuming…" → "Starting browser…" →
+ *     "Delivered" | "Couldn't resume: <reason>" (the browser's rows after it)
+ *   Rose agent (metadata.resumedFrom): "Resuming…" → "Delivered" (its next row)
+ *
  * A Browser-composer message (metadata.browserTaskId + excludeFromModel) went
  * straight to that browser, not this agent: it reads "You → Browser: …" in the
  * code-agent "You → <agent>" text style.
  */
+import { useContext } from 'react';
 import { cn } from '@/lib/utils';
+import { AgentContext } from '@/features/agent-context';
 import type { Message } from '../../hooks';
+import {
+  browserResumeState,
+  codeAgentResumeLabel,
+  roseResumeState,
+  type CodeAgentResumeState,
+} from '../../hooks/codeAgentResume';
 import { roleConfig } from './constants';
 import { AttachmentDisplay } from './AttachmentDisplay';
 
@@ -44,6 +60,32 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
           <AttachmentDisplay attachments={attachments} agentId={agentId} />
         </div>
       )}
+      <ResumeLine message={message} />
     </div>
+  );
+}
+
+function ResumeLine({ message }: { message: Message }) {
+  const messages = useContext(AgentContext)?.messages ?? [];
+  const resume =
+    (message.metadata?.codeAgentResume as CodeAgentResumeState | undefined) ??
+    browserResumeState(messages, message) ??
+    roseResumeState(messages, message);
+  if (!resume) return null;
+  const time = new Date(message.timestamp).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  return (
+    <p
+      data-testid="code-agent-resume-status"
+      data-resume-status={resume.status}
+      className={cn(
+        'text-xs text-muted-foreground',
+        resume.status === 'failed' && 'text-red-500 dark:text-red-400',
+      )}
+    >
+      <time dateTime={message.timestamp}>{time}</time> · {codeAgentResumeLabel(resume)}
+    </p>
   );
 }

@@ -4,6 +4,7 @@ import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { updateAgentProgressEstimate } from './agentProgressEstimateService';
 import { updateProgressEstimateSchema } from './types';
+import { workerWriteGeneration } from '../../providers/codeResumeGeneration';
 
 const router = Router();
 router.patch(
@@ -14,7 +15,10 @@ router.patch(
       res.status(403).json({ error: 'Internal workflow authentication required' });
       return;
     }
-    const generation = req.header('x-agent-workflow-generation');
+    const generation = await workerWriteGeneration(
+      req.params.id,
+      req.header('x-agent-workflow-generation')
+    );
     if (generation === undefined || generation.length === 0) {
       res.status(400).json({ error: 'X-Agent-Workflow-Generation header is required' });
       return;

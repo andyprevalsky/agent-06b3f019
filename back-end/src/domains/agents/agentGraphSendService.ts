@@ -185,10 +185,12 @@ export async function sendGraphMessage(
 
   const title = `${fromLabel} → ${toLabel}`;
   if (!(await alreadyDelivered(target, key))) spendSendBudget(caller);
-  const status =
+  const delivered =
     target.kind === 'agent'
       ? await deliverToRoseAgent({ target, key, text, title, a2a })
       : await deliverToCodeAgent({ target, key, text, title, a2a, original: input.text });
+  // Held for a user's direct chat is an accepted, waiting turn: `queued` to the sender.
+  const status = delivered === 'held' ? 'queued' : delivered;
 
   if (caller.self.kind === 'code') {
     const chip = await graphRepo.findCodeSessionChip(caller.self.ownerAgentId, caller.self.id);
