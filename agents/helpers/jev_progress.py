@@ -180,10 +180,12 @@ def _prepare(snapshot: dict) -> tuple[dict, str]:
 async def _predict_jev_progress_impl(snapshot: dict) -> dict | None:
     """Best effort, bounded HTTP; cancellation propagates through both requests.
 
-    Returns {"stopSession": True} when this prefix can never be estimated: it
-    exceeds the frozen token budget, or the provider refused it as a client
-    error (HTTP 4xx other than 408/429; e.g. 400 max_tokens_exceeded). The
-    session's own-call history only grows, so later prefixes would fail too.
+    Returns {"stopSession": True} only when this prefix is too large to ever be
+    estimated: it exceeds the frozen token budget, or the provider refused its
+    size (413, or 400 with detail.error_type "max_tokens_exceeded"). The
+    session's own-call history only grows, so later prefixes would be too large
+    as well. Every other failure (auth, 5xx, timeouts, publish errors) leaves
+    the session scheduling, because it can be transient.
     """
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key:
@@ -218,11 +220,24 @@ async def _predict_jev_progress_impl(snapshot: dict) -> dict | None:
             fields = {"status_code": status, "response_class": f"{status // 100}xx"}
         logger.warning("jev_progress.failed", agent_id=snapshot["agentId"], error_type=type(exc).__name__,
                        stage=stage, **fields)
-        if isinstance(exc, JEVBudgetExceeded) or (
-                stage == "predict" and 400 <= fields.get("status_code", 0) < 500
-                and fields["status_code"] not in (408, 429)):
+        if isinstance(exc, JEVBudgetExceeded) or (stage == "predict" and _refused_as_too_large(exc)):
             return {"stopSession": True}
     return None
+
+
+def _refused_as_too_large(exc: Exception) -> bool:
+    """TypeSafe's size refusal: 413, or 400 {"detail": {"error_type": "max_tokens_exceeded"}}."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if exc.response.status_code == 413:
+        return True
+    if exc.response.status_code != 400:
+        return False
+    try:
+        detail = exc.response.json().get("detail")
+    except Exception:
+        return False
+    return isinstance(detail, dict) and detail.get("error_type") == "max_tokens_exceeded"
 
 
 @activity.defn
@@ -251,8 +266,8 @@ class JEVSession:
     Scheduling every turn replaces only a waiting prefix, never an active HTTP
     request. Backend sequence guards reject out-of-order active completions.
     The own-call history only grows, so after one prefix exceeds the frozen token
-    budget or is refused by the provider, every later prefix would be too: the
-    session stops estimating.
+    budget or the provider refuses it as too large, every later prefix would be
+    too: the session stops estimating. Other failures never stop it.
     """
     def __init__(self, agent_id: str, task_id: str | None = None, kind: str = "normal_root"):
         self.agent_id, self.task_id, self.kind = agent_id, task_id, kind

@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -193,7 +194,6 @@ def test_browser_batches():
 
 async def test_generation_publication():
     from helpers import update_status
-    from types import SimpleNamespace
     client = AsyncMock()
     client.patch.return_value.raise_for_status = lambda: None
     config = SimpleNamespace(backend=SimpleNamespace(api_url="http://local.test", api_key="test"))
@@ -210,7 +210,6 @@ async def test_http_concurrency_bound():
     active = peak = 0
     four_started = asyncio.Event()
     release = asyncio.Event()
-    from types import SimpleNamespace
     async def post(*args, **kwargs):
         nonlocal active, peak
         active += 1
@@ -233,7 +232,6 @@ async def test_http_concurrency_bound():
 
 async def test_tree_generation_broadcast():
     from helpers import messages
-    from types import SimpleNamespace
     client = AsyncMock()
     client.patch.return_value.status_code = 200
     client.patch.return_value.json = lambda: {"mutation_accepted": True}
@@ -261,10 +259,13 @@ def long_browser_snapshot(steps=190):
             "observedAt": "2026-11-08T06:23:20Z", "sequence": 1}
 
 
-def status_client(status):
+def status_client(status, body=None):
     client = AsyncMock()
-    client.post.return_value = httpx.Response(status, request=httpx.Request("POST", "https://api.typesafe.ai/v1/systemone"))
+    client.post.return_value = httpx.Response(status, json=body, request=httpx.Request("POST", "https://api.typesafe.ai/v1/systemone"))
     return client
+
+
+TOO_LARGE = {"detail": {"error_type": "max_tokens_exceeded"}}
 
 
 async def test_prefix_build_runs_off_event_loop():
@@ -281,6 +282,7 @@ async def test_prefix_build_runs_off_event_loop():
             return original(*args, **kwargs)
         finally:
             built["thread"], built["seconds"] = threading.get_ident(), time.perf_counter() - start
+    jev.request(long_browser_snapshot(20), {"scope": "", "progress": "", "eta": ""})  # warm tiktoken outside the measurement
     worst = 0.0
     done = False
     async def ticker():
@@ -341,17 +343,38 @@ async def test_budget_exceeded_stops_session():
     assert failed[0]["error_type"] == "JEVBudgetExceeded" and failed[0]["stage"] == "prepare"
 
 
-async def test_provider_rejection_stops_session():
+async def test_provider_size_refusal_stops_session():
     """H-76: TypeSafe answers 400 {"detail": {"error_type": "max_tokens_exceeded"}}
     for a ~25.6k-token body that passed the state-only 24k check (steps 130-141,
-    18 failures). A non-retryable 4xx stops the session; 429 stays retryable."""
-    rejected = status_client(400)
-    failed = await drive_session(snapshot(), rejected)
-    assert rejected.post.await_count == 1 and len(failed) == 1, failed
-    assert failed[0]["status_code"] == 400 and failed[0]["stage"] == "predict"
-    limited = status_client(429)
-    failed = await drive_session(snapshot(), limited, schedules=3)
-    assert limited.post.await_count == 3 and len(failed) == 3
+    18 failures). That size refusal, or a 413, stops the session."""
+    for client in (status_client(400, TOO_LARGE), status_client(413)):
+        failed = await drive_session(snapshot(), client)
+        assert client.post.await_count == 1 and len(failed) == 1, failed
+        assert failed[0]["status_code"] in (400, 413) and failed[0]["stage"] == "predict"
+
+
+async def test_transient_failures_do_not_stop_session():
+    """A stop is recorded in Temporal history for the rest of the run, so only a
+    size refusal may stop it. Auth/availability blips, other 400s, network errors
+    and publish-stage 4xx keep the session estimating on every schedule."""
+    request = httpx.Request("POST", "https://api.typesafe.ai/v1/systemone")
+    cases = {status: status_client(status) for status in (500, 503, 408, 409, 401, 403, 404, 425, 429)}
+    cases["400 other"] = status_client(400, {"detail": {"error_type": "invalid_request"}})
+    cases["400 no body"] = status_client(400)
+    for name, error in (("connect", httpx.ConnectError("down", request=request)), ("read timeout", httpx.ReadTimeout("slow", request=request))):
+        cases[name] = AsyncMock()
+        cases[name].post.side_effect = error
+    for name, client in cases.items():
+        failed = await drive_session(snapshot(), client, schedules=3)
+        assert client.post.await_count == 3 and len(failed) == 3, (name, failed)
+    ok = status_client(200)
+    ok.post.return_value = SimpleNamespace(raise_for_status=lambda: None, json=answer)
+    rejected = httpx.Response(404, request=httpx.Request("PATCH", "http://local.test/api/agents/root/progress-estimate"))
+    publish = AsyncMock(side_effect=httpx.HTTPStatusError("not found", request=rejected.request, response=rejected))
+    with patch.object(jev, "publish_progress_estimate", publish):
+        failed = await drive_session(snapshot(), ok, schedules=3)
+    assert ok.post.await_count == 3 and publish.await_count == 3, failed
+    assert len(failed) == 3 and all(entry["stage"] == "publish" and entry["status_code"] == 404 for entry in failed)
 
 
 async def run_all_tests():
@@ -369,7 +392,8 @@ async def run_all_tests():
     await r.record_async("prefix build runs off the event loop", test_prefix_build_runs_off_event_loop)
     await r.record_async("HTTP failure logs status and stage", test_http_failure_logs_status_and_stage)
     await r.record_async("budget exceeded stops the session", test_budget_exceeded_stops_session)
-    await r.record_async("provider rejection stops the session", test_provider_rejection_stops_session)
+    await r.record_async("provider size refusal stops the session", test_provider_size_refusal_stops_session)
+    await r.record_async("transient failures do not stop the session", test_transient_failures_do_not_stop_session)
     return r.all_passed
 
 

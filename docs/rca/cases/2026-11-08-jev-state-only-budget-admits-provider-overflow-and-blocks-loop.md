@@ -24,7 +24,7 @@ sources:
   - agent e64f404c-ac44-477f-a8db-0dc6d1f7f8fe (task 2920ea99-5bc8-53cb-ba8b-5e6221059c36)
   - fleet run 20261108-054415-3146305 browser-doordash-food-plan-grocery-cart-reauth r2 job r002-j0006 (descend-failed-neverrun-20261106 epoch 24, source d49ef3c511)
   - commit d49ef3c511 (failing source; fix on branch rca/h-76-20261108)
-repro: agents/tests/blackbox/jev_progress.blackbox.py::test_prefix_build_runs_off_event_loop; ::test_http_failure_logs_status_and_stage; ::test_budget_exceeded_stops_session; ::test_provider_rejection_stops_session
+repro: agents/tests/blackbox/jev_progress.blackbox.py::test_prefix_build_runs_off_event_loop; ::test_http_failure_logs_status_and_stage; ::test_budget_exceeded_stops_session; ::test_provider_size_refusal_stops_session; ::test_transient_failures_do_not_stop_session
 status: mitigated
 ---
 
@@ -90,13 +90,19 @@ decoding or concurrency:
   local stall measurement fell from 138/270/372 ms to 5.6/4.5/2.9 ms.
 - `jev_progress.failed` now logs `stage` (prepare/predict/decode/publish). For HTTP errors it also logs
   `status_code` and `response_class`. No body or credential is logged.
-- The budget overflow raises `JEVBudgetExceeded`, a ValueError subclass. A non-retryable provider 4xx at
-  the predict stage (not 408/429) also stops the session. In both cases the prediction returns
-  `{"stopSession": true}` and `JEVSession` stops scheduling, because the own-call history only grows.
-  The result is one warning per long session instead of one per step. 429 stays retryable.
+- The budget overflow raises `JEVBudgetExceeded`, a ValueError subclass. A predict-stage size refusal
+  (413, or 400 with `detail.error_type == "max_tokens_exceeded"`) also stops the session. In both
+  cases the prediction returns `{"stopSession": true}` and `JEVSession` stops scheduling, because the
+  own-call history only grows. The result is one warning per long session instead of one per step.
+- The stop is recorded in Temporal history for the rest of the `run_agent` call, so nothing else may
+  stop a session. Other 400s, 401/403/404/408/409/425/429, 5xx, network errors and publish-stage
+  errors all keep estimating. An adversarial review rejected the first version, which stopped on
+  every non-408/429 4xx.
 
-Regression: four tests in the `jev-progress` agents blackbox domain failed on d49ef3c511 and passed
-5/5 consecutive runs on the fix. The `workflow` and `run-agent` domains pass.
+Regression: five tests in the `jev-progress` agents blackbox domain. The four behavior tests fail on
+d49ef3c511; the fifth is a "does not stop" boundary test. All pass 5/5 consecutive runs on the fix.
+The stall test warms tiktoken before measuring. The `workflow` and `run-agent` domains pass on the
+first revision.
 
 10k agents: per-agent CPU drops to zero after a session stops, and builds no longer block a shared
 worker loop. The thread pool is bounded by the existing per-loop semaphore of 4.
@@ -111,7 +117,10 @@ outcome on the original task is pending.
 The parent coordinator directed: keep the fix minimal and measurable, run the prefix build off the
 event-loop thread with a regression for the stall, log status_code and response class, stop
 re-attempting once the budget is deterministically exceeded, and do not change the JEV prompt or
-format. Report a model-input-changing clip as an option only.
+format. Report a model-input-changing clip as an option only. Adversarial review of 55f3d1f439
+(CHANGES_REQUIRED): stopping on every predict 4xx except 408/429 lets a transient 401/404 disable
+JEV for a whole multi-day session through Temporal history. Stop only on the budget overflow, 413 or
+400 max_tokens_exceeded, and add "does not stop" boundary tests.
 
 ## Reusable lesson
 
