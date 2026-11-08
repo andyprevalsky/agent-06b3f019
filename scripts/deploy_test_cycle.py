@@ -2236,6 +2236,8 @@ def main(argv: list[str] | None = None) -> int:
                 renew(state, bounded_read(args.proof, 'AgentCard renewal'), args.root)
             elif args.action in {'prepare-historical-import', 'admit-historical-import'}:
                 from deploy_test_historical_custody import prepare_import, admit_import
+                if plan != state['plan']:
+                    raise ValueError('historical import plan differs from fresh selection')
                 if args.input is None:
                     raise ValueError('--input immutable historical donor cycle required')
                 if args.donor_sha256 is None:

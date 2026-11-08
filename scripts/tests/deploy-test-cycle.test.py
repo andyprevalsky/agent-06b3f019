@@ -474,6 +474,38 @@ class Cycle(unittest.TestCase):
                 '--root', str(self.root), '--historical-no-retry-proof', str(proof)]))
         self.assertFalse((empty / 'cycle.json').exists())
 
+    def test_historical_import_cli_rejects_valid_mismatched_named_plan_before_write(self):
+        import contextlib, io
+        fresh, donor = self.historical_import_fixture()
+        plan = self.directory / 'plan.json'; c.write(plan, fresh['plan'])
+        other = copy.deepcopy(fresh['plan']); other['gates'][1]['worker'] = 'other-api-worker'
+        c.validate_plan(other, self.root)
+        self.assertNotEqual(fresh['plan'], other)
+        wrong = self.directory / 'other-plan.json'; c.write(wrong, other)
+        state_path = self.directory / 'cycle.json'; c.write(state_path, fresh)
+        bound = ['--input', str(donor), '--state-dir', str(self.directory), '--root', str(self.root),
+                 '--donor-sha256', self.donor_sha256]
+        output = io.StringIO()
+        before = state_path.read_bytes()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, c.main(['prepare-historical-import', *bound, '--plan', str(plan)]))
+        self.assertEqual(before, state_path.read_bytes())
+        proof = donor.parent / 'named-plan-proof.json'; proof.write_text(output.getvalue())
+        for action in ('prepare-historical-import', 'admit-historical-import'):
+            before = state_path.read_bytes(); errors = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors), \
+                    patch.object(c, 'write', wraps=c.write) as writer:
+                result = c.main([action, *bound, '--plan', str(wrong), '--proof', str(proof)])
+            with self.subTest(action=action, contract='refusal'):
+                self.assertEqual(2, result)
+                self.assertIn('historical import plan differs from fresh selection', errors.getvalue())
+            with self.subTest(action=action, contract='no state write'):
+                self.assertEqual([], writer.call_args_list)
+                self.assertEqual(before, state_path.read_bytes())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['admit-historical-import', *bound, '--plan', str(plan), '--proof', str(proof)]))
+        self.assertEqual(2, len(c.read(state_path)['historical_no_retry_custody']))
+
     def test_cross_goal_custody_import_preserves_fresh_selection_without_execution_credit(self):
         import deploy_test_historical_custody as h
         new = self.custody_fixture()
