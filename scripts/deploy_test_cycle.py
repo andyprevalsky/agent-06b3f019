@@ -906,14 +906,26 @@ def validate_resource_skip(entry: dict, failure: dict) -> None:
 
 
 def adjudicate(state: dict, report: dict) -> None:
+    """Adjudicate all pending RCA by default, or an explicit independent subset.
+
+    Partial reports retain every unhandled occurrence and keep readiness blocked;
+    they permit normal independent FULL execution of diagnosed repairs only.
+    """
     from deploy_failure_report import decision
     if state["phase"] != "triage":
         raise ValueError("no failures awaiting RCA")
     entries = report.get("failures", [])
     by_id = {entry["id"]: entry for entry in entries}
-    if len(by_id) != len(entries) or set(by_id) != set(state["pending"]):
+    partial = report.get('partial', False)
+    if type(partial) is not bool:
+        raise ValueError('partial RCA mode must be an explicit boolean')
+    selected = set(by_id)
+    pending_ids = set(state['pending'])
+    covered = bool(selected) and selected < pending_ids if partial else selected == pending_ids
+    if len(by_id) != len(entries) or not covered:
         raise ValueError("RCA dispositions must cover every pending occurrence exactly once")
-    pending = [f for f in state["failures"] if f["id"] in state["pending"]]
+    pending = [f for f in state["failures"] if f["id"] in selected]
+    unhandled = [identifier for identifier in state['pending'] if identifier not in selected]
     decisions = []
     for failure in pending:
         entry = by_id[failure["id"]]
@@ -986,10 +998,12 @@ def adjudicate(state: dict, report: dict) -> None:
     # Gates routed by `reexecute` during THIS triage are repair work for the same round; the
     # accumulated repair_gates ledger carries stale credit from earlier rounds and is not the signal.
     repair |= set(state.pop("triage_repair_gates", []))
-    if renewals:
+    if unhandled or renewals:
         state['failures'].extend(renewals)
-        state['pending'] = [f['id'] for f in renewals]
-        state.update(phase='triage', ready=False, failure_phase='refresh')
+        state['pending'] = unhandled + [f['id'] for f in renewals]
+        state.update(phase='triage', ready=False)
+        if renewals:
+            state['failure_phase'] = 'refresh'
         if repair:
             state['repair_gates'] = sorted(set(state['repair_gates']) | repair)
             state['triage_repair_gates'] = sorted(repair)

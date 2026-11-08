@@ -516,6 +516,68 @@ class Cycle(unittest.TestCase):
                 'source': failure['source'], 'description': 'real failure', 'evidence': 'RCA evidence',
                 'native_result': failure['native_result'], 'command': failure.get('command'), 'attribution': attribution, **fields}]}
 
+    def test_partial_rca_preserves_unhandled_blockers_until_final_adjudication(self):
+        self.state['phase'] = 'initial'
+        c.advance(self.state, [self.result(a='FAIL', b='PASS'), self.result('ui', c='FAIL')])
+        first, remaining = self.state['failures'][-2:]
+        untouched = copy.deepcopy(remaining)
+        native_first = copy.deepcopy(first)
+        attempts = copy.deepcopy(self.state['attempts'])
+        report = {**self.report(first), 'partial': True}
+        c.adjudicate(self.state, report)
+        self.assertEqual([remaining['id']], self.state['pending'])
+        self.assertEqual(untouched, remaining)
+        self.assertEqual(native_first, {k: first[k] for k in native_first})
+        self.assertEqual(attempts, self.state['attempts'])
+        self.assertEqual(('triage', False), (self.state['phase'], self.state['ready']))
+        self.assertEqual({}, self.state['skips'])
+        self.assertIn('api', self.state['triage_repair_gates'])
+        self.assertEqual(self.plan, self.state['plan'])
+        c.write(self.directory / 'cycle.json', self.state)
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+        observed = []
+        def full(gate, *_args, **_kwargs):
+            observed.append(gate['name'])
+            return {**self.result(gate['name'], **dict.fromkeys(gate['checks'], 'PASS')),
+                    'native_exit': 0}
+        with patch.object(c, 'execute', side_effect=full):
+            c.run_phase(self.plan, self.state, self.directory, self.root, independent=True)
+        self.assertEqual(['api'], observed)
+        self.assertEqual([remaining['id']], self.state['pending'])
+        self.assertEqual(untouched, remaining)
+        self.assertEqual(('triage', False), (self.state['phase'], self.state['ready']))
+        c.adjudicate(self.state, self.report(remaining))
+        self.assertFalse(self.state.get('pending'))
+        self.assertEqual('needs-focused-plan', self.state['phase'])
+        self.assertTrue({'api', 'ui'} <= set(self.state['repair_gates']))
+        self.assertFalse(self.state['ready'])
+
+    def test_partial_rca_is_explicit_nonempty_source_bound_and_atomic(self):
+        self.state['phase'] = 'initial'
+        c.advance(self.state, [self.result(a='FAIL', b='FAIL'), self.result('ui', c='FAIL')])
+        first, second, _ = self.state['failures'][-3:]
+        entry = self.report(first)['failures'][0]
+        bad_source = {**entry, 'source': {'head': 'wrong', 'digest': 'wrong'}}
+        other = self.report(second)['failures'][0]
+        variants = [
+            {'failures': [entry]},
+            {'failures': [entry], 'partial': False},
+            {'failures': [entry], 'partial': 'true'},
+            {'failures': [], 'partial': True},
+            {'failures': [entry, entry], 'partial': True},
+            {'failures': [{**entry, 'id': 'foreign'}], 'partial': True},
+            {'failures': [bad_source], 'partial': True},
+            {'failures': [{**entry, 'attribution': 'UNKNOWN'}], 'partial': True},
+            {'failures': [entry, {**other, 'source': bad_source['source']}], 'partial': True},
+        ]
+        original = copy.deepcopy(self.state)
+        for report in variants:
+            with self.subTest(report=report):
+                self.state = copy.deepcopy(original)
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, report)
+                self.assertEqual(original, self.state)
+
     MAC_STATIC = ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check']
 
     def triage_quick_fixture(self, mac=None):
