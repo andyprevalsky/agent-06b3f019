@@ -450,7 +450,7 @@ async function main(): Promise<void> {
           return true;
         }
       );
-      assert.equal(calls(), 6, 'rate-limit retries on a read must stay bounded');
+      assert.equal(calls(), 5, 'rate-limit retries on a read must stay bounded');
     }
   );
 

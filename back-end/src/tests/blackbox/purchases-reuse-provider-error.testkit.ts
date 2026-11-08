@@ -134,7 +134,7 @@ export async function testReuseMintProviderFailureIsTyped(): Promise<void> {
       `expected 429 agentcard_org_mcp_rate_limited, got ${typed.statusCode} ${typed.code}`
     );
     assert(
-      calls.length === 6 && calls.every((tool) => tool === 'get_card_details'),
+      calls.length === 5 && calls.every((tool) => tool === 'get_card_details'),
       `the existing bounded throttle retry must own the read, got ${calls.join(',')}`
     );
     const row = await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: held.id } });

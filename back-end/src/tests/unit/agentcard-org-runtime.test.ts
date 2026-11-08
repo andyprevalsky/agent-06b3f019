@@ -230,7 +230,7 @@ async function main(): Promise<void> {
         // exhausted throttle must stay recognisable to it.
         /too many requests|rate.?limit|\b429\b/i.test(error.message)
     );
-    assert.equal(exhaustedCalls, 6, 'rate-limit retries on a read must stay bounded');
+    assert.equal(exhaustedCalls, 5, 'rate-limit retries on a read must stay bounded');
 
     // A window reset further out than the delay budget must fail fast rather than parking the
     // request: nested callers (the 20-attempt release observer) would otherwise multiply the wait.
@@ -285,19 +285,15 @@ async function main(): Promise<void> {
     );
 
     let stuckUnavailableCalls = 0;
-    const stuckUnavailableRuntime = new AgentCardOrgRuntime(
-      async () => {
-        stuckUnavailableCalls += 1;
-        return {
-          structuredContent: {
-            status: 'error',
-            message: 'get_company_wallet failed: Service temporarily unavailable',
-          },
-        };
-      },
-      fetch,
-      virtualClock()
-    );
+    const stuckUnavailableRuntime = new AgentCardOrgRuntime(async () => {
+      stuckUnavailableCalls += 1;
+      return {
+        structuredContent: {
+          status: 'error',
+          message: 'get_company_wallet failed: Service temporarily unavailable',
+        },
+      };
+    });
     await assert.rejects(
       () => stuckUnavailableRuntime.callTool('get_company_wallet', {}),
       (error: unknown) =>
@@ -306,7 +302,7 @@ async function main(): Promise<void> {
         error.code === 'agentcard_org_mcp_unavailable' &&
         /temporarily unavailable/.test(error.message)
     );
-    assert.equal(stuckUnavailableCalls, 6, 'transient-unavailable read retries must stay bounded');
+    assert.equal(stuckUnavailableCalls, 3, 'transient-unavailable retries must stay bounded');
 
     // AgentCard also reports its upstream API-key throttle as an HTTP-200 tool error (no
     // retryAfter). On a read that is the same backpressure as a transport 429 and must ride the
@@ -351,7 +347,7 @@ async function main(): Promise<void> {
         error.code === 'agentcard_org_mcp_rate_limited' &&
         /API key rate limit exceeded/.test(error.message)
     );
-    assert.equal(stuckToolThrottleCalls, 6, 'tool-level throttle retries must stay bounded');
+    assert.equal(stuckToolThrottleCalls, 5, 'tool-level throttle retries must stay bounded');
 
     // A tool-level throttle can arrive after a multi-step mutation already changed provider state,
     // so a mutation's result is handed back untouched for its caller to interpret.
@@ -393,16 +389,12 @@ async function main(): Promise<void> {
     );
 
     let stuckTimeoutCalls = 0;
-    const stuckTimeoutRuntime = new AgentCardOrgRuntime(
-      undefined,
-      async () => {
-        stuckTimeoutCalls += 1;
-        const timeout = new Error('The operation was aborted due to timeout');
-        timeout.name = 'TimeoutError';
-        throw timeout;
-      },
-      virtualClock()
-    );
+    const stuckTimeoutRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      stuckTimeoutCalls += 1;
+      const timeout = new Error('The operation was aborted due to timeout');
+      timeout.name = 'TimeoutError';
+      throw timeout;
+    });
     await assert.rejects(
       () => stuckTimeoutRuntime.callTool('list_transfers', { limit: 100 }),
       (error: unknown) =>
@@ -411,7 +403,7 @@ async function main(): Promise<void> {
         error.code === 'agentcard_org_mcp_unavailable' &&
         /temporarily unavailable/.test(error.message)
     );
-    assert.equal(stuckTimeoutCalls, 6, 'AbortSignal timeout read retries must stay bounded');
+    assert.equal(stuckTimeoutCalls, 3, 'AbortSignal timeout retries must stay bounded');
 
     // undici reports a connection that never reached the provider as `TypeError: fetch failed`
     // with the cause code on `.cause` (`UND_ERR_CONNECT_TIMEOUT` after its 10 s connect timeout,

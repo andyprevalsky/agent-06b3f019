@@ -202,11 +202,10 @@ async function main(): Promise<void> {
     console.log('PASS AgentCard org reads ride out a bounded provider auth flap');
 
     // Regression (smoke agent-payment-idempotent-abandonment, PR #1775 deploy, agent 2c6b3ffd,
-    // 2026-11-08 02:08:26-31Z): the second browser's reuse lookup read get_card_details while the
-    // shared org window was saturated. Two HTTP-200 structured throttles carrying no retryAfter
-    // were followed by "Invalid or expired organization token" on attempt 3 with 24.3 s of the
-    // 30 s budget unspent, POST /api/purchases/lookup answered 502 and the browser task died. The
-    // three-attempt cap, not the budget, ended the read.
+    // 2026-11-08 02:08:26-31Z): the second browser's reuse lookup read get_card_details, received
+    // two HTTP-200 throttles carrying no retryAfter, then "Invalid or expired organization token"
+    // on attempt 3 with 24.3 s of budget left. The rejection was non-retryable, so
+    // POST /api/purchases/lookup answered 502 and the browser task died.
     const structuredThrottle = (): Response =>
       new Response(
         JSON.stringify({
@@ -226,34 +225,54 @@ async function main(): Promise<void> {
         headers: { 'content-type': 'application/json' },
       });
 
-    const replayClock = fakeClock();
-    const replayStartedAtMs = replayClock.now();
-    let replayRequests = 0;
-    const replayRuntime = new AgentCardOrgRuntime(
+    // The observed sequence: the read auth-flap window rides out the rejection.
+    const observedClock = fakeClock();
+    let observedRequests = 0;
+    const observedRuntime = new AgentCardOrgRuntime(
       undefined,
       async () => {
-        replayRequests += 1;
-        if (replayRequests <= 2) return structuredThrottle();
-        // The six immediate attempts of the auth-rejected third read.
-        if (replayRequests <= 8) return providerUnauthorized();
-        // The window is still saturated when the rejection clears.
-        if (replayRequests <= 10) return structuredThrottle();
+        observedRequests += 1;
+        if (observedRequests <= 2) return structuredThrottle();
+        if (observedRequests <= 8) return providerUnauthorized();
         return liveCardResponse();
       },
-      replayClock
+      observedClock
     );
     assert.deepEqual(
-      await replayRuntime.callTool('get_card_details', { card_id: 'card-1' }),
+      await observedRuntime.callTool('get_card_details', { card_id: 'card-1' }),
       liveCard,
-      'a read throttled then auth-rejected must keep retrying while its budget remains'
+      'the observed throttle-then-rejection read must recover'
     );
-    assert.equal(replayRequests, 11, 'the replayed read must recover on the first clear window');
+    assert.equal(observedRequests, 9, 'the observed read must recover on its first clear request');
+
+    // Hypothesised continuation, not observed: the window is still throttled when the rejection
+    // clears. A throttle after the rejection must keep backing off instead of ending the read.
+    const continuationClock = fakeClock();
+    const continuationStartedAtMs = continuationClock.now();
+    let continuationRequests = 0;
+    const continuationRuntime = new AgentCardOrgRuntime(
+      undefined,
+      async () => {
+        continuationRequests += 1;
+        if (continuationRequests <= 2) return structuredThrottle();
+        if (continuationRequests <= 8) return providerUnauthorized();
+        if (continuationRequests <= 10) return structuredThrottle();
+        return liveCardResponse();
+      },
+      continuationClock
+    );
+    assert.deepEqual(
+      await continuationRuntime.callTool('get_card_details', { card_id: 'card-1' }),
+      liveCard,
+      'a read throttled again after the rejection must keep retrying while its budget remains'
+    );
+    assert.equal(continuationRequests, 11, 'the read must recover on the first clear window');
     assert.ok(
-      replayClock.now() - replayStartedAtMs <= 30_000,
-      'the replayed read must stay inside the one 30 s rate-limit budget'
+      continuationClock.now() - continuationStartedAtMs <= 30_000,
+      'the read must stay inside the one 30 s rate-limit budget'
     );
 
-    // Reads are bounded by the budget, so a throttle that never clears still surrenders typed.
+    // A throttle that never clears still surrenders typed, within the budget.
     const sustainedClock = fakeClock();
     const sustainedStartedAtMs = sustainedClock.now();
     let sustainedRequests = 0;
@@ -273,7 +292,7 @@ async function main(): Promise<void> {
         error.code === 'agentcard_org_mcp_rate_limited' &&
         /Too many requests/.test(error.message)
     );
-    assert.equal(sustainedRequests, 6, 'a sustained read throttle must stay request-bounded');
+    assert.equal(sustainedRequests, 5, 'a sustained read throttle must stay request-bounded');
     assert.ok(
       sustainedClock.now() - sustainedStartedAtMs <= 30_000,
       'a sustained read throttle must fail inside the 30 s budget'
@@ -297,7 +316,7 @@ async function main(): Promise<void> {
     );
     assert.equal(mutationThrottleRequests, 3, 'a mutation must keep its three throttle attempts');
 
-    console.log('PASS AgentCard org reads spend the rate-limit budget before surrendering');
+    console.log('PASS AgentCard org reads keep backing off a throttle within the budget');
   } finally {
     for (const name of CREDENTIAL_ENV) {
       const value = original[name];
