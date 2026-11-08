@@ -1,25 +1,33 @@
 {
   "primary_merge": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
   "status": "NOT_SHIPPED",
-  "as_of": 1794132400.6591735,
+  "as_of": 1794134318.0221279,
   "visual": {
     "schemaVersion": 1,
     "ok": true,
-    "artifactId": "vis_be133ca953655186cd6fc96f81853623",
+    "artifactId": "vis_2c78578a368752ae242473971da04db2",
     "title": "Code-session deploy progress",
-    "url": "https://boxes.dev/visuals/vis_be133ca953655186cd6fc96f81853623",
-    "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_be133ca953655186cd6fc96f81853623)",
-    "sizeBytes": 55694
+    "url": "https://boxes.dev/visuals/vis_2c78578a368752ae242473971da04db2",
+    "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_2c78578a368752ae242473971da04db2)",
+    "sizeBytes": 59064
   },
   "native_ready": false,
   "records_pr": 1822,
   "classifier_fix_pr": 1821,
+  "classifier_fix_source": "d140cadb93380026759ea81c044a39f3bf923053",
+  "qualification": {
+    "executor": "local",
+    "run": "d18-gates4",
+    "started_at": "2026-11-08T10:33:38Z",
+    "previous_remote_results": "UNVERIFIED; mandatory installer release download HTTP504 before gate execution",
+    "source_of_current_status": "existing repair owner native start receipt; terminal summary pending"
+  },
   "scheduled_resume": {
     "complete": false,
     "native_readiness": "NOT_READY",
-    "reason": "current-caller tool-host false positive; existing owner PR1821 in qualification",
-    "scheduled_check_id": "wd8ee9jqa7p90v1rhh4p0cecan8hvze1",
-    "scheduled_at": "2026-11-08T10:47:00Z"
+    "reason": "current-caller tool-host false positive; canonical fix PR1821 local qualification",
+    "scheduled_check_id": "wd87pxac0sy114nr8m0bqz7z498hvnma",
+    "scheduled_at": "2026-11-08T11:30:00Z"
   },
   "terminal_publication_metadata": true
 }
