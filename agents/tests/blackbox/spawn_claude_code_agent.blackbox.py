@@ -1238,7 +1238,7 @@ async def test_close_timeout_reconciles_same_task_before_activity_completion():
     request_lost = asyncio.Event()
     close_requests = []
     beats = []
-    handoff = _collatz_handoff()
+    handoff = _collatz_handoff_file()
     receipt = {"output_files": [], "handoff": {"status": "present", "content": json.dumps(handoff)},
                "code_session": {"code_session_id": "session-close", "state": "PAUSED"}}
 
@@ -1281,7 +1281,7 @@ async def test_close_timeout_reconciles_same_task_before_activity_completion():
             backend_done.set()
             result = await asyncio.wait_for(activity_task, 5)
             assert result["success"] is True, result["message"]
-            assert result["structured_response"] == handoff
+            assert result["structured_response"] == _collatz_handoff()
             assert create.await_count == 1 and loop.await_count == 1, "close retry must not re-enter the CLI"
             assert len(close_requests) == 2 and close_requests[0] == close_requests[1]
             assert beats, "a closing activity keeps heartbeating while its backend finishes"
