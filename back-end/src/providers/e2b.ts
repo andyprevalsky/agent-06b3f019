@@ -38,7 +38,6 @@ import {
 import { type CodeSessionRow } from './codeSessions/store';
 import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
 import { restoreSandboxProject } from './projects/workspace';
-import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { waitForSandboxWsServer, wsReadinessOutcome, wsStartupBudgetMs } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';

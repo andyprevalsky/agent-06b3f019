@@ -431,6 +431,11 @@ def qualifications(state, gate, root, *, current=None):
             check = f['check'].split('/', 1)[1]
             need(check in gate['checks'] and check not in expected, 'duplicate/removed custody check')
             expected[check] = {**r, 'source': state['source']}
+    if state.get('completed_local_custody_history'):
+        from deploy_test_completed_local import qualifications as completed_qualifications
+        mapped = completed_qualifications(state, gate, root, current=current)
+        need(not set(mapped) & set(expected), 'duplicate custody authority')
+        expected.update(mapped)
     return expected
 
 
@@ -453,6 +458,9 @@ def verify(state, root):
     """Validate retained provenance and every protected obligation against the current plan."""
     import deploy_test_cycle as c
     verify_import_origin(state, root)
+    if state.get('completed_local_custody_history'):
+        from deploy_test_completed_local import verify as verify_completed
+        verify_completed(state, root)
     if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
         return
     gates = {g['name']: g for g in state['plan']['gates']}
@@ -487,7 +495,7 @@ def state_identity(state):
     import deploy_test_cycle as c
     return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
                     'historical_no_retry_custody', 'historical_custody_history',
-                    'historical_custody_import', 'historical_custody_transfers')})
+                    'historical_custody_import', 'historical_custody_transfers', 'completed_local_custody_history')})
 
 
 def admission(request, root):
@@ -534,3 +542,21 @@ def runtime_identity(root):
     return {name: c.runtime_config_sha256(root / name) for name in
             ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
              'front-end/.env', 'front-end/.env.local') if (root / name).is_file()}
+
+
+def sandbox_stall_snapshot(snap):
+    """Exact typed sandbox settlement predicate, never a generic payment error."""
+    card, transfer, purchase, funding = (snap[k] for k in ('agentCard', 'orgTransfer', 'purchase', 'walletFunding'))
+    amount = transfer['amountCents']
+    need(all(isinstance(v, str) and v for v in (snap['agentId'], card.get('id'), transfer.get('id'), purchase.get('id')))
+         and type(amount) is int and amount > 0 and type(transfer['transferredCents']) is int
+         and transfer['transferredCents'] == amount and type(transfer['releasedCents']) is int
+         and transfer['releasedCents'] == 0 and transfer['livemode'] is False
+         and transfer['status'] == 'consumed' and card['status'] == 'CLOSED'
+         and type(card['balanceCents']) is int and card['balanceCents'] == 0
+         and ('livemode' not in card or card['livemode'] is False)
+         and purchase['status'] == 'HELD' and funding['status'] == 'RECLAIMING'
+         and transfer['cardId'] == purchase['cardId'] == card['id']
+         and funding['providerTransferId'] == transfer['id']
+         and snap['stripeHold']['livemode'] is False and snap['stripeRefund'] is None,
+         'not an exact sandbox settlement stall')

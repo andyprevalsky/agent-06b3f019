@@ -288,7 +288,8 @@ def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=
     if include_custody:
         from deploy_test_historical_custody import guard, identical_inputs_binding
         current = (identical_inputs_binding(state, root)
-                   if custody_refresh and state.get('historical_no_retry_custody') else None)
+                   if custody_refresh and (state.get('historical_no_retry_custody')
+                       or state.get('completed_local_custody_history')) else None)
         expected.update(guard(state, gate, root, expected, current=current))
     if not set(expected) <= set(gate['checks']):
         raise ValueError('reuse qualification outside full inventory')
@@ -520,7 +521,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     from deploy_test_historical_custody import guard, state_identity, known
     custody = {}
     if ('historical_custody_import' in state or known(state, root)
-            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
+            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')
+            or state.get('completed_local_custody_history')):
         legacy = reuse_qualifications(state, gate, include_custody=False, root=root)
         custody = guard(state, gate, root, legacy)
     token = uuid.uuid4().hex
@@ -910,6 +912,59 @@ def standing_claude_bundle(proof: dict) -> dict:
     return result
 
 
+def standing_treasury_bundle(state: dict, proof: dict) -> dict:
+    """Qualify a policy change from original native bytes, never regrade a result."""
+    from deploy_failure_report import decision, TREASURY_SKIP
+    key = 'backend-coverage-blackbox/blackbox:treasury-rails'
+    rows = [f for f in state['failures'] if f['id'] == proof.get('occurrence')]
+    if len(rows) != 1:
+        raise ValueError('standing treasury original occurrence missing or ambiguous')
+    failure = rows[0]
+    if (failure.get('check') != key or failure.get('complete') is not True
+            or failure.get('native_result') != 'FAIL' or failure.get('disposition') != 'blocking'
+            or failure.get('rca', {}).get('assigned_repair') is not True
+            or proof.get('failure_sha256') != digest(failure)):
+        raise ValueError('standing treasury requires the unchanged complete assigned native FAIL')
+    result_path = Path(failure['worker_result'])
+    folder = result_path.parent
+    entry = proof['rca']
+    paths = {folder/'receipt.json', folder/'request.json', result_path,
+             Path(failure['evidence']), Path(entry['evidence'])}
+    if set(proof.get('files', {})) != {str(p) for p in paths}:
+        raise ValueError('standing treasury original file closure changed')
+    for path in paths:
+        if (not path.is_absolute() or path.resolve() != path or path.is_symlink()
+                or not path.is_file() or path.stat().st_size > MAX_RECEIPT_BYTES
+                or sha_file(path) != proof['files'][str(path)]):
+            raise ValueError('standing treasury original file binding changed')
+    receipt, native, request = (bounded_read(p, 'standing treasury original')
+                                for p in (folder/'receipt.json', result_path, folder/'request.json'))
+    owners = [r for a in state['attempts'] for r in a['results']
+              if r.get('worker_result') == str(result_path)]
+    case = 'blackbox:treasury-rails'
+    if (len(owners) != 1 or owners[0] != receipt
+            or any(receipt.get(k) != failure.get(k) for k in ('source','gate','command','finished_at'))
+            or receipt.get('log') != failure['evidence'] or receipt.get('worker_result') != str(result_path)
+            or receipt.get('executed') is not True or receipt.get('cancelled') is not False
+            or receipt.get('timed_out') is not False or receipt.get('lingering_group') is not False
+            or receipt.get('cases', {}).get(case) != 'FAIL' or receipt.get('case_complete', {}).get(case) is not True
+            or type(receipt.get('native_exit')) is not int or not 1 <= receipt['native_exit'] <= 255
+            or any(native.get(k) != receipt.get(k) for k in ('token','source','gate','cases','native_exit'))
+            or native.get('source_unchanged') is not True or native.get('interrupted') is not False
+            or native.get('cleanup_complete') is not True
+            or native.get('evidence', {}).get(case) != failure.get('worker_evidence')
+            or failure.get('worker_evidence', {}).get('passed') is not False
+            or failure.get('worker_evidence', {}).get('aborted') is not False
+            or any(request.get(k) != receipt.get(k) for k in ('token','source','gate'))
+            or case not in request.get('checks', [])):
+        raise ValueError('standing treasury original native receipt differs')
+    if (any(entry.get(k) != failure.get(k) for k in ('id','source','check','command','native_result'))
+            or decision(entry) != TREASURY_SKIP
+            or not failure['finished_at'] <= entry['standing_policy']['evidence_at'] <= time.time()):
+        raise ValueError('standing treasury policy does not bind the original FAIL')
+    return copy.deepcopy(entry)
+
+
 def standing_skip(state: dict, proof: dict, root: Path) -> None:
     if (CANCEL.is_set() or state.get('phase') in {'interrupted','stale','ready'} or 'live_failures' in state
             or state.get('resume_phase') or proof.get('source') != state['source']
@@ -920,6 +975,23 @@ def standing_skip(state: dict, proof: dict, root: Path) -> None:
         raise ValueError('standing skip frozen plan changed')
     validate_plan(state['plan'], root)
     gate = next((g for g in state['plan']['gates'] if g['name'] == proof.get('gate')), None)
+    if proof.get('kind') == 'standing-treasury-requalification-v1':
+        key = 'backend-coverage-blackbox/blackbox:treasury-rails'
+        if (state.get('phase') != 'needs-focused-plan' or state.get('pending') or state.get('running')
+                or not gate or gate['name'] != 'backend-coverage-blackbox'
+                or gate.get('native_backend') is not True or gate.get('case_protocol') is not True
+                or 'blackbox:treasury-rails' not in gate['checks'] or key in state['skips']
+                or proof.get('binding') != {'plan_digest':state['plan_digest'],
+                    'environment':state['environment'],
+                    'input_fingerprint':state['input_fingerprints'][gate['name']]}):
+            raise ValueError('standing treasury requires a quiescent selected backend occurrence')
+        entry = standing_treasury_bundle(state, proof)
+        # The original failure/RCA stays immutable. Existing skips/renewals own current policy.
+        state['skips'][key] = {'source':state['source'], 'rca':entry,
+            'disposition':'treasury / skipped with warning',
+            'input_fingerprint':state['input_fingerprints'][gate['name']],
+            'standing_skip':copy.deepcopy(proof)}
+        return
     if not gate or gate.get('native_cloud') is not True or 'claude-code-agent' not in gate['checks']:
         raise ValueError('standing skip requires the selected native cloud Claude check')
     key = gate['name'] + '/claude-code-agent'
@@ -938,7 +1010,17 @@ def revalidate_standing_skips(state: dict) -> None:
             if (entry['source'] != state['source'] or entry.get('input_fingerprint')
                     != state['input_fingerprints'].get(key.split('/',1)[0])):
                 raise ValueError('standing skip input/source binding changed')
-            standing_claude_bundle(entry['standing_skip'])
+            if entry['standing_skip'].get('kind') == 'standing-treasury-requalification-v1':
+                from deploy_failure_report import decision, TREASURY_SKIP
+                native_rca = entry['rca']
+                while native_rca.get('native_result') == 'prior waived failure; changed inputs':
+                    native_rca = native_rca['prior_waiver']['rca']
+                if (entry['disposition'] != TREASURY_SKIP or decision(entry['rca']) != TREASURY_SKIP
+                        or native_rca != entry['standing_skip']['rca']):
+                    raise ValueError('standing treasury qualification changed')
+                standing_treasury_bundle(state, entry['standing_skip'])
+            else:
+                standing_claude_bundle(entry['standing_skip'])
 
 
 def validate_resource_skip(entry: dict, failure: dict) -> None:
@@ -1058,6 +1140,9 @@ def adjudicate(state: dict, report: dict) -> None:
             state["skips"][failure["check"]] = {"source": state["source"], "rca": entry,
                                                    "disposition": disposition,
                                                    "input_fingerprint": state["input_fingerprints"][failure["gate"]]}
+            prior = entry.get('prior_waiver', {})
+            if prior.get('standing_skip', {}).get('kind') == 'standing-treasury-requalification-v1':
+                state['skips'][failure['check']]['standing_skip'] = copy.deepcopy(prior['standing_skip'])
             if disposition == "pending post-merge":
                 # Pre-merge READY may proceed; completion stays blocked until the parent dispatches
                 # this packet after merge and records the actual repair link (resolve action).
@@ -2126,8 +2211,19 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
 
 
 def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None,
-            historical_no_retry_proof: dict | None = None) -> None:
+            historical_no_retry_proof: dict | None = None, completed_local_proof: dict | None = None) -> None:
     from deploy_test_historical_custody import known, prepare, apply, verify
+    if completed_local_proof is not None:
+        from deploy_test_completed_local import prepare as prepare_completed, verify as verify_completed
+        if election_proof is not None or historical_no_retry_proof is not None:
+            raise ValueError('completed local migration cannot mix other removal authorities')
+        prepare_completed(state, old, new, completed_local_proof, root)
+        candidate = copy.deepcopy(state)
+        _refresh(candidate, old, new, root, completed_local_proof=completed_local_proof)
+        candidate.setdefault('completed_local_custody_history', []).append(copy.deepcopy(completed_local_proof))
+        verify_completed(candidate, root)
+        state.clear(); state.update(candidate)
+        return
     if historical_no_retry_proof is not None and election_proof is not None:
         raise ValueError('historical custody cannot mix election flags')
     if historical_no_retry_proof is not None:
@@ -2161,7 +2257,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
     _refresh(state, old, new, root, election_proof=election_proof)
 
 
-def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=None) -> None:
+def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=None, completed_local_proof=None) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -2189,14 +2285,22 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     old_gates = {g["name"]: g for g in old["gates"]}
     new_gates = {g["name"]: g for g in new["gates"]}
     from deploy_test_election import prepare as prepare_election
-    election = prepare_election(state, old, new, election_proof)
+    election = (prepare_election(state, old, new, election_proof)
+                if completed_local_proof is None else None)
     removed = {election['gate']} if election else set()
+    if completed_local_proof is not None:
+        from deploy_test_completed_local import prepare as prepare_completed
+        removed.add(prepare_completed(state, old, new, completed_local_proof, root))
     if not old_gates.keys() <= new_gates.keys() | removed:
         raise ValueError("repair cannot silently remove originally selected gates")
     for name, gate in old_gates.items():
         if name in removed:
             continue
-        preserve_contract(gate, new_gates[name])
+        if completed_local_proof is not None and name == completed_local_proof['row']['target_gate']:
+            from deploy_test_completed_local import normal_policy_contract
+            normal_policy_contract(gate, new_gates[name])
+        else:
+            preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
             raise ValueError("repair cannot silently remove originally selected checks")
     fingerprints = input_fingerprints(new, root)
@@ -2277,7 +2381,7 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     if carried:
         state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
     state['repair_gates'] = [name for name in state['repair_gates']
-                            if name not in carried and name not in completed_repairs]
+                            if name not in carried and name not in completed_repairs and name not in removed]
     from deploy_test_election import apply as apply_election
     apply_election(state, election)
     if interrupted_refresh:
@@ -2347,6 +2451,9 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or state["input_fingerprints"] != input_fingerprints(plan, root)
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
+        if state.get('completed_local_custody_history'):
+            from deploy_test_completed_local import completion as completed_coverage
+            completed_coverage(state, root)
         revalidate_standing_skips(state)
         from deploy_test_historical_custody import verify as verify_custody
         verify_custody(state, root)
@@ -2366,7 +2473,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-completed-local"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -2375,6 +2482,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--donor-sha256')
     parser.add_argument('--donor-index-sha256')
     parser.add_argument("--historical-no-retry-proof", type=Path)
+    parser.add_argument("--completed-local-proof", type=Path)
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -2408,6 +2516,12 @@ def main(argv: list[str] | None = None) -> int:
                 with cancellation_handlers():
                     while state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
                         run_phase(plan, state, directory, args.root, args.rca_launcher)
+            elif args.action == 'prepare-completed-local':
+                from deploy_test_completed_local import build as build_completed
+                if args.input is None or args.proof is None or args.donor_state is None:
+                    raise ValueError('--input new plan, --donor-state evidence descriptor, --proof output required')
+                write(args.proof, build_completed(state, plan, read(args.input), read(args.donor_state), args.root))
+                return 0  # Proposal only: never rewrite the original cycle.
             elif args.action == "triage":
                 if args.input is None:
                     raise ValueError("--input RCA report required")
@@ -2470,7 +2584,8 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("--input previous plan required")
                 refresh(state, read(args.input), plan, args.root,
                         election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None,
-                        historical_no_retry_proof=read(args.historical_no_retry_proof) if args.historical_no_retry_proof else None)
+                        historical_no_retry_proof=read(args.historical_no_retry_proof) if args.historical_no_retry_proof else None,
+                        completed_local_proof=read(args.completed_local_proof) if args.completed_local_proof else None)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
@@ -2501,12 +2616,18 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("--proof cleanup proof required")
                 reconcile(state, args.occurrence, bounded_read(args.proof, "cleanup proof"))
             elif args.action == "complete":
+                if state.get('completed_local_custody_history'):
+                    from deploy_test_completed_local import completion as completed_coverage
+                    completed_coverage(state, args.root)
                 # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
                 blocked = pending_completion_block(state)
                 if blocked:
                     print(f"DEPLOY_CYCLE INCOMPLETE: {blocked}", file=sys.stderr)
                     return 1
             elif args.action == "verify":
+                if state.get('completed_local_custody_history'):
+                    from deploy_test_completed_local import completion as completed_coverage
+                    completed_coverage(state, args.root)
                 from deploy_test_historical_custody import verify as verify_custody
                 verify_custody(state, args.root)
                 from deploy_test_election import verify as verify_elections
@@ -2530,6 +2651,10 @@ def main(argv: list[str] | None = None) -> int:
                           f"Resource warnings: {len(state.get('resource_warnings', []))}\n")
                 # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
                 text = header + render({"failures": failures})
+                for skip in state['skips'].values():
+                    if skip.get('standing_skip', {}).get('kind') == 'standing-treasury-requalification-v1':
+                        text += '\nCurrent standing-policy qualification (original RCA retained):\n' + render({
+                            'failures':[{**skip['rca'], 'disposition':skip['disposition']}]})
                 for election in state.get('elected_omissions', []):
                     text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
                              + election['reason'] + '\nNative: ' + election['native_result']
