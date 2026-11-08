@@ -263,3 +263,63 @@ def test_fleet_monitor_snapshot_already_removed_is_a_clean_exit(tmp_path: Path):
     assert len(statuses) == 1, "detached launch lost its actual exit status"
     assert statuses[0].read_text().strip() == "7"
     assert not list(snapshots.glob("cloudbench-scripts.*")), "the snapshot was left behind"
+
+
+def test_script_snapshot_removal_never_exposes_a_partly_deleted_snapshot(tmp_path, monkeypatch):
+    """RCA 2026-11-07: rmtree unlinked the helper before the directory, so the
+    launcher's EXIT cleanup ran the helper from a snapshot that still existed
+    without it ("can't open file .../cloudbench-script-snapshot.py", then
+    "FATAL: could not remove the exact owned script snapshot"), failing
+    test_fleet_monitor_detached_launch_retains_actual_controller_exit on
+    Blacksmith runners. Deletion must start only after the path is gone."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_script_snapshot_under_test", ROOT / "scripts/cloudbench-script-snapshot.py"
+    )
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    snapshot = tmp_path / "cloudbench-scripts.0123456789abcdef0123456789abcdef"
+    snapshot.mkdir()
+    (snapshot / "cloudbench-script-snapshot.py").write_text("# helper\n")
+    observed = []
+    real_rmtree = helper.shutil.rmtree
+
+    def recording_rmtree(target, *args, **kwargs):
+        observed.append((Path(target), snapshot.exists()))
+        return real_rmtree(target, *args, **kwargs)
+
+    monkeypatch.setattr(helper.shutil, "rmtree", recording_rmtree)
+    helper._remove_unadopted_snapshot(snapshot)
+
+    assert not snapshot.exists()
+    assert observed and all(not visible for _, visible in observed), observed
+    assert [p for p in tmp_path.iterdir()] == [], list(tmp_path.iterdir())
+
+
+def test_script_snapshot_cleanup_retries_abandoned_tombstones(tmp_path):
+    """CodeRabbit on PR #1762: a removal interrupted after its rename leaves a
+    private tombstone. The next removal of that snapshot, or a cleanup that finds
+    the snapshot already absent, deletes it instead of leaking it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_script_snapshot_tombstones", ROOT / "scripts/cloudbench-script-snapshot.py"
+    )
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    token = "0123456789abcdef0123456789abcdef"
+    snapshot = tmp_path / f"cloudbench-scripts.{token}"
+    abandoned = tmp_path / f".{snapshot.name}.removing-4242"
+    (abandoned / "nested").mkdir(parents=True)
+    (abandoned / "nested" / "left-behind").write_text("partial\n")
+    snapshot.mkdir()
+    (snapshot / "cloudbench-script-snapshot.py").write_text("# helper\n")
+
+    helper._remove_unadopted_snapshot(snapshot)
+    assert list(tmp_path.iterdir()) == []
+
+    abandoned.mkdir()
+    (abandoned / "left-behind").write_text("partial\n")
+    assert helper.cleanup(snapshot, tmp_path, token, os.getppid(), "unused", False) == "absent"
+    assert list(tmp_path.iterdir()) == []
