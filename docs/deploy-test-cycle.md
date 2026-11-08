@@ -487,7 +487,15 @@ target cycle path plus fresh current source/full-plan/environment/input hashes.
 It requires pristine initialized state and no existing attempt namespace. All
 validation precedes the cycle writer's atomic publication. Immediate exact
 replay is idempotent; drift or non-fresh current state refuses admission without
-changing it. `--historical-no-retry-proof` is accepted by same-cycle `refresh` and the
+changing it. This hash-pinned interface delegates admission to the same
+authoritative `adopt()` protocol as `import-historical-no-retry`, using the
+preserved donor's embedded plan. It records `historical_custody_transfers` with
+persistent protected failure identities in addition to import provenance;
+removing custody/history rows cannot erase those obligations. Existing legacy
+import metadata is not replayable over a cycle that already has attempts;
+preserve that cycle and route any metadata migration through its owner rather
+than resetting or importing it again.
+`--historical-no-retry-proof` is accepted by same-cycle `refresh` and the
 donor-plan `import-historical-no-retry` flow below; supplying it to `init` fails
 instead of silently losing custody.
 

@@ -263,6 +263,15 @@ class Cycle(unittest.TestCase):
         self.assertEqual([], fresh['attempts']); self.assertEqual({}, fresh['skips'])
         self.assertFalse(fresh['ready']); self.assertEqual('quick', fresh['phase'])
         self.assertEqual(2, len(fresh['historical_no_retry_custody']))
+        receipt, = fresh['historical_custody_transfers']
+        self.assertEqual(c.digest(c.read(donor)), receipt['donor_state_sha256'])
+        self.assertEqual(c.digest(proof['transfer_proof']), receipt['proof_sha256'])
+        self.assertEqual([r['original_failure']['id'] for r in proof['cases']], receipt['protected_failure_ids'])
+        lost = copy.deepcopy(fresh)
+        for key in ('failures', 'historical_no_retry_custody', 'historical_custody_history'):
+            lost[key] = []
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.verify(lost, self.root)
         self.assertEqual(c.read(donor)['historical_custody_history'], fresh['historical_custody_history'])
         self.assertEqual([f for f in c.read(donor)['failures'] if f['id'] != 'unrelated'], fresh['failures'])
         self.assertEqual('ACTIVE', fresh['failures'][1]['worker_evidence']['native_task']['status'])
@@ -330,6 +339,23 @@ class Cycle(unittest.TestCase):
             with self.assertRaises(ValueError): h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
             path.write_bytes(raw)
         self.assertEqual({}, fresh['skips']); self.assertEqual([], fresh['failures'])
+
+    def test_historical_import_uses_authoritative_pending_repair_guard(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        altered = c.read(donor)
+        resolved = altered['failures'][1]
+        # The existing resolved auth row may not acquire an invented pending
+        # wrapper through the hash-pinned compatibility interface either.
+        altered['pending_post_merge'].append(dict(id=resolved['id'], check=resolved['check'],
+            gate=resolved['gate'], native_result='PASS', packet={'invented': True}))
+        c.write(donor, altered)
+        approved = c.sha_file(donor)
+        proof = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=approved)
+        before = copy.deepcopy(fresh)
+        with self.assertRaisesRegex(ValueError, 'pending repair wrapper changed'):
+            h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=approved)
+        self.assertEqual(before, fresh)
 
     def test_historical_import_retains_native_absence_and_collision_guards(self):
         import deploy_test_historical_custody as h

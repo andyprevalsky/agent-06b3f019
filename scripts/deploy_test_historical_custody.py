@@ -289,10 +289,12 @@ def prepare_import(state, donor_path, directory, root, *, donor_sha256):
         gate = gates.get(failure['gate'], {})
         need(failure['check'].split('/', 1)[1] in gate.get('checks', [])
              and gate.get('case_protocol') is True, 'protected task or case protocol missing')
+    transfer_proof = build(donor, donor['plan'], state['plan'], root)
+    need(c.digest(transfer_proof['cases']) == c.digest(rows), 'donor transfer inventory differs')
     need(c.sha_file(donor_path) == donor_sha, 'donor index changed during preparation')
     return {'kind': IMPORT_KIND, 'donor_path': str(donor_path), 'donor_sha256': donor_sha,
             'target_state': str(directory / 'cycle.json'), 'before_state_sha256': c.digest(fresh),
-            'current_binding': binding(state['plan'], root), 'cases': rows,
+            'current_binding': binding(state['plan'], root), 'cases': rows, 'transfer_proof': transfer_proof,
             'failures': [copy.deepcopy(found[identifier]) for identifier in ids],
             'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', []) if p['id'] in ids]}
 
@@ -303,10 +305,13 @@ def admit_import(state, proof, donor_path, directory, root, *, donor_sha256):
     fresh = c.initialize(state['plan'], root)
     expected = prepare_import(fresh, donor_path, directory, root, donor_sha256=donor_sha256)
     need(c.digest(proof) == c.digest(expected), 'import proof differs from exact donor/current binding')
+    # The hash-pinned interface is an adapter to the authoritative transfer
+    # protocol, including its persistent identities and pending-repair guards.
+    donor = c.bounded_read(Path(donor_path), 'historical donor index')
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed before admission')
     candidate = copy.deepcopy(fresh)
-    candidate['failures'] = copy.deepcopy(expected['failures'])
-    candidate['pending_post_merge'] = copy.deepcopy(expected['pending_post_merge'])
-    apply(candidate, expected['cases'], root)
+    adopt(candidate, donor, donor['plan'], expected['transfer_proof'], root)
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed during admission')
     candidate['historical_custody_import'] = {'kind': IMPORT_KIND, 'proof_sha256': c.digest(expected),
         'donor_path': expected['donor_path'], 'donor_sha256': expected['donor_sha256']}
     verify(candidate, root)
