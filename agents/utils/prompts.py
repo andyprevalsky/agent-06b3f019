@@ -321,9 +321,8 @@ def format_required_output_schema_user_message(
         )
     return (
         "Required output schema:\n"
-        "Gather required evidence in your tool results before calling attempt_completion, "
-        "which takes no arguments. Optional fields may be omitted. Present fields are extracted "
-        "from your tool history, not passed to it:\n"
+        "Gather required evidence in your tool results before calling attempt_completion. "
+        "Optional fields may be omitted. Present fields are extracted from your tool history:\n"
         f"{fields_desc}"
     )
 
