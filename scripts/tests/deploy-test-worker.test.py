@@ -673,6 +673,59 @@ class CloudCampaign(unittest.TestCase):
         cases,_,cleaned,_=self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
         self.assertEqual('FAIL',cases['task-16']);self.assertEqual('PASS',cases['task-0']);self.assertTrue(cleaned)
 
+    def seal_native_lifecycle(self, fleet, *, teardown='0', benches='task-5'):
+        """Run the fleet's actual lifecycle writer for a controller that exited 1."""
+        text=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=text.index("<<'PY'\n",text.index('# Seal the lifecycle after provider audit'))
+        body=text[text.index('\n',start)+1:text.index('\nPY\n',start)]
+        owner=cycle.read(fleet/'_batch/lifecycle.json')['fleet_owner_token']
+        (fleet/'_batch/lifecycle.json').unlink()
+        subprocess.run([sys.executable,'-c',body,str(fleet),owner,fleet.name,str(self.root),'1',teardown,'0','1',
+                        '1' if benches else '0',str(self.root/'registry'),'0','1'],check=True,timeout=30,
+                       env={**os.environ,'CLOUDBENCH_AUTOSCALER_FAILED_BENCHES':benches})
+
+    def mass_agent_autoscaler_capacity_failure(self, **lifecycle):
+        """PR #1760 smoke: the task passed, its worker clone was capacity-denied, teardown was verified."""
+        fleet=self.runs/'fleet-5'
+        (fleet/'task-5/autoscaler.failed').write_text('Machine-count capacity unavailable for worker clone\n')
+        self.seal_native_lifecycle(fleet,**lifecycle)
+        self.summary['status']='failed';self.summary['jobs'][5].update(status='failed',controller_exit_code=1)
+        self.seal_campaign(self.campaign)
+        return self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
+
+    def test_autoscaler_capacity_failure_is_one_verified_failure_not_an_unverified_gate(self):
+        from deploy_test_result import validate
+        cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure()
+        self.assertEqual('FAIL',cases['task-5'])
+        self.assertEqual({name:'PASS' for name in self.request['checks'] if name!='task-5'},
+                         {k:v for k,v in cases.items() if k!='task-5'})
+        self.assertTrue(cleaned)
+        self.assertEqual('Machine-count capacity unavailable for worker clone',
+                         details['task-5']['mandatory_autoscaler_failure'])
+        result={**{k:self.request[k] for k in ('token','source','gate')},'cases':cases,'complete':True,
+                'cleanup_complete':cleaned,'reused':False}
+        self.assertEqual((cases,True),validate(result,self.request,1))
+        lifecycle=cycle.read(self.runs/'fleet-5/_batch/lifecycle.json')
+        self.assertEqual('failed',lifecycle['status'])  # existing consumers keep the run-level verdict
+        self.assertEqual((True,['task-5']),(lifecycle['cleanup_verified'],lifecycle['autoscaler_failed_benches']))
+
+    def test_autoscaler_failure_with_unverified_teardown_still_blocks_cleanup(self):
+        cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure(teardown='1')
+        self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+        self.assertIn('native cleanup was not verified',details['task-5']['unverified'])
+
+    def test_unattributed_failed_lifecycle_still_blocks_cleanup(self):
+        cases,_,cleaned,_=self.mass_agent_autoscaler_capacity_failure(benches='')
+        self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+
+    def test_fleet_attributes_every_autoscaler_failure_branch_to_its_bench(self):
+        text=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=text.index('AUTOSCALER_FAILED_BENCHES=()\n')
+        loop=text[start:text.index('\ndone\n',start)]
+        self.assertNotIn('AUTOSCALER_FAILURE=1\n        ',loop.split('if [ "$autoscaler_bench_failed" = 1 ]')[0])
+        self.assertGreaterEqual(loop.count('autoscaler_bench_failed=1'),7)
+        self.assertIn('AUTOSCALER_FAILED_BENCHES+=("${CHILD_BENCH[$j]}")',loop)
+
     def test_execute_seventeen_tasks_crosses_real_capacity_and_receipt_boundary(self):
         import shutil
         import runpy

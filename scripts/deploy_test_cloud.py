@@ -41,8 +41,15 @@ def collect_fleet(request, root, fleet, started, native_exit):
         raise ValueError('invalid native teardown audit')
     audit = dict(audit_rows)
     release = float((fleet / 'teardown-ownership/provider-teardown-verified.epoch').read_text())
+    # A failed mandatory autoscaler fails its run but not the verified release of
+    # its resources; the fleet seals both facts (PR #1760 smoke, 2026-11-07).
+    autoscaler_failed = lifecycle.get('autoscaler_failed_benches')
+    autoscaler_only = (lifecycle.get('status') == 'failed' and lifecycle.get('cleanup_verified') is True
+                       and native_exit == 1 and isinstance(autoscaler_failed, list) and autoscaler_failed
+                       and set(autoscaler_failed) <= set(request['checks']))
     if (type(lifecycle.get('version')) is not int or lifecycle['version'] != 1
-            or lifecycle.get('status') != 'verified' or lifecycle.get('run_id') != fleet.name
+            or (lifecycle.get('status') != 'verified' and not autoscaler_only)
+            or lifecycle.get('run_id') != fleet.name
             or lifecycle.get('workspace_root') != str(root)
             or type(lifecycle.get('controller_exit_code')) is not int
             or lifecycle.get('controller_exit_code') != native_exit
@@ -79,9 +86,26 @@ def collect_fleet(request, root, fleet, started, native_exit):
                              'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
         except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
             details[name] = {'unverified': str(error), 'path': str(child)}
+    for name in autoscaler_failed if autoscaler_only else ():
+        if cases[name] == 'PASS':
+            cases[name] = 'FAIL'
+        if cases[name] == 'FAIL':
+            details[name]['mandatory_autoscaler_failure'] = autoscaler_reason(fleet / name)
     if native_exit != 0 and all(v == 'PASS' for v in cases.values()):
         cases = dict.fromkeys(cases, 'UNVERIFIED')
     return cases, details, True, str(fleet)
+
+
+def autoscaler_reason(directory):
+    """The native autoscaler's own first-line reason, or an explicit evidence gap."""
+    for leaf in ('autoscaler.failed', 'autoscaler.acceptance-failed'):
+        path = directory / leaf
+        if path.is_file() and not path.is_symlink():
+            with path.open(errors='replace') as stream:
+                reason = stream.readline(4096).strip()
+            if reason:
+                return reason
+    return 'mandatory autoscaler failed; see the fleet controller log'
 
 
 def campaign_width(checks):
