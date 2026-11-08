@@ -19,6 +19,8 @@ tags:
 sources:
   - agent 77783ad2-f547-473d-8191-a98c173edc97
   - commit 87b887bd39f8d762976fb33511aaafcb8e023512
+  - PR #1770
+  - commit 5066feea73da4a966aa7655ccbc40ea8c26529a8
 repro: front-end/src/tests/blackbox/trajectory-work-batch.blackbox.tsx
 status: fixed
 ---
@@ -96,10 +98,23 @@ raw Message INSERT normalization and immutability. The standard Vitest include
 pattern discovers both; the frontend coverage-blackbox deploy gate runs them
 for this front-end change. Golden reference: not applicable (no approval-gated hunk).
 
+Deployment: PR1770 merged as `5066feea73da4a966aa7655ccbc40ea8c26529a8`.
+Exact-merge Vercel, Render, endpoint probes and all production-semantic jobs
+passed. Four final-source quick gates passed;275 provider/dependency checks and
+two historical custody checks remain explicitly UNVERIFIED under the recorded
+policy qualifications. The Mac binary was not built/released because Electron
+installation returned HTTP504. A separate production payment mixed-mode
+admission defect remains native ERROR with a delegated repair and unreleased
+100c live allocation. Neither exception is a PASS or financial cleanup credit.
+Full source/evidence/recovery and the five repair links are recorded in
+`docs/handoffs/pr-1770-closeout/`.
+
 ## Human feedback
 
 The user required completing RCA followed by deployment and being relentlessly
-resourceful. No additional correction or rejected fix was recorded.
+resourceful. The user clarified that the incorrect duration was on the main
+agent work row, not a browser/sub-agent row. The MessageList regression covers
+that main-row label. No rejected fix was recorded.
 
 ## Reusable lesson
 

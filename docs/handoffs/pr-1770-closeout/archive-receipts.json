@@ -1,0 +1,129 @@
+{
+  "format": "PR1770-ARCHIVE-RECEIPTS-V1",
+  "receipts": {
+    "final_core": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeouts/pr-1770/final-core-20261108-5066-v1.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "5d87aa5f2c2e523678814c73232751d921bdf7eeab44493e920e841218694698",
+      "gzip_sha256": "45f52f45ef0530b9db7abd9aa94d385f478f5e3b6c6a33d644b9fc6a0d25d5f6",
+      "stored_bytes": 3138729618,
+      "frames": 375,
+      "files": 66656,
+      "original_bytes": 12356205952,
+      "manifest_sha256": "523e4da7db55348c2109310f9860cd2d959b913b1acbb6dbd5868af188d07126",
+      "full_readback_verified": true
+    },
+    "historical_branches": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeouts/pr-1770/local-branches-main-base-v2.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "17e50a1d117ff88d57e1ffad7cb4016743b5ae663cfb7502db2c82f3f4c8268e",
+      "gzip_sha256": "34191d67c94475fdad3bd84caa011d0d5f753f903f2d01f5f60f28ae301ba24b",
+      "stored_bytes": 3239535,
+      "frames": 1,
+      "files": 4,
+      "original_bytes": 3347207,
+      "manifest_sha256": "973009c1eb561ff31607aa4395fdfdc0fbb3c3e079ca2d1e36fc44ae4cee5a98",
+      "full_readback_verified": true
+    },
+    "historical_custody_base": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeouts/pr-1770/historical-custody-native-recovery-v1.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "fb0bc5d5623b2fa854900064f5d5868c4659c282728b6a18c2da2940fdfddf8d",
+      "gzip_sha256": "192896c5c700f10d39b1af31308b1940609162937f6cad36b8241b01ca05fe6a",
+      "stored_bytes": 180809384,
+      "frames": 22,
+      "files": 1869,
+      "original_bytes": 795413168,
+      "manifest_sha256": "3b84a29c2cb594a7003bbdbf9e17813587fdc7d3ec540bf4c25f81b4ef7dbc7a",
+      "full_readback_verified": true
+    },
+    "historical_custody_v2_closure": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeouts/pr-1770/historical-custody-closure-supplement-v2.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "43e436ec6cc00f3afd7247e5fb1b19efbb97da472534f409cc2b392f5a9c113a",
+      "gzip_sha256": "33088e8fe205c8f2bebb7ba0ff497667e13d2f98be1c6eef557a081baeab6fb7",
+      "stored_bytes": 36722433,
+      "frames": 5,
+      "files": 96,
+      "original_bytes": 194746290,
+      "manifest_sha256": "4d10420cd37997af21e34d72eda20635b555468d64aa8f4e644967f588d9e8d4",
+      "full_readback_verified": true
+    },
+    "completed_run_renderer": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeouts/pr-1770/renderer-completed-run-v1.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "af7901611fbc9e078283f0781df78aa50934402b73bb5c7a79b286616867ec5e",
+      "gzip_sha256": "2c36f99523ed400299c89b65aaf859e26c965a83ebd2477c23efe33b7e837be4",
+      "stored_bytes": 42040,
+      "frames": 1,
+      "files": 4,
+      "original_bytes": 107781,
+      "manifest_sha256": "0f2654debda099d59b8a92f0a7daf66eb1e5069b30cf9f58367fdae389c74b6c",
+      "full_readback_verified": true
+    }
+  },
+  "independent_core_restore": {
+    "format": "PR1770-FINAL-CORE-INDEPENDENT-RESTORE-V1",
+    "observed_at": "2026-11-08T11:31:53.813934+00:00",
+    "receipt_sha256": "f9ba13d0cdcd46e98e4090db4b740da60c439c1c57673dfc46d4d8b5e515d5a1",
+    "restored_files": 66656,
+    "restored_original_bytes": 12356205952,
+    "embedded_manifest_sha256": "523e4da7db55348c2109310f9860cd2d959b913b1acbb6dbd5868af188d07126",
+    "native_restore_exit": 0,
+    "empty_destination": true,
+    "independent_object_stream": true,
+    "every_file_hash_verified_by_native_restore": true,
+    "no_source_object_alternates": true
+  },
+  "independent_historical_branch_restore": {
+    "observed_at": "2026-11-07T21:52:53.853982+00:00",
+    "bundle_sha256": "4e3a5fbb04a164440f6ffc041da4a788a093651ed574be059ee2da4560c90b24",
+    "branch_count": 72,
+    "all_refs_recovered": true,
+    "independent_remote_main_clone": true,
+    "used_existing_object_alternates": false,
+    "durable_main_base": "20f6e41f20dd044305838802bfcfbfa4c3e3df7b",
+    "bundle_bytes": 3333815
+  },
+  "independent_supplemental_commits": {
+    "format": "PR1770-SUPPLEMENTAL-INDEPENDENT-RECOVERY-V1",
+    "observed_at": "2026-11-08T10:38:45.503470+00:00",
+    "independent_main_includes_app_merge": true,
+    "no_object_alternates": true,
+    "supplemental_commits": {
+      "2529b4d51a06021b9cbfa89a88f4f3440e4c9eee": {
+        "bundle": "supplementary-validation-commit.bundle",
+        "sha256": "81fb8d8e85793606fbe7144cccd61ee9a1f88a5d1a3a1c2fc10a82eeb62c5ecb",
+        "native_commit_exists": true
+      },
+      "2feae2c95fe928ca34c482f16fa76cd6553b7bb3": {
+        "bundle": "selector-freeze-intermediate.bundle",
+        "sha256": "2d89ca2c34bd2a88f328d2ba3929566f23b1f7d73ec1384252cbf76dd989a970",
+        "native_commit_exists": true
+      }
+    },
+    "remote_main_ref": "refs/remotes/origin/main",
+    "remote_main_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+    "validation_note": "Main ancestry checked against the explicit independent remote-main ref after supplemental bundle fetches changed FETCH_HEAD."
+  },
+  "custody_v2_independent_restore": {
+    "format": "PR1770-CUSTODY-CLOSURE-SUPPLEMENT-RESTORE-V1",
+    "files": 96,
+    "all_hashes_verified": true,
+    "empty_destination_restore": true,
+    "original_known_and_historical_readonly_validation": 2,
+    "receipt_sha256": "9a8f950cdf2664c9b3d053cd7fe680255f73cd29194be2f82e151e2d6351ed24"
+  },
+  "renderer_independent_restore_files": 4,
+  "renderer_sha256": "712b81666f57fb0d6b37d353e0634901fe2101d1335c7f6c2f618182bbd9761b"
+}
