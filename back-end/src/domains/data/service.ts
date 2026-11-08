@@ -150,7 +150,11 @@ function resultMessage(
 // ---------------------------------------------------------------------------
 
 export async function grep(userId: string, params: GrepParams): Promise<GrepResult> {
-  const input = await resolveTaskPathScope(userId, validateGrepInput(params), params.agent_id);
+  const input = await resolveTaskPathScope(
+    userId,
+    await validateGrepInput(params),
+    params.agent_id
+  );
   const sourceResults = await searchAllSources(userId, input, params.agent_id);
   const { soleTrajectory, oldestFirst, contextUnit } = displayOrder(input);
 
