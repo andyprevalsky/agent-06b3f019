@@ -9,6 +9,7 @@ import {
   resetGithubRateLimitStateForTests,
   type GithubRateLimitInfo,
 } from './githubRateLimit';
+import { githubPoolFetch } from './githubTokenPool';
 import { createLogger } from './logger';
 
 const log = createLogger('GitHub');
@@ -86,7 +87,7 @@ async function lookupRepoVisibility(
     const response = await githubFetch(
       `${githubApiBase()}/repos/${owner}/${repo}`,
       { headers: githubApiAuthHeaders() },
-      { component: 'GithubRepoVisibility' }
+      { component: 'GithubRepoVisibility', fetchImpl: githubPoolFetch() }
     );
     if (response.status === 404) return { visibility: 'missing' };
     if (!response.ok) {
@@ -130,7 +131,7 @@ export async function fetchGithubBranchHeadSha(
         headers: { ...githubApiAuthHeaders(), Accept: 'application/vnd.github.sha' },
         signal: AbortSignal.timeout(10_000),
       },
-      { maxWaitMs: 0, component: 'GithubBranchHead' }
+      { maxWaitMs: 0, component: 'GithubBranchHead', fetchImpl: githubPoolFetch() }
     );
     if (!response.ok) {
       log.warn('GitHub branch head lookup failed', {
