@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 import assert from 'node:assert/strict';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { randomUUID, createHash } from 'node:crypto';
@@ -18,6 +17,8 @@ async function main() {
   const schema = `managed_producer_${randomUUID().replaceAll('-', '')}`;
   const url = new URL(process.env.DATABASE_URL!);
   url.searchParams.set('schema', schema);
+  // The engine's one-time TLS setenv must finish before another client reads process.env.
+  await prisma.$connect();
   const db = new PrismaClient({ datasources: { db: { url: url.toString() } } });
   const original = prisma.$transaction;
   try {
@@ -193,8 +194,8 @@ async function main() {
       ).phase,
       'RETIRED'
     );
-    console.log(
-      'PASS actual Postgres lease/resume/staged0wire/concurrent-root/inbound-CAN/retirement'
+    process.stdout.write(
+      'PASS actual Postgres lease/resume/staged0wire/concurrent-root/inbound-CAN/retirement\n'
     );
   } finally {
     prisma.$transaction = original;
@@ -204,6 +205,8 @@ async function main() {
   }
 }
 main().catch((error) => {
-  console.error(error);
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
   process.exitCode = 1;
 });
