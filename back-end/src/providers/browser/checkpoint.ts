@@ -5,6 +5,7 @@ import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets'
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import type { HydrationTarget } from './resumeLifecycle';
 import type { SteelLifecycleMutation } from '../steel/lifecycleClaim';
@@ -381,10 +382,25 @@ export async function restoreLogicalBrowserCheckpoint(
   }
   log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'navigation_started' });
   for (const { page, url } of prepared) {
-    await assertRestoreBinding();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await retryWithBackoff(
+      async () => {
+        await assertRestoreBinding();
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      },
+      {
+        maxRetries: 3,
+        fixedDelays: [500, 1_500],
+        isRetryable: isProxyTunnelFailure,
+        component: 'browser-checkpoint:restore-navigation',
+      }
+    );
   }
   log.info('Logical browser tabs restored', { taskId, tabs: prepared.length });
+}
+
+/** The proxy never opened a tunnel, so the site saw nothing and reloading repeats no request. */
+function isProxyTunnelFailure(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('net::ERR_TUNNEL_CONNECTION_FAILED');
 }
 
 /** Seed each origin in the destination tab's storage namespace, including late-created frames. */
