@@ -76,5 +76,5 @@
   "freedom_and_protected_instructions": "PRESERVED",
   "local_and_remote_branches": "RETAINED",
   "preservation": "Receipts adjacent; final evidence receipt added after full readback; review metadata archive receipt in records PR discussion",
-  "records_pr": null
+  "records_pr": "Records-only follow-up linked from https://github.com/Rose-Ai-Labs/rose/pull/1830"
 }
