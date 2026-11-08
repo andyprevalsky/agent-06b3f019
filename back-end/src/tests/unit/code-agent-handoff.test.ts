@@ -112,7 +112,7 @@ async function main(): Promise<void> {
   await test('E2B code-agent prompt: goal end condition, standard fields, no questions, ship only when asked', () => {
     for (const roseDesktop of [false, true]) {
       const prompt = buildCodeAgentSystemPrompt({ roseDesktop });
-      assert.ok(prompt.includes('Your task is a goal.'), 'goal framing missing');
+      assert.ok(prompt.includes('Your task is a goal that ends when'), 'goal framing missing');
       assert.ok(prompt.includes(CODE_AGENT_HANDOFF_SCHEMA_PATH), 'schema path missing');
       assert.ok(prompt.includes('rose_handoff'), 'standard fields missing');
       assert.ok(
@@ -124,14 +124,12 @@ async function main(): Promise<void> {
         'questions mentioned as a field'
       );
       assert.ok(
-        prompt.includes('only when your task or the user asks you to publish or ship'),
+        prompt.includes('only when your task or the user asks you to ship'),
         'merge rule missing'
       );
     }
     assert.ok(
-      buildLocalCodeAgentSystemPrompt().includes(
-        'only when your task or the user asks you to publish or ship'
-      )
+      buildLocalCodeAgentSystemPrompt().includes('only when your task or the user asks you to ship')
     );
   });
 

@@ -1912,7 +1912,9 @@ HANDOFF_STANDARD_SCHEMA: Dict[str, Any] = {
             "enum": list(HANDOFF_STATUSES),
             "description": (
                 "complete: the task is done and verified. blocked: an external condition you cannot change "
-                "stops you (name it in summary). failed: you could not do it."
+                "stops you after reasonable attempts (name it and its evidence in summary). failed: the task "
+                "cannot be done here, shown by what you tried. Never blocked or failed because the work is "
+                "hard, slow, uncertain or would benefit from clarification."
             ),
         },
         "summary": {
@@ -1941,8 +1943,11 @@ DEFAULT_HANDOFF_SCHEMA: Dict[str, Any] = {
 # whose condition ends with writing the handoff. The ws-server prefixes /goal.
 HANDOFF_END_CONDITION = (
     f"End condition: you are done only when {CODE_AGENT_HANDOFF_PATH} holds one JSON object valid against the "
-    f"JSON Schema in {CODE_AGENT_HANDOFF_SCHEMA_PATH}, with {HANDOFF_STANDARD_KEY}.status set to complete "
-    "(the task is done and verified), blocked or failed. Do not ask questions: nobody answers them. Make "
+    f"JSON Schema in {CODE_AGENT_HANDOFF_SCHEMA_PATH} (show it in this conversation by printing the written "
+    "file and validating it against that schema with a command), with "
+    f"{HANDOFF_STANDARD_KEY}.status set to complete (the task is done and verified), or to blocked or failed "
+    "only after reasonable attempts show the task cannot be finished here, never because it is hard, slow, "
+    "uncertain or would benefit from clarification. Do not ask questions: nobody answers them. Make "
     f"reasonable assumptions, proceed, and list them in {HANDOFF_STANDARD_KEY}.summary."
 )
 # Close responses without a ``handoff`` key come from sessions outside E2B (a

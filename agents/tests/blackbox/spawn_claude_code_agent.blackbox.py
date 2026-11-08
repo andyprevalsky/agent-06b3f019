@@ -4054,6 +4054,16 @@ async def _run_all_tests():
     await r.record_async("handoff_valid_json_is_tool_result", test_handoff_valid_json_is_the_tool_result)
     await r.record_async("handoff_missing_or_invalid_truthful", test_handoff_missing_or_invalid_is_reported_truthfully)
     await r.record_async("handoff_replay_31f51d25_bounded", test_handoff_replay_31f51d25_result_is_bounded)
+    r.record("handoff_task_is_goal_with_end_condition", test_handoff_task_is_a_goal_ending_in_the_handoff_condition)
+    r.record("handoff_schema_reserves_standard_key", test_handoff_schema_reserves_the_standard_key)
+    await r.record_async(
+        "handoff_blocked_or_failed_without_declared_fields",
+        test_handoff_blocked_or_failed_is_reported_without_declared_fields,
+    )
+    await r.record_async(
+        "handoff_complete_needs_standard_and_declared", test_handoff_complete_needs_standard_and_declared_fields
+    )
+    await r.record_async("claude_ws_server_task_is_a_goal", test_claude_ws_server_starts_every_task_as_a_goal)
     await r.record_async("handoff_spawn_activity_end_to_end", test_spawn_activity_returns_close_handoff_as_result)
     await r.record_async(
         "run_verifier_disabled_schema_incomplete",
@@ -4133,6 +4143,9 @@ async def _run_all_tests():
     r.record("native_codex_usage_retains_session_scope", test_native_codex_usage_retains_session_scope)
     await r.record_async("native_codex_terminal_finishes_idle_app_server", test_native_codex_terminal_event_finishes_idle_app_server)
     await r.record_async("native_codex_terminal_respects_hold_and_newer_active_turn", test_native_codex_terminal_respects_hold_and_newer_active_turn)
+    await r.record_async(
+        "native_codex_active_goal_outlives_completed_turn", test_native_codex_active_goal_outlives_a_completed_turn
+    )
     # spawn_claude_code_activity
     await r.record_async(
         "spawn_activity_resolves_claude_credential",
