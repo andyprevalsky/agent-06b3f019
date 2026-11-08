@@ -1,0 +1,131 @@
+{
+  "agent_cutover": {
+    "required": false,
+    "runtime_files": [],
+    "workflow_changed": false
+  },
+  "changed_files": 7,
+  "cutover_verify": null,
+  "finished_at": "2026-11-08T13:29:19Z",
+  "fly": {
+    "reason": "no agent runtime or deploy-agents.yml change in the merge",
+    "required": false
+  },
+  "github_waits": [
+    {
+      "head": "4c67384926326c3a43d8a1eb371871973038aca0",
+      "kind": "run-start",
+      "outcome": "found",
+      "polls": 2,
+      "run_id": "42485188122",
+      "waited_s": 11.9,
+      "workflow": "chat-lifecycle-ratchet.yml"
+    },
+    {
+      "attempt": 1,
+      "conclusion": "success",
+      "kind": "run-complete",
+      "outcome": "completed",
+      "polls": 1,
+      "run_id": "42485188122",
+      "status": "completed",
+      "waited_s": 0.9,
+      "workflow": "chat-lifecycle-ratchet.yml"
+    }
+  ],
+  "merged_sha": "4c67384926326c3a43d8a1eb371871973038aca0",
+  "render": {
+    "backend_diff": [],
+    "deploy_id": "dep-dbo7erfb9u1s73darq20",
+    "deploy_status": "live",
+    "equivalence": null,
+    "finished_at": "2026-11-08T13:29:19Z",
+    "live_commit": "4c67384926326c3a43d8a1eb371871973038aca0",
+    "merged_sha": "4c67384926326c3a43d8a1eb371871973038aca0",
+    "observed_live_commit": "4c67384926326c3a43d8a1eb371871973038aca0",
+    "observed_live_deploy_id": "dep-dbo7erfb9u1s73darq20",
+    "polls": 44,
+    "provider": "render",
+    "service_paths": [
+      "back-end/",
+      "render.yaml",
+      "package.json",
+      "package-lock.json"
+    ],
+    "started_at": "2026-11-08T13:22:03Z",
+    "status": "live",
+    "then": null,
+    "waited_s": 436.0,
+    "wall_s": 436.0
+  },
+  "schema_version": 1,
+  "semantic": {
+    "attempt": 1,
+    "completed_at": "2026-11-08T13:34:59Z",
+    "conclusion": "success",
+    "created_at": "2026-11-08T13:29:20Z",
+    "dispatch": {
+      "at": "2026-11-08T13:29:19Z",
+      "inputs": {
+        "backend_url": "https://navi-j9a9.onrender.com",
+        "frontend_url": "https://www.roselabs.ai",
+        "source_sha": "4c67384926326c3a43d8a1eb371871973038aca0"
+      },
+      "ref": "main"
+    },
+    "display_title": "Production semantic gate source_sha=4c67384926326c3a43d8a1eb371871973038aca0",
+    "error": "gh run view 42485188122 failed: HTTP 403: API rate limit exceeded for user ID 25310436. If you reach out to GitHub Support for help, please include the request ID ED3A:1AEEFD:4303FE:7BB36D:6AF0793C and timestamp 2026-11-08 13:29:32 UTC. For more on scraping GitHub and how it may affect your rights, please review our Terms of Service (https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) (https://api.github.com/repos/Rose-Ai-Labs/rose/actions/runs/42485188122/jobs?per_page=100)",
+    "finished_at": "2026-11-08T13:39:00Z",
+    "head_sha": "4742fa80d8839c6fc8b9de98adb592602b684c56",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_plan)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42485188122/job/128745423618"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (web_search)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42485188122/job/128745423675"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (direct_answer)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42485188122/job/128745423691"
+      },
+      {
+        "conclusion": "success",
+        "name": "Semantic frontend flows",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42485188122/job/128745423744"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_execute)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42485188122/job/128745423860"
+      }
+    ],
+    "merged_sha": "4c67384926326c3a43d8a1eb371871973038aca0",
+    "outcome": "passed",
+    "retry": null,
+    "run_id": "42485188122",
+    "source_sha": "4c67384926326c3a43d8a1eb371871973038aca0",
+    "started_at": "2026-11-08T13:29:19Z",
+    "status": "completed",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42485188122",
+    "wall_s": 0.9,
+    "workflow": "chat-lifecycle-ratchet.yml"
+  },
+  "semantic_dispatch": {
+    "command": null,
+    "gate": "open"
+  },
+  "started_at": "2026-11-08T13:29:19Z",
+  "started_epoch": 1794144559.5777323,
+  "status": "passed",
+  "wall_s": 0.0
+}
