@@ -486,6 +486,9 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                  and w.get("input_fingerprint") == state["input_fingerprints"].get(name)}
     active = [c for c in gate["checks"] if c not in case_skips and c not in qualified]
     if not active:
+        if any(v.get('disposition') == 'user / overridden' for v in case_skips.values()) and (
+                not host_admission or host_admission.get('started') is not True):
+            raise ValueError('explicit all-skip gate requires successful native root admission')
         return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
                 "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified}
     # A worker must explicitly consume the case inventory, including exclusions.
@@ -850,8 +853,22 @@ def standing_skip(state: dict, proof: dict, root: Path) -> None:
                 'evidence':str(Path(proof['run_dir']) / 'run.json'), 'policy_source':result['warnings'][0]['policy_source']}}
 
 
+def validate_user_override(entry, state, check):
+    from deploy_failure_report import USER_OVERRIDE, decision
+    approval = entry.get('user_override', {})
+    gate = check.split('/', 1)[0]
+    if (decision(entry) != USER_OVERRIDE or entry.get('check') != check
+            or approval.get('source') != state['source']
+            or approval.get('input_fingerprint') != state['input_fingerprints'].get(gate)):
+        raise ValueError('explicit user override current source/input/check binding changed')
+
+
 def revalidate_standing_skips(state: dict) -> None:
     for key, entry in state.get('skips', {}).items():
+        if entry.get('disposition') == 'user / overridden':
+            validate_user_override(entry['rca'], state, key)
+            if entry['source'] != state['source'] or entry.get('input_fingerprint') != state['input_fingerprints'].get(key.split('/', 1)[0]):
+                raise ValueError('explicit user override projection changed')
         if 'standing_skip' in entry:
             if (entry['source'] != state['source'] or entry.get('input_fingerprint')
                     != state['input_fingerprints'].get(key.split('/',1)[0])):
@@ -934,6 +951,10 @@ def adjudicate(state: dict, report: dict) -> None:
                 or entry.get("native_result") != failure["native_result"]):
             raise ValueError("RCA receipt has the wrong source or check")
         disposition = decision(entry)
+        if disposition == 'user / overridden':
+            validate_user_override(entry, state, failure['check'])
+            if entry.get('prior_waiver') != failure.get('prior_waiver'):
+                raise ValueError('explicit user override renewal changed')
         if 'standing_policy' in entry:
             # A refresh renewal retains the original native failure, never fabricates a new FAIL.
             prior = failure.get('prior_waiver')
@@ -951,7 +972,7 @@ def adjudicate(state: dict, report: dict) -> None:
         if disposition == "execution required":
             if failure["complete"]:
                 raise ValueError("execution recovery requires an incomplete occurrence")
-        elif disposition != "blocking" and not failure["complete"]:
+        elif disposition not in {"blocking", "user / overridden"} and not failure["complete"]:
             raise ValueError("unverified/incomplete execution cannot be waived as a completed case")
         decisions.append((failure, entry, disposition))
     # Atomic transition: UNKNOWN leaves every occurrence open, never drops peers.
@@ -962,7 +983,7 @@ def adjudicate(state: dict, report: dict) -> None:
     for failure, entry, disposition in decisions:
         failure["rca"] = entry
         failure["disposition"] = disposition
-        if failure['source'] != state['source'] and disposition not in {'blocking', 'execution required'}:
+        if failure['source'] != state['source'] and disposition not in {'blocking', 'execution required', 'user / overridden'}:
             # Same renewal semantics as refresh: old native facts never become a new-source exclusion.
             prior = {'source': failure['source'], 'rca': entry, 'disposition': disposition}
             state.setdefault('superseded_skips', []).append(prior)
@@ -2071,7 +2092,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
         gate = key.split("/", 1)[0]
         if gate in removed:
             continue  # Original qualification remains in superseded_skips below.
-        if skip.get("input_fingerprint") == fingerprints.get(gate):
+        if skip.get('disposition') != 'user / overridden' and skip.get("input_fingerprint") == fingerprints.get(gate):
             carry[key] = {**skip, "source": new["source"], "original_source": skip["source"]}
         elif skip.get("disposition") == "pending post-merge":
             # A pending qualification is not an executed handoff: with changed inputs the case simply
@@ -2083,7 +2104,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
             revisit.append({"id": uuid.uuid4().hex, "check": key, "gate": gate,
                             "source": new["source"], "native_result": "prior waived failure; changed inputs",
                             "command": new_gates[gate]["command"],
-                            "complete": True, "phase": "refresh", "prior_waiver": skip})
+                            "complete": skip.get("disposition") != "user / overridden", "phase": "refresh", "prior_waiver": skip})
     state["superseded_skips"] = [*state.get("superseded_skips", []), *state["skips"].values()]
     state["skips"] = carry
     kept_warnings, stale_warnings = [], []

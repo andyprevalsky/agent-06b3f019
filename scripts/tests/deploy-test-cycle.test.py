@@ -7207,4 +7207,134 @@ class Round49RetirementCertificates(unittest.TestCase):
         self.assertEqual(process['reaped'][0], {'pid': 900002, 'status': 256})
 
 
+
+class ExplicitAgentCardOverride(unittest.TestCase):
+    def setUp(self):
+        import deploy_failure_report as report
+        self.report = report
+        self.source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        self.native = {'head': 'c' * 40, 'digest': 'd' * 64}
+        self.six = ['agentcard-lifecycle/agentcard-lifecycle'] + ['smoke/' + x for x in (
+            'agent-payment-test-shop', 'agent-payment-setup-resume', 'agent-payment-idempotent-abandonment',
+            'agent-payment-abandonment', 'agent-payment-new-user-journey')]
+        self.other = ['smoke/required-' + str(i) for i in range(9)]
+        self.state = {'source': self.source, 'phase': 'triage', 'ready': False, 'failure_phase': 'initial',
+                      'repair_gates': [], 'skips': {}, 'input_fingerprints': {'smoke': 'e' * 64, 'agentcard-lifecycle': 'f' * 64},
+                      'plan': {'gates': [{'name': 'smoke', 'checks': [s.split('/')[1] for s in self.six[1:] + self.other], 'command': ['never']},
+                                        {'name': 'agentcard-lifecycle', 'checks': ['agentcard-lifecycle'], 'command': ['never']}]}}
+        self.state['failures'] = [{'id': str(i), 'check': check, 'gate': check.split('/')[0], 'source': self.native,
+                                  'native_result': 'UNVERIFIED', 'complete': False, 'command': ['never']}
+                                 for i, check in enumerate(self.six + self.other)]
+        self.state['pending'] = [f['id'] for f in self.state['failures']]
+        self.entries = [{**f, 'description': 'explicit omission', 'evidence': 'retained original UNKNOWN', 'attribution': 'UNKNOWN',
+                         'user_override': {'message': {'thread_id': 'ph7bsx6sqkqz9eap7w95xcs9t98gdv97',
+                          'turn_id': 'turn:01a1bcfc-c96e-73c0-b344-d80486cd674c', 'reply': 'SKIP agentcard bs'},
+                          'question_checks': list(self.six), 'source': self.source,
+                          'input_fingerprint': self.state['input_fingerprints'][f['gate']]}}
+                        for f in self.state['failures'][:6]]
+
+    def qualify(self):
+        c.adjudicate(self.state, {'partial': True, 'failures': self.entries})
+
+    def test_incomplete_unknown_omits_exact_six_and_keeps_other_nine_pending(self):
+        self.qualify()
+        self.assertEqual(set(self.state['skips']), set(self.six))
+        self.assertEqual(self.state['pending'], [str(i) for i in range(6, 15)])
+        self.assertFalse(self.state['ready'])
+        self.assertTrue(all(f['complete'] is False and f['native_result'] == 'UNVERIFIED' for f in self.state['failures']))
+        gate = self.state['plan']['gates'][0]
+        qualified = c.reuse_qualifications(self.state, gate)
+        self.assertEqual([v for v in gate['checks'] if v not in qualified], [x.split('/')[1] for x in self.other])
+        card = self.state['plan']['gates'][1]
+        result = c._execute(card, self.state, Path('/unused'), Path('/unused'), host_admission={'started': True})
+        self.assertEqual(result['cases'], {'agentcard-lifecycle': 'SKIP'})
+        self.assertIs(result['executed'], False); self.assertIsNone(result['native_exit'])
+
+    def test_exact_authority_scope_and_exclusive_flags_required(self):
+        original = self.entries[0]
+        for key in ('resource_skip', 'external_provider', 'repair_agent', 'post_merge', 'execute_unverified', 'assigned_repair', 'standing_policy'):
+            with self.subTest(key=key), self.assertRaises(ValueError): self.report.decision({**original, key: False})
+        for check in ['backend-coverage-blackbox/blackbox:iphone', 'smoke/browser-smoke', 'smoke/agent-payment-test-shop-extra']:
+            with self.subTest(check=check), self.assertRaises(ValueError): self.report.decision({**original, 'check': check})
+        for field, value in [('message', {'reply': 'SKIP everything'}), ('question_checks', self.six[:-1]), ('input_fingerprint', True)]:
+            changed = copy.deepcopy(original); changed['user_override'][field] = value
+            with self.assertRaises(ValueError): self.report.decision(changed)
+
+    def test_reuse_and_request_reject_source_input_or_disposition_drift(self):
+        self.qualify()
+        for key, value in [('source', self.native), ('input_fingerprint', '0' * 64)]:
+            entry = self.state['skips'][self.six[0]]; before = copy.deepcopy(entry)
+            entry['rca']['user_override'][key] = value
+            with self.assertRaises(ValueError): c.revalidate_standing_skips(self.state)
+            entry.clear(); entry.update(before)
+        self.state['skips'][self.six[0]]['rca']['user_override']['message']['reply'] = 'not approved'
+        with self.assertRaises(ValueError): c.revalidate_standing_skips(self.state)
+
+    def test_incomplete_generic_external_waiver_still_rejected(self):
+        entry = copy.deepcopy(self.entries[0]); entry.pop('user_override')
+        entry.update(attribution='NOT_INTRODUCED', external_provider={'name': 'test', 'reason': 'outage'})
+        with self.assertRaises(ValueError): c.adjudicate(self.state, {'partial': True, 'failures': [entry]})
+        self.assertEqual(self.state['skips'], {})
+
+    def test_report_marks_override_and_preserves_financial_unknown(self):
+        entry = {**self.entries[0], 'disposition': 'user / overridden'}
+        text = self.report.render({'failures': [entry]})
+        self.assertIn('⚠️ Overridden', text); self.assertIn('$43.96', text); self.assertIn('settlement UNKNOWN', text)
+        self.assertIn('UNVERIFIED', text); self.assertNotIn('native PASS', text)
+
+
+    def test_all_skipped_card_still_requires_native_admission_and_retained_owner_guard(self):
+        self.qualify(); card = self.state['plan']['gates'][1]
+        for admission in (None, {}, {'started': False}, {'started': 1}):
+            with self.subTest(admission=admission), self.assertRaises(ValueError):
+                c._execute(card, self.state, Path('/unused'), Path('/unused'), host_admission=admission)
+        card.update(worker_transport='local-isolated', case_protocol=True)
+        def refused(gate, root, admission, **kwargs):
+            admission['started'] = False
+            return kwargs['operation'](None)
+        with patch.object(c, 'run_with_local_slot', side_effect=refused), self.assertRaises(ValueError):
+            c.execute(card, self.state, Path('/unused'), Path('/unused'))
+        self.state.update(phase='final', plan_digest=c.digest(self.state['plan']), environment='test')
+        with patch.object(c, 'source', return_value=self.source), patch.object(c, 'environment_digest', return_value='test'), \
+             patch.object(c, 'input_fingerprints', return_value=self.state['input_fingerprints']), \
+             patch.object(c, 'reusable_full_pass', return_value=False), \
+             patch.object(c, 'retained_owners', return_value=['agentcard-lifecycle']), patch.object(c, 'execute') as execute:
+            with self.assertRaisesRegex(ValueError, 'unreconciled cleanup'):
+                c.run_phase(self.state['plan'], self.state, Path('/unused'), Path('/unused'))
+            execute.assert_not_called()
+
+    def test_changed_source_even_same_inputs_requires_normal_explicit_renewal(self):
+        import deploy_test_election
+        self.qualify(); old = copy.deepcopy(self.state['plan']); old['source'] = self.source
+        self.state.update(plan=old, plan_digest=c.digest(old), environment='test')
+        new = copy.deepcopy(old); new['source'] = self.native
+        with patch.object(c, 'validate_plan'), patch.object(c, 'source', return_value=self.native), \
+             patch.object(c, 'input_fingerprints', return_value=self.state['input_fingerprints']), \
+             patch.object(c, 'environment_digest', return_value='test'), \
+             patch.object(deploy_test_election, 'prepare', return_value=None), patch.object(deploy_test_election, 'apply'):
+            c.refresh(self.state, old, new, Path('/unused'))
+        self.assertEqual(self.state['skips'], {})
+        renewals = [f for f in self.state['failures'] if f.get('phase') == 'refresh']
+        self.assertEqual(len(renewals), 6); self.assertTrue(all(f['complete'] is False for f in renewals))
+        self.assertTrue(all(f['native_result'] == 'prior waived failure; changed inputs' for f in renewals))
+
+    def test_normal_smoke_request_contains_nine_active_and_five_omissions(self):
+        self.qualify(); gate = self.state['plan']['gates'][0]
+        gate.update(case_protocol=True, result_transport='file', command=['python3', 'scripts/deploy_test_cloud.py'])
+        self.state.update(round=58, environment='e' * 64)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); seen = {}
+            def worker(argv, **kwargs):
+                request = c.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST'])); seen.update(request=request, argv=argv)
+                c.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), {**{k:request[k] for k in ('token','source','gate')},
+                    'cases': dict.fromkeys(request['checks'], 'PASS'), 'complete': True, 'cleanup_complete': True, 'reused': False})
+                return 0, False, False, False
+            with patch.object(c, 'run_command', side_effect=worker), patch.object(c, 'isolated_request', return_value=None):
+                c._execute(gate, self.state, root, root)
+            self.assertEqual(seen['request']['checks'], [x.split('/')[1] for x in self.other])
+            self.assertEqual(set(seen['request']['skips']), {x.split('/')[1] for x in self.six[1:]})
+            self.assertEqual(seen['argv'], ['python3', 'scripts/deploy_test_cloud.py'])
+            self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
+
+
 if __name__ == '__main__': unittest.main()
