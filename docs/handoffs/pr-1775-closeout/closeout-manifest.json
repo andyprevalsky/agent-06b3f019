@@ -7,16 +7,16 @@
  "gated_source": "3bf66999e1a34cf975b7f822188ac62c544c0f5e",
  "deploy_devbox": "3acb6d3e-5cc8-44e0-8c1f-387a7469c8b2",
  "assigned_fix": {
-  "capacity_accounting": "stale 56-Machine worker reservation default already fixed on main (54a651e43); live 2026-11-08: machines_per_org_limit=1000, bench app 31-51 Machines vs ceiling 300; no ceiling or concurrency change",
+  "capacity_accounting": "stale 56-Machine worker reservation default already fixed on main (54a651e43); live 2026-11-08: machines_per_org_limit=1000; bench app observed at 31 (00:05Z) and 51 (00:37Z) Machines vs ceiling 300; no ceiling or concurrency change",
   "evidence": "fleet lifecycle seals cleanup_verified + autoscaler_failed_benches; deploy_test_cloud turns an attributed mandatory-autoscaler failure with verified teardown into one verified FAIL",
-  "proof": "scripts/tests/deploy-test-worker.test.py CloudCampaign (red on old source, 5/5 green), cloudbench-multi-workstream 2h/2h2 on the real fleet, and test-mass-agent-run-0 PASS with worker clone admitted in every completed smoke campaign of this deploy (7)"
+  "proof": "scripts/tests/deploy-test-worker.test.py CloudCampaign (red on old source, 5/5 green); cloudbench-multi-workstream full suite on Linux incl. scenarios 2h/2h2 (evidence/cloudbench-multi-workstream-runs.txt); test-mass-agent-run-0 PASS with its worker clone created and joined in 7 of 8 smoke campaigns of this deploy (the 8th, b2dd6533 on cc3642ae2034, was cancelled by the 04:49Z 1/13 infra stop and is UNVERIFIED)"
  },
  "harness_fix": "structured AgentCard org-MCP 429 retry in the setup fixture; provably rootless pre-creation failures keep their task verdict instead of tripping the 1/13 infra stop; nested composite stages mark the enclosing task (review finding)",
  "rca_cases": [
   "2026-11-07-autoscaler-capacity-failure-sealed-verified-cleanup-as-failed",
   "2026-11-08-rootless-setup-throttle-tripped-smoke-infra-stop"
  ],
- "review": "CodeRabbit merged unreviewed: organization usage spending cap on every head (deploy_review_cycle.py skip --reason usage-cap); three fresh adversarial sub-agent reviews; blocking findings fixed (composite-stage fail-open) or reverted (CHILDFAIL mapping)",
+ "review": "CodeRabbit merged unreviewed: organization usage spending cap; deploy_review_cycle.py skip --reason usage-cap recorded on 6 heads, cc3642ae2034 closed as unavailable (superseded before any review), merged head 3bf66999e sync-inherited from 7da6480dc; fresh adversarial sub-agent reviews ran instead; blocking findings fixed (composite-stage fail-open) or reverted (CHILDFAIL mapping)",
  "repair_goals": [
   {
    "packet": "smoke gate UNVERIFIED after a post-pass cache-ratchet CHILDFAIL (open follow-up of the primary RCA)",
@@ -57,6 +57,7 @@
  "evidence": {
   "handoff_archive": "evidence/archive-receipt-handoff.json",
   "core_archive": "evidence/archive-receipt-core.json",
-  "restore": "closeout_archive.py --env back-end/.env restore --receipt <receipt> --destination <dir>"
+  "restore": "closeout_archive.py --env back-end/.env restore --receipt <receipt> --destination <dir>",
+  "fake_fleet_runs": "evidence/cloudbench-multi-workstream-runs.txt"
  }
 }
