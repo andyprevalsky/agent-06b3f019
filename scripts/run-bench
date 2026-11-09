@@ -175,7 +175,7 @@ run_bench_secret_like_setting() {
         ''|0|1|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|[Oo][Nn]|[Oo][Ff][Ff]) return 1 ;;
     esac
     case "$1" in
-        *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*API_KEY*|*AUTH_HEADER*|*AUTHORIZATION*|*COOKIE*|*CREDENTIAL*|*PRIVATE*|*OTP*|*SIGNATURE*) return 0 ;;
+        *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*API_KEY*|*ACCESS_KEY*|*AUTH_HEADER*|*AUTH_CONFIG*|*AUTH_SOCK*|*AUTHORIZATION*|*COOKIE*|*CREDENTIAL*|*PRIVATE*|*OTP*|*SIGNATURE*) return 0 ;;
         *_KEY|*_B64|*_AUTH|*_DSN|*_PAT|*_PASS|*_PWD|*_JWT|*_PAN|*_CVV|*_CVC|*_PIN|*_EXPIRY) return 0 ;;
     esac
     [[ "$value" =~ $secret_values ]]

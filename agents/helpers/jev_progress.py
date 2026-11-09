@@ -321,7 +321,8 @@ class JEVSession:
 
     def _done(self, future: Any) -> None:
         self.pending.discard(future)
-        if not future.cancelled() and future.exception() is None and (future.result() or {}).get("stopSession"):
+        result = None if future.cancelled() or future.exception() is not None else future.result()
+        if isinstance(result, dict) and result.get("stopSession"):
             self.stopped = True
             self.queued = None
         if not self.closed and not self.stopped and self.queued is not None:

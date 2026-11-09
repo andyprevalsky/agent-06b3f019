@@ -543,6 +543,15 @@ def test_cgroup_throttle_stat_prefers_cpu_stat_local_for_ancestor_quotas():
         with open(os.path.join(base, "cpu.stat"), "w", encoding="ascii") as fh:
             fh.write("usage_usec 10\nthrottled_usec 0\n")
         assert worker._own_cgroup_cpu_stat_path(proc, root) == os.path.join(base, "cpu.stat")
+        # Without cpu.stat.local, a limited ancestor makes the child's zero meaningless: unknown.
+        with open(os.path.join(root, "a", "cpu.max"), "w", encoding="ascii") as fh:
+            fh.write("50000 100000\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) is None
+        with open(os.path.join(root, "a", "cpu.max"), "w", encoding="ascii") as fh:
+            fh.write("max 100000\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) == os.path.join(base, "cpu.stat")
+        with open(os.path.join(root, "a", "cpu.max"), "w", encoding="ascii") as fh:
+            fh.write("50000 100000\n")
         with open(os.path.join(base, "cpu.stat.local"), "w", encoding="ascii") as fh:
             fh.write("throttled_usec 2500000\n")
         chosen = worker._own_cgroup_cpu_stat_path(proc, root)

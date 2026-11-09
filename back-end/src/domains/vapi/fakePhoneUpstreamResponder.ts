@@ -52,7 +52,8 @@ export function respondFakePhoneUpstream(
     const call = state.vapiCalls.get(vapiGet[1]);
     return call === undefined ? [404, { error: 'not found' }] : [200, call];
   }
-  const vapiRecording = /^\/call\/([^/?]+)\/mono-recording$/.exec(request.path);
+  // The downloader falls back to stereo-recording when mono fails (VAPI_RECORDING_ARTIFACT_PATHS).
+  const vapiRecording = /^\/call\/([^/?]+)\/(?:mono|stereo)-recording$/.exec(request.path);
   if (vapiRecording !== null && request.method === 'GET') {
     const call = state.vapiCalls.get(vapiRecording[1]);
     return call?.status === 'ended'

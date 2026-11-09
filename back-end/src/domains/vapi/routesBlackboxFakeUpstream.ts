@@ -11,7 +11,7 @@
  *   GET /__status            — whether the effective Vapi/Twilio base URLs route here
  *   GET /__requests?after=N  — requests this fake received (bounded, newest kept)
  */
-import { Router, type Request } from 'express';
+import { Router, text, type Request } from 'express';
 import { TWILIO_API_BASE_URL, VAPI_BASE_URL, VAPI_PRIVATE_KEY } from './config';
 import {
   respondFakePhoneUpstream,
@@ -60,6 +60,8 @@ function routesToThisFake(baseUrl: string, req: Request): boolean {
 
 export function createBlackboxFakePhoneUpstreamRouter(): Router {
   const router = Router();
+  // The app parses JSON only; Twilio REST calls are form-encoded (hangUpTwilioCall posts Status=completed).
+  router.use(text({ type: 'application/x-www-form-urlencoded' }));
   const state: FakePhoneUpstreamState = { vapiCalls: new Map(), twilioStatuses: new Map() };
   const records: FakePhoneUpstreamRecord[] = [];
   let nextId = 1;

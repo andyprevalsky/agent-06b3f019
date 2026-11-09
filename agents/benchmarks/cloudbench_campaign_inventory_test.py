@@ -4388,6 +4388,10 @@ OPERATOR_SETTING_SECRET_DECOYS = {
     'CLOUDBENCH_FIXTURE_GH_VALUE': 'ghp_fixtureClassicMustNotRecord',
     'CLOUDBENCH_FIXTURE_GH2_VALUE': 'github_pat_fixtureFineGrainedMustNotRecord',
     'CLOUDBENCH_FIXTURE_PRESIGNED': 'https://bucket.invalid/o?X-Amz-Signature=fixture-presign-must-not-record',
+    # Well-known credential names no generic keyword covers (CodeRabbit PR #1865).
+    'CLOUDBENCH_FIXTURE_R2_ACCESS_KEY_ID': 'fixture-access-key-id-must-not-record',
+    'CLOUDBENCH_FIXTURE_DOCKER_AUTH_CONFIG': 'eyJmaXh0dXJlIjoiZG9ja2VyLWF1dGgtbXVzdC1ub3QtcmVjb3JkIn0=',
+    'CLOUDBENCH_FIXTURE_SSH_AUTH_SOCK': '/tmp/ssh-fixture/agent.must-not-record',
 }
 # Same name shapes or URLs without credentials: ordinary operator settings.
 OPERATOR_SETTING_NONSECRET_CONTROLS = {
@@ -4473,6 +4477,11 @@ def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_la
     digest = hashlib.sha256(long_value.encode()).hexdigest()
     assert capped == 'x' * 1024 + f'…[truncated: 1024 of 5000 characters recorded; sha256={digest}]', capped[1000:]
     assert recorded == settings, sorted(set(recorded) ^ set(settings))
+    # The campaign records its own controller identity for the scorecard (CodeRabbit PR #1865):
+    # a concurrency-1 campaign has no shared-inventory owner file to read it from.
+    controller = summary.get('controller') or {}
+    assert isinstance(controller.get('pid'), int) and controller['pid'] > 0, summary.get('controller')
+    assert str(controller.get('birth') or '').strip(), summary.get('controller')
     banner = result.stdout
     for name, value in settings.items():
         if name != 'CLOUDBENCH_FIXTURE_NOTE':

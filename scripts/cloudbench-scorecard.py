@@ -565,7 +565,10 @@ def controller_liveness(run_dir: Path, summary: dict) -> dict:
             break
         except OSError:
             continue
-    pid, start = owner.get("parent_pid", ""), owner.get("parent_start", "")
+    # Without a shared-inventory owner (concurrency 1), use the identity the campaign recorded itself.
+    own = summary.get("controller") if isinstance(summary.get("controller"), dict) else {}
+    pid = owner.get("parent_pid") or str(own.get("pid") or "")
+    start = owner.get("parent_start") or str(own.get("birth") or "")
     if not pid.isdigit() or not start:
         return {"state": "UNVERIFIED", "pid": None, "detail": "campaign controller PID/birth not recorded"}
     current = process_birth(int(pid))

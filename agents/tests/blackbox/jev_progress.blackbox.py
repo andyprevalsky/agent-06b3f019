@@ -377,12 +377,39 @@ async def test_transient_failures_do_not_stop_session():
     assert len(failed) == 3 and all(entry["stage"] == "publish" and entry["status_code"] == 404 for entry in failed)
 
 
+def test_done_callback_ignores_non_dict_results():
+    """CodeRabbit PR #1865: a non-dict activity result must not raise inside the done callback,
+    which would leave the queued prefix unstarted; only a dict stopSession stops the session."""
+    from helpers.jev_progress import JEVSession
+
+    class finished:  # a completed future's surface; hashable like a real future
+        def __init__(self, value):
+            self.value = value
+
+        def cancelled(self):
+            return False
+
+        def exception(self):
+            return None
+
+        def result(self):
+            return self.value
+
+    session = JEVSession("agent-done-callback")
+    for value in ("unexpected", ["stopSession"], None, {}):
+        session._done(finished(value))
+        assert session.stopped is False, value
+    session._done(finished({"stopSession": True}))
+    assert session.stopped is True
+
+
 async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("tree bus generation", test_tree_generation_broadcast)
     r.record("prefix and decoder", test_prefix_and_decode)
     r.record("task ownership", test_scope)
     r.record("browser batches", test_browser_batches)
+    r.record("done callback type guard", test_done_callback_ignores_non_dict_results)
     await r.record_async("snapshot freeze and cancellation", test_freeze_queue_and_cancel_http)
     await r.record_async("generation publication", test_generation_publication)
     await r.record_async("global HTTP concurrency bound", test_http_concurrency_bound)

@@ -702,6 +702,25 @@ def stress_default_environment(requirements: dict[str, object], environment: dic
     return result
 
 
+def controller_identity() -> dict | None:
+    """This campaign controller's PID and birth, in the form cloudbench-scorecard's process_birth reads.
+
+    The shared-inventory owner file records them only when that inventory runs (concurrency > 1),
+    so summary.json carries them too; a concurrency-1 campaign can then prove liveness.
+    """
+    pid = os.getpid()
+    try:
+        if Path("/proc/self/stat").exists():
+            fields = Path("/proc", str(pid), "stat").read_text().rsplit(") ", 1)[1].split()
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            return {"pid": pid, "birth": f"proc-start:{boot}:{fields[19]}"}
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True,
+                                timeout=10, check=False)
+        return {"pid": pid, "birth": result.stdout.strip()} if result.returncode == 0 and result.stdout.strip() else None
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        return None
+
+
 def cleanup_ticket_module(root: Path) -> ModuleType:
     """Bind and execute the exact immutable helper once in the campaign parent."""
     cached = getattr(cleanup_ticket_module, "_checked", None)
@@ -1378,7 +1397,7 @@ def provider_capacity_refusal(benches: int) -> int:
 # recorded name list is untrusted input (parity regression in
 # cloudbench_campaign_inventory_test.py).
 SECRET_LIKE_SETTING_NAME = re.compile(
-    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH_HEADER|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE|OTP|SIGNATURE"
+    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|ACCESS_KEY|AUTH_HEADER|AUTH_CONFIG|AUTH_SOCK|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE|OTP|SIGNATURE"
     r"|(_KEY|_B64|_AUTH|_DSN|_PAT|_PASS|_PWD|_JWT|_PAN|_CVV|_CVC|_PIN|_EXPIRY)\Z"
 )
 SECRET_LIKE_SETTING_VALUE = re.compile(
@@ -1600,6 +1619,9 @@ def main() -> int:
         "e2e_timeout_seconds": args.e2e_timeout,
         "e2e_timeout_exceeded": False,
     }
+    identity = controller_identity()
+    if identity is not None:
+        state["controller"] = identity
     operator_settings = launch_operator_settings(os.environ)
     if operator_settings is not None:
         # Unset names use source defaults; a successor relaunches with exactly these.

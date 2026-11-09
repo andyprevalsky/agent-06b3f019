@@ -10,8 +10,8 @@ _PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 _RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
-# An explicit scale right after the first score ("3 out of 10", "8/10"); only a 5-point scale becomes stars.
-_RATING_SCALE_RE = re.compile(r"\s*(?:/|out\s+of)\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+# An explicit scale right after the first score ("3 out of 10", "8/10", "3%"); only a 5-point scale becomes stars.
+_RATING_SCALE_RE = re.compile(r"\s*(?:(?:/|out\s+of)\s*(\d+(?:\.\d+)?)|(%))", re.IGNORECASE)
 _REVIEW_COUNT_RE = re.compile(
     r"\b\d[\d,]*(?:\.\d+)?\s*[kmb]?\+?\s+(?:customer\s+)?(?:reviews?|ratings?)\b",
     re.IGNORECASE,
@@ -209,7 +209,7 @@ def validate_product_rating(value: Any) -> Optional[str]:
     match = _RATING_RE.search(text)
     if match and float(match.group(1)) <= 5:
         scale = _RATING_SCALE_RE.match(text, match.end())
-        if scale is None or float(scale.group(1)) == 5:
+        if scale is None or (scale.group(1) is not None and float(scale.group(1)) == 5):
             return f"{match.group(1)} stars"
     return text
 

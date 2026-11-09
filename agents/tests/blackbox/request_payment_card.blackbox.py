@@ -403,7 +403,7 @@ def test_rating_keeps_the_merchant_scale_shown_on_the_page():
     # Owner decision 2026-11-08: no fixed-scale limit, so any other scale is kept as written.
     other_scales_kept_as_written = ("9.2 out of 10", "9.2/10 Wonderful", "Rated 8.7 of 10", "94%", "250 guests",
                                     # A low score on a non-5 scale keeps its scale (CodeRabbit PR #1865).
-                                    "3 out of 10", "3/10", "2 / 10 rating")
+                                    "3 out of 10", "3/10", "2 / 10 rating", "3%", "5 %")
     still_rejected = ("N/A", "312 reviews")
     for model in (PaymentLineItem, WriteLockPurchaseItem):
         # 3) 5-point outputs are identical to the pre-fix validator.

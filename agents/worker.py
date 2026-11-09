@@ -1355,18 +1355,31 @@ def _own_cgroup_cpu_stat_path(
 
     ``cpu.stat.local`` (newer kernels) counts this cgroup's throttling whether its own or an
     ancestor's ``cpu.max`` imposed it; ``cpu.stat`` reports only this cgroup's own quota, so a
-    parent's quota would read as zero there. Prefer the local file and fall back to ``cpu.stat``.
+    parent's quota would read as zero there. Prefer the local file; fall back to ``cpu.stat`` only
+    when no ancestor sets a ``cpu.max`` limit, otherwise the throttling is unknown (None).
     """
     try:
         with open(proc_cgroup, encoding="ascii") as fh:
             for line in fh:
                 if line.startswith("0::"):
-                    base = os.path.join(cgroup_root, line[3:].strip().lstrip("/"))
-                    for name in ("cpu.stat.local", "cpu.stat"):
-                        path = os.path.join(base, name)
-                        if os.path.exists(path):
-                            return path
-                    return None
+                    parts = [part for part in line[3:].strip().split("/") if part]
+                    base = os.path.join(cgroup_root, *parts)
+                    local = os.path.join(base, "cpu.stat.local")
+                    if os.path.exists(local):
+                        return local
+                    stat = os.path.join(base, "cpu.stat")
+                    if not os.path.exists(stat):
+                        return None
+                    # Without cpu.stat.local, cpu.stat counts only this cgroup's own quota, so a
+                    # limited ancestor would read as zero throttling: report unknown instead.
+                    for depth in range(len(parts)):
+                        try:
+                            with open(os.path.join(cgroup_root, *parts[:depth], "cpu.max"), encoding="ascii") as limit:
+                                if limit.read().split()[0] != "max":
+                                    return None
+                        except (OSError, IndexError):
+                            continue
+                    return stat
     except OSError:
         return None
     return None

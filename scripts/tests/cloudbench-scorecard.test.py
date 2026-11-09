@@ -318,6 +318,20 @@ class Scorecard(unittest.TestCase):
                 self.assertNotIn("RUNNING", document.split('id="scorecard-data"')[0])
                 self.assertIn("CONTROLLER LOST", document)
 
+    def test_campaign_without_inventory_owner_uses_its_recorded_controller(self):
+        # CodeRabbit PR #1865: a concurrency-1 campaign has no shared-inventory owner file;
+        # the controller identity it records in summary.json proves liveness instead.
+        directory = self.f.campaign(None)
+        summary = json.loads((directory / "summary.json").read_text())
+        summary["controller"] = {"pid": os.getpid(), "birth": process_birth(os.getpid())}
+        write(directory / "summary.json", summary)
+        data = render(directory, self.f)
+        self.assertEqual(data["experiment"]["state"], "RUNNING")
+        summary["controller"] = {"pid": reaped_pid(), "birth": process_birth(os.getpid())}
+        write(directory / "summary.json", summary)
+        os.utime(directory / "summary.json", (T0 + 1800, T0 + 1800))
+        self.assertEqual(render(directory, self.f)["experiment"]["state"], "CONTROLLER LOST")
+
     def test_unreadable_boot_id_is_unverified_not_a_crash(self):
         # CodeRabbit PR #1865: an OSError reading /proc boot_id must not crash load_campaign.
         if not Path("/proc/self/stat").exists():

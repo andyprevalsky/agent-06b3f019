@@ -792,6 +792,38 @@ async def test_dom_build_sub_phase_timing_reaches_step_phases():
     assert "record_browser_use_dom_build_timing()" in (AGENTS_ROOT / "browser_tools" / "dom_service.py").read_text()
 
 
+async def test_dom_build_timing_is_best_effort():
+    """CodeRabbit PR #1865: the timing probe must not fail a successful DOM build when
+    browser-use returns a shorter tuple or the session rejects the attribute write."""
+    from types import SimpleNamespace
+
+    from browser_use.dom.service import DomService
+
+    from browser_tools.dom_service import record_browser_use_dom_build_timing
+
+    class _NoAttributes:
+        __slots__ = ()
+
+    async def short_build(self, previous_cached_state=None):
+        return "tree", None
+
+    async def full_build(self, previous_cached_state=None):
+        return "tree", None, {"get_all_trees_total_ms": 5.0}
+
+    original_build = DomService.get_serialized_dom_tree
+    try:
+        DomService.get_serialized_dom_tree = short_build
+        record_browser_use_dom_build_timing()
+        result = await DomService.get_serialized_dom_tree(SimpleNamespace(browser_session=SimpleNamespace()))
+        assert result == ("tree", None), result
+        DomService.get_serialized_dom_tree = full_build
+        record_browser_use_dom_build_timing()
+        result = await DomService.get_serialized_dom_tree(SimpleNamespace(browser_session=_NoAttributes()))
+        assert result[0] == "tree", result
+    finally:
+        DomService.get_serialized_dom_tree = original_build
+
+
 class _PrefetchDom:
     def __init__(self, url="https://shop.example/s?k=tv", error=None, delay=0.0):
         self.url = url
@@ -1109,6 +1141,7 @@ async def run_all_tests():
     await r.record_async("dom_build_skips_serial_evaluates", test_dom_build_skips_serial_page_evaluates)
     await r.record_async("slow_dom_tree_request_not_resent", test_slow_dom_tree_request_is_waited_on_not_resent)
     await r.record_async("dom_build_timing_in_step_phases", test_dom_build_sub_phase_timing_reaches_step_phases)
+    await r.record_async("dom_build_timing_best_effort", test_dom_build_timing_is_best_effort)
     await r.record_async(
         "stalled_speculative_state_soft_budget", test_stalled_speculative_state_gives_up_at_soft_budget
     )

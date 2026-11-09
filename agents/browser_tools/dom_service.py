@@ -205,7 +205,11 @@ def record_browser_use_dom_build_timing() -> None:
     @functools.wraps(build)
     async def get_serialized_dom_tree(self: Any, *args: Any, **kwargs: Any) -> Any:
         result = await build(self, *args, **kwargs)
-        self.browser_session._rose_dom_build_timing_ms = _dom_build_timing_ms(result[2])
+        # Telemetry is best-effort: a changed return shape or a rejected attribute must not fail the build.
+        try:
+            self.browser_session._rose_dom_build_timing_ms = _dom_build_timing_ms(result[2])
+        except Exception:
+            logger.debug("DOM build timing unavailable", exc_info=True)
         return result
 
     _DOM_BUILD_TIMING_WRAPPERS.add(get_serialized_dom_tree)
