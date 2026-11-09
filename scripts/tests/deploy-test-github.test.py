@@ -410,6 +410,27 @@ class Launcher(unittest.TestCase):
         with self.assertRaises(ValueError):
             gh.tag_name('ubuntu-latest', 'g', 'tok')
 
+    def test_user_elected_overrides_travel_to_the_vm_and_nothing_else_does(self):
+        """deploy.md lets the user override a named gate; a Blacksmith VM's env is its own, so the
+        coordinator's DEPLOY_GATE_OVERRIDES must ride the envelope (PR #1854's live Tilion override)."""
+        self.assertEqual('a:b,browser-provider:tilion-residential-live',
+                         gh.gate_overrides(' browser-provider:tilion-residential-live , a:b,a:b '))
+        for bad in ('Bad Name', 'x;rm -rf /', '-flag'):
+            with self.assertRaises(ValueError):
+                gh.gate_overrides(bad)
+        with patch.dict(os.environ, {gh.OVERRIDES_ENV: ''}):
+            plain = gh.envelope(remote_request('a' * 40), 'deploy_test_worker.py', RUNNER)
+        self.assertNotIn(b'overrides', plain)  # an ordinary request keeps its deterministic tag
+        with patch.dict(os.environ, {gh.OVERRIDES_ENV: 'browser-provider:tilion-residential-live'}):
+            elected = gh.envelope(remote_request('a' * 40), 'deploy_test_worker.py', RUNNER)
+        self.assertEqual('browser-provider:tilion-residential-live', json.loads(elected)['overrides'])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            head = git_repo(root)
+            for elected_value in ('browser-provider:tilion-residential-live', ''):
+                out = self.run_extract(root, remote_request(head, root=str(root)), overrides=elected_value)
+                self.assertEqual(elected_value, (out / 'overrides').read_text())
+
     def test_envelope_binds_the_runner_root_and_a_known_worker(self):
         with self.assertRaises(ValueError):
             gh.envelope(remote_request('a' * 40, root='/elsewhere'), 'deploy_test_worker.py', RUNNER)
@@ -427,10 +448,12 @@ class Launcher(unittest.TestCase):
             self.assertEqual((fields['object'], fields['type']), (head, 'commit'))
             self.assertEqual(json.loads(body)['request']['source']['head'], head)
 
-    def run_extract(self, root, request, runner=RUNNER, script='deploy_test_worker.py', name=None):
+    def run_extract(self, root, request, runner=RUNNER, script='deploy_test_worker.py', name=None, overrides=''):
         name = name or gh.tag_name(runner, request['gate'], request['token'])
-        body = (json.dumps({'version': gh.ENVELOPE_VERSION, 'worker_script': script, 'runner': runner,
-                            'request': request}) + '\n').encode()
+        fields = {'version': gh.ENVELOPE_VERSION, 'worker_script': script, 'runner': runner, 'request': request}
+        if overrides:
+            fields['overrides'] = overrides
+        body = (json.dumps(fields) + '\n').encode()
         head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, check=True, capture_output=True,
                               text=True).stdout.strip()
         sha = subprocess.run(['git', 'hash-object', '-t', 'tag', '-w', '--stdin'], cwd=root, check=True,

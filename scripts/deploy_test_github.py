@@ -112,12 +112,30 @@ def tag_name(runner: str, gate: str, token: str) -> str:
     return f'{TAG_PREFIX}/{match.group(1)}vcpu/{safe_name(gate)}-{hashlib.sha256(token.encode()).hexdigest()[:16]}'
 
 
+OVERRIDES_ENV = 'DEPLOY_GATE_OVERRIDES'
+OVERRIDE_NAME = re.compile(r'[a-z0-9][a-z0-9_.:-]*')
+
+
+def gate_overrides(value: str | None = None) -> str:
+    """The user-elected harness overrides (deploy.md: an override names its gate explicitly), as the
+    comma list the suites read from DEPLOY_GATE_OVERRIDES. The coordinator's value is part of the cycle's
+    bound environment; remote gates receive it through the envelope, since a VM's env is its own."""
+    raw = os.environ.get(OVERRIDES_ENV, '') if value is None else value
+    names = [part.strip() for part in raw.split(',') if part.strip()]
+    if any(not OVERRIDE_NAME.fullmatch(name) for name in names):
+        raise ValueError(f'invalid {OVERRIDES_ENV} entry in {raw!r}')
+    return ','.join(sorted(set(names)))
+
+
 def envelope(request: dict, worker_script: str, runner: str) -> bytes:
     if worker_script not in WORKER_SCRIPTS:
         raise ValueError(f'unsupported worker script: {worker_script}')
     if request.get('worker_root') != REMOTE_ROOT:
         raise ValueError(f'remote gates must bind worker_root {REMOTE_ROOT}')
     body = {'version': ENVELOPE_VERSION, 'worker_script': worker_script, 'runner': runner, 'request': request}
+    overrides = gate_overrides()
+    if overrides:  # absent when none, so the deterministic tag of an ordinary request is unchanged
+        body['overrides'] = overrides
     return (json.dumps(body, sort_keys=True, separators=(',', ':')) + '\n').encode()
 
 
@@ -794,6 +812,7 @@ def remote_extract(args) -> int:
         raise SystemExit('deploy-gates envelope does not match this checkout and tag')
     (out / 'request.json').write_text(json.dumps(request))
     (out / 'worker_script').write_text(body['worker_script'])
+    (out / 'overrides').write_text(gate_overrides(body.get('overrides', '')))
     timing = {'job_started_at': float(os.environ.get('DEPLOY_GATE_T0') or time.time()), 'extracted_at': time.time()}
     (out / 'timing.json').write_text(json.dumps(timing))
     print(f"gate={request['gate']} worker={body['worker_script']} checks={len(request['checks'])}")
@@ -846,6 +865,11 @@ def remote_run(args) -> int:
     timing['timing_run_started'] = started.returncode == 0
     env = {**os.environ, 'DEPLOY_GATE_REQUEST': str(out / 'request.json'), 'DEPLOY_GATE_RESULT': str(out / 'result.json'),
            progress.ENV: str(out / 'progress.jsonl')}
+    env.pop(OVERRIDES_ENV, None)  # only the coordinator's elected overrides apply, never the VM's own env
+    overrides = (out / 'overrides').read_text().strip() if (out / 'overrides').is_file() else ''
+    if overrides:
+        env[OVERRIDES_ENV] = gate_overrides(overrides)
+        print(f'DEPLOY_GATE_OVERRIDDEN {overrides} (user-elected; the overridden cases do not run)', flush=True)
     streamer = None
     try:
         streamer = ProgressStreamer(Channel(env_file_values(ROOT)), os.environ['GITHUB_REF_NAME'], out / 'progress.jsonl')

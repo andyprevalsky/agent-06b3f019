@@ -60,6 +60,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Never merge an unwaived blocking failure, and never invent a PASS.
 - A skip, waiver, exception or override is never PASS; keep the native result visible.
 - An override must name the gate explicitly; never infer one, never re-confirm it, keep it narrow, and list its risk in the PR.
+- Apply a user-elected harness override by exporting `DEPLOY_GATE_OVERRIDES=<gate>` in the one environment that runs `gates` and `merge`; Blacksmith gates receive it through their request.
 - On any stop, run `scripts/deploy finish --outcome blocked` before ending the turn.
 
 ### Approvals
