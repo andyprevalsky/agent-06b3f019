@@ -605,14 +605,12 @@
   "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr-1866-ready",
+      "branch": "refs/heads/records/pr-1866-ready-2",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1866-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]

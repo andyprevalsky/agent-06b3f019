@@ -323,6 +323,26 @@ def cmd_review_finish(args: argparse.Namespace) -> int:
 
 
 def cmd_review_next(args: argparse.Namespace) -> int:
+    post_approval = getattr(args, 'post_findings_review_approval', None)
+    prior_hash = getattr(args, 'prior_ledger_sha256', None)
+    if post_approval is not None or prior_hash is not None:
+        if not post_approval or not prior_hash or not getattr(args, 'approved_head', None):
+            print('DEPLOY_REVIEW_NEXT BLOCKED: post-findings approval, approved HEAD and prior ledger SHA-256 are required', file=sys.stderr)
+            return 1
+        if args.verification_approval is not None or getattr(args, 'one_final_review_approval', None) is not None:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: post-findings approval cannot combine with other approvals', file=sys.stderr)
+            return 1
+    final_approval = getattr(args, 'one_final_review_approval', None)
+    approved_head = getattr(args, 'approved_head', None)
+    if post_approval is None and (final_approval is not None or approved_head is not None):
+        if not final_approval or not approved_head:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: --one-final-review-approval and --approved-head are both required',
+                  file=sys.stderr)
+            return 1
+        if args.verification_approval is not None:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: cannot combine --verification-approval with --one-final-review-approval',
+                  file=sys.stderr)
+            return 1
     opened = read_json(PR_FILE, 'open-pr')
     if pending := uncommitted():
         print('DEPLOY_REVIEW_NEXT BLOCKED: commit the stabilization batch first: ' + ', '.join(pending[:10]),
@@ -332,15 +352,26 @@ def cmd_review_next(args: argparse.Namespace) -> int:
         print('DEPLOY_REVIEW_NEXT BLOCKED: parked benchmark-history rows are not committed; run '
               '`scripts/deploy ledger` so the review covers them', file=sys.stderr)
         return 1
-    nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
-                         capture_output=True, text=True)
-    if nxt.returncode:
-        print(nxt.stdout + nxt.stderr, end='')
-        print('DEPLOY_REVIEW_NEXT BLOCKED: the ledger allows no further cycle; defer the remaining non-security '
-              'findings with `deploy_review_cycle.py override` and merge', file=sys.stderr)
-        return 1
-    kind, sha = json.loads(nxt.stdout)['kind'], head()
-    start = ['start', '--kind', kind, '--head', sha]
+    if post_approval is not None:
+        kind, sha = 'verification', head()
+        start = ['start', '--kind', kind, '--head', sha,
+                 '--post-findings-review-approval', post_approval, '--approved-head', approved_head,
+                 '--prior-ledger-sha256', prior_hash, '--repo', str(ROOT)]
+    elif final_approval is not None or approved_head is not None:
+        kind, sha = 'verification', head()
+        start = ['start', '--kind', kind, '--head', sha,
+                 '--one-final-review-approval', final_approval,
+                 '--approved-head', approved_head, '--repo', str(ROOT)]
+    else:
+        nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
+                             capture_output=True, text=True)
+        if nxt.returncode:
+            print(nxt.stdout + nxt.stderr, end='')
+            print('DEPLOY_REVIEW_NEXT BLOCKED: the ledger allows no further cycle; defer the remaining non-security '
+                  'findings with `deploy_review_cycle.py override` and merge', file=sys.stderr)
+            return 1
+        kind, sha = json.loads(nxt.stdout)['kind'], head()
+        start = ['start', '--kind', kind, '--head', sha]
     if args.verification_approval:
         start += ['--verification-approval', args.verification_approval]
     if run([sys.executable, 'scripts/deploy_review_cycle.py', *start]):
@@ -773,6 +804,10 @@ def parser() -> argparse.ArgumentParser:
     ended.add_argument('--result', choices=['clean', 'findings'], required=True)
     nxt = sub.add_parser('review-next', help='open the next bounded review cycle on the pushed stabilization batch')
     nxt.add_argument('--verification-approval', help="user approval id for a verification cycle after a clean cycle 2")
+    nxt.add_argument('--post-findings-review-approval', help='New explicit user approval ID for one fifth remediation review')
+    nxt.add_argument('--prior-ledger-sha256', help='Exact prior ledger snapshot approved by the user')
+    nxt.add_argument('--one-final-review-approval', help='Explicit user evidence ID for one fourth verification')
+    nxt.add_argument('--approved-head', help='Exact40 HEAD named in that user decision')
     approval = sub.add_parser('approval', help='record an approval packet or decision; on approval rerun flagged guards')
     approval.add_argument('action', choices=['request', 'decide'])
     approval.add_argument('--decision', choices=['approved', 'grounded', 'rejected'])

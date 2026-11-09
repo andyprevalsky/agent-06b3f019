@@ -1,0 +1,24 @@
+{
+  "gate": "NOT_INTRODUCED",
+  "pr": 1859,
+  "merge": "4e28dab648a66e70f513979cb11b59e614866424",
+  "test": "production-workflow-migration",
+  "primary_failure": "candidate_bootstrap_durable_ready",
+  "results": {
+    "PASS": 42,
+    "FAIL": 3,
+    "total": 45,
+    "fixture_cleanup": "PASS"
+  },
+  "cause": "Liveness sealed a reserved but unstarted replacement as NOT_FOUND before the validator launched it.",
+  "repair_status": "Fullgoal/evidencedelivered; independentBugsrepair, notclaimedcomplete",
+  "matched_owner": null,
+  "private_attachments": [
+    "/home/boxes/rose/.context/deploy-final/production-logs/workflow-migration.log",
+    "/home/boxes/rose/.context/deploy-final/production-lanes.json",
+    "/home/boxes/rose/.context/rca-6f2f4117/production-migration-failure/original-result.json",
+    "/home/boxes/rose/.context/rca-6f2f4117/production-migration-failure/findings.json"
+  ],
+  "attribution_evidence_sha256": "855cc46deb61ae553f011220b316991fcac37bf78b637384be32322da2de585e",
+  "repair_agent": "https://boxes.dev/thread/thr_6b90d980e2ef4d78b2b744d5fcb1b357"
+}

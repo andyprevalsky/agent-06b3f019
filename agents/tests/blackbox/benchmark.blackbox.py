@@ -25871,6 +25871,15 @@ def test_predeploy_selector_rejects_production_only_tasks():
             test_predeploy_excludes_production_only_even_with_pass_streak(Path(folder), surface)
 
 
+def test_predeploy_selector_machine_formats_at_cap():
+    from benchmarks.select_predeploy_benches_test import test_cli_machine_formats_keep_cap_warning_on_stderr
+
+    for output_format in ("names", "json"):
+        for drop_extra in (False, True):
+            with tempfile.TemporaryDirectory() as folder:
+                test_cli_machine_formats_keep_cap_warning_on_stderr(Path(folder), output_format, drop_extra)
+
+
 def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
     from benchmarks.select_predeploy_benches_test import (
         test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
@@ -27198,6 +27207,7 @@ async def run_all_tests():
         "predeploy_selector_explicit_deploy_opt_out",
         _with_tmp_path(test_selector_treats_explicit_deploy_opt_out_as_uncategorized),
     )
+    r.record("predeploy_selector_machine_formats_at_cap", test_predeploy_selector_machine_formats_at_cap)
     r.record(
         "local_cleanup_preserves_run_id_observers",
         test_local_cleanup_does_not_signal_processes_that_only_mention_run_id,

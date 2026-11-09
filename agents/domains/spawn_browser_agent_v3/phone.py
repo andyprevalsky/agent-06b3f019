@@ -357,6 +357,21 @@ async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> d
         return {"enabled": False}
 
 
+def _busy_phone_error(acquired: dict) -> str:
+    """Tell the agent which agent currently holds the phone, using the backend's own queue view."""
+    holder = acquired.get("holder") if isinstance(acquired.get("holder"), dict) else {}
+    position = acquired.get("queuePosition")
+    agent = holder.get("agentId") if isinstance(holder.get("agentId"), str) else None
+    parts = ["Phone is in use"]
+    if agent:
+        parts.append(f" by agent {agent}")
+        if holder.get("controlOwner") == "user":
+            parts.append(" (the user has control)")
+    if isinstance(position, int) and not isinstance(position, bool) and position > 0:
+        parts.append(f"; this task is waiting at queue position {position}")
+    return "".join(parts)
+
+
 async def execute_phone(
     params: dict,
     *,
@@ -435,7 +450,7 @@ async def execute_phone(
         lease = acquired.get("lease") or {}
         lease_id = lease.get("id")
         if lease.get("status") != "ACTIVE" or not lease_id:
-            return {"success": False, "phone": acquired, "error": "Phone lease is not active"}
+            return {"success": False, "phone": acquired, "error": _busy_phone_error(acquired)}
         # A newly allocated lease starts at its own cursor. Reuse must keep the
         # decision's observed cursor to reject a concurrently superseded action.
         observed_lease = view.get("lease") or {}

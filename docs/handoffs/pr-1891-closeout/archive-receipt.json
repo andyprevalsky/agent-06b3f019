@@ -1,0 +1,14 @@
+{
+  "bucket": "trace-archive",
+  "ciphertext_sha256": "039f53cec6d432af0aa2197b1f73d39507c7d024a6397391a60f3386d8342b7c",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "files": 9617,
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "frames": 7,
+  "full_readback_verified": true,
+  "gzip_sha256": "b893d0f74ee5c5d9233639e56422f423fca477fabf4f39a8113a1e42869f1614",
+  "key": "devbox-closeout-private/pr1891-agentcard-stall/20261109T182314Z-.tar.gz.aesgcm",
+  "manifest_sha256": "62791249f2628dfbecf6b9ac5933612837309b80f4268db5ee57e3666f3b72af",
+  "original_bytes": 411085344,
+  "stored_bytes": 56083058
+}

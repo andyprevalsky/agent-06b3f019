@@ -69,6 +69,12 @@ export interface PendingAgentCreation {
   message: Message;
 }
 
+/** An optimistic USER row; confirm swaps in the server row, drop removes it. */
+export interface StagedUserMessage {
+  confirm: (server: Message) => void;
+  drop: () => void;
+}
+
 export interface AgentContextValue {
   // Agent data
   agent: AgentDetail | null;
@@ -79,6 +85,8 @@ export interface AgentContextValue {
   stagePendingAgentCreation: (input: PendingAgentCreationInput) => void;
   reconcilePendingAgentCreation: (agentId: string) => Promise<void>;
   rollbackPendingAgentCreation: (agentId: string) => boolean;
+  /** Render a send to an existing agent before the POST returns (shows Sending). */
+  stageUserMessage: (agentId: string, text: string) => StagedUserMessage;
 
   // Messages (history, not buffer - buffer is in MessageList)
   messages: Message[];

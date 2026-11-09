@@ -535,11 +535,17 @@ async function run() {
   pendingGoto = new Promise((r) => (release = r));
   const enteredPromise = new Promise((r) => (entered = r));
   onGotoBlocked = entered;
+  const gotoBeforeActive = gotocalls;
   const work = resumeBrowserSession(active.id);
   try {
     // Navigation is suspended only after hydration target provenance commits.
     // Expiring the earlier phase write races that later provenance write.
     await enteredPromise;
+    assert.equal(
+      gotocalls,
+      gotoBeforeActive + 1,
+      'fixture must hold actual navigation before expiring custody'
+    );
     const held = await prisma.toolSideEffect.findUniqueOrThrow({
       where: { operationKey: key(active.id) },
     });

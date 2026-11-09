@@ -62,6 +62,7 @@ export function useAgentOps({
     stagePendingAgentCreation: ctx.stagePendingAgentCreation,
     reconcilePendingAgentCreation: ctx.reconcilePendingAgentCreation,
     rollbackPendingAgentCreation: ctx.rollbackPendingAgentCreation,
+    stageUserMessage: ctx.stageUserMessage,
   });
 
   return { actions, messaging };

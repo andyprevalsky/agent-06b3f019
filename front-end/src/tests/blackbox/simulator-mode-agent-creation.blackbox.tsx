@@ -35,6 +35,7 @@ describe('Simulator mode agent creation', () => {
           stagePendingAgentCreation: vi.fn(),
           reconcilePendingAgentCreation: vi.fn(async () => undefined),
           rollbackPendingAgentCreation: vi.fn(() => true),
+          stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
         }),
       );
 

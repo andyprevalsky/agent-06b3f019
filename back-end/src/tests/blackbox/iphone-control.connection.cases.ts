@@ -32,9 +32,19 @@ export const connectionCases: Case[] = [
       assert.equal(initial.status, 200);
       assert.deepEqual(
         Object.keys(initial.data).sort(),
-        ['configured', 'connectionRevision', 'enabled', 'setupAgentId', 'status'].sort()
+        [
+          'configured',
+          'connectionRevision',
+          'enabled',
+          'setupAgentId',
+          'setupProgress',
+          'setupTaskId',
+          'status',
+        ].sort()
       );
       assert.equal(initial.data.status, 'not_connected');
+      assert.equal(initial.data.setupProgress, null);
+      assert.equal(initial.data.setupTaskId, null);
       const expectedRevision = initial.data.connectionRevision;
       const requestKey = randomUUID();
       let created = 0;
@@ -174,6 +184,79 @@ export const connectionCases: Case[] = [
         h.calls.length,
         providerCallsBefore,
         'setup admission/verification control must not touch synthetic phone provider'
+      );
+    },
+  ],
+  [
+    'a paused setup agent no longer holds Connect: status is not_connected and Connect relaunches',
+    async (h) => {
+      const f = await h.fixture();
+      await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' });
+      const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
+      const old = setupState(device.setupEncrypted);
+      assert.equal(
+        (
+          await h.request(f.userId, '/device/setup-profile', {
+            method: 'PUT',
+            body: {
+              expectedProfileRevision: old.profileRevision,
+              expectedAppleIdentity: 'paused-owner@example.invalid',
+              expectedGoogleIdentity: 'paused-google@example.invalid',
+            },
+          })
+        ).status,
+        200
+      );
+      const launched: string[] = [];
+      h.setupAgentLauncher = async (userId, _deviceId, reservation) => {
+        if (await prisma.agent.findUnique({ where: { id: reservation.agentId } })) return;
+        launched.push(reservation.agentId);
+        await prisma.agent.create({
+          data: {
+            id: reservation.agentId,
+            userId,
+            status: 'ACTIVE',
+            goal: 'Synthetic setup agent',
+            temporalWorkflowId: reservation.agentId,
+            temporalFirstExecutionRunId: randomUUID(),
+            temporalWorkflowStartPending: false,
+          },
+        });
+      };
+      const connect = async () => {
+        const revision = (await h.request(f.userId, '/connection', { actor: 'user' })).data
+          .connectionRevision;
+        return h.request(f.userId, '/connect', {
+          actor: 'user',
+          method: 'POST',
+          body: { requestKey: randomUUID(), expectedRevision: revision },
+        });
+      };
+      const first = await connect();
+      assert.equal(first.status, 200);
+      const firstAgent = first.data.setupAgentId as string;
+      assert.equal(
+        (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
+        'setting_up'
+      );
+      await prisma.agent.update({ where: { id: firstAgent }, data: { status: 'PAUSED' } });
+      const stalled = await h.request(f.userId, '/connection', { actor: 'user' });
+      assert.equal(
+        stalled.data.status,
+        'not_connected',
+        'a paused setup agent must not pin setting_up'
+      );
+      const second = await connect();
+      assert.equal(second.status, 200);
+      assert.notEqual(
+        second.data.setupAgentId,
+        firstAgent,
+        'Connect must start a fresh setup agent'
+      );
+      assert.deepEqual(launched, [firstAgent, second.data.setupAgentId]);
+      assert.equal(
+        (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
+        'setting_up'
       );
     },
   ],

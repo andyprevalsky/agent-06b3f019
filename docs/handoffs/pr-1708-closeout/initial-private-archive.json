@@ -1,0 +1,19 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1708-browser/20261106-initial-13ca6371c3e5.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "8116a436b20013bd1c429bbf0cb266a07188a44b1e400120c4d3f2f45b8bc320",
+  "gzip_sha256": "71f95531c485e6c32a616a695e6d38eb57b237ad2e3d4279b4c8a9f32cb03c41",
+  "stored_bytes": 1282222,
+  "frames": 1,
+  "files": 129,
+  "original_bytes": 5400380,
+  "manifest_sha256": "30b5fc25216d601bc5de056eef6acad94fab929a7d9c971fa8f96920b84c4c3a",
+  "full_readback_verified": true,
+  "receipt_sidecar_key": "devbox-closeout-private/pr1708-browser/20261106-initial-13ca6371c3e5.tar.gz.aesgcm.receipt.aesgcm",
+  "archive_key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "receipt_sidecar_authenticated_readback": true,
+  "all_members_restored_and_hash_verified": true,
+  "captured_at": "2026-11-06T03:15:16.046877+00:00"
+}

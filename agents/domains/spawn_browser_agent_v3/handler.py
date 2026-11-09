@@ -25,6 +25,7 @@ import traceback
 import uuid as uuid_module
 import weakref
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
@@ -45,9 +46,13 @@ from browser_tools.secret_refs import (
 )
 from config import load_config
 from domains.spawn_browser_agent_v3.service_activity_queue import (
+    BrowserCleanupOwners,
+    acknowledge_browser_activity_cleanup,
     await_owned_browser_cleanup,
     browser_activity_turn,
+    browser_cleanup_owners,
     cancel_and_join_browser_activity,
+    get_browser_cleanup_owners,
 )
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
@@ -556,12 +561,13 @@ async def _capture_browser_passkey_usage(capture_passkey_usage: Any) -> bool:
 
 
 async def _disconnect_browser(dom_service: Any) -> bool:
-    return await _await_bounded_browser_cleanup(
+    completed = await _await_bounded_browser_cleanup(
         dom_service.disconnect(),
         timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
         timeout_message="Browser disconnect timed out; continuing terminal return",
         failure_message="Browser disconnect failed; continuing terminal return",
     )
+    return completed and getattr(dom_service, "disconnect_confirmed", True) is not False
 
 
 async def _release_browser_client(dom_service: Any) -> bool:
@@ -2219,22 +2225,45 @@ async def _wait_for_document_ready(
     return last_state
 
 
+def _retained_playwright_resources_for_pid(owners: Any, pid: Optional[int]) -> list:
+    if owners is None or pid is None:
+        return []
+    # Resolve only objects already captured by this activity. A numeric PID is
+    # never authority to reopen a process or select between distinct owners.
+    return [
+        resource for key, resource in owners.playwright.items()
+        if key[0] != "pid" and resource[2] == pid
+    ]
+
+
 async def _stop_playwright_resources(
     playwright_browser: Optional[Any],
     playwright_instance: Optional[Any],
     agent_id: str,
     close_browser: bool = True,
     driver_pid: Optional[int] = None,
-) -> None:
-    """Disconnect Playwright's CDP client and stop its local driver process."""
+) -> bool:
+    """Disconnect Playwright resources and report whether each close was acknowledged."""
+    confirmed = True
+    owners = get_browser_cleanup_owners()
+    if playwright_browser is None and playwright_instance is None:
+        retained = _retained_playwright_resources_for_pid(owners, driver_pid)
+        if len(retained) > 1:
+            return False
+        if retained:
+            playwright_browser, playwright_instance, driver_pid, retained_close_browser = retained[0]
+            close_browser = close_browser and retained_close_browser
     driver_process = _playwright_driver_process(playwright_instance)
     driver_pid = driver_pid or getattr(driver_process, "pid", None)
+    if owners is not None:
+        owners.track_playwright(playwright_browser, playwright_instance, driver_pid, close_browser=close_browser)
 
     if playwright_browser and close_browser:
         try:
             await asyncio.wait_for(playwright_browser.close(), timeout=5.0)
             logger.info("Playwright browser CDP connection closed", agent_id=agent_id)
         except Exception as e:
+            confirmed = False
             logger.warning(
                 "Failed to close Playwright browser CDP connection",
                 agent_id=agent_id,
@@ -2243,12 +2272,30 @@ async def _stop_playwright_resources(
 
     if playwright_instance:
         try:
-            await asyncio.wait_for(playwright_instance.stop(), timeout=5.0)
+            startup = next(
+                (owner for owner in owners.playwright_startups.values()
+                 if owner.instance is playwright_instance), None
+            ) if owners is not None else None
+            await asyncio.wait_for(
+                startup.close() if startup is not None else playwright_instance.stop(), timeout=5.0
+            )
             logger.info("Playwright instance stopped", agent_id=agent_id)
         except Exception as e:
+            confirmed = False
             logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
         await _reap_playwright_driver_process(driver_process, agent_id)
-    await _reap_playwright_driver_pid(driver_pid, agent_id)
+    native_owner = (
+        owners.driver_owners.get(BrowserCleanupOwners.playwright_key(playwright_browser, playwright_instance, driver_pid))
+        if owners is not None else None
+    )
+    driver_exited = driver_process is not None and getattr(driver_process, "returncode", None) is not None
+    if not driver_exited:
+        await _reap_playwright_driver_pid(driver_pid, agent_id, native_owner=native_owner)
+    if driver_pid:
+        confirmed = confirmed and (driver_exited or _playwright_driver_owner_stopped(native_owner))
+    if confirmed and owners is not None:
+        owners.release_playwright(playwright_browser, playwright_instance, driver_pid)
+    return confirmed
 
 
 def _playwright_driver_process(playwright_instance: Optional[Any]) -> Optional[Any]:
@@ -2838,6 +2885,7 @@ async def _reconnect_browser_stack_after_rotation(
         downloads_path=browser_downloads_path_for_provider(provider),
         **_cdp_multiplexer_kwargs(cdp_multiplexer),
     )
+    _track_browser_dom_service(dom_service)
     if hasattr(old_dom_service, "secret_redaction_state"):
         dom_service.restore_secret_redaction_state(old_dom_service.secret_redaction_state())
     if hasattr(old_dom_service, "rendered_image_state"):
@@ -2847,6 +2895,7 @@ async def _reconnect_browser_stack_after_rotation(
     pw_browser = None
     driver_pid = None
     try:
+        _ensure_browser_acquisition_open()
         await dom_service.connect()
         if config is not None and task_id:
             from browser_tools.captcha_solve_indicator import (
@@ -2863,9 +2912,11 @@ async def _reconnect_browser_stack_after_rotation(
 
         from playwright.async_api import async_playwright
 
-        pw_instance = await async_playwright().start()
+        pw_instance = await _start_owned_playwright(async_playwright)
         driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
+        _track_browser_playwright(None, pw_instance, driver_pid)
         pw_browser = await pw_instance.chromium.connect_over_cdp(connection_cdp_url)
+        _track_browser_playwright(pw_browser, pw_instance, driver_pid)
         pw_context = pw_browser.contexts[0]
         pw_page = await _synchronize_playwright_page_with_agent_focus(
             dom_service=dom_service,
@@ -3421,8 +3472,23 @@ def _playwright_driver_command_matches(command: str) -> bool:
     return "playwright/driver" in command and "run-driver" in command
 
 
-async def _reap_playwright_driver_pid(pid: Optional[int], agent_id: str) -> None:
-    if not pid:
+def _playwright_driver_owner_stopped(native_owner: Any) -> bool:
+    if native_owner is False:
+        return True
+    if native_owner is None:
+        return False
+    import psutil
+
+    try:
+        return not native_owner.is_running() or native_owner.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        return False
+
+
+async def _reap_playwright_driver_pid(pid: Optional[int], agent_id: str, *, native_owner: Any = None) -> None:
+    if not pid or native_owner is None or native_owner is False:
         return
 
     try:
@@ -3432,7 +3498,11 @@ async def _reap_playwright_driver_pid(pid: Optional[int], agent_id: str) -> None
         return
 
     try:
-        proc = psutil.Process(pid)
+        # psutil retains (PID, creation time) and guards its signals against
+        # reuse. Never reopen this bare PID after its original owner exited.
+        proc = native_owner
+        if not proc.is_running():
+            return
         command = " ".join(proc.cmdline()) or proc.name()
         if not _playwright_driver_command_matches(command):
             logger.debug(
@@ -3756,18 +3826,9 @@ async def _call_browser_use_with_rotation(
             action_result_redact=getattr(dom_service, "model_visible_action_result", None),
         )
         rose_kwargs["browser_state"] = redact(browser_state_for_llm)
-        rose_kwargs["action_history"] = [redact(entry) for entry in action_entries]
-        # Preserve only harness-owned action mechanics, never similarly named
-        # fields inside an evaluate result or other page-supplied payload.
-        for original, visible in zip(action_entries, rose_kwargs.get("action_history", [])):
-            for key in ("step", "action", "index", "coordinates"):
-                if key in original:
-                    visible[key] = original[key]
-            for key in ("params", "result"):
-                if key in original:
-                    visible[key] = dom_service.model_visible_value(original[key])
-            if not dom_service.secret_values_used and original.get("screenshot"):
-                visible["screenshot"] = original["screenshot"]
+        from browser_tools.dom_service import ActionHistory
+
+        rose_kwargs["action_history"] = [ActionHistory.project_entry(entry, dom_service) for entry in action_entries]
         for key in ("viewport", "scroll_position", "page_stats"):
             if key in browser_state_for_llm:
                 rose_kwargs["browser_state"][key] = browser_state_for_llm[key]
@@ -5879,6 +5940,68 @@ async def _emit_browser_task_terminal_for_fe(
         )
 
 
+def _with_browser_cleanup_owners(function):
+    @wraps(function)
+    async def run(*args, **kwargs):
+        with browser_cleanup_owners():
+            return await function(*args, **kwargs)
+
+    return run
+
+
+async def _gather_browser_setup(*awaitables):
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        try:
+            owners.ensure_acquisition_open()
+        except BaseException:
+            for item in awaitables:
+                if inspect.iscoroutine(item):
+                    item.close()
+            raise
+    tasks = [asyncio.create_task(item) for item in awaitables]
+    if owners is not None:
+        owners.setup_tasks.update(tasks)
+    return await asyncio.gather(*tasks)
+
+
+def _ensure_browser_acquisition_open():
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        owners.ensure_acquisition_open()
+
+
+async def _start_owned_playwright(factory):
+    from browser_tools.playwright_owner import PlaywrightOwner
+
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        owners.ensure_acquisition_open()
+    startup = PlaywrightOwner(factory=factory)
+    if owners is not None:
+        owners.playwright_startups[id(startup)] = startup
+    try:
+        return await startup.start()
+    except BaseException:
+        if owners is None:
+            with contextlib.suppress(Exception):
+                await _bounded_browser_terminal_io(startup.close(), "failed Playwright startup")
+        raise
+
+
+def _track_browser_dom_service(service):
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        owners.track_dom(service)
+
+
+def _track_browser_playwright(browser, instance, pid):
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        owners.track_playwright(browser, instance, pid)
+        owners.track_driver(browser, instance, pid)
+
+
 def _schedule_browser_cleanup(
     *,
     agent_id: str,
@@ -5907,6 +6030,134 @@ def _schedule_browser_cleanup(
     cleanup_failure: Optional[Dict[str, Any]] = None,
     paused_session_id: Optional[str] = None,
 ) -> asyncio.Task:
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        owners.close_admission()
+
+    def dom_owners():
+        services = list(owners.dom_services.values()) if owners is not None else []
+        if dom_service is not None and not any(item is dom_service for item in services):
+            services.append(dom_service)
+        return services
+
+    def playwright_owners():
+        nonlocal playwright_browser, playwright_instance, playwright_driver_pid
+        resources = dict(owners.playwright) if owners is not None else {}
+        if playwright_browser is None and playwright_instance is None:
+            retained = _retained_playwright_resources_for_pid(owners, playwright_driver_pid)
+            if len(retained) == 1:
+                # Keep this object binding after the first drain removes its
+                # registry entry; the captured PID must not reappear as a new
+                # unknown owner on the next stable-drain pass.
+                playwright_browser, playwright_instance, playwright_driver_pid, _ = retained[0]
+            elif retained:
+                return list(resources.values())
+        key = BrowserCleanupOwners.playwright_key(playwright_browser, playwright_instance, playwright_driver_pid)
+        prior = resources.get(key, (None, None, None, True))
+        resources[key or ("empty", 0)] = (
+            playwright_browser if playwright_browser is not None else prior[0],
+            playwright_instance if playwright_instance is not None else prior[1],
+            playwright_driver_pid if playwright_driver_pid is not None else prior[2],
+            prior[3],
+        )
+        return list(resources.values())
+
+    async def drain_connections(*, sealed: bool = False) -> bool:
+        # Admission is closed, but cancellation tails may still hand us resources
+        # they acquired earlier. Re-read custody after every batch of awaits.
+        attempted_dom, attempted_mux, attempted_playwright, attempted_startups = set(), set(), set(), set()
+        confirmed = True
+        while True:
+            progressed = False
+            for service in dom_owners():
+                if id(service) in attempted_dom:
+                    continue
+                attempted_dom.add(id(service))
+                progressed = True
+                if getattr(service, "disconnect_confirmed", False) is not True:
+                    try:
+                        await _bounded_browser_terminal_io(service.disconnect(), "cleanup CDP disconnect")
+                    except Exception as error:
+                        confirmed = False
+                        logger.warning(
+                            "Browser cleanup CDP disconnect failed",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            error=extract_error_message(error),
+                        )
+                if getattr(service, "disconnect_confirmed", False) is True:
+                    if owners is not None:
+                        owners.dom_services.pop(id(service), None)
+                else:
+                    confirmed = False
+            for multiplexer in list(owners.multiplexers.values()) if owners is not None else ():
+                if id(multiplexer) in attempted_mux:
+                    continue
+                attempted_mux.add(id(multiplexer))
+                progressed = True
+                try:
+                    await _bounded_browser_terminal_io(multiplexer.close(), "cleanup unattached CDP disconnect")
+                except Exception as error:
+                    confirmed = False
+                    logger.warning(
+                        "Browser cleanup unattached CDP disconnect failed",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error_type=type(error).__name__,
+                    )
+                else:
+                    owners.multiplexers.pop(id(multiplexer), None)
+            for browser, instance, pid, close_browser in playwright_owners():
+                key = BrowserCleanupOwners.playwright_key(browser, instance, pid)
+                if key in attempted_playwright:
+                    continue
+                attempted_playwright.add(key)
+                progressed = True
+                stopped = await _stop_playwright_resources(
+                    browser, instance, agent_id, close_browser=close_browser and not sealed, driver_pid=pid
+                )
+                confirmed = confirmed and stopped is True
+            for startup in list(owners.playwright_startups.values()) if owners is not None else ():
+                if id(startup) in attempted_startups:
+                    continue
+                attempted_startups.add(id(startup))
+                progressed = True
+                try:
+                    await _bounded_browser_terminal_io(startup.close(), "cleanup Playwright startup")
+                except Exception as error:
+                    confirmed = False
+                    logger.warning(
+                        "Browser cleanup Playwright startup failed",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error_type=type(error).__name__,
+                    )
+                if getattr(startup, "close_confirmed", False) is True:
+                    owners.playwright_startups.pop(id(startup), None)
+                else:
+                    confirmed = False
+            if not progressed:
+                break
+        setup_settled = all(
+            task is None or task.done()
+            for task in (
+                interaction_layer_task,
+                network_recorder_task,
+                *local_only_setup_tasks,
+                *(owners.setup_tasks if owners is not None else ()),
+            )
+        )
+        empty = owners is None or not (
+            owners.dom_services
+            or owners.multiplexers
+            or owners.playwright
+            or owners.driver_owners
+            or owners.playwright_startups
+        )
+        # No await between this stable, sealed ownership check and the caller's
+        # decision to signal. An unsettled setup retains the generation fence.
+        return confirmed and setup_settled and empty
+
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
         resolved_network_recorder = browser_network_recorder
@@ -5917,7 +6168,12 @@ def _schedule_browser_cleanup(
             deadline = asyncio.get_running_loop().time() + BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS
             owned_tasks = {
                 task
-                for task in (interaction_layer_task, network_recorder_task, *local_only_setup_tasks)
+                for task in (
+                    interaction_layer_task,
+                    network_recorder_task,
+                    *local_only_setup_tasks,
+                    *(owners.setup_tasks if owners is not None else ()),
+                )
                 if isinstance(task, asyncio.Task)
             }
             if cursor_streamer is not None:
@@ -5945,21 +6201,18 @@ def _schedule_browser_cleanup(
             if humanizer is not None:
                 with contextlib.suppress(Exception):
                     await _bounded_browser_terminal_io(humanizer.close(), "sealed humanizer detach")
-            if dom_service is not None:
-                with contextlib.suppress(Exception):
-                    await _bounded_browser_terminal_io(dom_service.disconnect(), "sealed CDP detach")
-            await _stop_playwright_resources(
-                playwright_browser,
-                playwright_instance,
-                agent_id,
-                close_browser=False,
-                driver_pid=playwright_driver_pid,
-            )
+            await drain_connections(sealed=True)
 
         try:
             if local_only:
                 await dispose_local()
                 return
+            if owners is not None and owners.setup_tasks:
+                for task in tuple(owners.setup_tasks):
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                    task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                await asyncio.wait(tuple(owners.setup_tasks), timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
             if cursor_streamer:
                 with _suppress_browser_cleanup_errors():
                     await cursor_streamer.close()
@@ -6035,22 +6288,8 @@ def _schedule_browser_cleanup(
                     cleanup_failure=cleanup_failure,
                     session_id=paused_session_id,
                 )
-            if dom_service:
-                try:
-                    await _bounded_browser_terminal_io(dom_service.disconnect(), "cleanup CDP disconnect")
-                except Exception as disconnect_error:
-                    logger.warning(
-                        "Browser cleanup CDP disconnect failed",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        error=extract_error_message(disconnect_error),
-                    )
-            await _stop_playwright_resources(
-                playwright_browser,
-                playwright_instance,
-                agent_id,
-                driver_pid=playwright_driver_pid,
-            )
+            if await drain_connections():
+                await acknowledge_browser_activity_cleanup()
         except WorkflowGenerationSealed:
             await dispose_local()
         except Exception as exc:  # background cleanup must never crash the worker loop
@@ -6146,6 +6385,7 @@ async def drain_background_browser_cleanups(
 
 @activity.defn
 @traced("spawn_browser_agent_activity_v3")
+@_with_browser_cleanup_owners
 async def spawn_browser_agent_activity_v3(
     user_id: str,
     agent_id: str,
@@ -6843,6 +7083,7 @@ def _finalize_rejected_browser_approval(state: Dict[str, Any]) -> None:
             if isinstance(grant, dict) and is_approval_valid({key: grant}, str(approval_kind), url):
                 approvals.pop(key, None)
         container["write_lock_approvals"] = approvals
+
 
 def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
     if not source.get("world_model_simulated"):
@@ -7763,7 +8004,6 @@ async def _spawn_browser_agent_activity_v3_simulated(
         jev_session.close()
 
 
-
 async def _publish_browser_session_metadata_message(
     *,
     agent_id: str,
@@ -8039,11 +8279,17 @@ async def _spawn_browser_agent_activity_v3_real(
     action_history = ActionHistory()
     jev_session = JEVSession(agent_id, task_id, "browser")
 
-    def _redact_activity_value(value: Any) -> Any:
+    def _redact_activity_value(value: Any, *, action_entries: bool = False) -> Any:
+        # Only the native history caller supplies typed entries. Arbitrary
+        # dictionaries continue through the generic page/media policy.
+        visible = (
+            [action_history._model_visible_entry(entry) for entry in value]
+            if action_entries else action_history.model_visible_value(value)
+        )
         # Private hydration can precede DOM binding, and cleanup can outlive
         # its transport. Keep those boundaries under the activity's policy.
         return mask_secret_values(
-            redact_current_secret_values(action_history.model_visible_value(value)),
+            redact_current_secret_values(visible),
             (write_lock_resume_state or {}).get("secret_redaction_refs"),
         )
 
@@ -9017,6 +9263,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 ),
                 **_cdp_multiplexer_kwargs(_cdp_multiplexer),
             )
+            _track_browser_dom_service(_dom_service)
             if hasattr(_dom_service, "restore_secret_redaction_state"):
                 _dom_service.restore_secret_redaction_state(write_lock_resume_state or {})
                 if (
@@ -9030,6 +9277,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
             async def _connect_dom():
                 t = time.monotonic()
+                _ensure_browser_acquisition_open()
                 await _dom_service.connect()
                 _record_timing("parallel.browser.dom_connect", t)
                 logger.info("\U0001f310 Connected to browser via CDP")
@@ -9043,21 +9291,13 @@ async def _spawn_browser_agent_activity_v3_real(
                 t = time.monotonic()
                 from playwright.async_api import async_playwright
 
-                _pw_instance = await async_playwright().start()
+                _pw_instance = await _start_owned_playwright(async_playwright)
                 _playwright_instance = _pw_instance
                 playwright_driver_pid = getattr(_playwright_driver_process(_pw_instance), "pid", None)
-                try:
-                    _pw_browser = await _pw_instance.chromium.connect_over_cdp(connection_cdp_url)
-                except BaseException:
-                    _driver_process = _playwright_driver_process(_pw_instance)
-                    # Bounded like _stop_playwright_resources: a hung stop must not keep
-                    # the DOMService teardown below from releasing the CDP client.
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(_pw_instance.stop(), timeout=5.0)
-                    await _reap_playwright_driver_process(_driver_process, agent_id)
-                    _playwright_instance = None
-                    raise
+                _track_browser_playwright(None, _pw_instance, playwright_driver_pid)
+                _pw_browser = await _pw_instance.chromium.connect_over_cdp(connection_cdp_url)
                 _playwright_browser = _pw_browser
+                _track_browser_playwright(_pw_browser, _pw_instance, playwright_driver_pid)
                 _record_timing("parallel.browser.playwright_connect", t)
                 _pw_context = _pw_browser.contexts[0]
                 _pw_page = _pw_context.pages[0]
@@ -9108,7 +9348,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     (
                         _dom_page,
                         (_playwright_instance, _playwright_browser, _playwright_context, _input_page),
-                    ) = await asyncio.gather(_connect_dom(), _connect_playwright())
+                    ) = await _gather_browser_setup(_connect_dom(), _connect_playwright())
                 else:
                     _dom_page = await _connect_dom()
                     (
@@ -9121,12 +9361,14 @@ async def _spawn_browser_agent_activity_v3_real(
                 # Bounded; a wedged or failed disconnect falls back to closing the
                 # loopback multiplexer, which drops Tilion's single upstream socket.
                 await _release_browser_client(_dom_service)
-                await _stop_playwright_resources(
+                stopped = await _stop_playwright_resources(
                     _playwright_browser,
                     _playwright_instance,
                     agent_id,
                     driver_pid=playwright_driver_pid,
                 )
+                if stopped:
+                    playwright_driver_pid = None
                 raise
 
             return (
@@ -9252,8 +9494,13 @@ async def _spawn_browser_agent_activity_v3_real(
                 _realm_credential_state,
             )
 
+        setup_owners = get_browser_cleanup_owners()
+        if setup_owners is not None:
+            setup_owners.ensure_acquisition_open()
         browser_setup = asyncio.create_task(_setup_browser(), name=f"browser-setup:{agent_id}")
         data_setup = asyncio.create_task(_process_data(), name=f"browser-setup-data:{agent_id}")
+        if setup_owners is not None:
+            setup_owners.setup_tasks.update((browser_setup, data_setup))
         try:
             browser_result, data_result = await asyncio.gather(browser_setup, data_setup)
         except BaseException:
@@ -9266,7 +9513,9 @@ async def _spawn_browser_agent_activity_v3_real(
             if browser_setup.done() and not browser_setup.cancelled() and browser_setup.exception() is None:
                 dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_setup.result()
             for side in (browser_setup, data_setup):
-                side.cancel()
+                # Preserve the first cancellation's resource-release tail.
+                if not side.done() and not side.cancelling():
+                    side.cancel()
             await asyncio.wait({browser_setup, data_setup}, timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
             for side in (browser_setup, data_setup):
                 if not side.done():
@@ -10136,7 +10385,7 @@ async def _spawn_browser_agent_activity_v3_real(
             jev_session.schedule(
                 _redact_activity_value(goal),
                 _model_visible_browser_output_schema(response_schema, _redact_activity_value),
-                browser_prefix_events(_redact_activity_value(action_history.get_entries())),
+                browser_prefix_events(_redact_activity_value(action_history.get_entries(), action_entries=True)),
             )
             # Drain checkpoint. Between steps, with no approved action still
             # owed, the task is fully captured by the same resume payload a
@@ -11026,13 +11275,15 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 _tilion_leave_session()
                 dom_service = None
-                await _stop_playwright_resources(
+                stopped = await _stop_playwright_resources(
                     playwright_browser,
                     playwright_instance,
                     agent_id,
                     close_browser=False,
                     driver_pid=playwright_driver_pid,
                 )
+                if stopped:
+                    playwright_driver_pid = None
                 playwright_browser = None
                 playwright_instance = None
 
@@ -13744,9 +13995,19 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             goal=goal,
                             workflow_instance=workflow_instance,
                         )
+                        cleanup_activity_options = {}
+                        if workflow.in_workflow():
+                            cleanup_activity_id = f"browser-cleanup:{workflow.uuid4()}"
+                            workflow_instance._browser_activity_cleanup_receipt = {
+                                "run_id": workflow.info().run_id,
+                                "activity_id": cleanup_activity_id,
+                                "completed": False,
+                            }
+                            cleanup_activity_options["activity_id"] = cleanup_activity_id
                         activity_handle = workflow.start_activity(
                             spawn_browser_agent_activity_v3,
                             args=activity_args,
+                            **cleanup_activity_options,
                             start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
                             heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                             cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
@@ -14812,9 +15073,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             raise
         except Exception as e:
             if isinstance(e, ActivityError) and isinstance(e.cause, TemporalTimeoutError):
-                # A server timeout does not acknowledge the worker's cleanup.
-                # Fail later same-GP turns closed until workflow reconciliation.
-                workflow_instance._browser_activity_cleanup_unknown = True
+                # The worker can finish teardown before or after the server's
+                # timeout result. Only its exact attempt receipt releases custody.
+                receipt = getattr(workflow_instance, "_browser_activity_cleanup_receipt", None)
+                workflow_instance._browser_activity_cleanup_unknown = not (
+                    isinstance(receipt, dict) and receipt.get("completed") is True
+                )
             if isinstance(e, asyncio.CancelledError):
                 raise
 

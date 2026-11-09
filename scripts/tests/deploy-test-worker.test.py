@@ -463,6 +463,16 @@ class Worker(unittest.TestCase):
 
 class Cloud(unittest.TestCase):
     def setUp(self):
+        # These native receipt fixtures own their adapter inputs, not the deploy's fanout.
+        environment = patch.dict(os.environ, {
+            'CLOUDBENCH_BROWSER_PROVIDER': 'tilion',
+            'CLOUDBENCH_PROVIDER_LIMITS_FILE': str(ROOT / 'scripts/cloudbench-provider-limits.json'),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
+        # This standalone fixture owns its request, not the invoking gate's custody.
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
@@ -581,6 +591,37 @@ class Cloud(unittest.TestCase):
         self.assertNotIn('failing',argv)
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
+
+    def test_cloud_admission_limit_preserves_every_selected_case(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1'}), \
+             patch.object(self.cloud, 'source', return_value=self.request['source']), \
+             patch.object(self.cloud, 'run_command', return_value=(0,False,False,False)) as launch, \
+             patch.object(self.cloud, 'collect_campaign', return_value=({'passing':'PASS','failing':'PASS'},{},True,'native-run')):
+            result=self.cloud.execute(self.request,self.root)
+        argv=launch.call_args.args[0]
+        self.assertEqual(['passing','failing'],argv[2:4])
+        self.assertEqual('1',argv[argv.index('--concurrency')+1])
+        self.assertEqual('1',argv[argv.index('--runs')+1])
+        self.assertEqual('0',argv[argv.index('--retry-infra')+1])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+
+    def test_cloud_admission_limit_cannot_raise_provider_capacity(self):
+        checks=[str(i) for i in range(100)]
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1000'}):
+            limited=self.cloud.campaign_width(checks)
+        with patch.dict(os.environ, {}, clear=True):
+            provider_width=self.cloud.campaign_width(checks)
+        self.assertEqual(provider_width,limited)
+
+    def test_invalid_cloud_admission_limit_fails_before_launch(self):
+        for value in ('', '0', '-1', '1.5', ' 2', 'two'):
+            with self.subTest(value=value), patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY':value}), \
+                 patch.object(self.cloud, 'source', return_value=self.request['source']), \
+                 patch.object(self.cloud, 'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'DEPLOY_CLOUD_CONCURRENCY'):
+                    self.cloud.execute(self.request,self.root)
+                launch.assert_not_called()
 
     def test_cloud_launch_records_selected_standing_skip_eligibility_before_dispatch(self):
         names=['browser-auth-guest-purchase','claude-only','ordinary']
@@ -2333,7 +2374,7 @@ class Backend(unittest.TestCase):
         docker.chmod(0o700)
         env = {'CONDUCTOR_WORKSPACE_NAME': 'fixture', 'CONDUCTOR_PORT': '20000',
                'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'FAKE_POSTGRES': str(state),
-               'FAKE_DOCKER_CALLS': str(calls)}
+               'FAKE_DOCKER_CALLS': str(calls), 'BACKEND_COVERAGE_DATABASE_URL': ''}
         # A stopped fixture genuinely prevents the original setup; no fabricated result.
         setup = [sys.executable, '-c', "import json,os; from pathlib import Path; "
                  "assert json.loads(Path(os.environ['FAKE_POSTGRES']).read_text())['row']['running']; "
@@ -3147,6 +3188,8 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
                         patch('time.sleep',side_effect=self.sleep)):
             patcher.start();self.addCleanup(patcher.stop)
+        # Test the account ceiling independently of the invoking deploy's width.
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
 
     def sleep(self, seconds):
         self.sleeps.append(seconds);self.now[0]+=seconds
@@ -3220,6 +3263,32 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         with self.assertRaises(headroom.HeadroomUnavailable):
             headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
                                           opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FixtureEnvironmentIsolation(unittest.TestCase):
+    def test_cloud_request_custody_is_local_and_parent_environment_is_restored(self):
+        parent = '/tmp/fixture-parent/attempts/34/phase/gate/request.json'
+        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': parent, 'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            Cloud('test_cloud_cli_gets_only_active_cases_and_frozen_ref').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual(parent, os.environ['DEPLOY_GATE_REQUEST'])
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+
+    def test_headroom_fixture_preserves_parent_width_and_explicit_limits(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            CloudSharedProviderHeadroom('test_live_account_sessions_narrow_the_smoke_width').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+            fixture = CloudSharedProviderHeadroom()
+            fixture.setUp()
+            try:
+                with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+                    self.assertEqual(4, fixture.width(FakeTilionListing(5))[0])
+            finally:
+                fixture.doCleanups()
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
 
 
 class FakeCerebrasProbe:

@@ -1,43 +1,43 @@
 {
   ".cloud-env": "reproducible: boxes.dev managed project env / Template box injection; never committed",
   ".context/": {
-    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109.tar.gz",
-    "detail": "gzip tar of local evidence (37,801 entries; entry count verified against the source); durable project filesystem /project",
+    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109-p02.tar.gz",
+    "detail": "gzip tar of current local evidence (17,973 entries; entry list verified against the source). Earlier snapshot: workspace-evidence-20261109.tar.gz (sha256 bb492bde\u2026, 37,801 entries). Deploy cycles moved out of .context: deploy-records-20261109-p03.tar.gz (sha256 653c9bbb\u2026, 61,072 entries). All in the durable project filesystem /project.",
     "disposition": "archived",
-    "sha256": "bb492bdeefebe46da35bafd3d0f95aedd6cd1ac03d847952f60eefe636c57c2b"
+    "sha256": "9b339ecdd9c51e450785ddac9ed4b5eabb867a4ca8cf3b011be24d0d050fcc75"
   },
   ".devbox/": "reproducible: Template box snapshot (2026-10-08), unchanged by this deploy",
   ".env.npm": "reproducible: boxes.dev managed project env / Template box injection; never committed",
   ".llm-dumps/": {
-    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109.tar.gz",
-    "detail": "gzip tar of local evidence (37,801 entries; entry count verified against the source); durable project filesystem /project",
+    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109-p02.tar.gz",
+    "detail": "gzip tar of current local evidence (17,973 entries; entry list verified against the source). Earlier snapshot: workspace-evidence-20261109.tar.gz (sha256 bb492bde\u2026, 37,801 entries). Deploy cycles moved out of .context: deploy-records-20261109-p03.tar.gz (sha256 653c9bbb\u2026, 61,072 entries). All in the durable project filesystem /project.",
     "disposition": "archived",
-    "sha256": "bb492bdeefebe46da35bafd3d0f95aedd6cd1ac03d847952f60eefe636c57c2b"
+    "sha256": "9b339ecdd9c51e450785ddac9ed4b5eabb867a4ca8cf3b011be24d0d050fcc75"
   },
   "agents/.env": "reproducible: boxes.dev managed project env / Template box injection; never committed",
   "agents/.env.benchmark-temporal": "reproducible: boxes.dev managed project env / Template box injection; never committed",
   "agents/.env.cloudbench-upsert.lock": "reproducible: transient lock file",
   "agents/.ruff_cache/": "reproducible: ruff lint cache",
   "agents/benchmarks/runs/20261108_0*": {
-    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109.tar.gz",
-    "detail": "gzip tar of local evidence (37,801 entries; entry count verified against the source); durable project filesystem /project",
+    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109-p02.tar.gz",
+    "detail": "gzip tar of current local evidence (17,973 entries; entry list verified against the source). Earlier snapshot: workspace-evidence-20261109.tar.gz (sha256 bb492bde\u2026, 37,801 entries). Deploy cycles moved out of .context: deploy-records-20261109-p03.tar.gz (sha256 653c9bbb\u2026, 61,072 entries). All in the durable project filesystem /project.",
     "disposition": "archived",
-    "sha256": "bb492bdeefebe46da35bafd3d0f95aedd6cd1ac03d847952f60eefe636c57c2b"
+    "sha256": "9b339ecdd9c51e450785ddac9ed4b5eabb867a4ca8cf3b011be24d0d050fcc75"
   },
   "agents/navi-worker-log.txt": {
-    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109.tar.gz",
-    "detail": "gzip tar of local evidence (37,801 entries; entry count verified against the source); durable project filesystem /project",
+    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109-p02.tar.gz",
+    "detail": "gzip tar of current local evidence (17,973 entries; entry list verified against the source). Earlier snapshot: workspace-evidence-20261109.tar.gz (sha256 bb492bde\u2026, 37,801 entries). Deploy cycles moved out of .context: deploy-records-20261109-p03.tar.gz (sha256 653c9bbb\u2026, 61,072 entries). All in the durable project filesystem /project.",
     "disposition": "archived",
-    "sha256": "bb492bdeefebe46da35bafd3d0f95aedd6cd1ac03d847952f60eefe636c57c2b"
+    "sha256": "9b339ecdd9c51e450785ddac9ed4b5eabb867a4ca8cf3b011be24d0d050fcc75"
   },
   "agents/providers/fast_cache/": "reproducible: Python bytecode cache (only __pycache__/*.pyc remain after the fast_cache->demo_cache rename)",
   "back-end/.env": "reproducible: boxes.dev managed project env / Template box injection; never committed",
   "back-end/.env.cloudbench-upsert.lock": "reproducible: transient lock file",
   "back-end/backend-logs.log": {
-    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109.tar.gz",
-    "detail": "gzip tar of local evidence (37,801 entries; entry count verified against the source); durable project filesystem /project",
+    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109-p02.tar.gz",
+    "detail": "gzip tar of current local evidence (17,973 entries; entry list verified against the source). Earlier snapshot: workspace-evidence-20261109.tar.gz (sha256 bb492bde\u2026, 37,801 entries). Deploy cycles moved out of .context: deploy-records-20261109-p03.tar.gz (sha256 653c9bbb\u2026, 61,072 entries). All in the durable project filesystem /project.",
     "disposition": "archived",
-    "sha256": "bb492bdeefebe46da35bafd3d0f95aedd6cd1ac03d847952f60eefe636c57c2b"
+    "sha256": "9b339ecdd9c51e450785ddac9ed4b5eabb867a4ca8cf3b011be24d0d050fcc75"
   },
   "branch:backup/cerebras-chat-quota-prepush-20261002": {
     "archive": "/project/devbox-closeouts/pr-1803/refs-20261109.bundle",
@@ -49,16 +49,16 @@
   "docs/rca/INDEX.md": "reproducible: generated by `python3 scripts/rca_archive.py reindex` from the committed docs/rca/cases/*.md (git-ignored on main)",
   "front-end/.env": "reproducible: boxes.dev managed project env / Template box injection; never committed",
   "front-end/frontend-logs.log": {
-    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109.tar.gz",
-    "detail": "gzip tar of local evidence (37,801 entries; entry count verified against the source); durable project filesystem /project",
+    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109-p02.tar.gz",
+    "detail": "gzip tar of current local evidence (17,973 entries; entry list verified against the source). Earlier snapshot: workspace-evidence-20261109.tar.gz (sha256 bb492bde\u2026, 37,801 entries). Deploy cycles moved out of .context: deploy-records-20261109-p03.tar.gz (sha256 653c9bbb\u2026, 61,072 entries). All in the durable project filesystem /project.",
     "disposition": "archived",
-    "sha256": "bb492bdeefebe46da35bafd3d0f95aedd6cd1ac03d847952f60eefe636c57c2b"
+    "sha256": "9b339ecdd9c51e450785ddac9ed4b5eabb867a4ca8cf3b011be24d0d050fcc75"
   },
   "hub-poller-logs.log": {
-    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109.tar.gz",
-    "detail": "gzip tar of local evidence (37,801 entries; entry count verified against the source); durable project filesystem /project",
+    "archive": "/project/devbox-closeouts/pr-1803/workspace-evidence-20261109-p02.tar.gz",
+    "detail": "gzip tar of current local evidence (17,973 entries; entry list verified against the source). Earlier snapshot: workspace-evidence-20261109.tar.gz (sha256 bb492bde\u2026, 37,801 entries). Deploy cycles moved out of .context: deploy-records-20261109-p03.tar.gz (sha256 653c9bbb\u2026, 61,072 entries). All in the durable project filesystem /project.",
     "disposition": "archived",
-    "sha256": "bb492bdeefebe46da35bafd3d0f95aedd6cd1ac03d847952f60eefe636c57c2b"
+    "sha256": "9b339ecdd9c51e450785ddac9ed4b5eabb867a4ca8cf3b011be24d0d050fcc75"
   },
   "mac-app/.env": "reproducible: boxes.dev managed project env / Template box injection; never committed",
   "package-lock.json": "reproducible: root npm install output for the workspace (git-ignored); package-local lockfiles are committed",

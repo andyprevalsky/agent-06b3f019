@@ -26,17 +26,18 @@
  *   SMOKE_BASE_URL=http://localhost:3001 npx tsx scripts/prod-endpoint-smoke.ts
  *
  * Env — override any of these; they default to the repo's shared dev
- * credentials (the X-API-Key in .claude/commands/loop.md and the front-end e2e
- * helpers, and Andy's dev user id from CLAUDE.md "Credentials and environment";
- * the /deploy production lane runs this script), so it runs with no setup.
- * Set SMOKE_API_KEY / SMOKE_USER_ID to point at another env.
+ * credentials (the same X-API-Key / test-user id documented in CLAUDE.md and
+ * used by every blackbox test + the /deploy Step 13a probe), so the script runs
+ * with no setup. Set SMOKE_API_KEY / SMOKE_USER_ID to point at another env.
  *   SMOKE_BASE_URL   backend base URL     (default https://navi-j9a9.onrender.com)
- *   SMOKE_API_KEY    internal X-API-Key   (default: shared dev key, see .claude/commands/loop.md)
- *   SMOKE_USER_ID    X-User-Id            (default: Andy's dev user, see CLAUDE.md)
+ *   SMOKE_API_KEY    internal X-API-Key   (default: shared dev key, see CLAUDE.md)
+ *   SMOKE_USER_ID    X-User-Id            (default: shared dev test user, see CLAUDE.md)
+ *   SCHEMA_MIGRATIONS_DIR  migrations the schema check replays (default: this
+ *                    checkout's; /deploy passes the commit production runs)
  */
 import { config } from 'dotenv';
 import { runAuthCorsPreflights } from '../src/providers/corsSmoke';
-import { driftProblems, SCHEMA_DRIFT_HINT, verifySchemaObjects } from './verify-schema-objects';
+import { schemaHints, schemaProblems, verifySchemaObjects } from './verify-schema-objects';
 config();
 
 const RAW_BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.com').replace(
@@ -78,8 +79,8 @@ if (LOCAL_BASE && !ALLOW_LOCAL) {
   process.exit(2);
 }
 const BASE_URL = RAW_BASE_URL;
-// Shared dev credentials (also in .claude/commands/loop.md; the user id is in
-// CLAUDE.md). Not a real secret; override via env to probe a different environment.
+// Shared dev credentials (also in CLAUDE.md + every *.blackbox.ts). Not a real
+// secret; override via env to probe a different environment.
 const API_KEY = process.env.SMOKE_API_KEY ?? 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
 const USER_ID = process.env.SMOKE_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
@@ -216,13 +217,14 @@ async function main(): Promise<void> {
   } else if (!LOCAL_BASE && databaseUrl) {
     schemaChecks = 1;
     try {
-      const problems = driftProblems(await verifySchemaObjects(databaseUrl));
+      const report = await verifySchemaObjects(databaseUrl);
+      const problems = schemaProblems(report);
       if (problems.length > 0) failed++;
       console.log(
         `  ${problems.length > 0 ? '❌' : '✅'} ${'schema'.padEnd(18)} migration-declared objects`
       );
       for (const problem of problems) console.log(`       ${problem}`);
-      if (problems.length > 0) console.log(`       ${SCHEMA_DRIFT_HINT}`);
+      for (const hint of schemaHints(report)) console.log(`       ${hint}`);
     } catch (error) {
       failed++;
       console.log(`  ❌ ${'ERR'.padEnd(18)} migration-declared objects`);

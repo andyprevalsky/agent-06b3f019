@@ -1,0 +1,44 @@
+{
+  "originating_pr": 1859,
+  "originating_merge": "4e28dab648a66e70f513979cb11b59e614866424",
+  "native_production_status": "FAIL",
+  "qualified_status": "Complete with delegated additional failure; native FAIL retained",
+  "fly": "PASS",
+  "semantic": "PASS",
+  "workflow_migration": {
+    "native": "FAIL",
+    "counts": {
+      "PASS": 42,
+      "FAIL": 3,
+      "total": 45
+    },
+    "fixture_cleanup": "PASS",
+    "attribution": "NOT_INTRODUCED",
+    "repair_agent": "https://boxes.dev/thread/thr_6b90d980e2ef4d78b2b744d5fcb1b357",
+    "full_goal_delivery": {
+      "schemaVersion": 2,
+      "ok": true,
+      "requestId": "f7878bc3-bc83-412a-9927-ca0997edc04b",
+      "threadId": "ph7ay017hwvqyw6wbsymgd5v2s8hw02d",
+      "agent": "codex",
+      "status": "delivered"
+    },
+    "separate_devbox": "95a927f8-1267-45e5-ba7b-b5ed9e864f03",
+    "Bugs_folder_membership": {
+      "placementId": "p175qrv9tsqyakg1m8mypk4qes8hx77j",
+      "primaryInstanceId": "0f8c2d78-3043-4af0-89bd-eb53f8500a5c",
+      "executionInstanceId": "95a927f8-1267-45e5-ba7b-b5ed9e864f03",
+      "folderId": "z57k17gzz4egv17ag6qqtasexs8h273j",
+      "folderRevision": 1
+    },
+    "configured_model": "gpt-6.1-sol",
+    "configured_effort": "high",
+    "configured_speed": "standard",
+    "repair_completion_claimed": false,
+    "native_goal_active_reported": true,
+    "current_main_contains_merge_reported": "e34666de",
+    "recipient_evidence_hashing_reported": true
+  },
+  "checked_at": "2026-11-09T17:18:20.109688+00:00",
+  "original_receipt_unchanged": true
+}

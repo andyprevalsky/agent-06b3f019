@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => {
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => true),
+    stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
     forceResubscribe: vi.fn(),
   };
   return { authState, ctxState };
@@ -108,6 +109,7 @@ function messageSendingArgs(overrides: Partial<Parameters<typeof useMessageSendi
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => true),
+    stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
     ...overrides,
   };
 }
