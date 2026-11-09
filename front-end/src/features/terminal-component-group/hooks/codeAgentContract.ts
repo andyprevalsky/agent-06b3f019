@@ -774,9 +774,11 @@ export async function sendCodeAgentMessage(args: {
     ...args.options,
   })) as {
     status?: string;
+    resuming?: boolean;
     effective_settings?: { model?: string; effort?: string; speed?: string };
   };
-  if (ack.status !== 'delivered' && ack.status !== 'duplicate') {
+  // `queued`: the code agent was stopped and is resuming with this as its next turn.
+  if (ack.status !== 'delivered' && ack.status !== 'duplicate' && ack.status !== 'queued') {
     throw new Error('The code session has not confirmed delivery. Your draft is kept.');
   }
   return ack;

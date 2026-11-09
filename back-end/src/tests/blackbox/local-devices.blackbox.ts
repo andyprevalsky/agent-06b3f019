@@ -21,7 +21,14 @@
  * credentials). Section B drives the running backend's routes and sockets.
  */ import { config } from 'dotenv';
 import assert from 'node:assert';
-import { randomUUID } from 'node:crypto';
+import {
+  constants as cryptoConstants,
+  createCipheriv,
+  createPublicKey,
+  publicEncrypt,
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { originDeviceFields } from '../../domains/agents/agentOriginService';
 import type { CreateAgentBody } from '../../domains/agents/types';
@@ -55,6 +62,36 @@ function userToken(userId: string, extra: Record<string, unknown> = {}): string 
     issuer: `${supabaseUrl}/auth/v1`,
     expiresIn: '10m',
   });
+}
+
+/**
+ * A credential envelope the test backend can open: sealed with the public half
+ * of the backend's own CLAUDE_CREDENTIAL_DECRYPTION_KEY (both load back-end/.env).
+ */
+function sealForBackend(plaintext: string): string {
+  const keyB64 = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  assert.ok(keyB64, 'CLAUDE_CREDENTIAL_DECRYPTION_KEY must be set (back-end/.env)');
+  const publicKey = createPublicKey(Buffer.from(keyB64, 'base64').toString('utf8'));
+  const aesKey = randomBytes(32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', aesKey, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(plaintext, 'utf8'),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+  const encryptedKey = publicEncrypt(
+    { key: publicKey, padding: cryptoConstants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+    aesKey
+  );
+  return Buffer.from(
+    JSON.stringify({
+      version: 1,
+      encrypted_aes_key: encryptedKey.toString('base64'),
+      iv: iv.toString('base64'),
+      ciphertext: ciphertext.toString('base64'),
+    })
+  ).toString('base64');
 }
 
 async function http(
@@ -380,6 +417,83 @@ async function sectionB(): Promise<TestResult[]> {
               );
             }
           }
+          // A started session's task row carries the spawn's task_name (the
+          // agents-list title), through both create routes. A Mac runs on the
+          // user's own logins.
+          for (const [name, secret] of [
+            [
+              'claude_code',
+              {
+                claudeAiOauth: {
+                  accessToken: 'sk-ant-oat01-local-devices',
+                  refreshToken: 'refresh-local-devices',
+                  expiresAt: Date.now() + 60 * 60 * 1000,
+                },
+              },
+            ],
+            [
+              'gpt_code',
+              {
+                auth_mode: 'chatgpt',
+                tokens: {
+                  access_token: 'own-access',
+                  refresh_token: 'own-refresh',
+                  account_id: 'a1',
+                },
+              },
+            ],
+          ] as const) {
+            await prisma.integration.create({
+              data: {
+                userId: userA,
+                type: 'TOOL_SETUP',
+                name,
+                status: 'CONNECTED',
+                isActive: true,
+                config: { encryptedCredentials: sealForBackend(JSON.stringify(secret)) },
+              },
+            });
+          }
+          for (const path of [
+            '/api/claude-code-session/create',
+            '/api/codex-code-session/create',
+          ]) {
+            const created = http(path, {
+              method: 'POST',
+              headers: internal,
+              body: {
+                agent_id: webRoot,
+                user_id: userA,
+                goal: 'You are working in the Rose UI sandbox.\nTask: remove the border',
+                target: 'local',
+                device_id: deviceA,
+                task_name: 'remove_rose_card_border',
+              },
+            });
+            const frameOrRefusal = await Promise.race([
+              control!.next((m) => m.includes('"start_session"')),
+              created.then((res) => {
+                throw new Error(`${path} answered before starting: ${JSON.stringify(res)}`);
+              }),
+            ]);
+            const start = JSON.parse(frameOrRefusal) as { task_id: string };
+            const tunnel = await openSocket(
+              `${WS_BASE}/api/local-code-relay/${start.task_id}/device`,
+              deviceHeaders(tokenA, deviceA)
+            );
+            control!.ws.send(
+              JSON.stringify({ type: 'session_started', task_id: start.task_id, folder: '~/code' })
+            );
+            const res = await created;
+            assert.strictEqual(res.status, 200, `${path} ${JSON.stringify(res.data)}`);
+            assert.strictEqual(res.data.task_id, start.task_id);
+            const row = await prisma.claudeCodeSession.findUniqueOrThrow({
+              where: { id: start.task_id },
+            });
+            assert.strictEqual(row.taskName, 'remove_rose_card_border', path);
+            tunnel.ws.close();
+            await tunnel.closed;
+          }
           // Relay endpoints for another user's task are refused.
           await expectRefused(
             `${WS_BASE}/api/local-code-relay/${randomUUID()}/device`,
@@ -408,6 +522,7 @@ async function sectionB(): Promise<TestResult[]> {
     await prisma.localDevice.deleteMany({
       where: { id: { in: [deviceA, deviceA2, foreignDevice] } },
     });
+    await prisma.integration.deleteMany({ where: { userId: { in: [userA, userB] } } });
     await prisma.user.deleteMany({ where: { userId: { in: [userA, userB] } } });
   }
   return results;

@@ -1,0 +1,170 @@
+{
+  "reviewed_at": "2026-11-08T23:33:23.413873+00:00",
+  "verdict": "PASS_FOR_PUBLICATION",
+  "deletion_readiness": "PENDING_NATIVE_DELETION_CHECK_AND_FRESH_IGNORED_REF_INVENTORY",
+  "files_reviewed": 28,
+  "files": [
+    {
+      "path": "CONFIG-RECOVERY.txt",
+      "bytes": 3708,
+      "sha256": "eb5206e3bd19457dc5864b8087084f234ed929173c79262bdc8f1c87a891f48e"
+    },
+    {
+      "path": "RECOVERY.txt",
+      "bytes": 2595,
+      "sha256": "41c669bba9c74360b7574f606f7c6c56bbd922b5323ab015513da351d03178ce"
+    },
+    {
+      "path": "closeout-manifest.json",
+      "bytes": 2114,
+      "sha256": "551486023f30f48ebe756d4471e8b87dcd4357b9d13fdb2123a1f76bb6b8be7e"
+    },
+    {
+      "path": "config-archive-receipt.json",
+      "bytes": 596,
+      "sha256": "1071a1119e927cde0ad66a86d07cd9c6a06e4c77b4cfa6f6fc3cd9e2f5b4dbea"
+    },
+    {
+      "path": "config-control-archive-receipt.json",
+      "bytes": 606,
+      "sha256": "4982329a76b15c7e52ed8c702df6eedef75d8ce2a6677365732004091eb8a8ea"
+    },
+    {
+      "path": "config-render-restore-proof.sanitized.json",
+      "bytes": 853,
+      "sha256": "a44238807281a42aeb870970eb9cb2189488335957ba11da70cc18a5508c1a6a"
+    },
+    {
+      "path": "config-restore-hash-modes.sanitized.json",
+      "bytes": 5065,
+      "sha256": "58b68757a92287d121641b14a74b3d7599defa4b209febe48cadbe457b6cf19f"
+    },
+    {
+      "path": "deletion-manifest.json",
+      "bytes": 62623,
+      "sha256": "e813e7c79d6f04f003dd54e4c83ab78a4399191b9681cfd358dec7726ab4ac1b"
+    },
+    {
+      "path": "final-recipe-binding.json",
+      "bytes": 354,
+      "sha256": "f461a6c7bd4fed5eeeec4c883b0756a82c9bdd81a469212996265f650f41a409"
+    },
+    {
+      "path": "final-test-identity.json",
+      "bytes": 355,
+      "sha256": "318487183312ea4bf19dc21337d14b546d22f776aaa53b3f5069e2efd283a66f"
+    },
+    {
+      "path": "helper-versions.json",
+      "bytes": 486,
+      "sha256": "da5db117100aeda41f355b1bd6867e7286ca566fdc30dc11893fe1161519c94a"
+    },
+    {
+      "path": "included-workspace.json",
+      "bytes": 1724,
+      "sha256": "5fbb03f8b5acd265aec68395b73617d901f09f481741e6961832caa3fe985006"
+    },
+    {
+      "path": "inherited-restored-refs-verification.json",
+      "bytes": 8651,
+      "sha256": "c1a9bf5b2c8ee6b234352d668025a2829b634239d80a6d1715e2d014be3301f6"
+    },
+    {
+      "path": "mac-device-discovery.json",
+      "bytes": 335,
+      "sha256": "347c36a016b5c6d2725f9b51c516232a895754f6a2d13e907781076148f1dd1d"
+    },
+    {
+      "path": "preservation-index.prepared.json",
+      "bytes": 6380,
+      "sha256": "a0d78bac69be567d6ff3e675eea7619658781b3bdbc33ee7e3456d1b302b2c8f"
+    },
+    {
+      "path": "production-summary.json",
+      "bytes": 2315,
+      "sha256": "1c5f565ea737f65532a25b595139f4da84ddcbc54085280cf60fab975ed75067"
+    },
+    {
+      "path": "render-recovery-source.sanitized.json",
+      "bytes": 1555,
+      "sha256": "87d18bb5e88ddb734a6894b57fd6144fd95db2ce6178b59b1e52c3351670d4d2"
+    },
+    {
+      "path": "reproduction-attempts.json",
+      "bytes": 3061,
+      "sha256": "4b5dc83f29b139bb6c04e5c9761e52345936f2b3f04d3692ff57097c3e2b761a"
+    },
+    {
+      "path": "restore_from_render.py",
+      "bytes": 3786,
+      "sha256": "617e525cda9b97d56cf045078cd4bc64119f3174e9afb7b76f852e2bdfbca2b1"
+    },
+    {
+      "path": "smoke-final-proof.json",
+      "bytes": 21968,
+      "sha256": "80917fadf18373e126a61e4b2ddcb399e4d00d010ab8fa691947d7b827b46ae7"
+    },
+    {
+      "path": "terminal-archive-receipt.json",
+      "bytes": 635,
+      "sha256": "a43bf1ee7eb7973b2af6b029ef2436f874e1d0f02582240da401056e37a82764"
+    },
+    {
+      "path": "terminal-capture-qualification.json",
+      "bytes": 25617,
+      "sha256": "700b8df23fedbe7a1061741251d9ea874544bde9e288ca7f84b2392ad91a32c5"
+    },
+    {
+      "path": "terminal-capture-review.json",
+      "bytes": 44304,
+      "sha256": "0b8c68bfa8b0d3902ed12827d6f2bccb976ff656752448eedcdee518c11fb68f"
+    },
+    {
+      "path": "terminal-controls-archive-receipt.json",
+      "bytes": 612,
+      "sha256": "fe9caf100f01b0e6bced5b8e5e77ed70b8080b36999913f26ac02a64bacd2cd7"
+    },
+    {
+      "path": "terminal-controls-verification.json",
+      "bytes": 211,
+      "sha256": "07bd89851835a1943185a0ddb73f9f5516af6e3a7d1c15ddd03116ee45041e63"
+    },
+    {
+      "path": "terminal-restore-hash-verification.json",
+      "bytes": 756,
+      "sha256": "df41be7a13716b048d2cd06f59c215a6a6b2b4e0ab2772a98ac8988558e6e6b3"
+    },
+    {
+      "path": "terminal-snapshot-summary.json",
+      "bytes": 2344,
+      "sha256": "c90d771c3fd8b1d7122f4dd92a41e8a30e1e8d588701c5cac2f039a358f6aa6b"
+    },
+    {
+      "path": "validation-summary.json",
+      "bytes": 6666,
+      "sha256": "c6c3d17f4bcd21d6659bc3d11d1580d54957215b0817e238f66c793db857f782"
+    }
+  ],
+  "security_flags": [],
+  "private_config_values_checked_in_memory": 156,
+  "private_values_saved": false,
+  "verified": [
+    "No raw transcripts, environment/configuration values, credential payloads, signed URLs or bundle bytes in the current public file set; only code, instructions, sanitized receipts/proofs/metadata.",
+    "Corrected published restore helper path and repository-root cwd instructions; helper SHA matches exercised and authenticated control-manifest copy from prior review.",
+    "All11077 original expected sizes/hashes match the restored authenticated11080-member terminal manifest; included .git/cloudbench-experiments.jsonl confirmed. Native proof reports actual restored member checks and retained original flags.",
+    "All9 terminal-control restored files hash and size match their authenticated manifest; both manifest digests match public archive receipts.",
+    "Explicit .devbox regenerated-identity classification and separately archived ngrok config; manifest includes exact72 inherited branch tips plus1 stash and nine-configuration recovery proofs.",
+    "RCA case now durably records native card source/lifecycle display gaps without introducing a renderer repair or claiming historical socket/pixels.",
+    "Production summary and authenticated HTTP200 empty owner-device list consistently distinguish automatic Mac release PASS from manual local-Mac acceptance SKIPPED."
+  ],
+  "nonblocking_notes": [
+    "CONFIG-RECOVERY.txt final Outstanding scope paragraph retains historical wording that final deploy/visual artifacts still need terminal capture; terminal snapshot now exists, so only later post-cutoff outputs remain pending. Clarify in final records if edited.",
+    "Post-cutoff durable-publication disposition becomes factual only when this source record package is committed/pushed and its GitHub/boxes references recorded. Preserve the forthcoming final deletion-readiness receipt and this review through that durable record path or an addendum."
+  ],
+  "limits": [
+    "No provider requests, service starts, helper execution, tests, source/draft edits, or branch mutations performed.",
+    "Did not claim current ignored/ref inventory complete; parent owns those remaining native checks.",
+    "Did not rehash2.18GB restored payload a second time; crosschecked all11077 entries against authenticated native manifest and existing actual restore/hash verification, and independently hashed all9 terminal controls."
+  ],
+  "changed_during_review": []
+}

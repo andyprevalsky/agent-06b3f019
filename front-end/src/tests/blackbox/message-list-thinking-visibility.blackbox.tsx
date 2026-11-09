@@ -5,6 +5,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AgentContext, type AgentContextValue } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import type { AgentDetail, Message } from '@/lib/api';
+import { handleAssistantStream } from '@/features/agent-context/hooks/realtimeHandlers';
 
 vi.mock('@/components/ThinkingAnimation', () => ({
   default: () => <div data-testid="thinking-animation" />,
@@ -91,6 +92,135 @@ describe('MessageList thinking visibility', () => {
 
     await waitFor(() => expect(screen.queryByText('Thinking')).not.toBeInTheDocument());
   });
+
+  it('shows a new root model call while its background child remains running (prod 784d6a3b)', async () => {
+    // Captured UI contract: background spawn 21:46:59.945, user reply 22:03:08.624,
+    // wait ends 22:03:11.940, empty root stream 22:03:14.120; no tool until :41.
+    // Keep the child running: finishing or removing it would hide the original bug.
+    const ctx = makeContext('ACTIVE');
+    ctx.messages = [
+      {
+        message_id: 'background-spawn',
+        timestamp: '2026-11-08T21:46:59.945Z',
+        role: 'TOOL',
+        text: '',
+        metadata: {
+          toolName: 'spawn_general_purpose_agent',
+          toolCallId: 'background-call',
+          toolStatus: 'IN_PROGRESS',
+          title: 'Spawning sub-agent',
+          busId: 'agent-1',
+          subAgentIds: ['child-1'],
+          excludeFromModel: true,
+        },
+      },
+      {
+        message_id: 'reply',
+        timestamp: '2026-11-08T22:03:08.624Z',
+        role: 'USER',
+        text: 'can u give me the link to the flights u found so i can finish booking myself',
+      },
+      {
+        message_id: 'wait-start',
+        timestamp: '2026-11-08T21:58:11.940Z',
+        role: 'TOOL',
+        text: 'Waiting for child',
+        metadata: { toolName: 'wait_for', toolCallId: 'wait-call', toolStatus: 'IN_PROGRESS' },
+      },
+      {
+        message_id: 'wait-end',
+        timestamp: '2026-11-08T22:03:11.940Z',
+        role: 'TOOL',
+        text: 'Woken by a new user message',
+        metadata: { toolName: 'wait_for', toolCallId: 'wait-call', toolStatus: 'FINISHED' },
+      },
+    ];
+    const view = renderMessageList(ctx);
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+    handleAssistantStream(
+      {
+        agentId: 'agent-1',
+        stream_id: 'reply-model-call',
+        sequence: 0,
+        delta: '',
+        done: false,
+        llm_started_at_ms: Date.parse('2026-11-08T22:03:14.120Z'),
+      },
+      'agent-1',
+      ctx.streamedTextsRef,
+      (update) => {
+        ctx.streamingBubbles = typeof update === 'function' ? update(ctx.streamingBubbles) : update;
+      },
+    );
+    view.rerender(
+      <AgentContext.Provider value={{ ...ctx }}>
+        <TooltipProvider>
+          <MessageList />
+        </TooltipProvider>
+      </AgentContext.Provider>,
+    );
+    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument(), {
+      timeout: 1200,
+    });
+    expect(ctx.messages[0].metadata?.toolStatus).toBe('IN_PROGRESS');
+    expect(
+      screen.getByText(
+        'can u give me the link to the flights u found so i can finish booking myself',
+      ),
+    ).toBeInTheDocument();
+    expect(view.container.querySelector('[data-tool-call-id="background-call"]')).toHaveAttribute(
+      'data-tool-status',
+      'IN_PROGRESS',
+    );
+    expect(view.container.querySelector('[data-tool-call-id="wait-call"]')).toHaveAttribute(
+      'data-tool-status',
+      'FINISHED',
+    );
+  });
+
+  it.each(['none', 'child', 'done', 'foreground'] as const)(
+    'does not claim root thinking from a %s stream with background work',
+    async (stream) => {
+      const ctx = makeContext('ACTIVE');
+      ctx.messages = [
+        {
+          message_id: 'background',
+          timestamp: '2026-11-08T21:46:59.945Z',
+          role: 'TOOL',
+          text: '',
+          metadata: {
+            toolName: 'spawn_agent',
+            toolCallId: 'background',
+            toolStatus: 'IN_PROGRESS',
+            excludeFromModel: true,
+            taskId: 'child-task',
+          },
+        },
+      ];
+      if (stream !== 'none')
+        ctx.streamingBubbles.set('stream', {
+          text: '',
+          sequence: 0,
+          done: stream === 'done',
+          subAgentId: stream === 'child' ? 'child-task' : undefined,
+        });
+      if (stream === 'foreground')
+        ctx.messages.push({
+          message_id: 'foreground',
+          timestamp: '2026-11-08T22:03:14.000Z',
+          role: 'TOOL',
+          text: '',
+          metadata: {
+            toolName: 'web_search',
+            toolCallId: 'search',
+            toolStatus: 'IN_PROGRESS',
+          },
+        });
+      renderMessageList(ctx);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+    },
+  );
 
   it('does not treat a hung chat escalation as still thinking', async () => {
     const messages: Message[] = [

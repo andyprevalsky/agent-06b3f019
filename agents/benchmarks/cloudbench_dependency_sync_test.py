@@ -19762,7 +19762,7 @@ def test_alternate_warm_donor_cannot_borrow_legacy_snapshot_proof(tmp_path: Path
         "patch_conflict",
         "no_delta",
         "peer_refreshed",
-        "peer_refreshed_fine_clock_ahead",
+        "peer_refreshed_clock_ahead",
         "peer_stale",
         "peer_foreign_ref",
         "peer_patched",
@@ -19795,14 +19795,7 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     guest = tmp_path / "warm"
     subprocess.run(["git", "clone", "-q", str(repo), str(guest)], check=True)
     # Peer reuse requires an unpatched request for the peer's exact source ref.
-    # peer_refreshed_fine_clock_ahead pins the coarse-file-clock boundary: the
-    # wall clock read before the lock is already in the next second when the
-    # peer's write is stamped from the kernel's coarser file clock (RCA
-    # 2026-11-07-peer-refreshed-snapshot-compares-coarse-file-mtime-to-fine-clock).
-    fine_clock_ahead = scenario == "peer_refreshed_fine_clock_ahead"
-    if fine_clock_ahead:
-        scenario = "peer_refreshed"
-    unpatched = scenario in ("no_delta", "peer_refreshed", "peer_stale", "peer_foreign_ref")
+    unpatched = scenario in ("no_delta", "peer_refreshed", "peer_refreshed_clock_ahead", "peer_stale", "peer_foreign_ref")
     if not unpatched:
         (repo / "agents/requirements.txt").write_text("temporalio[grpc]>=1.18.1\n")
         (repo / "scripts/branch-only-helper.txt").write_text("same source as task guests\n")
@@ -19828,16 +19821,14 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     (bin_dir / "gosu").chmod(0o755)
     (bin_dir / "chown").write_text("#!/usr/bin/env bash\nexit 0\n")
     (bin_dir / "chown").chmod(0o755)
-    if fine_clock_ahead:
+    if scenario == "peer_refreshed_clock_ahead":
+        # The wall clock reads a second ahead of the filesystem's file times (ext4
+        # stamps mtimes from a coarser clock): a peer's proof written just after the
+        # request started must still be reused (2026-11-08 deploy-suite flake).
         real_date = shutil.which("date")
-        assert real_date, "date is required"
         (bin_dir / "date").write_text(
             "#!/usr/bin/env bash\n"
-            'if [ "$#" -eq 1 ] && [ "$1" = +%s ]; then\n'
-            f"    echo $(( $({shlex.quote(real_date)} +%s) + 1 ))\n"
-            "    exit 0\n"
-            "fi\n"
-            f'exec {shlex.quote(real_date)} "$@"\n'
+            f'if [ "$1" = "+%s" ]; then echo $(( $({real_date} +%s) + 1 )); else exec {real_date} "$@"; fi\n'
         )
         (bin_dir / "date").chmod(0o755)
     script = f"""set -euo pipefail
@@ -19856,7 +19847,7 @@ ensure_app() {{ echo ensure >> "$CALLS"; }}
 acquire_app_environment_lock() {{
     echo lock >> "$CALLS"
     # A queued controller's peer finishes the same refresh while it waits.
-    case "$SCENARIO" in peer_refreshed|peer_foreign_ref|peer_patched)
+    case "$SCENARIO" in peer_refreshed|peer_refreshed_clock_ahead|peer_foreign_ref|peer_patched)
         printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$(date +%s)" snap-peer > "$WARM_DEPS_STATE_FILE"
         peer_ref="$EXPECTED_REF"
         [ "$SCENARIO" != peer_foreign_ref ] || peer_ref=0000000000000000000000000000000000000000
@@ -19921,9 +19912,18 @@ fi
             CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest),
         )
     result = subprocess.run(["bash", "-c", script], cwd=repo, env=env, text=True, capture_output=True, timeout=20)
-    success = scenario in ("pinned", "direct", "no_delta", "peer_refreshed", "peer_stale", "peer_foreign_ref", "peer_patched")
+    success = scenario in (
+        "pinned",
+        "direct",
+        "no_delta",
+        "peer_refreshed",
+        "peer_refreshed_clock_ahead",
+        "peer_stale",
+        "peer_foreign_ref",
+        "peer_patched",
+    )
     assert (result.returncode == 0) == success, result.stdout + result.stderr
-    if scenario == "peer_refreshed":
+    if scenario in ("peer_refreshed", "peer_refreshed_clock_ahead"):
         assert "reusing snapshot snap-peer" in result.stdout
         assert calls.read_text().splitlines() == ["ensure", "lock"]
         assert not built.exists(), "a peer's exact proof must not trigger another install"

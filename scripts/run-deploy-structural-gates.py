@@ -618,6 +618,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
     ),
     Gate(
+        "cloudbench-shared-transport-integration",
+        ("python3", "scripts/tests/cloudbench-shared-transport-integration.test.py"),
+    ),
+    Gate(
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"), expected_seconds=200, shards=2
     ),

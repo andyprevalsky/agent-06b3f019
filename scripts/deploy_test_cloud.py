@@ -41,7 +41,12 @@ from deploy_test_process import cancellation_handlers, run_command
 
 
 class SourceRefusal(ValueError):
-    """The source guard refused before this request could admit any resources."""
+    """The source or custody-locator guard refused before this request could admit any resources."""
+
+    def __init__(self, message, reason_code=None):
+        """Source refusals carry no reason code; custody locator refusals carry theirs."""
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def collect(request, root, runs, started, native_exit):
@@ -367,8 +372,15 @@ def execute(request, root):
         if directory.exists() or directory.is_symlink():
             raise ValueError('unpushed cloud source with an existing request namespace')
         raise SourceRefusal(unpushed_reason(request['source']['head']))
-    from deploy_test_historical_custody import admission
-    admission(request, root)
+    from deploy_test_historical_custody import AdmissionRefusal, admission
+    try:
+        admission(request, root)
+    except AdmissionRefusal as error:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('historical custody refused with an existing request namespace') from error
+        if error.detail:
+            print(f'DEPLOY_CLOUD custody detail: {error.detail}', file=sys.stderr)
+        raise SourceRefusal(str(error), error.reason_code) from error
     # An invalid marker refuses here, before any resource is admitted (same rules as @quarantine).
     quarantines = catalog_quarantines(root, checks)
     # launch() owns each campaign's runs root, width check and campaign id (first run and rerun).
@@ -446,6 +458,8 @@ def main():
                        cleanup_complete=True, reused=False, evidence={}, native_exit=2,
                        native_command=[], fleet_directory=None, reason=str(error),
                        admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+        if error.reason_code:
+            receipt['reason_code'] = error.reason_code
         write(Path(os.environ['DEPLOY_GATE_RESULT']), receipt)
         print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
         return 2

@@ -116,6 +116,7 @@ jobs:
         env:
           DEPLOY_GATE_ENV_BUNDLE: ${{ secrets.DEPLOY_GATE_ENV_BUNDLE }}
           DEPLOY_GATE_DEPS: /home/runner/rose-deps
+          FETCH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/deploy-gate-setup.sh
 
       - name: Run gate

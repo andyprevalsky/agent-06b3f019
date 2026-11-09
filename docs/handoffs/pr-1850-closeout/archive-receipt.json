@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1850/deploy-evidence-20261108-v1.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "46061f76949cd75f209ecb3fa7f2067b1eff3ffbf815cd64db0035b3499b05d6",
+  "gzip_sha256": "46c61460fac6921463db1d1769580ca93301c2fe4a932411f3221f9a9f6aa9ed",
+  "stored_bytes": 619304648,
+  "frames": 74,
+  "files": 17903,
+  "original_bytes": 2775908596,
+  "manifest_sha256": "a0a0dc6da3f1927bf18151dcaf3d7b6ead435268db77e87ac26baf1149b3a84d",
+  "full_readback_verified": true
+}

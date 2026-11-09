@@ -2,6 +2,7 @@
  * Shared agent resume primitive for domain services that need to unblock a workflow.
  */
 
+import type { CodeCliSettingsOverride } from './codeAgentModels';
 import { prisma } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
@@ -225,6 +226,12 @@ export interface AgentMessageSignalPayload {
   message?: string;
   /** Resuming a paused browser/code task: continue its conversation or start fresh. */
   continue_conversation?: boolean;
+  /** The owner typed this message in the code agent's own view (may resume a finished code task). */
+  from_user?: boolean;
+  /** File pointers the owner attached to that message (the resumed CLI turn receives them). */
+  attachments?: Array<Record<string, unknown>>;
+  /** Its model / effort / speed: the resumed CLI's first turn runs on them. */
+  cli_settings?: CodeCliSettingsOverride;
 }
 
 export async function signalAgentMessage(
@@ -238,6 +245,9 @@ export async function signalAgentMessage(
     wake_task_id?: string;
     message?: string;
     continue_conversation?: boolean;
+    from_user?: boolean;
+    attachments?: Array<Record<string, unknown>>;
+    cli_settings?: CodeCliSettingsOverride;
   } = {},
   send: (workflowId: string, payload: AgentMessageSignalPayload) => Promise<void> = async (
     id,
@@ -256,6 +266,9 @@ export async function signalAgentMessage(
       payload.message = sender.message;
       if (sender.continue_conversation !== undefined)
         payload.continue_conversation = sender.continue_conversation;
+      if (sender.from_user === true) payload.from_user = true;
+      if (sender.attachments?.length) payload.attachments = sender.attachments;
+      if (sender.cli_settings) payload.cli_settings = sender.cli_settings;
     }
     await send(workflowId, payload);
     return true;

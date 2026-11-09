@@ -1010,6 +1010,35 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     return descriptor
 
 
+RELAY_METADATA_TIMEOUT = 30
+RELAY_METADATA_ATTEMPTS = 3
+
+
+def read_relay_app_metadata(app: str, workspace: Path, environment: dict,
+                            deadline: float | None) -> subprocess.CompletedProcess:
+    """Read-only `flyctl status`; a transient Fly API stall gets bounded retries within the deadline."""
+    for attempt in range(1, RELAY_METADATA_ATTEMPTS + 1):
+        timeout = RELAY_METADATA_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+            if timeout <= 0:
+                raise ValueError('shared transport app metadata unavailable before the campaign deadline')
+        try:
+            metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
+                                      env=environment, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if attempt == RELAY_METADATA_ATTEMPTS:
+                raise
+            print(f'[campaign] flyctl status timed out after {timeout:.0f}s; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+                  file=sys.stderr)
+            continue
+        if metadata.returncode == 0 or attempt == RELAY_METADATA_ATTEMPTS:
+            return metadata
+        print(f'[campaign] flyctl status exited {metadata.returncode}; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+              file=sys.stderr)
+    raise AssertionError('unreachable')
+
+
 def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                        inventory: Path, deadline: float | None) -> dict:
     """Own one canonical Fly bootstrap and one relay until all children join."""
@@ -1053,8 +1082,7 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     agent_socket = directory / 'fly-agent.sock'
     environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
     environment['FLY_AGENT_ISOLATED'] = '1'
-    metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
-                              env=environment, capture_output=True, timeout=30)
+    metadata = read_relay_app_metadata(app, workspace, environment, deadline)
     metadata_path = directory / 'app-metadata.private.json'
     metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)
     if metadata.returncode: raise ValueError('shared transport app metadata unavailable')

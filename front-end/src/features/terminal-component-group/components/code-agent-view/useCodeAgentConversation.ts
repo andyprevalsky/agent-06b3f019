@@ -5,6 +5,11 @@
  * Lifecycle reuses the chip's view-model (useClaudeCodeChip): one WS for this
  * session while it runs, dropped when the view closes. The view mounts no
  * terminal and never reads the saved terminal output (transcript only).
+ *
+ * Runs: a stopped code agent resumed by a message runs again under the same
+ * spawn with a new task id. The transcript folds every run into this view
+ * (mergeCodeAgentRuns: `messages`); state, snapshot and the live socket are the
+ * NEWEST run's own (`liveTaskId`), so an earlier run's ending never reads as now.
  */
 
 import { useMemo } from 'react';
@@ -20,6 +25,7 @@ import {
   type CodeAgentTranscriptEvent,
 } from '../../hooks/codeAgentContract';
 import { collectCodeAgentEvents } from '../../hooks/codeSessionTranscript';
+import { mergeCodeAgentRuns } from '../../hooks/codeAgentResume';
 import { desktopChipState } from '../../hooks/codeAgentSteering';
 import type { ChipState } from '../../types';
 import { useClaudeCodeChip, type ClaudeCodeChipVM } from '../claudeCodeChip.hooks';
@@ -48,6 +54,10 @@ export interface CodeAgentConversation {
   events: CodeAgentTranscriptEvent[];
   toolCallId: string | undefined;
   vm: ClaudeCodeChipVM;
+  /** The owner's messages with every run of this spawn read as the open task. */
+  messages: ReturnType<typeof useAgentContext>['messages'];
+  /** The newest run's task id (the open one until it resumes). */
+  liveTaskId: string;
 }
 
 /** The session's live stream URL, from its spawn rows (latest wins). */
@@ -78,16 +88,21 @@ function targetLine(meta: CodeAgentMeta | null): string | null {
 }
 
 export function useCodeAgentConversation(open: OpenCodeAgent): CodeAgentConversation {
-  const { messages } = useAgentContext();
+  const { messages: ownerMessages } = useAgentContext();
   const { taskId } = open;
-  const meta = useMemo(() => latestCodeAgentMeta(messages, taskId), [messages, taskId]);
+  const runs = useMemo(() => mergeCodeAgentRuns(ownerMessages, taskId), [ownerMessages, taskId]);
+  const { messages, latestTaskId: liveTaskId } = runs;
+  const meta = useMemo(
+    () => latestCodeAgentMeta(ownerMessages, liveTaskId),
+    [ownerMessages, liveTaskId],
+  );
   const events = useMemo(() => collectCodeAgentEvents(messages, taskId), [messages, taskId]);
   const toolCallId = useMemo(() => codeAgentToolCallId(messages, taskId), [messages, taskId]);
-  const wsUrl = useMemo(() => sessionWsUrl(messages, taskId), [messages, taskId]);
+  const wsUrl = useMemo(() => sessionWsUrl(ownerMessages, liveTaskId), [ownerMessages, liveTaskId]);
   const provider: CodeAgentProvider = meta?.provider ?? open.provider ?? 'claude';
   // A snapshot drives the view: no terminal WebSocket (nothing displays its bytes).
   // Without one the socket carries lifecycle only and keeps no terminal output.
-  const vm = useClaudeCodeChip(taskId, meta ? undefined : wsUrl, false, provider, {
+  const vm = useClaudeCodeChip(liveTaskId, meta ? undefined : wsUrl, false, provider, {
     savedOutput: false,
     terminalOutput: false,
   });
@@ -108,5 +123,7 @@ export function useCodeAgentConversation(open: OpenCodeAgent): CodeAgentConversa
     events,
     toolCallId,
     vm,
+    messages,
+    liveTaskId,
   };
 }

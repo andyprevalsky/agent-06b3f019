@@ -60,7 +60,7 @@ replay-cache JSON files (≈360 KB each) filled the budget, and `bundle.json` li
    recorded within 3 ms at 16:10:34.642–.645 (a backlog draining after a ~1 s block), then
    nothing until 41.402, then ~25 OpenRouter entries at 42.037–.042. The same CI cache holds
    those chats' follow-up LLM requests whose tool result is `Grep {"pattern":"report-bug.*blackbox.*fixture|..."}
-   Error: Pattern safety analysis did not complete`, built at server times 34.687/.688 and
+Error: Pattern safety analysis did not complete`, built at server times 34.687/.688 and
    42.071, 42.117, 42.592, 42.699, 43.020. That ties the CI stall to failed safety analyses
    (some entries are duplicate builds of one turn, one per raced model, so the exact count of
    distinct greps in the 6.76 s gap is about 5–7, not proven). On 6427f84e1 those fixtures
@@ -69,7 +69,7 @@ replay-cache JSON files (≈360 KB each) filled the budget, and `bundle.json` li
    a fresh-connection `/health` prober every 100 ms): 104 probes slower than 500 ms, worst
    8198 ms. A second run with integration-accounts and integrations beside it reached 10452 ms.
    A third, under `--cpu-prof`, failed `POST /report-bug/screenshots -- signed URL serves the image:
-   fetch failed`. Same domain on main: worst probe 78 ms. Not reproduced: the exact assigned
+fetch failed`. Same domain on main: worst probe 78 ms. Not reproduced: the exact assigned
    case. The run with integration-accounts (`bad-ia1`) stalled 10.4 s but its LinkedIn case
    passed. That is consistent with the inferred keep-alive collision, which needs the request
    to land on an idle reused socket during a stall longer than 5 s.
@@ -146,10 +146,10 @@ blocking call predates it. The assigned repair is owned here regardless.
   has no gap over 0.3 s, so this is CPU load from those chats, not a block. PR #1760 already
   removed those chats from the fixture.
 - Regression at the owning boundary: the data-grep blackbox case `concurrent ReDoS analyses
-  keep the backend answering`. It sends 8 concurrent greps with the captured pattern, asserts
+keep the backend answering`. It sends 8 concurrent greps with the captured pattern, asserts
   each one ran the analysis to its deadline (400 `did not complete`), and probes `/health` on
   fresh connections every 100 ms. Before the fix: `GET /health took
-  8498 ms while 8 greps ran their ReDoS analysis`. After: PASS. The unit test now awaits the
+8498 ms while 8 greps ran their ReDoS analysis`. After: PASS. The unit test now awaits the
   async API with the same fail-closed assertions.
 - Observability: `remote_bundle` orders the gate's named evidence and every `.log`/`.txt`
   file (plus `summary.json`/`manifest.json`) ahead of bulk JSON (`bundle_priority`), so a failed shard's server log survives the
@@ -182,6 +182,40 @@ tasks.json synchronously and stringifies it on every request (benchmarks/config.
 1.7–2.4 s. That is below the 5 s keep-alive threshold, so it did not cause this failure.
 
 Golden reference: not applicable (no approval-gated hunk).
+
+## Independent original-source report-bug cleanup reproduction
+
+The PR1770 report-bug repair goal independently reproduced its reported 12/13
+failure on byte-clean 2bea5aa71 in a bounded original-case sequence: attempt8,
+`POST /report-bug/screenshots -- signed URL serves the image: fetch failed`,
+domain7601ms. Scoped Undici capture shows upload201/body complete at11:31:47.933Z,
+signed GET200/body complete at11:31:48.253Z, then fixture cleanup DELETE ECONNRESET
+at11:31:53.069Z after4816ms. The signed-image read succeeded; cleanup was the victim.
+The original historical native artifact remains unlocalized and its stage is not
+asserted from this later reproduction.
+
+This run contains six fixture-chat executions of the exact alternation. The
+backend48.041Z-53.056Z interval spans5.015s, with queued Prisma durations
+1013/2017/3028/4018/5024ms. The upload response47.933Z + default5s keep-alive
+expiry52.933Z falls inside the block; reset arrives13ms after it ends. Only three
+analyses log explicit unknown rejections; the remaining attribution initially came
+from that signature. This case's original owner reviewed the packet and confirmed
+MATCH for the reproduced first-bad synchronous regex boundary.
+
+The repair goal closed the causal gap locally: it applied ONLY the three merged
+49c2c60ce runtime files to2bea, leaving the original13 report-bug cases/fixtures/
+cleanup DELETE unchanged. All8 post-intervention repetitions passed. The existing
+responsiveness regression, with a measurement print but unchanged assertions,
+measured worst /health7712ms before and13ms after. Its before verdict was FAIL on
+expected400 vs200 (not the latency assertion); after was PASS with all8 HTTP400.
+Both measurements and verdicts are retained accurately. No new production fix was
+duplicated. Current main already contains this fix and PR1760's no-live-chat fixture.
+
+Evidence is private, encrypted and readback verified through
+`docs/handoffs/report-bug-fetch-repair/evidence-archive-receipt.json`. The companion
+report-bug-error-cause-and-cleanup-evidence-loss case records the added stage/cause
+and dual-error preservation regressions. This is a verified historical-source
+occurrence, not a recurrence after the fix and not proof of the old native stage.
 
 ## Human feedback
 
