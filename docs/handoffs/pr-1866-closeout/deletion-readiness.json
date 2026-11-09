@@ -99,7 +99,8 @@
   ],
   "manifest": "docs/handoffs/pr-1866-closeout/deletion-manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1866-closeout/archive-receipts/cloud-00.json, docs/handoffs/pr-1866-closeout/archive-receipts/cloud-01.json, docs/handoffs/pr-1866-closeout/archive-receipts/cloud-02.json, docs/handoffs/pr-1866-closeout/archive-receipts/core.json, docs/handoffs/pr-1866-closeout/archive-receipts/unpushed-refs.txt",
+    "1 unpushed commit(s) in /home/boxes/rose",
+    "branch records/pr-1866-closeout-3 has 1 commit(s) on no remote",
     "live process 247680 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server --listen ws://127.0.0.1:42763 --enabl",
     "live process 486991 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host"
   ],
@@ -620,22 +621,13 @@
   "ready": false,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr-1866-closeout-2",
+      "branch": "refs/heads/records/pr-1866-closeout-3",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1866-closeout/archive-receipts/cloud-00.json",
-        "docs/handoffs/pr-1866-closeout/archive-receipts/cloud-01.json",
-        "docs/handoffs/pr-1866-closeout/archive-receipts/cloud-02.json",
-        "docs/handoffs/pr-1866-closeout/archive-receipts/core.json",
-        "docs/handoffs/pr-1866-closeout/archive-receipts/unpushed-refs.txt",
-        "docs/handoffs/pr-1866-closeout/closeout_archive.py",
-        "docs/handoffs/pr-1866-closeout/deletion-manifest.json",
-        "docs/handoffs/pr-1866-closeout/deletion-readiness.json"
-      ],
-      "unpushed_commits": 0
+      "uncommitted": [],
+      "unpushed_commits": 1
     }
   ]
 }
