@@ -38747,6 +38747,8 @@ async def run_all_tests():
     await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
     await r.record_async("native_phone_auth_cancellation_preserves_exact_pending_request", test_native_phone_auth_cancellation_preserves_exact_pending_request)
     await r.record_async("phone_supervisor_preserves_unknown_and_cancellation", test_phone_supervisor_preserves_unknown_and_cancellation)
+    await r.record_async("phone_setup_window_rejection_feedback_and_latest_observation", test_phone_setup_window_rejection_feedback_and_latest_observation)
+    await r.record_async("phone_setup_window_feedback_never_reflects_untrusted_errors", test_phone_setup_window_feedback_never_reflects_untrusted_errors)
     return r.all_passed
 
 
@@ -39875,3 +39877,59 @@ async def test_phone_task_availability_is_authoritative():
         assert calls == []
         assert await observe_phone(config, 'user', 'task-owned', client=client) == {'enabled': False}
         assert len(calls) == 1
+
+
+async def test_phone_setup_window_rejection_feedback_and_latest_observation():
+    """The captured [12,14] rejection must teach the agent how to form fresh evidence."""
+    teardown_mock()
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 14,
+                "setup": {"attemptId": "attempt", "revision": 2}}}
+    posts = []
+    def backend(request):
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={"enabled": True, "source": "bootstrap"})
+        assert request.method == "POST" and request.url.path.endswith("/setup")
+        body = json.loads(request.content); posts.append(body)
+        assert body["expectedCursor"] == 14 and body["expectedRevision"] == 2
+        if body["evidenceOperationIds"] == ["read-12", "read-14"]:
+            return httpx.Response(409, json={"error": "Setup observations must be the current uninterrupted cursor window"})
+        assert body["evidenceOperationIds"] == ["read-14"]
+        return httpx.Response(200, json={"operation": {"id": body["requestKey"], "status": "SUCCEEDED"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task",
+                      snapshot=snapshot, client=client)
+        params = {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock"}
+        rejected = await execute_phone({**params, "evidenceOperationIds": ["read-12", "read-14"]},
+                                       **common, decision_id="bad-window")
+        assert rejected["success"] is False and rejected["_httpStatus"] == 409
+        assert rejected.get("errorCode") == "phone_setup_observation_window", rejected
+        assert "latest" in rejected["error"] and "Do not replay" in rejected["error"]
+        assert len(posts) == 1, "rejection must not automatically retry or mutate the evidence"
+        accepted = await execute_phone({**params, "evidenceOperationIds": ["read-14"]},
+                                       **common, decision_id="fresh-window")
+        assert accepted["success"] is True and len(posts) == 2
+
+
+async def test_phone_setup_window_feedback_never_reflects_untrusted_errors():
+    teardown_mock()
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import _request
+    literal = "Setup observations must be the current uninterrupted cursor window"
+    for status, path, body in (
+        (409, "interactions/task/setup", {"error": "CANARY-PRIVATE-ERROR"}),
+        (403, "interactions/task/setup", {"error": literal}),
+        (409, "leases/lease/operations", {"error": literal}),
+        (409, "interactions/task/setup", {"error": literal + " CANARY-PRIVATE-ERROR"}),
+        (409, "interactions/task/setup", {"error": {"private": "CANARY-PRIVATE-ERROR"}}),
+        (409, "interactions/task/setup", {"error": literal, "padding": "x" * 4096}),
+    ):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(status, json=body))) as client:
+            result = await _request(client, _fake_config(), "user", "POST", path, {})
+        assert result == {"_httpStatus": status}, result
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(409, json={"error": literal, "private": "CANARY-PRIVATE-ERROR"}))) as client:
+        result = await _request(client, _fake_config(), "user", "POST", "interactions/task/setup", {})
+    assert result["errorCode"] == "phone_setup_observation_window"
+    assert "CANARY" not in json.dumps(result)
