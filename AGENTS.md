@@ -4,7 +4,7 @@
 rules, testing, benchmarks and production, and it is auto-loaded for every
 Claude agent. Use the repo's own skills by default: the `.claude/commands/*`
 slash-commands (`/deploy`, `/RCA`, `/benchmark`, …) and the `docs/` guides they
-reference (e.g. `docs/root-cause-analysis.md`, `docs/testing.md`). Do not
+reference (e.g. `docs/testing.md`). Do not
 duplicate that guidance here.
 
 Before editing files under `front-end/`, `back-end/` or `agents/`, read that

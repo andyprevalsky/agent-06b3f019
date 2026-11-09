@@ -73,7 +73,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 ## RCA per failure
 
-- INFRA means the environment failed before a trustworthy verdict; HARNESS means a trustworthy verdict failed real criteria, including a fallback that masks the required path; issue classes and the timeout and provider-limit evidence rules are in `docs/root-cause-analysis.md`.
+- INFRA means the environment failed before a trustworthy verdict; HARNESS means a trustworthy verdict failed real criteria, including a fallback that masks the required path; issue classes and the timeout and provider-limit evidence rules are in `/rca` **Classify**.
 - As each task fails, start one muted `/RCA` thread for it via `boxes-delegated-threads`, with its own worktree and non-overlapping files, the task's run, attempt and agent IDs, FE link, evaluator output, source SHA, scope and a 100-minute time box (91% of 140 recorded RCA lanes finished within 100 minutes); fixing starts while the batch still runs.
 - RCAs dedupe themselves: each first checks the RCA ledger in state and `python3 scripts/rca_archive.py search <terms>` for the same defect and, if another RCA already owns it, hands its task to that owner with its evidence (run, attempt and agent IDs, FE link, the matching boundary) and stops; before writing a fix it posts its named defect (code site and mechanism) to the ledger, and the later of two RCAs naming the same site hands over the same way.
 - Never treat a shared symptom (failure string, evaluator, status, timeout, website or issue class) as the same defect.
@@ -119,4 +119,4 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 ## References
 
-`.claude/commands/benchmark.md`, `.claude/commands/rca.md`, `.claude/commands/deploy.md`, `.claude/shared/approval-format.md`, `.claude/shared/benchmark-report-format.txt`, `docs/root-cause-analysis.md`, `agents/benchmarks/README.md`, `docs/factory-telemetry.md`; the previous version is in Git history (`git log -p -- .claude/commands/descend.md`).
+`.claude/commands/benchmark.md`, `.claude/commands/rca.md`, `.claude/commands/deploy.md`, `.claude/shared/approval-format.md`, `.claude/shared/benchmark-report-format.txt`, `agents/benchmarks/README.md`, `docs/factory-telemetry.md`; the previous version is in Git history (`git log -p -- .claude/commands/descend.md`).

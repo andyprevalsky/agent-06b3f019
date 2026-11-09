@@ -19,6 +19,9 @@ to the persistent memory store; case ids refer to `docs/rca/cases/`.
 1. **"Pre-existing" is never a diagnosis.**
    Why: a repo maintained by many parallel agents degrades on every commit if
    nobody owns the errors they walk past. If you found it, you own it.
+   Under `/deploy`, `.claude/shared/deploy-failure-policy.md` attributes the
+   failure (INTRODUCED, NOT_INTRODUCED or UNKNOWN) and hands off what you did
+   not introduce; attribution never closes the repair.
    Source: `memory:feedback_fix_preexisting_tests`, `memory:feedback_clean_tech_debt_in_scope`, CLAUDE.md rules 16/24.
 
 2. **"Infrastructure issue" is a diagnosis that demands a fix, not an excuse to skip.**
@@ -31,7 +34,7 @@ to the persistent memory store; case ids refer to `docs/rca/cases/`.
    state" does not close an RCA. Reproduce it, or classify it honestly as an
    observability gap and keep it open.
    Why: unreproduced theories produce unverifiable fixes.
-   Source: the hard gate in `docs/root-cause-analysis.md`, CLAUDE.md rule 6.
+   Source: `/RCA` **Done**, CLAUDE.md rule 6.
 
 4. **Surface errors are not root causes.** Not "timeout at 300s" but "the browser
    agent made 12 LLM calls averaging 8s each because screenshot processing is
@@ -43,7 +46,7 @@ to the persistent memory store; case ids refer to `docs/rca/cases/`.
 5. **Correlation is not causation, and a prior case is not evidence.** A matching
    archive entry narrows the search; your own runtime evidence still has to point
    at that boundary.
-   Source: `docs/root-cause-analysis.md` anti-patterns 7 and 8.
+   Source: `/RCA` **Evidence**.
 
 ## B. Fix shapes the user has explicitly rejected
 
@@ -93,7 +96,7 @@ Source: `2026-09-29-force-clear-kills-approval-blocked-cutover-stragglers`.
 10. **Never add a fallback that masks a third-party or configuration failure.**
     Surface it loudly. A silent fallback converts a visible outage into an
     invisible one.
-    Source: `docs/root-cause-analysis.md` Step 4, CLAUDE.md rule 8.
+    Source: `/RCA` **Classify** and **Fix**, CLAUDE.md rule 8.
 
 11. **Never truncate anything that becomes part of an LLM prompt.** Tool
     descriptions, system prompts, docstrings — send them in full. Forbidden
@@ -113,7 +116,7 @@ Why: prompt tokens that name the incident, the benchmark, or one captured
 miss overfit the instance and leave the class intact. The failed deeper
 attempt is the anti-overfit proof; without it the Problem is too specific
 to edit a prompt against.
-Source: `/RCA` Step 5b, user instruction 2026-09-09.
+Source: `/RCA` **Hypothesis**, user instruction 2026-09-09.
 
 11b. **Never add a keyword classifier that mutates model-chosen schemas,
     spawn routing, DAG tools, or completion text.** Persist the fields the
@@ -143,11 +146,14 @@ Source: `/RCA` Step 5b, user instruction 2026-09-09.
     harness delivers a verdict.
     Source: `memory:feedback_verify_through_harness_not_direct`.
 
-14. **A benchmark failure needs two proofs.** The owning-boundary repro proves
-    causality; the exact unchanged benchmark proves the outcome. A unit test,
-    mock, simulator, fixture replay, or "benchmark-like" test is supporting
-    evidence and never a substitute.
-    Source: `docs/root-cause-analysis.md` exact-benchmark-outcome gate, CLAUDE.md rule 6.
+14. **A benchmark failure needs a causal proof, and only the task can prove the
+    outcome.** An isolated local repro at the failing boundary proves causality.
+    The outcome comes from the unchanged task itself: one cloud run
+    (`scripts/run-bench <task> --wait`, never `--local` or a whole-benchmark
+    rerun) when the fix needs an end-to-end check, or the next `/descend` batch.
+    A unit test, mock, simulator, fixture replay, or "benchmark-like" test never
+    proves the outcome.
+    Source: `/RCA` **Repro**, user instruction 2026-11-08, CLAUDE.md rule 6.
 
 15. **A green run on the wrong target proves nothing — read what the tool printed.**
     `DATABASE_URL=<local> npx prisma db push` still hit PROD, because the
@@ -163,7 +169,7 @@ Source: `/RCA` Step 5b, user instruction 2026-09-09.
 17. **Beware fake failures.** Wrong `DATABASE_URL`, missing env, stale services,
     or leftover processes produce failures that are not the bug. Confirm the repro
     reproduces the harness's real conditions before diagnosing it.
-    Source: `docs/root-cause-analysis.md` hard gate.
+    Source: `/RCA` **Repro**.
 
 18. **Every fix lands a test in a consistently-run suite.** Behavior with no
     cemented test is assumed broken; a bug fixed without a regression test will

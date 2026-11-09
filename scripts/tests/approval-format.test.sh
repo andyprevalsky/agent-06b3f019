@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FORMAT="$ROOT_DIR/.claude/shared/approval-format.md"
 DEPLOY="$ROOT_DIR/.claude/commands/deploy.md"
 RCA="$ROOT_DIR/.claude/commands/rca.md"
-RCA_GUIDE="$ROOT_DIR/docs/root-cause-analysis.md"
 DESCEND="$ROOT_DIR/.claude/commands/descend.md"
 DEPLOY_CLI="$ROOT_DIR/scripts/deploy_cli.py"
 APPROVAL_BATCH="$ROOT_DIR/scripts/deploy_approval_batch.py"
@@ -292,15 +291,15 @@ require_text "$FORMAT" '**Golden reference:** citation, or Environment triple' \
   "an approval without a golden reference must be invalid"
 require_text "$DESCEND" 'golden-reference verdict and reviewer' \
   "/descend must record each golden-reference verdict in its change ledger"
-require_text "$RCA" 'When the fix changes an approval-gated surface, the golden-reference check' \
+require_text "$RCA" 'Run the golden-reference check only when the fix changes an approval-gated surface' \
   "RCA completion must record the golden-reference check for approval-gated fixes"
-require_text "$RCA_GUIDE" 'Run this step only when the fix changes an approval-gated surface' \
+require_text "$RCA" 'otherwise record `Golden reference: not applicable (no approval-gated hunk)`' \
   "RCA golden-reference grounding is scoped to approval-gated fixes, not all code"
 require_text "$FORMAT" 'Scope: only the hunks inside the mandatory user-approval section' \
   "golden-reference review covers only the hunks in the mandatory approval scope"
 require_text "$ROOT_DIR/CLAUDE.md" 'It reviews only the hunks inside the mandatory user-approval scope' \
   "CLAUDE.md rule 26a scopes grounding to the mandatory approval hunks"
-require_text "$RCA_GUIDE" "### Step 6b: Check the golden references before choosing the fix" \
+require_text "$RCA" "open each reference harness's analog" \
   "RCA methodology must check the reference harnesses before choosing a fix"
 require_text "$FORMAT" "## Golden-reference adversarial review" \
   "every approval request must pass the adversarial golden-reference review first"
@@ -367,15 +366,15 @@ require_text "$DESCEND" 'A rejected change is reverted, then its tasks and the f
   "/descend must revert a rejected change and rerun the slice before deploying"
 require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
   "/rca approval output must require the Evidence pack"
-require_text "$RCA" "## Autonomous fix-and-deploy default" \
+require_text "$RCA" "Default: implement the fix, then immediately run \`/deploy\`" \
   "/rca must define the autonomous fix-and-deploy default"
 require_text "$RCA" 'immediately run `/deploy`; drive it fully autonomously' \
   "/rca must deploy approval-free fixes without an intermediate handoff"
 require_text "$RCA" "Never choose a weaker point fix" \
   "/rca must not trade correctness for an approval-free diff"
-require_text "$RCA_GUIDE" 'immediately run `/deploy`; drive it fully autonomously' \
+require_text "$RCA" 'drive it fully autonomously, with any approval-gated hunk' \
   "the canonical RCA methodology must match the autonomous deploy behavior"
-require_text "$RCA_GUIDE" "If the correct fix is approval-gated" \
+require_text "$RCA" "riding \`/deploy\`'s single start-of-deploy approval" \
   "the canonical RCA methodology must retain the narrow approval boundary"
 
 if grep -Fq "exact five-part RCA narrative" "$DESCEND"; then

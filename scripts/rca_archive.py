@@ -61,7 +61,7 @@ REQUIRED_SECTIONS = (
     "Reusable lesson",
 )
 
-# Step 4 of docs/root-cause-analysis.md.
+# Step 4 (Classify) of .claude/commands/rca.md.
 CLASSIFICATIONS = {
     "undetermined",
     "our-bug",
@@ -73,7 +73,7 @@ CLASSIFICATIONS = {
     "unresolved",
 }
 
-# Step 5a problem buckets from docs/root-cause-analysis.md, plus `other`.
+# Problem buckets from .claude/commands/rca.md (Hypothesis), plus `other`.
 PROBLEM_CLASSES = {
     "timeout-too-aggressive",
     "logical-inconsistency-in-harness-contracts",

@@ -2,8 +2,8 @@
 
 Updated October 8, 2026. Read the current `CLAUDE.md` completely first, then
 `AGENTS.md`, this checkpoint, `.claude/commands/deploy.md`,
-`.claude/commands/benchmark.md`, `.claude/commands/RCA.md`,
-`docs/root-cause-analysis.md` and `docs/rca/process-feedback.md`.
+`.claude/commands/benchmark.md`, `.claude/commands/rca.md`
+and `docs/rca/process-feedback.md`.
 
 ## Branch and workspace
 

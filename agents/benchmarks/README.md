@@ -880,8 +880,8 @@ change the task/evaluator to obtain infrastructure proof credit.
 **If a run goes wrong:** Start with its `summary.json`, `_batch/run.json`,
 `_batch/lifecycle.json`, per-task `cloudbench-run.json`, `fleet-child.log`,
 `remote-logs/cloudbench-driver.log`, and `teardown-ownership` audit. Use
-`/descend` for the exact HARNESS-versus-INFRA contract and `/RCA` plus
-`docs/root-cause-analysis.md` for a failing path. A task `FAILED` verdict can
+`/descend` for the exact HARNESS-versus-INFRA contract and `/RCA`
+(`.claude/commands/rca.md`) for a failing path. A task `FAILED` verdict can
 still satisfy an infrastructure proof; a missing result, missing successful
 model responses, stale/foreign evidence, or unverified teardown cannot. Stop
 only the exact controller PID/owner recorded for your run and let its traps
