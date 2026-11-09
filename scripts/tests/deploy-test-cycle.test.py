@@ -16,6 +16,10 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 # Source of the original round-37 inventory-init failure whose exact producer bytes the native validator pins.
 INVENTORY_INIT_PRODUCER_SOURCE = 'ce016428eeb484b19b503a6f65884eb92f1e3fde'
+# The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
+# outer deploy worker (the local executor runs this suite inside a gate) would
+# make admission() demand that outer cycle's custody locator in-process.
+os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 import deploy_gate_progress as progress

@@ -46,7 +46,7 @@ function sha(path: string): string {
 }
 
 /** A pushed clone with tracked data of `bigBytes`, then local edits on top. */
-function seedRepo(
+export function seedRepo(
   fixtureDir: string,
   home: string,
   bigBytes: number
