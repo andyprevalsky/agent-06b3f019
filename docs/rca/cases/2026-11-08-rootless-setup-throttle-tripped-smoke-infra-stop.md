@@ -102,9 +102,32 @@ only the discarded inner custody and the composite row looked rootless. Nested c
 new setup-retry blackbox test is now registered in `run_all_tests()` (the agents structural registration gate had
 flagged it as never run).
 
+## Google400 merge follow-up (2026-11-08)
+
+Merging this fix into Google400 as `9e58aa18` initially retained a second,
+metadata-only precreation exception. Gate: INTRODUCED by that composition.
+The existing strict setup regression failed with `DID NOT RAISE RuntimeError`:
+old stop metadata could admit a row whose canonical custody marker was missing
+or contradictory. The original native RED is preserved, not relabeled.
+
+Remove the obsolete metadata-only exception and use this case's existing shared
+canonical custody predicate unchanged. `run_single_task` establishes custody
+before the phone preflight and copies its marker into every returned result;
+all creation paths mark it before a request. The old phone-positive fixture now
+supplies that actual `False` marker, preserving every original assertion. No
+new proof variant, task-name allowlist, unknown-root waiver or financial action
+is introduced. The identical two-test command was RED (one fail, one pass,
+1.58 s), then GREEN (two pass, 1.35 s). Lost-create and composite-custody negative
+controls also pass; native supervisors are quiescent with no orphans or signals.
+The complete owning phone-daily and cloud-batch-cleanup files also passed all
+123 cases in 10.85 seconds with clean supervisor closure. Normal final-source
+agents validation remains required.
+
 ## Human feedback
 
-None recorded.
+None recorded for the original incident. For the Google400 follow-up, the user
+prohibits new card/mint/charge/close/reclaim loops. This source merge and its
+offline regressions do not authorize those operations.
 
 ## Reusable lesson
 

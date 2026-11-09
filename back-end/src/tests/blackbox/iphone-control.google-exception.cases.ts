@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   freshSetup,
+  authorizeSyntheticSetup,
   observe,
   setupPost,
   proveSettings,
@@ -61,6 +62,7 @@ export const googleExceptionCases: Case[] = [
         },
       });
       assert.equal(profile.status, 200);
+      await authorizeSyntheticSetup(f);
       f.setup = (await h.request(f.userId, `/interactions/${f.taskId}`)).data.setup as SetupDto;
       assert.equal(
         (f.setup as unknown as { googlePasscodeExceptionAllowed: boolean })
@@ -75,6 +77,8 @@ export const googleExceptionCases: Case[] = [
         },
       });
       assert.equal(omitted.status, 200);
+      await authorizeSyntheticSetup(f);
+      await authorizeSyntheticSetup(f);
       f.setup = (await h.request(f.userId, `/interactions/${f.taskId}`)).data.setup as SetupDto;
       assert.equal(
         (f.setup as unknown as { googlePasscodeExceptionAllowed: boolean })
@@ -154,6 +158,7 @@ export const googleExceptionCases: Case[] = [
           allowGooglePasscodeException: true,
         },
       });
+      await authorizeSyntheticSetup(f);
       f.setup = (await h.request(f.userId, `/interactions/${f.taskId}`)).data.setup as SetupDto;
       let entered!: () => void, release!: () => void;
       const ready = new Promise<void>((resolve) => {

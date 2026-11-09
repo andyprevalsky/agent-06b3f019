@@ -879,6 +879,9 @@ def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
     out_dir = ARTIFACTS_ROOT / agent_id
     out_dir.mkdir(parents=True, exist_ok=True)
     out_html = out_dir / "last_llm_call.html"
+    # Render separately, then publish the self-contained copy into this agent's
+    # owned directory. The renderer's default shared root is not ours to write.
+    render_html = out_dir / "rendered" / "last_llm_call.html"
     # The R2 HTTPS upload needs boto3, which lives in agents/venv rather than
     # the system python3 this script is documented to run under.
     python = AGENTS_VENV_PYTHON if AGENTS_VENV_PYTHON.is_file() else Path(sys.executable)

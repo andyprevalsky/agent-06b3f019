@@ -1119,3 +1119,21 @@ def test_cli_machine_formats_keep_cap_warning_on_stderr(
     assert warning in result.stderr
     if drop_extra:
         assert "payment-extra" in result.stderr and "DROPPED" in result.stderr
+
+
+@pytest.mark.parametrize("output_format", ["names", "json"])
+def test_machine_readable_cap_output_keeps_warnings_on_stderr(tmp_path: Path, output_format: str) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    tasks = [{"name": f"smoke-{i}", "tags": ["smoke"], "timeout_seconds": 60,
+              "deploy_category": "harness"} for i in range(DEFAULT_CAP)]
+    catalog.write_text(json.dumps(tasks))
+    attempts.write_text("")
+    result = subprocess.run([sys.executable, str(SELECTOR), "--catalog", str(catalog),
+        "--attempts-file", str(attempts), "--format", output_format, "--cap", str(DEFAULT_CAP),
+        "--repo-root", str(tmp_path)], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    selected = json.loads(result.stdout)["selected"] if output_format == "json" else result.stdout.splitlines()
+    assert set(selected) == {task["name"] for task in tasks}
+    assert len(selected) == DEFAULT_CAP
+    assert "HARD CAP" in result.stderr

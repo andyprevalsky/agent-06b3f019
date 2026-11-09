@@ -5,6 +5,7 @@
  * BrowserStatusBar.tsx so the component file stays under the 300-line cap.
  */
 
+import { readPhoneTarget, readCriticalReason } from '@/lib/api/phoneAttention';
 import { useMemo } from 'react';
 import { liveViewSessionIdentity } from './liveViewDisplay';
 import { BROWSER_INIT_ACTION_TYPES } from '@/lib/backendToolNames';
@@ -28,6 +29,8 @@ interface RequestUserAuthenticationMeta {
   taskId?: string;
   authRealm?: string;
   liveViewUrl?: string;
+  target?: unknown;
+  criticalReason?: unknown;
 }
 
 function readRequestUserApproval(m: Message): RequestUserApprovalMeta | undefined {
@@ -120,7 +123,9 @@ function extractPendingAuthAssistance(
     const authTaskId = auth.taskId ?? message.metadata?.task_id;
     if (authTaskId !== taskId) continue;
     if (message.metadata?.toolStatus !== 'IN_PROGRESS') return null;
-    if (!auth.requestId || !auth.liveViewUrl) return null;
+    const target = readPhoneTarget(auth.target);
+    if (!auth.requestId || (!auth.liveViewUrl && !target)) return null;
+    if (target && target.browserTaskId !== taskId) return null;
 
     return {
       requestId: auth.requestId,
@@ -128,7 +133,9 @@ function extractPendingAuthAssistance(
       request: auth.authRealm
         ? `Sign in to ${auth.authRealm} so I can continue`
         : 'Complete the sign-in so I can continue',
-      liveViewUrl: auth.liveViewUrl,
+      liveViewUrl: target ? undefined : auth.liveViewUrl,
+      target,
+      criticalReason: readCriticalReason(auth.criticalReason),
     };
   }
 

@@ -6,6 +6,7 @@
  * [MOUNTED] --> read ?agent-id
  *   |
  *   +--> missing/empty --> replace to "/"
+ * Exact attention/task locators survive the alias redirect for authenticated validation.
  *   +--> present --> replace to "/?agent-id=<id>" (Terminal deep link)
  *
  * Why: `/open-agent` is the hub/archive redirect path and the durable URL we
@@ -26,7 +27,13 @@ export default function OpenAgentRedirect() {
       navigate('/', { replace: true });
       return;
     }
-    navigate(`/?agent-id=${encodeURIComponent(agentId)}`, { replace: true });
+    const destination = new URL('/', window.location.origin);
+    destination.searchParams.set('agent-id', agentId);
+    for (const key of ['browser-id', 'attention-request-id']) {
+      const value = params.get(key);
+      if (value) destination.searchParams.set(key, value);
+    }
+    navigate(`${destination.pathname}${destination.search}`, { replace: true });
   }, [navigate, params]);
 
   return (
