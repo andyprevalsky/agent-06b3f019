@@ -105,6 +105,6 @@ For a slow, stalled or failed agent, run the first three in parallel, then expan
 ## Case file and output
 
 - Write a case for every outcome, blocked ones included; `symptoms` are the literal strings a future engineer will grep; record user corrections in `## Human feedback` or `None recorded.`; set `status` honestly (`open` while the repro gap is open, `mitigated` when only the symptom is contained); after the fix lands, update the same case with its verified status, shipped `## Solution` and PR.
-- Report the pre-fix failure and the post-fix pass of the exact identical command you ran, side by side.
+- The final reply names the archive queries you ran and whether the incident is a recurrence, a relative or novel, and reports the pre-fix failure and the post-fix pass of the exact identical command you ran, side by side.
 - Approval Evidence follows `.claude/shared/approval-format.md` (Read it completely immediately before composing one): a task-framed `What failed:` sentence, the durable FE link from `publish_evidence_links.py`, the HTTPS LLM-dump link (never a VM-local path), the `Tests:` repro and the golden reference.
 - Record factory execution metadata per `docs/factory-telemetry.md`.
