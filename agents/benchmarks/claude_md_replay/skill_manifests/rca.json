@@ -1,0 +1,667 @@
+{
+  "version": 1,
+  "description": "/rca skill replay tests: 10 previous real /rca runs replayed on the buggy base with the rewritten CLAUDE.md and skills overlaid (--skill-overlay-from). A run passes only if the fix's own hidden regression test passes afterwards; rubric items are judged separately.",
+  "source_repo": "/home/boxes/rose",
+  "defaults": {
+    "timeout_seconds": 3000,
+    "exclude_paths": [
+      "agents/benchmarks/history"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "rca-github-pool-headerless",
+      "kind": "pr",
+      "base_sha": "e08b166e0faf8131c8a48de1bfd0326daeb5a37f",
+      "merge_sha": "29470ef019569094f32a8f8b94e2aa01f954fc50",
+      "prompt": "/rca The staged /deploy backend-coverage gate failed `blackbox:github-agent-repo` (1 of 249 cases). The domain log shows `GitHub branch head lookup errored owner=fixture repo=repo branch=topic/branch error=Cannot read properties of undefined (reading 'get')`, then the process exits with an uncaught `Error: fixture timeout` and the runner prints `FAIL  github-agent-repo`.",
+      "test_files": [
+        "back-end/src/tests/unit/github-token-pool.test.ts"
+      ],
+      "test_commands": [
+        "cd back-end && npx tsx src/tests/unit/github-token-pool.test.ts"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "node_modules",
+        "back-end/node_modules"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history",
+        "docs/rca/INDEX.md"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: the GitHub token pool's quota learning read `response.headers` unconditionally (sendWithToken -> recordGithubResponse), so a response without headers threw inside the read it was only observing (case 2026-11-06-github-pool-quota-learning-threw-on-a-headerless-response-double)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes back-end/src/providers/githubTokenPool.ts (quota learning must not fail the read); no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in back-end/src/tests/unit/github-token-pool.test.ts or the github-agent-repo backend blackbox that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-06-github-pool-quota-learning-threw-on-a-headerless-response-double.md; PR #1723 (landed via d78719f5b4); fix commit 29470ef019. Prompt from case symptoms (no originating boxes.dev thread found by search). Calibrated with --allow-dep-mismatch: base differs from the deps checkout only in back-end/package.json scripts/engines, a 2-line back-end lock change, a front-end lock and certifi in agents/requirements.txt; none can affect this tsx unit test of githubTokenPool.",
+      "pr": 1723
+    },
+    {
+      "id": "rca-render-llm-dumps",
+      "kind": "pr",
+      "base_sha": "a93f0fb5a1d49387ed1860cfe3c9404d738ef297",
+      "merge_sha": "b695d03aaf45d939de7d908f3e76106bfe5b5e24",
+      "prompt": "/rca The production backend on Render is writing LLM context dumps to its disk: Render's prod log shows `llm.context.dumped` entries under `/opt/render/project/src/.llm-dumps/`. Those dumps hold full prompts (page content, user messages) and must never be written in production.",
+      "test_files": [
+        "back-end/src/tests/unit/llm-dump-production.test.ts"
+      ],
+      "test_commands": [
+        "cd back-end && npx tsx src/tests/unit/llm-dump-production.test.ts"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "node_modules",
+        "back-end/node_modules"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history",
+        "docs/rca/INDEX.md"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: back-end/src/providers/llmDump.ts detected production only through Fly's FLY_APP_NAME (IS_PRODUCTION copied from the agents helper); Render sets NODE_ENV=production and no FLY_APP_NAME, so the dev-only dump writer ran in prod (case 2026-10-03-render-backend-wrote-llm-context-dumps)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes back-end/src/providers/llmDump.ts production detection (dumpLlmContext and updateLlmDump both refuse in production), not deleting dump files after the fact; no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in back-end/src/tests/unit/llm-dump-production.test.ts (or the owning backend unit/blackbox suite) that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-10-03-render-backend-wrote-llm-context-dumps.md; PR #1341; fix commit b695d03aaf (2026-10-03). Prompt from the case Problem/symptoms (no originating thread found). Calibrated with --allow-dep-mismatch: the October base's root package.json and back-end/package-lock.json differ from the deps checkout, which cannot affect this tsx unit test of a pure fs/env module. The hidden test toggles NODE_ENV after import, so it needs production checked per call, not a module-level constant; scripts/select_affected_tests.py does not exist at this base. Replaces rca-spawn-replay-nameless, whose backend blackbox runner refuses shared system Postgres on this box (other workspace DB containers active).",
+      "pr": 1341
+    },
+    {
+      "id": "rca-storage-monitor-cancel",
+      "kind": "pr",
+      "base_sha": "66adafe0bb9707fbc0568eb298773e1483402327",
+      "merge_sha": "38e61c39cf2612378e4c354e162b1d0475ad1315",
+      "prompt": "/rca The sandbox new-user smoke completed checkout but failed its ordered contract because the browser agent ended in ERROR. Native worker logs show `StorageStateWatchdog.on_BrowserStopEvent() has been running for >15s`, then the unchanged 20-second checkpoint deadline expired with `Checkpoint CDP release timed out`, and `Browser Session Cleanup Failed`. Later cleanup completed and all campaign resources were torn down.",
+      "test_files": [
+        "agents/tests/blackbox/storage_watchdog_cleanup.blackbox.py"
+      ],
+      "test_commands": [
+        "cd agents && . venv/bin/activate && python scripts/run_blackbox_tests.py storage-watchdog-cleanup"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "agents/venv"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: browser disconnect awaited the periodic storage monitor after cancelling it only once; a concurrently completed RPC could consume that one-shot cancellation, so the loop slept again and stop blocked past the deadline (case 2026-11-08-browser-storage-monitor-one-shot-cancellation)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes agents/browser_tools/dom_service.py (storage monitor stop/cancellation), without raising the 20-second deadline or skipping storage persistence; no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in agents/tests/blackbox/storage_watchdog_cleanup.blackbox.py that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-08-browser-storage-monitor-one-shot-cancellation.md; PR #1831 (landed via 6c56e81201); fix commit 38e61c39cf (also carries an unrelated backend inspect-fixture repair, not graded). Prompt from case symptoms.",
+      "pr": 1831
+    },
+    {
+      "id": "rca-foreground-taskname-replay",
+      "kind": "pr",
+      "base_sha": "9e7b82d5ff24cd5e305680459c31d603061222c3",
+      "merge_sha": "b65d7927e0432439698200255388b77a6ffa727d",
+      "prompt": "/rca The pre-deploy smoke `test-mass-agent-run-0` (DEMO-cache replay) failed: `Declared evaluator t10-no-tool-failures failed`, `Observed tool failure spawn_agent status=ERROR` (agent 030c4a79-c37d-4bf7-a55d-477f9d11bd6c, tool call toolu_01WDeLVcbPCgNkQ9gDWDCE3u) with the tool text `task_name 'research_ethan_mollick_s_substa_5c9a76d1' is already used by another agent you spawned; choose a different task_name.` The same replay passes on main. Preserve the task, its recorded trajectory and the evaluator.",
+      "test_files": [
+        "agents/tests/blackbox/background_agents.blackbox.py"
+      ],
+      "test_commands": [
+        "cd agents && . venv/bin/activate && python scripts/run_blackbox_tests.py background-agents"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "agents/venv"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history",
+        "docs/rca/INDEX.md"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: agents/workflows/background_agents.py _begin_foreground_spawn rejected any task_name held by a record, and _evict_finished_overflow retired every evicted name, so a FINISHED foreground agent kept its task_name reserved and the replayed repeat spawn errored (case 2026-11-07-foreground-task-name-reserved-by-finished-agent-failed-replay)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes agents/workflows/background_agents.py task_name reservation (a finished foreground agent frees its name; a running one still refuses), not the DEMO-cache replay, the recorded trajectory or the evaluator; no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in agents/tests/blackbox/background_agents.blackbox.py that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Benchmark-failure RCA (pre-deploy smoke test-mass-agent-run-0). Source: docs/rca/cases/2026-11-07-foreground-task-name-reserved-by-finished-agent-failed-replay.md; PR #1744 (landed via 8dbb27dbfc on 2026-11-07); fix commit b65d7927e0. Prompt from case Problem/symptoms (no originating thread found). Replaces rca-verifier-receipt-images, whose whole spawn-browser-agent-v3 blackbox domain also fails on its merge commit in this sandbox (its originating repair /goal is thread thr_82ea6e4547cf49c1ae2fa5d5906baa20).",
+      "pr": 1744
+    },
+    {
+      "id": "rca-native-timestamp-local",
+      "kind": "pr",
+      "base_sha": "87b887bd39f8d762976fb33511aaafcb8e023512",
+      "merge_sha": "8f8f5ac956ba50da15adba9bd1bf193bf6a5d77d",
+      "prompt": "/rca the following bug for agent with ID: [77783ad2-f547-473d-8191-a98c173edc97]\nthe fe says interrupted after 9h and 21m, but it definitely hasnt been that long",
+      "test_files": [
+        "front-end/src/tests/blackbox/realtime-payload-extractors.blackbox.ts",
+        "front-end/src/tests/blackbox/trajectory-work-batch.blackbox.tsx"
+      ],
+      "test_commands": [
+        "cd front-end && npx vitest run src/tests/blackbox/realtime-payload-extractors.blackbox.ts src/tests/blackbox/trajectory-work-batch.blackbox.tsx"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "node_modules",
+        "front-end/node_modules"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history",
+        "docs/rca/INDEX.md"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: front-end/src/lib/realtime-types/extractors.ts accepted the native database broadcast's timezone-less updatedAt as an API timestamp, so it was parsed as local time (+8 h) and the canonical REST refresh was rejected as stale (case 2026-11-07-native-db-broadcast-timestamp-interpreted-as-local)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes front-end/src/lib/realtime-types/extractors.ts (normalize the native DB wire timestamp at the extractor boundary); no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in front-end/src/tests/blackbox (realtime-payload-extractors / trajectory-work-batch) that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-07-native-db-broadcast-timestamp-interpreted-as-local.md; PR #1770 (landed via 5066feea73); fix commit 8f8f5ac956. Prompt is the user's original wording from thread thr_c41e5302f95a4309952900330862d62a (ph74sx0mzz3w0kgm9tdfmeqzms8hrv4h), reassembled from search snippets (the preview did not return the whole message)."
+    },
+    {
+      "id": "rca-child-vetoes-thinking",
+      "kind": "pr",
+      "base_sha": "3e43210f67f838ba8f4be551fc62b2ac95ac5c8d",
+      "merge_sha": "cf85beba8d87fa02212065c0560f32198f09de01",
+      "prompt": "/rca the following bug for agent with ID: [784d6a3b-2b10-452b-a07b-a1dca682c251]\nwhen responding to this agent (... so i can finish booking myself), it took something like 30s for the fe to show the state. seems like some weird race or soemthing",
+      "test_files": [
+        "front-end/src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx"
+      ],
+      "test_commands": [
+        "cd front-end && npx vitest run src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "node_modules",
+        "front-end/node_modules"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: useThinkingVisibility treated every persisted IN_PROGRESS background child as blocking the parent's live model stream, so the root's thinking indicator stayed hidden for the ~27 s model call (case 2026-11-08-background-child-vetoes-parent-thinking)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes front-end useThinkingVisibility/useMessageList (thinking visibility), without attributing or masking provider latency; no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in front-end/src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx (or the owning message-list blackbox) that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-08-background-child-vetoes-parent-thinking.md; PR #1857 (landed via 5a0b1c6c15); fix commit cf85beba8d. Prompt is the user's original wording from thread thr_d2f8916ce6c348568fb3803713717708 (ph7chyy9knyndf8rammrf6f60s8hvjs1), reassembled from search snippets."
+    },
+    {
+      "id": "rca-autotag-exit-141",
+      "kind": "pr",
+      "base_sha": "4e5bc791846b82c330b441598bbfa73472dc6972",
+      "merge_sha": "d2183672191106b73f1f4880208f39bb1e95ef40",
+      "prompt": "/rca Failed test/gate: .github/workflows/auto-tag-mac-app.yml, job auto-tag, existing step \"Create and push tag\". The native Auto-tag Mac App Release run on the PR #1770 merge failed with `##[error]Process completed with exit code 141.` in Create and push tag, before its first echo (`Release reason`); the decision and checkout steps succeeded.",
+      "test_files": [
+        "scripts/tests/mac-app-autotag.test.py"
+      ],
+      "test_commands": [
+        "python3 scripts/tests/mac-app-autotag.test.py AutoTagBlackbox.test_existing_target_large_inventory_is_noop AutoTagBlackbox.test_existing_nonversion_tag_is_still_noop AutoTagBlackbox.test_git_query_error_is_not_an_empty_inventory AutoTagBlackbox.test_no_tags_fails_without_publication"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [],
+      "exclude_paths": [
+        "agents/benchmarks/history"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: the Create and push tag step piped live `git tag` output into `head` inside command substitutions under `set -euo pipefail`, so head closing the pipe gave the producer SIGPIPE (141) and errexit stopped the step (case 2026-11-08-tag-selection-closes-git-output-early)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes .github/workflows/auto-tag-mac-app.yml tag selection (drain the git output before selecting), not disabling pipefail/errexit globally; no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in scripts/tests/mac-app-autotag.test.py registered in scripts/run-deploy-structural-gates.py that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-08-tag-selection-closes-git-output-early.md; PR #1830 (landed via 4ce770943a) repairing the PR #1770 failure; fix commit d218367219. Prompt from thread thr_16c350fec66f4b62bc75cb75751690d8 (ph7eqhzzy84swdbcy4jbfmq2t58hvb11) first line plus case symptoms; that report named the workflow file. The hidden test is a new file at merge. The command runs only the tests that do not depend on hardening bundled in the same commit (tagging MERGE_SHA rather than HEAD, rejecting a malformed latest tag): the large-inventory no-op test is the SIGPIPE regression; the other three passed on base and guard against breakage.",
+      "pr": 1770
+    },
+    {
+      "id": "rca-gate-slot-ledger-park",
+      "kind": "pr",
+      "base_sha": "b80d31db5c9a68dd33954b9fd4f4b4496eedc327",
+      "merge_sha": "84c6e07d0a8cde620caa88f937636c262d1553f5",
+      "prompt": "/rca `scripts/deploy gates --executor local` reported `Agents blackbox: 123 passed, 2 failed (benchmark, span-history)`. Errors: `\u274c attempt_ledger_records_run_id_and_outcome_class: FileNotFoundError: [Errno 2] No such file or directory: '/var/tmp/tmp.../attempts.jsonl'` and `\u274c history_ledgers_union_merged: AssertionError: ['agents/benchmarks/history/span_durations.jsonl', ...]`. Afterwards there were fixture rows (task 't', 'first', 'second') in .context/deploy-ledger-park/attempts.jsonl.",
+      "test_files": [
+        "scripts/tests/deploy-gates.test.py"
+      ],
+      "test_commands": [
+        "python3 scripts/tests/deploy-gates.test.py Inventory"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [],
+      "exclude_paths": [
+        "agents/benchmarks/history",
+        "docs/rca/INDEX.md"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: scripts/deploy_gates.py local_slot injected BENCHMARK_HISTORY_PARK_DIR (PARK_ENV) into every local gate, so ledger tests in test-suite gates parked their fixture rows instead of writing their own files (case 2026-11-07-local-gate-slots-parked-test-suite-ledger-rows)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes scripts/deploy_gates.py (only benchmark gates get the park env), not the agents ledger tests; no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in scripts/tests/deploy-gates.test.py that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-07-local-gate-slots-parked-test-suite-ledger-rows.md; case cites PR #1762; fix commit 84c6e07d0 landed on main via the PR #1751 merge 87b887bd39. Prompt from case symptoms (no originating thread found). No dependency links needed (stdlib python3). The test command runs only the Inventory class: the same fix commit also changed retire to preserve parked rows (Retire tests), a second behavior the report does not describe.",
+      "pr": 1762
+    },
+    {
+      "id": "rca-question-cutover-repeat",
+      "kind": "pr",
+      "base_sha": "26f10d9a46b3424848be24230297cb55e4c1c7b3",
+      "merge_sha": "bb5f25a22cffe2572cfc5513f53a66b1b1e0843b",
+      "prompt": "/rca the following bug for agent with ID: [6f2f4117-3ce9-4a41-88aa-d7cb36b6c571]\nwhy is the message to the user repeated twice on my screen here?",
+      "test_files": [
+        "agents/tests/blackbox/send_message_to_user.blackbox.py"
+      ],
+      "test_commands": [
+        "cd agents && . venv/bin/activate && python scripts/run_blackbox_tests.py send-message-to-user"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "agents/venv"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: agents/domains/send_message_to_user/handler.py emitted FINISHED and DEPLOY_INTERRUPTED (\"new code version deployed, retry this tool\") for a live unanswered question during a cooperative worker cutover instead of parking the original call, so the retried tool sent the question again (case 2026-11-08-question-wait-completed-on-generation-handoff)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes agents/domains/send_message_to_user/handler.py (question wait across generation handoff); no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in agents/tests/blackbox/send_message_to_user.blackbox.py that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-08-question-wait-completed-on-generation-handoff.md; PR #1859 (landed via 4e28dab648 at 2026-11-09T01:05Z = Nov 8 17:05 PST); fix commit bb5f25a22c. Prompt is the user's original wording from thread thr_4f2c46016cbe4d1088a7d57dc130723c (ph7eht76dg20r8qw9gr8fymcv98ht8rv), reassembled from search snippets.",
+      "pr": 1859
+    },
+    {
+      "id": "rca-selector-module-race",
+      "kind": "pr",
+      "base_sha": "db41fbbed7e8cdd4a4d3ddd3f1ed5b7b5bb6cfca",
+      "merge_sha": "7df366f750b44cc53abea9dc0ffb2167e637b3b5",
+      "prompt": "/rca The final staged deployment on db41fbbed (PR #1770) failed at the quick stage: the deployment coordinator exited before paid smoke admission or any allocation. Parallel custody guards were running `agentcard_release_stall_task`; the Python 3.11.9 traceback ends in `dataclasses._is_type` with an AttributeError because its module lookup returned None, at the benchmark selector's `TaskRef` dataclass declaration. The healthy quick sibling processes exited zero with verified quiescence.",
+      "test_files": [
+        "scripts/tests/deploy-test-cycle.test.py"
+      ],
+      "test_commands": [
+        "agents/venv/bin/python3 scripts/tests/deploy-test-cycle.test.py Cycle.test_concurrent_agentcard_selector_keeps_dataclass_module_registered"
+      ],
+      "test_timeout_seconds": 900,
+      "deps_link": [
+        "agents/venv"
+      ],
+      "exclude_paths": [
+        "agents/benchmarks/history"
+      ],
+      "timeout_seconds": 3000,
+      "rubric": [
+        {
+          "id": "R1",
+          "requirement": "Searched the RCA archive with the real symptom strings before diagnosing, and reported the searches and whether this is a recurrence, relative or novel.",
+          "verification": "Trace shows at least two `python3 scripts/rca_archive.py search` (or `show`/grep of docs/rca/cases) calls before the first non-test source edit; the final reply names them."
+        },
+        {
+          "id": "R2",
+          "requirement": "A local repro failed on the buggy code before any fix, and the identical command passed after the fix with the assertion unweakened.",
+          "verification": "Trace order: the repro command exits non-zero before the first edit to non-test source, and the same command string exits 0 after the fix; the final reply shows both results side by side. Hidden test output confirms the pass."
+        },
+        {
+          "id": "R3",
+          "requirement": "The named cause matches the case's first bad boundary.",
+          "verification": "Final reply/case file names: parallel custody guards loaded the dataclass-bearing benchmark selector through runpy under one shared temporary module name, and one load removed another active load's sys.modules entry, so dataclasses found no module (case 2026-11-08-concurrent-deploy-selector-runpy-module-retired)."
+        },
+        {
+          "id": "R4",
+          "requirement": "The fix is at the owning layer with no masking fallback, retry, silenced error or raised timeout.",
+          "verification": "Diff changes scripts/deploy_test_cycle.py / scripts/deploy_test_historical_custody.py dynamic source loading (a unique module identity per load, retiring only its own), not serializing or retrying the gate; no try/except or catch that swallows the error, no new fallback path, no timeout/deadline raised and no test assertion weakened."
+        },
+        {
+          "id": "R5",
+          "requirement": "The regression landed in the owning suite.",
+          "verification": "Diff adds or changes a test in scripts/tests/deploy-test-cycle.test.py (Cycle) that fails on the base code; agent ran `python3 scripts/select_affected_tests.py` or otherwise confirmed the suite is registered."
+        },
+        {
+          "id": "R6",
+          "requirement": "A case file was created and validated.",
+          "verification": "Diff adds docs/rca/cases/<date>-<slug>.md via `python3 scripts/rca_archive.py new`, with literal symptoms, first_bad_boundary and repro; trace shows `rca_archive.py validate` exiting 0 (reindex run first)."
+        },
+        {
+          "id": "R7",
+          "requirement": "Factory events were recorded for each stage and exactly one outcome.",
+          "verification": "Trace shows `python3 scripts/record_factory_event.py rca stage evidence-trace`, `... stage reproduce-diagnose`, `... stage verify-handoff`, and exactly one `... rca outcome <fixed|diagnosis-ready|blocked>` (fixed expected)."
+        },
+        {
+          "id": "R8",
+          "requirement": "No push, pull request or deploy happened: the prompt's \"Do not push, open pull requests or deploy\" wins over the skill's default /deploy.",
+          "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
+        }
+      ],
+      "notes": "Source: docs/rca/cases/2026-11-08-concurrent-deploy-selector-runpy-module-retired.md; PR #1770 (landed via 5066feea73); fix commit 7df366f750. Prompt from case Problem/symptoms (no originating thread found). Replaces rca-web-fetch-html-title, whose hidden test imports a constant (PAGE_METADATA_HEADER) that only the fix introduced. Only the concurrent-load test is run; the sibling failed-load test errors on base with KeyError '<run_path>' and may encode the fix's module-naming choice.",
+      "pr": 1770
+    }
+  ]
+}
