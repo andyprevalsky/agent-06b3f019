@@ -315,7 +315,7 @@ async def _request(client, config, user_id, method, path, payload=None):
         if response.status_code == 409 and path.endswith("/setup") and len(response.content) <= 4096:
             try:
                 body = response.json()
-            except ValueError:
+            except (ValueError, RecursionError):
                 body = None
             if isinstance(body, dict) and body.get("error") == _SETUP_WINDOW_REJECTION:
                 return {"_httpStatus": 409, **_SETUP_WINDOW_FEEDBACK}

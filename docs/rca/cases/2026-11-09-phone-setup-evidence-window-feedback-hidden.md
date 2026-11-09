@@ -42,7 +42,7 @@ Related cases read were 2026-10-18-phone-results-omitted-from-browser-verifier-h
 2026-10-18-phone-setup-claim-and-unknown-fences, and
 2026-10-20-public-phone-redaction-erased-trusted-identity-evidence. This incident
 is distinct: the result and observations existed, but the selected window was
-invalid and the public adapter erased its corrective rejection.
+invalid. The adapter also discards the known rejection in the executed owning replay; the original wire body is not claimed captured.
 
 The exact workflow history identified browser activity 207 and its cancelled
 completion 290. Its encrypted, authenticated paused snapshot retained the exact
@@ -65,7 +65,7 @@ current observations without explaining the consecutive-window requirement.
 
 ## Solution
 
-The unapplied candidate preserves every backend consecutive-window, current-cursor,
+The implemented follow-up preserves every backend consecutive-window, current-cursor,
 revision, 120-second freshness, custody and privacy guard. Guidance says to
 normally use only the latest fresh screen.text ID after navigation; multiple IDs
 must be adjacent reads ending at the current cursor. It adds no two-read requirement
@@ -90,15 +90,67 @@ additional unchanged new-test runs are2/2. All supervisor receipts are quiescent
 no orphans, no TERM/KILL, no remaining children. Full domain tests and production
 physical acceptance remain parent-owned and pending. Status stays open.
 
+## Abstraction and simplification review
+
+Step5a ladder: (1) The model submitted nonconsecutive IDs12 and14 across input13;
+(2) the public selection guidance does not define the backend's uninterrupted window;
+(3) the adapter's deliberate opaque-error boundary removes even a stable, locally
+known window rejection. The deepest proved owned class is privacy-preserving,
+actionable feedback for explicit current-observation validation failures. It covers
+gapped IDs, duplicated reads, and a selected window that does not end at the current
+cursor; the implementation never branches on incident IDs, task names or benchmark data.
+
+Step5b stopped at that class. The next broader class tried was uniform automatic
+repair or corrective disclosure for all phone HTTP rejections. That cannot have one
+coherent safe recovery:403 authorization,409 unconfirmed physical outcome, stale
+setup revision and provider failures have different authority, and unknown bodies
+are deliberately opaque to protect credentials. Automatically substituting evidence
+or replaying input would cross the documented seen-context/custody/no-replay contract.
+This is a source-contract design analysis, not a claimed runtime experiment or
+historical pre-design golden research. No model-intelligence limitation is claimed.
+
+Step6a delete/unify/guard: deleting native window validation would admit stale proof;
+deleting opacity for arbitrary remote failures would disclose untrusted or private
+content. Deriving or replacing explicitly supplied evidence IDs would silently change
+the requested verification and conflict with the deliberate seen-intent contract.
+The current request/result boundary is already shared by all setup targets. Unify the
+window's wording there, then add only the bounded exact native-rejection projection;
+retain every unknown error as opaque. No extra retry, timer, cache or recovery state
+is introduced. The additional JSON decoder exception handling keeps a2200-byte
+nested response an ordinary opaque rejection instead of creating uncertain recovery.
+
+Golden references opened during review of this candidate, not before the initial
+implementation: Codex `codex/codex-rs/apply-patch/src/file_update.rs:155` rejects missing
+context; `codex/codex-rs/core/src/tools/handlers/apply_patch.rs:366` returns the verified
+rejection to the model, while373 uses a local constant for malformed input. Hermes
+`hermes-agent/tools/file_tools.py:1039` teaches a fresh read and1176 documents its
+current-baseline gate; `hermes-agent/tools/file_tools_write_guards.py:594` refuses
+unread/stale writes. OpenClaw `openclaw/src/agents/tools/mobile-ui-tool.ts:455` requires
+a current snapshot and479 consumes its authorization; `openclaw/src/agents/tools/computer-tool-guidance.ts:130`
+requires fresh observation for stale refs and forbids blind replay. Its apply-patch
+context errors at `openclaw/src/agents/apply-patch-update.ts:116` are another analogue.
+These align on useful local rejection feedback without accepting stale state. Rose
+remains stricter: no tolerant phone-cursor matching and no arbitrary provider-body
+reflection. The three reference implementations do not authorize weakening Rose's
+physical custody or privacy invariants.
+
+## Review findings and validation limits
+
+The first independent review rejected the packet's missing canonical fields and
+noted that the original wire literal was unretained. It also found a concrete bounded
+JSON recursion case: the initial candidate caught ValueError but not RecursionError.
+The same new test observed this candidate fail and the revised decoder pass; all
+original backend admission and public opacity assertions remain intact. First review
+and superseded hashes are retained rather than relabeled clear. The final prompt
+approval, complete new-source deploy gates and original physical Connect acceptance
+are pending; the case remains open until those outcomes are witnessed.
+
 ## Human feedback
 
-The parent required candidate-only work, unchanged backend guards, no live phone
-or provider action, identical-command causal evidence, and preserved original
-FAIL/paused custody. The parent corrected an unnecessary two-observation assumption:
-one latest successful observation is valid; multiple observations must be consecutive.
-Read docs/rca/process-feedback.md: a theory is not a deliverable, surface errors
-are not root causes, and privacy/guard assertions must not be weakened to make tests pass.
-The parent's correction is reflected in the candidate and tests.
+None recorded for this specific incident. The standing user requirements to preserve
+Freedom and finish the normal phone setup/deploy remain in force. Parent-agent
+coordination corrected an unnecessary two-read assumption and required an unchanged
+owning reproduction; those are agent review facts, not human approval or feedback.
 
 ## Reusable lesson
 

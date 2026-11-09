@@ -39918,6 +39918,11 @@ async def test_phone_setup_window_feedback_never_reflects_untrusted_errors():
     import httpx
     from domains.spawn_browser_agent_v3.phone import _request
     literal = "Setup observations must be the current uninterrupted cursor window"
+    deeply_nested = b"[" * 1100 + b"]" * 1100
+    assert len(deeply_nested) == 2200
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(409, content=deeply_nested))) as client:
+        result = await _request(client, _fake_config(), "user", "POST", "interactions/task/setup", {})
+    assert result == {"_httpStatus": 409}, "deep malformed JSON must stay an opaque rejection"
     for status, path, body in (
         (409, "interactions/task/setup", {"error": "CANARY-PRIVATE-ERROR"}),
         (403, "interactions/task/setup", {"error": literal}),
