@@ -39,7 +39,7 @@ import {
  * and holds no cross-agent shared state.
  */
 
-import type { AgentStatus } from '@prisma/client';
+import type { AgentStatus, Prisma } from '@prisma/client';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { releaseAgentBrowserSessions } from './agentCleanup';
 import { prisma } from './database';
@@ -129,6 +129,10 @@ function defaultDependencies(): WorkflowLivenessDependencies {
   };
 }
 
+// One bounded scan position per reconciler process, never per agent. A restart
+// safely begins at the oldest row; ownership checks remain entirely durable.
+let livenessScanAfter: { updatedAt: Date; id: string; quietBefore: Date } | undefined;
+
 /**
  * Open rows worth checking: not deleted, workflow-backed, not already settled,
  * and quiet long enough that a live agent would have touched them.
@@ -136,24 +140,50 @@ function defaultDependencies(): WorkflowLivenessDependencies {
 export async function findLivenessCandidates(
   deps: Pick<WorkflowLivenessDependencies, 'now' | 'batchSize'>
 ): Promise<LivenessCandidate[]> {
-  const rows = await prisma.agent.findMany({
-    where: {
-      deletedAt: null,
-      temporalWorkflowId: { not: null },
-      status: { notIn: [...TERMINAL_AGENT_STATUSES] },
-      updatedAt: { lt: new Date(deps.now() - MIN_QUIET_MS) },
-    },
-    select: {
-      id: true,
-      temporalWorkflowId: true,
-      temporalFirstExecutionRunId: true,
-      workflowReplacementToken: true,
-      status: true,
-      statusMessage: true,
-    },
-    orderBy: { updatedAt: 'asc' },
-    take: deps.batchSize,
-  });
+  const where: Prisma.AgentWhereInput = {
+    deletedAt: null,
+    temporalWorkflowId: { not: null },
+    status: { notIn: [...TERMINAL_AGENT_STATUSES] },
+    updatedAt: { lt: livenessScanAfter?.quietBefore ?? new Date(deps.now() - MIN_QUIET_MS) },
+  };
+  const readPage = (after: typeof livenessScanAfter) =>
+    prisma.agent.findMany({
+      where:
+        after === undefined
+          ? where
+          : {
+              AND: [
+                where,
+                {
+                  OR: [
+                    { updatedAt: { gt: after.updatedAt } },
+                    { updatedAt: after.updatedAt, id: { gt: after.id } },
+                  ],
+                },
+              ],
+            },
+      select: {
+        id: true,
+        updatedAt: true,
+        temporalWorkflowId: true,
+        temporalFirstExecutionRunId: true,
+        workflowReplacementToken: true,
+        status: true,
+        statusMessage: true,
+      },
+      orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+      take: deps.batchSize,
+    });
+  const rows = await readPage(livenessScanAfter);
+  const last = rows.at(-1);
+  livenessScanAfter =
+    last === undefined || rows.length < deps.batchSize
+      ? undefined
+      : {
+          updatedAt: last.updatedAt,
+          id: last.id,
+          quietBefore: livenessScanAfter?.quietBefore ?? new Date(deps.now() - MIN_QUIET_MS),
+        };
 
   return rows.flatMap((row) =>
     row.temporalWorkflowId === null

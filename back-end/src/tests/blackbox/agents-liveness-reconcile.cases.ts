@@ -464,3 +464,76 @@ test('reconciler rejects a missing-chain observation raced by exact start accept
     'exact execution receipt must survive'
   );
 });
+
+for (const change of ['chain', 'claim'] as const) {
+  test(`reconciler fences accepted ${change} changes during a closed observation`, async () => {
+    const session = await createAnonymousSession(`liveness-${change}-race`);
+    const { agentId } = await seedLivenessAgent(session.user.id, change, 'PAUSED');
+    const claim = await claimWorkflowReplacement(agentId);
+    const originalRun = randomUUID();
+    await recordWorkflowReplacementStartAcceptance(claim, {
+      workflowId: claim.plannedWorkflowId,
+      firstExecutionRunId: originalRun,
+    });
+    const nextRun = change === 'chain' ? randomUUID() : originalRun;
+    await makeEligible([agentId]);
+    await reconcileWorkflowLiveness({
+      batchSize: 1000,
+      describeStatus: async (id) => {
+        if (id !== claim.plannedWorkflowId) return 'RUNNING';
+        await prisma.agent.update({
+          where: { id: agentId },
+          data: {
+            temporalFirstExecutionRunId: nextRun,
+            ...(change === 'claim' ? { workflowReplacementToken: null } : {}),
+          },
+        });
+        return 'TERMINATED';
+      },
+    });
+    const row = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+    assert(row.status === 'STARTING_UP', `stale ${change} observation must lose the terminal CAS`);
+    assert(row.temporalFirstExecutionRunId === nextRun, 'the winning exact chain must survive');
+  });
+}
+
+test('reconciler does not grant prepared custody to an absent or mismatched token', async () => {
+  const session = await createAnonymousSession('liveness-invalid-claim');
+  for (const token of [null, randomUUID()]) {
+    const { agentId } = await seedLivenessAgent(session.user.id, 'invalid-token', 'PAUSED');
+    const claim = await claimWorkflowReplacement(agentId);
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { workflowReplacementToken: token },
+    });
+    await makeEligible([agentId]);
+    await reconcileWorkflowLiveness({
+      batchSize: 1000,
+      describeStatus: async (id) => (id === claim.plannedWorkflowId ? 'NOT_FOUND' : 'RUNNING'),
+    });
+    assert(
+      (await statusOf(agentId)) === 'FAILED',
+      'only the exact planned token owns absent execution custody'
+    );
+  }
+});
+
+test('reconciler advances its bounded scan past quiet prepared custody', async () => {
+  const session = await createAnonymousSession('liveness-prepared-fairness');
+  const prepared = await seedLivenessAgent(session.user.id, 'oldest-prepared', 'PAUSED');
+  await claimWorkflowReplacement(prepared.agentId);
+  const dead = await seedLivenessAgent(session.user.id, 'later-terminated', 'ACTIVE');
+  await prisma.$executeRaw`UPDATE "Agent" SET "updatedAt" = '1900-01-01T00:00:00.000Z' WHERE id = ${prepared.agentId}`;
+  await prisma.$executeRaw`UPDATE "Agent" SET "updatedAt" = '1901-01-01T00:00:00.000Z' WHERE id = ${dead.agentId}`;
+  for (let tick = 0; tick < 3; tick++) {
+    await reconcileWorkflowLiveness({
+      batchSize: 1,
+      describeStatus: async (id) => (id === dead.workflowId ? 'TERMINATED' : 'NOT_FOUND'),
+    });
+  }
+  assert((await statusOf(prepared.agentId)) === 'STARTING_UP', 'prepared custody stays protected');
+  assert(
+    (await statusOf(dead.agentId)) === 'FAILED',
+    'protected oldest rows must not starve real cleanup'
+  );
+});
