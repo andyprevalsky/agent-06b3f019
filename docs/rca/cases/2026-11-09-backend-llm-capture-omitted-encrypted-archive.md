@@ -155,3 +155,14 @@ missed that local import. Typechecking independently reproduced TS2304 at the sa
 call. The import was corrected; a fresh typecheck and native run are required.
 That run's one archived router call and two frontend messages are preserved as
 actual evidence, never relabeled as a full healthy chat trajectory.
+
+Final runtime-source acceptance on d4905c570c555e740acb084b029a72228a64a496:
+unchanged native chat-mode PASS, no chat-handler errors, three complete root-bound
+archived bases (initial router, after-search router, generator), and normal full
+publisher PASS through archive recovery with no local plaintext dump. A fresh
+browser verified eight frontend messages and the durable last-call HTML. Native
+benchmark and stack cleanup receipts both report clean. Existing compaction
+regression also failed on missing root binding and passed unchanged after the
+metadata path was completed; compaction prompts and thresholds are untouched.
+These facts supersede pending final-native acceptance, not the original failure
+or the unhealthy intermediate candidate's native grades. Full deploy remains open.
