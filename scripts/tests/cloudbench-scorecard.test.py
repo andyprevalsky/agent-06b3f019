@@ -318,6 +318,24 @@ class Scorecard(unittest.TestCase):
                 self.assertNotIn("RUNNING", document.split('id="scorecard-data"')[0])
                 self.assertIn("CONTROLLER LOST", document)
 
+    def test_unreadable_boot_id_is_unverified_not_a_crash(self):
+        # CodeRabbit PR #1865: an OSError reading /proc boot_id must not crash load_campaign.
+        if not Path("/proc/self/stat").exists():
+            self.skipTest("needs /proc process births")
+        directory = self.f.campaign("reused")
+        summary = json.loads((directory / "summary.json").read_text())
+        real = Path.read_text
+
+        def guarded(path, *args, **kwargs):
+            if str(path) == "/proc/sys/kernel/random/boot_id":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", guarded):
+            liveness = CARD["controller_liveness"](directory, summary)
+        self.assertEqual(liveness["state"], "UNVERIFIED")
+        self.assertIn("another host boot", liveness["detail"])
+
     def test_campaign_without_controller_identity_is_unverified_not_running(self):
         data = render(self.f.campaign(None), self.f)
         exp = data["experiment"]

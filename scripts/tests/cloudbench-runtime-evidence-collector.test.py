@@ -42,6 +42,7 @@ def exercise(
     wmh_log: bool = False,
     guest_diagnostics: bool = False,
     file_fault: str | None = None,
+    manifest_fault: str | None = None,
 ):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
@@ -130,6 +131,20 @@ def exercise(
                     self.send_error(409, "exact runtime is not sealed")
                     return
                 data = json.dumps(manifest).encode()
+                if manifest_fault == "truncate" and manifest_calls == seal_after + 1:
+                    # The first sealed manifest closes before Content-Length (a relay tunnel
+                    # dropping mid-body); read(amt) returns the short body without IncompleteRead.
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data[: len(data) // 2])
+                    self.wfile.flush()
+                    self.close_connection = True
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    return
             else:
                 name = parse_qs(parts.query)["file"][0]
                 data = files[name]
@@ -572,6 +587,10 @@ def exercise_read_transition(case: str):
                 recovery=recovery,
                 socket_fault=case.removeprefix("socket-"),
             )
+    elif case == "manifest-truncate":
+        # CodeRabbit PR #1865: a short final-manifest body is a retried TruncatedTransfer in both collectors.
+        for recovery in (False, True):
+            exercise(seal_after=0, deadline=30, file_delay=0, recovery=recovery, manifest_fault="truncate")
     elif case in ("file-stall", "file-truncate", "file-corrupt"):
         # Run the inline controller collector and the recovery helper together:
         # the stall case waits out a real 6 s socket read budget in each.
@@ -640,6 +659,7 @@ READ_TRANSITIONS = (
     "socket-disconnect",
     "file-stall",
     "file-truncate",
+    "manifest-truncate",
     "file-corrupt",
     "shutdown-url",
     "driver-timeout",

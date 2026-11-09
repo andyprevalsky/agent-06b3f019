@@ -53,6 +53,10 @@ def manifest():
     with request() as response:
         data = response.read(1048577)
         assert len(data) <= 1048576 and response.status == 200
+        # read(amt) returns a short body without IncompleteRead when the stream closes early.
+        sealed = response.headers.get("Content-Length")
+        if sealed is not None and sealed.isdigit() and len(data) != int(sealed):
+            raise TruncatedTransfer(f"manifest ended at {len(data)} of {sealed} bytes")
         return json.loads(data)
 def collect_driver_log():
     """Preserve the exact original log through the existing bounded protocol."""

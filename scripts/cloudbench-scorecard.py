@@ -573,7 +573,11 @@ def controller_liveness(run_dir: Path, summary: dict) -> dict:
         return {"state": "ALIVE", "pid": int(pid), "detail": f"controller PID {pid} alive"}
     if start.startswith("proc-start:"):
         boot = Path("/proc/sys/kernel/random/boot_id")
-        if not boot.exists() or start.split(":")[1] != boot.read_text().strip():
+        try:
+            same_boot = start.split(":")[1] == boot.read_text().strip()
+        except OSError:  # missing or unreadable: the boot cannot be confirmed
+            same_boot = False
+        if not same_boot:
             return {"state": "UNVERIFIED", "pid": int(pid), "detail": f"controller PID {pid} recorded on another host boot"}
     if current is None:
         return {"state": "UNVERIFIED", "pid": int(pid), "detail": f"controller PID {pid} liveness unreadable"}

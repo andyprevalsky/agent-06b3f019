@@ -333,6 +333,41 @@ async def test_reused_near_expiry_search_session_is_refreshed_before_returning_c
     assert len(result["results"]) == 2
 
 
+async def test_near_expiry_session_without_refresh_budget_returns_page_without_cursor():
+    # When the refresh wait cannot fit the remaining budget, the first page is kept and its
+    # about-to-expire cursor is not forwarded (CodeRabbit PR #1865).
+    teardown_mock()
+    calls = []
+    expiry = datetime.now(UTC) + timedelta(seconds=20)
+    setup_mock_fn(_paged_upstream([("reused-session.2.2.sig", expiry)], calls))
+    with patch("tools.people_search.service.HTTP_TIMEOUT", 5.0):
+        result = await _run(query="engineer", limit=2, search_options={"titles": ["Software Engineer"]})
+    assert len(calls) == 1, calls
+    assert "next_cursor" not in result, result.get("next_cursor")
+    assert len(result["results"]) == 2
+
+
+async def test_failed_session_refresh_keeps_first_page_without_cursor():
+    # The optional refetch failing must not discard the first page (CodeRabbit PR #1865).
+    import httpx
+
+    teardown_mock()
+    calls = []
+    first = _paged_upstream([("reused-session.2.2.sig", datetime.now(UTC) + timedelta(seconds=0.5))], calls)
+
+    def upstream(request: httpx.Request):
+        if calls:
+            calls.append(datetime.now(UTC))
+            return httpx.Response(500, json={"ok": False, "error": {"code": "INTERNAL"}})
+        return first(request)
+
+    setup_mock_fn(upstream)
+    result = await _run(query="engineer", limit=2, search_options={"titles": ["Software Engineer"]})
+    assert len(calls) == 2, calls
+    assert "next_cursor" not in result, result.get("next_cursor")
+    assert len(result["results"]) == 2
+
+
 async def test_search_session_with_usable_lifetime_or_cursor_is_never_refetched():
     # A continuation cannot open a new session, so its short lifetime is reported as-is.
     for cursor, lifetime in ((None, timedelta(minutes=14)), ("page-2", timedelta(seconds=0.5))):
@@ -846,6 +881,8 @@ async def run_all_tests():
         test_discover_request_normalization_and_criteria,
         test_reused_near_expiry_search_session_is_refreshed_before_returning_cursor,
         test_search_session_with_usable_lifetime_or_cursor_is_never_refetched,
+        test_near_expiry_session_without_refresh_budget_returns_page_without_cursor,
+        test_failed_session_refresh_keeps_first_page_without_cursor,
         test_enrich_by_id_preserves_fields_without_contact_reveals,
         test_exact_enrichment_missing_record_is_typed_error,
         test_missing_enrichment_manager_reports_error_without_query_charge,

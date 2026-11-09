@@ -523,6 +523,36 @@ async def test_loop_lag_attributes_stall_to_cpu_starvation_window():
         assert key in stall, stall
 
 
+def test_cgroup_throttle_stat_prefers_cpu_stat_local_for_ancestor_quotas():
+    """cpu.stat.local includes ancestor-imposed throttling; cpu.stat alone reads zero under a parent quota."""
+    import os
+    import tempfile
+
+    os.environ.setdefault("TEMPORAL_ADDRESS", "localhost:7233")
+    os.environ.setdefault("TEMPORAL_TASK_QUEUE", "test")
+    import worker
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = os.path.join(tmp, "cgroup")
+        root = os.path.join(tmp, "fs")
+        base = os.path.join(root, "a", "b")
+        os.makedirs(base)
+        with open(proc, "w", encoding="ascii") as fh:
+            fh.write("0::/a/b\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) is None
+        with open(os.path.join(base, "cpu.stat"), "w", encoding="ascii") as fh:
+            fh.write("usage_usec 10\nthrottled_usec 0\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) == os.path.join(base, "cpu.stat")
+        with open(os.path.join(base, "cpu.stat.local"), "w", encoding="ascii") as fh:
+            fh.write("throttled_usec 2500000\n")
+        chosen = worker._own_cgroup_cpu_stat_path(proc, root)
+        assert chosen == os.path.join(base, "cpu.stat.local")
+        assert worker._cgroup_throttled_usec(chosen) == 2500000
+        with open(proc, "w", encoding="ascii") as fh:
+            fh.write("12:cpu,cpuacct:/a/b\n")
+        assert worker._own_cgroup_cpu_stat_path(proc, root) is None
+
+
 def test_cgroup_throttled_usec_reads_cpu_stat_and_reports_unknown_when_absent():
     """Container quotas show as cgroup v2 throttled_usec, not hypervisor steal."""
     import os
@@ -3111,6 +3141,7 @@ async def run_all_tests():
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     await r.record_async("loop_lag_attributes_cpu_starvation", test_loop_lag_attributes_stall_to_cpu_starvation_window)
     r.record("cgroup_throttled_usec_parser", test_cgroup_throttled_usec_reads_cpu_stat_and_reports_unknown_when_absent)
+    r.record("cgroup_throttle_stat_prefers_local", test_cgroup_throttle_stat_prefers_cpu_stat_local_for_ancestor_quotas)
     r.record("run_then_exit_survives_a_finalization_deadlock", test_run_then_exit_survives_a_finalization_deadlock)
     r.record("exit_code_for_matches_cpython_system_exit", test_exit_code_for_matches_cpython_system_exit)
     r.record("worker_entrypoint_skips_interpreter_finalization", test_worker_entrypoint_skips_interpreter_finalization)

@@ -1406,7 +1406,7 @@ def bounded_setting_value(value: str) -> str:
 
 def banner_setting_value(value: str) -> str:
     """One shell-quoted line: control characters cannot forge banner lines."""
-    return shlex.quote(re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\\]",
+    return shlex.quote(re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\\\ud800-\udfff]",
                               lambda match: match.group().encode("unicode_escape").decode("ascii"), value))
 
 

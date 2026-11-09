@@ -200,13 +200,30 @@ async def execute_people_search(
             )
         data = await fetch_lantern_people(api_url=origin, api_token=token, operation=operation, payload=payload)
         seconds_left = _session_seconds_left(data) if "cursor" not in payload else None
+        # A first page whose session is about to expire keeps its results but never forwards a dead cursor.
+        cursor_unusable = False
         if seconds_left is not None and seconds_left < SEARCH_SESSION_MIN_LIFETIME_SECONDS:
             wait = max(seconds_left, 0.0) + 1.0
             budget_left = (budget.when() or 0.0) - asyncio.get_running_loop().time()
             if wait + SEARCH_SESSION_REFRESH_RESERVE_SECONDS <= budget_left:
                 logger.info("Refreshing reused Lantern search session", seconds_left=round(seconds_left, 1))
                 await asyncio.sleep(wait)
-                data = await fetch_lantern_people(api_url=origin, api_token=token, operation=operation, payload=payload)
+                try:
+                    data = await fetch_lantern_people(
+                        api_url=origin, api_token=token, operation=operation, payload=payload
+                    )
+                except Exception as exc:  # cancellation is a BaseException and still propagates
+                    logger.warning(
+                        "Lantern search session refresh failed; returning the first page without its cursor",
+                        error=type(exc).__name__,
+                    )
+                    cursor_unusable = True
+            else:
+                logger.info(
+                    "Lantern search session expires before a refresh fits; returning the first page without its cursor",
+                    seconds_left=round(seconds_left, 1),
+                )
+                cursor_unusable = True
     rows = data.get("items" if operation == "people_profiles_get" else "people")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise lantern_error("INVALID_RESPONSE")
@@ -239,7 +256,7 @@ async def execute_people_search(
         "warnings": warnings,
     }
     for source_key, key in (("nextCursor", "next_cursor"), ("generation", "generation"), ("source", "source_metadata")):
-        if source_key in data:
+        if source_key in data and not (cursor_unusable and source_key == "nextCursor"):
             result[key] = data[source_key]
     if "generation" not in result and isinstance(data.get("source"), dict) and data["source"].get("index"):
         result["generation"] = data["source"]["index"]

@@ -1348,14 +1348,25 @@ async def _decide_and_actuate(
     _prev_desired = _desired_machines
 
 
-def _own_cgroup_cpu_stat_path() -> str | None:
-    """This process's cgroup v2 ``cpu.stat``; None on cgroup v1 or when unreadable."""
+def _own_cgroup_cpu_stat_path(
+    proc_cgroup: str = "/proc/self/cgroup", cgroup_root: str = "/sys/fs/cgroup"
+) -> str | None:
+    """This process's cgroup v2 throttling stat; None on cgroup v1 or when unreadable.
+
+    ``cpu.stat.local`` (newer kernels) counts this cgroup's throttling whether its own or an
+    ancestor's ``cpu.max`` imposed it; ``cpu.stat`` reports only this cgroup's own quota, so a
+    parent's quota would read as zero there. Prefer the local file and fall back to ``cpu.stat``.
+    """
     try:
-        with open("/proc/self/cgroup", encoding="ascii") as fh:
+        with open(proc_cgroup, encoding="ascii") as fh:
             for line in fh:
                 if line.startswith("0::"):
-                    path = os.path.join("/sys/fs/cgroup", line[3:].strip().lstrip("/"), "cpu.stat")
-                    return path if os.path.exists(path) else None
+                    base = os.path.join(cgroup_root, line[3:].strip().lstrip("/"))
+                    for name in ("cpu.stat.local", "cpu.stat"):
+                        path = os.path.join(base, name)
+                        if os.path.exists(path):
+                            return path
+                    return None
     except OSError:
         return None
     return None

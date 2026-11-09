@@ -4483,6 +4483,20 @@ def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_la
     assert not calls.exists(), calls.read_text()
 
 
+def test_campaign_banner_escapes_invalid_utf8_setting_values():
+    """A CLOUDBENCH_* value holding invalid UTF-8 must not crash the startup banner (CodeRabbit PR #1865).
+
+    os.environ decodes such bytes as lone surrogates (surrogateescape); print() on a strict UTF-8
+    stdout raised UnicodeEncodeError after summary.json was written, leaving a "running" campaign.
+    """
+    campaign = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+    value = os.fsdecode(b'queued-\xff\xfe-tail')
+    rendered = campaign['banner_setting_value'](value)
+    rendered.encode('utf-8')  # strict: a lone surrogate would raise UnicodeEncodeError
+    assert '\\udcff' in rendered and '\\udcfe' in rendered, rendered
+    assert campaign['banner_setting_value']('plain-value') == 'plain-value'
+
+
 def test_campaign_inventory_operator_settings_python_filter_matches_run_bench(tmp_path):
     """A recorded name list is untrusted: the campaign re-applies run-bench's exact filter."""
     function = re.search(r'^run_bench_secret_like_setting\(\) \{\n.*?^\}\n',
