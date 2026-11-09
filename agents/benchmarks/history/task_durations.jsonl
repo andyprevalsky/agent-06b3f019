@@ -6745,10 +6745,6 @@
 {"task": "browser-smoke", "duration_seconds": 136.8, "cost_cents": 1.0, "timestamp": "2026-10-16T20:19:11.055322+00:00", "agent_id": "5fbc7d49-158c-4be5-905d-240652c6d9e7"}
 {"task": "chat-mode", "duration_seconds": 15.4, "cost_cents": 0.0, "timestamp": "2026-10-16T20:19:11.055322+00:00", "agent_id": "48c330d3-9235-46e7-9cfa-896687cb87a2"}
 {"task": "claude-code-agent", "duration_seconds": 71.1, "cost_cents": 0.0, "timestamp": "2026-10-16T20:19:11.055322+00:00", "agent_id": "98fb3d3e-a762-4625-b7ee-cc180f1c55a6"}
-{"task": "browser-cloud-iphone-settings", "duration_seconds": 177.3, "cost_cents": 0.0, "timestamp": "2026-10-18T20:42:30.690487+00:00", "agent_id": "b53db629-4b68-4d7a-b763-1777d3b15f45"}
-{"task": "browser-cloud-iphone-settings", "duration_seconds": 146.4, "cost_cents": 0.0, "timestamp": "2026-10-18T21:20:39.846559+00:00", "agent_id": "49e6acd8-e821-4121-9a18-ccb035d0b0c9"}
-{"task": "browser-cloud-iphone-settings", "duration_seconds": 119.3, "cost_cents": 0.0, "timestamp": "2026-10-18T23:08:38.442741+00:00", "agent_id": "76660e5a-7c40-4771-ac73-dd5e2c69826f"}
-{"task": "browser-cloud-iphone-critical-attention", "duration_seconds": 135.8, "cost_cents": 1.0, "timestamp": "2026-10-18T23:31:03.751282+00:00", "agent_id": "7972d040-1416-4179-bf6b-b679b9e61112"}
 {"task": "browser-auth-existing-browser-session", "duration_seconds": 56.4, "cost_cents": 0.0, "timestamp": "2026-10-16T19:27:59.467618+00:00", "agent_id": "13b3c485-caad-4979-ae58-b71139545eb6"}
 {"task": "browser-auth-stale-session-password", "duration_seconds": 71.2, "cost_cents": 0.0, "timestamp": "2026-10-16T19:27:59.467618+00:00", "agent_id": "28476350-b602-4af2-a699-8251b3bfdbce"}
 {"task": "browser-auth-passkey-preferred", "duration_seconds": 97.5, "cost_cents": 0.0, "timestamp": "2026-10-16T19:27:59.467618+00:00", "agent_id": "4127b97e-105b-45ee-923c-27a43b147146"}
