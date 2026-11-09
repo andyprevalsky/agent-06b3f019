@@ -1,0 +1,8 @@
+{
+  "premerge_monitor": "Completed all15nativegate terminalreceipts14PASS/1FAIL, independent13smokeauditclosure.",
+  "production_monitor": "Stopped by harness usage_limit_exceeded at2026-11-09T01:16:25.503Z; parentrecoveredoriginalterminalnativeoutputs later.",
+  "native_original_production_finished": "2026-11-09T02:05:42Z",
+  "no_replacement_cutover_or_blind_rerun": true,
+  "missing_watch_interval_not_claimed_monitored": true,
+  "source": "Saved exactmonitor failedturn receipt and originalproduction-lanes.json/production.json/log; no inferred activework duringunobservedgap."
+}
