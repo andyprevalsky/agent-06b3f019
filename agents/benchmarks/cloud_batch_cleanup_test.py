@@ -3050,3 +3050,119 @@ def test_native_system_database_identity_agrees_for_create_restore_runtime_and_m
             assert local.benchmark_system_pg_db_name(run_id) == name
             observed.append(name)
     assert len(set(observed)) == len(run_ids), "hash must include original punctuation and sibling suffix"
+
+
+async def _assert_terminal_report_final_grade(scenarios):
+    """Real main finalizer must project canonical post-cleanup outcomes to the native card."""
+    from benchmarks import results as result_types
+    from benchmarks import report_card as native_card
+    import runpy
+
+    source = Path(__file__).with_name("run_benchmark.py")
+    module = ast.parse(source.read_text()).body
+    save_helper = next(node for node in module if isinstance(node, ast.AsyncFunctionDef) and node.name == "_finalize_owned_batch_and_save_run")
+    private_emitter = runpy.run_path(str(source.with_name("report_card.py")))["ReportCardEmitter"]
+    main = next(node for node in module if isinstance(node, ast.AsyncFunctionDef) and node.name == "main_async")
+    start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "initial_credential_skips" for target in node.targets))
+    stop = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "owned_batch_cleanup" for target in node.targets))
+    owner = next(node for node in main.body if isinstance(node, ast.Try) and any(
+        isinstance(child, ast.Name) and child.id == "_report_ticker_task"
+        for statement in node.finalbody for child in ast.walk(statement)))
+    finish = ast.AsyncFunctionDef(name="_finish_native_report", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=owner.finalbody, decorator_list=[])
+    task = SimpleNamespace(name="agent-payment-setup-resume", world_model_mode=None)
+    for scenario in scenarios:
+        grade = scenario.removesuffix("-closed")
+        closed = [False]
+        def sink(*args, **kwargs):
+            if closed[0]:
+                raise BrokenPipeError("stdout closed")
+        error = asyncio.CancelledError("owned cleanup cancelled") if grade == "cleanup-cancelled" else RuntimeError("provider verification database is not the owned local stack")
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            passed = grade in {"cleanup-error", "cleanup-cancelled", "passed"}
+            status = "COMPLETED" if passed else grade.upper()
+            result = bench.TaskResult(name=task.name, passed=passed, agent_id=ROOT, status=status,
+                benchmark_status="PASSED" if passed else status, progress_score=1 if passed else 0,
+                duration_seconds=241.5, cost_cents=2.0, message_count=3, tokens_in=194195, tokens_out=1679)
+            run = result_types.BenchmarkRun(run_id="native-final-report", task_results=[result])
+            real_save = run.save
+            run.save = lambda: real_save(directory=str(context / "canonical"))
+            async def stop_collector():
+                return 0
+            async def finalize(_url, results, _roots, **_kwargs):
+                assert results == [result]
+                if scenario.endswith("-closed"):
+                    closed[0] = True
+                if grade.startswith("cleanup-"):
+                    bench._record_owned_cleanup_failure(result,
+                        {"errors":["provider: exact provider ownership was not established", "payment: exact payment ownership was not established"]}, error)
+                    raise error
+            namespace = dict(vars(bench))
+            namespace.update(tasks=[task], skipped_claude_tasks=[], run=run, base_url="http://localhost:3201",
+                stop_fly_log_collector=stop_collector, realtime_started=False, memory_gate_enabled=False,
+                print=sink, _finalize_owned_cloud_batch=finalize, _complete_interrupt_cleanup=lambda:None,
+                owned_batch_cleanup=True, _live_task_agent_ids={task.name:[ROOT]}, _never_admitted_results=[],
+                _WMHEvidenceSnapshot=lambda: SimpleNamespace(refresh=lambda:None, finalize=lambda:None),
+                _infra_usd_for_elapsed=lambda _elapsed:None)
+            with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR":directory}), \
+                 patch.object(bench, "_finalize_owned_cloud_batch", finalize), \
+                 patch.object(bench, "_complete_interrupt_cleanup"), \
+                 patch.object(run, "_record_history") as history, \
+                 patch.object(run, "_upload_to_hub") as hub, \
+                 patch("socket.create_connection", side_effect=AssertionError("real network forbidden")) as dial, \
+                 patch("socket.socket.connect", side_effect=AssertionError("real network forbidden")) as connect, \
+                 patch("socket.socket.connect_ex", side_effect=AssertionError("real network forbidden")) as connect_ex, \
+                 patch.object(native_card, "ReportCardEmitter", private_emitter), \
+                 patch("benchmarks.report_card.clean_source_sha", return_value="a"*40):
+                exec(compile(ast.fix_missing_locations(ast.Module(body=[save_helper, *main.body[start:stop], finish], type_ignores=[])),
+                    str(source), "exec"), namespace)
+                namespace["_report_emitter"]._emit = sink
+                namespace["_emit_report"](force=True)
+                before = json.loads((context / "report-card.json").read_text())
+                ticker = asyncio.create_task(asyncio.Event().wait())
+                namespace["_report_ticker_task"] = ticker
+                try:
+                    if grade.startswith("cleanup-"):
+                        with pytest.raises(type(error)) as caught:
+                            await namespace["_finish_native_report"]()
+                        assert caught.value is error, "output failure replaced the original cleanup exception"
+                    else:
+                        await namespace["_finish_native_report"]()
+                finally:
+                    ticker.cancel()
+                    await asyncio.gather(ticker, return_exceptions=True)
+            history.assert_called_once()
+            hub.assert_called_once()
+            dial.assert_not_called()
+            connect.assert_not_called()
+            connect_ex.assert_not_called()
+            card = json.loads((context / "report-card.json").read_text())
+            canonical = json.loads((context / "run.json").read_text())
+            expected = "failed" if grade.startswith("cleanup-") else grade
+            assert card["per_task"][0]["status"] == expected, "terminal report retained pre-cleanup PASS after canonical ERROR"
+            assert card["results"]["passed"] == int(expected == "passed")
+            assert card["results"]["failed"] == int(expected == "failed")
+            assert card["results"]["cancelled"] == int(expected == "cancelled")
+            assert canonical["tasks"][0]["passed"] is (expected == "passed")
+            assert card["per_task"][0]["agent_id"] == ROOT
+            assert card["source_sha"] == before["source_sha"] == "a"*40
+            assert card["started_at"] == before["started_at"] and card["finished_at"] == before["finished_at"]
+            assert card["per_task"][0]["tokens_in"] == 194195 and card["per_task"][0]["cost_usd"] == .02
+
+
+@async_case
+async def test_terminal_report_refreshes_after_owned_cleanup_final_grade():
+    await _assert_terminal_report_final_grade(("cleanup-error", "passed", "failed", "cancelled", "passed-closed"))
+
+
+@async_case
+async def test_terminal_report_closed_sink_preserves_cleanup_runtime_error():
+    await _assert_terminal_report_final_grade(("cleanup-error-closed",))
+
+
+@async_case
+async def test_terminal_report_closed_sink_preserves_real_cleanup_cancellation():
+    await _assert_terminal_report_final_grade(("cleanup-cancelled-closed",))

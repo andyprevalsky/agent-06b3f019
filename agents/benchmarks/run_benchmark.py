@@ -7566,13 +7566,19 @@ async def _finalize_owned_batch_and_save_run(
     if run.task_results:
         run.world_model_retrieval_audit = retrieval_audit()
         path = run.save()
-        print(f"\n  Results saved: {path}")
+        try:
+            print(f"\n  Results saved: {path}")
+        except (OSError, ValueError):
+            pass
         try:
             context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
             context_dir.mkdir(parents=True, exist_ok=True)
             (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
         except Exception as exc:
-            print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+            try:
+                print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+            except (OSError, ValueError):
+                pass
 
     if batch_cleanup_error is not None:
         raise batch_cleanup_error
@@ -18057,7 +18063,10 @@ async def main_async(args):
                 force=force,
             )
         except Exception as exc:  # [REDACTED] must never fail the run
-            print(f"  ⚠ report card emit failed: {exc}")
+            try:
+                print(f"  ⚠ report card emit failed: {exc}")
+            except (OSError, ValueError):
+                pass
 
     # Live report card: a background ticker emits on a timer so the dashboard updates
     # DURING the run. The drain loop only emits on task-completion events, so a single
@@ -18352,14 +18361,18 @@ async def main_async(args):
             else:
                 print(f"  ⚠ Worker memory sampling unavailable after smoke: {memory_after.get('reason')}")
 
-        await _finalize_owned_batch_and_save_run(
-            base_url,
-            run,
-            _live_task_agent_ids,
-            owned_batch_cleanup=owned_batch_cleanup,
-            retrieval_audit=_wmh_evidence.finalize,
-            never_admitted_results=tuple(_never_admitted_results),
-        )
+        try:
+            await _finalize_owned_batch_and_save_run(
+                base_url,
+                run,
+                _live_task_agent_ids,
+                owned_batch_cleanup=owned_batch_cleanup,
+                retrieval_audit=_wmh_evidence.finalize,
+                never_admitted_results=tuple(_never_admitted_results),
+            )
+        finally:
+            # Cleanup can change the canonical grade even when it raises.
+            _emit_report(force=True)
 
     # Print summary
     s = run.summary
