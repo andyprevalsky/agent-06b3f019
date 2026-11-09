@@ -75,9 +75,7 @@ function MetaLine({ message }: { message: Message }) {
     (message.metadata?.codeAgentResume as CodeAgentResumeState | undefined) ??
     browserResumeState(messages, message) ??
     roseResumeState(messages, message);
-  const time = (
-    <time dateTime={message.timestamp}>{formatMessageSentAt(message.timestamp)}</time>
-  );
+  const time = <time dateTime={message.timestamp}>{formatMessageSentAt(message.timestamp)}</time>;
   if (resume) {
     return (
       <p
