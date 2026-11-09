@@ -1,0 +1,26 @@
+{
+ "name": "pr1866-7577a657/20261109-cloud-02",
+ "key_prefix": "devbox-closeout-private/pr1866-7577a657/20261109-cloud-02/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "79215c177e4be112188789efd1247393b54ac6296929c381dfae6234b725206c",
+ "archive_size_bytes": 2281739891,
+ "parts": 35,
+ "chunk_size": 67108864,
+ "members": [
+  "/home/boxes/rose/.context/deploy-cloud/b1e30b2a256731370c5187bfaf00bea6698527bb33ecf56efe3c14d6abd7227d",
+  "/home/boxes/rose/.context/deploy-cloud/b9fa6b13dc4dffc1ecad5a781d7b4e0613d6c4a865ca5fc6032d8151756e52c4",
+  "/home/boxes/rose/.context/deploy-cloud/cd762486f84cfe45c3e99ece391d6c18c42eed420199b21c93e06e321cd909ab",
+  "/home/boxes/rose/.context/deploy-cloud/dc3c509db4ccb6b03561f7c74beb6c8bb50773d47a5ff8d13fb9a18e07f09d93",
+  "/home/boxes/rose/.context/deploy-cloud/e27f00ad43c3caf6754455d6f06c4abe135f3e31d85ac8cf906a854046e6733a",
+  "/home/boxes/rose/.context/deploy-cloud/e6f5b5085b1ef95a40157dbc090208d11107b681bd348680179540e639a6acf8",
+  "/home/boxes/rose/.context/deploy-cloud/eedeedc8af7b2c8fbf69dbb84d4b428fbbcc9f64bf4d862bbbb3a764a433c695",
+  "/home/boxes/rose/.context/deploy-cloud/f257c048bae8995fc047c278cf588510d57e0b9e55e70d15f8b35b3379480356",
+  "/home/boxes/rose/.context/deploy-cloud/f558de472d91c97bfb8d75eaae30eea85262ff2827fe571a01744f8d96196d9f",
+  "/home/boxes/rose/.context/deploy-cloud/fdc5b43d4b0ce80a3009b9778ac492f363784f49fca27afdb5289364f6645a97"
+ ],
+ "files": 11472,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}
