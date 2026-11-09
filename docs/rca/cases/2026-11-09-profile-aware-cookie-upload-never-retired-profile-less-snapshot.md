@@ -25,6 +25,7 @@ sources:
   - task browser-opentable-reservation
   - benchmark run descend-failed-neverrun-20261106 epochs 4 and 18 (cluster H-06)
   - commit f5b2564ef4 (related unmerged H-05i discovery fix; also be13be8a36, c6236d0ebc)
+  - commit e1c36f3568 (fix + regression on branch rca/opentable-cookie-injection-20261108, unmerged)
 repro: back-end/src/tests/blackbox/browser-credential-sync.profile-snapshot.cases.ts › profile-aware chrome upload retires the superseded profile-less snapshot
 status: mitigated
 ---
