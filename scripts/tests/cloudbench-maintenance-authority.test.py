@@ -936,4 +936,52 @@ class InterruptedMaintenance(unittest.TestCase):
         with self.assertRaises(ValueError):m.interrupted_evidence(self.root,record)
 
 
+class HistoricalSocketRetirement(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.owner=Path(self.temp.name)/'hub.owner';self.owner.write_text('pid=374522\nport=18768\nstatus=live-transfer-required\n')
+        self.socket={'pid':374522,'port':18768,'inodes':['87141398']}
+        self.anchor={'proof':{'guest_observation':{'hub_socket':self.socket},
+                    'files':{str(self.owner):hashlib.sha256(self.owner.read_bytes()).hexdigest()}}}
+        self.original_read=Path.read_text
+    def absent_net(self,path,*args,**kwargs):
+        if str(path) in ('/proc/net/tcp','/proc/net/tcp6'):return 'header\n'
+        return self.original_read(path,*args,**kwargs)
+    def test_live_original_socket_stays_required(self):
+        with patch.object(r16,'hub_socket',return_value=self.socket),patch('deploy_test_round12_isolation.retired_hub') as retired:
+            m.validate_historical_hub_socket(self.anchor);retired.assert_not_called()
+        with patch.object(r16,'hub_socket',return_value={**self.socket,'inodes':['other']}),self.assertRaises(ValueError):
+            m.validate_historical_hub_socket(self.anchor)
+    def test_retired_absent_socket_preserves_old_pin(self):
+        before=copy.deepcopy(self.anchor)
+        with patch.object(r16,'hub_socket',side_effect=FileNotFoundError),patch('deploy_test_round12_isolation.retired_hub',return_value=True),patch.object(Path,'read_text',lambda path,*a,**kw:self.absent_net(path,*a,**kw)):
+            m.validate_historical_hub_socket(self.anchor)
+        self.assertEqual(self.anchor,before)
+    def test_unproved_retirement_and_changed_owner_refuse(self):
+        with patch.object(r16,'hub_socket',side_effect=FileNotFoundError),patch('deploy_test_round12_isolation.retired_hub',return_value=False),self.assertRaises(ValueError):
+            m.validate_historical_hub_socket(self.anchor)
+        self.owner.write_text('changed')
+        with patch.object(r16,'hub_socket',side_effect=FileNotFoundError),self.assertRaises(ValueError):m.validate_historical_hub_socket(self.anchor)
+    def test_foreign_listener_and_unreadable_inventory_refuse(self):
+        original=self.original_read
+        def net(path,*args,**kwargs):
+            if str(path).startswith('/proc/net/'):
+                return 'header\n0: 00000000:4950 00000000:0000 0A 0 0 0 0 0 999\n'
+            return original(path,*args,**kwargs)
+        with patch.object(r16,'hub_socket',side_effect=FileNotFoundError),patch('deploy_test_round12_isolation.retired_hub',return_value=True),patch.object(Path,'read_text',net),self.assertRaises(ValueError):
+            m.validate_historical_hub_socket(self.anchor)
+        def unreadable(path,*args,**kwargs):
+            if str(path).startswith('/proc/net/'):raise PermissionError('unknown')
+            return original(path,*args,**kwargs)
+        with patch.object(r16,'hub_socket',side_effect=FileNotFoundError),patch('deploy_test_round12_isolation.retired_hub',return_value=True),patch.object(Path,'read_text',unreadable),self.assertRaises(PermissionError):
+            m.validate_historical_hub_socket(self.anchor)
+    def test_present_reused_pid_and_nonabsence_errors_refuse(self):
+        exists=Path.exists
+        def live(path):return True if str(path)=='/proc/374522' else exists(path)
+        with patch.object(r16,'hub_socket',side_effect=FileNotFoundError),patch.object(Path,'exists',live),self.assertRaises(ValueError):
+            m.validate_historical_hub_socket(self.anchor)
+        with patch.object(r16,'hub_socket',side_effect=PermissionError),self.assertRaises(PermissionError):
+            m.validate_historical_hub_socket(self.anchor)
+
+
 if __name__=='__main__':unittest.main()

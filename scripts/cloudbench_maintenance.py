@@ -832,6 +832,37 @@ def finish(args):
     need(complete['qualified'], 'native transition did not qualify; original exit retained')
 
 
+def validate_historical_hub_socket(anchor):
+    """Keep the original socket pin; a sealed retirement proves absence only."""
+    import deploy_test_round16_isolation as prior
+    from deploy_test_round12_isolation import retired_hub
+    from deploy_test_native_cleanup import fields
+    old=anchor['proof']['guest_observation']['hub_socket']
+    try:
+        current=prior.hub_socket(pid=old['pid'],port=old['port'])
+    except FileNotFoundError:
+        # Missing ancillary proc data or a live replacement cannot be excused
+        # by historical retirement evidence.
+        need(not Path('/proc',str(old['pid'])).exists(),'historical Hub PID still present')
+        matches=[]
+        for name,expected in anchor['proof']['files'].items():
+            path=Path(name)
+            if path.suffix!='.owner':continue
+            need(path.is_file() and not path.is_symlink() and path.resolve()==path
+                 and hashlib.sha256(path.read_bytes()).hexdigest()==expected,'historical Hub owner seal')
+            owner=fields(path.read_bytes())
+            if owner.get('pid')==str(old['pid']) and owner.get('port')==str(old['port']):
+                matches.append((path,owner))
+        need(len(matches)==1 and retired_hub(*matches[0]),'historical Hub retirement required')
+        for name in ('tcp','tcp6'):
+            for line in (Path('/proc/net')/name).read_text().splitlines()[1:]:
+                row=line.split()
+                need(not (int(row[1].rsplit(':',1)[1],16)==old['port'] and row[3]=='0A'),
+                     'retired Hub port has a current listener')
+        return
+    need(current==old,'original Hub socket changed')
+
+
 def validate_current(state, entries, anchor, operation):
     """Only a genuine recorded native transition can replace current guest pins."""
     root = Path(anchor['owner']['worker_root'])
@@ -914,8 +945,7 @@ def validate_current(state, entries, anchor, operation):
                 raise
             need(item['id'] == identifier and item['state'] in ('destroyed','pending_destroy')
                  and (resource == 'machines' or item.get('attached_machine_id') is None), 'original resource remains active')
-    old_socket = anchor['proof']['guest_observation']['hub_socket']
-    need(prior.hub_socket(pid=old_socket['pid'],port=old_socket['port']) == old_socket, 'original Hub socket changed')
+    validate_historical_hub_socket(anchor)
     final = observation(intent['app'], intent['targets'][0][1])
     need(all(final[key] == current[key] for key in ('warm','volumes','inventory'))
          and all(final['guard'][key] == current['guard'][key] for key in ('boot','uid')),
