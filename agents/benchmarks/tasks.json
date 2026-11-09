@@ -6052,7 +6052,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -6232,7 +6235,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -6406,7 +6412,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -6579,7 +6588,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -6759,7 +6771,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -6933,7 +6948,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -7242,7 +7260,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -8287,6 +8308,11 @@
       ]
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
+      },
       "purchase": {
         "status": "CLEARED",
         "merchant": "Rose Labs Test Payment",
@@ -8420,6 +8446,11 @@
       ]
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
+      },
       "purchase": {
         "status": "CLEARED",
         "merchant": "Rose Labs Test Payment",
@@ -8594,6 +8625,11 @@
       ]
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
+      },
       "purchase": {
         "status": "CLEARED",
         "merchant": "Rose Labs Test Payment",
@@ -8728,7 +8764,10 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",
@@ -8878,6 +8917,11 @@
       ]
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
+      },
       "purchase": {
         "status": "VOIDED",
         "merchant": "Rose Labs Test Payment",
@@ -11252,7 +11296,8 @@
         "agentCardProviderCardCount": 1,
         "agentCardProviderTransferCount": 1,
         "stripePaymentIntentCount": 1,
-        "stripeProviderPaymentIntentCount": 1
+        "stripeProviderPaymentIntentCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "CLEARED",

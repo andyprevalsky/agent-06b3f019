@@ -3485,8 +3485,13 @@ def test_local_main_seeds_only_the_selected_child_payment_fixture():
     """Native child main must not bind a sibling's payment identity into this world."""
     from types import SimpleNamespace
     from benchmarks import local
+    from benchmarks import run_benchmark as bench
 
-    cohort = ["agent-payment-new-user-journey", "agent-payment-test-shop", "chat-mode"]
+    cohort = ["agent-payment-new-user-journey", "agent-payment-test-shop", "chat-mode",
+        "agent-payment-idempotent-abandonment", "agent-payment-setup-resume", "agent-payment-abandonment",
+        "browser-auth-guest-purchase", "browser-auth-member-discount-purchase", "browser-auth-member-discount-signup-fails-purchase",
+        "browser-auth-paid-membership-purchase", "browser-auth-signup-purchase", "browser-auth-signup-purchase-no-subscription",
+        "browser-auth-session-expires-at-checkout", "spawn-sub-agents", "parallel-tool-calls", "gate-subscription-card-mint"]
 
     class RunnerBoundaryReached(Exception):
         pass
@@ -3520,9 +3525,36 @@ def test_local_main_seeds_only_the_selected_child_payment_fixture():
             assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
             assert kwargs["env"]["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"
             assert kwargs["env"]["DIRECT_URL"] == kwargs["env"]["DATABASE_URL"]
+            assert kwargs["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == "usr_native_fixture"
             return SimpleNamespace(returncode=0)
 
+        def service_boundary(*_args, **_kwargs):
+            expected_opt_in = selected in cohort[:2]
+            assert (os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == "true") is expected_opt_in, (
+                f"selected {selected} must own bootstrap, not its {len(cohort)}-task cohort"
+            )
+            if expected_opt_in:
+                manifest["agentcard_world_identity"] = {"version":1,"worldId":stack.run_id,"providerUserId":"usr_native_fixture","livemode":False,"fundsSource":"company_flow","scope":"a"*64}
+            return None, manifest
+
+        def runner_boundary(*_args, **_kwargs):
+            if selected == cohort[0]:
+                def new_user_fixture(command, **options):
+                    assert command == ["npx", "tsx", "scripts/setup-benchmark-new-user-payment.ts"]
+                    assert options["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == manifest["agentcard_world_identity"]["providerUserId"], "new-user CLI inherited a sibling/shared provider identity"
+                    assert options["env"]["BENCHMARK_USER_ID"] == "native-synthetic-new-user"
+                    return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+                with (
+                    patch.object(bench, "_local_victoria_database_url", return_value="postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"),
+                    patch.object(bench.subprocess, "run", side_effect=new_user_fixture) as fixture,
+                ):
+                    bench._run_new_user_payment_fixture("native-synthetic-new-user")
+                    fixture.assert_called_once()
+            raise RunnerBoundaryReached
+
         argv = [selected, "--no-dashboard"]
+        if selected == cohort[2]:
+            argv.append("--simulate")
         if child_world:
             read_fd, write_fd = os.pipe()
             os.write(write_fd, b"1")
@@ -3535,19 +3567,19 @@ def test_local_main_seeds_only_the_selected_child_payment_fixture():
         # external service/fixture/runner boundaries are replaced; no stack,
         # database, agent or provider call is allowed to start.
         with (
-            patch.dict(os.environ, {"TRACE_ARCHIVE_ENABLED": "1", local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV: local.AGENT_PAYMENT_BENCHMARK_USER_ID}),
+            patch.dict(os.environ, {"TRACE_ARCHIVE_ENABLED": "1", "BENCHMARK_AGENTCARD_WORLD_IDENTITY":"true", "BENCHMARK_AGENTCARD_V2_USER_ID":"usr_shared", local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV: local.AGENT_PAYMENT_BENCHMARK_USER_ID}),
             patch.object(local, "enforce_provider_capacity"),
             patch.object(local, "validate_agentcard_org_credentials"),
             patch.object(local, "build_service_stack", return_value=stack),
             patch.object(local, "configure_task_environment", wraps=local.configure_task_environment) as configure,
             patch.object(local, "LocalBenchmarkOwner", return_value=owner),
-            patch.object(local, "start_services", return_value=(None, manifest)) as services,
-            patch.object(local, "apply_manifest_environment"),
+            patch.object(local, "start_services", side_effect=service_boundary) as services,
+            patch.object(local, "apply_manifest_environment", wraps=local.apply_manifest_environment),
             patch.object(local, "diagnostic_log_env", return_value={}),
             patch.object(local, "dashboard_enabled", return_value=False),
             patch.object(local, "print_scorecard_instruction"),
             patch.object(local, "seed_payment_fixture", wraps=local.seed_payment_fixture) as seed,
-            patch.object(local, "run_benchmark_invocation", side_effect=RunnerBoundaryReached) as runner,
+            patch.object(local, "run_benchmark_invocation", side_effect=runner_boundary) as runner,
             patch.object(local, "stop_services") as stop,
             patch.object(local, "start_frontend_tunnel", side_effect=AssertionError("real tunnel started")),
             patch.object(local.subprocess, "run", side_effect=fixture_subprocess) as fixture_process,
@@ -27350,6 +27382,12 @@ async def run_all_tests():
     r.record(
         "local_cleanup_port_candidates_exclude_clients", test_local_cleanup_port_candidates_exclude_connected_clients
     )
+    from benchmarks.benchmark_tasks_policy_test import (
+        test_agentcard_world_inventory_contract_rejects_duplicate_and_unlinked_provider_objects,
+        test_agentcard_world_inventory_setup_accepts_compensated_initial_stripe_intent,
+    )
+    r.record("agentcard_world_inventory_contract", test_agentcard_world_inventory_contract_rejects_duplicate_and_unlinked_provider_objects)
+    r.record("agentcard_world_inventory_setup_compensation", test_agentcard_world_inventory_setup_accepts_compensated_initial_stripe_intent)
     from benchmarks import cloud_batch_cleanup_test, local_lifecycle_test
 
     for name in sorted(dir(local_lifecycle_test)):

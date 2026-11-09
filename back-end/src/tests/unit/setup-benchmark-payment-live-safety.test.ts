@@ -159,7 +159,7 @@ async function main(): Promise<void> {
       const root = process.cwd();
       const localRequire = Module.createRequire(path.join(root, 'package.json'));
       const scenario = process.env.FIXTURE_SCENARIO;
-      const record = kind => fs.appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({kind}) + '\n');
+      const record = (kind, details={}) => fs.appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({kind,...details}) + '\n');
       const put = (name, value) => { const id = localRequire.resolve(name); const m = new Module(id); m.loaded = true; m.exports = value; require.cache[id] = m; };
       const file = relative => path.join(root, 'src/providers', relative);
       global.fetch = () => { throw new Error('Unexpected real network'); };
@@ -168,7 +168,7 @@ async function main(): Promise<void> {
         user: { upsert: async () => { record('user-write'); return {}; } },
         credit: { aggregate: async () => ({_sum:{amountCents:100000}}), create: async () => { record('credit-write'); } },
         toolUsage: { aggregate: async () => ({_sum:{totalCostCents:0}}) },
-        subscription: { findUnique: async () => ({stripeCustomerId:'cus_owned_live'}), upsert: async () => { record('subscription-write'); return {}; } },
+        subscription: { findUnique: async () => scenario === 'default-new' ? null : ({stripeCustomerId:scenario === 'default-resume'?'cus_new_live':'cus_owned_live'}), upsert: async args => { record('subscription-write', {customer:args.update.stripeCustomerId,livemode:args.update.stripeLivemode}); return {}; } },
         integration: { findMany: async () => [], upsert: async () => { record('integration-write'); return {}; } },
         $queryRaw: async () => [{locked:1}], $transaction: async fn => fn(client), $disconnect: async () => {},
       };
@@ -195,9 +195,38 @@ async function main(): Promise<void> {
       const Stripe = localRequire('stripe');
       class FakeStripe {
         constructor(){
-          this.customers = {retrieve:async id => {record('stripe-customer-read'); return {id,livemode:true,deleted:false,metadata:{userId:scenario === 'foreign-customer'?'foreign':process.env.BENCHMARK_USER_ID,fixture:'agent-payment-production-lifecycle'},invoice_settings:{default_payment_method:scenario === 'hosted-setup' ? null : 'pm_saved_live'}};}};
-          this.paymentMethods = {list:async () => ({data:[]})};
-          this.checkout = {sessions:{create:async input => {if(input.mode !== 'setup') throw new Error('Unexpected financial call'); record('stripe-setup-link'); return {url:'https://billing.example.test/setup'};}}};
+          const kind=scenario.replace(/^default-/, '');
+          const replaced=['new','deleted','resource-missing'].includes(kind);
+          const expectedCustomer=replaced||kind==='resume'?'cus_new_live':'cus_owned_live';
+          const customer=id=>({id,livemode:kind!=='wrong-mode',deleted:false,
+            metadata:kind==='missing-metadata'?undefined:{userId:kind==='foreign-customer'?'foreign':process.env.BENCHMARK_USER_ID,fixture:kind==='wrong-fixture'?'unrelated':'agent-payment-production-lifecycle'},
+            invoice_settings:{default_payment_method:kind==='hosted-setup'||kind==='attached'||replaced?null:'pm_saved_live'}});
+          this.customers = {
+            retrieve:async id=>{
+              record('stripe-customer-read');
+              if(id==='cus_owned_live'&&kind==='deleted')return{id,deleted:true};
+              if(id==='cus_owned_live'&&kind==='resource-missing')throw new Stripe.errors.StripeInvalidRequestError({code:'resource_missing',type:'invalid_request_error',message:'missing'});
+              if(kind==='lookup-error')throw new Error('temporary customer lookup failure');
+              if(kind==='lookup-auth')throw new Stripe.errors.StripeAuthenticationError({message:'no access'});
+              return customer(kind==='wrong-id'?'cus_foreign':id);
+            },
+            create:async input=>{
+              if(input.metadata.userId!==process.env.BENCHMARK_USER_ID||input.metadata.fixture!=='agent-payment-production-lifecycle')throw new Error('new customer ownership missing');
+              record('stripe-customer-create');return customer('cus_new_live');
+            },
+            update:async(id,input)=>{
+              if(id!==expectedCustomer||input.invoice_settings.default_payment_method!=='pm_attached')throw new Error('wrong default payment method owner');
+              record('stripe-default-update');return customer(id);
+            },
+          };
+          this.paymentMethods = {list:async input=>{
+            if(input.customer!==expectedCustomer)throw new Error('wrong saved-card owner');
+            return{data:kind==='attached'?[{id:'pm_attached'}]:[]};
+          }};
+          this.checkout = {sessions:{create:async input=>{
+            if(input.mode!=='setup'||input.customer!==expectedCustomer||input.amount||input.line_items)throw new Error('wrong hosted setup scope');
+            record('stripe-setup-link',{customer:input.customer,mode:input.mode});return{url:'https://billing.example.test/setup'};
+          }}};
         }
       }
       FakeStripe.errors = Stripe.errors;
@@ -213,6 +242,20 @@ async function main(): Promise<void> {
       'foreign-customer',
       'hosted-setup',
       'ready',
+      'default-foreign-customer',
+      'default-missing-metadata',
+      'default-wrong-fixture',
+      'default-wrong-mode',
+      'default-wrong-id',
+      'default-lookup-error',
+      'default-lookup-auth',
+      'default-ready',
+      'default-new',
+      'default-deleted',
+      'default-resource-missing',
+      'default-hosted-setup',
+      'default-resume',
+      'default-attached',
     ]) {
       writeFileSync(eventsFile, '');
       const live = spawnSync(
@@ -224,8 +267,7 @@ async function main(): Promise<void> {
           'tsx',
           'scripts/setup-benchmark-payment.ts',
           '--live',
-          '--stripe-customer-id',
-          'cus_owned_live',
+          ...(scenario.startsWith('default-') ? [] : ['--stripe-customer-id', 'cus_owned_live']),
         ],
         {
           cwd: path.resolve(__dirname, '../../..'),
@@ -266,14 +308,22 @@ async function main(): Promise<void> {
         assert.match(live.stderr, /provider-verified live credentials and company_flow/);
       if (['pending', 'rejected'].includes(scenario))
         assert.match(live.stderr, /requires approved KYC/);
-      if (scenario === 'ready') {
+      if (['ready', 'default-ready', 'default-resume', 'default-attached'].includes(scenario)) {
         assert.equal(live.status, 0, live.stderr);
         assert(events.includes('subscription-write'));
         assert(
           !events.some((kind) => /binding-write|integration-write|legacy-mcp/.test(kind)),
           'live provisioning preserves existing integrations and never uses MCP readiness'
         );
-      } else if (scenario === 'hosted-setup') {
+      } else if (
+        [
+          'hosted-setup',
+          'default-hosted-setup',
+          'default-new',
+          'default-deleted',
+          'default-resource-missing',
+        ].includes(scenario)
+      ) {
         assert.equal(live.status, 1);
         assert.match(live.stderr, /https:\/\/billing\.example\.test\/setup/);
         assert(
@@ -288,10 +338,52 @@ async function main(): Promise<void> {
           `unsafe ${scenario} fixture must be rejected; observed events: ${events.join(',')}`
         );
         assert(
-          !events.some((kind) => kind.endsWith('-write')),
+          !events.some(
+            (kind) =>
+              kind.endsWith('-write') ||
+              ['stripe-customer-create', 'stripe-default-update', 'stripe-setup-link'].includes(
+                kind
+              )
+          ),
           `unsafe ${scenario} fixture must not write`
         );
       }
+      const entries = readFileSync(eventsFile, 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              kind: string;
+              customer?: string;
+              livemode?: boolean;
+              mode?: string;
+            }
+        );
+      const expectedCustomer = [
+        'default-new',
+        'default-deleted',
+        'default-resource-missing',
+        'default-resume',
+      ].includes(scenario)
+        ? 'cus_new_live'
+        : 'cus_owned_live';
+      for (const entry of entries.filter((e) => e.kind === 'subscription-write')) {
+        assert.equal(entry.customer, expectedCustomer);
+        assert.equal(entry.livemode, true);
+      }
+      for (const entry of entries.filter((e) => e.kind === 'stripe-setup-link')) {
+        assert.equal(entry.customer, expectedCustomer);
+        assert.equal(entry.mode, 'setup');
+      }
+      if (['default-new', 'default-deleted', 'default-resource-missing'].includes(scenario))
+        assert.equal(events.filter((e) => e === 'stripe-customer-create').length, 1);
+      if (scenario === 'default-resume')
+        assert.ok(
+          !events.includes('stripe-customer-create') && !events.includes('stripe-setup-link'),
+          'hosted completion reuses exact customer and saved card'
+        );
       assert.doesNotMatch(live.stderr, /Unexpected real/);
     }
     writeFileSync(

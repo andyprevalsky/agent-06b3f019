@@ -1519,6 +1519,20 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
             os.environ[key] = value
 
 
+def _manifest_agentcard_world_user_id(manifest: dict, expected_world: str | None = None) -> str:
+    identity = manifest.get("agentcard_world_identity")
+    if not isinstance(identity, dict) or identity.get("version") != 1 or identity.get("livemode") is not False or identity.get("fundsSource") != "company_flow":
+        raise RuntimeError("Native payment world has no verified sandbox AgentCard identity")
+    if not isinstance(identity.get("worldId"), str) or not identity["worldId"] or (expected_world is not None and identity["worldId"] != expected_world):
+        raise RuntimeError("Native payment world has no verified sandbox AgentCard identity")
+    if not isinstance(identity.get("scope"), str) or not re.fullmatch(r"[a-f0-9]{64}", identity["scope"]):
+        raise RuntimeError("Native payment world has invalid credential/database scope")
+    provider_user_id = identity.get("providerUserId")
+    if not isinstance(provider_user_id, str) or not re.fullmatch(r"usr_[A-Za-z0-9_-]+", provider_user_id):
+        raise RuntimeError("Native payment world provider identity is invalid")
+    return provider_user_id
+
+
 def seed_payment_fixture(manifest: dict) -> None:
     database_url = manifest_database_url(manifest)
     # A backend script: like the stack services, it reads back-end/.env itself.
@@ -1527,6 +1541,12 @@ def seed_payment_fixture(manifest: dict) -> None:
         "DATABASE_URL": database_url,
         "DIRECT_URL": database_url,
     }
+    opted_in = os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == "true"
+    if opted_in or manifest.get("agentcard_world_identity") is not None:
+        provider_user_id = _manifest_agentcard_world_user_id(manifest, os.environ.get("BENCHMARK_RUN_ID") if opted_in else None)
+        if not opted_in and env.get("BENCHMARK_AGENTCARD_V2_USER_ID") != provider_user_id:
+            raise RuntimeError("Existing stack has a scoped AgentCard identity; supply its exact mapping explicitly or start a new isolated benchmark")
+        env["BENCHMARK_AGENTCARD_V2_USER_ID"] = provider_user_id
     # `configure_task_environment` publishes the payment identity on
     # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV. Prefer that, else the dedicated
     # synthetic lifecycle id — never BENCHMARK_USER_ID / the admin operator,
@@ -2167,6 +2187,11 @@ BENCHMARK_DB_CONNECTION_LIMIT = 80
 
 
 def apply_manifest_environment(manifest: dict) -> None:
+    if os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == "true":
+        if os.environ.get("BENCHMARK_ISOLATED_RUN") != "true":
+            raise RuntimeError("AgentCard world identity requires an isolated native run")
+        # The same validated server identity must reach regular AND fresh-user writers.
+        os.environ["BENCHMARK_AGENTCARD_V2_USER_ID"] = _manifest_agentcard_world_user_id(manifest, os.environ.get("BENCHMARK_RUN_ID"))
     urls = manifest.get("urls") if isinstance(manifest, dict) else {}
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
     database = manifest.get("database") if isinstance(manifest, dict) else {}
@@ -3152,6 +3177,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_task_worlds(sys.modules[__name__], args, selected_tasks)
     stack = build_service_stack(args)
     configure_task_environment(cohort_tasks, isolated=stack.isolated)
+    # Provider identity belongs to this selected world, not other cohort members.
+    if stack.isolated and not args.simulate and (AGENT_PAYMENT_TASK_NAMES | NEW_USER_PAYMENT_TASK_NAMES) & set(selected_tasks):
+        os.environ["BENCHMARK_AGENTCARD_WORLD_IDENTITY"] = "true"
+    else:
+        os.environ.pop("BENCHMARK_AGENTCARD_WORLD_IDENTITY", None)
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     imessage_relay: IMessageRelay | None = None

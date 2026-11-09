@@ -153,7 +153,19 @@ export async function requireOwnedLiveFixtureCustomer(
   userId: string
 ): Promise<string> {
   if (customerId.trim() === '') throw new Error('--stripe-customer-id must not be blank');
-  const customer = await stripe.customers.retrieve(customerId);
+  return assertOwnedLiveFixtureCustomer(
+    await stripe.customers.retrieve(customerId),
+    customerId,
+    userId
+  );
+}
+
+/** Validate a retrieved or newly created customer without trusting a persisted pointer. */
+export function assertOwnedLiveFixtureCustomer(
+  customer: Stripe.Customer | Stripe.DeletedCustomer,
+  customerId: string,
+  userId: string
+): string {
   if (
     customer.deleted === true ||
     customer.id !== customerId ||
@@ -161,7 +173,7 @@ export async function requireOwnedLiveFixtureCustomer(
     customer.metadata?.userId !== userId ||
     customer.metadata?.fixture !== 'agent-payment-production-lifecycle'
   ) {
-    throw new Error('Selected Stripe customer is not an owned live production lifecycle fixture');
+    throw new Error('Stripe customer is not an owned live production lifecycle fixture');
   }
   return customer.id;
 }

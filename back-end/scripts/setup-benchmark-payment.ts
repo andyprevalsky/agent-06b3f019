@@ -29,6 +29,7 @@ import {
   isStripeResourceMissing,
   requireStripeLiveKey,
   requireOwnedLiveFixtureCustomer,
+  assertOwnedLiveFixtureCustomer,
   requireLiveV2FixtureReady,
   type FixtureMode,
 } from './setup-benchmark-payment-guards';
@@ -312,7 +313,8 @@ async function ensureLiveBillingCustomer(
   if (existingId !== undefined && existingId !== null && existingId.trim() !== '') {
     try {
       const existing = await stripe.customers.retrieve(existingId);
-      if (existing.deleted !== true) return existing.id;
+      if (existing.deleted !== true)
+        return assertOwnedLiveFixtureCustomer(existing, existingId, userId);
       console.log('Stored live Stripe customer was deleted; provisioning a replacement');
     } catch (error) {
       if (!isStripeResourceMissing(error)) throw error;
@@ -324,7 +326,7 @@ async function ensureLiveBillingCustomer(
     metadata: { userId, fixture: 'agent-payment-production-lifecycle' },
   });
   console.log(`Created live Stripe customer ${customer.id} for ${userId}`);
-  return customer.id;
+  return assertOwnedLiveFixtureCustomer(customer, customer.id, userId);
 }
 
 /**
@@ -397,14 +399,13 @@ async function provisionLiveFixture(
   const stripeKey = requireStripeLiveKey();
   await requireLiveV2FixtureReady(userId);
   const stripe = new Stripe(stripeKey, { apiVersion: STRIPE_API_VERSION });
-  const selectedCustomer =
+  const customerId =
     selectedCustomerId === undefined
-      ? undefined
+      ? await ensureLiveBillingCustomer(stripe, prisma, userId)
       : await requireOwnedLiveFixtureCustomer(stripe, selectedCustomerId, userId);
   console.log('AgentCard live v2 connection, company funding and approved KYC verified');
   await upsertBenchmarkUser(prisma, userId);
   await ensureBenchmarkCredits(prisma, userId);
-  const customerId = selectedCustomer ?? (await ensureLiveBillingCustomer(stripe, prisma, userId));
   // Persist the customer before asking for a card. The first cardless run intentionally throws a
   // hosted setup URL; saving first makes the next run reuse the customer that URL attached to.
   await upsertBenchmarkSubscription(prisma, userId, customerId, true);
