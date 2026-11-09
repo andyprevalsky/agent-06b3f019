@@ -20,7 +20,7 @@ IMAGE = 'sha256:' + 'a' * 64
 NODE, PYTHON = 'b' * 64, 'c' * 64
 
 
-def admission(tmp_path, fault='', storage='fresh', simulate=False, namespace='ordinary'):
+def admission(tmp_path, fault='', storage='fresh', simulate=False, namespace='ordinary', pinned=True, required=False):
     source_id = 'private-warm' if namespace == 'private' else 'warm'
     receipt = {
         'schema': 'cloudbench-image-build-v1', 'publication_verified': True,
@@ -80,8 +80,9 @@ BENCHES=(fixture)
 CATALOG_MODES=(real)
 WARM_ID={source_id}
 CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
-CLOUDBENCH_IMAGE_BUILD_RECEIPT={shlex.quote(str(path))}
-CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256={checksum}
+{f'CLOUDBENCH_IMAGE_BUILD_RECEIPT={shlex.quote(str(path))}' if pinned else ''}
+{f'CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256={checksum}' if pinned else ''}
+{'CLOUDBENCH_REQUIRE_IMAGE_RECEIPT=1' if required else ''}
 PRIVATE_SOURCE_FILE={'fixture' if namespace == 'private' else ''}
 WARM_DEPS_STATE_FILE={shlex.quote(str(tmp_path / 'volume-proof'))}
 SNAP_ID=snapshot
@@ -121,6 +122,22 @@ def test_matching_image_and_other_storage_namespaces(tmp_path, storage, simulate
     assert 'ALLOCATE' in calls
     if storage == 'snapshot' or simulate:
         assert 'inventory' not in calls
+
+
+@pytest.mark.parametrize('namespace', ['ordinary', 'private'])
+def test_unpinned_fresh_storage_defers_to_guest_dependency_verification(tmp_path, namespace):
+    # Ordinary runs and /deploy smoke carry no receipt; guests still refuse mismatched baked deps at dep_sync.
+    result, calls = admission(tmp_path, 'old-image', namespace=namespace, pinned=False)
+    assert result.returncode == 0, result.stderr
+    assert 'no pinned image-build receipt' in result.stdout
+    assert 'inventory' not in calls and 'ALLOCATE' in calls
+
+
+@pytest.mark.parametrize('namespace', ['ordinary', 'private'])
+def test_required_receipt_refuses_unpinned_fresh_storage_before_allocation(tmp_path, namespace):
+    result, calls = admission(tmp_path, namespace=namespace, pinned=False, required=True)
+    assert result.returncode != 0, (result.stdout, result.stderr, calls)
+    assert 'ALLOCATE' not in calls
 
 
 def test_actual_volume_refresh_does_not_repair_fresh_image_donor(tmp_path):
