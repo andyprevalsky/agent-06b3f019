@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "sha": "99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2",
+  "pr": 1804,
+  "status": "PASS",
+  "started_at": "2026-11-09T05:57:32Z",
+  "finished_at": "2026-11-09T05:57:32Z",
+  "changed_files": 3,
+  "selected": [
+    "agentcard"
+  ],
+  "lanes": {
+    "render": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent runtime or deploy-agents.yml change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no front-end/ change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #1804 without MAC-APP-RELEASE)",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "backend-probes": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent cutover",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "agentcard": {
+      "status": "SKIPPED-elected",
+      "reason": "elected: user elected 2026-11-09: prod payer fixture is Stripe test-mode (stripeHold.livemode); live KYC cardholder not available; native FAIL 2026-11-08 run 20261108_085928 retained",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "semantic": {
+      "status": "PASS",
+      "reason": "chat-lifecycle-ratchet run 42464080989 success",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-08T08:42:42Z",
+      "finished_at": "2026-11-08T08:48:37Z",
+      "exit_code": 0,
+      "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha 99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2 --state-dir /home/boxes/rose/.context/deploy-pipeline && /home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2 --state-dir /home/boxes/rose/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/semantic.log",
+      "carried_forward": true
+    }
+  }
+}
