@@ -43,6 +43,13 @@ function harness(accepted = true, status = 'ACTIVE') {
         signals.push(value),
     },
     '../../providers/logger': { createLogger: () => ({ warn() {} }) },
+    // The agent under test is running, so no stopped-agent resume path applies.
+    './agentMessageResume': {
+      stoppedAgentStatus: async () => null,
+      resumeStoppedBrowser: async () => {
+        throw new Error('a running agent must not resume a stopped browser');
+      },
+    },
   };
   const exports: Record<string, (...args: unknown[]) => Promise<{ status?: number }>> = {};
   const sourcePath = path.resolve(

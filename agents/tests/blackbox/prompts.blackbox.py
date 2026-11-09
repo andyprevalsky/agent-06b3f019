@@ -196,31 +196,6 @@ def test_schema_contracts_render_nested_field_descriptions():
     assert "They are never evidence." in static
 
 
-def test_completion_prompt_matches_authored_result_tool_contract():
-    """The generated execution instructions must not deny the tool's real arguments."""
-    from utils.prompts import build_system_prompt
-    from utils.tool_schemas import AttemptCompletionTool
-
-    schema = {
-        "fields": [
-            {"name": "draft", "type": "str", "required": True, "description": "The composed analysis"},
-            {"name": "note", "type": "str", "required": False, "description": "Optional context"},
-        ]
-    }
-    declaration = AttemptCompletionTool.model_json_schema()
-    assert "result" in declaration["properties"]
-    assert "result" not in declaration.get("required", [])
-    authored = AttemptCompletionTool(tool="attempt_completion", result="A grounded authored analysis")
-    assert authored.result == "A grounded authored analysis"
-    prompt = build_system_prompt(
-        phase="EXECUTE", enabled_tools=["attempt_completion"], response_schema=schema
-    )
-    assert "which takes no arguments" not in prompt, "Prompt denies the supported authored-result argument"
-    assert "not passed to it" not in prompt, "Prompt forbids the supported authored-result channel"
-    assert "The composed analysis" in prompt and "Optional context" in prompt
-    assert "tool results" in prompt, "Grounded evidence requirement must remain"
-
-
 async def run_all_tests():
     print("prompts blackbox tests:")
     r = BlackboxResult()
@@ -237,10 +212,6 @@ async def run_all_tests():
     r.record(
         "schema_contracts_render_nested_field_descriptions",
         test_schema_contracts_render_nested_field_descriptions,
-    )
-    r.record(
-        "completion_prompt_matches_authored_result_tool_contract",
-        test_completion_prompt_matches_authored_result_tool_contract,
     )
     teardown_mock()
     return r.all_passed

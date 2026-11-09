@@ -291,7 +291,8 @@ grep -Fq 'CLOUDBENCH_SOURCE_SCOPE=worker-runtime' "$ROOT_DIR/scripts/cloudbench-
 # measured from the packs the fetch itself wrote (unpackLimit=1 keeps them packed).
 git -C "$TMP_ROOT/origin.git" config uploadpack.allowAnySHA1InWant true
 mkdir -p "$TMP_ROOT/source/agents/benchmarks/history"
-head -c 3000000 /dev/urandom | base64 > "$TMP_ROOT/source/agents/benchmarks/history/span_durations.20261013.jsonl"
+# The seed payload avoids span_durations*.jsonl: fresh primaries omit those shards (primary_runtime_omitted).
+head -c 3000000 /dev/urandom | base64 > "$TMP_ROOT/source/agents/benchmarks/history/task_durations.20261013.jsonl"
 git -C "$TMP_ROOT/source" add agents
 git -C "$TMP_ROOT/source" commit -qm "seed-era history"
 git -C "$TMP_ROOT/source" push -q origin HEAD:main
@@ -331,8 +332,8 @@ seeded_fetch() {  # <checkout> <seed-dir> <log>
 assert_exact_checkout() {  # <checkout> <label>
   [ "$(git -C "$1" rev-parse HEAD)" = "$seed_target" ] \
     && [ "$(git -C "$1" rev-parse HEAD^{tree})" = "$(git -C "$TMP_ROOT/source" rev-parse "$seed_target^{tree}")" ] \
-    && cmp -s "$TMP_ROOT/source/agents/benchmarks/history/span_durations.20261013.jsonl" \
-              "$1/agents/benchmarks/history/span_durations.20261013.jsonl" \
+    && cmp -s "$TMP_ROOT/source/agents/benchmarks/history/task_durations.20261013.jsonl" \
+              "$1/agents/benchmarks/history/task_durations.20261013.jsonl" \
     && cmp -s "$TMP_ROOT/source/agents/new_runtime.py" "$1/agents/new_runtime.py" \
     && ! git -C "$1" rev-parse --verify -q refs/cloudbench/seed >/dev/null \
     && git -C "$1" fsck --connectivity-only --no-progress "$seed_target" >/dev/null 2>&1 \
@@ -366,7 +367,7 @@ printf '{"schema": "cloudbench-git-seed-v1", "commit": "%s"}\n' "$seed_target" >
 # offsets of two blobs that the requested tree checks out (the large history
 # ledger and payload.txt). The seed is imported through Git, which re-hashes.
 cp -a "$TMP_ROOT/seed" "$TMP_ROOT/seed-index"
-swap_a="$(git -C "$TMP_ROOT/source" rev-parse "$seed_base:agents/benchmarks/history/span_durations.20261013.jsonl")"
+swap_a="$(git -C "$TMP_ROOT/source" rev-parse "$seed_base:agents/benchmarks/history/task_durations.20261013.jsonl")"
 swap_b="$(git -C "$TMP_ROOT/source" rev-parse "$seed_base:payload.txt")"
 python3 - "$(ls "$TMP_ROOT"/seed-index/objects/pack/pack-*.idx)" "$swap_a" "$swap_b" <<'PYIDX'
 import os, struct, sys
