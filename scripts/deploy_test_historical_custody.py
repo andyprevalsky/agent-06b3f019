@@ -264,6 +264,83 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
+LEGACY_IMPORT_KIND = 'historical-agentcard-no-retry-import-v1'
+
+
+def prepare_import(state, donor_path, directory, root, *, donor_sha256):
+    """Bind exact donor obligations to a pristine independent cycle; never copy files."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    directory, donor_path = Path(directory), Path(donor_path)
+    for path in (directory, donor_path):
+        need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+             and not path.is_symlink(), 'noncanonical import path')
+    need(donor_path.name == 'cycle.json' and donor_path.is_file()
+         and donor_path != directory / 'cycle.json', 'invalid independent donor index')
+    need(not (directory / 'cycle.json').is_symlink(), 'symlinked target cycle')
+    need(not (directory / 'attempts').exists() and not (directory / 'attempts').is_symlink(),
+         'import target has an existing attempt namespace')
+    donor_sha = c.sha_file(donor_path)
+    need(isinstance(donor_sha256, str) and re.fullmatch('[0-9a-f]{64}', donor_sha256)
+         and donor_sha == donor_sha256, 'donor bytes differ from approved hash')
+    donor = c.bounded_read(donor_path, 'historical donor index')
+    need(not c.CANCEL.is_set() and not any(donor.get(k) for k in
+         ('running', 'live_failures', 'resume_phase', 'pending')), 'active/unknown donor coordinator')
+    validate_donor_rows(donor, root)
+    found = known(donor, root)
+    history = donor.get('historical_custody_history', [])
+    ids = [row['original_failure']['id'] for row in history]
+    need(ids and len(ids) == len(set(ids)) and set(ids) == set(found), 'donor custody inventory differs')
+    need(not any(w['id'] in ids for w in donor.get('resource_warnings', []))
+         and not any(found[i]['check'] in donor.get('skips', {}) for i in ids), 'mixed donor waiver and custody')
+    for identifier in ids:
+        for raw in (found[identifier]['worker_evidence']['path'], found[identifier]['worker_result']):
+            path = Path(raw)
+            need(path.is_absolute() and path.resolve() == path and path.is_file()
+                 and path.is_relative_to(root / '.context') and not path.is_symlink(), 'noncanonical native/adapter file')
+    rows = [historical(donor, found[identifier], root) for identifier in ids]
+    need(c.digest(rows) == c.digest(history), 'donor native custody history changed')
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({row[key] for row in rows}) == len(rows), 'borrowed resource identity')
+    gates = {gate['name']: gate for gate in state['plan']['gates']}
+    for row in rows:
+        failure = row['original_failure']
+        gate = gates.get(failure['gate'], {})
+        need(failure['check'].split('/', 1)[1] in gate.get('checks', [])
+             and gate.get('case_protocol') is True, 'protected task or case protocol missing')
+    transfer_proof = build(donor, donor['plan'], state['plan'], root)
+    need(c.digest(transfer_proof['cases']) == c.digest(rows), 'donor transfer inventory differs')
+    need(c.sha_file(donor_path) == donor_sha, 'donor index changed during preparation')
+    return {'kind': LEGACY_IMPORT_KIND, 'donor_path': str(donor_path), 'donor_sha256': donor_sha,
+            'target_state': str(directory / 'cycle.json'), 'before_state_sha256': c.digest(fresh),
+            'current_binding': binding(state['plan'], root), 'cases': rows, 'transfer_proof': transfer_proof,
+            'failures': [copy.deepcopy(found[identifier]) for identifier in ids],
+            'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', []) if p['id'] in ids]}
+
+
+def admit_import(state, proof, donor_path, directory, root, *, donor_sha256):
+    """Revalidate everything before one state publication by the existing CLI writer."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    expected = prepare_import(fresh, donor_path, directory, root, donor_sha256=donor_sha256)
+    need(c.digest(proof) == c.digest(expected), 'import proof differs from exact donor/current binding')
+    # The hash-pinned interface is an adapter to the authoritative transfer
+    # protocol, including its persistent identities and pending-repair guards.
+    donor = c.bounded_read(Path(donor_path), 'historical donor index')
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed before admission')
+    candidate = copy.deepcopy(fresh)
+    adopt(candidate, donor, donor['plan'], expected['transfer_proof'], root)
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed during admission')
+    candidate['historical_custody_import'] = {'kind': LEGACY_IMPORT_KIND, 'proof_sha256': c.digest(expected),
+        'donor_path': expected['donor_path'], 'donor_sha256': expected['donor_sha256']}
+    verify(candidate, root)
+    if state.get('historical_custody_import'):
+        need(c.digest(state) == c.digest(candidate), 'import replay changed or cycle is no longer fresh')
+    else:
+        need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    state.clear(); state.update(candidate)
+
 IMPORT_KIND = 'historical-agentcard-custody-import-v1'
 
 
@@ -278,6 +355,12 @@ def donor_rows(donor_path, index_path, donor_sha256, index_sha256, root):
     need(index.get('format') == 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1'
          and index.get('files', {}).get(str(root / '.context/deploy-pipeline/cycle.json')) == donor_sha256,
          'donor snapshot not in pinned contents manifest')
+    return validate_donor_rows(donor, root)
+
+
+def validate_donor_rows(donor, root):
+    """Shared native/index inventory checks for both explicit provenance envelopes."""
+    import deploy_test_cycle as c
     history, active = donor.get('historical_custody_history', []), donor.get('historical_no_retry_custody', [])
     need(history and active, 'empty donor custody index')
     ids = [r['original_failure']['id'] for r in history]
@@ -468,6 +551,9 @@ def verify_import_origin(state, root):
     if 'historical_custody_import' not in state:
         return
     proof = state['historical_custody_import']
+    if isinstance(proof, dict) and proof.get('kind') == LEGACY_IMPORT_KIND:
+        verify_legacy_import_origin(state, proof, root)
+        return
     need(isinstance(proof, dict) and proof.get('kind') == IMPORT_KIND, 'malformed retained import provenance')
     origin = proof.get('donor')
     need(isinstance(origin, dict), 'malformed retained donor provenance')
@@ -481,6 +567,23 @@ def verify_import_origin(state, root):
          and all(r in state.get('historical_custody_history', []) for r in rows),
          'custody import provenance/index changed')
 
+
+
+def verify_legacy_import_origin(state, proof, root):
+    """Revalidate the approved-SHA/adopt envelope without resetting a progressed cycle."""
+    import deploy_test_cycle as c
+    need(set(proof) == {'kind', 'proof_sha256', 'donor_path', 'donor_sha256'}
+         and re.fullmatch('[0-9a-f]{64}', proof.get('proof_sha256', ''))
+         and re.fullmatch('[0-9a-f]{64}', proof.get('donor_sha256', '')),
+         'malformed retained legacy import provenance')
+    path = Path(proof['donor_path'])
+    need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+         and path.name == 'cycle.json' and path.is_file() and not path.is_symlink()
+         and c.sha_file(path) == proof['donor_sha256'], 'legacy donor provenance changed')
+    donor = c.bounded_read(path, 'historical donor index')
+    _, found, rows = validate_donor_rows(donor, root)
+    need(all(r in state.get('historical_custody_history', []) for r in rows), 'historical failure removed')
+    need(set(found) <= known(state, root).keys(), 'historical failure removed')
 
 def state_identity(state):
     """Bind admission to current inputs and the complete retained custody provenance."""

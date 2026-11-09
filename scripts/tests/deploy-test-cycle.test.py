@@ -385,6 +385,334 @@ class Cycle(unittest.TestCase):
         catalog.write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
         self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
 
+    def historical_import_fixture(self):
+        import deploy_test_historical_custody as h
+        native_closure = h.native_closure
+        new = self.custody_fixture()
+        h.native_closure.side_effect = native_closure
+        for index, failure in enumerate(self.state['failures']):
+            old = Path(failure['worker_evidence']['path'])
+            fleet = self.root / '.context/native' / f'run-{2147483600 + index}'
+            native = fleet / old.parent.name / old.name
+            native.parent.mkdir(parents=True); native.write_bytes(old.read_bytes())
+            failure['worker_evidence']['path'] = str(native)
+            adapter = c.read(Path(failure['worker_result']))
+            adapter['evidence'][old.parent.name] = copy.deepcopy(failure['worker_evidence'])
+            c.write(Path(failure['worker_result']), adapter)
+            token = f'{index + 1:032x}'
+            local, canonical = fleet / 'teardown-ownership', self.root / '.git/cloudbench-fleet-audits' / token
+            meta = (f'status=provider-teardown-verified\nfleet_owner_token={token}\n'
+                    f'run_id={fleet.name}\nworkspace_root={self.root}\n')
+            for directory in (local, canonical):
+                directory.mkdir(parents=True); (directory / 'meta').write_text(meta)
+            with c.source_module(ROOT / 'scripts/cloudbench-retained-successor.py') as library:
+                seal = library.tree_digest(local)
+            for directory in (local, canonical):
+                (directory / 'source-audit').write_text(f'path={canonical}\nsha256={seal}\n')
+            c.write(fleet / '_batch/lifecycle.json', dict(fleet_owner_token=token, status='verified',
+                hub_publication_failed=False, workspace_root=str(self.root), run_id=fleet.name, audit_sha256=seal))
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        c.resolve_post_merge(self.state, self.state['pending_post_merge'][0]['id'],
+                            'https://boxes.dev/thread/existing-auth-repair')
+        self.state.update(phase='ready', ready=True)
+        self.state['attempts'] = [{'phase': 'final', 'source': self.state['source'],
+                                  'results': [{'gate': 'old-unrelated', 'status': 'PASS'}]}]
+        self.state['failures'].append({'id': 'unrelated', 'check': 'ui/c', 'native_result': 'FAIL'})
+        donor = self.root / '.context/donor/cycle.json'; c.write(donor, self.state)
+        (self.root / 'code').write_text('independent current repair source')
+        current = copy.deepcopy(new); current['source'] = c.source(self.root)
+        fresh = c.initialize(current, self.root)
+        self.donor_sha256 = c.sha_file(donor)
+        return fresh, donor
+
+    def test_historical_import_fresh_cycle_retains_exact_debt_without_execution_credit(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        self.assertEqual({}, h.known(fresh, self.root))
+        donor_bytes = donor.read_bytes()
+        proof = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        original = copy.deepcopy(fresh)
+        h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        self.assertEqual(original['source'], fresh['source'])
+        self.assertEqual(original['environment'], fresh['environment'])
+        self.assertEqual(original['input_fingerprints'], fresh['input_fingerprints'])
+        self.assertEqual([], fresh['attempts']); self.assertEqual({}, fresh['skips'])
+        self.assertFalse(fresh['ready']); self.assertEqual('quick', fresh['phase'])
+        self.assertEqual(2, len(fresh['historical_no_retry_custody']))
+        receipt, = fresh['historical_custody_transfers']
+        self.assertEqual(c.digest(c.read(donor)), receipt['donor_state_sha256'])
+        self.assertEqual(c.digest(proof['transfer_proof']), receipt['proof_sha256'])
+        self.assertEqual([r['original_failure']['id'] for r in proof['cases']], receipt['protected_failure_ids'])
+        lost = copy.deepcopy(fresh)
+        for key in ('failures', 'historical_no_retry_custody', 'historical_custody_history'):
+            lost[key] = []
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.verify(lost, self.root)
+        self.assertEqual(c.read(donor)['historical_custody_history'], fresh['historical_custody_history'])
+        self.assertEqual([f for f in c.read(donor)['failures'] if f['id'] != 'unrelated'], fresh['failures'])
+        self.assertEqual('ACTIVE', fresh['failures'][1]['worker_evidence']['native_task']['status'])
+        self.assertEqual('https://boxes.dev/thread/existing-auth-repair', fresh['failures'][1]['rca']['repair_agent'])
+        self.assertIn('auth then timeout', fresh['failures'][1]['rca']['resolved_post_merge']['error'])
+        h.verify(fresh, self.root)
+        same = copy.deepcopy(fresh); h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        self.assertEqual(same, fresh); self.assertEqual(donor_bytes, donor.read_bytes())
+        fresh['phase'] = 'final'; c.write(self.directory / 'cycle.json', fresh)
+        gate = fresh['plan']['gates'][1]
+        def worker(argv, **kwargs):
+            request = c.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['peer-' + str(i) for i in range(13)], request['checks'])
+            self.assertEqual(2, len(request['skips']))
+            with patch.dict(os.environ, kwargs['env'], clear=True):
+                h.admission(request, self.root)
+            c.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases=dict.fromkeys(request['checks'], 'PASS'), complete=True,
+                cleanup_complete=True, reused=False))
+            return 0, False, False, False
+        with patch.object(c, 'run_command', side_effect=worker):
+            result = c.execute(gate, fresh, self.directory, self.root)
+        self.assertEqual('PASS', result['status'], result)
+        for name in gate['checks'][:2]:
+            self.assertEqual('SKIP', result['cases'][name]); self.assertFalse(result['case_complete'][name])
+            self.assertEqual('UNVERIFIED', result['current_execution'][name])
+        for row in fresh['historical_no_retry_custody']:
+            self.assertEqual('UNVERIFIED', row['current_financial_state'])
+            self.assertFalse(any(row['credit'].values()))
+
+    def test_historical_import_rejects_tampering_and_preserves_current_state(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        proof = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        for mutate in (lambda p: p['cases'].pop(), lambda p: p.update(extra='not allowed'),
+                       lambda p: p['failures'][1]['rca'].update(repair_agent='invented'),
+                       lambda p: p['current_binding'].update(environment='forged'),
+                       lambda p: p.update(target_state=str(self.directory.parent / 'other/cycle.json'))):
+            bad = copy.deepcopy(proof); mutate(bad); before = copy.deepcopy(fresh)
+            with self.assertRaises(ValueError): h.admit_import(fresh, bad, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+            self.assertEqual(before, fresh)
+        for mutate in (lambda s: s.update(phase='initial'), lambda s: s.update(ready=True),
+                       lambda s: s['attempts'].append({'phase': 'initial'}),
+                       lambda s: s['skips'].update({'api/old': {'disposition': 'SKIP'}}),
+                       lambda s: s.update(running=True), lambda s: s.update(pending=['old'])):
+            bad = copy.deepcopy(fresh); mutate(bad); before = copy.deepcopy(bad)
+            with self.assertRaises(ValueError): h.admit_import(bad, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+            self.assertEqual(before, bad)
+        raw = donor.read_bytes(); donor.write_bytes(raw + b'\n')
+        with self.assertRaisesRegex(ValueError, 'approved hash'):
+            h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        donor.write_bytes(raw)
+        with patch.dict(os.environ, HISTORICAL_IMPORT_FIXTURE='environment changed'):
+            with self.assertRaises(ValueError): h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        for path in (self.root / 'code', self.root / 'agents/benchmarks/tasks.json'):
+            raw = path.read_bytes(); path.write_bytes(raw + b' ')
+            with self.assertRaises(ValueError): h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+            path.write_bytes(raw)
+        altered = copy.deepcopy(fresh); altered['plan']['gates'][1]['command'] = ['false']
+        with self.assertRaises(ValueError): h.admit_import(altered, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        for key in ('path', 'worker_result'):
+            failure = c.read(donor)['failures'][0]
+            path = Path(failure['worker_evidence']['path'] if key == 'path' else failure[key])
+            raw = path.read_bytes(); path.write_bytes(raw + b'\n')
+            with self.assertRaises(ValueError): h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+            path.write_bytes(raw)
+        self.assertEqual({}, fresh['skips']); self.assertEqual([], fresh['failures'])
+
+    def test_historical_import_uses_authoritative_pending_repair_guard(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        altered = c.read(donor)
+        resolved = altered['failures'][1]
+        # The existing resolved auth row may not acquire an invented pending
+        # wrapper through the hash-pinned compatibility interface either.
+        altered['pending_post_merge'].append(dict(id=resolved['id'], check=resolved['check'],
+            gate=resolved['gate'], native_result='PASS', packet={'invented': True}))
+        c.write(donor, altered)
+        approved = c.sha_file(donor)
+        proof = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=approved)
+        before = copy.deepcopy(fresh)
+        with self.assertRaisesRegex(ValueError, 'pending repair wrapper changed'):
+            h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=approved)
+        self.assertEqual(before, fresh)
+
+    def test_historical_import_persistent_guard_rejects_erased_active_history(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        proof = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        for key in ('failures', 'historical_no_retry_custody', 'historical_custody_history'):
+            fresh[key] = []
+        gate = next(g for g in fresh['plan']['gates'] if g['name'] == 'api')
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.guard(fresh, gate, self.root)
+
+    def test_historical_import_rejects_unrelated_retained_donor_owner(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        altered = c.read(donor)
+        gate = next(g['name'] for g in altered['plan']['gates'] if g['name'] != 'api')
+        altered['attempts'].append(dict(phase='final', results=[dict(gate=gate, status='FAIL',
+            complete=False, lingering_group=True, cleanup_owner={'request_token': 'unrelated-owner'})]))
+        self.assertEqual([gate], c.retained_owners(altered, [g['name'] for g in altered['plan']['gates']]))
+        c.write(donor, altered)
+        before = copy.deepcopy(fresh)
+        with self.assertRaisesRegex(ValueError, 'active/unknown coordinator'):
+            h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=c.sha_file(donor))
+        self.assertEqual(before, fresh)
+
+    def test_historical_import_retains_native_absence_and_collision_guards(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        proof = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        row = proof['cases'][0]; fleet = Path(row['native_closure']['fleet'])
+        lifecycle = fleet / '_batch/lifecycle.json'; raw = lifecycle.read_bytes(); lifecycle.unlink()
+        with self.assertRaises(OSError): h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        lifecycle.write_bytes(raw)
+        token = c.read(lifecycle)['fleet_owner_token']
+        registry = self.root / '.git/cloudbench-fleet-ownership' / token
+        registry.parent.mkdir(); registry.symlink_to(self.root / 'missing-owner')
+        with self.assertRaisesRegex(ValueError, 'still registered'):
+            h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        registry.unlink(); registry.mkdir()
+        with self.assertRaisesRegex(ValueError, 'still registered'):
+            h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        registry.rmdir()
+        original_exists = Path.exists
+        with patch.object(Path, 'exists', lambda p: True if p == Path('/proc/2147483600') else original_exists(p)):
+            with self.assertRaisesRegex(ValueError, 'active or unknown'):
+                h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        audit = self.root / '.git/cloudbench-fleet-audits' / token / 'meta'
+        raw = audit.read_bytes(); audit.write_bytes(raw + b'changed=true\n')
+        with self.assertRaisesRegex(ValueError, 'audit changed'):
+            h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        audit.write_bytes(raw)
+        self.directory.mkdir(); (self.directory / 'attempts').symlink_to(self.root / 'absent-attempts')
+        with self.assertRaisesRegex(ValueError, 'attempt namespace'):
+            h.admit_import(fresh, proof, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        (self.directory / 'attempts').unlink()
+        alias = donor.parent / 'alias-cycle.json'; alias.symlink_to(donor)
+        with self.assertRaisesRegex(ValueError, 'noncanonical'):
+            h.admit_import(fresh, proof, alias, self.directory, self.root, donor_sha256=self.donor_sha256)
+        self.assertEqual([], fresh['failures'])
+
+    def test_historical_import_rejects_removed_duties_and_mixed_authority(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        for mutate in (lambda p: p['gates'][1]['checks'].pop(0),
+                       lambda p: p['gates'][1].update(case_protocol=False)):
+            plan = copy.deepcopy(fresh['plan']); mutate(plan)
+            target = c.initialize(plan, self.root)
+            with self.assertRaisesRegex(ValueError, 'protected task or case protocol'):
+                h.prepare_import(target, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        original = donor.read_bytes()
+        for mutate in (lambda d: d['historical_custody_history'].pop(),
+                       lambda d: d['historical_custody_history'][0].update(snapshot_sha256='changed'),
+                       lambda d: d['skips'].update({d['failures'][0]['check']: {'disposition': 'SKIP'}}),
+                       lambda d: d.update(running=True)):
+            altered = json.loads(original); mutate(altered); c.write(donor, altered)
+            with self.assertRaises(ValueError):
+                h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=c.sha_file(donor))
+        donor.write_bytes(original)
+        catalog = self.root / 'agents/benchmarks/tasks.json'; raw = catalog.read_bytes()
+        changed = json.loads(raw); changed[0]['prompt'] = 'changed task contract'; c.write(catalog, changed)
+        plan = copy.deepcopy(fresh['plan']); plan['source'] = c.source(self.root)
+        with self.assertRaisesRegex(ValueError, 'catalog task changed'):
+            h.prepare_import(c.initialize(plan, self.root), donor, self.directory, self.root,
+                             donor_sha256=self.donor_sha256)
+        catalog.write_bytes(raw)
+
+    def test_historical_import_cli_is_atomic_and_replay_revalidates(self):
+        import contextlib, io
+        fresh, donor = self.historical_import_fixture()
+        plan = self.directory / 'plan.json'; c.write(plan, fresh['plan'])
+        state_path = self.directory / 'cycle.json'; c.write(state_path, fresh)
+        bound = ['--input', str(donor), '--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root), '--donor-sha256', self.donor_sha256]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, c.main(['prepare-historical-import', *bound]))
+        proof = donor.parent / 'import-proof.json'; proof.write_text(output.getvalue())
+        before = state_path.read_bytes()
+        raw = proof.read_bytes(); value = json.loads(raw); value['cases'][0]['native_sha256'] = '0' * 64
+        c.write(proof, value)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, c.main(['admit-historical-import', *bound, '--proof', str(proof)]))
+        self.assertEqual(before, state_path.read_bytes()); proof.write_bytes(raw)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['admit-historical-import', *bound, '--proof', str(proof)]))
+            admitted = state_path.read_bytes()
+            self.assertEqual(0, c.main(['admit-historical-import', *bound, '--proof', str(proof)]))
+        self.assertEqual(admitted, state_path.read_bytes())
+        changed = c.read(proof); changed['current_binding']['plan_digest'] = 'changed'; c.write(proof, changed)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, c.main(['admit-historical-import', *bound, '--proof', str(proof)]))
+        self.assertEqual(admitted, state_path.read_bytes())
+        empty = self.root / '.context/unused-proof'; plan = donor.parent / 'current-plan.json'; c.write(plan, fresh['plan'])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, c.main(['init', '--plan', str(plan), '--state-dir', str(empty),
+                '--root', str(self.root), '--historical-no-retry-proof', str(proof)]))
+        self.assertFalse((empty / 'cycle.json').exists())
+
+    def test_historical_import_cli_rejects_valid_mismatched_named_plan_before_write(self):
+        import contextlib, io
+        fresh, donor = self.historical_import_fixture()
+        plan = self.directory / 'plan.json'; c.write(plan, fresh['plan'])
+        other = copy.deepcopy(fresh['plan']); other['gates'][1]['worker'] = 'other-api-worker'
+        c.validate_plan(other, self.root)
+        self.assertNotEqual(fresh['plan'], other)
+        wrong = self.directory / 'other-plan.json'; c.write(wrong, other)
+        state_path = self.directory / 'cycle.json'; c.write(state_path, fresh)
+        bound = ['--input', str(donor), '--state-dir', str(self.directory), '--root', str(self.root),
+                 '--donor-sha256', self.donor_sha256]
+        output = io.StringIO()
+        before = state_path.read_bytes()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, c.main(['prepare-historical-import', *bound, '--plan', str(plan)]))
+        self.assertEqual(before, state_path.read_bytes())
+        proof = donor.parent / 'named-plan-proof.json'; proof.write_text(output.getvalue())
+        for action in ('prepare-historical-import', 'admit-historical-import'):
+            before = state_path.read_bytes(); errors = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors), \
+                    patch.object(c, 'write', wraps=c.write) as writer:
+                result = c.main([action, *bound, '--plan', str(wrong), '--proof', str(proof)])
+            with self.subTest(action=action, contract='refusal'):
+                self.assertEqual(2, result)
+                self.assertIn('historical import plan differs from fresh selection', errors.getvalue())
+            with self.subTest(action=action, contract='no state write'):
+                self.assertEqual([], writer.call_args_list)
+                self.assertEqual(before, state_path.read_bytes())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['admit-historical-import', *bound, '--plan', str(plan), '--proof', str(proof)]))
+        self.assertEqual(2, len(c.read(state_path)['historical_no_retry_custody']))
+
+    def test_retained_legacy_import_verifies_progress_and_rejects_tampering(self):
+        import deploy_test_historical_custody as h
+        fresh, donor = self.historical_import_fixture()
+        prepared = h.prepare_import(fresh, donor, self.directory, self.root, donor_sha256=self.donor_sha256)
+        saved = c.read(donor)
+        h.adopt(fresh, saved, saved['plan'], prepared['transfer_proof'], self.root)
+        fresh['historical_custody_import'] = dict(kind=prepared['kind'], proof_sha256=c.digest(prepared),
+            donor_path=str(donor), donor_sha256=self.donor_sha256)
+        fresh.update(phase='final', attempts=[{'phase': 'initial', 'results': []}])
+        before = copy.deepcopy(fresh)
+        h.verify(fresh, self.root)
+        self.assertEqual(before, fresh)
+        self.assertEqual(2, len(h.guard(fresh, fresh['plan']['gates'][1], self.root)))
+        for key in ('failures', 'historical_custody_history', 'historical_no_retry_custody'):
+            changed = copy.deepcopy(fresh); changed.pop(key)
+            with self.subTest(collection=key), self.assertRaises(ValueError):
+                h.verify(changed, self.root)
+        for mutate in (lambda s: s['historical_custody_import'].update(donor_sha256='0' * 64),
+                       lambda s: s['historical_custody_import'].update(proof_sha256='not a digest'),
+                       lambda s: s['historical_custody_import'].update(extra='unmarked'),
+                       lambda s: s['historical_custody_history'][0].update(native_sha256='changed')):
+            changed = copy.deepcopy(fresh); mutate(changed)
+            with self.assertRaises(ValueError): h.verify(changed, self.root)
+        raw = donor.read_bytes(); donor.write_bytes(raw + b'\n')
+        with self.assertRaisesRegex(ValueError, 'legacy donor provenance changed'):
+            h.verify(fresh, self.root)
+        donor.write_bytes(raw)
+        h.verify(fresh, self.root)
+        self.assertEqual(before, fresh)
+
     def test_stall_snapshots_may_differ_only_in_provider_wide_counters(self):
         # PR #1784 cycle bn8: the end-of-task and cleanup snapshots of one stall disagreed only in
         # agentCardProviderCardCount/TransferCount (7 vs 12), because six other identical payment
