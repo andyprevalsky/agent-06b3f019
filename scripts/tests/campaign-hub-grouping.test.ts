@@ -2136,14 +2136,26 @@ print(json.dumps(results))`,
       path.join(sourceRoot, "scripts/run-bench-campaign.py"),
       fleetDir,
     ],
-    { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "" } },
+    {
+      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...process.env, CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "" },
+    },
   );
   let output = "";
   probe.stdout!.on("data", (chunk) => (output += chunk));
   return once(probe, "close").then(() => {
     assert.equal(probe.exitCode, 0);
     assert.deepEqual(JSON.parse(output), [
-      null, false, 30, 600, true, "fleet-infra-stop-v1", ["replaced", "finished"], "cancelled", true, null,
+      null,
+      false,
+      30,
+      600,
+      true,
+      "fleet-infra-stop-v1",
+      ["replaced", "finished"],
+      "cancelled",
+      true,
+      null,
     ]);
   });
 });
@@ -2196,54 +2208,106 @@ for pid in "\${CHILD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 echo "COMPLETED"
 `,
     );
-    const run = spawn("bash", [driver, path.join(sourceRoot, "scripts/run-bench-fleet"), work, sourceRoot], {
-      env: { ...process.env, FLEET_INFRA_STOP_POLL_SECONDS: "0.2", CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const run = spawn(
+      "bash",
+      [
+        driver,
+        path.join(sourceRoot, "scripts/run-bench-fleet"),
+        work,
+        sourceRoot,
+      ],
+      {
+        env: {
+          ...process.env,
+          FLEET_INFRA_STOP_POLL_SECONDS: "0.2",
+          CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     let stdout = "";
     let stderr = "";
     run.stdout!.on("data", (chunk) => (stdout += chunk.toString()));
     run.stderr!.on("data", (chunk) => (stderr += chunk.toString()));
     const closed = once(run, "close");
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    for (let i = 0; i < 300 && !existsSync(path.join(work, "driver.ready")); i++) await sleep(50);
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+    for (
+      let i = 0;
+      i < 300 && !existsSync(path.join(work, "driver.ready"));
+      i++
+    )
+      await sleep(50);
     assert.ok(existsSync(path.join(work, "driver.ready")), stderr);
     const finish = (bench: string, code: string, status?: string) => {
       const out = path.join(fleetDir, bench);
       if (status) {
         writeFileSync(
           path.join(out, "cloudbench-run.json"),
-          JSON.stringify({ tasks: [{ name: bench, status, passed: status === "PASSED" }] }),
+          JSON.stringify({
+            tasks: [{ name: bench, status, passed: status === "PASSED" }],
+          }),
         );
       }
-      writeFileSync(path.join(out, "benchmark-child.finished.tmp"), `${code}\n`);
+      writeFileSync(
+        path.join(out, "benchmark-child.finished.tmp"),
+        `${code}\n`,
+      );
       // Publish atomically, as run_fleet_child_supervised does.
-      renameSync(path.join(out, "benchmark-child.finished.tmp"), path.join(out, "benchmark-child.finished"));
+      renameSync(
+        path.join(out, "benchmark-child.finished.tmp"),
+        path.join(out, "benchmark-child.finished"),
+      );
     };
     finish("b00", "1", "INFRA_ERROR");
     finish("b01", "0", "PASSED");
     finish("b02", "1", "FAILED");
     finish("b03", "143");
     mkdirSync(path.join(fleetDir, "b04", "host-replaced-m1"));
-    writeFileSync(path.join(fleetDir, "b04", "host-replaced-m1", "benchmark-child.finished"), "1\n");
+    writeFileSync(
+      path.join(
+        fleetDir,
+        "b04",
+        "host-replaced-m1",
+        "benchmark-child.finished",
+      ),
+      "1\n",
+    );
     await sleep(2_000);
-    assert.equal(run.exitCode, null, `1/40 infra must not stop the fleet:\n${stderr}`);
-    assert.ok(!existsSync(path.join(fleetDir, "infra-stop.json")), "no breach receipt at 1/40");
-    assert.ok(!existsSync(path.join(work, "terminated-b05")), "no child cancelled at 1/40");
+    assert.equal(
+      run.exitCode,
+      null,
+      `1/40 infra must not stop the fleet:\n${stderr}`,
+    );
+    assert.ok(
+      !existsSync(path.join(fleetDir, "infra-stop.json")),
+      "no breach receipt at 1/40",
+    );
+    assert.ok(
+      !existsSync(path.join(work, "terminated-b05")),
+      "no child cancelled at 1/40",
+    );
     finish("b05", "1");
     const timeout = setTimeout(() => run.kill("SIGKILL"), 60_000);
     await closed;
     clearTimeout(timeout);
     assert.equal(run.exitCode, 143, stdout + stderr);
     assert.doesNotMatch(stdout, /COMPLETED/);
-    assert.match(stderr, /INFRA STOP: 2\/40 scheduled jobs confirmed INFRA \(b00, b05\)/);
+    assert.match(
+      stderr,
+      /INFRA STOP: 2\/40 scheduled jobs confirmed INFRA \(b00, b05\)/,
+    );
     assert.match(stdout + stderr, /controller received TERM/);
-    const receipt = JSON.parse(readFileSync(path.join(fleetDir, "infra-stop.json"), "utf8"));
+    const receipt = JSON.parse(
+      readFileSync(path.join(fleetDir, "infra-stop.json"), "utf8"),
+    );
     assert.equal(receipt.schema, "fleet-infra-stop-v1");
     assert.equal(receipt.infra_jobs, 2);
     assert.equal(receipt.scheduled_total, 40);
     assert.deepEqual(receipt.infra_job_ids, ["b00", "b05"]);
-    const b04 = receipt.jobs.find((job: { job_id: string }) => job.job_id === "b04");
+    const b04 = receipt.jobs.find(
+      (job: { job_id: string }) => job.job_id === "b04",
+    );
     assert.deepEqual(
       b04.attempts.map((attempt: { status: string }) => attempt.status),
       ["replaced", "running"],
