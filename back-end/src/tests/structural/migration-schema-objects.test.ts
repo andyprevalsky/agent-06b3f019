@@ -152,6 +152,7 @@ assert.ok(parsed.functions.has('f') && parsed.triggers.has('Message.t'), 'dollar
 const report = compareCatalog(
   {
     applied: new Set(['1_init', '2_drop']),
+    appliedAfterBaseline: new Set(['1_init', '2_drop']),
     indexes: new Map([['Stale_idx', false]]),
     triggers: new Set(['Message.t']),
     functions: new Set(['f']),
@@ -184,6 +185,7 @@ const livePolicies = (using: string) =>
   compareCatalog(
     {
       applied: new Set(['1_init', '2_drop']),
+      appliedAfterBaseline: new Set(['1_init', '2_drop']),
       indexes: new Map([['Agent_title_trgm_idx', true]]),
       triggers: new Set(['Message.t']),
       functions: new Set(['f']),
@@ -230,6 +232,7 @@ const handReport = (using: string) =>
     compareCatalog(
       {
         applied: new Set(['1_init']),
+        appliedAfterBaseline: new Set(['1_init']),
         indexes: new Map(),
         triggers: new Set(),
         functions: new Set(),
