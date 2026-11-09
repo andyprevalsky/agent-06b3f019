@@ -21,6 +21,8 @@ sources:
   - agent 784d6a3b-2b10-452b-a07b-a1dca682c251
   - commit 9a038b1e9f51ed8c7e419073c8cae63c08bf7a1c
   - memory:boxes-thread-ph7chyy9knyndf8rammrf6f60s8hvjs1
+  - PR #1857
+  - commit 5a0b1c6c150295da187c737f4ffa023907180e24
 repro: cd front-end && npx vitest run src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx
 status: fixed
 ---
@@ -104,10 +106,13 @@ before reapplying the fix. All original attempt logs are retained.
 Final unchanged command: `cd front-end && npx vitest run
 src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx`. Original
 production code: 1 failed / 6 passed, 11.98 s, missing Thinking. Fixed code:
-7 passed, 11.68 s, followed by four consecutive unchanged green runs. Related
+7 passed, 11.68 s, followed by five additional green runs (the last five use the identical formatted file). Related
 thinking/plan/tool-row suites passed 29 tests and frontend TypeScript passed. Independent adversarial review passed the final three-file
-change after rejecting an initial overly broad stream predicate. Deployment
-verification is pending; fixed here describes the locally proven UI mechanism,
+change after rejecting an initial overly broad stream predicate. All twelve selected deployment gates passed, including thirteen smoke tasks
+with verified cleanup and no retries. PR #1857 merged and production web,
+Mac release v1.1.299 and live semantic verification passed on the merge.
+Manual local-Mac acceptance was SKIPPED after authenticated discovery returned
+HTTP 200 with zero devices at 23:19:17Z. Fixed here describes the proven UI mechanism,
 not the uncaptured historical browser receipt or the provider's 27.8 s wait.
 
 ## Human feedback
@@ -119,3 +124,12 @@ permission was inferred from an idle thread or an owner label.
 ## Reusable lesson
 
 Separate background child progress from the displayed agent's live model activity before deciding whether to hide thinking.
+
+### Operational evidence note
+
+The CLI-native smoke card retains source/lifecycle projection gaps
+(UNRECORDED and 0/13) despite the exact per-run receipts proving all thirteen
+source bindings and released lifecycles. The native card was not edited. The
+private and sanitized closeout smoke-final-proof.json preserves the complete
+checks and this open reporting observation. It is separate from the fixed
+product Thinking-state veto; no repair or inferred cause is claimed for it.

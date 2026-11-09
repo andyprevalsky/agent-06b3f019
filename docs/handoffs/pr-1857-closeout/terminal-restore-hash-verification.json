@@ -1,0 +1,14 @@
+{
+  "format": "PR1857-QUALIFIED-TERMINAL-RESTORE-V1",
+  "verified_at": "2026-11-08T23:29:06.833927+00:00",
+  "original_files_checked": 11077,
+  "additional_metadata_checked": 3,
+  "all_original_sizes_and_sha256_match": true,
+  "mismatches": [],
+  "native_manifest_authenticated": true,
+  "archive_key": "devbox-closeout-private/pr1857-rca784d/20261108T232601Z-terminal-qualified-20da8396e4f9.tar.gz.aesgcm",
+  "original_flags_retained": true,
+  "qualification_sha256": "700b8df23fedbe7a1061741251d9ea874544bde9e288ca7f84b2392ad91a32c5",
+  "source_symlink_unchanged": true,
+  "scope": "Finite terminal deploy record snapshot; private fixture qualification and symlink metadata included; later generated publication controls require explicit disposition."
+}

@@ -17,6 +17,34 @@ def need(ok, message):
         raise ValueError('historical custody: ' + message)
 
 
+# Locator decisions made before the cloud request namespace exists. Each has a stable reason
+# code so deploy_test_cloud can publish a typed no-admission receipt; any other error stays generic.
+ADMISSION_REFUSALS = {
+    'request-locator-mismatch': 'historical custody: missing request-owned custody locator',
+    'canonical-locator-missing': 'historical custody: missing canonical custody locator',
+    'canonical-custody-unverifiable': 'historical custody: canonical custody history cannot be verified',
+    'canonical-custody-uncovered': 'historical custody: canonical custody obligations are not covered by the request-owned ledger',
+    'canonical-cycle-active': 'historical custody: canonical cycle is still active',
+    'canonical-cycle-owns-source': 'historical custody: canonical cycle owns the requested source',
+}
+
+
+class AdmissionRefusal(ValueError):
+    """A custody locator refusal raised by admission() before any allocation."""
+
+    def __init__(self, code, detail=None):
+        """Carry the stable reason code; the message is the exact registered refusal text."""
+        super().__init__(ADMISSION_REFUSALS[code])
+        self.reason_code = code
+        self.detail = detail
+
+
+def refuse(ok, code):
+    """Raise the typed pre-allocation refusal for ``code`` unless ``ok``."""
+    if not ok:
+        raise AdmissionRefusal(code)
+
+
 def task_contract(root, head, name):
     need(bool(re.fullmatch('[0-9a-f]{40}', head)), 'invalid original commit')
     result = subprocess.run(['git', 'show', head + ':agents/benchmarks/tasks.json'], cwd=root, capture_output=True)
@@ -264,6 +292,83 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
+LEGACY_IMPORT_KIND = 'historical-agentcard-no-retry-import-v1'
+
+
+def prepare_import(state, donor_path, directory, root, *, donor_sha256):
+    """Bind exact donor obligations to a pristine independent cycle; never copy files."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    directory, donor_path = Path(directory), Path(donor_path)
+    for path in (directory, donor_path):
+        need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+             and not path.is_symlink(), 'noncanonical import path')
+    need(donor_path.name == 'cycle.json' and donor_path.is_file()
+         and donor_path != directory / 'cycle.json', 'invalid independent donor index')
+    need(not (directory / 'cycle.json').is_symlink(), 'symlinked target cycle')
+    need(not (directory / 'attempts').exists() and not (directory / 'attempts').is_symlink(),
+         'import target has an existing attempt namespace')
+    donor_sha = c.sha_file(donor_path)
+    need(isinstance(donor_sha256, str) and re.fullmatch('[0-9a-f]{64}', donor_sha256)
+         and donor_sha == donor_sha256, 'donor bytes differ from approved hash')
+    donor = c.bounded_read(donor_path, 'historical donor index')
+    need(not c.CANCEL.is_set() and not any(donor.get(k) for k in
+         ('running', 'live_failures', 'resume_phase', 'pending')), 'active/unknown donor coordinator')
+    validate_donor_rows(donor, root)
+    found = known(donor, root)
+    history = donor.get('historical_custody_history', [])
+    ids = [row['original_failure']['id'] for row in history]
+    need(ids and len(ids) == len(set(ids)) and set(ids) == set(found), 'donor custody inventory differs')
+    need(not any(w['id'] in ids for w in donor.get('resource_warnings', []))
+         and not any(found[i]['check'] in donor.get('skips', {}) for i in ids), 'mixed donor waiver and custody')
+    for identifier in ids:
+        for raw in (found[identifier]['worker_evidence']['path'], found[identifier]['worker_result']):
+            path = Path(raw)
+            need(path.is_absolute() and path.resolve() == path and path.is_file()
+                 and path.is_relative_to(root / '.context') and not path.is_symlink(), 'noncanonical native/adapter file')
+    rows = [historical(donor, found[identifier], root) for identifier in ids]
+    need(c.digest(rows) == c.digest(history), 'donor native custody history changed')
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({row[key] for row in rows}) == len(rows), 'borrowed resource identity')
+    gates = {gate['name']: gate for gate in state['plan']['gates']}
+    for row in rows:
+        failure = row['original_failure']
+        gate = gates.get(failure['gate'], {})
+        need(failure['check'].split('/', 1)[1] in gate.get('checks', [])
+             and gate.get('case_protocol') is True, 'protected task or case protocol missing')
+    transfer_proof = build(donor, donor['plan'], state['plan'], root)
+    need(c.digest(transfer_proof['cases']) == c.digest(rows), 'donor transfer inventory differs')
+    need(c.sha_file(donor_path) == donor_sha, 'donor index changed during preparation')
+    return {'kind': LEGACY_IMPORT_KIND, 'donor_path': str(donor_path), 'donor_sha256': donor_sha,
+            'target_state': str(directory / 'cycle.json'), 'before_state_sha256': c.digest(fresh),
+            'current_binding': binding(state['plan'], root), 'cases': rows, 'transfer_proof': transfer_proof,
+            'failures': [copy.deepcopy(found[identifier]) for identifier in ids],
+            'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', []) if p['id'] in ids]}
+
+
+def admit_import(state, proof, donor_path, directory, root, *, donor_sha256):
+    """Revalidate everything before one state publication by the existing CLI writer."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    expected = prepare_import(fresh, donor_path, directory, root, donor_sha256=donor_sha256)
+    need(c.digest(proof) == c.digest(expected), 'import proof differs from exact donor/current binding')
+    # The hash-pinned interface is an adapter to the authoritative transfer
+    # protocol, including its persistent identities and pending-repair guards.
+    donor = c.bounded_read(Path(donor_path), 'historical donor index')
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed before admission')
+    candidate = copy.deepcopy(fresh)
+    adopt(candidate, donor, donor['plan'], expected['transfer_proof'], root)
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed during admission')
+    candidate['historical_custody_import'] = {'kind': LEGACY_IMPORT_KIND, 'proof_sha256': c.digest(expected),
+        'donor_path': expected['donor_path'], 'donor_sha256': expected['donor_sha256']}
+    verify(candidate, root)
+    if state.get('historical_custody_import'):
+        need(c.digest(state) == c.digest(candidate), 'import replay changed or cycle is no longer fresh')
+    else:
+        need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    state.clear(); state.update(candidate)
+
 IMPORT_KIND = 'historical-agentcard-custody-import-v1'
 
 
@@ -278,6 +383,12 @@ def donor_rows(donor_path, index_path, donor_sha256, index_sha256, root):
     need(index.get('format') == 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1'
          and index.get('files', {}).get(str(root / '.context/deploy-pipeline/cycle.json')) == donor_sha256,
          'donor snapshot not in pinned contents manifest')
+    return validate_donor_rows(donor, root)
+
+
+def validate_donor_rows(donor, root):
+    """Shared native/index inventory checks for both explicit provenance envelopes."""
+    import deploy_test_cycle as c
     history, active = donor.get('historical_custody_history', []), donor.get('historical_no_retry_custody', [])
     need(history and active, 'empty donor custody index')
     ids = [r['original_failure']['id'] for r in history]
@@ -468,6 +579,9 @@ def verify_import_origin(state, root):
     if 'historical_custody_import' not in state:
         return
     proof = state['historical_custody_import']
+    if isinstance(proof, dict) and proof.get('kind') == LEGACY_IMPORT_KIND:
+        verify_legacy_import_origin(state, proof, root)
+        return
     need(isinstance(proof, dict) and proof.get('kind') == IMPORT_KIND, 'malformed retained import provenance')
     origin = proof.get('donor')
     need(isinstance(origin, dict), 'malformed retained donor provenance')
@@ -482,6 +596,23 @@ def verify_import_origin(state, root):
          'custody import provenance/index changed')
 
 
+
+def verify_legacy_import_origin(state, proof, root):
+    """Revalidate the approved-SHA/adopt envelope without resetting a progressed cycle."""
+    import deploy_test_cycle as c
+    need(set(proof) == {'kind', 'proof_sha256', 'donor_path', 'donor_sha256'}
+         and re.fullmatch('[0-9a-f]{64}', proof.get('proof_sha256', ''))
+         and re.fullmatch('[0-9a-f]{64}', proof.get('donor_sha256', '')),
+         'malformed retained legacy import provenance')
+    path = Path(proof['donor_path'])
+    need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+         and path.name == 'cycle.json' and path.is_file() and not path.is_symlink()
+         and c.sha_file(path) == proof['donor_sha256'], 'legacy donor provenance changed')
+    donor = c.bounded_read(path, 'historical donor index')
+    _, found, rows = validate_donor_rows(donor, root)
+    need(all(r in state.get('historical_custody_history', []) for r in rows), 'historical failure removed')
+    need(set(found) <= known(state, root).keys(), 'historical failure removed')
+
 def state_identity(state):
     """Bind admission to current inputs and the complete retained custody provenance."""
     import deploy_test_cycle as c
@@ -490,17 +621,68 @@ def state_identity(state):
                     'historical_custody_import', 'historical_custody_transfers')})
 
 
+def debt_key(failure):
+    """The identity of one no-remint obligation: original failure, source and native bytes."""
+    import deploy_test_cycle as c
+    return c.digest({**{k: failure.get(k) for k in ('id', 'gate', 'check', 'source')},
+                     'native_sha256': (failure.get('worker_evidence') or {}).get('sha256')})
+
+
+def canonical_override(state, default, root):
+    """Admit a request-owned alternate ledger beside the canonical default only when the default's
+    authoritative custody history is validated and either empty or covered by that ledger."""
+    import deploy_test_cycle as c
+    try:
+        need(default.is_file() and not default.is_symlink(), 'canonical custody state is not a regular file')
+        canonical = c.read(default)
+        need(isinstance(canonical, dict) and isinstance(canonical.get('failures'), list)
+             and isinstance(canonical.get('source'), dict) and isinstance(canonical.get('plan'), dict)
+             and c.digest(canonical['plan']) == canonical.get('plan_digest'), 'malformed canonical cycle')
+        verify_import_origin(canonical, root)
+        found = known(canonical, root)
+        history = canonical.get('historical_custody_history', [])
+        # Re-derive every saved record from its exact native bytes, as donor import does; a stale
+        # source is fine, but changed credit, provenance or native history is not coverage.
+        for saved in history:
+            need(historical(canonical, found[saved['original_failure']['id']], root) == saved,
+                 'canonical custody history changed')
+        for record in canonical.get('historical_no_retry_custody', []):
+            native = historical(canonical, found[record['original_failure']['id']], root)
+            exact = dict(kind=KIND, disposition=DISPOSITION, **native, current_binding=record.get('current_binding'),
+                         current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+                         credit={'test_execution': False, 'assertions': False, 'financial_release': False})
+            need(record == exact and native in history, 'canonical custody record changed')
+        running = any(canonical.get(k) for k in ('running', 'live_failures', 'resume_phase'))
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
+        raise AdmissionRefusal('canonical-custody-unverifiable', f'{type(error).__name__}: {error}') from error
+    refuse(not running, 'canonical-cycle-active')
+    covered = known(state, root)
+    refuse(all(key in covered and debt_key(covered[key]) == debt_key(f) for key, f in found.items()),
+           'canonical-custody-uncovered')
+    identity = c.digest(canonical)
+    derived = ((state.get('historical_custody_import') or {}).get('donor', {}).get('state_digest') == identity
+               or any(t.get('donor_state_sha256') == identity for t in state.get('historical_custody_transfers', [])))
+    refuse(canonical['source'] != state['source'] or derived, 'canonical-cycle-owns-source')
+
+
 def admission(request, root):
+    """Bind a gate child's request to its custody ledger before the cloud namespace is created."""
     import deploy_test_cycle as c
     default = root / '.context/deploy-pipeline/cycle.json'
     locator = request.get('custody_state')
     request_path = Path(os.environ.get('DEPLOY_GATE_REQUEST', ''))
+    owner_state = None
     if (request_path.name == 'request.json' and len(request_path.parents) > 4
             and request_path.parents[3].name == 'attempts'):
         owner_state = request_path.parents[4] / 'cycle.json'
-        need(locator is not None and Path(locator).resolve() == owner_state.resolve(), 'missing request-owned custody locator')
-    if default.exists():
-        need(locator is not None and Path(locator).resolve() == default.resolve(), 'missing canonical custody locator')
+        refuse(locator is not None and Path(locator).resolve() == owner_state.resolve(), 'request-locator-mismatch')
+    override = False
+    if default.exists() or default.is_symlink():
+        # A supported non-default state directory owns its request; the canonical default must
+        # still be proven free of (or covered for) known no-remint obligations below.
+        override = owner_state is not None and owner_state.resolve() != default.resolve()
+        refuse(override or (locator is not None and Path(locator).resolve() == default.resolve()),
+               'canonical-locator-missing')
     if locator is None:
         return  # standalone disposable requests with no canonical cycle have no recorded obligations
     path = Path(locator)
@@ -509,6 +691,8 @@ def admission(request, root):
     state = c.read(path)
     need(request.get('custody_child_environment') == environment_identity(os.environ), 'admission environment changed')
     need(state_identity(state) == request.get('custody_state_sha256') and state['source'] == request['source'], 'custody state changed')
+    if override:
+        canonical_override(state, default, root)
     gate = next(g for g in state['plan']['gates'] if g['name'] == request['gate'])
     need(c.source(root) == state['source'] and c.digest(state['plan']) == state['plan_digest'], 'admission source/plan changed')
     need(request.get('custody_runtime') == runtime_identity(root), 'admission runtime files changed')
