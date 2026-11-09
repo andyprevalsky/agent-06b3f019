@@ -165,6 +165,43 @@ def swap_instructions(repo: Path, arm: str, new_claude_md: Optional[Path], neste
     return instruction_files(repo)
 
 
+# Instruction and skill files a skill test copies from the rewritten tree onto the base snapshot. A path
+# that is absent from the overlay tree is removed from the snapshot (a retired doc must not linger).
+SKILL_OVERLAY_PATHS = (
+    "CLAUDE.md",
+    "AGENTS.md",
+    *(f"{sub}/{name}" for sub in NESTED_INSTRUCTION_DIRS for name in ("CLAUDE.md", "AGENTS.md")),
+    ".claude/commands",
+    ".claude/shared",
+    "docs/root-cause-analysis.md",
+    "docs/rca/README.md",
+    "docs/rca/process-feedback.md",
+    "docs/internal",
+    "docs/testing.md",
+)
+
+
+def overlay_skills(repo: Path, overlay_from: Path) -> dict[str, str]:
+    """Copy the rewritten instructions and skills from ``overlay_from`` over the base snapshot."""
+    if not (overlay_from / "CLAUDE.md").is_file() or not (overlay_from / ".claude/commands").is_dir():
+        raise SandboxError(f"--skill-overlay-from {overlay_from} is not a checkout with CLAUDE.md and .claude/commands")
+    for rel in SKILL_OVERLAY_PATHS:
+        src, dst = overlay_from / rel, repo / rel
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        elif dst.is_dir():
+            shutil.rmtree(dst)
+        if src.is_symlink():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(os.readlink(src), dst)
+        elif src.is_dir():
+            shutil.copytree(src, dst, symlinks=True)
+        elif src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+    return instruction_files(repo)
+
+
 def instruction_files(repo: Path) -> dict[str, str]:
     found: dict[str, str] = {}
     for name in INSTRUCTION_NAMES:

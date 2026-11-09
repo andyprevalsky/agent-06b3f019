@@ -40,6 +40,7 @@ def _parse(argv: Optional[list[str]]) -> argparse.Namespace:
     run.add_argument("--rep-offset", type=int, default=0, help="First repetition number (to add reps later)")
     run.add_argument("--new-claude-md", type=Path, help="Rewritten root CLAUDE.md for --arm new")
     run.add_argument("--nested-from", type=Path, help="Tree whose front-end/back-end/agents CLAUDE.md files join --arm new")
+    run.add_argument("--skill-overlay-from", type=Path, help="Checkout whose CLAUDE.md files, .claude/commands and .claude/shared replace the base snapshot's (skill tests; implies --arm new)")
     run.add_argument("--credential", choices=runner.CREDENTIAL_MODES, default="lease")
     run.add_argument("--env-file", type=Path, help="agents/.env holding BACKEND_API_KEY for --credential lease")
     run.add_argument("--lease-backend", default=runner.parity.PROD_BACKEND_URL)
@@ -87,8 +88,9 @@ def _run(args: argparse.Namespace) -> int:
         max_budget_usd=args.max_budget_usd,
         keep_clone=args.keep_clone,
         grade=not args.no_grade,
+        skill_overlay_from=args.skill_overlay_from.resolve() if args.skill_overlay_from else None,
     )
-    if opts.arm == "new" and opts.new_claude_md is None:
+    if opts.arm == "new" and opts.new_claude_md is None and opts.skill_overlay_from is None:
         print("--arm new needs --new-claude-md", file=sys.stderr)
         return 2
     out = args.out.resolve()

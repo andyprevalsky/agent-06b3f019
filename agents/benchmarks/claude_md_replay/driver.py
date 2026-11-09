@@ -40,6 +40,7 @@ class RunOptions:
     max_budget_usd: Optional[float] = None
     keep_clone: bool = False
     grade: bool = True
+    skill_overlay_from: Optional[Path] = None
 
 
 def now() -> str:
@@ -51,7 +52,10 @@ def prepare(task: Task, paths: RunPaths, opts: RunOptions, *, sha: Optional[str]
     paths.make()
     sha = sha or task.base_sha
     sandbox.export_tree(opts.source_repo, sha, paths.repo, task.exclude_paths)
-    instructions = sandbox.swap_instructions(paths.repo, opts.arm, opts.new_claude_md, opts.nested_from)
+    if opts.skill_overlay_from is not None:
+        instructions = sandbox.overlay_skills(paths.repo, opts.skill_overlay_from)
+    else:
+        instructions = sandbox.swap_instructions(paths.repo, opts.arm, opts.new_claude_md, opts.nested_from)
     start_sha = sandbox.commit_root(paths.repo, opts.source_repo, sha)
     forbidden = (task.merge_sha,) if task.merge_sha and task.merge_sha != sha else ()
     leaks = sandbox.leak_check(paths.repo, forbidden)
