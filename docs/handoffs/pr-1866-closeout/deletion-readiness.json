@@ -99,8 +99,6 @@
   ],
   "manifest": "docs/handoffs/pr-1866-closeout/deletion-manifest.json",
   "open_items": [
-    "1 unpushed commit(s) in /home/boxes/rose",
-    "branch records/pr-1866-closeout-3 has 1 commit(s) on no remote",
     "live process 247680 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server --listen ws://127.0.0.1:42763 --enabl",
     "live process 486991 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host"
   ],
@@ -627,7 +625,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [],
-      "unpushed_commits": 1
+      "unpushed_commits": 0
     }
   ]
 }
