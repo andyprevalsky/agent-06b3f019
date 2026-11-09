@@ -210,6 +210,23 @@ normalize_conductor_workspace_env() {
   export CONDUCTOR_WORKSPACE_PATH="$workspace_physical"
 }
 
+# Usage: benchmark_system_pg_db_name <native run id>
+# PostgreSQL truncates identifiers after63bytes. Hash long native identities
+# before creation so sibling worlds cannot share the truncated prefix.
+benchmark_system_pg_db_name() {
+  python3 - "${1:?benchmark run id required}" <<'PY_BENCHMARK_DATABASE'
+import hashlib
+import re
+import sys
+
+run_id = sys.argv[1]
+name = "victoria_bench_" + re.sub(r"[^A-Za-z0-9]", "_", run_id)
+if len(name) > 63:
+    name = name[:46] + "_" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+print(name)
+PY_BENCHMARK_DATABASE
+}
+
 # Usage: workspace_system_pg_db_name [root]
 # Prints the system-Postgres database a non-benchmark stack may reset and seed.
 # localhost:5432 is ONE server shared by every workspace on the host, so a

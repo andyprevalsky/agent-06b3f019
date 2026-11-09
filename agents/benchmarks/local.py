@@ -52,6 +52,16 @@ from benchmarks.benchmark_tasks import (
 from benchmarks.polar_catalog import is_polar_bench_task
 
 
+def benchmark_system_pg_db_name(run_id: str) -> str:
+    """Use the native shell producer for retained recording's fixture identity."""
+    result = subprocess.run(
+        ["bash", "-c", '. "$1"; benchmark_system_pg_db_name "$2"', "benchmark-db-name",
+         str(REPO_ROOT / "scripts/lib/workspace-env.sh"), run_id],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
 def apply_owned_wmh_recording(
     env: dict[str, str],
     *,
@@ -59,7 +69,7 @@ def apply_owned_wmh_recording(
     simulate: bool,
     tasks: Sequence[object],
     workspace: str | None,
-    fixture_database: str,
+    fixture_database: str | Callable[[], str],
 ) -> bool:
     """Admit explicitly selected recording only into its retained owned cache."""
     recording = env.get("FAST_MODE_CACHE_RECORD_DEMO", env.get("DEMO_CACHE_RECORD_DEMO", "")).strip().lower()
@@ -80,6 +90,7 @@ def apply_owned_wmh_recording(
     url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
     parsed = urlsplit(url)
     database = parsed.path.removeprefix("/")
+    fixture_database = fixture_database() if callable(fixture_database) else fixture_database
     owned = (
         parsed.scheme in {"postgres", "postgresql"}
         and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
@@ -1929,8 +1940,8 @@ def start_services(
             simulate=resolve_simulate_mode(simulate, tasks),
             tasks=[get_task_by_name(name) for name in tasks],
             workspace=stack.workspace_name,
-            fixture_database=(
-                f"victoria_bench_{re.sub(r'[^a-zA-Z0-9]', '_', stack.run_id)}"
+            fixture_database=lambda: (
+                benchmark_system_pg_db_name(stack.run_id)
                 if stack.use_system_postgres
                 else f"victoria_{stack.workspace_name}"
             ),

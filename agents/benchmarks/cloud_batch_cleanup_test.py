@@ -2911,3 +2911,142 @@ async def test_archive_timeout_retains_only_completed_snapshots():
         assert observation["ready"] is False
         assert logs["messages"] == [{"text": "pre-pause snapshot"}]
         assert "tree" not in logs
+
+
+def test_exact_database_proof_preserves_native_long_run_identity_without_aliases():
+    """Replay the native74-character manifest failure through its real DB guard."""
+    import subprocess
+    import runpy
+
+    source = (Path(__file__).resolve().parents[2] / "scripts/run.sh").read_text()
+    marker = '    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then'
+    start = source.index(marker)
+    stop = source.index('\n    if pg_isready', start)
+    fragment = source[start:stop]
+    run_id = "agentcard-v2-stability-20261109-partial11-round-01-worlds-1"
+    def native_name(value):
+        completed = subprocess.run(
+            ["bash", "-e", "-c", '. "$1"\n' + fragment + '\nexport LOCAL_DB_NAME LOCAL_DB_URL\npython3 -c \'import json,os; print(json.dumps({"name":os.environ["LOCAL_DB_NAME"],"url":os.environ["LOCAL_DB_URL"]}))\'', "native-name", str(Path(__file__).resolve().parents[2] / "scripts/lib/workspace-env.sh")],
+            env={"PATH": os.environ["PATH"], "BENCHMARK_ISOLATED_RUN": "true",
+                 "BENCHMARK_RUN_ID": value, "SYSTEM_PG_PORT": "5432"},
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        row = json.loads(completed.stdout)
+        assert row["url"] == f"postgresql://postgres:postgres@localhost:5432/{row['name']}"
+        return row["name"]
+
+    names = [native_name(run_id), native_name(run_id[:-1] + "2")]
+    recovery = runpy.run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-guest-recovery.py"))
+    payload = {"root_exists": True, "root_user_id": ROOT, "root_deleted": True,
+               "unsealed_tree_agent_ids": [], "tree_agent_ids": [ROOT],
+               "browser_sessions": [], "purchase_cleanup": []}
+    queries = []
+    def query(_command, **kwargs):
+        queries.append(kwargs)
+        return json.dumps(payload)
+    recovery["run_exact_psql"] = query
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory)
+        manifest = {"worktree": str(cleanup.REPO_ROOT), "benchmark_mode": True, "status": "running",
+                    "temporal_task_queue": "owned-queue", "ports": {"backend": 3201},
+                    "database": {"name": names[0], "port": 5432, "use_system_postgres": True}}
+        manifest_path = context / "services.json"
+        manifest_path.write_text(json.dumps(manifest))
+        environment = {"BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true",
+                       "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
+                       "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
+                       "BENCHMARK_CONTEXT_DIR": directory, "TEMPORAL_TASK_QUEUE": "owned-queue"}
+        with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
+            assert cleanup.exact_root_sessions("http://localhost:3201", ROOT, require_deleted=True) == payload
+            assert queries[-1]["database"] == names[0] and queries[-1]["port"] == 5432
+            assert all(len(name.encode("ascii")) <= 63 for name in names)
+            assert names[0] != names[1], "world siblings must never alias one system database"
+            assert native_name(run_id) == names[0], "same world must retain the same identity"
+            assert native_name("short-fixture") == "victoria_bench_short_fixture"
+            exact_boundary = "x" * (63 - len("victoria_bench_"))
+            assert native_name(exact_boundary) == "victoria_bench_" + exact_boundary
+            assert len(native_name(exact_boundary + "x")) == 63
+            assert native_name(exact_boundary + "x") != native_name(exact_boundary + "y")
+            for foreign_url in ("https://production.example", "http://localhost:3202", "http://localhost:3201/foreign", "http://user@localhost:3201", "http://localhost:3201?database=foreign", "http://127.0.0.1:3201"):
+                count = len(queries)
+                with pytest.raises(RuntimeError, match="not the owned local stack"):
+                    cleanup.exact_root_sessions(foreign_url, ROOT)
+                assert len(queries) == count, "foreign URL must be refused before SQL"
+            for patch_value in ({"worktree": str(context / "foreign")}, {"temporal_task_queue": "foreign-queue"},
+                                {"database": {"name": "unsafe;DROP DATABASE foreign", "port": 5432}},
+                                {"database": {"name": names[0], "port": 65536}},
+                                {"database": {"name": names[0], "port": "5432"}}):
+                manifest_path.write_text(json.dumps({**manifest, **patch_value}))
+                count = len(queries)
+                with pytest.raises(RuntimeError, match="not the owned local stack"):
+                    cleanup.exact_root_sessions("http://localhost:3201", ROOT)
+                assert len(queries) == count, "foreign/unsafe stack must be refused before SQL"
+
+
+def test_native_system_database_identity_agrees_for_create_restore_runtime_and_manifest():
+    """Run native startup fragments with database commands replaced by exact captures."""
+    import subprocess
+    from urllib.parse import urlsplit
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "scripts/run.sh").read_text()
+    marker = '    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then'
+    name_start = source.index(marker)
+    names = source[name_start:source.index('\n    if pg_isready', name_start)]
+    create_start = source.index('    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then\n        PGPASSWORD=postgres dropdb')
+    creates = source[create_start:source.index('\nfi\n\n# DEMO cache', create_start)]
+    config_start = source.index('configure_local_db_url() {')
+    config = source[config_start:source.index('\nconfigure_local_db_url', config_start)]
+    restore_start = source.index('    if PGPASSWORD=postgres bash scripts/restore-seed-dump.sh')
+    restores = source[restore_start:source.index('; then', restore_start)].removeprefix('    if ')
+    writer_start = source.index('write_services_manifest() {')
+    python_start = source.index("python3 - <<'PY'\n", writer_start) + len("python3 - <<'PY'\n")
+    manifest_python = source[python_start:source.index('\nPY\n', python_start)]
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location("owned_db_local", repo / "agents/benchmarks/local.py")
+    local = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {spec.name: local}):
+        spec.loader.exec_module(local)
+    run_ids = ["agentcard-v2-stability-20261109-partial11-round-01-worlds-1",
+               "agentcard-v2-stability-20261109-partial11-round-01-worlds-2",
+               "same.prefix-" + "a" * 70, "same_prefix-" + "a" * 70]
+    observed = []
+    for run_id in run_ids:
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            script = (
+                '. "$1"\n' + names + "\n"
+                'dropdb() { DROPPED_DB="${@: -1}"; }\n'
+                'createdb() { CREATED_DB="${@: -1}"; }\n'
+                '{\n' + creates + '\n} >/dev/null\n' + config + '\nconfigure_local_db_url\n'
+                'bash() { [ "$1" = scripts/restore-seed-dump.sh ] || return 99; RESTORED_DB="$6"; }\n'
+                '_SEED_DUMP=offline.dump; _SEED_RESTORE_CONTAINER=""\n' + restores + '\n'
+                'export LOCAL_DB_NAME LOCAL_DB_ACTUAL_PORT DB_OWNED_BY_US DROPPED_DB CREATED_DB RESTORED_DB\n'
+                "python3 - <<'PY_NATIVE_MANIFEST'\n" + manifest_python + "\nPY_NATIVE_MANIFEST\n"
+                "python3 - <<'PY_NATIVE_CAPTURE'\n"
+                'import json,os,pathlib\n'
+                'row={k:os.environ[k] for k in ["LOCAL_DB_NAME","DATABASE_URL","DIRECT_URL","DROPPED_DB","CREATED_DB","RESTORED_DB"]}\n'
+                'row["manifest"]=json.loads((pathlib.Path(os.environ["RUN_CONTEXT_DIR"])/"services.json").read_text())\n'
+                'print(json.dumps(row))\nPY_NATIVE_CAPTURE\n'
+            )
+            result = subprocess.run(
+                ["bash", "-e", "-c", script, "native-db-identity", str(repo / "scripts/lib/workspace-env.sh")],
+                cwd=cleanup.REPO_ROOT,
+                env={"PATH": os.environ["PATH"], "BENCHMARK_ISOLATED_RUN":"true", "BENCHMARK_MODE":"true",
+                     "BENCHMARK_RUN_ID":run_id, "SYSTEM_PG_PORT":"5432", "LOCAL_DB_ACTUAL_PORT":"5432",
+                     "USE_SYSTEM_PG":"true", "IS_CLOUD":"true", "RUN_CONTEXT_DIR":directory,
+                     "SERVICE_STATUS":"running", "BACKEND_PORT":"3201", "TEMPORAL_TASK_QUEUE":"owned-queue"},
+                capture_output=True, text=True, check=True, timeout=5,
+            )
+            row = json.loads(result.stdout)
+            name = row["LOCAL_DB_NAME"]
+            assert name.isascii() and len(name) <= 63
+            for field in ["DROPPED_DB", "CREATED_DB", "RESTORED_DB"]:
+                assert row[field] == name
+            assert urlsplit(row["DATABASE_URL"]).path == urlsplit(row["DIRECT_URL"]).path == "/" + name
+            assert row["manifest"]["database"]["name"] == name
+            assert row["manifest"]["database"]["port"] == row["manifest"]["database"]["runtime_port"] == 5432
+            assert local.benchmark_system_pg_db_name(run_id) == name
+            observed.append(name)
+    assert len(set(observed)) == len(run_ids), "hash must include original punctuation and sibling suffix"

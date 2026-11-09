@@ -1083,8 +1083,7 @@ else
     SYSTEM_PG_PORT=5432
     LOCAL_DB_ACTUAL_PORT="$SYSTEM_PG_PORT"
     if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then
-        SAFE_BENCHMARK_RUN_ID=$(printf '%s' "$BENCHMARK_RUN_ID" | tr -c '[:alnum:]' '_')
-        LOCAL_DB_NAME="victoria_bench_${SAFE_BENCHMARK_RUN_ID}"
+        LOCAL_DB_NAME="$(benchmark_system_pg_db_name "$BENCHMARK_RUN_ID")" || exit 1
     else
         # One server serves every workspace on this host; never default a named
         # workspace onto the shared `victoria` (same resolver as setup-db.sh).
