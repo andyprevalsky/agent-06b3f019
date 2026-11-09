@@ -93,8 +93,9 @@ It covers all three original call sites, root/child identity, delayed identity
 resolution, completed and consumer-closed streams under empty Fly, named Fly and
 Render guards. It retains all original local capture assertions. The exact latest
 suite fails on the original producer with No archived LLM base calls and passes
-on the repaired producer. Native unchanged chat-mode plus normal publisher and
-full deployment remain pending; proxy fail/pass alone is not completion.
+on the repaired producer. Native unchanged chat-mode and the normal archive-backed
+publisher now pass on repaired source; full deployment remains pending. Proxy
+fail/pass alone is not completion.
 
 At 10k agents each write is isolated by root and unique dump identity, with one
 indexed identity read and one encrypted submission per call; there is no serial
@@ -103,6 +104,22 @@ in-flight captures, settled tasks are removed, and failures retain one error per
 agent until their owning terminal publication can report them. Existing archive
 I/O bounds/retries remain unchanged. Golden reference: not applicable (no
 approval-gated hunk).
+
+Native outcome proof: unchanged chat-mode passed on f52e5708c8ec8c840176cfec9b1a554ea8f34f55,
+then passed again on combined stabilization source fc731e92a72139e4d321784b02d6beebe855cd85.
+The second run recorded defined-empty Fly identity in the actual backend process,
+wrote no local plaintext root dump, and passed the normal full publisher through
+strict encrypted archive recovery: three genuine complete bases, all three chat
+call sites, eight frontend messages verified in a fresh browser, durable last-call
+HTML, and native clean benchmark/stack teardown. This controlled environment record
+applies only to the new run; original effective environment remains unrecorded.
+The first premature second-run publisher invocation failed because run.json was
+not finalized yet; that failed invocation is retained separately, then the identical
+command passed on terminal artifacts. No skip flags or synthetic histories.
+The existing archive suite also fails with terminal drain removed and passes
+unchanged after restoration; delayed child registration and failed-writer outcome
+are checked through actual direct finalization, in addition to stream coverage.
+Full deployment and independent additional-gate attribution remain in progress.
 
 ## Human feedback
 
