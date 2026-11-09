@@ -73,7 +73,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-06-github-pool-quota-learning-threw-on-a-headerless-response-double.md; PR #1723 (landed via d78719f5b4); fix commit 29470ef019. Prompt from case symptoms (no originating boxes.dev thread found by search). Calibrated with --allow-dep-mismatch: base differs from the deps checkout only in back-end/package.json scripts/engines, a 2-line back-end lock change, a front-end lock and certifi in agents/requirements.txt; none can affect this tsx unit test of githubTokenPool.",
+      "notes": "Source: docs/rca/cases/2026-11-06-github-pool-quota-learning-threw-on-a-headerless-response-double.md; PR #1723 (landed via d78719f5b4); fix commit 29470ef019. Prompt from case symptoms (no originating boxes.dev thread found by search). Calibrated with --allow-dep-mismatch: base differs from the deps checkout only in back-end/package.json scripts/engines, a 2-line back-end lock change, a front-end lock and certifi in agents/requirements.txt; none can affect this tsx unit test of githubTokenPool. Prompt-source search 2026-11-09: No /rca invocation exists: the case's own Problem says the staged /deploy backend-coverage gate of PR #1723 found it (Gate: INTRODUCED) and the deploy agent ran the RCA itself. Searches (dvb-onbox threads search --scope project, 2026-11-09): \"GitHub branch head lookup errored\", \"Cannot read properties of undefined (reading 'get') github-agent-repo\"; hits were the Lane F rate-limit RCA thread (thr_43540fc247f64169b25129d9f4af0625) and the 'Orchestrate agent bug fixes via /rca' deploy thread (thr_ced2fa3d52b34f1383a38b510a0f486d), neither with a user report of this failure. Local Claude sessions (/home/boxes/.claude/projects/-home-boxes-rose/*.jsonl) have no /rca command invocations. Prompt stays on case symptoms.",
       "pr": 1723
     },
     {
@@ -140,7 +140,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-10-03-render-backend-wrote-llm-context-dumps.md; PR #1341; fix commit b695d03aaf (2026-10-03). Prompt from the case Problem/symptoms (no originating thread found). Calibrated with --allow-dep-mismatch: the October base's root package.json and back-end/package-lock.json differ from the deps checkout, which cannot affect this tsx unit test of a pure fs/env module. The hidden test toggles NODE_ENV after import, so it needs production checked per call, not a module-level constant; scripts/select_affected_tests.py does not exist at this base. Replaces rca-spawn-replay-nameless, whose backend blackbox runner refuses shared system Postgres on this box (other workspace DB containers active).",
+      "notes": "Source: docs/rca/cases/2026-10-03-render-backend-wrote-llm-context-dumps.md; PR #1341; fix commit b695d03aaf (2026-10-03). Prompt from the case Problem/symptoms (no originating thread found). Calibrated with --allow-dep-mismatch: the October base's root package.json and back-end/package-lock.json differ from the deps checkout, which cannot affect this tsx unit test of a pure fs/env module. The hidden test toggles NODE_ENV after import, so it needs production checked per call, not a module-level constant; scripts/select_affected_tests.py does not exist at this base. Replaces rca-spawn-replay-nameless, whose backend blackbox runner refuses shared system Postgres on this box (other workspace DB containers active). Prompt-source search 2026-11-09: No /rca invocation exists: the case's Problem says an agent publishing deploy evidence noticed the missing chat dump and found the Render writes itself. Searches: \"llm.context.dumped render\", \"/opt/render/project/src/.llm-dumps\"; no user report found, and the 2026-10-03 incident predates most retained threads. Local Claude sessions have no /rca invocations. Prompt stays on case symptoms.",
       "pr": 1341
     },
     {
@@ -205,7 +205,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-08-browser-storage-monitor-one-shot-cancellation.md; PR #1831 (landed via 6c56e81201); fix commit 38e61c39cf (also carries an unrelated backend inspect-fixture repair, not graded). Prompt from case symptoms.",
+      "notes": "Source: docs/rca/cases/2026-11-08-browser-storage-monitor-one-shot-cancellation.md; PR #1831 (landed via 6c56e81201); fix commit 38e61c39cf (also carries an unrelated backend inspect-fixture repair, not graded). Prompt from case symptoms. Prompt-source search 2026-11-09: No /rca invocation exists: the failure surfaced in the deploy smoke of /goal thread thr_00839bdce7a24e74835d4ac65faf6779 (ph75eev1fsqqgxqdfz3n6fv5h58hvwa0, 'Prevent production mixed billing admission'), whose first user message (full read) is a repair handoff for a different defect; the RCA ran inside that deploy with reviewer thread thr_dafbbb47e02b43b585e14ae97a18d29a. Searches: \"StorageStateWatchdog on_BrowserStopEvent running for >15s\", \"Checkpoint CDP release timed out\", \"storage monitor cancellation browser shutdown repair\". Prompt stays on case symptoms.",
       "pr": 1831
     },
     {
@@ -271,7 +271,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Benchmark-failure RCA (pre-deploy smoke test-mass-agent-run-0). Source: docs/rca/cases/2026-11-07-foreground-task-name-reserved-by-finished-agent-failed-replay.md; PR #1744 (landed via 8dbb27dbfc on 2026-11-07); fix commit b65d7927e0. Prompt from case Problem/symptoms (no originating thread found). Replaces rca-verifier-receipt-images, whose whole spawn-browser-agent-v3 blackbox domain also fails on its merge commit in this sandbox (its originating repair /goal is thread thr_82ea6e4547cf49c1ae2fa5d5906baa20).",
+      "notes": "Benchmark-failure RCA (pre-deploy smoke test-mass-agent-run-0). Source: docs/rca/cases/2026-11-07-foreground-task-name-reserved-by-finished-agent-failed-replay.md; PR #1744 (landed via 8dbb27dbfc on 2026-11-07); fix commit b65d7927e0. Prompt from case Problem/symptoms (no originating thread found). Replaces rca-verifier-receipt-images, whose whole spawn-browser-agent-v3 blackbox domain also fails on its merge commit in this sandbox (its originating repair /goal is thread thr_82ea6e4547cf49c1ae2fa5d5906baa20). Prompt-source search 2026-11-09: No /rca invocation found: the fix was made inside the PR #1744 deploy of thread thr_ced2fa3d52b34f1383a38b510a0f486d ('Orchestrate agent bug fixes via /rca'; its 11-07 07:15Z reply reports the fix) after its pre-deploy smoke failed. The test-repair thread thr_fb466423a0cd4f24b155afd18e68f62c ('Test repair: test-mass-agent-run-0 spawn_agent status=ERROR') is a different incident (agent 4ec67f04, toolu_017WjLfY..., PR #1752; full read has no 'already used' text), so its handoff is not used. Searches: \"task_name is already used by another agent you spawned\", \"030c4a79-c37d-4bf7-a55d-477f9d11bd6c\", \"research_ethan_mollick_s_substa\", \"toolu_01WDeLVcbPCgNkQ9gDWDCE3u\", \"test-mass-agent-run-0 t10-no-tool-failures spawn_agent ERROR\". Prompt stays on case symptoms.",
       "pr": 1744
     },
     {
@@ -339,7 +339,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-07-native-db-broadcast-timestamp-interpreted-as-local.md; PR #1770 (landed via 5066feea73); fix commit 8f8f5ac956. Prompt is the user's original wording from thread thr_c41e5302f95a4309952900330862d62a (ph74sx0mzz3w0kgm9tdfmeqzms8hrv4h), reassembled from search snippets (the preview did not return the whole message)."
+      "notes": "Source: docs/rca/cases/2026-11-07-native-db-broadcast-timestamp-interpreted-as-local.md; PR #1770 (landed via 5066feea73); fix commit 8f8f5ac956. Prompt is the user's original wording from thread thr_c41e5302f95a4309952900330862d62a (ph74sx0mzz3w0kgm9tdfmeqzms8hrv4h). Message sent 2026-11-07T20:21:49Z. The thread's full first user message, verified on 2026-11-09 with `threads read --full`, also has a leading line '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful'; the replay keeps only the /rca lines verbatim because it grades /rca alone and the sandbox refuses deploys."
     },
     {
       "id": "rca-child-vetoes-thinking",
@@ -404,14 +404,14 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-08-background-child-vetoes-parent-thinking.md; PR #1857 (landed via 5a0b1c6c15); fix commit cf85beba8d. Prompt is the user's original wording from thread thr_d2f8916ce6c348568fb3803713717708 (ph7chyy9knyndf8rammrf6f60s8hvjs1), reassembled from search snippets."
+      "notes": "Source: docs/rca/cases/2026-11-08-background-child-vetoes-parent-thinking.md; PR #1857 (landed via 5a0b1c6c15); fix commit cf85beba8d. Prompt is the user's original wording from thread thr_d2f8916ce6c348568fb3803713717708 (ph7chyy9knyndf8rammrf6f60s8hvjs1). Message sent 2026-11-08T22:05:01Z. The thread's full first user message, verified on 2026-11-09 with `threads read --full`, also has a leading line '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful' and a Bug Report paragraph telling the agent to read and message other active bug threads before editing; the replay keeps only the /rca lines verbatim because it grades /rca alone and the sandbox refuses deploys."
     },
     {
       "id": "rca-autotag-exit-141",
       "kind": "pr",
       "base_sha": "4e5bc791846b82c330b441598bbfa73472dc6972",
       "merge_sha": "d2183672191106b73f1f4880208f39bb1e95ef40",
-      "prompt": "/rca Failed test/gate: .github/workflows/auto-tag-mac-app.yml, job auto-tag, existing step \"Create and push tag\". The native Auto-tag Mac App Release run on the PR #1770 merge failed with `##[error]Process completed with exit code 141.` in Create and push tag, before its first echo (`Release reason`); the decision and checkout steps succeeded.",
+      "prompt": "/rca Failed test/gate: .github/workflows/auto-tag-mac-app.yml, job auto-tag, existing step \"Create and push tag\".\nOriginal native run: https://github.com/Rose-Ai-Labs/rose/actions/runs/42471940816/job/128704515147\nExact error: \"##[error]Process completed with exit code 141.\"\nFailed source and originating confirmed main merge: 5066feea73da4a966aa7655ccbc40ea8c26529a8 (PR1770).\nOriginal environment: MERGE_SHA=5066feea73da4a966aa7655ccbc40ea8c26529a8; REASON=shipped-surface; /usr/bin/bash -e plus script set -euo pipefail.\nScope: auto-tag version selection and release idempotency; do not weaken the ship decision, existing-tag detection, global concurrency policy, credential authority, tag-target identity or release verification.\n\nGate: NOT_INTRODUCED relative to originating PR. Workflow blob98626334ed87634e501ab831e46fabbfc28fe43d is identical on failed merge, reviewed606 and basebf26. Cause: OPEN. Failure occurred before first runtime echo. Two git-tag-to-head pipelines are candidates; no trace identifies which command. A SINGLE unchanged local selection replay passed (Git2.43.0,227tags/1914bytes). Captured remote317tags/2713namebytes do not establish buffer pressure. Do not call SIGPIPE proved or invent a failing local reproduction. Resolve these evidence gaps independently; retain the actual native failure.",
       "test_files": [
         "scripts/tests/mac-app-autotag.test.py"
       ],
@@ -466,7 +466,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-08-tag-selection-closes-git-output-early.md; PR #1830 (landed via 4ce770943a) repairing the PR #1770 failure; fix commit d218367219. Prompt from thread thr_16c350fec66f4b62bc75cb75751690d8 (ph7eqhzzy84swdbcy4jbfmq2t58hvb11) first line plus case symptoms; that report named the workflow file. The hidden test is a new file at merge. The command runs only the tests that do not depend on hardening bundled in the same commit (tagging MERGE_SHA rather than HEAD, rejecting a malformed latest tag): the large-inventory no-op test is the SIGPIPE regression; the other three passed on base and guard against breakage.",
+      "notes": "Source: docs/rca/cases/2026-11-08-tag-selection-closes-git-output-early.md; PR #1830 (landed via 4ce770943a) repairing the PR #1770 failure; fix commit d218367219. Prompt is verbatim from the first user message of thread thr_16c350fec66f4b62bc75cb75751690d8 (ph7eqhzzy84swdbcy4jbfmq2t58hvb11, 2026-11-08T10:43:14Z, full read): the /goal repair handoff that the PR #1770 deploy coordinator (thread ph74sx0mzz3w0kgm9tdfmeqzms8hrv4h) wrote, so it is agent-authored, not typed by Andy. Kept: its failure report (Failed test/gate, Original native run, Exact error, Failed source, Original environment, Scope) and its Gate/Cause paragraph, unchanged; the cause candidates in that paragraph were in the original. Dropped: the leading /goal sentence and the closing deploy, Bugs-folder, custody and AgentCard paragraphs (deploy work the sandbox refuses), the 'Original exact script: see ... handoff.json' line (attachment not in the sandbox; the workflow file is in the repo), and the operational-recovery paragraph about tag v1.1.296. The hidden test is a new file at merge. The command runs only the tests that do not depend on hardening bundled in the same commit (tagging MERGE_SHA rather than HEAD, rejecting a malformed latest tag): the large-inventory no-op test is the SIGPIPE regression; the other three passed on base and guard against breakage.",
       "pr": 1770
     },
     {
@@ -530,7 +530,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-07-local-gate-slots-parked-test-suite-ledger-rows.md; real fix c8f71b1aff ('park history rows only for benchmark gates'); base is its parent. Re-paired 2026-11-09: the first pairing used 84c6e07d0a, the commit that introduced the bug. Hidden test: the Inventory class of scripts/tests/deploy-gates.test.py (test_only_benchmark_gates_park_history_rows plus the two slot-env expectations)."
+      "notes": "Source: docs/rca/cases/2026-11-07-local-gate-slots-parked-test-suite-ledger-rows.md; real fix c8f71b1aff ('park history rows only for benchmark gates'); base is its parent. Re-paired 2026-11-09: the first pairing used 84c6e07d0a, the commit that introduced the bug. Hidden test: the Inventory class of scripts/tests/deploy-gates.test.py (test_only_benchmark_gates_park_history_rows plus the two slot-env expectations). Prompt-source search 2026-11-09: No /rca invocation exists: the deploy agent of test-repair thread thr_d5e17805393f43a4810eb9179c120328 ('Test repair: background-agent-message-smoke titles') hit it in its own local gate cycle and fixed it there ('Gates are running on c8f71b1af, which adds a third infra fix: test-suite gates no longer park ledger rows', 11-07 19:18Z). Searches: \"deploy-ledger-park fixture rows attempts.jsonl\", \"attempt_ledger_records_run_id_and_outcome_class\". Prompt stays on case symptoms."
     },
     {
       "id": "rca-question-cutover-repeat",
@@ -594,7 +594,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-08-question-wait-completed-on-generation-handoff.md; PR #1859 (landed via 4e28dab648 at 2026-11-09T01:05Z = Nov 8 17:05 PST); fix commit bb5f25a22c. Prompt is the user's original wording from thread thr_4f2c46016cbe4d1088a7d57dc130723c (ph7eht76dg20r8qw9gr8fymcv98ht8rv), reassembled from search snippets.",
+      "notes": "Source: docs/rca/cases/2026-11-08-question-wait-completed-on-generation-handoff.md; PR #1859 (landed via 4e28dab648 at 2026-11-09T01:05Z = Nov 8 17:05 PST); fix commit bb5f25a22c. Prompt is the user's original wording from thread thr_4f2c46016cbe4d1088a7d57dc130723c (ph7eht76dg20r8qw9gr8fymcv98ht8rv). Message sent 2026-11-08T22:32:15Z. The thread's full first user message, verified on 2026-11-09 with `threads read --full`, also has a leading line '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful' and a Bug Report paragraph telling the agent to read and message other active bug threads before editing; the replay keeps only the /rca lines verbatim because it grades /rca alone and the sandbox refuses deploys.",
       "pr": 1859
     },
     {
@@ -659,7 +659,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-08-concurrent-deploy-selector-runpy-module-retired.md; PR #1770 (landed via 5066feea73); fix commit 7df366f750. Prompt from case Problem/symptoms (no originating thread found). Replaces rca-web-fetch-html-title, whose hidden test imports a constant (PAGE_METADATA_HEADER) that only the fix introduced. Only the concurrent-load test is run; the sibling failed-load test errors on base with KeyError '<run_path>' and may encode the fix's module-naming choice.",
+      "notes": "Source: docs/rca/cases/2026-11-08-concurrent-deploy-selector-runpy-module-retired.md; PR #1770 (landed via 5066feea73); fix commit 7df366f750. Prompt from case Problem/symptoms (no originating thread found). Replaces rca-web-fetch-html-title, whose hidden test imports a constant (PAGE_METADATA_HEADER) that only the fix introduced. Only the concurrent-load test is run; the sibling failed-load test errors on base with KeyError '<run_path>' and may encode the fix's module-naming choice. Prompt-source search 2026-11-09: No /rca invocation exists: the PR #1770 deploy coordinator (thread thr_c41e5302f95a4309952900330862d62a, the /goal that also carried rca-native-timestamp-local) hit it at its own quick stage and assigned the loader repair to helper thread ph7axhjy8m6qk88dz25zfv2fsd8hreph by peer message (full read: that thread's first message is an unrelated AgentCard custody task). Searches: \"dataclasses._is_type TaskRef AttributeError selector\", \"agentcard_release_stall_task\". Prompt stays on case symptoms.",
       "pr": 1770
     }
   ]

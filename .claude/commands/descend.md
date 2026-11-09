@@ -23,7 +23,7 @@ One full-slice run reaches a 95% pass rate (passing copies over scored copies, e
 | 6 | `INFRA_REPAIR` | On a 5% stop: fix the infra blockers now (ship with `/push` if production needs it), then rerun the same batch | see **Stopping conditions** |
 | 7 | `RCA_FAILURES` | Start one `/RCA` per failed task as it fails; RCAs dedupe themselves | gap: `scripts/descend handoff <task>` |
 | 8 | `ITERATION_RETRO` | Name the slowest step and apply one speedup, or record why none exists | `python3 scripts/descend_step_log.py report --slice $SLICE --task-count $N --lane main --window 5` |
-| 9 | `NEXT_BATCH_OR_ROTATION` | Only when every RCA's fix is applied or its 100-minute box has expired, go back to 3; an RCA that returned without a fix is resumed, never counted as done | — |
+| 9 | `NEXT_BATCH_OR_ROTATION` | Only when every RCA's fix is applied or its time box has expired, go back to 3; a diagnosis without an applied fix is not done (see **Fixes**) | — |
 | 10 | `RERUN_FULL_SLICE` | Once the batches have covered every task and pass at 95% or more, run the whole slice as one launch; below 95% returns to 7 | `scripts/run-bench <all tasks...> -k K --concurrency N` |
 | 11 | `FINAL_CHANGE_REVIEW` | Start `/deploy`; its approval step reviews the guarded changes | `/deploy` |
 | 12 | `DONE` / `BLOCKED` | Transition, then close the clock with verified counts | `python3 scripts/descend_step_log.py transition --step DONE ...` then `finish --status completed --run-terminal --detail scheduled_total=N --detail infra_failed=N` |
@@ -43,7 +43,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 ### Running benchmarks
 - Run every batch and rerun on the cloud fleet from the worktree holding the fixes; use `--local` only when the user asks.
 - Never split a batch across launches and never launch proof reruns; the next batch run is the outcome proof, and the only extra run is an RCA's granted single-task check under **Fixes**.
-- The run sub-agent works in the background so the parent stays free; it reads new failures from every sample (`summary.json` and the job logs) and the parent starts their RCAs at once, and every card is the CLI-rendered one published per `/benchmark` **Reporting**, never a hand-made table.
+- The run sub-agent works in the background so the parent stays unblocked; it reports each failure as it appears and the parent starts its RCA at once, never waiting for the batch to end.
 - A sharded (>32-copy) run needs a clean pushed commit, its executed SHA must be verified, and fixes never move its launch ref while it runs.
 - Never build or activate images in an ordinary descent; cold-image and mass-demo runs happen only when explicitly requested.
 - Capacity and admission follow `/benchmark`'s capacity checks, and speedups respect provider rate limits: `scripts/cloudbench-provider-limits.json` (`python3 scripts/cloudbench-provider-capacity.py cap`) and Fly's `machines_per_org_limit`.
@@ -75,7 +75,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 ## RCA per failure
 
 - INFRA means the environment failed before a trustworthy verdict; HARNESS means a trustworthy verdict failed real criteria, including a fallback that masks the required path; issue classes and the timeout and provider-limit evidence rules are in `/rca` **Classify**.
-- As each task fails, start one muted `/RCA` thread for it via `boxes-delegated-threads`, with its own worktree and non-overlapping files, the task's run, attempt and agent IDs, FE link, evaluator output, source SHA, scope and a 100-minute time box (91% of 140 recorded RCA lanes finished within 100 minutes); fixing starts while the batch still runs; each handoff copies that job's agent ID, FE link and attempt number from its job log into the prompt (a pointer to the log is not enough), every failed task gets its RCA (never skip or defer one for budget), the time box is wall-clock time and never a tool-call or token cap, and when managed threads are unavailable the same handoff starts as a native background sub-agent.
+- As each task fails, start one muted `/RCA` thread for it via `boxes-delegated-threads`, with its own worktree and non-overlapping files, the task's run, attempt and agent IDs, FE link, evaluator output, source SHA, scope and a 100-minute time box (91% of 140 recorded RCA lanes finished within 100 minutes); fixing starts while the batch still runs. The handoff carries that evidence itself, never a pointer to where it lives; every failed task gets its RCA, queued explicitly only while worker capacity is full; no other cap replaces its time box; and when managed threads are unavailable the same handoff starts as a background sub-agent.
 - RCAs dedupe themselves: each first checks the RCA ledger in state and `python3 scripts/rca_archive.py search <terms>` for the same defect and, if another RCA already owns it, hands its task to that owner with its evidence (run, attempt and agent IDs, FE link, the matching boundary) and stops; before writing a fix it posts its named defect (code site and mechanism) to the ledger, and the later of two RCAs naming the same site hands over the same way.
 - Never treat a shared symptom (failure string, evaluator, status, timeout, website or issue class) as the same defect.
 - Before blaming the agent, confirm the judge saw what the user sees and no inherited repo-default gate applies; prove evaluator defects with judge-only replays and count the verdicts they change.
@@ -85,7 +85,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 - At 90 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 100 minutes take what it handed back.
 - The next batch launches once every RCA's fix is applied or its time box expires; an expired RCA keeps its evidence, carries over, and never ships a guessed repair.
-- An RCA that returns before its box expires without an applied fix is resumed with its evidence; a diagnosis is not a fix, the next batch still waits, and budget never justifies leaving it unresumed (report a binding budget cap as a blocker instead).
+- An RCA that returns before its box expires without an applied fix is resumed with its evidence, since a passing diagnostic does not repair the failure, and the next batch still waits; only a measured binding limit stops it, reported as a blocker with that limit.
 - Each RCA proves its fix at the owning boundary with an isolated local repro and lands that regression in the owning suite; it never uses a full end-to-end benchmark rerun as proof.
 - When the fix needs an end-to-end check, the RCA asks the parent for a check slot; the parent grants it only when the task's recorded p90 plus 15 minutes of fleet startup ends before minute 85 and the provider and Fly budget hold the running batch plus every granted check.
 - With a slot, the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait` in the background, never `--local`, with `CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES` set to the batch's simultaneous width plus the granted checks; the check publishes no card and is not outcome proof, and if it is still running at minute 95 the RCA TERMs its exact controller and confirms release before handing back.
@@ -113,7 +113,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 ## Response contract
 
-- Render every card with `scripts/run-bench scorecard <run-dir> --html <file>` per `scripts/run-bench report-format` and publish it; the card shows the latest real batch or slice run, never a proof or recovery run.
+- Render every card with `scripts/run-bench scorecard <run-dir> --html <file>` per `scripts/run-bench report-format` and publish it per `/benchmark` **Reporting**, never hand-writing it; the card shows the latest real batch or slice run, never a proof or recovery run.
 - Show `Overall slice: <passed>/<original total>` and `Latest run: <passed>/<batch total>` with producer-artifact times; never put a batch denominator in the Overall slice field.
 - List each open RCA in ISSUES / NEXT ACTION with its tasks, named defect, owner and fix state.
 - Show the wall-clock trend, the largest step regression and improvement, and the retro's chosen speedup.
