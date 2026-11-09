@@ -33,6 +33,8 @@ from deploy_test_result import validate as validate_result
 
 ROOT = p.ROOT
 LAUNCHER = str(ROOT / 'scripts/deploy_test_github.py')
+# Read-only REST calls ask the GitHub token pool first; no scenario probes the real API (no member).
+os.environ['DEPLOY_GH_TOKEN_POOL'] = str(ROOT / 'scripts/tests/no-such-token-pool.py')
 RUNNER = 'blacksmith-8vcpu-ubuntu-2404'
 
 
@@ -734,6 +736,73 @@ class RestQuota(unittest.TestCase):
         self.assertEqual(pauses, [100.0])
         with self.assertRaises(gh.urllib.error.HTTPError):
             self.run_request(client, [self.limited(reset)], now=1_000_100.0)
+
+    def run_auth(self, client, outcomes, method='GET'):
+        """Like run_request, also recording each attempt's Authorization header."""
+        sent = []
+
+        class Response:
+            status, headers = 200, {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        class Opener:
+            def open(self, req, timeout):
+                sent.append(req.get_header('Authorization'))
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return Response()
+
+        pauses = []
+        with patch.object(gh.urllib.request, 'build_opener', return_value=Opener()), \
+             patch.object(gh.time, 'time', return_value=1_000_000.0), \
+             patch.object(gh.STOP, 'wait', side_effect=pauses.append), redirect_stdout(io.StringIO()):
+            status, _, _ = client.request(method, '/actions/runs/1')
+        return status, sent, pauses
+
+    def test_reads_use_the_pool_member_and_writes_keep_the_workflow_token(self):
+        # PR #1901 deploy, 2026-11-09: the primary token's quota ran out; the watcher waited 1007 s and
+        # spent the semantic-stack gate's whole deadline although its run had already succeeded.
+        picks = []
+        client = gh.GitHub('primary', 'acme/rose', repick=lambda: picks.append(1) or 'pool-app')
+        self.assertEqual(self.run_auth(client, [None]), (200, ['Bearer pool-app'], []))
+        self.assertEqual(self.run_auth(client, [None]), (200, ['Bearer pool-app'], []))
+        self.assertEqual(self.run_auth(client, [None], method='POST'), (200, ['Bearer primary'], []))
+        self.assertEqual(len(picks), 1, 'one pool pick serves every read until a limit')
+
+    def test_a_rate_limited_read_switches_member_without_waiting(self):
+        members = iter(['pool-a', 'pool-b'])
+        client = gh.GitHub('primary', 'acme/rose', repick=lambda: next(members))
+        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1003600'}
+        status, sent, pauses = self.run_auth(client, [self.limited(reset), None])
+        self.assertEqual((status, sent, pauses), (200, ['Bearer pool-a', 'Bearer pool-b'], []))
+        self.assertEqual(client.rate_limited_seconds, 0.0)
+
+    def test_every_member_limited_still_waits_for_the_reset(self):
+        client = gh.GitHub('primary', 'acme/rose', repick=lambda: 'pool-a')
+        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1000100'}
+        status, sent, pauses = self.run_auth(client, [self.limited(reset), None])
+        self.assertEqual((status, sent, pauses), (200, ['Bearer pool-a', 'Bearer pool-a'], [101.0]))
+
+    def test_a_pool_member_that_cannot_see_the_run_retries_with_the_workflow_token(self):
+        from email.message import Message
+        missing = gh.urllib.error.HTTPError('https://api.github.com/x', 404, 'Not Found', Message(),
+                                            io.BytesIO(b'{"message": "Not Found"}'))
+        client = gh.GitHub('primary', 'acme/rose', repick=lambda: 'pool-app')
+        self.assertEqual(self.run_auth(client, [missing, None]), (200, ['Bearer pool-app', 'Bearer primary'], []))
+
+    def test_no_pool_member_reads_with_the_workflow_token(self):
+        client = gh.GitHub('primary', 'acme/rose', repick=lambda: None)
+        self.assertEqual(self.run_auth(client, [None]), (200, ['Bearer primary'], []))
+        self.assertIsNone(gh.pool_read_token(ROOT), 'the suite stubs the pool to no member')
 
     def test_the_cancel_poll_is_conditional(self):
         polled = []

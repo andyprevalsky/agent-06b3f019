@@ -179,24 +179,45 @@ def rate_limit_pause(headers, now: float) -> float:
     return 60.0
 
 
+def pool_read_token(root: Path) -> str | None:
+    """The GitHub token pool's member with the most core quota left, for read-only REST calls
+    (CLAUDE.md "GitHub token pool"); None when the pool has no usable member. Every token of the
+    primary user shares one 5,000/h quota that other devbox threads drain; a wait on it once spent a
+    gate's whole deadline after its run had already succeeded (PR #1901 deploy, 2026-11-09)."""
+    from run_deploy_pipeline import gh_token_pool_argv  # one pool invocation for every deploy reader
+    try:
+        picked = subprocess.run(gh_token_pool_argv(root, os.environ), cwd=root, capture_output=True, text=True,
+                                timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    token = picked.stdout.strip()
+    return token if picked.returncode == 0 and token else None
+
+
 class GitHub:
-    def __init__(self, token: str, repo: str, deadline: float | None = None):
+    def __init__(self, token: str, repo: str, deadline: float | None = None, repick=None):
         self.token, self.repo, self.etags, self.cache = token, repo, {}, {}
+        # repick() -> a pool token for GET requests (None: read with `token`); writes always use `token`.
+        self.repick, self.read_token, self.picked = repick, None, False
         self.rate_limited_seconds = 0.0  # time spent waiting out the shared REST quota, for the receipt
         self.deadline = deadline  # epoch the caller must be done by; a rate-limit wait never passes it
         self.until = None  # epoch every request must finish by (the stop-cancel bound); None: 60 s per request
 
     def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
-        req = urllib.request.Request(url, method=method, headers={
-            'Authorization': f'Bearer {self.token}', 'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rose-deploy-gates'})
-        if conditional and url in self.etags:
-            req.add_header('If-None-Match', self.etags[url])
+        if method == 'GET' and self.repick is not None and not self.picked:
+            self.read_token, self.picked = self.repick(), True
+        pooled = method == 'GET' and self.read_token is not None and self.read_token != self.token
         opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
         for attempt in range(5):
             if self.until is not None and time.time() >= self.until:
                 raise urllib.error.URLError(f'stop-cancel bound exhausted before {method} {path}')
+            req = urllib.request.Request(url, method=method, headers={
+                'Authorization': f'Bearer {self.read_token if pooled else self.token}',
+                'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+                'User-Agent': 'rose-deploy-gates'})
+            if conditional and url in self.etags:
+                req.add_header('If-None-Match', self.etags[url])
             try:
                 timeout = 60.0 if self.until is None else max(0.5, min(60.0, self.until - time.time()))
                 with opener.open(req, timeout=timeout) as response:
@@ -210,7 +231,16 @@ class GitHub:
                     return 304, error.headers, None
                 if error.code in (301, 302, 303, 307, 308) and not redirect:
                     return error.code, error.headers, b''
-                if error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower():
+                limited = error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower()
+                if limited and self.repick is not None and method == 'GET':
+                    fresh = self.repick()  # another pool member may still have quota: no wait
+                    if fresh is not None and fresh != (self.read_token if pooled else self.token):
+                        self.read_token, pooled = fresh, fresh != self.token
+                        continue
+                if not limited and pooled and error.code in (401, 403, 404):
+                    pooled = False  # a pool member that cannot see the repo is not authoritative
+                    continue
+                if limited:
                     now = time.time()
                     pause = rate_limit_pause(error.headers, now)
                     if self.deadline is not None:
@@ -514,7 +544,7 @@ def launch(args) -> int:
         detail = error.stderr.decode(errors='replace')[-2000:] if isinstance(error, subprocess.CalledProcessError) else ''
         return finish(blocked(request, f'remote gate launch failed: {error} {detail}'.strip()))
     # Watching stops CANCEL_SECONDS early so a cancel still fits; a rate-limit wait keeps that window too.
-    gh = GitHub(token, repo, deadline=deadline)
+    gh = GitHub(token, repo, deadline=deadline, repick=lambda: pool_read_token(root))
     folder = result_path.parent / 'remote-artifact'
     try:
         channel = Channel(env_file_values(root))
