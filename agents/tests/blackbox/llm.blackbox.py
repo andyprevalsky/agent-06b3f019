@@ -5729,172 +5729,9 @@ async def test_check_progress_extracts_browser_recording_metadata_from_context()
     ]
 
 
-async def test_check_progress_accepts_completed_code_task_structured_response():
-    """Parent execute verifier accepts a finished code child structured response without an LLM call."""
-    from helpers.llm import check_progress
-
-    async def verifier_should_not_run(*_args, **_kwargs):
-        raise AssertionError("verifier should not run for completed code task output")
-
-    structured_response = {
-        "collatz_sequence": [
-            27,
-            82,
-            41,
-            124,
-            62,
-            31,
-            94,
-            47,
-            142,
-            71,
-            214,
-            107,
-            322,
-            161,
-            484,
-            242,
-            121,
-            364,
-            182,
-            91,
-            274,
-            137,
-            412,
-            206,
-            103,
-            310,
-            155,
-            466,
-            233,
-            700,
-            350,
-            175,
-            526,
-            263,
-            790,
-            395,
-            1186,
-            593,
-            1780,
-            890,
-            445,
-            1336,
-            668,
-            334,
-            167,
-            502,
-            251,
-            754,
-            377,
-            1132,
-            566,
-            283,
-            850,
-            425,
-            1276,
-            638,
-            319,
-            958,
-            479,
-            1438,
-            719,
-            2158,
-            1079,
-            3238,
-            1619,
-            4858,
-            2429,
-            7288,
-            3644,
-            1822,
-            911,
-            2734,
-            1367,
-            4102,
-            2051,
-            6154,
-            3077,
-            9232,
-            4616,
-            2308,
-            1154,
-            577,
-            1732,
-            866,
-            433,
-            1300,
-            650,
-            325,
-            976,
-            488,
-            244,
-            122,
-            61,
-            184,
-            92,
-            46,
-            23,
-            70,
-            35,
-            106,
-            53,
-            160,
-            80,
-            40,
-            20,
-            10,
-            5,
-            16,
-            8,
-            4,
-            2,
-            1,
-        ],
-        "total_steps": 111,
-        "python_script": {
-            "id": "file-1",
-            "path": "/home/user/collatz_27.py",
-            "storage_path": "uploads/collatz_27.py",
-        },
-    }
-    context = [
-        {"role": "USER", "text": "compute Collatz sequence from 27"},
-        {
-            "role": "TOOL",
-            "text": "Status: SUCCESS",
-            "metadata": {
-                "toolName": "spawn_claude_code_agent",
-                "toolStatus": "FINISHED",
-                "action_type": "task_complete",
-                "success": True,
-                "structured_response": structured_response,
-            },
-        },
-    ]
-
-    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
-        result = await check_progress(
-            context=context,
-            verifier_system_prompt="VERIFY",
-            response_schema={
-                "fields": [
-                    {"name": "collatz_sequence", "type": "list[int]"},
-                    {"name": "total_steps", "type": "int"},
-                    {"name": "python_script", "type": "file_pointer"},
-                ]
-            },
-            call_site="verifier_execute",
-        )
-
-    assert result["score"] == 1.0
-    assert result["structured_response"] == structured_response
-    assert result["usage"]["actual_model"] == "structured_response"
-
-
 def test_completed_code_task_rejects_failed_placeholder_structured_response():
     """A failed code child cannot satisfy the parent with empty schema defaults."""
-    from helpers.llm import _completed_child_task_structured_response, _structured_response_satisfies_schema
+    from helpers.llm import _structured_response_satisfies_schema
 
     schema = {
         "fields": [
@@ -5910,119 +5747,27 @@ def test_completed_code_task_rejects_failed_placeholder_structured_response():
         "collatz_step_count": 0,
         "collatz_sequence_from_27": [],
     }
-    # Required object/string/list outputs must carry useful values.  The
-    # success-metadata checks below remain a separate defense for schemas whose
-    # legitimate output can contain zero-valued primitives.
+    # Required object/string/list outputs must carry useful values.
     assert _structured_response_satisfies_schema(placeholder, schema) is False
 
-    for success_value in (False, None):
-        metadata = {
-            "toolName": "spawn_claude_code_agent",
-            "toolStatus": "FINISHED",
-            "action_type": "task_complete",
-            "structured_response": placeholder,
-        }
-        if success_value is not None:
-            metadata["success"] = success_value
-        assert _completed_child_task_structured_response([{"role": "TOOL", "metadata": metadata}], schema) is None
 
+async def test_check_progress_runs_the_llm_verifier_for_a_completed_child():
+    """Owner decision 2026-11-09: no deterministic accept of a completed child's output.
 
-def test_rejected_completed_child_handoff_is_scoped_to_source_child():
-    """A verifier rejection skips its child, without hiding an older valid one."""
-    from helpers.llm import (
-        _completed_child_handoff_identity,
-        _completed_child_task_structured_handoff,
-    )
-
-    schema = {"fields": [{"name": "answer", "type": "str", "required": True}]}
-
-    def completed_child(tool_call_id, answer):
-        return {
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": tool_call_id,
-                "toolName": "spawn_browser_agent",
-                "toolStatus": "FINISHED",
-                "action_type": "task_complete",
-                "success": True,
-                "structured_response": {"answer": answer},
-            },
-        }
-
-    newer_child_id = "browser-newer"
-    synthetic_id = f"completed-child-attempt-completion-{_completed_child_handoff_identity(newer_child_id)}-synthetic"
-    synthetic_marker = {
-        "role": "ASSISTANT",
-        "metadata": {
-            "tool_calls": [
-                {
-                    "tool": "attempt_completion",
-                    "tool_call_id": synthetic_id,
-                }
-            ]
-        },
-    }
-    base_context = [
-        completed_child("browser-older", "older valid answer"),
-        completed_child(newer_child_id, "newer rejected answer"),
-        synthetic_marker,
-    ]
-
-    # While that synthetic completion is being verified, its declaration is
-    # present but no verifier feedback exists yet. It must still fast-accept
-    # the newest child rather than call the verifier model unnecessarily.
-    assert _completed_child_task_structured_handoff(base_context, schema) == (
-        {"answer": "newer rejected answer"},
-        newer_child_id,
-    )
-
-    rejected_feedback = {
-        "role": "TOOL",
-        "metadata": {
-            "toolCallId": synthetic_id,
-            "toolName": "attempt_completion",
-            "toolStatus": "FINISHED",
-            "title": "⚖️ Verifier rejected (40%) — continue task",
-            "verifierMessage": True,
-        },
-    }
-    assert _completed_child_task_structured_handoff([*base_context, rejected_feedback], schema) == (
-        {"answer": "older valid answer"},
-        "browser-older",
-    )
-
-    # Non-polling loops append the same verifier result locally without the
-    # persistence-only verifierMessage marker. Its score title still scopes the
-    # rejection to this synthetic handoff.
-    local_rejected_feedback = {
-        "role": "TOOL",
-        "metadata": {
-            "toolCallId": synthetic_id,
-            "toolName": "attempt_completion",
-            "toolStatus": "FINISHED",
-            "title": "Progress: 40%",
-        },
-    }
-    assert _completed_child_task_structured_handoff([*base_context, local_rejected_feedback], schema) == (
-        {"answer": "older valid answer"},
-        "browser-older",
-    )
-
-    for legacy_success in (False, None):
-        old_result = completed_child("browser-unverified", "looks complete")
-        if legacy_success is None:
-            old_result["metadata"].pop("success")
-        else:
-            old_result["metadata"]["success"] = legacy_success
-        assert _completed_child_task_structured_handoff([old_result], schema) is None
-
-
-async def test_check_progress_accepts_completed_browser_task_structured_response():
-    """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
+    A finished browser child returned structured output covering every parent field;
+    the parent execute verifier still runs its normal LLM judgement.
+    """
     from helpers.llm import check_progress
 
-    async def verifier_should_not_run(*_args, **_kwargs):
-        raise AssertionError("verifier should not run for completed browser task output")
+    verifier_calls = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        verifier_calls.append(messages)
+        return {"score": 0.5, "reasoning": "needs the visible verdict"}, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
 
     structured_response = {
         "fcaptcha_risk_score_display": "0.16",
@@ -6046,7 +5791,7 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
         },
     ]
 
-    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+    with patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier), patch("temporalio.activity.heartbeat"):
         result = await check_progress(
             context=context,
             verifier_system_prompt="VERIFY",
@@ -6061,9 +5806,9 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
             call_site="verifier_execute",
         )
 
-    assert result["score"] == 1.0
-    assert result["structured_response"] == structured_response
-    assert result["usage"]["actual_model"] == "structured_response"
+    assert len(verifier_calls) == 1, "the normal LLM verifier must run"
+    assert result["score"] == 0.5
+    assert (result.get("usage") or {}).get("actual_model") != "structured_response"
 
 
 async def test_simulated_planner_sees_its_world_date_not_the_wall_clock():
@@ -11496,21 +11241,13 @@ async def run_all_tests():
         "call_llm_verifier_required_output_keys_bind_only_completion_verdicts",
         test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts,
     )
-    await r.record_async(
-        "check_progress_accepts_completed_code_task_structured_response",
-        test_check_progress_accepts_completed_code_task_structured_response,
-    )
     r.record(
         "completed_code_task_rejects_failed_placeholder_structured_response",
         test_completed_code_task_rejects_failed_placeholder_structured_response,
     )
-    r.record(
-        "rejected_completed_child_handoff_is_scoped_to_source_child",
-        test_rejected_completed_child_handoff_is_scoped_to_source_child,
-    )
     await r.record_async(
-        "check_progress_accepts_completed_browser_task_structured_response",
-        test_check_progress_accepts_completed_browser_task_structured_response,
+        "check_progress_runs_the_llm_verifier_for_a_completed_child",
+        test_check_progress_runs_the_llm_verifier_for_a_completed_child,
     )
     await r.record_async(
         "check_progress_propagates_resolved_demo_cache_tree_context",

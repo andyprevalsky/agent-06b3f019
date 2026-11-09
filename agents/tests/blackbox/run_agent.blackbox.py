@@ -3622,217 +3622,6 @@ async def test_run_verifier_dynamic_schema_getter():
     assert len(schema_calls) == 1
 
 
-async def test_completed_browser_output_forces_parent_completion_instead_of_second_browser():
-    """A verified browser result must complete without another model turn.
-
-    Regression: the simulated Amazon checkout browser returned a terminal,
-    schema-complete result, but the unrestricted next root turn spawned a second
-    browser session instead of calling attempt_completion. The parent verifier
-    already accepts this exact child output, so the runtime deterministically
-    dispatches the completion boundary instead of asking a model to repeat it.
-    """
-    from helpers.llm import call_llm_activity, check_progress
-    from loop import run_agent as run_mod
-
-    response_schema = {
-        "fields": [
-            {"name": "purchase_completed", "type": "bool", "required": True},
-            {"name": "order_confirmation_id", "type": "str", "required": True},
-        ]
-    }
-    context = [
-        {"role": "USER", "text": "Buy the item", "timestamp": "2026-07-21T00:00:00Z"},
-        {
-            "role": "ASSISTANT",
-            "text": "",
-            "timestamp": "2026-07-21T00:00:01Z",
-            "metadata": {
-                "tool_calls": [
-                    {
-                        "tool": "spawn_agent",
-                        "tool_call_id": "browser-one",
-                        "type": "browser",
-                        "goal": "Complete checkout",
-                        "output_schema": response_schema,
-                    }
-                ]
-            },
-        },
-        {
-            "role": "TOOL",
-            "text": "Browser automation complete",
-            "timestamp": "2026-07-21T00:00:02Z",
-            "metadata": {
-                "toolCallId": "browser-one",
-                "toolName": "spawn_browser_agent",
-                "toolStatus": "FINISHED",
-                "action_type": "task_complete",
-                "success": True,
-                "title": "Browser automation complete",
-                "structured_response": {
-                    "purchase_completed": True,
-                    "order_confirmation_id": "111-2222222-3333333",
-                },
-            },
-        },
-    ]
-    llm_calls = []
-    executed_tools = []
-
-    async def mock_execute_activity(fn, args=None, **_kwargs):
-        if fn is call_llm_activity:
-            llm_calls.append(args)
-            raise AssertionError("schema-complete child handoff must not call the LLM")
-        if fn is check_progress:
-            return {
-                "score": 1.0,
-                "reasoning": "The completed browser child supplied every required field.",
-                "structured_response": context[-1]["metadata"]["structured_response"],
-                "usage": {},
-            }
-        raise AssertionError(f"Unexpected activity: {fn}")
-
-    async def execute_tool(tool_name, _tool_args, _tool_call_id):
-        executed_tools.append(tool_name)
-        return {"message": f"{tool_name} complete"}
-
-    async def prompt():
-        return "System prompt"
-
-    with (
-        patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
-        patch.object(run_mod.asyncio, "sleep", new=AsyncMock()),
-    ):
-        result = await run_mod.run_agent(
-            agent_id="amazon-parent",
-            user_id="user-test",
-            system_prompt=prompt,
-            verifier_prompt_generator=prompt,
-            model="rose-labs/rose-1-flash",
-            tools=["spawn_agent", "attempt_completion"],
-            initial_context=context,
-            is_inside_temporal_activity=False,
-            post_message=AsyncMock(),
-            execute_tool=execute_tool,
-            max_iterations=2,
-            skip_status_updates=True,
-            response_schema=response_schema,
-            fast_mode_cache_enabled=True,
-        )
-
-    assert result["status"] == "completed"
-    assert executed_tools == ["attempt_completion"]
-    assert llm_calls == []
-
-
-async def test_completed_code_child_dispatches_parent_completion_without_llm():
-    """A terminal Claude Code result reaches the verifier without a model roundtrip."""
-    response_schema = {
-        "fields": [
-            {"name": "program_output", "type": "str", "required": True},
-            {"name": "step_count", "type": "int", "required": True},
-        ]
-    }
-    child_result = {"program_output": "27 82 41 ... 1", "step_count": 111}
-    context = [
-        {"role": "USER", "text": "Run the program", "timestamp": "2026-09-10T00:00:00Z"},
-        {
-            "role": "TOOL",
-            "text": "Claude Code completed successfully",
-            "timestamp": "2026-09-10T00:00:01Z",
-            "metadata": {
-                "toolCallId": "claude-one",
-                "toolName": "spawn_claude_code_agent",
-                "toolStatus": "FINISHED",
-                "action_type": "task_complete",
-                "success": True,
-                "structured_response": {"output": child_result},
-            },
-        },
-    ]
-
-    def fail_if_llm_called():
-        raise AssertionError("terminal code-child handoff must not call the LLM")
-
-    result, _, executed = await _run_single_iteration(
-        [],
-        [],
-        skip_verification=False,
-        initial_context=context,
-        response_schema=response_schema,
-        verifier_structured_response=child_result,
-        llm_tool_calls_factory=fail_if_llm_called,
-        max_iterations=2,
-    )
-
-    assert result["status"] == "completed"
-    assert result["structured_response"] == child_result
-    assert [item["tool_name"] for item in executed] == ["attempt_completion"]
-
-
-async def test_rejected_completed_child_handoff_returns_control_to_llm():
-    """A rejected synthetic completion is not replayed forever."""
-    cache_steps = []
-
-    async def record_cache_step(_agent_id, step):
-        cache_steps.append(step)
-
-    response_schema = {
-        "fields": [
-            {"name": "purchase_completed", "type": "bool", "required": True},
-            {"name": "order_confirmation_id", "type": "str", "required": True},
-        ]
-    }
-    child_result = {
-        "purchase_completed": True,
-        "order_confirmation_id": "111-2222222-3333333",
-    }
-    context = [
-        {"role": "USER", "text": "Buy the item", "timestamp": "2026-09-10T00:00:00Z"},
-        {
-            "role": "TOOL",
-            "text": "Browser automation complete",
-            "timestamp": "2026-09-10T00:00:01Z",
-            "metadata": {
-                "toolCallId": "browser-one",
-                "toolName": "spawn_browser_agent",
-                "toolStatus": "FINISHED",
-                "action_type": "task_complete",
-                "success": True,
-                "structured_response": child_result,
-            },
-        },
-    ]
-    llm_calls = 0
-
-    def corrective_llm_turn():
-        nonlocal llm_calls
-        llm_calls += 1
-        return [{"tool": "web_search", "query": "correct the rejected handoff"}]
-
-    with patch(
-        "providers.demo_cache.client.ensure_position_context",
-        new=AsyncMock(side_effect=record_cache_step),
-    ):
-        result, _, executed = await _run_single_iteration(
-            [],
-            [],
-            skip_verification=False,
-            initial_context=context,
-            response_schema=response_schema,
-            verifier_score=0.4,
-            verifier_reasoning="The parent still needs corrective work.",
-            verifier_structured_response=child_result,
-            llm_tool_calls_factory=corrective_llm_turn,
-            max_iterations=2,
-        )
-
-    assert result["status"] == "max_iterations"
-    assert llm_calls == 1
-    assert [item["tool_name"] for item in executed] == ["attempt_completion", "web_search"]
-    assert cache_steps == [1], "the synthetic completion must not consume a provider-cache position"
-
-
 async def test_verifier_usage_preserves_cache_sequence_identity():
     usage_calls = []
 
@@ -3885,20 +3674,21 @@ async def test_verifier_usage_does_not_invent_cache_sequence_identity():
     assert all(call["cache_sequence_id"] is None for call in verifier_calls)
 
 
-async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
-    """A schema-complete child dispatches completion without another LLM call."""
-    import providers.demo_cache.context as demo_cache_context
+async def test_completed_child_output_gets_a_normal_model_turn():
+    """Owner decision 2026-11-09: no forced "completed child" auto-complete.
 
+    A browser child returned structured output covering every parent field. The
+    parent still gets a normal model turn: the model is called, its own tool
+    choice runs, no attempt_completion is forced and no completion instruction is
+    injected into its messages.
+    """
     response_schema = {
         "fields": [
             {"name": "purchase_completed", "type": "bool", "required": True},
             {"name": "order_confirmation_id", "type": "str", "required": True},
         ]
     }
-    child_result = {
-        "purchase_completed": True,
-        "order_confirmation_id": "111-2222222-3333333",
-    }
+    child_result = {"purchase_completed": True, "order_confirmation_id": "111-2222222-3333333"}
     context = [
         {"role": "USER", "text": "Buy the item", "timestamp": "2026-07-21T00:00:00Z"},
         {
@@ -3931,123 +3721,34 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
             },
         },
     ]
-    cache_contexts = []
-    stream_sequences = []
-    stream_final_sequences = []
-    response_models = []
-    auth_calls = []
-    usage_reports = []
-    event_order = []
-    llm_call_count = 0
-    original_set_context = demo_cache_context.set_context
+    model_turns = []
+    built_messages = []
 
-    class CapturingBroadcaster:
-        def __init__(self, **_kwargs):
-            pass
+    def model_turn():
+        model_turns.append(1)
+        return [{"tool": "web_search", "query": "confirm the order status"}]
 
-        def update(self, _delta, sequence):
-            stream_sequences.append(sequence)
+    def build_messages(_context, prompt):
+        messages = [{"role": "system", "content": prompt}]
+        built_messages.append(messages)
+        return messages
 
-        def reset(self):
-            pass
-
-        async def aclose(self, *, final_delta, final_sequence, await_done_broadcast):
-            del final_delta, await_done_broadcast
-            stream_final_sequences.append(final_sequence)
-
-        async def adispose(self):
-            pass
-
-    def capture_cache_context(cache_context):
-        cache_contexts.append((cache_context.read_enabled, cache_context.should_write, cache_context.base_step))
-        return original_set_context(cache_context)
-
-    def replay_while_cache_is_active():
-        nonlocal llm_call_count
-        llm_call_count += 1
-        event_order.append(f"llm_{llm_call_count}")
-        cache_context = demo_cache_context.current_context()
-        if cache_context is not None and cache_context.active:
-            return [{"tool": "web_search", "query": "replayed rejected response"}]
-        return [{"tool": "attempt_completion"}]
-
-    async def capture_usage(tokens_in, tokens_out, actual_model, **metadata):
-        usage_reports.append((tokens_in, tokens_out, actual_model, metadata))
-        event_order.append(f"usage_{actual_model}")
-
-    async def capture_pause_check():
-        if event_order and event_order[-1].startswith("usage_"):
-            event_order.append("pause_check_after_usage")
-        return False
-
-    from pydantic import BaseModel, Field
-
-    class CustomBrowserAction(BaseModel):
-        response: str = ""
-        tool_calls: list = Field(default_factory=list)
-
-    with (
-        patch.object(demo_cache_context, "set_context", side_effect=capture_cache_context),
-        patch.object(demo_cache_context, "write_through_enabled_for_user", return_value=False),
-        patch("loop.run_agent.CoalescingStreamBroadcaster", CapturingBroadcaster),
-        patch("loop.run_agent.activity.heartbeat"),
-    ):
-        result, _, executed = await _run_single_iteration(
+    with patch("loop.run_agent.activity.heartbeat"):
+        _result, _, executed = await _run_single_iteration(
             [],
-            [("attempt_completion", "completion-tool", 1.0)],
+            [("web_search", "model-web-search", 1.0)],
             skip_verification=False,
             initial_context=context,
             response_schema=response_schema,
             verifier_structured_response=child_result,
-            llm_tool_calls_factory=replay_while_cache_is_active,
-            llm_chunk_texts_sequence=["wrong tool", "required tool"],
-            llm_usages_sequence=[
-                {
-                    "prompt_tokens": 11,
-                    "completion_tokens": 2,
-                    "total_tokens": 13,
-                    "cache_read_input_tokens": 3,
-                    "actual_model": "rejected-model",
-                    "gpt_token_rotated": True,
-                    "compute_token_used": {
-                        "type": "gpt",
-                        "source": "pool",
-                        "poolTokenId": "pool-token-2",
-                        "lineageKey": "agent:agent-test",
-                    },
-                },
-                {
-                    "prompt_tokens": 7,
-                    "completion_tokens": 5,
-                    "total_tokens": 12,
-                    "actual_model": "accepted-model",
-                },
-            ],
-            llm_response_models=response_models,
-            llm_auth_calls=auth_calls,
-            fast_mode_cache_enabled=True,
-            goal_text="complete from verified child",
-            response_model=CustomBrowserAction,
-            on_tokens_override=capture_usage,
-            check_paused_override=capture_pause_check,
-            gpt_token="stale-gpt-token",
-            gpt_account_id="stale-gpt-account",
+            llm_tool_calls_factory=model_turn,
+            build_messages_override=build_messages,
         )
-    original_set_context(None)
 
-    assert result["status"] == "completed"
-    assert [item["tool_name"] for item in executed] == ["attempt_completion"]
-    assert llm_call_count == 0
-    assert cache_contexts == []
-    assert stream_sequences == []
-    assert stream_final_sequences == []
-    assert response_models == []
-    assert auth_calls == []
-    assert len(usage_reports) == 1
-    assert usage_reports[0][:3] == (5, 6, None)
-    assert usage_reports[0][3]["call_site"] == "verifier_execute"
-    assert result["tokens_in"] >= 5
-    assert result["tokens_out"] >= 6
+    assert len(model_turns) == 1, "the parent must get a normal model turn"
+    assert [item["tool_name"] for item in executed] == ["web_search"], executed
+    sent = [str(message.get("content")) for messages in built_messages for message in messages]
+    assert not any("previously delegated browser or code task" in text for text in sent), sent
 
 
 async def test_pause_after_forced_completion_llm_still_dispatches_attempt_completion():
@@ -4807,20 +4508,8 @@ async def run_all_tests():
         test_verifier_reloads_prompt_and_schema_until_requirement_revision_matches,
     )
     await r.record_async(
-        "completed_browser_output_forces_parent_completion",
-        test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
-    )
-    await r.record_async(
-        "completed_child_bypasses_llm_and_demo_cache",
-        test_completed_child_required_tool_is_enforced_inside_direct_activity,
-    )
-    await r.record_async(
-        "completed_code_child_dispatches_parent_completion_without_llm",
-        test_completed_code_child_dispatches_parent_completion_without_llm,
-    )
-    await r.record_async(
-        "rejected_completed_child_handoff_returns_control_to_llm",
-        test_rejected_completed_child_handoff_returns_control_to_llm,
+        "completed_child_output_gets_a_normal_model_turn",
+        test_completed_child_output_gets_a_normal_model_turn,
     )
     await r.record_async(
         "pause_after_forced_completion_llm_still_dispatches_attempt_completion",
