@@ -2130,6 +2130,15 @@ finish(fleet, benches[30], "1", "INFRA_ERROR")
 results += [first["infra_jobs"], first["scheduled_total"], first["infra_job_ids"] == benches[:30],
             first["schema"], [a["status"] for a in attempts[benches[104]]], attempts[benches[102]][0]["status"],
             stop(fleet, benches, receipt) == first]
+# An unreadable receipt still records a breach: it keeps stopping (with the current count while the
+# fleet still breaches) and is never overwritten.
+corrupt = fleet / "corrupt.json"
+corrupt.write_text("{")
+empty = root / "empty"
+empty.mkdir()
+(empty / "corrupt.json").write_text("")
+results += [stop(fleet, benches, corrupt)["infra_jobs"], stop(empty, benches, empty / "corrupt.json")["infra_jobs"],
+            corrupt.read_text()]
 os.environ["CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP"] = "disabled"
 results.append(stop(fleet, benches, fleet / "disabled.json"))
 print(json.dumps(results))`,
@@ -2155,9 +2164,60 @@ print(json.dumps(results))`,
       ["replaced", "finished"],
       "cancelled",
       true,
+      31,
+      "recorded",
+      "{",
       null,
     ]);
   });
+});
+
+test("the fleet child watch ignores a live PID that is no longer its own child", () => {
+  const work = path.join(workRoot, "fleet-watch-reused-pid");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  // The real wait loop around one own child that exits without its marker and a
+  // PID owned by an unrelated live process (as after PID reuse). The old
+  // kill -0 fallback kept this deadline-free watch open until that process exited.
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; FLEET_DIR="$2/fleet"; FOREIGN="$3"
+for name in fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+    body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+    [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
+    eval "$body"
+done
+FLEET_INFRA_STOP_SENT=0; INFRA_PROBE=0; RUN_BENCH_CAMPAIGN_CHILD=1
+mkdir -p "$FLEET_DIR/own" "$FLEET_DIR/reused"
+( sleep 0.3 ) &
+CHILD_PIDS=("$!" "$FOREIGN"); CHILD_OUT=("$FLEET_DIR/own" "$FLEET_DIR/reused")
+fleet_wait_children_for_infra_stop
+echo "RETURNED"
+`,
+  );
+  const foreign = spawn("sleep", ["60"], { stdio: "ignore" });
+  try {
+    const result = spawnSync(
+      "bash",
+      [
+        driver,
+        path.join(sourceRoot, "scripts/run-bench-fleet"),
+        work,
+        String(foreign.pid),
+      ],
+      {
+        env: { ...process.env, FLEET_INFRA_STOP_POLL_SECONDS: "0.1" },
+        encoding: "utf8",
+        timeout: 20_000,
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /RETURNED/);
+  } finally {
+    foreign.kill("SIGTERM");
+  }
 });
 
 test(
@@ -2175,7 +2235,7 @@ test(
       `#!/usr/bin/env bash
 set -uo pipefail
 FLEET_SOURCE="$1"; WORK="$2"; ROOT_DIR="$3"; FLEET_DIR="$WORK/fleet"
-for name in fleet_job_running fleet_job_may_be_running fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+for name in fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
     body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
     [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
     eval "$body"

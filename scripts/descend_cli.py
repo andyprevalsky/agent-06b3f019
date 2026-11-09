@@ -48,7 +48,10 @@ def fleet_of(log: Path, job_id: str) -> Path:
         raise Missing(f"job {job_id}: missing job log {log}")
     for line in log.read_text(errors="replace").splitlines():
         if "/scripts/run-bench monitor " in line:
-            fields = shlex.split(line.strip())
+            try:
+                fields = shlex.split(line.strip())
+            except ValueError as error:
+                raise Missing(f"job {job_id}: unreadable 'run-bench monitor' line in {log} ({error})") from error
             if "monitor" in fields[:-1]:
                 return Path(fields[fields.index("monitor") + 1])
     raise Missing(f"job {job_id}: missing fleet run directory (no 'run-bench monitor' line in {log})")

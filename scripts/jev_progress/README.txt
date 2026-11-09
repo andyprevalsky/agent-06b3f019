@@ -113,9 +113,11 @@ R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_TRACE_ARCHIVE and
 TRACE_ARCHIVE_ENCRYPTION_KEY_B64 use the existing private trace bucket.
 Production DB comes from explicit JEV_PROD_DATABASE_URL or back-end/.env's
 DATABASE_URL, not the commonly injected local development DATABASE_URL.
-All SQL runs with default_transaction_read_only and a 25-second timeout, and
-production.py also wraps every query in explicit BEGIN READ ONLY / ROLLBACK:
-transaction-pooling proxies may ignore startup PGOPTIONS.
+All SQL runs with default_transaction_read_only and a 25-second statement
+timeout set through startup PGOPTIONS, and production.py also wraps every query
+in explicit BEGIN READ ONLY / ROLLBACK: transaction-pooling proxies may ignore
+startup PGOPTIONS. Behind such a proxy the read-only transaction still holds,
+but only the 90-second psql subprocess timeout bounds a query.
 
 One-time bootstrap (fails if an existing research head is present):
   agents/venv/bin/python scripts/jev_progress/weekly.py bootstrap --dataset .context/progress-jev-xp/training-success-v2 --prompt .context/progress-jev-xp/optimization/winner.json

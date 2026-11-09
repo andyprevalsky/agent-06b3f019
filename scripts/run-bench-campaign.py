@@ -951,11 +951,17 @@ def fleet_infra_stop(fleet_dir: Path, benches: list[str], receipt: Path) -> dict
     The frozen schedule is the fleet's requested benches. The first breach is
     written once and returned unchanged on every later evaluation.
     """
+    scheduled = list(dict.fromkeys(benches))
     try:
         return json.loads(receipt.read_text())
     except FileNotFoundError:
         pass
-    scheduled = list(dict.fromkeys(benches))
+    except ValueError as error:
+        # Only a breach writes the receipt, so an unreadable one still records a breach: keep
+        # stopping (never continue past it), with the current count when it still breaches.
+        current = infra_stop_receipt(fleet_infra_jobs(fleet_dir, scheduled), len(scheduled), infra_stop_policy())
+        return current or {"infra_jobs": "recorded", "scheduled_total": len(scheduled),
+                           "infra_job_ids": [f"unreadable breach receipt {receipt}: {error}"]}
     jobs = fleet_infra_jobs(fleet_dir, scheduled)
     breach = infra_stop_receipt(jobs, len(scheduled), infra_stop_policy())
     if breach is None:

@@ -19642,6 +19642,20 @@ sys.exit(runpy.run_path(sys.argv[1])["fleet_infra_stop_main"](sys.argv[2:]))' \
     kill -TERM "${BASHPID:-$$}"
 }
 
+# A child counts as running while `jobs -pr` lists it or, when a loaded
+# controller's `jobs -pr` misses it, while its PID is still this controller's
+# own child. This watch has no deadline, so a PID reused by an unrelated
+# process after the child exited must never keep it open.
+fleet_child_pid_is_ours() {  # fleet_child_pid_is_ours <pid>
+    local pid="${1:-}" parent
+    fleet_job_running "$pid" && return 0
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$parent" ] && [ "$parent" = "$$" ]
+}
+
 # Watch the children until each has finished, re-evaluating the infra stop
 # whenever another child finishes. Exit codes are still reaped by `wait` after.
 fleet_wait_children_for_infra_stop() {
@@ -19651,7 +19665,7 @@ fleet_wait_children_for_infra_stop() {
         for j in "${!CHILD_PIDS[@]}"; do
             if [ -e "${CHILD_OUT[$j]}/benchmark-child.finished" ]; then
                 finished=$((finished + 1))
-            elif fleet_job_may_be_running "${CHILD_PIDS[$j]}"; then
+            elif fleet_child_pid_is_ours "${CHILD_PIDS[$j]}"; then
                 live=$((live + 1))
             fi
         done
