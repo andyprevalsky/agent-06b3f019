@@ -93,8 +93,8 @@ class ReviewCycleTest(unittest.TestCase):
             )
 
 
-class SyncInheritanceTest(unittest.TestCase):
-    """A main-sync-only HEAD may inherit a clean review; anything else may not."""
+class SyncRepoFixture(unittest.TestCase):
+    """A feature branch with one clean reviewed HEAD and a moved main (no tests of its own)."""
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -150,6 +150,10 @@ class SyncInheritanceTest(unittest.TestCase):
     def inherit(self, head: str) -> dict:
         return MODULE.inherit_sync(self.state_path, head=head, base="main", repo=self.repo)
 
+
+class SyncInheritanceTest(SyncRepoFixture):
+    """A main-sync-only HEAD may inherit a clean review; anything else may not."""
+
     def test_generated_index_conflict_sync_inherits_and_is_mergeable(self) -> None:
         head = self.sync()
         entry = self.inherit(head)
@@ -197,6 +201,68 @@ class SyncInheritanceTest(unittest.TestCase):
         later = self.commit("new code after sync")
         cycle = MODULE.start_cycle(self.state_path, head=later, kind="incremental")
         self.assertEqual(cycle["number"], 2)
+
+
+class PostCapUnreviewedTest(SyncRepoFixture):
+    """After three delivered rounds and the cap, later changes are recorded as merged unreviewed."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Replace the inherited clean initial cycle with three delivered rounds ending clean.
+        self.state_path.unlink()
+        heads = [self.reviewed]
+        for text in ("one\nfeature v2\n", "one\nfeature v3\n"):
+            self.write("app.py", text)
+            heads.append(self.commit("fix"))
+        for kind, head, result in (("initial", heads[0], "findings"), ("incremental", heads[1], "findings"),
+                                   ("verification", heads[2], "clean")):
+            MODULE.start_cycle(self.state_path, head=head, kind=kind, reset=kind == "initial")
+            MODULE.finish_cycle(self.state_path, head=head, result=result)
+        self.final = heads[2]
+
+    def record(self, head: str) -> dict:
+        return MODULE.post_cap_unreviewed(self.state_path, head=head, base="main", repo=self.repo,
+                                          reason="user pre-authorization: skip review after 3 rounds")
+
+    def test_conflicting_sync_and_later_commit_are_recorded_unreviewed_and_mergeable(self) -> None:
+        head = self.sync(extra={"app.py": "one\nfeature v3\nresolved with main\n"})
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "post-cap-unreviewed"):
+            self.inherit(head)
+        self.write("tool.py", "x\n")
+        later = self.commit("tooling after the cap")
+        entry = self.record(later)
+        self.assertEqual((entry["kind"], entry["disposition"], entry["inherited_from"]),
+                         ("post-cap-unreviewed", "unreviewed", self.final))
+        self.assertIn("app.py", entry["changed_files"])
+        self.assertIn("tool.py", entry["changed_files"])
+        self.assertIn("merged unreviewed", entry["report_row"])
+        self.assertEqual(MODULE.require_mergeable(self.state_path, head=later)["head"], later)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap reached"):
+            MODULE.next_cycle(MODULE.read_state(self.state_path)["cycles"])
+
+    def test_refused_before_the_cap_or_with_open_findings(self) -> None:
+        state = MODULE.read_state(self.state_path)
+        state["cycles"][-1]["result"] = "findings"
+        MODULE.write_state(self.state_path, state)
+        head = self.sync()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "override"):
+            self.record(head)
+        state["cycles"] = state["cycles"][:1]
+        state["cycles"][0]["result"] = "clean"
+        MODULE.write_state(self.state_path, state)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap is not reached"):
+            self.record(head)
+
+    def test_quota_skips_are_not_delivered_rounds(self) -> None:
+        state = MODULE.read_state(self.state_path)
+        state["cycles"][0].update(result="clean", disposition="skipped", skip_reason="usage-cap")
+        MODULE.write_state(self.state_path, state)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap is not reached"):
+            self.record(self.sync())
+
+    def test_reason_is_required(self) -> None:
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "--reason"):
+            MODULE.post_cap_unreviewed(self.state_path, head=self.sync(), base="main", repo=self.repo, reason=" ")
 
 
 class ApprovedFinalVerificationTest(unittest.TestCase):

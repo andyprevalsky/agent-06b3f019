@@ -37,8 +37,9 @@ UNAVAILABLE = "unavailable"
 KIND_BY_POSITION = {1: "initial", 2: "incremental", 3: "verification"}
 SYNC_KIND = "sync-inherited"
 NO_REVIEW_KIND = "no-reviewable-paths"
+POST_CAP_KIND = "post-cap-unreviewed"
 # Audited entries that carry or need no CodeRabbit review; never part of the cap.
-UNCOUNTED_KINDS = frozenset({SYNC_KIND, NO_REVIEW_KIND})
+UNCOUNTED_KINDS = frozenset({SYNC_KIND, NO_REVIEW_KIND, POST_CAP_KIND})
 CODERABBIT_CONFIG = ".coderabbit.yaml"
 # Files regenerated from the merged tree after a main sync. Their content is
 # derived, so a sync may change them without new review.
@@ -319,7 +320,8 @@ def inherit_sync(
     reviewed_diff = branch_diff(repo, source, base_sha)
     synced_diff = branch_diff(repo, head, base_sha)
     if reviewed_diff != synced_diff:
-        raise ReviewCycleError("branch diff differs from the reviewed diff; review the change")
+        raise ReviewCycleError("branch diff differs from the reviewed diff; review the change "
+                               f"(after the {MAX_REVIEW_CYCLES}-cycle cap: `{POST_CAP_KIND}`)")
     fork = git(repo, "merge-base", source, base_sha).strip()
     main_side = changed_files(repo, fork, base_sha)
     unexpected = sorted(changed_files(repo, source, head) - main_side - GENERATED_PATHS)
@@ -341,6 +343,66 @@ def inherit_sync(
         "started_at": now(),
         "finished_at": now(),
     }
+    entries.append(entry)
+    write_state(path, state)
+    return entry
+
+
+def post_cap_unreviewed(path: Path, *, head: str, base: str, repo: Path, reason: str) -> dict[str, object]:
+    """Record changes after the three-cycle cap as merged unreviewed, never as reviewed.
+
+    The standing user pre-authorization (2026-10-18, reaffirmed 2026-10-27) allows merging without another
+    cycle after three review rounds. A conflicting main sync then changes the branch diff, which
+    ``inherit-sync`` rightly refuses, and the ledger refuses a fourth cycle. This entry needs three delivered
+    rounds (quota skips never count), the cap reached and a clean final cycle (defer its findings with
+    ``override`` first). It names every file changed since the reviewed HEAD.
+    """
+    if not reason.strip():
+        raise ReviewCycleError("--reason must name the user authorization and why review cannot run")
+    state = read_state(path)
+    entries = state["cycles"]
+    assert isinstance(entries, list)
+    cycles = review_cycles(entries)
+    if not cycles or cycles[-1].get("status") != "completed":
+        raise ReviewCycleError("post-cap recording needs a completed review cycle")
+    if cycles[-1].get("result") != "clean":
+        raise ReviewCycleError(
+            f"latest review result is {cycles[-1].get('result')}; defer its findings with `override` first"
+        )
+    budget = budget_cycles(entries)
+    delivered = sum(c.get("disposition") != "skipped" and not c.get("skip_reason") for c in budget)
+    if len(budget) < MAX_REVIEW_CYCLES or delivered < MIN_OVERRIDE_ROUNDS:
+        raise ReviewCycleError(
+            f"the review cap is not reached ({len(budget)} cycles, {delivered} delivered rounds); "
+            "request the next review cycle"
+        )
+    source = resolve(repo, str(entries[-1].get("head")))
+    head = resolve(repo, head)
+    if head == source:
+        raise ReviewCycleError("HEAD is already recorded")
+    if not is_ancestor(repo, source, head):
+        raise ReviewCycleError("recorded HEAD is not an ancestor of HEAD")
+    base_sha = resolve(repo, base)
+    entry = {
+        "number": len(entries) + 1,
+        "kind": POST_CAP_KIND,
+        "head": head,
+        "status": "completed",
+        "result": "clean",
+        "disposition": "unreviewed",
+        "inherited_from": source,
+        "base": base_sha,
+        "reviewed_branch_diff_sha256": hashlib.sha256(branch_diff(repo, source, base_sha).encode()).hexdigest(),
+        "branch_diff_sha256": hashlib.sha256(branch_diff(repo, head, base_sha).encode()).hexdigest(),
+        "changed_files": sorted(changed_files(repo, source, head)),
+        "reason": reason,
+        "started_at": now(),
+        "finished_at": now(),
+    }
+    entry["report_row"] = (
+        f"Code Review | \u26a0\ufe0f Overridden | merged unreviewed after the {MAX_REVIEW_CYCLES}-cycle cap: "
+        f"{len(entry['changed_files'])} file(s) changed since {source[:9]} ({reason})"
+    )
     entries.append(entry)
     write_state(path, state)
     return entry
@@ -1202,6 +1264,14 @@ def parse_args() -> argparse.Namespace:
     inherit.add_argument("--base", default="origin/main")
     inherit.add_argument("--repo", type=Path, default=Path.cwd())
 
+    post_cap = subparsers.add_parser(
+        POST_CAP_KIND, help="after the 3-cycle cap, record later changes (e.g. a conflicting main sync) as merged unreviewed"
+    )
+    post_cap.add_argument("--head", required=True)
+    post_cap.add_argument("--base", default="origin/main")
+    post_cap.add_argument("--repo", type=Path, default=Path.cwd())
+    post_cap.add_argument("--reason", required=True, help="the user authorization and why review cannot run")
+
     unreviewable = subparsers.add_parser(
         NO_REVIEW_KIND, help="record a HEAD whose changed paths CodeRabbit's path filters all exclude"
     )
@@ -1249,6 +1319,11 @@ def main() -> int:
             payload = inherit_sync(
                 args.state, head=args.head, base=args.base, repo=args.repo
             )
+        elif args.command == POST_CAP_KIND:
+            payload = post_cap_unreviewed(
+                args.state, head=args.head, base=args.base, repo=args.repo, reason=args.reason
+            )
+            print(payload["report_row"])
         elif args.command == NO_REVIEW_KIND:
             payload = record_no_reviewable_paths(
                 args.state, head=args.head, repo=args.repo, base=args.base, reset=args.reset, pr=args.pr,
