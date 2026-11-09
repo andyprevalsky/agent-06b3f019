@@ -133,6 +133,15 @@ if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
   export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
 fi
 
+# Explicit fixture opt-in for isolated phone-capable owning suites, never product defaults.
+# Respect caller-provided 0 so denial/rollout suites can run the real OFF branch.
+if [[ "$USE_EXISTING_BACKEND" != "1" && -z "${CLOUD_IPHONE_ENABLED+x}" ]]; then
+  case ",${1:-all}," in
+    *,all,*|*,iphone,*|*,iphone-control,*|*,iphone-interactions,*|*,iphone-rls,*|*,auth-assistance,*|*,sms-supervisor,*|*,attention-requests,*)
+      export CLOUD_IPHONE_ENABLED=1 ;;
+  esac
+fi
+
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
   if [[ "$arg" == "--list" ]]; then

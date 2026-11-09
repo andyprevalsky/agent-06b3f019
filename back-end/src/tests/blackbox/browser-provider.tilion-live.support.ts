@@ -139,96 +139,148 @@ function readExitIpWithRetry(wsUrl: string, previousIp?: string): Promise<string
   );
 }
 
+const NAME_NOT_RESOLVED = 'net::ERR_NAME_NOT_RESOLVED';
+/**
+ * From the gate network 16 of 34 serial direct sessions landed on the DNS-dead worker,
+ * 6 of 15 right after another dead one (longest run 2; 5 under parallel load). Eight
+ * sessions leave ~0.08% residual failure; a dead session fails in ~1 s.
+ */
+const DIRECT_SESSION_LIMIT = 8;
+
+/**
+ * A direct (`exit: worker`) Tilion session resolves DNS on the worker it lands on, and
+ * Tilion round-robins a client's sessions across its workers. On 2026-11-08 one worker
+ * failed every lookup of every session from the gate network (130/130, still failing
+ * after 1 s/2 s/4 s waits) while its peer resolved all 110, so a same-session retry
+ * cannot recover. `use` runs on each new session; a session whose use fails with
+ * ERR_NAME_NOT_RESOLVED is released and replaced. Any other failure, or a DNS failure
+ * on the `maxSessions`th session, releases the session and surfaces natively.
+ */
+export async function acquireResolvingSession<S extends { sessionId: string }>(
+  create: () => Promise<S>,
+  use: (session: S) => Promise<void>,
+  release: (session: S) => Promise<void>,
+  maxSessions: number
+): Promise<S> {
+  for (let attempt = 1; ; attempt++) {
+    const session = await create();
+    try {
+      await use(session);
+      return session;
+    } catch (error) {
+      await release(session).catch((releaseError: unknown) =>
+        console.warn(`[tilion-live] could not release session ${session.sessionId}:`, releaseError)
+      );
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === maxSessions || !message.includes(NAME_NOT_RESOLVED)) throw error;
+      console.warn(
+        `[tilion-live] replacing session ${session.sessionId} (${attempt}/${maxSessions}): ` +
+          `its worker could not resolve DNS: ${message.split('\n')[0]}`
+      );
+    }
+  }
+}
+
+/** The checks made while this test's CDP client is attached to the session. */
+async function assertAttachedVendorContract(sessionId: string, connectUrl: string): Promise<void> {
+  assert(connectUrl !== '', 'Tilion create returned no connect_url (raw CDP not enabled?)');
+  await withPage(connectUrl, async (page, browser) => {
+    await navigateKernelPage(page, 'https://example.com');
+    const second = await secondCdpClientOutcome(connectUrl);
+    assert(
+      second.closeCode === 4409,
+      `second CDP client was not refused with 4409: ${JSON.stringify(second)}`
+    );
+    assert(browser.isConnected(), 'first CDP client was dropped by the refused second client');
+    assert((await page.title()) === 'Example Domain', 'first CDP client stopped working');
+    const cdp = await page.context().newCDPSession(page);
+    let targetId: string;
+    try {
+      targetId = (await cdp.send('Target.getTargetInfo')).targetInfo.targetId;
+    } finally {
+      await cdp.detach();
+    }
+    const viewport = () =>
+      page.evaluate(() => ({
+        url: location.href,
+        width: innerWidth,
+        height: innerHeight,
+        scrollX,
+        scrollY,
+      }));
+    const before = await viewport();
+    const shot = await tilionApi('POST', `/v1/session/${sessionId}/screenshot`, {});
+    const body = shot.body as {
+      ok?: boolean;
+      beside_client?: boolean;
+      format?: string;
+      full_page?: boolean;
+      image_base64?: string;
+      data_url?: string;
+      size_b64?: number;
+      tab_id?: string;
+      url?: string;
+    } | null;
+    assert(
+      shot.status === 200 && body?.ok === true,
+      `REST screenshot while CDP attached: HTTP ${shot.status}, ok=${String(body?.ok)}`
+    );
+    assert(body?.beside_client === true, 'attached screenshot missing beside_client=true');
+    assert(
+      body.tab_id === targetId && body.url === before.url,
+      'attached screenshot does not match the original CDP target'
+    );
+    const encoded = body.image_base64 ?? '';
+    const jpeg = Buffer.from(encoded, 'base64');
+    assert(
+      body.format === 'jpeg' &&
+        body.full_page === false &&
+        jpeg.length > 4 &&
+        jpeg.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])) &&
+        jpeg.subarray(-2).equals(Buffer.from([0xff, 0xd9])) &&
+        jpeg.toString('base64') === encoded &&
+        body.size_b64 === encoded.length &&
+        body.data_url === `data:image/jpeg;base64,${encoded}`,
+      'attached screenshot did not return a complete viewport JPEG'
+    );
+    try {
+      const decoded = decodeJpeg(jpeg, { useTArray: true, tolerantDecoding: false });
+      assert(
+        decoded.width > 0 &&
+          decoded.height > 0 &&
+          decoded.data.length === decoded.width * decoded.height * 4,
+        'attached screenshot JPEG has no pixels'
+      );
+    } catch (error) {
+      throw new Error(`attached screenshot JPEG decode failed: ${String(error)}`);
+    }
+    assert(browser.isConnected(), 'first CDP client disconnected after screenshot');
+    assert((await page.title()) === 'Example Domain', 'first CDP client failed after screenshot');
+    assert(
+      JSON.stringify(await viewport()) === JSON.stringify(before),
+      'attached screenshot changed the CDP viewport'
+    );
+  });
+}
+
 /**
  * Vendor facts the adapter is built on (measured by back-end/scripts/tilion-probe.ts).
  * Drift here means the adapter's single-client and release semantics are wrong.
  */
 export async function assertLiveTilionVendorContract(): Promise<void> {
-  const created = await tilionApi('POST', '/v1/session', { idle_timeout: 120, ttl: 600 });
-  const record = created.body as { session_id?: string; connect_url?: string | null };
-  assert(created.status === 201 && record.session_id, `Tilion create HTTP ${created.status}`);
-  const sessionId = String(record.session_id);
+  const { sessionId } = await acquireResolvingSession(
+    async () => {
+      const created = await tilionApi('POST', '/v1/session', { idle_timeout: 120, ttl: 600 });
+      const record = created.body as { session_id?: string; connect_url?: string | null };
+      assert(created.status === 201 && record.session_id, `Tilion create HTTP ${created.status}`);
+      return { sessionId: String(record.session_id), connectUrl: String(record.connect_url ?? '') };
+    },
+    (session) => assertAttachedVendorContract(session.sessionId, session.connectUrl),
+    (session) => releaseTilionRemoteSession(session.sessionId),
+    DIRECT_SESSION_LIMIT
+  );
   let released = false;
   try {
-    const connectUrl = String(record.connect_url ?? '');
-    assert(connectUrl !== '', 'Tilion create returned no connect_url (raw CDP not enabled?)');
-    await withPage(connectUrl, async (page, browser) => {
-      await navigateKernelPage(page, 'https://example.com');
-      const second = await secondCdpClientOutcome(connectUrl);
-      assert(
-        second.closeCode === 4409,
-        `second CDP client was not refused with 4409: ${JSON.stringify(second)}`
-      );
-      assert(browser.isConnected(), 'first CDP client was dropped by the refused second client');
-      assert((await page.title()) === 'Example Domain', 'first CDP client stopped working');
-      const cdp = await page.context().newCDPSession(page);
-      let targetId: string;
-      try {
-        targetId = (await cdp.send('Target.getTargetInfo')).targetInfo.targetId;
-      } finally {
-        await cdp.detach();
-      }
-      const viewport = () =>
-        page.evaluate(() => ({
-          url: location.href,
-          width: innerWidth,
-          height: innerHeight,
-          scrollX,
-          scrollY,
-        }));
-      const before = await viewport();
-      const shot = await tilionApi('POST', `/v1/session/${sessionId}/screenshot`, {});
-      const body = shot.body as {
-        ok?: boolean;
-        beside_client?: boolean;
-        format?: string;
-        full_page?: boolean;
-        image_base64?: string;
-        data_url?: string;
-        size_b64?: number;
-        tab_id?: string;
-        url?: string;
-      } | null;
-      assert(
-        shot.status === 200 && body?.ok === true,
-        `REST screenshot while CDP attached: HTTP ${shot.status}, ok=${String(body?.ok)}`
-      );
-      assert(body?.beside_client === true, 'attached screenshot missing beside_client=true');
-      assert(
-        body.tab_id === targetId && body.url === before.url,
-        'attached screenshot does not match the original CDP target'
-      );
-      const encoded = body.image_base64 ?? '';
-      const jpeg = Buffer.from(encoded, 'base64');
-      assert(
-        body.format === 'jpeg' &&
-          body.full_page === false &&
-          jpeg.length > 4 &&
-          jpeg.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])) &&
-          jpeg.subarray(-2).equals(Buffer.from([0xff, 0xd9])) &&
-          jpeg.toString('base64') === encoded &&
-          body.size_b64 === encoded.length &&
-          body.data_url === `data:image/jpeg;base64,${encoded}`,
-        'attached screenshot did not return a complete viewport JPEG'
-      );
-      try {
-        const decoded = decodeJpeg(jpeg, { useTArray: true, tolerantDecoding: false });
-        assert(
-          decoded.width > 0 &&
-            decoded.height > 0 &&
-            decoded.data.length === decoded.width * decoded.height * 4,
-          'attached screenshot JPEG has no pixels'
-        );
-      } catch (error) {
-        throw new Error(`attached screenshot JPEG decode failed: ${String(error)}`);
-      }
-      assert(browser.isConnected(), 'first CDP client disconnected after screenshot');
-      assert((await page.title()) === 'Example Domain', 'first CDP client failed after screenshot');
-      assert(
-        JSON.stringify(await viewport()) === JSON.stringify(before),
-        'attached screenshot changed the CDP viewport'
-      );
-    });
     const detached = await tilionApi('POST', `/v1/session/${sessionId}/screenshot`, {
       format: 'jpeg',
       quality: 40,
@@ -245,7 +297,9 @@ export async function assertLiveTilionVendorContract(): Promise<void> {
   } finally {
     if (!released) await releaseTilionRemoteSession(sessionId).catch(() => undefined);
   }
-  console.log('PASS live Tilion vendor contract (4409, screenshot beside CDP, DELETE 204/204/410)');
+  console.log(
+    `PASS live Tilion vendor contract (4409, screenshot beside CDP, DELETE 204/204/410) session=${sessionId}`
+  );
 }
 
 /** Backend-route parity on a Tilion-pinned run, mirroring the Kernel live parity. */

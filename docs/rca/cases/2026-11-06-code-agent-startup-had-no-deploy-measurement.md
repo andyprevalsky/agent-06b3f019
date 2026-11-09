@@ -23,7 +23,7 @@ sources:
   - agent acad4658-ebe4-4d9f-b26d-f9503b7f29d5
   - agent 657427ef-e7ab-47c8-9c6d-0adb5a32753d
 repro: agents/benchmarks/code_agent_checks_test.py
-status: open
+status: mitigated
 ---
 
 ## Problem
@@ -88,6 +88,60 @@ Offline proofs (real prod and local log lines) in
 agents/benchmarks/code_agent_checks_test.py, registered in the permanent agents
 blackbox gate. 10k-agent behaviour: evaluation-only, per run; nothing on the
 product path changes.
+
+## Recurrence 2026-11-08: the CLI waited for a cold dependency install
+
+The new startup-time check failed in both local runs of code-agent-rose-repo:
+- ready 810.8 s = create 333.2 s (clone 317.5 s) + project_startup 474.3 s.
+  That run's `npm install` also died with
+  `spawnSync …/node_modules/esbuild/bin/esbuild ETXTBSY`.
+- ready 782.1 s = create 305.8 s (clone 292.0 s, preview 10.0 s) + project_startup
+  468.6 s + cli_init 7.7 s.
+
+A live probe of the second sandbox showed:
+- one `npm install` at about 55% CPU for about 380 s (network-bound);
+- the front-end postinstall `playwright install chromium --with-deps` (apt-get
+  plus a Chromium download, about 100 s);
+- `rose-preview` correctly waiting for the startup report.
+
+So the budget miss was deterministic, not flaky. The CLI could not start until
+a cold install finished.
+
+The ETXTBSY did not recur in that sandbox or in three local cold installs on two
+CPUs with the same Node 22.23.4 and npm 10.9.9. It stays an open observability
+gap.
+
+Clone options measured on a devbox, against GitHub:
+
+| Clone | Time | `.git` size |
+|---|---|---|
+| full | 122 s | 1.2 GB |
+| single-branch | not timed | 1.1 GB |
+| blobless | 285 s | 371 MB |
+| depth 1 | 399 s | 452 MB |
+| depth 50 | 163 s | 512 MB |
+
+GitHub serves a full clone from a cached pack, so the clone was left as is.
+
+Two causes were fixed:
+1. The ws-server (Claude and Codex) waits for project startup for at most
+   `CODE_SESSION_PROJECT_STARTUP_GRACE_MS` (default 30 s). After that the CLI
+   starts and the first turn says startup is still running and where its report
+   will appear. Before startup runs, a previous boot's report is removed so it
+   cannot pass for this boot's.
+2. `codePreviewAutostartCommand` backgrounded the whole `mkdir && nohup` list.
+   A subshell held the caller's output pipe for the preview's life, so every E2B
+   autostart waited out its 10 s timeout. Now only the nohup'd preview runs in
+   the background.
+
+Repros:
+- back-end/src/tests/unit/code-preview-autostart.test.ts: held the caller
+  4013 ms before the fix, returns immediately after.
+- back-end project-workspace slow-startup cases (Claude and Codex): fail on the
+  old ws-server.
+
+The unchanged task then passed all nine evaluators (agent
+fa6a39db-880c-420c-acaf-e578f313cbef, 482 s run).
 
 ## Human feedback
 

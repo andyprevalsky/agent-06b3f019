@@ -113,3 +113,27 @@ with tempfile.TemporaryDirectory(prefix='allocator-cleanup-control-') as folder:
                 primary.add_note('control cleanup failed: ' + repr(errors))
             else:
                 raise AssertionError(errors)
+
+
+def check_failed_fixture_dumps_task_bench_log(source: Path) -> None:
+    """Run only real fail(), preserving its primary failure and five-second dumps."""
+    import shlex
+    text = source.read_text()
+    start = text.index('\nfail() {\n') + 1
+    end = text.index('\ntest_tcp_listener_absent() {', start)
+    fail_function = text[start:end]
+    with tempfile.TemporaryDirectory(prefix='cloudbench failure-log-') as folder:
+        temporary = Path(folder)
+        log = temporary / 'ws/.context/fleet/runs/current/readiness/remote-logs/bench.log'
+        log.parent.mkdir(parents=True)
+        reason = 'FATAL: readiness boundary phase=healthy-retry failed_worker=owned ready_workers=[]'
+        log.write_text(reason + '\n')
+        command = fail_function + '\nTMP_ROOT=' + shlex.quote(folder) + "\nfail 'original primary fixture failure'\n"
+        result = subprocess.run(['bash', '-c', command], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 1, result
+        assert 'FAIL: original primary fixture failure' in result.stderr, result.stderr
+        assert reason in result.stderr, 'task bench.log reason was lost before fixture cleanup'
+        assert log.read_text() == reason + '\n', 'diagnostic dump changed original evidence'
+
+
+check_failed_fixture_dumps_task_bench_log(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')

@@ -22,6 +22,7 @@ sources:
   - commit 4a2aae4bd4274a1d3a140063fb6d2b5543b8a31b
   - agent ph74hwnjjn92y5dkttwnv6v8c98hf19y
   - plan:.context/deploy-pipeline-successor/attempts/41/triage/agents-coverage-blackbox
+  - PR #1866 (shipped; merge 7577a6573682179b3715fa25e9433e27cf9e24e6)
 repro: agents/tests/blackbox/browser_tilion.blackbox.py
 status: open
 ---
@@ -146,3 +147,34 @@ These are coordinator constraints, not attributed to the end user.
 ## Reusable lesson
 
 Count a single-client slot at actual transport ownership loss, and prove the oracle still rejects a genuinely open client instead of counting delayed relay-handler retirement.
+
+
+## 2026-11-07 round53: release assertion remains unexplained
+
+Source 8e63108749d9023219328f56489242b09debab73 failed the original
+multiplexer release/reattach test at round2: `slot not released`. The native
+Agents aggregate recorded124/125 blackbox groups, native exit1 and UNVERIFIED.
+Coverage combine, demo_cache, unit pytest and coverage report/fail-under did
+not execute. The original occurrence remains UNKNOWN and unwaived; it is not
+attributed to the earlier bridge-retirement defect merely because the message
+matches. The native log did not capture socket/task state at the assertion.
+
+Four ordinary isolated owning replays passed with unchanged assertions and
+0.2-second release observation:2.885784s,2.696587s,2.427141s and2.460363s.
+One additional original19-case prefix passed19/19 in56.459288s, preserving
+order, one asyncio loop and record_async, including the three survivor
+regressions before the release test. Every supervisor exited0 and reported
+quiescence with no remaining child or termination signal. These passes do not
+explain the original failure or establish full Agents coverage. Evidence is
+under `.context/rca-7a2ead9f/native53-mux-one-replay`,
+`native53-mux-three-replays` and `native53-mux-prefix19`.
+
+The diagnostic-only follow-up leaves the production mux, original assertion
+predicate, sleep and timeouts unchanged. Its lazy failure message records
+native socket state, counters, client membership, lock state, clocks and
+code-function/line task frames. It reads no task names, URLs, arguments,
+locals or environment values. Collection failure preserves the original
+AssertionError message. Pure unit controls check shape, privacy, nonthrowing
+failure collection and no collection on success. This is observability for
+the next required full Agents execution, not a repair or a retrospective
+cause claim. Full Agents validation and all original obligations remain open.

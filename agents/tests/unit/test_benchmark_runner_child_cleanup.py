@@ -159,7 +159,7 @@ def _coordinator_case(parallel: bool):
         "_emit_report": lambda **kwargs: None, "checkpoint_source_mode": False,
         "args": SimpleNamespace(parallel=parallel, keep_failed_agents=True, max_concurrency=1, prod=False),
         "tasks": tasks, "run": run, "base_url": "http://offline.invalid",
-        "batch_started_at": None, "_report_ticker_task": SimpleNamespace(cancel=lambda: None),
+        "batch_started_at": None,
         "stop_fly_log_collector": stop_collector, "realtime_started": False, "memory_gate_enabled": False,
         "owned_batch_cleanup": False, "_finalize_owned_batch_and_save_run": finalize,
         "_wmh_evidence": SimpleNamespace(finalize=lambda: None),
@@ -169,12 +169,14 @@ def _coordinator_case(parallel: bool):
     exec(compile(module, str(bench.__file__), "exec"), namespace)
 
     async def scenario():
+        namespace["_report_ticker_task"] = asyncio.create_task(asyncio.Event().wait())
         main = asyncio.create_task(namespace["_coordinator"]())
         await asyncio.wait_for(first_entered.wait(), 10)
         main.cancel()  # asyncio.run's handling of the owner's SIGINT.
         try:
             await asyncio.wait_for(main, 10)
         except asyncio.CancelledError:
+            assert namespace["_report_ticker_task"].cancelled()
             return "interrupted"
         return "completed"
 

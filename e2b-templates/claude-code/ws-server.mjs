@@ -17,10 +17,11 @@ import {
   renameSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 
 // Log to both console and file for debugging
 const LOG_FILE = "/tmp/ws-server.log";
@@ -1646,6 +1647,12 @@ function onCliTurnResult(message) {
     closeStdinIfIdle("autonomous turn finished");
     return;
   }
+  // The user's turn finished the goal: hand the session back so the parent
+  // gets the result now (root 0874662a waited out the 10-minute idle hold).
+  if (goalHandoffWritten()) {
+    releaseDirectHold("goal handoff written");
+    return;
+  }
   clearDirectHoldTimer();
   directHoldTimer = setTimeout(
     () => releaseDirectHold("idle"),
@@ -1855,6 +1862,7 @@ async function deliverNativeTurn(msg) {
     // back like any other agent turn (an attaching spawn's goal included).
     return queueHeldAgentTurn(id, msg, { requeue: true });
   }
+  const turnText = sender === "agent" ? agentTurnText(text) : text;
   try {
     if (nativeInitialization) await nativeInitialization;
     await taskPromptReady;
@@ -1877,10 +1885,11 @@ async function deliverNativeTurn(msg) {
   const turn = startNativeTurn();
   pendingTurns += 1;
   try {
+    if (turnText !== text) markGoalDelivered();
     await new Promise((resolve, reject) => {
       cliChild.stdin.write(
         userMessageLine(
-          text +
+          turnText +
             (files.length ? "\n\nAttached files:\n" + files.join("\n") : ""),
         ),
         (error) => (error ? reject(error) : resolve()),
@@ -1951,6 +1960,18 @@ function handleHandBack(msg) {
   return { type: "hand_back_ack", status: wasHeld ? "released" : "not_held" };
 }
 
+function projectStartupPaths() {
+  try {
+    const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
+    return {
+      reportPath: typeof cfg.reportPath === "string" ? cfg.reportPath : null,
+      logPath: typeof cfg.logPath === "string" ? cfg.logPath : null,
+    };
+  } catch {
+    return { reportPath: null, logPath: null };
+  }
+}
+
 function startupBudgetMs() {
   try {
     const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
@@ -1993,6 +2014,10 @@ function runProjectStartup() {
   if (!projectMode || !PROJECT_STARTUP || !existsSync(PROJECT_STARTUP)) {
     return Promise.resolve(null);
   }
+  // The report means "this boot's startup finished": a previous boot's report
+  // must not tell the agent (or the preview) that dependencies are ready.
+  const { reportPath } = projectStartupPaths();
+  if (reportPath) rmSync(reportPath, { force: true });
   appendEvent({
     type: "project_startup",
     status: "running",
@@ -2090,6 +2115,13 @@ function runProjectStartup() {
 function projectStartupNote(report) {
   if (!report || report.status === "skipped") return "";
   const name = PROJECT_NAME ? ` for project ${PROJECT_NAME}` : "";
+  if (report.status === "running") {
+    const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
+    const wait = report.reportPath
+      ? ` Before builds, tests or dev servers, wait until ${report.reportPath} exists, then read its status.`
+      : "";
+    return `Project startup${name} is still running in the background (it may be installing dependencies).${logRef}${wait}\n\n`;
+  }
   const secs = ((report.durationMs || 0) / 1000).toFixed(1);
   const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
   if (report.status === "ok") {
@@ -2125,11 +2157,125 @@ function mcpConfigLists(path, server) {
   }
 }
 
+// Every code-agent task is Claude Code's own `/goal` (Andy, 2026-11-08): the
+// CLI's goal evaluator keeps it working until the condition holds, and the
+// task's condition ends with writing the result handoff (and says no questions). /goal caps a condition at
+// 4000 characters, so the result schema goes to a file next to the handoff and
+// a task too long for the cap goes to a task file the condition names.
+const HANDOFF_SCHEMA_PREFIX = "\n\nResult JSON Schema for ";
+const DEFAULT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json";
+const GOAL_CONDITION_MAX_CHARS = 4000;
+// The handoff the current goal ends by writing (null: the task had no schema).
+let goalHandoffPath = null;
+// When the current goal's turn reached the CLI: only a handoff written after
+// it counts. Accepting a goal also moves any handoff still on disk aside (a
+// close that failed to consume it), keeping it for inspection.
+let goalStartedAtMs = Infinity;
+let goalPendingDelivery = false;
+
+function retireStaleHandoff(path) {
+  if (!existsSync(path)) return;
+  try {
+    renameSync(path, `${path}.superseded-${Date.now()}`);
+  } catch (error) {
+    log("warn", "Could not move a stale handoff aside", {
+      error: error.message,
+    });
+  }
+}
+
+/** Called as the goal turn is written to the CLI's stdin. */
+function markGoalDelivered() {
+  if (!goalPendingDelivery) return;
+  goalPendingDelivery = false;
+  goalStartedAtMs = Date.now();
+}
+
+function goalHandoffWritten() {
+  if (!goalHandoffPath) return false;
+  try {
+    return statSync(goalHandoffPath).mtimeMs >= goalStartedAtMs;
+  } catch {
+    return false;
+  }
+}
+
+function splitHandoffSchema(text) {
+  const at = text.lastIndexOf(HANDOFF_SCHEMA_PREFIX);
+  if (at < 0) return null;
+  const rest = text.slice(at + HANDOFF_SCHEMA_PREFIX.length);
+  const colon = rest.indexOf(":\n");
+  if (colon <= 0) return null;
+  // The task names sandbox paths; a CLI whose HOME is elsewhere (tests, the
+  // local fallback) keeps them under its own HOME.
+  const named = rest.slice(0, colon);
+  const handoffPath = named.startsWith("/home/user/")
+    ? join(homedir(), named.slice("/home/user/".length))
+    : named;
+  const schema = rest.slice(colon + 2);
+  try {
+    JSON.parse(schema);
+  } catch {
+    return null;
+  }
+  return { task: text.slice(0, at), handoffPath, schema };
+}
+
+function writeRoseFile(path, text) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+    return true;
+  } catch (error) {
+    log("warn", "Could not write a goal file", { path, error: error.message });
+    return false;
+  }
+}
+
+/** The `/goal` turn for a task; writes its schema (and an over-cap task) to files. */
+function goalTurnText(rawTask, note = "") {
+  const text = String(rawTask).replace(/\0/g, "");
+  const split = splitHandoffSchema(text);
+  let task = text;
+  if (split) {
+    const schemaPath = join(dirname(split.handoffPath), "handoff.schema.json");
+    if (writeRoseFile(schemaPath, split.schema)) {
+      task = split.task.split(DEFAULT_HANDOFF_SCHEMA_PATH).join(schemaPath);
+    } else {
+      // No schema file: the condition carries the schema inline instead.
+      task = `${split.task}${HANDOFF_SCHEMA_PREFIX}${split.handoffPath}:\n${split.schema}`;
+    }
+    goalHandoffPath = split.handoffPath;
+    retireStaleHandoff(goalHandoffPath);
+    goalStartedAtMs = Infinity;
+    goalPendingDelivery = true;
+  }
+  // A new spawn's goal reaches a live CLI already headed "Task:" (backend
+  // attachLiveCodeCli); the first task is headed here.
+  const body = task.startsWith("Task:\n") ? task.slice("Task:\n".length) : task;
+  let condition = `${note}Task:\n${body}`;
+  if (condition.length > GOAL_CONDITION_MAX_CHARS) {
+    const taskPath = join(
+      dirname(split ? split.handoffPath : join(homedir(), ".rose", "x")),
+      "task.md",
+    );
+    // Unwritable: send the task as written; /goal then reports the length cap.
+    if (writeRoseFile(taskPath, body))
+      condition = `${note}Task: read ${taskPath} and do exactly what it says. Its final paragraph is your end condition.`;
+  }
+  return `/goal ${condition}`;
+}
+
+/** A task from the agent graph (a new spawn's goal) starts as a goal; other turns are as written. */
+function agentTurnText(text) {
+  return splitHandoffSchema(text) ? goalTurnText(text) : text;
+}
+
 async function runClaudeCli(startupReport = null) {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
   // Direct-chat stream-json user message; the project startup note leads the task.
   const prompt = userMessageLine(
-    `${projectStartupNote(startupReport)}Task:\n${sanitizedGoal}`,
+    goalTurnText(sanitizedGoal, projectStartupNote(startupReport)),
   );
 
   appendEvent({
@@ -2315,6 +2461,7 @@ async function runClaudeCli(startupReport = null) {
     if (!cliStdinOpen) return;
     pendingTurns = 1;
     startNativeTurn();
+    markGoalDelivered();
     child.stdin.write(prompt);
     resolveTaskPrompt();
   } catch (error) {
@@ -2324,5 +2471,34 @@ async function runClaudeCli(startupReport = null) {
   }
 }
 
-runProjectStartup().then((report) => runClaudeCli(report));
+// A slow project startup (a cold dependency install) does not hold the CLI:
+// past the grace window the agent starts, told that startup is still running
+// and where its report appears (code-agent-rose-repo waited 469 s for a cold
+// npm install, 2026-11-08). A startup that finishes in the window (template
+// snapshot, resume) is reported up front as before.
+const PROJECT_STARTUP_GRACE_MS = (() => {
+  const raw = Number.parseInt(
+    process.env.CODE_SESSION_PROJECT_STARTUP_GRACE_MS || "",
+    10,
+  );
+  return Number.isInteger(raw) && raw >= 0 ? raw : 30_000;
+})();
+function startupReportForCli(startup) {
+  let timer = null;
+  const running = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      const { reportPath, logPath } = projectStartupPaths();
+      log("info", "Project startup still running; starting the CLI", {
+        graceMs: PROJECT_STARTUP_GRACE_MS,
+      });
+      resolve({ status: "running", reportPath, logPath });
+    }, PROJECT_STARTUP_GRACE_MS);
+  });
+  return Promise.race([startup, running]).finally(() => clearTimeout(timer));
+}
+const projectStartup = runProjectStartup();
+(projectMode && PROJECT_STARTUP
+  ? startupReportForCli(projectStartup)
+  : projectStartup
+).then((report) => runClaudeCli(report));
 markServing();

@@ -1,6 +1,7 @@
+import { availabilityInTransaction } from './repo.availability';
 import { createCommandJournal } from './repo.commandJournal';
 /** Per-device command slot. Provider calls happen only after this transaction commits. */
-import { executionCustody } from './repo.executionCustody';
+import { executionCustody, rejectExecutionCustody } from './repo.executionCustody';
 import { setupGate } from './repo.setupGate';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import * as leases from './repo';
@@ -9,7 +10,7 @@ import { setupState } from '../../providers/phoneSetupState';
 import { privateResult, internalPhoneObservation } from './privacy';
 import { claimPrivacy } from './repo.privacy';
 import { LEASE_TIMEOUT_MS } from './config';
-import { IPhoneError, type Transaction } from './types';
+import { IPhoneError, type Transaction, type IPhoneOperation } from './types';
 import type { CommandClaim, PhoneActor, PhoneCommand } from './types.operations';
 
 export const READ_OPERATIONS = new Set([
@@ -25,6 +26,30 @@ export const READ_OPERATIONS = new Set([
 ]);
 export function isPhoneRead(operation: string): boolean {
   return READ_OPERATIONS.has(operation);
+}
+
+function replayableRejection(command: IPhoneOperation | null, inputHash: string) {
+  // Failed rejection receipts contain no successful observation or new grant.
+  return (
+    command?.state === 'FAILED' &&
+    command.inputHash === inputHash &&
+    (command.errorCode === 'phone_setup_stale' ||
+      (command.operation === 'credentials.fill_saved' &&
+        command.errorCode === 'phone_credential_binding_required'))
+  );
+}
+
+async function previousRejection(
+  tx: Transaction,
+  leaseId: string,
+  input: PhoneCommand,
+  actor: PhoneActor
+) {
+  const { inputHash } = phoneIntent(input, actor);
+  const command = await tx.iPhoneOperation.findUnique({
+    where: { leaseId_requestKey: { leaseId, requestKey: input.operationId } },
+  });
+  return command && replayableRejection(command, inputHash) ? command : null;
 }
 
 async function rawLock(tx: Transaction, deviceId: string) {
@@ -52,6 +77,16 @@ export async function claimCommand(
     if (observation) actor = lease.controlOwner === 'user' ? 'user' : 'agent';
     if (lease.controlOwner !== actor)
       return new IPhoneError(409, 'Phone control belongs to the other participant');
+    if (actor === 'agent' && lease.browserTaskId !== null) {
+      const allowed = await availabilityInTransaction(tx, userId, lease.browserTaskId);
+      if (!allowed.enabled) {
+        const rejected = await previousRejection(tx, leaseId, input, actor);
+        // An exact terminal rejection is not permission to observe or execute.
+        // Never replay a successful result or accept changed input after revocation.
+        if (rejected) return { device, lease, command: rejected, execute: false };
+        return new IPhoneError(409, 'iPhone setup is required');
+      }
+    }
     if (!observation) {
       const error = await validateAttentionInput(tx, lease, input, actor);
       if (error !== null) return error;
@@ -107,6 +142,17 @@ export async function beginExecution(claim: CommandClaim): Promise<boolean> {
   return leases.transaction(async (tx) => {
     const { device, enabled } = await leases.lockedDevice(tx, claim.lease.userId);
     const lease = await tx.iPhoneLease.findUnique({ where: { id: claim.lease.id } });
+    if (
+      claim.command.actor === 'agent' &&
+      lease?.browserTaskId !== undefined &&
+      lease.browserTaskId !== null
+    ) {
+      const allowed = await availabilityInTransaction(tx, claim.lease.userId, lease.browserTaskId);
+      if (!allowed.enabled) {
+        await rejectExecutionCustody(tx, claim);
+        return false;
+      }
+    }
     if (
       lease === null ||
       lease.status !== 'ACTIVE' ||
@@ -249,6 +295,8 @@ async function messageMutationBlocked(
         phoneBrowserTaskId: taskId,
         transport: 'phone_harness',
         dispatchedAt: { not: null },
+        sentAt: null,
+        failedAt: null,
       },
       select: { id: true },
     })) !== null

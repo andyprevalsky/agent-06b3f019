@@ -44,6 +44,7 @@ FIXTURES_PATH = "/api/rose-shop/fixtures"
 # What auth options must list for each scenario: (saved passwords, minted offered,
 # passkeys, saved-session bundles). Mirrors back-end serviceScenarios.ts.
 SCENARIO_LADDERS: dict[str, tuple[int, bool, int, int]] = {
+    "phone_sms_otp": (0, False, 0, 0),
     "password_retry": (3, False, 0, 0),
     "saved_logins_fail": (3, False, 0, 0),
     "user_signs_in": (3, False, 0, 0),

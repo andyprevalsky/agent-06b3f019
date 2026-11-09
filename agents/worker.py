@@ -61,6 +61,7 @@ from domains.message_person.repo import (
     fetch_recent_messages_activity,
     generate_message_activity,
     queue_imessage_activity,
+    read_phone_message_activity,
     send_agent_sms_activity,
     send_email_activity,
 )
@@ -1711,6 +1712,7 @@ async def main():
         generate_message_activity,
         fetch_recent_messages_activity,
         queue_imessage_activity,
+        read_phone_message_activity,
         send_agent_sms_activity,
         send_email_activity,
         call_phone_number_activity,

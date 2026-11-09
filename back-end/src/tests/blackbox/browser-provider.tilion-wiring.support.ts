@@ -35,6 +35,8 @@ import {
 import { storedBrowserProvider, type BrowserProviderSession } from '../../providers/browser/types';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { prisma } from '../../providers/database';
+import { isConfirmedBrowserEnd } from '../../providers/browser/sessionPersist';
+import { TilionApiError } from '../../providers/browser/tilionClient';
 
 type Env = Record<string, string | undefined>;
 
@@ -205,6 +207,30 @@ export async function assertStoredTilionRowDispatchesToTilion(): Promise<void> {
       nodeAssert.equal(health.status, 'ready');
     });
     nodeAssert.deepEqual(requested, ['GET /v1/session/sess_stored/status']);
+
+    // Agent 7a2ead9f repeatedly re-initialized a logical row whose native
+    // session had disappeared. Replay the provider response at the shared
+    // health boundary: confirmed absence must reach the lifecycle reconciler,
+    // while authentication, outage and routing errors must still throw.
+    for (const status of [404, 410, 401, 500]) {
+      globalThis.fetch = async () => Response.json({ detail: 'No such session' }, { status });
+      await withEnv(TILION_ENV, async () => {
+        if (status === 404 || status === 410) {
+          const health = await getBrowserSessionHealth('sess_stored');
+          nodeAssert.equal(health.sessionId, 'sess_stored');
+          nodeAssert.equal(health.provider, 'tilion');
+          nodeAssert.equal(isConfirmedBrowserEnd(health.status), true);
+          nodeAssert.equal(health.ttlMs, 0);
+          nodeAssert.equal(health.createdAt, null);
+          nodeAssert.equal(health.expiresAt, null);
+        } else {
+          await nodeAssert.rejects(
+            getBrowserSessionHealth('sess_stored'),
+            (error: unknown) => error instanceof TilionApiError && error.status === status
+          );
+        }
+      });
+    }
 
     const pressed: string[] = [];
     const result = await pressSessionKeysUsingDependencies('sess_stored', ['Escape'], {

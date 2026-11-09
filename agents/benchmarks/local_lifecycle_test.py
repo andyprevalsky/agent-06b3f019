@@ -160,6 +160,7 @@ def load_local():
 
 def test_local_launchers_preserve_inherited_proxy_configuration():
     from unittest.mock import patch
+    from tests.env_defaults import apply_test_env_defaults
 
     local = load_local()
     keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy")
@@ -171,7 +172,8 @@ def test_local_launchers_preserve_inherited_proxy_configuration():
         )
         for configured in (False, True):
             inherited = {key: "fixture-proxy-setting" for key in keys} if configured else {}
-            base = {"PATH": os.environ["PATH"], "BENCHMARK_SEED_DUMP": str(folder / "fixture.dump"), **inherited}
+            base = {"PATH": os.environ["PATH"], "BENCHMARK_SEED_DUMP": str(folder / "fixture.dump"),
+                    "BACKEND_API_KEY": "fixture-backend-api-key", **inherited}
             expected = {key: base[key] for key in keys if key in base}
             assert {key: value for key, value in local.benchmark_runner_env(base).items() if key in keys} == expected
 
@@ -186,7 +188,9 @@ def test_local_launchers_preserve_inherited_proxy_configuration():
                     patch.dict(os.environ, base, clear=True),
                     patch.object(local.subprocess, "Popen", capture),
                     patch.object(local, "_release_port_range"),
+                    patch.object(local, "_dotenv_values", return_value={}),
                 ):
+                    apply_test_env_defaults()
                     try:
                         if launch == "streamed":
                             local.run_streamed_command(["fixture-command"], cwd=folder)

@@ -1,3 +1,5 @@
+import { seedPortraitRoute } from './iphone-portrait-route.fixture';
+import { portraitFrame, portraitOcr } from './iphone-portrait.fixture';
 import { gmailCases } from './iphone-control.gmail.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -5,6 +7,7 @@ import { prisma } from '../../providers/database';
 import type { Case } from './iphone-control.cases';
 import {
   freshSetup,
+  authorizeSyntheticSetup,
   observe,
   setupPost,
   proveSettings,
@@ -82,6 +85,11 @@ export const settingsCases: Case[] = [
         return { identityConfirmed: false, status, usage: verifierUsage };
       };
       const submit = async () => {
+        if (status !== 'unknown') {
+          h.framePng = portraitFrame(status === 'confirmed');
+          h.observationResult = portraitOcr();
+          await seedPortraitRoute(h, f);
+        } else h.framePng = undefined;
         const read = await observe(h, f);
         const reply = await setupPost(h, f, {
           action: 'verify',
@@ -157,6 +165,7 @@ export const settingsCases: Case[] = [
         requestKey: randomUUID(),
       });
       f.setup = blocked.data.setup as SetupDto;
+      await authorizeSyntheticSetup(f);
       h.setupVerifier = async () => ({
         identityConfirmed: false,
         status: 'confirmed',

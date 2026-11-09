@@ -408,6 +408,37 @@ async def test_tilion_worker_attach_uses_one_upstream_socket():
                 assert gateway.rejected_4409 == 0
 
 
+def _multiplexer_release_failure(gateway, multiplexer, round_number):
+    """Observe the original failed release assertion without changing its outcome."""
+    prefix = f"round {round_number}: slot not released"
+    try:
+        def socket_state(ws):
+            if ws is None:
+                return None
+            name = getattr(getattr(ws, "state", None), "name", None)
+            transport = getattr(ws, "transport", None)
+            code = getattr(ws, "close_code", None)
+            return {"state": name if name in {"CONNECTING", "OPEN", "CLOSING", "CLOSED"} else "UNKNOWN",
+                    "close_code": code if isinstance(code, int) else None,
+                    "transport_closing": bool(transport.is_closing()) if transport is not None else None}
+        observation = {
+            "observed_at": time.time(), "monotonic": time.monotonic(),
+            "active": gateway.active, "accepted": gateway.accepted,
+            "rejected_4409": gateway.rejected_4409,
+            "gateway_sockets": [socket_state(ws) for ws in gateway._sockets],
+            "upstream": socket_state(multiplexer._upstream),
+            "upstream_lock": multiplexer._upstream_lock.locked(),
+            "clients": [{"number": client.number, "socket": socket_state(client.websocket)}
+                        for client in multiplexer._clients],
+            "tasks": [{"frames": [{"function": frame.f_code.co_name, "line": frame.f_lineno}
+                                   for frame in task.get_stack()]}
+                      for task in asyncio.all_tasks()],
+        }
+        return prefix + "; " + json.dumps(observation)
+    except BaseException:
+        return prefix + "; diagnostic unavailable"
+
+
 async def test_multiplexer_releases_upstream_when_clients_leave_and_reattaches():
     from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
 
@@ -430,7 +461,7 @@ async def test_multiplexer_releases_upstream_when_clients_leave_and_reattaches()
                         assert "sessionId" not in first and "sessionId" not in second
                         assert gateway.active == 1
                     await asyncio.sleep(0.2)
-                    assert gateway.active == 0, f"round {round_number}: slot not released"
+                    assert gateway.active == 0, _multiplexer_release_failure(gateway, multiplexer, round_number)
                 assert multiplexer.upstream_connections_opened == 2
                 assert gateway.rejected_4409 == 0
             finally:
@@ -2137,6 +2168,105 @@ async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():
             finally:
                 await browser.close()
                 await multiplexer.close()
+
+
+async def test_multiplexer_reapplies_past_a_confirmed_detached_survivor():
+    """A delayed detach event must not strand overrides on an invalid CDP session."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    mux = SingleCdpConnectionMultiplexer(
+        "ws://fixture.invalid", emulation={"timezone": "Asia/Tokyo", "locale": "de-DE"}
+    )
+    mux._session_target.update({"holder": "page", "gone": "page", "live": "page"})
+    methods = ("Emulation.setTimezoneOverride", "Emulation.setLocaleOverride")
+    for method in methods:
+        mux._override_holder[("page", method)] = "holder"
+    sent = []
+
+    async def send(session, method, params):
+        """Replay a missing locator while preserving the live target response."""
+        sent.append((session, method))
+        reply = asyncio.get_running_loop().create_future()
+        if session == "gone":
+            reply.set_result({"error": {"code": -32001, "message": "Session with given id not found."}})
+        elif method == "Runtime.evaluate":
+            reply.set_result({"result": {"result": {"value": "de-DE"}}})
+        else:
+            reply.set_result({"result": {}})
+        return reply
+
+    mux._send_session_command = send
+    mux._reapply_overrides_after_detach(["holder"])
+    await asyncio.gather(*list(mux._background))
+    for method in methods:
+        assert mux._override_holder.get(("page", method)) == "live", sent
+    assert "gone" not in mux._session_target
+    assert mux.overrides_reapplied == 2
+    assert mux.locale_mismatches == 0
+
+
+async def test_multiplexer_retires_all_overrides_of_a_dead_survivor():
+    """Retiring one stale locator must also restore its separately held override."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    mux = SingleCdpConnectionMultiplexer(
+        "ws://fixture.invalid", emulation={"timezone": "Asia/Tokyo", "locale": "de-DE"}
+    )
+    mux._session_target.update({"holder": "page", "gone": "page", "live": "page"})
+    methods = ("Emulation.setTimezoneOverride", "Emulation.setLocaleOverride")
+    for method in methods:
+        mux._override_holder[("page", method)] = "holder" if method == methods[0] else "gone"
+    sent = []
+
+    async def send(session, method, params):
+        """Replay the captured missing-session response before a live target acknowledgement."""
+        sent.append((session, method))
+        reply = asyncio.get_running_loop().create_future()
+        if session == "gone":
+            reply.set_result({"error": {"code": -32001, "message": "Session with given id not found."}})
+        elif method == "Runtime.evaluate":
+            reply.set_result({"result": {"result": {"value": "de-DE"}}})
+        else:
+            reply.set_result({"result": {}})
+        return reply
+
+    mux._send_session_command = send
+    mux._reapply_overrides_after_detach(["holder"])
+    while mux._background:
+        await asyncio.gather(*list(mux._background))
+    for method in methods:
+        assert mux._override_holder.get(("page", method)) == "live", sent
+    assert "gone" not in mux._session_target
+    assert mux.overrides_reapplied == 2
+    assert mux.locale_mismatches == 0
+
+
+async def test_multiplexer_reports_only_unrestored_confirmed_dead_retries():
+    """Report exhausted confirmed-dead locators without flagging normal target closure."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    method = "Emulation.setTimezoneOverride"
+    for scenario in ("dead", "restored", "closed"):
+        mux = SingleCdpConnectionMultiplexer("ws://fixture.invalid", emulation={"timezone": "Asia/Tokyo"})
+        mux._session_target["holder"] = "page"
+        mux._override_holder[("page", method)] = "holder"
+        if scenario != "closed":
+            mux._session_target["gone"] = "page"
+
+        async def send(session, command, params):
+            assert (session, command) == ("gone", method)
+            reply = asyncio.get_running_loop().create_future()
+            reply.set_result({"error": {"code": -32001, "message": "Session with given id not found."}})
+            if scenario == "restored":
+                mux._override_holder[("page", method)] = "concurrent-live-holder"
+            return reply
+
+        mux._send_session_command = send
+        with patch("browser_tools.cdp_multiplexer.logger.error") as report:
+            mux._reapply_overrides_after_detach(["holder"])
+            while mux._background:
+                await asyncio.gather(*list(mux._background))
+            assert report.call_count == (1 if scenario == "dead" else 0), (scenario, report.call_args_list)
 
 
 async def test_multiplexer_reapplies_overrides_when_their_holder_detaches():
@@ -4020,9 +4150,12 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                                 await attached.close()
                             pending.discard(task)
                             backend_done.set()
-                    app = web.Application(); app.router.add_post("/api/browser-session/close", checkpoint)
-                    server = web.AppRunner(app); await server.setup()
-                    site = web.TCPSite(server, "127.0.0.1", 0); await site.start()
+                    app = web.Application()
+                    app.router.add_post("/api/browser-session/close", checkpoint)
+                    server = web.AppRunner(app)
+                    await server.setup()
+                    site = web.TCPSite(server, "127.0.0.1", 0)
+                    await site.start()
                     port = site._server.sockets[0].getsockname()[1]
                     try:
                         await service.connect()
@@ -4127,7 +4260,8 @@ async def test_tilion_pause_releases_socket_before_backend_checkpoint():
                         if mux is not None:
                             await mux.close()
                         if pw_browser is not None:
-                            with contextlib.suppress(Exception): await pw_browser.close()
+                            with contextlib.suppress(Exception):
+                                await pw_browser.close()
                         if pending:
                             await asyncio.wait_for(backend_done.wait(), 10)
                         if server is not None:
@@ -4416,6 +4550,9 @@ async def test_storage_writer_race_preserves_state_before_transport_release():
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("multiplexer_reports_dead_retry_exhaustion", test_multiplexer_reports_only_unrestored_confirmed_dead_retries),
+        ("multiplexer_retires_all_dead_survivor_overrides", test_multiplexer_retires_all_overrides_of_a_dead_survivor),
+        ("multiplexer_reapplies_past_detached_survivor", test_multiplexer_reapplies_past_a_confirmed_detached_survivor),
         ("storage_writer_race_preserves_state_before_release", test_storage_writer_race_preserves_state_before_transport_release),
         ("fake_gateway_transport_slot_retirement", test_gateway_slot_tracks_closed_transport_while_bridge_retires),
         ("held_gateway_transport_slot_retirement", test_held_gateway_starts_hold_at_transport_retirement),

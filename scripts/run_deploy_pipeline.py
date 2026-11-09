@@ -276,6 +276,7 @@ plan enabled the feature, so a receipt can never call a reused lane passed.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 from collections.abc import Mapping
 import json
@@ -674,6 +675,7 @@ def sample_lane_tree_memory(pids: set[int], proc: Path | None = None) -> dict[in
     except OSError:
         return {int(pid): None for pid in pids}
     parents: dict[int, int] = {}
+    births: dict[int, str] = {}
     for entry in entries:
         if not entry.isdigit():
             continue
@@ -684,6 +686,8 @@ def sample_lane_tree_memory(pids: set[int], proc: Path | None = None) -> dict[in
         fields = stat[stat.rindex(")") + 2:].split()
         try:
             parents[int(entry)] = int(fields[1])
+            if len(fields) > 19 and fields[19].isdigit():
+                births[int(entry)] = fields[19]
         except (IndexError, ValueError):
             continue
     children: dict[int, list[int]] = {}
@@ -694,10 +698,23 @@ def sample_lane_tree_memory(pids: set[int], proc: Path | None = None) -> dict[in
         """(anonymous PSS, total PSS) in MB; None when the tree is unknown."""
         try:
             lines = (proc / str(pid) / "smaps_rollup").read_text().splitlines()
-        except OSError:
-            # Exited since the listing: nothing resident. Otherwise a live
-            # process without a readable rollup, which makes the tree unknown.
-            return (0.0, 0.0) if not (proc / str(pid)).exists() else None
+        except OSError as error:
+            if not (proc / str(pid)).exists():
+                return (0.0, 0.0)  # Already gone, as before.
+            if error.errno != errno.ESRCH or pid not in births:
+                return None
+            # A zombie still has /proc/PID but no memory map. Recheck identity
+            # AFTER the failed read; never skip a stale initially-Z snapshot.
+            try:
+                current = (proc / str(pid) / "stat").read_text()
+                current_pid = current.split(" ", 1)[0]
+                fields = current[current.rindex(")") + 2:].split()
+                if (current_pid == str(pid) and fields[0] == "Z" and fields[19] == births[pid]
+                        and fields[17].isascii() and fields[17].isdigit() and int(fields[17]) == 1):
+                    return (0.0, 0.0)
+            except (OSError, IndexError, ValueError):
+                pass
+            return None  # Live/unreadable/malformed/reused identity stays unknown.
         values: dict[str, float] = {}
         for line in lines:
             key, _, rest = line.partition(":")

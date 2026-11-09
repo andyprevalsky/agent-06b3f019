@@ -23,7 +23,8 @@ export interface CodeSessionFs {
   home: string;
   /** Run a bash script; never throws on a non-zero exit. */
   exec(script: string, opts?: { timeoutMs?: number }): Promise<ExecResult>;
-  readFile(path: string): Promise<Buffer>;
+  /** `timeoutMs` bounds a remote download (E2B); a local read ignores it. */
+  readFile(path: string, opts?: { timeoutMs?: number }): Promise<Buffer>;
   writeFile(path: string, data: Buffer): Promise<void>;
 }
 
@@ -100,7 +101,13 @@ export function e2bSandboxFs(sandbox: Sandbox, home = '/home/user'): CodeSession
         throw error;
       }
     },
-    readFile: async (path) => Buffer.from(await sandbox.files.read(path, { format: 'bytes' })),
+    readFile: async (path, opts) =>
+      Buffer.from(
+        await sandbox.files.read(path, {
+          format: 'bytes',
+          ...(opts?.timeoutMs !== undefined ? { requestTimeoutMs: opts.timeoutMs } : {}),
+        })
+      ),
     writeFile: async (path, data) => {
       const bytes = new Uint8Array(data.byteLength);
       bytes.set(data);

@@ -12,9 +12,9 @@ import {
 import path from "node:path";
 import vm from "node:vm";
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import test from "node:test";
+import test, { after } from "node:test";
 import type * as TypeScript from "../../back-end/node_modules/typescript";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -48,6 +48,24 @@ const workRoot =
   process.env.ROSE_GROUPING_CONTROL_ROOT ??
   path.join(project, ".context", `campaign-grouping-control-${process.pid}`);
 mkdirSync(workRoot, { recursive: true, mode: 0o700 });
+const cleanupRoots: string[] = [];
+after(() => {
+  for (const root of cleanupRoots) {
+    const retired = spawnSync(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        path.join(
+          sourceRoot,
+          "scripts/tests/fixtures/campaign_cleanup_fixture.py",
+        ),
+        "retire",
+        root,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(retired.status, 0, retired.stdout + retired.stderr);
+  }
+});
 
 function owningBoundary() {
   const objects = new Map<string, string>();
@@ -416,7 +434,23 @@ function fixtureRoot(name: string) {
     `#!/usr/bin/env bash\nexec '${project}/agents/venv/bin/python' '${child}' '${root}/agents/benchmarks/hub_upload.py'\n`,
   );
   chmodSync(fleet, 0o700);
-  return { root, fleet };
+  const prepared = spawnSync(
+    path.join(project, "agents/venv/bin/python"),
+    [
+      path.join(
+        sourceRoot,
+        "scripts/tests/fixtures/campaign_cleanup_fixture.py",
+      ),
+      "prepare",
+      root,
+      sourceRoot,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
+  const cleanupEnv = JSON.parse(prepared.stdout) as Record<string, string>;
+  cleanupRoots.push(root);
+  return { root, fleet, cleanupEnv };
 }
 
 async function waitFor(check: () => boolean, child: ReturnType<typeof spawn>) {
@@ -499,11 +533,15 @@ test(
           BENCHMARK_HUB_UPLOAD_URL: api.base,
           RUN_BENCH_CAMPAIGN_ID: "group-first",
           RUN_BENCH_CAMPAIGN_ROOT: path.join(fixture.root, "campaigns"),
+          ...fixture.cleanupEnv,
           RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
           CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
           GROUP_CONTROL_WORK: receipts,
           GROUP_PROJECT_ROOT: project,
-          PYTHONPATH: path.join(project, "agents"),
+          PYTHONPATH: [
+            fixture.cleanupEnv.PYTHONPATH,
+            path.join(project, "agents"),
+          ].join(path.delimiter),
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -723,11 +761,15 @@ test(
             // The last shard misstates the group size; the Hub must refuse it.
             RUN_BENCH_CAMPAIGN_GROUP_TOTAL: index === 2 ? "8" : "6",
             RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT: String(startedAt),
+            ...fixture.cleanupEnv,
             RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
             CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
             GROUP_CONTROL_WORK: receipts,
             GROUP_PROJECT_ROOT: project,
-            PYTHONPATH: path.join(project, "agents"),
+            PYTHONPATH: [
+              fixture.cleanupEnv.PYTHONPATH,
+              path.join(project, "agents"),
+            ].join(path.delimiter),
           },
           stdio: ["ignore", "pipe", "pipe"],
         },
@@ -1962,6 +2004,7 @@ test(
           BENCHMARK_HUB_PARENT_RUN_ID: "infra-stop-parent",
           RUN_BENCH_CAMPAIGN_ID: "infra-stop",
           RUN_BENCH_CAMPAIGN_ROOT: campaigns,
+          ...fixture.cleanupEnv,
           RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
           CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
           CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "",

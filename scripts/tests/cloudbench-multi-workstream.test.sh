@@ -239,10 +239,15 @@ fail() {
     # terminal markers live in the per-bench run dir and explain intermittent
     # finalization failures. Dump the three newest so they outlive TMP_ROOT.
     local autoscaler_logs
+    local -a task_bench_logs=()
     # -r: with no autoscaler log, a bare `ls -t` would list (and dump) the cwd.
     autoscaler_logs="$(find "$TMP_ROOT" -name autoscaler.log -type f -print 2>/dev/null |
         xargs -r ls -t 2>/dev/null | head -3)"
-    for log in "$TMP_ROOT"/controller-*.log $autoscaler_logs; do
+    while IFS= read -r log; do
+        task_bench_logs+=("$log")
+    done < <(find "$TMP_ROOT" -name bench.log -type f -print0 2>/dev/null |
+        xargs -0 -r ls -t -- 2>/dev/null | head -3)
+    for log in "$TMP_ROOT"/controller-*.log $autoscaler_logs "${task_bench_logs[@]}"; do
         [ -f "$log" ] || continue
         if [ "$(basename "$log")" = "autoscaler.log" ]; then
             echo "── $(dirname "$log") autoscaler markers: $(cd "$(dirname "$log")" &&
@@ -1361,6 +1366,7 @@ def run_fake_driver(mdir):
         retry_started = time.time()
         deadline = retry_started + (int(execution_budget_s) if exit_code == 0 else 0)
         failed_worker = None
+        ready = []
         while time.time() < deadline:
             output = current_task_output()
             if output:
@@ -1398,8 +1404,14 @@ def run_fake_driver(mdir):
                     break
                 time.sleep(0.1)
         if exit_code == 0 and not Path(MARKERS, "worker-readiness-retry-proven").is_file():
+            observed = time.time()
             log("FATAL: readiness failure never crossed captured cleanup and healthy retry "
-                f"within the {execution_budget_s}s benchmark execution budget")
+                f"within the {execution_budget_s}s benchmark execution budget " + json.dumps({
+                    "phase": "healthy-retry" if failed_worker else "captured-retirement",
+                    "failed_worker": failed_worker, "ready_workers": ready,
+                    "elapsed_seconds": observed - retry_started,
+                    "deadline_remaining_seconds": deadline - observed,
+                }, sort_keys=True))
             exit_code = 1
     # Keep the lower-target regression alive after the in-flight worker reaches
     # its own terminal cleanup boundary. Staging remains committed while it is

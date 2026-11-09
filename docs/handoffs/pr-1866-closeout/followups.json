@@ -1,0 +1,32 @@
+{
+  "pr": 1866,
+  "merged_sha": "7577a6573682179b3715fa25e9433e27cf9e24e6",
+  "production": "render, fly, backend-probes, workflow-migration, semantic: PASS on the merged SHA",
+  "followups": [
+    {
+      "item": "PR #1697 deploy-custody tooling (~14k lines) remains unshipped",
+      "state": "open PR, branch fix/rca-agent-7a2ead9f-browser at 4d425f3b0 pushed; its round-97 cycle preserved in .context/deploy-pipeline-release on devbox 669a4893",
+      "blocker": "23 failing deploy-command-structural tooling tests; local custody refuses on an unreadable root socat port forwarder"
+    },
+    {
+      "item": "AgentCard sandbox release stall on smoke agent-payment-abandonment",
+      "state": "SKIPPED_WITH_WARNING (resource_skip agentcard_release_stall), never PASS",
+      "unreleased": "$43.96 sandbox (transfer owt_7120d1852917a2187c2b2bad, transferredCents 4396 / releasedCents 0)",
+      "agent": "06918ec3-674e-4c27-95c6-601a891de61e"
+    },
+    {
+      "item": "mac-app-coverage-blackbox",
+      "state": "platform omitted on Linux; unverified, not a pass"
+    },
+    {
+      "item": "Devbox deletion readiness",
+      "state": "NOT_READY: only the boxes.dev daemon's shared Codex app-server (247680) and its code-mode host (486991) remain; no workspace state",
+      "reasons": [
+        "Archived to R2 devbox-closeout-private/pr1866-7577a657/ (core + 3 deploy-cloud batches, 7.2 GB, read-back verified): .context (24 GB), logs, 72 unpushed branches and the stash (git bundle)",
+        "13 leftover PR #1697 agent_link_server hubs stopped by exact PID; flyctl agent stopped",
+        "Not stopped: the platform Codex app-server and code-mode host, owned by boxes.dev for other threads",
+        "All 4 box-created Codex helper threads (ph74gd5h, ph73qw1t, ph78a0bs, ph77071p) archived after their work finished; the daemon-owned app-server was not killed (deploy rule: never kill processes this deploy did not start) and clears when the daemon recycles it"
+      ]
+    }
+  ]
+}

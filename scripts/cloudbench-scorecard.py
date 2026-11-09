@@ -1141,7 +1141,7 @@ ul{list-style:none;margin:0;padding:0;font-size:13px}li{margin:2px 0;overflow-wr
 .agents{display:grid;grid-template-columns:1fr auto auto auto;gap:2px 10px;font-size:13px;font-variant-numeric:tabular-nums}
 .agents .h{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}.agents .life{text-align:right}
 .agents .why{grid-column:1/-1;color:var(--bad);font-size:12px;padding-left:18px}
-@media (max-width:420px){.causes{grid-template-columns:auto 36px minmax(0,1fr)}.tile .v{font-size:20px}}
+@media (max-width:420px){.causes{grid-template-columns:auto 36px minmax(0,1fr)}.tile .v{font-size:20px}.agents{grid-template-columns:repeat(3,minmax(0,1fr));gap:4px 6px}.agents>span{min-width:0;overflow-wrap:anywhere}.agents>.work{grid-column:1/-1;margin-top:4px}}
 footer{border-top:1px solid var(--line);padding-top:8px;font-weight:650}
 .gen{font-size:11px;color:var(--muted);font-weight:400;margin-top:4px}
 """
@@ -1361,7 +1361,7 @@ def _agents_html(card) -> str:
     if not agents:
         body = '<div class="note">No active agents</div>'
     else:
-        cells = ['<span class="h">Agent / work</span><span class="h">Tokens</span><span class="h">15m tok/min</span><span class="h life">Life</span>']
+        cells = ['<span class="h work">Agent / work</span><span class="h">Tokens</span><span class="h">15m tok/min</span><span class="h life">Life</span>']
         for a in agents:
             icon = a.get("status") or ("⛔" if a.get("blocking") else "🔄")
             tokens = compact(a.get("tokens")) if isinstance(a.get("tokens"), (int, float)) else "UNMETERED"
@@ -1375,7 +1375,7 @@ def _agents_html(card) -> str:
                 duration(card["generated_at"] - a["started_at"]) if isinstance(a.get("started_at"), (int, float)) else "UNMEASURED")
             red = icon in ("⛔", "🚨")
             cls = "bad" if red else "ok" if icon == "✅" else "run"
-            cells.append(f'<span class="{cls}">{e(icon)} {e(a["name"])}' + (f' / {e(a["work"])}' if a.get("work") else "") + "</span>"
+            cells.append(f'<span class="{cls} work">{e(icon)} {e(a["name"])}' + (f' / {e(a["work"])}' if a.get("work") else "") + "</span>"
                          f'<span class="{"warn" if tokens == "UNMETERED" else ""}">{e(tokens)}</span>'
                          f'<span class="{"warn" if rate == "UNMETERED" else ""}">{e(rate)}</span><span class="life">{e(life)}</span>')
             if red:
