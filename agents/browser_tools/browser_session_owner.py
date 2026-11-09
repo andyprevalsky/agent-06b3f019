@@ -121,6 +121,10 @@ class BrowserSessionCustody:
             raise RuntimeError("Browser session native transport remains live")
 
     @property
+    def stopping(self) -> bool:
+        return self.stop_task is not None and not self.stop_task.done()
+
+    @property
     def closed(self) -> bool:
         return (
             self.sealed
@@ -181,7 +185,10 @@ class BrowserSessionOwnershipMixin:
                 self._native_custody.remember(self._cdp_client_root)
 
     async def get_or_create_cdp_session(self, target_id=None, focus: bool = True):
-        with self._native_custody.acquiring():
+        custody = self._native_custody
+        # The SDK's own stop dispatches its final SaveStorageStateEvent on an
+        # event-bus task, which still needs CDP while that stop is in flight.
+        with custody.acquiring(allow_teardown=custody.stopping):
             return await super().get_or_create_cdp_session(target_id, focus)
 
     async def reset(self) -> None:
