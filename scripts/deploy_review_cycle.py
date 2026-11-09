@@ -417,8 +417,13 @@ def path_filters(repo: Path, head: str) -> tuple[list[re.Pattern[str]], list[re.
 
 
 def is_reviewable(path: str, include: list[re.Pattern[str]], exclude: list[re.Pattern[str]]) -> bool:
-    included = not include or any(pattern.match(path) for pattern in include)
-    return included and not any(pattern.match(path) for pattern in exclude)
+    """CodeRabbit's case sensitivity for custom (extglob) filters is unverified, so either reading that reviews wins."""
+    def reviewable(flags: int) -> bool:
+        def hit(pattern: re.Pattern[str]) -> bool:
+            return re.match(pattern.pattern, path, flags) is not None
+        included = not include or any(hit(pattern) for pattern in include)
+        return included and not any(hit(pattern) for pattern in exclude)
+    return reviewable(0) or reviewable(re.IGNORECASE)
 
 
 def record_no_reviewable_paths(

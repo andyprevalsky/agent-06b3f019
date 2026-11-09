@@ -291,6 +291,7 @@ class NoReviewablePathsTest(unittest.TestCase):
             self.assertFalse(MODULE.is_reviewable(name, include, exclude), name)
         for name in ("scripts/deploy_cli.py", "agents/tools/x.py", "back-end/src/server.ts",
                      "agents/tests/browser_tilion.blackbox.py", "agents/x/browser_tilion.blackbox.py",
+                     "agents/tests/BROWSER_TILION.blackbox.py", "agents/x/Browser_Tilion.blackbox.py",
                      ".github/workflows/deploy.yml", ".github/notes.md"):
             self.assertTrue(MODULE.is_reviewable(name, include, exclude), name)
 
