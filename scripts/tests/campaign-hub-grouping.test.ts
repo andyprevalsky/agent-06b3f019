@@ -2220,6 +2220,58 @@ echo "RETURNED"
   }
 });
 
+test("the fleet child watch follows each child's recorded start identity, not its PID", () => {
+  const work = path.join(workRoot, "fleet-watch-start-identity");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  // A live child of this controller whose recorded start identity no longer
+  // matches stands in for a PID reused by a later child: it is listed by
+  // jobs -pr and its parent is the controller, yet the watch must not wait on
+  // it. The child whose identity matches is still waited for.
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; ROOT_DIR="$2"; FLEET_DIR="$3/fleet"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+for name in fleet_job_running fleet_pid_start_time fleet_pid_matches_start fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+    body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+    [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
+    eval "$body"
+done
+FLEET_INFRA_STOP_SENT=0; INFRA_PROBE=0; RUN_BENCH_CAMPAIGN_CHILD=1
+mkdir -p "$FLEET_DIR/reused" "$FLEET_DIR/live"
+sleep 60 &
+reused=$!
+( sleep 1 ) &
+live=$!
+CHILD_PIDS=("$reused" "$live"); CHILD_OUT=("$FLEET_DIR/reused" "$FLEET_DIR/live")
+CHILD_STARTS=("$(fleet_pid_start_time "$reused")-earlier-process" "$(fleet_pid_start_time "$live")")
+fleet_wait_children_for_infra_stop
+kill -0 "$live" 2>/dev/null && echo "LIVE_STILL_RUNNING" || echo "LIVE_FINISHED"
+kill -0 "$reused" 2>/dev/null && echo "RETURNED_WHILE_REUSED_PID_LIVE"
+kill "$reused" 2>/dev/null
+`,
+  );
+  const result = spawnSync(
+    "bash",
+    [
+      driver,
+      path.join(sourceRoot, "scripts/run-bench-fleet"),
+      sourceRoot,
+      work,
+    ],
+    {
+      env: { ...process.env, FLEET_INFRA_STOP_POLL_SECONDS: "0.1" },
+      encoding: "utf8",
+      timeout: 20_000,
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /LIVE_FINISHED/);
+  assert.match(result.stdout, /RETURNED_WHILE_REUSED_PID_LIVE/);
+});
+
 test(
   "a plain fleet continues at 1/40 infra jobs and stops itself through its TERM trap at 2/40",
   { timeout: 120_000 },

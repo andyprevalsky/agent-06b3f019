@@ -15199,6 +15199,7 @@ FLEET_EXECUTION_COMPLETED=0
 AUTOSCALER_PIDS=()
 PROVISION_PIDS=()
 CHILD_PIDS=()
+CHILD_STARTS=()
 CHILD_EXIT_CODES=()
 CHILD_OUT=()
 CHILD_BENCH=()
@@ -19379,8 +19380,11 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
             --ref "$BENCH_REF" \
             --timeout "$bench_child_timeout" \
         > "$out/fleet-child.log" 2>&1 &
+    child_pid=$!
+    child_start="$(fleet_pid_start_time "$child_pid" || true)"
     if [ -z "$slot" ]; then
-    CHILD_PIDS+=("$!")
+    CHILD_PIDS+=("$child_pid")
+    CHILD_STARTS+=("$child_start")
     CHILD_OUT+=("$out")
     CHILD_BENCH+=("$bench")
     CHILD_MODE+=("$mode_label")
@@ -19389,7 +19393,8 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CHILD_RUN_TOKEN+=("$FLEET_OWNER_TOKEN-$i")
     CHILD_BENCH_INDEX+=("$i")
     else
-    CHILD_PIDS[$slot]="$!"
+    CHILD_PIDS[$slot]="$child_pid"
+    CHILD_STARTS[$slot]="$child_start"
     CHILD_MACHINE[$slot]="$cid"
     fi
     # Boot-launch is one bounded update/start pair and has exponential retry; it
@@ -19642,16 +19647,23 @@ sys.exit(runpy.run_path(sys.argv[1])["fleet_infra_stop_main"](sys.argv[2:]))' \
     kill -TERM "${BASHPID:-$$}"
 }
 
-# A child counts as running while `jobs -pr` lists it or, when a loaded
-# controller's `jobs -pr` misses it, while its PID is still this controller's
-# own child. This watch has no deadline, so a PID reused by an unrelated
-# process after the child exited must never keep it open.
-fleet_child_pid_is_ours() {  # fleet_child_pid_is_ours <pid>
-    local pid="${1:-}" parent
-    fleet_job_running "$pid" && return 0
+# Whether a launched child is still running. This watch has no deadline, so a
+# PID reused after the child exited (by an unrelated process or by a later
+# child of this controller) must never keep it open: when the child's start
+# identity (fleet_pid_start_time) was recorded at launch, only that same
+# process counts. Without one, a
+# PID counts while `jobs -pr` lists it or, when a loaded controller's
+# `jobs -pr` misses it, while it is still this controller's own child.
+fleet_child_pid_is_ours() {  # fleet_child_pid_is_ours <pid> [<start>]
+    local pid="${1:-}" start="${2:-}" parent
     case "$pid" in
         ''|*[!0-9]*) return 1 ;;
     esac
+    if [ -n "$start" ]; then
+        fleet_pid_matches_start "$pid" "$start"
+        return
+    fi
+    fleet_job_running "$pid" && return 0
     parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$parent" ] && [ "$parent" = "$$" ]
 }
@@ -19665,7 +19677,7 @@ fleet_wait_children_for_infra_stop() {
         for j in "${!CHILD_PIDS[@]}"; do
             if [ -e "${CHILD_OUT[$j]}/benchmark-child.finished" ]; then
                 finished=$((finished + 1))
-            elif fleet_child_pid_is_ours "${CHILD_PIDS[$j]}"; then
+            elif fleet_child_pid_is_ours "${CHILD_PIDS[$j]}" "${CHILD_STARTS[$j]:-}"; then
                 live=$((live + 1))
             fi
         done
@@ -19899,6 +19911,7 @@ done
 # Normal completion has already reaped every child. Clear the ownership list so
 # EXIT cleanup cannot signal a stale PID that the OS may have since reused.
 CHILD_PIDS=()
+CHILD_STARTS=()
 # Autoscalers that already published causal completion are finished work, not
 # live ownership. Reap them before the fleet summary / EXIT path so guest
 # shutdown cannot race a vanishing jobs(1) entry into "survived local teardown".
