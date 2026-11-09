@@ -47,7 +47,7 @@ Scenario format (stable; other scenario authors depend on it). JSON object:
                passthrough: bool}}: extra commands routed through the same rules (rule ``tool`` = name);
                with passthrough, an unmatched call execs the next ``name`` on PATH
 Placeholders ``{CONTROLLER_PID}``, ``{CONTROLLER_PID_START}``, ``{CONTROLLER_TOKEN}``, ``{REPO}``,
-``{GIT_COMMON}``, ``{MOCKS}``, ``{CALL}`` (1-based call number), ``{CHILD_PID_<n>}``, ``{NOW_PST}``, ``{REPORT_FORMAT}`` (the replay repo's
+``{GIT_COMMON}``, ``{MOCKS}``, ``{HEAD_SHA}``/``{HEAD_SHORT}``/``{HEAD_13}`` (the replay repo's HEAD), ``{CALL}`` (1-based call number), ``{CHILD_PID_<n>}``, ``{NOW_PST}``, ``{REPORT_FORMAT}`` (the replay repo's
 .claude/shared/benchmark-report-format.txt, as the real launch prints it), the matched rule's named regex
 groups (``(?P<HTML>[^ ]+)`` -> ``{HTML}``) and every ``vars`` key are replaced in stdout, stderr, file
 paths and file contents. The n-th call matching a rule gets responses[n-1].
@@ -153,6 +153,9 @@ def placeholders(layout: Layout, scenario: dict[str, Any], call: int = 0, groups
         "MOCKS": str(layout.mocks),
         "CALL": str(call),
     }
+    head = head_sha(layout.repo)
+    if head:  # recorded output names the replay repo's own HEAD, not the source run's commit
+        values.update({"HEAD_SHA": head, "HEAD_SHORT": head[:10], "HEAD_13": head[:13]})
     for n, child in enumerate(info.get("children") or [], 1):
         values[f"CHILD_PID_{n}"] = str(child)
     try:
@@ -168,6 +171,13 @@ def placeholders(layout: Layout, scenario: dict[str, Any], call: int = 0, groups
         for key, value in (scenario.get("vars") or {}).items():
             values[key] = substitute(str(value), values)
     return values
+
+
+def head_sha(repo: Path) -> str:
+    try:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def substitute(text: str, values: dict[str, str]) -> str:

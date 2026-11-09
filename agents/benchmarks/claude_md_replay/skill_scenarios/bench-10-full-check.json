@@ -29,7 +29,7 @@
     }
   ],
   "vars": {
-    "HEAD": "5a9b91f0e4d6a7accff187c77b8a5bb282c326d5"
+    "HEAD": "{HEAD_SHA}"
   },
   "scenario": "bench-10-full-check"
 }
