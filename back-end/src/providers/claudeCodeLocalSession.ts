@@ -40,7 +40,7 @@ import { MAX_FILE_SIZE, type FilePointer, downloadFromStorage, uploadToStorage }
 import { randomUUID } from './crypto';
 import { isMissingLocalFileError, readRegularFileNoFollow } from './claudeCodeLocalFileRead';
 import { isFilePointer } from './claudeCodeLocalOwnership';
-import { allocatePort, waitForChildReadiness } from './claudeCodeLocalProcess';
+import { allocatePort, killChildQuietly, waitForChildReadiness } from './claudeCodeLocalProcess';
 import { isSandboxCreateTimeoutOrAbortError } from './e2bSandboxCreate';
 import { materializeUserUiInLocalHome, type UserUiWorkspace } from './userUi/workspace';
 import { localCodeSessionRoot } from './codeSessions/lifecycle';
@@ -469,6 +469,7 @@ export async function createLocalClaudeCodeSession(params: {
   projectWorkspace?: ProjectWorkspace | null;
   claudeTokenSource: string | null;
   claudeTokenIntegrationId: string | null;
+  taskName?: string | null; // the spawn's task_name: the agents-list title on the task row
 }): Promise<{
   wsUrl: string;
   taskId: string;
@@ -579,6 +580,7 @@ export async function createLocalClaudeCodeSession(params: {
         sandboxId,
         streamUrl: wsUrl,
         goal,
+        taskName: params.taskName ?? null,
         status: 'ACTIVE',
         claudeTokenSource: params.claudeTokenSource ?? 'local_fallback',
         claudeTokenIntegrationId: params.claudeTokenIntegrationId,
@@ -590,11 +592,7 @@ export async function createLocalClaudeCodeSession(params: {
   } catch (persistErr) {
     // Child is already listening; kill it so a failed DB write cannot leak a
     // process that no close path can reach.
-    try {
-      child.kill('SIGKILL');
-    } catch {
-      // already dead
-    }
+    killChildQuietly(child);
     try {
       // A persistent HOME holds earlier sessions' work; only the task dir goes.
       rmSync(taskDir, { recursive: true, force: true });

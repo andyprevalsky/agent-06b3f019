@@ -7,11 +7,14 @@ export function phoneAttentionCandidate(
   taskId: string,
   agentId: string | null | undefined,
   messages: Message[],
+  retiredId?: string,
 ) {
   const query = getQueryParams(),
     linked = query.get('attention-request-id');
-  if (linked)
-    return query.get('agent-id') === agentId && query.get('browser-id') === taskId ? linked : '';
+  if (linked) {
+    if (query.get('agent-id') !== agentId || query.get('browser-id') !== taskId) return '';
+    if (linked !== retiredId) return linked;
+  }
   for (let i = messages.length - 1; i >= 0; i--) {
     const meta = messages[i].metadata;
     const raw = meta?.requestUserAuthentication;
@@ -19,6 +22,7 @@ export function phoneAttentionCandidate(
     const r = raw as Record<string, unknown>,
       target = readPhoneTarget(r.target);
     if (target?.browserTaskId !== taskId) continue;
+    if (r.requestId === retiredId) return '';
     return meta.toolStatus === 'IN_PROGRESS' && typeof r.requestId === 'string' ? r.requestId : '';
   }
   return '';

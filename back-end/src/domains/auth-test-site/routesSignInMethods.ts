@@ -1,3 +1,4 @@
+import { phoneSmsRetryAfterSeconds, phoneSmsTarget } from './servicePhoneSms';
 /**
  * Sign-in methods other than the password form.
  *
@@ -143,22 +144,32 @@ signInMethodsRouter.post(
   '/:siteId/login/sms',
   asyncHandler(async (req: Request, res: Response) => {
     const site = siteOf(req);
-    const phone = formField(req, 'phone').trim();
+    const phone = phoneSmsTarget(site, formField(req, 'phone').trim());
     if (phone === '' || site.behavior.smsSignIn === 'off') {
       res.redirect(303, siteUrl(site, '/login/sms'));
+      return;
+    }
+    const retryAfterSeconds = phoneSmsRetryAfterSeconds(site);
+    if (retryAfterSeconds > 0) {
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      sendPage(
+        res,
+        '<p>Please wait before requesting another sign-in code, then try again.</p>',
+        429
+      );
       return;
     }
     await requestSmsCode(site, phone);
     res.redirect(
       303,
-      `${siteUrl(site, '/login/sms/verify')}&phone=${encodeURIComponent(phone)}${nextQuery(nextOf(req))}`
+      `${siteUrl(site, '/login/sms/verify')}${site.scenario === 'phone_sms_otp' ? '' : `&phone=${encodeURIComponent(phone)}`}${nextQuery(nextOf(req))}`
     );
   })
 );
 
 signInMethodsRouter.get('/:siteId/login/sms/verify', (req: Request, res: Response) => {
   const site = siteOf(req);
-  const phone = queryField(req, 'phone').trim();
+  const phone = phoneSmsTarget(site, queryField(req, 'phone').trim());
   if (phone === '') {
     res.redirect(303, siteUrl(site, '/login/sms'));
     return;

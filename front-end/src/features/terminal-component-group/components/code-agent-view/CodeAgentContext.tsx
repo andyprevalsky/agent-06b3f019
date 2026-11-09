@@ -62,7 +62,8 @@ export function CodeAgentContextProvider({
   const messages = useMemo<Message[]>(
     () =>
       codeSessionMessages({
-        messages: owner.messages,
+        // Every run of this spawn (a resumed code agent continues the same view).
+        messages: c.messages,
         taskId,
         ownerAgentId,
         provider: c.provider,
@@ -70,7 +71,7 @@ export function CodeAgentContextProvider({
         sessionEndedAt: endedAt,
         echoes,
       }),
-    [owner.messages, taskId, ownerAgentId, c.provider, state, endedAt, echoes],
+    [c.messages, taskId, ownerAgentId, c.provider, state, endedAt, echoes],
   );
   const firstAt = messages[0]?.timestamp ?? new Date(0).toISOString();
   const agent = useMemo(

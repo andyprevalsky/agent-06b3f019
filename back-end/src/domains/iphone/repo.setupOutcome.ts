@@ -1,21 +1,28 @@
 import type { IPhoneDevice, Transaction } from './types';
-import { sealSetup, type SetupState, type SetupInput } from '../../providers/phoneSetupState';
+import {
+  sealSetup,
+  configurationState,
+  type SetupState,
+  type SetupInput,
+} from '../../providers/phoneSetupState';
 import {
   verificationDto,
   SETUP_REQUIREMENTS_VERSION,
 } from '../../providers/phoneSetupVerification';
-import type { SetupVerificationResult } from '../../providers/phoneSetupVerifier';
+import type { SetupOutcomeResult } from '../../providers/phoneSetupVerifier';
 export async function writeSetupOutcome(
   tx: Transaction,
   device: IPhoneDevice,
   state: SetupState,
   input: SetupInput,
-  result: SetupVerificationResult | null,
+  result: SetupOutcomeResult | null,
   now: Date,
   succeeded: boolean,
   errorCode: string | null,
   evidenceDigest: string
 ) {
+  if (!(input.action === 'verify' && input.verificationTarget === 'runtime'))
+    delete state.completedConfiguration;
   state.claimRevision++;
   state.attempt!.revision = state.claimRevision;
   const target = input.verificationTarget ?? 'apple_account';
@@ -39,7 +46,9 @@ export async function writeSetupOutcome(
       workflowId: state.attempt!.workflowId,
       providerEpoch: device.providerEpoch,
       expectedPhone: state.expectedPhone ?? null,
-      ...(target === 'runtime' && result?.runtime ? { runtime: result.runtime } : {}),
+      ...(target === 'runtime' && result && 'runtime' in result && result.runtime
+        ? { runtime: result.runtime }
+        : {}),
     };
     if (target === 'apple_account' && result?.identityConfirmed === true)
       state.verified = { at: now.toISOString(), profileRevision: state.profileRevision };
@@ -62,6 +71,8 @@ export async function writeSetupOutcome(
     errorCode,
   };
   if (input.action === 'block' && input.reasonCode === 'observed_signed_out') {
+    delete state.connection;
+    delete state.readinessAdmission;
     state.attempt!.floorAt = now.toISOString();
     state.attempt!.floorCursor = input.expectedCursor + 1;
     delete state.verified;
@@ -77,7 +88,7 @@ export async function writeSetupOutcome(
   });
 }
 
-function outcomeReason(input: SetupInput, result: SetupVerificationResult | null) {
+function outcomeReason(input: SetupInput, result: SetupOutcomeResult | null) {
   const target = input.verificationTarget ?? 'apple_account';
   return (
     input.reasonCode ??
@@ -94,6 +105,7 @@ function outcomeReason(input: SetupInput, result: SetupVerificationResult | null
 }
 
 function currentConfigurationReady(device: IPhoneDevice, state: SetupState, now: Date) {
+  state = configurationState(state);
   return verificationDto(state.verification, {
     attemptId: state.attempt!.id,
     profileRevision: state.profileRevision,

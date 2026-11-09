@@ -1,0 +1,51 @@
+{
+  "format": "PR1857-FINAL-RECORDS-SNAPSHOT-V1",
+  "cutoff_started_at": "2026-11-08T23:22:00.587369+00:00",
+  "completed_at": "2026-11-08T23:23:15.223272+00:00",
+  "scope": "all .context required records excluding credentials/caches, plus root runtime logs and preparation metadata",
+  "original_bytes": 2183462661,
+  "skipped": [
+    {
+      "path": ".context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/shared-inventory/inventory/current",
+      "reason": "symlink directory not followed"
+    }
+  ],
+  "credential_signature_review_paths": [
+    ".context/deploy-pipeline/attempts/2/initial/cloudbench-controller/remote-artifact/files/.context/cloudbench-controller-tests/native-sewozai4/scripts/tests/github-token-pool.test.py"
+  ],
+  "excluded": [
+    {
+      "path": ".context/tsbuildinfo",
+      "category": "reproducible-cache"
+    },
+    {
+      "path": ".context/frontend-builds",
+      "category": "reproducible-cache"
+    },
+    {
+      "path": ".context/pr1634-archive-recovery.env",
+      "category": "protected-configuration-external-proof-required"
+    },
+    {
+      "path": ".context/rca-784d/closeout-prep",
+      "category": "separate-prep-classification"
+    },
+    {
+      "path": ".context/deploy-pipeline/attempts/2/initial/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/worker-ports-hhtf8vj9/.env",
+      "category": "protected-configuration-external-proof-required"
+    },
+    {
+      "path": ".context/deploy-pipeline/attempts/2/initial/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/worker-ports-c6gzay2n/.env",
+      "category": "protected-configuration-external-proof-required"
+    },
+    {
+      "path": ".context/deploy-pipeline/attempts/2/initial/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/worker-ports-azwkkcbb/.env",
+      "category": "protected-configuration-external-proof-required"
+    }
+  ],
+  "captured_files": 11077,
+  "private_manifest_sha256": "582516472c38e93e7e1e242efb06436c16c7eb7269408253840183d4739ad42e",
+  "private_manifest_member": "rose/.context/rca-784d/closeout-prep/terminal-20261108T232200Z/snapshot-manifest.json",
+  "qualification": "terminal-capture-qualification.json",
+  "original_flags_preserved": true
+}

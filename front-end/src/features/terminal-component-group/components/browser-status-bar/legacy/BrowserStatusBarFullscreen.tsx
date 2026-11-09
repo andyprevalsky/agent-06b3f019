@@ -4,7 +4,8 @@
  *
  * DESKTOP LAYOUT (>= md): the task-progress panel sits as a fixed-width left
  * column beside the live iframe (horizontal split); the frame header lives above
- * the iframe.
+ * the iframe. The view starts at --rose-bar-offset (the pinned Rose left bar's
+ * width, else 64px; unset outside Rose Desktop → 0) so the bar never covers it.
  *
  * MOBILE LAYOUT (< md): one fixed view stacks the header, a full-width 8:5
  * desktop browser, its control footer, then the always-visible task-progress
@@ -52,7 +53,7 @@ import type {
   StepProgress,
 } from '../types';
 
-interface FullscreenProps {
+export interface FullscreenProps {
   readOnly?: boolean;
   agentId?: string | null;
   taskId: string;
@@ -273,7 +274,10 @@ function DesktopFullscreen({
   progressPanel: ReactNode;
 }) {
   return createPortal(
-    <div className="fixed inset-0 z-50 flex flex-row bg-background">
+    <div
+      data-testid="browser-desktop-fullscreen"
+      className="fixed inset-0 z-50 flex flex-row bg-background md:left-[var(--rose-bar-offset,0px)]"
+    >
       {progressPanel}
       <div className="flex min-w-0 flex-1 flex-col">
         <DesktopFrameHeader

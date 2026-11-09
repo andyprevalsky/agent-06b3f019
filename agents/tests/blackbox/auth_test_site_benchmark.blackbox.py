@@ -51,6 +51,7 @@ TASK_SCENARIOS = {
     "browser-auth-created-account-reused": "created_account_reused",
     "browser-auth-named-account": "named_account",
 }
+PHONE_TASK_SCENARIOS = {"phone-daily-sms-challenge": "phone_sms_otp"}
 PROMPTS = {
     "Tell me my member number for {auth_test_site_url}",
     "Create an account for me at {auth_test_site_url} and tell me my member number",
@@ -168,8 +169,8 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
     from benchmarks.long_horizon import load_raw_catalog
 
     hosted = {raw["name"] for raw in load_raw_catalog() if "auth_test_site" in (raw.get("environment") or {})}
-    assert hosted == set(TASK_SCENARIOS), (
-        f"catalog and test disagree on hosted auth tasks: {hosted ^ set(TASK_SCENARIOS)}"
+    assert hosted == set(TASK_SCENARIOS) | set(PHONE_TASK_SCENARIOS), (
+        f"catalog and test disagree on hosted auth tasks: {hosted ^ (set(TASK_SCENARIOS) | set(PHONE_TASK_SCENARIOS))}"
     )
     for name, scenario in TASK_SCENARIOS.items():
         task = get_task_by_name(name)
@@ -182,7 +183,14 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
         assert task.prompt in PROMPTS, f"{name}: fixtures, not prompts, must decide the branch: {task.prompt!r}"
         first_run = declared_block(task.environment).get("first_run_prompt")
         assert first_run is None or first_run in PROMPTS, f"{name}: {first_run!r}"
-    assert set(TASK_SCENARIOS.values()) == set(AUTH_TEST_SITE_SCENARIOS)
+    for name, scenario in PHONE_TASK_SCENARIOS.items():
+        task = get_task_by_name(name)
+        assert task.group == "daily" and task.status == "ready", name
+        assert declared_block(task.environment)["scenario"] == scenario, name
+        assert task.environment["mode"] == "live" and "LIVE" in task.tags, name
+        assert task.demo_cache == "off" and task.requires_browser_agent, name
+        assert "{auth_test_site_url}" in task.prompt, name
+    assert set(TASK_SCENARIOS.values()) | set(PHONE_TASK_SCENARIOS.values()) == set(AUTH_TEST_SITE_SCENARIOS)
     for prompt in PROMPTS:
         lowered = prompt.lower()
         for hint in (

@@ -716,13 +716,14 @@ def format_report(selection: Selection) -> str:
     return "\n".join(lines)
 
 
-def scream_if_cap_hit(selection: Selection, stream=None) -> None:
+def scream_if_cap_hit(selection: Selection, stream=None, *, machine_readable: bool = False) -> None:
     stream = stream or sys.stderr
     if not selection.cap_hit:
         if selection.total == selection.cap:
             msg = f"*** PREDEPLOY BENCH COUNT AT HARD CAP: {selection.total}/{selection.cap} ***"
             print(msg, file=stream)
-            print(msg, file=sys.stdout)
+            if not machine_readable:
+                print(msg, file=sys.stdout)
         return
     text = CAP_SCREAM.format(
         selected=selection.total,
@@ -731,7 +732,8 @@ def scream_if_cap_hit(selection: Selection, stream=None) -> None:
         dropped=", ".join(selection.dropped) or "(none)",
     )
     print(text, file=stream)
-    print(text, file=sys.stdout)
+    if not machine_readable:
+        print(text, file=sys.stdout)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -812,7 +814,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\n".join(selection.selected))
         if guidance := format_skip_eligibility(selection.skip_eligibility):
             print(guidance, file=sys.stderr)
-        scream_if_cap_hit(selection)
+        scream_if_cap_hit(selection, machine_readable=True)
     elif args.format == "report":
         print(format_report(selection))
         scream_if_cap_hit(selection)
@@ -841,7 +843,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
-        scream_if_cap_hit(selection)
+        scream_if_cap_hit(selection, machine_readable=True)
     else:
         print(format_report(selection))
         scream_if_cap_hit(selection)

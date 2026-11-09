@@ -19,6 +19,7 @@ import {
   AccessDeniedError,
   WorkflowGenerationMismatchError,
 } from './service';
+import { workerWriteGeneration } from '../../providers/codeResumeGeneration';
 
 const log = createLogger('ToolUsage');
 const router = Router();
@@ -93,7 +94,8 @@ router.post(
         accounting_checkpoint,
         workflow_generation:
           req.isInternal === true
-            ? (req.header('x-agent-workflow-generation') ?? agent_id)
+            ? ((await workerWriteGeneration(agent_id, req.header('x-agent-workflow-generation'))) ??
+              agent_id)
             : undefined,
       });
 

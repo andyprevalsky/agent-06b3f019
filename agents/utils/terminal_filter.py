@@ -9,6 +9,7 @@ import re
 
 import pyte
 
+_BARE_LF_RE = re.compile(r"(?<!\r)\n")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -50,13 +51,12 @@ class TerminalFilter:
         xterm with convertEol) treats bare LF as "move down, keep column", which
         produces the staircase wraps persisted into ``ClaudeCodeSession.output``.
         """
-        out: list[str] = []
-        for ch in data:
-            if ch == "\n" and not last_was_cr:
-                out.append("\r")
-            out.append(ch)
-            last_was_cr = ch == "\r"
-        return "".join(out), last_was_cr
+        if data == "":
+            return data, last_was_cr
+        normalized = _BARE_LF_RE.sub("\r\n", data)
+        if last_was_cr and data.startswith("\n"):
+            normalized = normalized[1:]
+        return normalized, data.endswith("\r")
 
     def feed(self, data: str) -> None:
         """

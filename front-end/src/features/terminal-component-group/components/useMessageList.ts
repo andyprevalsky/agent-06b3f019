@@ -269,7 +269,9 @@ export function useMessageListState({
     agent: ctx.agent,
     filteredMessages,
     isChatMode: ctx.isChatMode,
-    hasStreamingBubbles: streaming.bubbles.size > 0,
+    hasLiveThinkingStream: [...streaming.bubbles.values()].some(
+      (bubble) => !bubble.done && (bubble.subAgentId ?? '') === targetStreamingKey,
+    ),
     hasStreamingPlan: streaming.plan !== null,
     hasStreamingTools: hasBlockingStreamingTool,
     selectedAgentId: ctx.selectedAgentId,

@@ -475,6 +475,9 @@ if [[ -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
   export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
 fi
 # The instrumented backend starts independently of run-blackbox-tests.sh.
+# Full-suite phone fixtures explicitly opt in; never a product default or shared env write.
+# Preserve an explicit caller0 for rollout-denial coverage.
+export CLOUD_IPHONE_ENABLED="${CLOUD_IPHONE_ENABLED-1}"
 # OAuth URL cases need the same synthetic local client, never the production one.
 export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"

@@ -45,7 +45,8 @@ export const CODE_AGENT_LIST_MAX_ROOTS = 50;
 /**
  * One row of GET /api/agents/code-agents: a code agent of one of the requested
  * trees (root_agent_id = the tree's root, owner_agent_id = the Rose agent that
- * owns the session). `title` is the first line of its goal.
+ * owns the session). `title` is the spawn's task_name, else (legacy rows) the
+ * first line of its goal.
  */
 export interface CodeAgentListItem {
   code_agent_id: string;
@@ -54,8 +55,13 @@ export interface CodeAgentListItem {
   provider: CodeAgentProviderName;
   status: CodeAgentStatus;
   title: string;
+  /** Its container (the code session's sandbox); null when unknown (Mac and legacy runs). */
+  container_state?: CodeContainerState | null;
   created_at: string;
 }
+
+/** awake = running · stopped = paused, resumes on the next message · destroyed = retired. */
+export type CodeContainerState = 'awake' | 'stopped' | 'destroyed';
 
 /**
  * Code agents of up to CODE_AGENT_LIST_MAX_ROOTS trees in one request (the

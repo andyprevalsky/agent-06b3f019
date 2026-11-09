@@ -13,6 +13,7 @@ import {
   mintTilionLiveViewUrl,
   tilionRequest,
   tilionSessionPath,
+  TilionApiError,
 } from './tilionClient';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
@@ -196,9 +197,29 @@ function isoFromUnixSeconds(value: number | null | undefined): string | null {
 
 /** `/status` reads the session without touching its idle clock. */
 export async function getTilionSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
-  const record = await tilionRequest<TilionStatusRecord>(tilionSessionPath(sessionId, '/status'), {
-    retryOnTimeout: true,
-  });
+  let record: TilionStatusRecord;
+  try {
+    record = await tilionRequest<TilionStatusRecord>(tilionSessionPath(sessionId, '/status'), {
+      retryOnTimeout: true,
+    });
+  } catch (error) {
+    // Tilion removes ended sessions from its status API. Report confirmed
+    // absence through the same health contract as a retained closed record;
+    // unknown/auth/provider failures must not authorize replacement.
+    if (!(error instanceof TilionApiError) || (error.status !== 404 && error.status !== 410))
+      throw error;
+    return {
+      provider: 'tilion',
+      sessionId,
+      status: 'deleted',
+      createdAt: null,
+      timeoutMs: null,
+      expiresAt: null,
+      ttlMs: 0,
+      profileId: null,
+      uptimeMs: null,
+    };
+  }
   const ended = record.state !== 'ready' && record.state !== 'remote';
   const expiresAt = ended ? (record.closed_at ?? record.expires_at) : record.expires_at;
   const now = Date.now();

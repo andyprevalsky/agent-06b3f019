@@ -13,6 +13,8 @@
  *                             never upscales; Chrome UI stays visible)
  *                             Tilion viewer page inset-0 (page-only stream)
  *
+ * PHONE OVERLAY: active/queued -> root overlay blocks the mounted browser; release -> same iframe.
+ *
  * LOAD STATE: [LOADING] (LiveViewLoading covers the iframe)
  *   --iframe load for this url--> [STREAMING]; a new url restarts at LOADING.
  *   live=false (bound session closed/ended) --> [NOT_LIVE] LiveViewLoading and
@@ -55,6 +57,7 @@ interface LiveViewFrameProps {
   className?: string;
   style?: CSSProperties;
   children?: ReactNode;
+  overlay?: ReactNode;
 }
 
 export function LiveViewFrame({
@@ -67,6 +70,7 @@ export function LiveViewFrame({
   className,
   style,
   children,
+  overlay,
 }: LiveViewFrameProps) {
   const display = resolveLiveViewDisplaySize(url);
   const crop = resolveLiveViewChromeCrop(url);
@@ -142,6 +146,7 @@ export function LiveViewFrame({
         {ended ? <LiveViewEnded /> : (!live || !isLoaded) && <LiveViewLoading />}
         {children}
       </div>
+      {overlay}
     </div>
   );
 }

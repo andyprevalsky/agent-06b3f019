@@ -16,6 +16,9 @@ export const backgroundTaskEntrySchema = z.object({
   // Codex-style path `<owner path>/<task_name>`; null when the owner has no path.
   task_name: z.string().max(60).nullable().optional(),
   path: z.string().max(400).nullable().optional(),
+  // The owner's workflow holds a wake record for this finished task (not a foreground
+  // spawn, not an older record): only then can it start the task's next run.
+  wakeable: z.boolean().optional(),
 });
 export type BackgroundTaskEntry = z.infer<typeof backgroundTaskEntrySchema>;
 

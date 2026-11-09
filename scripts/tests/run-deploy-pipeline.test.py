@@ -790,6 +790,83 @@ def releasing(*releases: Path):
             release.touch()
 
 
+def check_identity_verified_zombie_memory(tmp: Path) -> None:
+    """Existing sampler owner: real ESRCH zombie plus conservative fake-proc negatives."""
+    pipeline = load_module("pipeline_verified_zombie", DRIVER)
+    proc = tmp / 'identity-zombie-proc'
+    pid = 901
+    (proc / str(pid)).mkdir(parents=True)
+    stat_path, rollup = proc / str(pid) / 'stat', proc / str(pid) / 'smaps_rollup'
+    def stat_text(state='S', birth='100', threads='1'):
+        fields = [state, '1'] + ['0'] * 17 + [birth, '0', '0']
+        fields[17] = threads
+        return f"{pid} (fake with spaces) {' '.join(fields)}\n"
+    stat_path.write_text(stat_text())
+    original_read = Path.read_text
+    original_exists = Path.exists
+    def observe(*, error=None, current=None, vanished=False, initial='S'):
+        stat_path.write_text(stat_text(initial))
+        calls = 0
+        def read(path, *args, **kwargs):
+            nonlocal calls
+            if path == rollup:
+                calls += 1
+                if error is not None:
+                    raise error
+                return 'Pss: 2048 kB\nPss_Anon: 1024 kB\n'
+            if path == stat_path and calls and current is not None:
+                return current
+            return original_read(path, *args, **kwargs)
+        def exists(path):
+            if vanished and path == proc / str(pid) and calls:
+                return False
+            return original_exists(path)
+        with patch.object(Path, 'read_text', read), patch.object(Path, 'exists', exists):
+            result = pipeline.sample_lane_tree_memory({pid}, proc)
+        assert calls == 1, 'one original smaps read, no retry'
+        return result
+    zero = {pid: {'anon_mb': 0.0, 'pss_mb': 0.0}}
+    unknown = {pid: None}
+    # Same observed identity, current Z at failedread; both initial Z and S->Z allowed.
+    for initial in ('S', 'Z'):
+        assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('Z'), initial=initial) == zero
+    for threads in ('2','0','malformed','-1','1.0'):
+        assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('Z',threads=threads)) == unknown
+    assert observe(error=PermissionError(13, 'synthetic'), current=stat_text('S')) == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('S')) == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('Z','101')) == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('S','101'), initial='Z') == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current='malformed') == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), vanished=True) == zero
+    assert observe() == {pid: {'anon_mb':1.0,'pss_mb':2.0}}
+    def malformed_read(path,*args,**kwargs):
+        return 'Pss: malformed\nPss_Anon: 1024 kB\n' if path==rollup else original_read(path,*args,**kwargs)
+    with patch.object(Path,'read_text',malformed_read):
+        assert pipeline.sample_lane_tree_memory({pid},proc)==unknown
+
+
+def check_identity_verified_zombie_memory_real(tmp: Path) -> None:
+    """Physical owning RED is independently runnable, not masked by fake-proc RED."""
+    pipeline = load_module("pipeline_verified_zombie_real", DRIVER)
+    if sys.platform == 'linux':
+        child = os.fork()
+        if child == 0:
+            os._exit(0)
+        try:
+            child_stat = Path('/proc') / str(child) / 'stat'
+            def is_zombie():
+                return child_stat.read_text().rsplit(') ',1)[1].split()[0] == 'Z'
+            await_fixture(is_zombie, 'owned child zombie before waitpid')
+            before = child_stat.read_text().rsplit(') ',1)[1].split()
+            assert before[0] == 'Z'
+            assert pipeline.sample_lane_tree_memory({child}) == {child:{'anon_mb':0.0,'pss_mb':0.0}}
+            after = child_stat.read_text().rsplit(') ',1)[1].split()
+            assert after[0] == 'Z' and after[19] == before[19]
+        finally:
+            reaped, status = os.waitpid(child,0)  # Exact own exited child only; no signals.
+            assert reaped == child and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+
 def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     """Review of f3127ca41: the credit must bind to a fresh, fully observed
     PSS sample. (1) Summed RSS is never a PSS substitute: shared pages count
@@ -2485,6 +2562,8 @@ def main() -> int:
         with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
             check_materialized_reservation_credit(tmp / "inherited-flag", env, holder_start_delay_s=1.5)
         check_observation_validity(tmp, env)
+        check_identity_verified_zombie_memory(tmp)
+        check_identity_verified_zombie_memory_real(tmp)
         check_semantic_stack_beside_stack_owners(tmp, env)
         check_lane_scoped_reuse(tmp, env, source_root)
         check_reconcile_reused_lane(tmp)
@@ -4944,22 +5023,29 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
     plan = tmp / "declared-phase-plan.json"
     state = tmp / "declared-phase"
-    # smoke runs until semantic has started (a marker, not a sleep racing three
-    # lane startups on a loaded host); gating semantic behind smoke would hold
-    # smoke until its fixture bound and fail the overlap assertions below.
     semantic_started = tmp / "declared-phase-semantic-started"
+    # Preserve the original smoke duration, then synchronize overlap with semantic
+    # admission instead of assuming child startup/reaping fits inside 1.2 seconds.
+    smoke_command = [sys.executable, "-c",
+                     "import pathlib, time; "
+                     f"marker = pathlib.Path({str(semantic_started)!r}); "
+                     "time.sleep(1.2); deadline = time.monotonic() + 10\n"
+                     "while not marker.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+                     "assert marker.exists(), 'semantic start was serialized behind smoke'"]
     # Budget 100: smoke (50) beside big (80) cannot fit; cov (30) beside smoke can.
     write_plan(plan, [
         {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
         {"name": "big", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "exclusive": True,
          "memory_mb": 80},
         {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 30},
-        {"name": "smoke", "command": released_lane(semantic_started), "reuse_passed": False, "group": "4",
-         "memory_mb": 50, "phase": "coverage"},
+        {"name": "smoke", "command": smoke_command, "reuse_passed": False, "group": "4", "memory_mb": 50,
+         "phase": "coverage"},
         {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
          "after": ["big", "cov"]},
-        {"name": "semantic", "command": ["touch", str(semantic_started)], "reuse_passed": False, "group": "4",
-         "memory_mb": 10, "after": ["big", "cov", "probe"]},
+        {"name": "semantic", "command": [sys.executable, "-c",
+                                          f"import pathlib, time; pathlib.Path({str(semantic_started)!r}).touch(); "
+                                          "time.sleep(0.2)"], "reuse_passed": False, "group": "4", "memory_mb": 10,
+         "after": ["big", "cov", "probe"]},
         {"name": "g4-free", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10},
     ], schedule={"policy": "phased"})
     with releasing(semantic_started):

@@ -1879,9 +1879,225 @@ def test_message_person_prompt_forbids_automatic_agent_sms_retry():
     assert "only if the user explicitly asks for a new attempt" in normalized
 
 
+async def test_queue_phone_transport_preserved_without_mac_polling():
+    from domains.message_person.repo import queue_imessage_activity
+    calls = []
+    def backend(request):
+        calls.append(request.url.path)
+        assert request.method == "POST" and request.url.path == "/api/imessage/queue"
+        return httpx.Response(200, json={"success": True, "queue_id": "cloud-queue", "provider": "phone_harness", "status": "approved", "browser_task_id": None, "sent_at": None})
+    setup_mock_fn(backend)
+    try:
+        with patch("temporalio.activity.heartbeat"):
+            result = await queue_imessage_activity("user", "agent", "tool", "+15550000000", "Exact approved body")
+        assert result["provider"] == "phone_harness" and result["status"] == "approved"
+        assert calls == ["/api/imessage/queue"]
+    finally:
+        teardown_mock()
+
+
+async def test_cloud_message_adapter_requires_backend_sent_receipt_and_stable_binding():
+    from domains.message_person import handler as cloud_phone
+    from tools.base import ToolEvent, EventType, MessageStatus
+    from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
+    class Browser:
+        def __init__(self):
+            self.calls = []
+        async def execute_tool(self, instance, args, call_id):
+            self.calls.append((args, call_id))
+            schema = args.get("output_schema")
+            assert schema and schema.get("fields"), "Fresh cloud-message browser task has no required output schema"
+            from helpers.llm import _build_verifier_response_model
+            contract = _build_verifier_response_model(schema).model_json_schema()
+            assert "send_outcome" in contract["$defs"]["VerifierOutput"]["required"]
+
+            yield ToolEvent(type=EventType.POST_MESSAGE, message="Synthetic model claims sent", status=MessageStatus.FINISHED, metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete", "success": True})
+    browser = Browser()
+    backend = {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "unknown", "sent_at": None, "browser_task_id": _logical_browser_task_id("agent-1")}
+    fake = _FakeWFModule(activity_results={"bind_phone_message_activity": {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "approved", "browser_task_id": _logical_browser_task_id("agent-1")}, "read_phone_message_activity": lambda: dict(backend)})
+    with patch.object(cloud_phone, "workflow", fake), patch.object(cloud_phone, "get_browser_manager", lambda: browser):
+        for status in ("unknown", "sent"):
+            backend["status"] = status
+            backend["sent_at"] = "2026-10-19T00:00:00Z" if status == "sent" else None
+            events = await _collect(cloud_phone.deliver_cloud_message(_WFInstance(), queue_id="queue", tool_call_id="original", recipient="+15550000000", body="Exact approved body"))
+            receipt = [e.data["cloud_delivery"] for e in events if e.data and "cloud_delivery" in e.data]
+            assert (len(receipt) == 1) == (status == "sent"), "Model summary fabricated a confirmed send"
+            if status == "unknown":
+                assert any(e.status == MessageStatus.ERROR for e in events)
+                assert not any(e.status == MessageStatus.FINISHED for e in events), "Child summary appeared confirmed before receipt"
+                assert not any("Synthetic model claims sent" in (e.message or "") for e in events)
+        assert all(call_id == "original:cloud-message" for _, call_id in browser.calls)
+        assert len({json.dumps(args, sort_keys=True) for args, _ in browser.calls}) == 1
+        assert "Exact approved body" in browser.calls[0][0]["goal"] and "+15550000000" in browser.calls[0][0]["goal"]
+        assert all(args["approvedMessageIntent"] == "queue" for args, _ in browser.calls)
+        assert not any(c["name"] == "bind_phone_message_activity" for c in fake.calls), "Bind ran before browser task creation"
+        assert all(c["kwargs"]["retry_policy"].maximum_attempts == 1 for c in fake.calls)
+
+
+async def test_handler_cloud_route_after_exact_approval_without_mac_fallback():
+    from domains.message_person.handler import MessagePersonManager
+    from domains.message_person import handler as cloud_phone
+    from tools.base import ToolEvent, EventType, MessageStatus
+    approvals, delegated = [], []
+    async def approval(*args, **kwargs):
+        approvals.append(kwargs.get("question"))
+    async def cloud(instance, **kwargs):
+        assert len(approvals) == 1
+        delegated.append(kwargs)
+        yield ToolEvent(type=EventType.POST_MESSAGE, message="", status=MessageStatus.FINISHED, data={"cloud_delivery": {"channel": "imessage", "provider": "phone_harness", "queue_id": "queue", "status": "sent", "sent_at": "2026-10-19T00:00:00Z"}})
+    fake = _FakeWFModule(activity_results={"read_message_history_activity": {"person": {"firstName": "Alice", "phoneNumber": "+15550000000"}, "messages": []}, "fetch_recent_messages_activity": {"messages": []}, "generate_message_activity": {"message": "Exact approved body", "usage": {}}, "queue_imessage_activity": {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "approved", "sent_at": None}})
+    restore = _patch_handler_workflow(fake)
+    try:
+        with patch("domains.message_person.handler.request_user_approval_direct", approval), patch("domains.message_person.handler.deliver_cloud_message", cloud):
+            events = await _collect(MessagePersonManager().execute_tool(_WFInstance(), {"person_id": "Alice", "channel": "imessage", "intent": "ping"}, "original"))
+    finally:
+        restore()
+    assert len(approvals) == len(delegated) == 1
+    assert delegated[0] == {"queue_id": "queue", "tool_call_id": "original", "recipient": "+15550000000", "body": "Exact approved body"}
+    final = [e for e in events if e.data and e.data.get("delivery")]
+    assert len(final) == 1 and final[0].data["delivery"]["provider"] == "phone_harness"
+    assert len([c for c in fake.calls if c["name"] == "queue_imessage_activity"]) == 1
+    fake._results["queue_imessage_activity"] = {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "sent", "sent_at": "2026-10-19T00:00:00Z"}
+    restore = _patch_handler_workflow(fake)
+    try:
+        with patch("domains.message_person.handler.request_user_approval_direct", approval), patch("domains.message_person.handler.deliver_cloud_message", cloud):
+            replay_events = await _collect(MessagePersonManager().execute_tool(_WFInstance(), {"person_id": "Alice", "channel": "imessage", "intent": "ping"}, "original"))
+    finally:
+        restore()
+    assert len(delegated) == 1, "Already sent backend receipt restarted a browser send"
+    assert any(e.data and e.data.get("delivery", {}).get("sent_at") for e in replay_events)
+
+
+
+async def test_cloud_bind_http_fails_closed_and_after_browser_init():
+    import ast
+    from pathlib import Path
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3.phone import bind_approved_message
+    from domains.spawn_browser_agent_v3 import handler
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic"))
+    calls = []
+    status = 200
+    matched = True
+    def backend(request):
+        calls.append(request)
+        assert request.url.raw_path == b"/api/imessage/queue/queue%2Fopaque/phone-bind"
+        assert json.loads(request.content) == {"user_id": "user", "browser_task_id": "owned-task"}
+        assert request.headers["X-User-Id"] == "user"
+        return httpx.Response(status, json={"success": True, "provider": "phone_harness", "queue_id": "queue/opaque", "browser_task_id": "owned-task" if matched else "foreign"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        await bind_approved_message(config, "user", "owned-task", "queue/opaque", client=client)
+        await bind_approved_message(config, "user", "owned-task", "queue/opaque", client=client)
+        for status, matched in ((403, True), (200, False)):
+            try:
+                await bind_approved_message(config, "user", "owned-task", "queue/opaque", client=client)
+                raise AssertionError("Foreign/denied cloud binding accepted")
+            except RuntimeError as error:
+                assert "synthetic" not in str(error)
+    tree = ast.parse(Path(handler.__file__).read_text())
+    boundary = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_spawn_browser_agent_activity_v3_real")
+    bind = next(n for n in ast.walk(boundary) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "bind_approved_message")
+    init = next(n for n in ast.walk(boundary) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_init_browser_session_preserving_owner")
+    model = [n for n in ast.walk(boundary) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_call_browser_use_with_rotation"]
+    assert init.lineno < bind.lineno < min(n.lineno for n in model)
+
+    # The real Temporal activity entry must carry the same trusted intent on
+    # initial execution and resume, without changing the logical task identity.
+    import uuid
+    from utils.browser_identity import logical_browser_task_id
+    assert handler._logical_browser_task_id("agent") == logical_browser_task_id("agent") == str(
+        uuid.uuid5(uuid.NAMESPACE_URL, "rose-browser-owner:agent"))
+    for resumed in (False, True):
+        with patch.object(handler.WorldModelToolExecutionAdapter, "from_env", return_value=SimpleNamespace(should_simulate=lambda _: False)), patch.object(handler, "_spawn_browser_agent_activity_v3_real", new_callable=AsyncMock) as real:
+            real.return_value = {"status": "completed"}
+            await handler.spawn_browser_agent_activity_v3("user", "agent", "Approved goal", "call", task_id="owned-task", is_resume=resumed, approved_message_intent="queue/opaque")
+            assert real.await_args.kwargs["approved_message_intent"] == "queue/opaque"
+            assert real.await_args.kwargs["task_id"] == "owned-task"
+            assert real.await_args.kwargs["is_resume"] is resumed
+
+
+async def test_phone_message_commit_rejects_forged_payload_fields():
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    physical = []
+    def backend(request):
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": {"id": "lease", "status": "ACTIVE"}})
+        physical.append(request.url.path)
+        return httpx.Response(200, json={"operation": {"status": "SUCCEEDED"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        for operation in ("messages.send_approved", "messages.verify_sent"):
+            for args in ({}, {"queueId": "queue", "to": "+15550000000"}, {"queueId": "queue", "body": "Changed"}, {"queueId": "queue", "approved": True}):
+                result = await execute_phone({"mode": "operation", "operation": operation, "args": args}, config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="user", agent_id="agent", task_id="task", decision_id="decision", snapshot={"enabled": True, "interaction": {"cursor": 0}}, client=client)
+                assert not result["success"], "Model forged approved-message payload reached submission"
+        assert physical == []
+
+
+async def test_cloud_receipt_requires_explicit_success_and_exact_bound_task():
+    from domains.message_person.repo import read_phone_message_activity
+    from domains.message_person import handler as cloud_phone
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
+    setup_mock_fn(lambda request: httpx.Response(200, json={"provider": "phone_harness", "status": "sent", "sent_at": "2026-10-19T00:00:00Z"}))
+    try:
+        result = await read_phone_message_activity("user", "agent", "queue")
+        assert result["success"] is False, "Malformed status was promoted to success"
+    finally:
+        teardown_mock()
+    class Browser:
+        async def execute_tool(self, *args):
+            yield ToolEvent(type=EventType.POST_MESSAGE, status=MessageStatus.FINISHED, message="Claimed sent", metadata={"action_type": "task_complete"})
+    fake = _FakeWFModule(activity_results={"read_phone_message_activity": {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "sent", "sent_at": "2026-10-19T00:00:00Z", "browser_task_id": "foreign-task"}})
+    with patch.object(cloud_phone, "workflow", fake), patch.object(cloud_phone, "get_browser_manager", lambda: Browser()):
+        events = await _collect(cloud_phone.deliver_cloud_message(_WFInstance(), queue_id="queue", tool_call_id="original", recipient="+15550000000", body="Exact"))
+    assert not any(event.data and event.data.get("cloud_delivery") for event in events)
+    assert any(event.status == MessageStatus.ERROR for event in events)
+
+
+async def test_cloud_receipt_activity_failure_is_unconfirmed_but_cancellation_propagates():
+    from domains.message_person import handler as cloud_phone
+    from temporalio.exceptions import ActivityError, CancelledError, RetryState
+    from tools.base import MessageStatus
+
+    class Browser:
+        async def execute_tool(self, *args):
+            if False:
+                yield
+
+    failure = ActivityError("Synthetic status unavailable", scheduled_event_id=1,
+                            started_event_id=2, identity="test", activity_type="read_phone_message_activity",
+                            activity_id="read", retry_state=RetryState.NON_RETRYABLE_FAILURE)
+    for error in (failure, CancelledError("cancelled"), asyncio.CancelledError()):
+        class Fake:
+            async def execute_activity(self, *args, **kwargs):
+                raise error
+        with patch.object(cloud_phone, "workflow", Fake()), patch.object(cloud_phone, "get_browser_manager", lambda: Browser()):
+            if error is failure:
+                events = await _collect(cloud_phone.deliver_cloud_message(_WFInstance(), queue_id="queue", tool_call_id="original", recipient="+15550000000", body="Exact"))
+                assert len(events) == 1 and events[0].status == MessageStatus.ERROR
+                assert "Do not resend" in events[0].message
+                assert not events[0].data
+            else:
+                try:
+                    await _collect(cloud_phone.deliver_cloud_message(_WFInstance(), queue_id="queue", tool_call_id="original", recipient="+15550000000", body="Exact"))
+                except type(error):
+                    pass
+                else:
+                    raise AssertionError("Cancellation swallowed as delivery failure")
+
+
 async def run_all_tests():
     print("message-person blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("cloud_receipt_activity_failure_cancellation", test_cloud_receipt_activity_failure_is_unconfirmed_but_cancellation_propagates)
+    await r.record_async("cloud_receipt_explicit_success_binding", test_cloud_receipt_requires_explicit_success_and_exact_bound_task)
+    await r.record_async("phone_message_commit_args", test_phone_message_commit_rejects_forged_payload_fields)
+    await r.record_async("handler_cloud_exact_approval", test_handler_cloud_route_after_exact_approval_without_mac_fallback)
+    await r.record_async("cloud_bind_http_and_init_order", test_cloud_bind_http_fails_closed_and_after_browser_init)
+    await r.record_async("queue_phone_transport_preserved", test_queue_phone_transport_preserved_without_mac_polling)
+    await r.record_async("cloud_message_authoritative_receipt", test_cloud_message_adapter_requires_backend_sent_receipt_and_stable_binding)
     await r.record_async(
         "queue_imessage_activity_confirmed_send",
         test_queue_imessage_activity_waits_for_delivery_confirmation,

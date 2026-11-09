@@ -157,9 +157,7 @@ export async function updateAgentConfig(
 ) {
   const agent = await repo.findAgentWithVerifier(agentId, userId);
 
-  if (!agent) {
-    return { error: 'Agent not found', status: 404 };
-  }
+  if (!agent) return { error: 'Agent not found', status: 404 };
 
   const agentUpdateData = buildAgentUpdateData(body);
   await applyPlacementUpdate(body, agent, agentUpdateData);
@@ -188,7 +186,8 @@ export async function updateAgentConfig(
   if (accepted && updatedAgent !== null) {
     const realtimeUpdate: Parameters<typeof broadcastAgentUpdate>[1] = {};
     if (body.tree_cost_cents !== undefined) {
-      realtimeUpdate.treeCostCents = body.tree_cost_cents;
+      // The stored value: the write adds the resume spend under this agent.
+      realtimeUpdate.treeCostCents = updatedAgent.treeCostCents;
     }
     if (body.generated_title !== undefined && updatedAgent.parentAgentId === null) {
       // Broadcast the stored value, not the candidate, so a concurrent human

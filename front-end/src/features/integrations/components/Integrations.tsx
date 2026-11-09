@@ -57,6 +57,7 @@ import IntegrationModals from './IntegrationModals';
 import IntegrationSections from './IntegrationSections';
 import FileInputs from './FileInputs';
 import PebbleIndexSetupModal from './PebbleIndexSetupModal';
+import IPhoneConnectionSection from './IPhoneConnectionSection';
 
 function IntegrationBanners({
   error,
@@ -83,7 +84,7 @@ function IntegrationBanners({
 
 export default function Integrations() {
   const handlers = useIntegrationHandlers();
-  const { isFullySignedIn } = useAuth();
+  const { isFullySignedIn, user } = useAuth();
 
   const accordion = useAccordion();
   const data = useIntegrationData();
@@ -126,6 +127,7 @@ export default function Integrations() {
         />
 
         <div className="space-y-3">
+          <IPhoneConnectionSection key={user?.id ?? 'signed-out'} />
           {data.loadingIntegrations ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />

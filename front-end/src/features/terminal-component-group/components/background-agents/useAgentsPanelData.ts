@@ -51,7 +51,9 @@ export function useAgentsPanelData(
   const nodes = useAgentTree(selectedAgentId ? busId : null);
   return useMemo(
     () =>
-      selectedAgentId ? buildAgentPanelModel({ nodes, selectedAgentId, spawns }) : EMPTY_MODEL,
-    [nodes, selectedAgentId, spawns],
+      selectedAgentId
+        ? { ...buildAgentPanelModel({ nodes, selectedAgentId, spawns }), rootAgentId: busId }
+        : EMPTY_MODEL,
+    [busId, nodes, selectedAgentId, spawns],
   );
 }

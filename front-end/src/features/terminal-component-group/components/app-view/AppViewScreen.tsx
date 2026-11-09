@@ -17,7 +17,8 @@
  *      below md, where there is no left bar or keyboard — the bare close icon.
  * The host keys this screen by task, so another session starts fresh.
  *
- * Fixed over the content (left of it the 64px bar stays usable; the top-right
+ * Fixed over the content (left of it the bar stays usable: left follows
+ * --rose-bar-offset, the pinned bar's width or 64px; the top-right
  * app icons float over the header's reserved inset). Light surfaces unchanged;
  * dark via the rose-theme `dark:` tokens.
  */
@@ -70,7 +71,7 @@ export function AppViewScreen({ target, onClose, renderQueryBox }: AppViewScreen
   return (
     <div
       data-testid="app-view-screen"
-      className="fixed inset-y-0 left-0 right-0 z-[60] flex flex-col bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8] md:left-16"
+      className="fixed inset-y-0 left-0 right-0 z-[60] flex flex-col bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8] md:left-[var(--rose-bar-offset,64px)]"
     >
       <header
         className="flex h-14 flex-none items-center gap-6 border-b border-gray-200/80 pl-6 dark:border-white/[0.09]"

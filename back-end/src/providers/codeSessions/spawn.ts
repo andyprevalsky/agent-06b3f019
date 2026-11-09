@@ -44,11 +44,13 @@ import {
   extendLease,
   findOwnedCodeSession,
   markPaused,
+  releaseLease,
   resolveCodeSession,
   type CodeSessionRow,
 } from './store';
 import {
   CODE_SANDBOX_IDLE_TIMEOUT_MS,
+  CodeSessionHeldError,
   CodeSessionPauseUnconfirmedError,
 } from '../e2bCodeSessionSandbox';
 import {
@@ -80,6 +82,10 @@ export function codeSessionHttpError(
   }
   if (error instanceof CodeSessionBusyError) {
     return { status: 409, body: { error: error.message, code: 'CODE_SESSION_BUSY' } };
+  }
+  if (error instanceof CodeSessionHeldError) {
+    // Retryable: the spawn attaches once the user hands the live CLI back.
+    return { status: 409, body: { error: error.message, code: 'CODE_SESSION_HELD' } };
   }
   if (error instanceof E2BSandboxCapacityError) {
     return { status: error.statusCode, body: { error: error.message, code: error.code } };
@@ -318,7 +324,17 @@ async function createSpawnTask<T extends SpawnCreateResult>(
         });
       });
     }
-    if (
+    // Refused because the user holds the live CLI in direct chat: the session is
+    // live, so only this spawn's lease is dropped (marking it PAUSED would read as
+    // stopped and let another spawn take the lease and stop that ws-server).
+    if (codeSession !== null && error instanceof CodeSessionHeldError) {
+      await releaseLease(codeSession.id, codeSession.leaseOwner).catch((cleanupError: unknown) => {
+        log.error('Held-session lease release failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
+    } else if (
       codeSession !== null &&
       switchedFrom === null &&
       !(error instanceof CodeSessionPauseUnconfirmedError)

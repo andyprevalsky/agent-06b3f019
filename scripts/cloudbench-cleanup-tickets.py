@@ -155,13 +155,46 @@ def cold_grant_liability(root):
         total+=max(0,remaining-credit)+(budget['job_count']+1)*budget['headroom']*MB
     return total
 
+def legacy_owner_absent(owner):
+    """Release working headroom only for a valid, positively absent owner."""
+    need(isinstance(owner,dict) and set(owner)=={'pid','birth'}
+         and type(owner['pid']) is int and owner['pid']>1
+         and isinstance(owner['birth'],str), 'invalid legacy cleanup owner')
+    stamp=owner['birth']
+    if stamp.startswith('proc-start:'):
+        need(re.fullmatch(r'proc-start:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9]+',stamp),
+             'invalid legacy cleanup owner birth')
+    else:
+        need(re.fullmatch(r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}',stamp), 'invalid legacy cleanup owner birth')
+        try:time.strptime(stamp,'%a %b %d %H:%M:%S %Y')
+        except ValueError:raise ValueError('invalid legacy cleanup owner birth') from None
+    try:
+        if birth(owner['pid']):return False  # Live or reused PID retains its floor.
+        if Path('/proc/self/stat').exists():
+            try:Path('/proc',str(owner['pid'])).stat()
+            except (FileNotFoundError,ProcessLookupError):return True
+            return False
+        observed=subprocess.run(['ps','-p',str(owner['pid']),'-o','lstart='],env={**os.environ,'TZ':'UTC'},capture_output=True,text=True)
+        return observed.returncode==1 and not observed.stdout and not observed.stderr
+    except (OSError,ValueError,subprocess.SubprocessError):return False
+
 def legacy_liability(root):
     path=root/'state.json'
     if not path.exists():return 0
     state=read(path);need(state.get('version') in (1,2),'unknown legacy cleanup accounting')
     # Consumed owners already occupy native free space; pending members still
     # need their minimum. Unknown liveness never releases declared headroom.
-    total=sum((len(g['members'])*g['headroom']+(len(g['members'])-len(g['consumed']))*g['minimum'])*MB for g in state['groups'].values())
+    total=0
+    for identifier,group in state['groups'].items():
+        peers=len(group['members'])
+        # Physical or unknown allocator debt is independent of an owner's birth.
+        if group['directory'] is None and not any(record.get('group')==identifier for record in state.get('inflight',{}).values()):
+            need(set(group)=={'directory','parent_lock_identity','members','consumed','preferred','minimum','headroom'}
+                 and group['parent_lock_identity'] is None and isinstance(group['members'],list)
+                 and group['members']==['standalone-'+identifier] and isinstance(group['consumed'],dict)
+                 and set(group['consumed'])<=set(group['members']), 'invalid legacy standalone cleanup group')
+            peers-=sum(legacy_owner_absent(owner) for owner in group['consumed'].values())
+        total+=(peers*group['headroom']+(len(group['members'])-len(group['consumed']))*group['minimum'])*MB
     for group in state['groups'].values():
         if group['directory'] is not None:
             total+=(group['headroom']+group['minimum'])*MB

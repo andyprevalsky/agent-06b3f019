@@ -17,10 +17,11 @@ import {
   renameSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 
 // Log to both console and file for debugging
 const LOG_FILE = "/tmp/ws-server.log";
@@ -421,6 +422,7 @@ function announceExit(exitCode) {
   exitAnnounced = true;
   finalExitCode = exitCode;
   dropStartupTurns("session_ended");
+  dropHeldAgentTurns("session_ended");
   resolveTaskPrompt();
   appendEvent({
     type: "final",
@@ -1215,10 +1217,14 @@ function resolveResumeSessionId() {
 // between turns until the user hands back (or the hold idles out), so the
 // user keeps talking to the same CLI conversation. While the user holds the
 // session, `sender: "agent"` turns (Rose agents relaying instructions or
-// agent-graph messages) are rejected with `relay_paused` so nothing
-// competes with the user; the caller retries after the hand back. Agent
-// turns never take the hold: they are ordinary queued turns, answered
-// before stdin closes.
+// agent-graph messages) are accepted and acked `queued`, never refused, so
+// nothing competes with the user: they wait in arrival order and become the
+// CLI's next turns as soon as the hold ends (hand back or idle). A spawn
+// attaching to the live CLI (`attach`) is held the same way: its token is
+// adopted at once (ack `queued` + `attached`), so the spawn follows this CLI
+// and its goal is the first turn after the hand back. The backend never stops
+// a ws-server the user holds. Agent turns never take the hold: they are
+// ordinary turns, answered before stdin closes.
 const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
 const DIRECT_HOLD_IDLE_MS = (() => {
   const raw = Number.parseInt(
@@ -1248,6 +1254,11 @@ const pendingDeliveries = new Map();
 // written. The queue lives and dies with this server: announceExit clears it.
 const MAX_STARTUP_TURNS = 20;
 const startupTurnQueue = [];
+// Direct-hold window: agent turns that arrive while the user holds the session
+// wait here (acked `queued`) and are written, in arrival order, when the hold
+// ends. Like the startup queue it lives and dies with this server.
+const MAX_HELD_AGENT_TURNS = 50;
+const heldAgentTurns = [];
 const queuedTurnAcks = new Map();
 let resolveTaskPrompt = () => {};
 const taskPromptReady = new Promise((resolve) => {
@@ -1603,7 +1614,23 @@ function releaseDirectHold(reason) {
   directHold = false;
   clearDirectHoldTimer();
   appendEvent({ type: "direct_chat", status: "released", reason });
-  if (pendingTurns === 0) endCliStdin(`direct hold released: ${reason}`);
+  // Agent turns held during the chat run next; their results close stdin.
+  if (heldAgentTurns.length > 0) releaseHeldAgentTurns();
+  else closeStdinIfIdle(`direct hold released: ${reason}`);
+}
+
+/**
+ * Close stdin only when nothing still needs it: no hold, no written turn
+ * awaiting its `result`, no held turn and no turn in the delivery chain. A
+ * delivering turn (a released held turn waiting on a settings round-trip
+ * included) is written only after its settings apply, so a `result` arriving
+ * meanwhile must leave stdin open; if that turn is then refused, its settling
+ * delivery calls this again (startSerialDelivery).
+ */
+function closeStdinIfIdle(reason) {
+  if (directHold || pendingTurns > 0 || heldAgentTurns.length > 0) return;
+  if (pendingDeliveries.size > 0) return;
+  endCliStdin(reason);
 }
 
 function onCliTurnResult(message) {
@@ -1617,7 +1644,13 @@ function onCliTurnResult(message) {
       : Math.max(0, pendingTurns - 1);
   if (pendingTurns > 0) return;
   if (!directHold) {
-    endCliStdin("autonomous turn finished");
+    closeStdinIfIdle("autonomous turn finished");
+    return;
+  }
+  // The user's turn finished the goal: hand the session back so the parent
+  // gets the result now (root 0874662a waited out the 10-minute idle hold).
+  if (goalHandoffWritten()) {
+    releaseDirectHold("goal handoff written");
     return;
   }
   clearDirectHoldTimer();
@@ -1639,7 +1672,12 @@ async function handleUserTurn(msg) {
   if (attach && attach.digest !== credentialDigest(attach.keys))
     return turnAck(id, "rejected", "credential_changed");
   const ack = await deliverTurnOnce(id, msg);
-  if (attach && (ack.status === "delivered" || ack.status === "duplicate")) {
+  // Held for the user's direct chat: the spawn is attached now, its goal waits.
+  const held = ack.status === "queued" && ack.reason === "direct_hold";
+  if (
+    attach &&
+    (ack.status === "delivered" || ack.status === "duplicate" || held)
+  ) {
     adoptedTokens.add(attach.token);
     const ignored = ignoredConfig(attach.config);
     log("info", "Spawn attached to the live CLI", { id, ignored });
@@ -1668,14 +1706,91 @@ async function deliverTurnOnce(id, msg) {
       ? queueStartupTurn(id, msg)
       : turnAck(id, "rejected", "session_starting");
   }
+  if (isHeldAgentTurn(msg) && !exitAnnounced && cliStdinOpen) {
+    return queueHeldAgentTurn(id, msg);
+  }
   return startSerialDelivery(id, msg);
+}
+/** An agent's turn (a message or an attaching spawn's goal) while the user holds the session. */
+function isHeldAgentTurn(msg) {
+  return msg.sender === "agent" && directHold;
+}
+/**
+ * Hold an agent turn until the hand back. `requeue`: a released turn that met a
+ * new hold inside the delivery chain; it must be held again even though its
+ * earlier `queued` ack is still recorded.
+ */
+function queueHeldAgentTurn(id, msg, { requeue = false } = {}) {
+  if (!requeue && queuedTurnAcks.has(id)) return { ...queuedTurnAcks.get(id) };
+  if (heldAgentTurns.length >= MAX_HELD_AGENT_TURNS) {
+    return turnAck(id, "rejected", "relay_queue_full");
+  }
+  heldAgentTurns.push({ id, msg });
+  const ack = {
+    ...turnAck(id, "queued", "direct_hold"),
+    queue_position: heldAgentTurns.length,
+    // An attaching spawn treats the events so far as earlier turns' history;
+    // a re-held turn keeps the boundary its first ack reported.
+    history_events: heldHistoryBoundary(id) ?? eventBuffer.length,
+  };
+  queuedTurnAcks.set(id, ack);
+  appendEvent({
+    type: "user_turn_queued",
+    client_message_id: id,
+    sender: "agent",
+    queue_position: ack.queue_position,
+    reason: "direct_hold",
+  });
+  log("info", "Queued agent turn until the user hands back", {
+    id,
+    queue_position: ack.queue_position,
+  });
+  return ack;
+}
+/** The history boundary a held turn's first ack reported (kept through re-holds and delivery). */
+function heldHistoryBoundary(id) {
+  const held = queuedTurnAcks.get(id);
+  return held?.reason === "direct_hold" && Number.isInteger(held.history_events)
+    ? held.history_events
+    : null;
+}
+/** The direct hold ended: held agent turns enter the delivery chain in arrival order. */
+function releaseHeldAgentTurns() {
+  for (const { id, msg } of heldAgentTurns.splice(0)) {
+    startSerialDelivery(id, msg).then((ack) => {
+      // Held again by a new direct hold: it stays queued for the next release.
+      if (ack.status === "queued") return;
+      queuedTurnAcks.delete(id);
+      if (ack.status !== "delivered" && ack.status !== "duplicate") {
+        appendEvent({
+          type: "user_turn_undelivered",
+          turn_ids: [id],
+          reason: ack.reason || "rejected",
+        });
+      }
+    });
+  }
+}
+/** The session ended while agent turns waited for the hand back: say which were lost. */
+function dropHeldAgentTurns(reason) {
+  if (heldAgentTurns.length === 0) return;
+  const ids = heldAgentTurns.map((turn) => turn.id);
+  appendEvent({ type: "user_turn_undelivered", turn_ids: ids, reason });
+  heldAgentTurns.length = 0;
+  for (const id of ids) queuedTurnAcks.delete(id);
 }
 function startSerialDelivery(id, msg) {
   const promise = controlSerial.then(() => deliverNativeTurn(msg));
   controlSerial = promise.catch(() => {});
   pendingDeliveries.set(id, promise);
   const done = () => pendingDeliveries.delete(id);
-  promise.then(done, done);
+  promise.then((ack) => {
+    done();
+    // Refused, so no `result` will answer it: when it was the last thing
+    // keeping stdin open (all released turns refused, or a result that arrived
+    // while it waited), close stdin as a finished autonomous turn would.
+    if (ack?.status === "rejected") closeStdinIfIdle("undelivered turn");
+  }, done);
   return promise;
 }
 function queueStartupTurn(id, msg) {
@@ -1707,6 +1822,8 @@ function queueStartupTurn(id, msg) {
 function releaseStartupTurns() {
   for (const { id, msg } of startupTurnQueue.splice(0)) {
     startSerialDelivery(id, msg).then((ack) => {
+      // Held again by a new direct hold: it stays queued for the next release.
+      if (ack.status === "queued") return;
       queuedTurnAcks.delete(id);
       if (ack.status !== "delivered" && ack.status !== "duplicate") {
         appendEvent({
@@ -1741,8 +1858,11 @@ async function deliverNativeTurn(msg) {
   }
   const sender = msg.sender === "agent" ? "agent" : "user";
   if (sender === "agent" && directHold) {
-    return turnAck(id, "rejected", "relay_paused");
+    // The user took the hold after this turn arrived: it waits for the hand
+    // back like any other agent turn (an attaching spawn's goal included).
+    return queueHeldAgentTurn(id, msg, { requeue: true });
   }
+  const turnText = sender === "agent" ? agentTurnText(text) : text;
   try {
     if (nativeInitialization) await nativeInitialization;
     await taskPromptReady;
@@ -1765,10 +1885,11 @@ async function deliverNativeTurn(msg) {
   const turn = startNativeTurn();
   pendingTurns += 1;
   try {
+    if (turnText !== text) markGoalDelivered();
     await new Promise((resolve, reject) => {
       cliChild.stdin.write(
         userMessageLine(
-          text +
+          turnText +
             (files.length ? "\n\nAttached files:\n" + files.join("\n") : ""),
         ),
         (error) => (error ? reject(error) : resolve()),
@@ -1803,6 +1924,10 @@ async function deliverNativeTurn(msg) {
     turn_id: turn.id,
     history_events: historyEvents,
   };
+  // A turn held first keeps the boundary its held ack reported, so a retry's
+  // `duplicate` matches what the spawn already treats as history.
+  const boundary = heldHistoryBoundary(id);
+  if (boundary !== null) ack.history_events = boundary;
   deliveredTurnIds.set(id, ack);
   return ack;
 }
@@ -1833,6 +1958,18 @@ function handleHandBack(msg) {
   const wasHeld = directHold;
   releaseDirectHold("handed_back");
   return { type: "hand_back_ack", status: wasHeld ? "released" : "not_held" };
+}
+
+function projectStartupPaths() {
+  try {
+    const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
+    return {
+      reportPath: typeof cfg.reportPath === "string" ? cfg.reportPath : null,
+      logPath: typeof cfg.logPath === "string" ? cfg.logPath : null,
+    };
+  } catch {
+    return { reportPath: null, logPath: null };
+  }
 }
 
 function startupBudgetMs() {
@@ -1877,6 +2014,10 @@ function runProjectStartup() {
   if (!projectMode || !PROJECT_STARTUP || !existsSync(PROJECT_STARTUP)) {
     return Promise.resolve(null);
   }
+  // The report means "this boot's startup finished": a previous boot's report
+  // must not tell the agent (or the preview) that dependencies are ready.
+  const { reportPath } = projectStartupPaths();
+  if (reportPath) rmSync(reportPath, { force: true });
   appendEvent({
     type: "project_startup",
     status: "running",
@@ -1974,6 +2115,13 @@ function runProjectStartup() {
 function projectStartupNote(report) {
   if (!report || report.status === "skipped") return "";
   const name = PROJECT_NAME ? ` for project ${PROJECT_NAME}` : "";
+  if (report.status === "running") {
+    const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
+    const wait = report.reportPath
+      ? ` Before builds, tests or dev servers, wait until ${report.reportPath} exists, then read its status.`
+      : "";
+    return `Project startup${name} is still running in the background (it may be installing dependencies).${logRef}${wait}\n\n`;
+  }
   const secs = ((report.durationMs || 0) / 1000).toFixed(1);
   const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
   if (report.status === "ok") {
@@ -2009,11 +2157,125 @@ function mcpConfigLists(path, server) {
   }
 }
 
+// Every code-agent task is Claude Code's own `/goal` (Andy, 2026-11-08): the
+// CLI's goal evaluator keeps it working until the condition holds, and the
+// task's condition ends with writing the result handoff (and says no questions). /goal caps a condition at
+// 4000 characters, so the result schema goes to a file next to the handoff and
+// a task too long for the cap goes to a task file the condition names.
+const HANDOFF_SCHEMA_PREFIX = "\n\nResult JSON Schema for ";
+const DEFAULT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json";
+const GOAL_CONDITION_MAX_CHARS = 4000;
+// The handoff the current goal ends by writing (null: the task had no schema).
+let goalHandoffPath = null;
+// When the current goal's turn reached the CLI: only a handoff written after
+// it counts. Accepting a goal also moves any handoff still on disk aside (a
+// close that failed to consume it), keeping it for inspection.
+let goalStartedAtMs = Infinity;
+let goalPendingDelivery = false;
+
+function retireStaleHandoff(path) {
+  if (!existsSync(path)) return;
+  try {
+    renameSync(path, `${path}.superseded-${Date.now()}`);
+  } catch (error) {
+    log("warn", "Could not move a stale handoff aside", {
+      error: error.message,
+    });
+  }
+}
+
+/** Called as the goal turn is written to the CLI's stdin. */
+function markGoalDelivered() {
+  if (!goalPendingDelivery) return;
+  goalPendingDelivery = false;
+  goalStartedAtMs = Date.now();
+}
+
+function goalHandoffWritten() {
+  if (!goalHandoffPath) return false;
+  try {
+    return statSync(goalHandoffPath).mtimeMs >= goalStartedAtMs;
+  } catch {
+    return false;
+  }
+}
+
+function splitHandoffSchema(text) {
+  const at = text.lastIndexOf(HANDOFF_SCHEMA_PREFIX);
+  if (at < 0) return null;
+  const rest = text.slice(at + HANDOFF_SCHEMA_PREFIX.length);
+  const colon = rest.indexOf(":\n");
+  if (colon <= 0) return null;
+  // The task names sandbox paths; a CLI whose HOME is elsewhere (tests, the
+  // local fallback) keeps them under its own HOME.
+  const named = rest.slice(0, colon);
+  const handoffPath = named.startsWith("/home/user/")
+    ? join(homedir(), named.slice("/home/user/".length))
+    : named;
+  const schema = rest.slice(colon + 2);
+  try {
+    JSON.parse(schema);
+  } catch {
+    return null;
+  }
+  return { task: text.slice(0, at), handoffPath, schema };
+}
+
+function writeRoseFile(path, text) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+    return true;
+  } catch (error) {
+    log("warn", "Could not write a goal file", { path, error: error.message });
+    return false;
+  }
+}
+
+/** The `/goal` turn for a task; writes its schema (and an over-cap task) to files. */
+function goalTurnText(rawTask, note = "") {
+  const text = String(rawTask).replace(/\0/g, "");
+  const split = splitHandoffSchema(text);
+  let task = text;
+  if (split) {
+    const schemaPath = join(dirname(split.handoffPath), "handoff.schema.json");
+    if (writeRoseFile(schemaPath, split.schema)) {
+      task = split.task.split(DEFAULT_HANDOFF_SCHEMA_PATH).join(schemaPath);
+    } else {
+      // No schema file: the condition carries the schema inline instead.
+      task = `${split.task}${HANDOFF_SCHEMA_PREFIX}${split.handoffPath}:\n${split.schema}`;
+    }
+    goalHandoffPath = split.handoffPath;
+    retireStaleHandoff(goalHandoffPath);
+    goalStartedAtMs = Infinity;
+    goalPendingDelivery = true;
+  }
+  // A new spawn's goal reaches a live CLI already headed "Task:" (backend
+  // attachLiveCodeCli); the first task is headed here.
+  const body = task.startsWith("Task:\n") ? task.slice("Task:\n".length) : task;
+  let condition = `${note}Task:\n${body}`;
+  if (condition.length > GOAL_CONDITION_MAX_CHARS) {
+    const taskPath = join(
+      dirname(split ? split.handoffPath : join(homedir(), ".rose", "x")),
+      "task.md",
+    );
+    // Unwritable: send the task as written; /goal then reports the length cap.
+    if (writeRoseFile(taskPath, body))
+      condition = `${note}Task: read ${taskPath} and do exactly what it says. Its final paragraph is your end condition.`;
+  }
+  return `/goal ${condition}`;
+}
+
+/** A task from the agent graph (a new spawn's goal) starts as a goal; other turns are as written. */
+function agentTurnText(text) {
+  return splitHandoffSchema(text) ? goalTurnText(text) : text;
+}
+
 async function runClaudeCli(startupReport = null) {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
   // Direct-chat stream-json user message; the project startup note leads the task.
   const prompt = userMessageLine(
-    `${projectStartupNote(startupReport)}Task:\n${sanitizedGoal}`,
+    goalTurnText(sanitizedGoal, projectStartupNote(startupReport)),
   );
 
   appendEvent({
@@ -2199,6 +2461,7 @@ async function runClaudeCli(startupReport = null) {
     if (!cliStdinOpen) return;
     pendingTurns = 1;
     startNativeTurn();
+    markGoalDelivered();
     child.stdin.write(prompt);
     resolveTaskPrompt();
   } catch (error) {
@@ -2208,5 +2471,34 @@ async function runClaudeCli(startupReport = null) {
   }
 }
 
-runProjectStartup().then((report) => runClaudeCli(report));
+// A slow project startup (a cold dependency install) does not hold the CLI:
+// past the grace window the agent starts, told that startup is still running
+// and where its report appears (code-agent-rose-repo waited 469 s for a cold
+// npm install, 2026-11-08). A startup that finishes in the window (template
+// snapshot, resume) is reported up front as before.
+const PROJECT_STARTUP_GRACE_MS = (() => {
+  const raw = Number.parseInt(
+    process.env.CODE_SESSION_PROJECT_STARTUP_GRACE_MS || "",
+    10,
+  );
+  return Number.isInteger(raw) && raw >= 0 ? raw : 30_000;
+})();
+function startupReportForCli(startup) {
+  let timer = null;
+  const running = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      const { reportPath, logPath } = projectStartupPaths();
+      log("info", "Project startup still running; starting the CLI", {
+        graceMs: PROJECT_STARTUP_GRACE_MS,
+      });
+      resolve({ status: "running", reportPath, logPath });
+    }, PROJECT_STARTUP_GRACE_MS);
+  });
+  return Promise.race([startup, running]).finally(() => clearTimeout(timer));
+}
+const projectStartup = runProjectStartup();
+(projectMode && PROJECT_STARTUP
+  ? startupReportForCli(projectStartup)
+  : projectStartup
+).then((report) => runClaudeCli(report));
 markServing();

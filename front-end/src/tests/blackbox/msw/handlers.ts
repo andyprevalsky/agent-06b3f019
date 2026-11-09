@@ -40,6 +40,16 @@ export const handlers = [
       documents: {},
     }),
   ),
+  // Cloud iPhone is account-gated; no assigned phone unless a test overrides it.
+  http.get(`${API_BASE}/iphone/connection`, () =>
+    HttpResponse.json({
+      enabled: false,
+      configured: false,
+      status: 'not_connected',
+      setupAgentId: null,
+      connectionRevision: 0,
+    }),
+  ),
   // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
   http.get(`${API_BASE}/integrations/progress`, () =>
     HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),
