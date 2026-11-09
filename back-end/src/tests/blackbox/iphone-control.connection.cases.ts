@@ -32,9 +32,19 @@ export const connectionCases: Case[] = [
       assert.equal(initial.status, 200);
       assert.deepEqual(
         Object.keys(initial.data).sort(),
-        ['configured', 'connectionRevision', 'enabled', 'setupAgentId', 'status'].sort()
+        [
+          'configured',
+          'connectionRevision',
+          'enabled',
+          'setupAgentId',
+          'setupProgress',
+          'setupTaskId',
+          'status',
+        ].sort()
       );
       assert.equal(initial.data.status, 'not_connected');
+      assert.equal(initial.data.setupProgress, null);
+      assert.equal(initial.data.setupTaskId, null);
       const expectedRevision = initial.data.connectionRevision;
       const requestKey = randomUUID();
       let created = 0;

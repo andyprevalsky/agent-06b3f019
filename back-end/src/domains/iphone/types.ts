@@ -20,3 +20,13 @@ export interface Capability {
 }
 
 export * from '../../providers/phoneAccountPolicy';
+import { PhoneInteractionError } from '../../providers/phoneInteractionError';
+/** Owner live view is unavailable: provider state, 'busy', 'private' or 'STALE' (lapsed grant). */
+export class PhoneDeviceUnavailable extends PhoneInteractionError {
+  constructor(
+    public readonly state: string,
+    message = 'Phone screen is not available'
+  ) {
+    super(409, message);
+  }
+}

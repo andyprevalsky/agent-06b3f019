@@ -1,15 +1,18 @@
 /** Device-locked, owner-scoped reservation; no workflow/provider IO inside transactions. */
 import { prisma } from '../../providers/database';
-import { setupState, sealSetup } from '../../providers/phoneSetupState';
+import { setupState, sealSetup, type SetupState } from '../../providers/phoneSetupState';
 import {
   connectionDto,
   connectionKey,
+  connectionVerification,
   currentConnection,
   reserveConnection,
+  type PhoneConnection,
   type PhoneConnectionReservation,
 } from '../../providers/phoneConnectionState';
+import { setupProgress } from '../../providers/phoneSetupVerification';
 import * as leases from './repo';
-import { IPhoneError, type Transaction } from './types';
+import { IPhoneError, type IPhoneDevice, type Transaction } from './types';
 
 const terminal = ['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED'];
 async function activeSetup(tx: Transaction, userId: string, id: string | undefined) {
@@ -23,24 +26,60 @@ async function activeSetup(tx: Transaction, userId: string, id: string | undefin
   // The encrypted reservation is committed before normal creation starts.
   return agent === null || !terminal.includes(agent.status);
 }
+/** Connection screen projection: stored checks as ordered steps plus the setup browser task. */
+async function withProgress(
+  tx: Transaction,
+  userId: string,
+  dto: PhoneConnection,
+  device: IPhoneDevice | null,
+  state: SetupState | null
+) {
+  if (dto.status === 'not_connected' || device === null || state === null)
+    return { ...dto, setupProgress: null, setupTaskId: null };
+  const task =
+    dto.setupAgentId === null
+      ? null
+      : await tx.browserSession.findFirst({
+          where: { agentId: dto.setupAgentId, context: { userId } },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        });
+  return {
+    ...dto,
+    setupProgress: setupProgress(connectionVerification(device, state), {
+      status: dto.status,
+      setupState: device.setupState,
+      providerState: device.providerState,
+      passcodeExceptionAllowed: state.allowGooglePasscodeException === true,
+    }),
+    setupTaskId: task?.id ?? null,
+  };
+}
 export async function connection(userId: string) {
   return leases.transaction(async (tx) => {
     const permitted = await leases.accountPermitted(tx, userId);
     const device = await tx.iPhoneDevice.findUnique({ where: { userId } });
     if (!permitted || device?.enabled !== true)
-      return connectionDto(device, null, permitted, false);
+      return withProgress(tx, userId, connectionDto(device, null, permitted, false), null, null);
     const state = setupState(device.setupEncrypted);
     const dto = connectionDto(device, state, permitted, false);
     const owner = await tx.user.findUniqueOrThrow({ where: { userId }, select: { phone: true } });
-    if (state.expectedPhone !== owner.phone) return { ...dto, status: 'not_connected' as const };
+    if (state.expectedPhone !== owner.phone)
+      return withProgress(tx, userId, { ...dto, status: 'not_connected' }, device, state);
     // A committed device attestation outlives its setup conversation. Only
     // pending setup requires that reservation's actor to remain available.
-    if (dto.status === 'ready') return dto;
-    return connectionDto(
+    if (dto.status === 'ready') return withProgress(tx, userId, dto, device, state);
+    return withProgress(
+      tx,
+      userId,
+      connectionDto(
+        device,
+        state,
+        permitted,
+        await activeSetup(tx, userId, currentConnection(state)?.agentId)
+      ),
       device,
-      state,
-      permitted,
-      await activeSetup(tx, userId, currentConnection(state)?.agentId)
+      state
     );
   });
 }

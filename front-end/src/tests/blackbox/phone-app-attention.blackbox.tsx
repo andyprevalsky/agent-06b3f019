@@ -21,6 +21,9 @@ vi.mock('@/lib/api/client', () => ({
   API_BASE_WITH_PATH: 'http://localhost:3001/api',
   getAuthHeaders: () => ({ Authorization: 'Bearer synthetic-user' }),
 }));
+/** Everything except the read-only device view's account-level reads. */
+const taskScoped = (calls: string[]) =>
+  calls.filter((call) => !/\/iphone\/(device|device\/frame|connection)$/.test(call));
 function view(currentMessages = messages) {
   return (
     <RoseAppsContext.Provider
@@ -205,9 +208,10 @@ it('does not reuse completed-task fallback when newer phone activity is ambiguou
       })),
     ),
   );
-  expect(screen.getByText('No active phone interaction for this agent.')).toBeVisible();
+  // Ambiguous tasks fall back to the read-only device view: no task-scoped reads.
+  expect(screen.getByTestId('phone-device-view')).toBeVisible();
   expect(screen.queryByTestId('phone-private-authentication')).toBeNull();
-  expect(f.calls).toHaveLength(calls);
+  expect(taskScoped(f.calls)).toHaveLength(taskScoped(f.calls.slice(0, calls)).length);
 });
 it('rejects a foreign-scope locator even when its ID equals the retired request', () => {
   const f = fixture();
@@ -222,7 +226,7 @@ it('rejects a foreign-scope locator even when its ID equals the retired request'
   ).toBeNull();
   render(view());
   expect(screen.queryByTestId('phone-private-authentication')).toBeNull();
-  expect(f.calls).toEqual([]);
+  expect(taskScoped(f.calls)).toEqual([]);
 });
 it('allows a distinct new exact request after retiring the completed one', async () => {
   const f = fixture({ completedAt: '2026-11-06T00:00:00Z' });
