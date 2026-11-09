@@ -27236,7 +27236,9 @@ async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner(
     assert "- go to instacart instead" in failed[0]["message"], failed[0]["message"]
 
 
-async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
+async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown(
+    unconfirmed_disconnect=False, setup_failure=False
+):
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
     Agent 3efa7cae: a deploy stopped the worker machine while a browser task
@@ -27257,6 +27259,12 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     from helpers.activity_generation_drain import WORKER_SHUTDOWN
 
     env = ActivityEnvironment()
+    if unconfirmed_disconnect:
+        env.info = dataclasses.replace(
+            env.info, activity_id="browser-cleanup:discarded-multiplexer-owner" if setup_failure == "constructor"
+            else "browser-cleanup:discarded-setup-owner" if setup_failure
+            else "browser-cleanup:discarded-drain-owner"
+        )
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     session_data = {
         "task_id": "task-1",
@@ -27269,6 +27277,13 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
         "user_settings": {},
     }
+    multiplexer = SimpleNamespace(
+        start=AsyncMock(return_value="ws://live"),
+        close=AsyncMock(side_effect=RuntimeError("fixture multiplexer detach failed")),
+    )
+    if setup_failure == "constructor":
+        session_data["ws_url"] = "wss://back.tilion.dev/v1/session/sess_" + "1" * 32 + "/cdp"
+        session_data["browser_session_metadata"]["provider"] = "tilion"
     llm_step = AsyncMock(
         return_value={
             "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
@@ -27284,6 +27299,23 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
 
     close_mock = AsyncMock()
+    cleanup_activity_ids = []
+
+    async def cleanup_receipt():
+        from temporalio import activity
+
+        cleanup_activity_ids.append(activity.info().activity_id)
+
+    class UnconfirmedDom(_FakeDomService):
+        def __init__(self, *args, **kwargs):
+            if setup_failure == "constructor":
+                raise RuntimeError("fixture CDP setup failed")
+            super().__init__(*args, **kwargs)
+            self.disconnect_confirmed = False
+            self.disconnect = AsyncMock(side_effect=RuntimeError("fixture earlier disconnect failed"))
+            if setup_failure:
+                self.connect = AsyncMock(side_effect=RuntimeError("fixture CDP setup failed"))
+
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     patch_targets = [
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
@@ -27298,7 +27330,12 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_while_deploy_lands),
         patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
         patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
-        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
+            AsyncMock(side_effect=RuntimeError("fixture earlier disconnect failed"))
+            if unconfirmed_disconnect else AsyncMock(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.acknowledge_browser_activity_cleanup", cleanup_receipt),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
             AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
@@ -27306,7 +27343,7 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
         patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
-        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.dom_service.DOMService", UnconfirmedDom if unconfirmed_disconnect else _FakeDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
         patch(
             "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
@@ -27314,21 +27351,46 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
 
+    if setup_failure == "constructor":
+        patch_targets.append(patch("browser_tools.cdp_multiplexer.SingleCdpConnectionMultiplexer", return_value=multiplexer))
+
     with ExitStack() as stack:
         for patch_target in patch_targets:
             stack.enter_context(patch_target)
         captured = stack.enter_context(capture_logs())
-        result = await env.run(
-            spawn_browser_agent_activity_v3,
-            user_id="user-1",
-            agent_id="agent-1",
-            goal="Add the socks to the cart",
-            tool_call_id="tool-1",
-            task_id="task-1",
-            output_schema={"fields": [{"name": "result", "type": "string"}]},
-            use_claude_mode=False,
-            start_url="https://example.com",
-        )
+        setup_error = None
+        try:
+            result = await env.run(
+                spawn_browser_agent_activity_v3,
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Add the socks to the cart",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+        except RuntimeError as error:
+            if not setup_failure:
+                raise
+            setup_error = error
+        if unconfirmed_disconnect:
+            from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
+
+            await drain_background_browser_cleanups(timeout=5)
+
+    if setup_failure:
+        assert setup_error is not None and "fixture CDP setup failed" in str(setup_error), setup_error
+        assert any(entry.get("event") == "Browser cleanup finished in background" for entry in captured)
+        assert not any(entry.get("event") == "Browser cleanup failed in background" for entry in captured)
+        if setup_failure == "constructor":
+            assert "browser-cleanup:discarded-multiplexer-owner" not in cleanup_activity_ids, "live multiplexer acknowledged cleanup"
+            assert multiplexer.close.await_count, "cleanup discarded a multiplexer created before DOM construction"
+            return
+        assert _FakeDomService.last_instance.disconnect.await_count >= 2, "cleanup discarded the failed setup owner"
+        assert "browser-cleanup:discarded-setup-owner" not in cleanup_activity_ids, "failed setup detach acknowledged cleanup"
+        return
 
     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
     assert result["yield_reason"] == WORKER_SHUTDOWN, result
@@ -27354,6 +27416,32 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert result.get("reasoning_messages") == ["Looking for the cart"], result
     llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
+    if unconfirmed_disconnect:
+        cleanup_errors = [entry for entry in captured if entry.get("event") == "Browser cleanup failed in background"]
+        assert not cleanup_errors, cleanup_errors
+        assert any(entry.get("event") == "Browser cleanup finished in background" for entry in captured), [
+            entry.get("event") for entry in captured if "cleanup" in str(entry.get("event", "")).lower()
+        ]
+        assert _FakeDomService.last_instance.disconnect.await_count, "cleanup discarded the failed DOM owner"
+        assert "browser-cleanup:discarded-drain-owner" not in cleanup_activity_ids, (
+            "discarded failed DOM detach acknowledged cleanup"
+        )
+
+
+async def test_discarded_drain_disconnect_never_acknowledges_cleanup():
+    await test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown(unconfirmed_disconnect=True)
+
+
+async def test_discarded_setup_disconnect_never_acknowledges_cleanup():
+    await test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown(
+        unconfirmed_disconnect=True, setup_failure=True
+    )
+
+
+async def test_pre_dom_multiplexer_failure_never_acknowledges_cleanup():
+    await test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown(
+        unconfirmed_disconnect=True, setup_failure="constructor"
+    )
 
 
 async def test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to():
@@ -27525,7 +27613,7 @@ async def test_credential_setup_failure_disconnects_the_connected_browser_client
     no clients; the orphaned loopback client kept Tilion's single CDP slot and
     every later browser start for the agent failed with 4409 / connect() timeouts.
     """
-    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from domains.spawn_browser_agent_v3.handler import build_realm_credential_state, spawn_browser_agent_activity_v3
 
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     session_data = {
@@ -27539,6 +27627,17 @@ async def test_credential_setup_failure_disconnects_the_connected_browser_client
         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
         "user_settings": {},
     }
+    # The incident requires both CDP clients acquired before credential setup
+    # fails. Owned Playwright startup yields to its tracked acquisition task.
+    clients_connected = asyncio.Event()
+    playwright = _FakePlaywright(fake_browser)
+    async def connected_playwright(*_args, **_kwargs):
+        clients_connected.set()
+        return fake_browser
+    playwright.chromium.connect_over_cdp = AsyncMock(side_effect=connected_playwright)
+    async def credentials_after_connect(*args, **kwargs):
+        await clients_connected.wait()
+        return await build_realm_credential_state(*args, **kwargs)
     # Inventory names an enabled passkey whose material the session lacks.
     auth_options = {"realm": "example.com", "passkeys": [{"id": "pk-1", "label": "Example passkey"}]}
     _FakeDomService.last_instance = None
@@ -27549,6 +27648,7 @@ async def test_credential_setup_failure_disconnects_the_connected_browser_client
         patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
         patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
         patch("domains.spawn_browser_agent_v3.handler.fetch_auth_options", AsyncMock(return_value=auth_options)),
+        patch("domains.spawn_browser_agent_v3.handler.build_realm_credential_state", new=credentials_after_connect),
         patch(
             "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
@@ -27563,7 +27663,7 @@ async def test_credential_setup_failure_disconnects_the_connected_browser_client
         patch("browser_tools.dom_service.DOMService", _FakeDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
         patch(
-            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(playwright)
         ),
     ):
         with pytest.raises(RuntimeError, match="missing passkey material"):
@@ -27575,10 +27675,13 @@ async def test_credential_setup_failure_disconnects_the_connected_browser_client
                 output_schema={"fields": [{"name": "result", "type": "string"}]},
                 use_claude_mode=False,
                 start_url="https://example.com",
+                # Assert release at this activity's native cleanup-join boundary.
+                await_owner_cleanup=True,
             )
 
     dom_service = _FakeDomService.last_instance
     assert dom_service is not None, "the browser side must have connected before the data side failed"
+    playwright.chromium.connect_over_cdp.assert_awaited_once()
     dom_service.disconnect.assert_awaited()
     fake_browser.close.assert_awaited()
 
@@ -28257,6 +28360,27 @@ async def test_terminal_passkey_failure_still_pauses_without_weakening_approval(
     assert not failures, failures
 
 
+async def test_terminal_passkey_error_keeps_fixture_transports_until_cleanup():
+    from browser_approval_lifecycle_support import TerminalPasskeyCaptureProbe
+    from domains.spawn_browser_agent_v3 import handler
+
+    class PendingRecorderProbe(TerminalPasskeyCaptureProbe):
+        def install(self, stack, handler):
+            super().install(stack, handler)
+            schedule = handler._schedule_browser_cleanup
+
+            def cleanup(**kwargs):
+                kwargs["network_recorder_task"] = asyncio.create_task(asyncio.sleep(0.01, result=None))
+                return schedule(**kwargs)
+
+            stack.enter_context(patch.object(handler, "_schedule_browser_cleanup", side_effect=cleanup))
+
+    probe = PendingRecorderProbe("browser-use", "command_failure", "error")
+    with pytest.raises(RuntimeError, match="fixture terminal model failure"):
+        await test_private_browser_pause_urls_use_protected_continuity(probe)
+    await probe.assert_terminal_cleanup(handler)
+
+
 async def test_tilion_terminal_pause_detaches_after_optional_passkey_capture():
     from browser_approval_lifecycle_support import TerminalPasskeyCaptureProbe
     from domains.spawn_browser_agent_v3 import handler
@@ -28889,21 +29013,27 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                 stack.enter_context(item)
             if _lifecycle_probe:
                 _lifecycle_probe.install(stack, handler)
-            result = await env.run(
-                handler.spawn_browser_agent_activity_v3,
-                user_id="u1",
-                agent_id="a1",
-                goal="Inspect checkout",
-                tool_call_id="tool-1",
-                task_id="task-1",
-                is_resume=True,
-                use_claude_mode=False,
-                output_schema={"fields": [{**output_schema["fields"][0], "description": visible_url}]}
-                if pause == "max_steps"
-                else copy.deepcopy(output_schema),
-                start_url=start_url,
-                write_lock_resume_state=resume_state,
-            )
+            try:
+                result = await env.run(
+                    handler.spawn_browser_agent_activity_v3,
+                    user_id="u1",
+                    agent_id="a1",
+                    goal="Inspect checkout",
+                    tool_call_id="tool-1",
+                    task_id="task-1",
+                    is_resume=True,
+                    use_claude_mode=False,
+                    output_schema={"fields": [{**output_schema["fields"][0], "description": visible_url}]}
+                    if pause == "max_steps"
+                    else copy.deepcopy(output_schema),
+                    start_url=start_url,
+                    write_lock_resume_state=resume_state,
+                )
+            finally:
+                if _lifecycle_probe:
+                    # Remote transport fakes own the entire async cleanup lifetime,
+                    # including activity exceptions that bypass observe().
+                    await handler.drain_background_browser_cleanups(timeout=2)
             if _lifecycle_probe:
                 await _lifecycle_probe.observe(result, handler)
                 return
@@ -29620,6 +29750,8 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id(us
 
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(run_id="cancel-run")),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.uuid4", return_value="cancel-attempt"),
         patch(
             "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
             side_effect=fake_start_activity,
@@ -29956,6 +30088,8 @@ async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_ta
     }
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(run_id="parked-run")),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.uuid4", return_value="parked-attempt"),
     ):
         workflow_instance, events, raised = await _run_manager_with_parked_activity(
             result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
@@ -32423,7 +32557,7 @@ async def _drive_browser_write_pause_archive_boundary(
         patch("helpers.messages.load_config", return_value=config),
         patch("temporalio.activity.heartbeat"),
         patch.object(browser.workflow, "logger", MagicMock()),
-        patch.object(browser.workflow, "info", return_value=SimpleNamespace(workflow_id=root)),
+        patch.object(browser.workflow, "info", return_value=SimpleNamespace(workflow_id=root, run_id="approval-run")),
         patch.object(browser.workflow, "uuid4", return_value="approval-tool"),
         patch.object(browser.workflow, "now", return_value=datetime(2026, 10, 1, tzinfo=timezone.utc)),
         patch.object(browser.workflow, "start_activity", side_effect=start_activity),
@@ -35583,6 +35717,21 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    from browser_payment_history_cases import (
+        test_payment_history_storage_read_and_restore,
+        test_payment_history_resume_and_export,
+        test_payment_history_llm_reprojection,
+        test_payment_history_verifier_projection,
+        test_payment_history_rejects_media_and_evaluate_spoofs,
+    )
+    for test in (
+        test_payment_history_storage_read_and_restore,
+        test_payment_history_resume_and_export,
+        test_payment_history_llm_reprojection,
+        test_payment_history_verifier_projection,
+        test_payment_history_rejects_media_and_evaluate_spoofs,
+    ):
+        await r.record_async(test.__name__, test)
     from browser_navigation_cases import test_browser_user_navigation_history, test_browser_user_navigation_command_binding
     await r.record_async("browser user navigation real history", test_browser_user_navigation_history)
     await r.record_async("browser user navigation command binding", test_browser_user_navigation_command_binding)
@@ -38145,6 +38294,18 @@ async def run_all_tests():
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
     )
     await r.record_async(
+        "pre_dom_multiplexer_retains_cleanup_owner",
+        test_pre_dom_multiplexer_failure_never_acknowledges_cleanup,
+    )
+    await r.record_async(
+        "discarded_setup_disconnect_retains_cleanup_owner",
+        test_discarded_setup_disconnect_never_acknowledges_cleanup,
+    )
+    await r.record_async(
+        "discarded_drain_disconnect_retains_cleanup_owner",
+        test_discarded_drain_disconnect_never_acknowledges_cleanup,
+    )
+    await r.record_async(
         "reattached_session_starts_in_its_credential_realm",
         test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to,
     )
@@ -38180,6 +38341,10 @@ async def run_all_tests():
     await r.record_async(
         "private_browser_pause_urls_use_protected_continuity",
         test_private_browser_pause_urls_use_protected_continuity,
+    )
+    await r.record_async(
+        "terminal_passkey_error_keeps_fixture_transports_until_cleanup",
+        test_terminal_passkey_error_keeps_fixture_transports_until_cleanup,
     )
     await r.record_async(
         "tilion_terminal_pause_detaches_after_optional_passkey_capture",
