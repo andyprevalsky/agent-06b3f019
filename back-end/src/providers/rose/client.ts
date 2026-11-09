@@ -49,7 +49,7 @@ import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { withNativeToolContract } from './transforms';
 import { waterfallComplete } from './waterfall';
-import { dumpLlmContext, updateLlmDump } from '../llmDump';
+import { startLlmCapture, finishLlmCapture, type LlmCapture } from '../llmDump';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import { exclusiveCerebrasCompletion, POOL_CEREBRAS_IDLE_TIMEOUT_MS } from './cerebrasRoute';
@@ -158,7 +158,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const poolSpec = getPool(opts.pool);
   const startedAt = Date.now();
   const acc = createStreamAccumulator();
-  let dumpPath: string | null = null;
+  let dumpCapture: LlmCapture | null = null;
 
   // OpenAI-dialect legs receive a tool-envelope response_model as native tools.
   // Anthropic legs extract the same tools from response_format themselves.
@@ -170,9 +170,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   };
 
   if (opts.options.dump_context) {
-    dumpPath = dumpLlmContext({
+    dumpCapture = await startLlmCapture({
       call_site: opts.options.dump_context.call_site,
       agent_id: opts.options.dump_context.agent_id,
+      root_agent_id: opts.options.dump_context.root_agent_id,
       model: opts.options.model,
       message_count: opts.options.messages.length,
       messages: opts.options.messages,
@@ -217,12 +218,12 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
 
   let dumpFinalized = false;
-  const finalizeDump = (error?: unknown, consumerClosed = false) => {
-    if (!dumpPath || dumpFinalized) return;
+  const finalizeDump = async (error?: unknown, consumerClosed = false) => {
+    if (!dumpCapture || dumpFinalized) return;
     dumpFinalized = true;
     const actualModelRaw = acc.metadata.actual_model || '';
     const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
-    updateLlmDump(dumpPath, {
+    await finishLlmCapture(dumpCapture, {
       model: actualModel ?? opts.options.model,
       config: {
         actual_model: actualModel,
@@ -259,7 +260,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         callSite: opts.callSite,
       });
     } catch (error) {
-      finalizeDump(error);
+      await finalizeDump(error);
       throw error;
     }
     const foundryRequest = () =>
@@ -298,10 +299,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         }
       } catch (error) {
         const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-        finalizeDump(cause);
+        await finalizeDump(cause);
         throw cause;
       }
-      finalizeDump();
+      await finalizeDump();
       return;
     }
 
@@ -327,7 +328,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         }
       } catch (error) {
         const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-        finalizeDump(cause);
+        await finalizeDump(cause);
         throw cause;
       }
 
@@ -336,7 +337,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         pool: opts.pool,
         elapsed_ms: Date.now() - startedAt,
       });
-      finalizeDump();
+      await finalizeDump();
       return;
     }
 
@@ -346,12 +347,12 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       const sharedOpenAiKey = openAiApiKey();
       if (!sharedOpenAiKey) {
         const error = new Error('Rose shared-openai-priority route requires GPT_API_KEY');
-        finalizeDump(error);
+        await finalizeDump(error);
         throw error;
       }
       if (await isGptApiKeyOnCooldown()) {
         const error = new Error('Rose shared-openai-priority route is on GPT_API_KEY cooldown');
-        finalizeDump(error);
+        await finalizeDump(error);
         throw error;
       }
 
@@ -381,7 +382,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         ) {
           await markGptApiKeyOnCooldown(cause.name);
         }
-        finalizeDump(cause);
+        await finalizeDump(cause);
         throw cause;
       }
 
@@ -390,7 +391,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         pool: opts.pool,
         elapsed_ms: Date.now() - startedAt,
       });
-      finalizeDump();
+      await finalizeDump();
       return;
     }
 
@@ -414,11 +415,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           log,
         });
       } catch (err) {
-        finalizeDump(err);
+        await finalizeDump(err);
         throw err;
       }
       if (subscriptions.served) {
-        finalizeDump();
+        await finalizeDump();
         return;
       }
       claudeAuthFailed = subscriptions.claudeAuthFailed;
@@ -459,7 +460,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           claude_auth_failed: claudeAuthFailed?.name ?? null,
           gpt_auth_failed: gptAuthFailed?.name ?? null,
         });
-        finalizeDump();
+        await finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -472,7 +473,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             reason: err.cause.name,
           });
         } else {
-          finalizeDump(err);
+          await finalizeDump(err);
           throw err;
         }
       }
@@ -520,7 +521,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           claude_auth_failed: claudeAuthFailed?.name ?? null,
           gpt_auth_failed: gptAuthFailed?.name ?? null,
         });
-        finalizeDump();
+        await finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -537,7 +538,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             reason: err.cause.name,
           });
         } else {
-          finalizeDump(err);
+          await finalizeDump(err);
           throw err;
         }
       }
@@ -565,7 +566,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           model: poolSpec.cerebrasModel,
           elapsed_ms: Date.now() - startedAt,
         });
-        finalizeDump();
+        await finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -575,7 +576,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             model: poolSpec.cerebrasModel,
           });
         } else {
-          finalizeDump(err);
+          await finalizeDump(err);
           throw err;
         }
       }
@@ -592,7 +593,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           emit: emitChunk,
         });
         log.info('foundry.done', { request_id: opts.requestId, pool: opts.pool });
-        finalizeDump();
+        await finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -602,7 +603,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             reason: err.cause.name,
           });
         } else {
-          finalizeDump(err);
+          await finalizeDump(err);
           throw err;
         }
       }
@@ -619,7 +620,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         gptAuthFailed ??
         claudeAuthFailed ??
         new Error('Rose waterfall disabled');
-      finalizeDump(error);
+      await finalizeDump(error);
       throw error;
     }
 
@@ -644,10 +645,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       });
     } catch (err) {
       if (err instanceof PreContentFallThroughError) {
-        finalizeDump(err.cause);
+        await finalizeDump(err.cause);
         throw err.cause;
       }
-      finalizeDump(err);
+      await finalizeDump(err);
       throw err;
     }
     log.info('waterfall.done', {
@@ -660,13 +661,13 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
       foundry_failed: foundryFailed?.name ?? null,
     });
-    finalizeDump();
+    await finalizeDump();
   } catch (error) {
-    finalizeDump(error);
+    await finalizeDump(error);
     throw error;
   } finally {
     // Async-generator return skips ordinary trailing code. Preserve the partial
     // response before the caller can seal/archive the terminated chat stream.
-    finalizeDump(undefined, true);
+    await finalizeDump(undefined, true);
   }
 }

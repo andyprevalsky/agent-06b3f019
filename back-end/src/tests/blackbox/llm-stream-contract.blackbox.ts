@@ -3,6 +3,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { listArchivedObjects, readArchivedArtifactStrict } from '../../providers/traceArchive';
+import { materializeArchiveLlmDumps } from '../../providers/archiveLlmMaterialization';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -273,15 +276,97 @@ async function testChatCompletionDumps(consumerClose = false): Promise<void> {
   }
 }
 
+async function testChatArchivedCompletionEvidence(): Promise<void> {
+  const fixture = fixtures.cases.find((candidate) => candidate.format === 'openai_chat');
+  assert(fixture);
+  const originalEnv = { ...process.env };
+  const originalFetch = global.fetch;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-archive-contract-'));
+  let providerCalls = 0;
+  try {
+    process.env.CEREBRAS_API_KEY = 'contract-test-key';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = directory;
+    process.env.TRACE_ARCHIVE_ENCRYPTION_KEY_B64 = Buffer.alloc(32, 7).toString('base64');
+    global.fetch = async (input) => {
+      assert.equal(String(input), CEREBRAS_API_URL);
+      providerCalls += 1;
+      return new Response(sseBody(fixture.sse_lines), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    };
+    for (const mode of ['empty-fly', 'fly', 'render']) {
+      process.env.NODE_ENV = mode === 'render' ? 'production' : 'test';
+      if (mode === 'render') delete process.env.FLY_APP_NAME;
+      else process.env.FLY_APP_NAME = mode === 'fly' ? 'contract-fly' : '';
+      for (const buildOptions of [buildRouterCompletionOptions, buildGeneratorCompletionOptions]) {
+        const agentId = randomUUID();
+        const options = buildOptions({
+          agentId,
+          model: 'rose-labs/rose-1-lite',
+          messages: [{ role: 'user', content: 'Return the contract fixture' }],
+          providerRoute: 'direct-cerebras',
+          providerFastMode: false,
+        });
+        assert(options.dump_context);
+        options.dump_context.root_agent_id = agentId;
+        const accumulator = new StructuredOutputAccumulator();
+        for await (const chunk of await createStreamingCompletion(options)) {
+          accumulator.addCompletionChunk(chunk);
+        }
+        assert.equal(accumulator.finalText(), fixture.expected_structured_content);
+        assert.equal(
+          fs.existsSync(path.join(repoRoot, '.llm-dumps', agentId)),
+          false,
+          `${mode} must never write plaintext dumps`
+        );
+        const recovered = await materializeArchiveLlmDumps(agentId, path.join(directory, agentId), {
+          list: (root) => listArchivedObjects(root, { throwOnError: true }),
+          read: (rootAgentId, objectPath) =>
+            readArchivedArtifactStrict({ rootAgentId, objectPath }),
+        });
+        const dump = JSON.parse(fs.readFileSync(recovered.latest.path, 'utf8'));
+        assert.equal(dump.root_agent_id, agentId);
+        assert.equal(dump.agent_id, agentId);
+        assert.deepEqual(dump.messages, JSON.parse(JSON.stringify(options.messages)));
+        assert.deepEqual(dump.response_format, options.response_format);
+        assert.deepEqual(dump.config.requested_params.provider_route, 'direct-cerebras');
+        assert.equal(dump.extra.output, fixture.expected_structured_content);
+        assert(dump.config.actual_model);
+        assert(dump.dump_id);
+      }
+    }
+    assert.equal(providerCalls, 6, 'archival never adds provider calls');
+  } finally {
+    global.fetch = originalFetch;
+    for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
-  await testSharedFixtures();
-  testAmbiguousFinalItemsFailTyped();
-  await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);
-  await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps());
-  await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps(true));
-  await withIsolatedFundedKeyCooldowns(testInteractiveClockGrounding);
-  testInteractiveClockProviderCachePrefixes();
-  console.log(`PASS llm-stream-contract (${fixtures.cases.length} shared provider fixtures)`);
+  const originalEnv = { ...process.env };
+  const archiveDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'stream-contract-archive-'));
+  try {
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDirectory;
+    await withIsolatedFundedKeyCooldowns(testChatArchivedCompletionEvidence);
+    await testSharedFixtures();
+    testAmbiguousFinalItemsFailTyped();
+    await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);
+    await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps());
+    await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps(true));
+    await withIsolatedFundedKeyCooldowns(testInteractiveClockGrounding);
+    testInteractiveClockProviderCachePrefixes();
+    console.log(`PASS llm-stream-contract (${fixtures.cases.length} shared provider fixtures)`);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+    fs.rmSync(archiveDirectory, { recursive: true, force: true });
+  }
 }
 
 /** Inspect provider bodies, including cache markers and Responses routing keys. */

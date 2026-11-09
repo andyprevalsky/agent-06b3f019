@@ -112,6 +112,7 @@ export interface CompletionOptions {
   disable_waterfall?: boolean;
   dump_context?: {
     call_site: string;
+    root_agent_id?: string;
     agent_id?: string;
     config?: Record<string, unknown>;
     extra?: Record<string, unknown>;

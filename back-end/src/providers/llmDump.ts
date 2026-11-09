@@ -14,6 +14,9 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from './logger';
 import { currentTraceContext } from './tracing';
+import { archiveEnabled, encryptArtifact } from './traceArchive';
+import { storeWorkerArtifact } from './traceArchiveLifecycle';
+import { prisma } from './database';
 
 const log = createLogger('LlmDump');
 
@@ -46,6 +49,7 @@ function safeJson(value: unknown): string {
 export interface LlmDumpPayload {
   call_site: string;
   agent_id?: string | null;
+  root_agent_id?: string | null;
   span_id?: string | null;
   model?: string | null;
   message_count: number;
@@ -127,4 +131,100 @@ export function updateLlmDump(dumpPath: string | null, patch: Record<string, unk
       error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
     });
   }
+}
+
+/** The encrypted archive is independent of the production plaintext-dump policy. */
+export interface LlmCapture {
+  localPath: string | null;
+  rootAgentId: string;
+  agentId: string;
+  dumpId: string;
+  archived: boolean;
+}
+
+export async function startLlmCapture(payload: LlmDumpPayload): Promise<LlmCapture> {
+  const trace = currentTraceContext();
+  const agentId = payload.agent_id || trace?.agent_id || 'unbound';
+  const dumpId = randomUUID();
+  const value = {
+    ...payload,
+    agent_id: agentId,
+    root_agent_id: payload.root_agent_id || agentId,
+    span_id: payload.span_id || trace?.span_id || randomUUID(),
+    dump_id: dumpId,
+  };
+  const capture: LlmCapture = {
+    localPath: dumpLlmContext(value),
+    rootAgentId: value.root_agent_id,
+    agentId,
+    dumpId,
+    archived: false,
+  };
+  try {
+    if (!archiveEnabled()) return capture;
+    if (!payload.root_agent_id) {
+      const agent = await prisma.agent.findUnique({
+        where: { id: agentId },
+        select: { busId: true },
+      });
+      if (!agent) return capture;
+      capture.rootAgentId = agent.busId || agentId;
+      value.root_agent_id = capture.rootAgentId;
+    }
+    await archiveCaptureValue(capture.rootAgentId, `llm/${dumpId}.json.gz.enc`, value);
+    capture.archived = true;
+  } catch (error) {
+    log.warn('llm.context.archive_failed', {
+      agent_id: agentId,
+      dump_id: dumpId,
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+  }
+  return capture;
+}
+
+export async function finishLlmCapture(
+  capture: LlmCapture,
+  patch: Record<string, unknown>
+): Promise<void> {
+  updateLlmDump(capture.localPath, patch);
+  if (!capture.archived) return;
+  try {
+    await archiveCaptureValue(
+      capture.rootAgentId,
+      `llm-updates/${capture.dumpId}-${randomUUID()}.json.gz.enc`,
+      {
+        ...patch,
+        agent_id: capture.agentId,
+        root_agent_id: capture.rootAgentId,
+        dump_id: capture.dumpId,
+      }
+    );
+  } catch (error) {
+    log.warn('llm.context.archive_update_failed', {
+      agent_id: capture.agentId,
+      dump_id: capture.dumpId,
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+  }
+}
+
+async function archiveCaptureValue(
+  rootAgentId: string,
+  objectPath: string,
+  value: unknown
+): Promise<void> {
+  const encrypted = encryptArtifact(
+    objectPath,
+    Buffer.from(safeJson(value)),
+    'application/json',
+    true
+  );
+  if (!encrypted) throw new Error('LLM archive encryption unavailable');
+  await storeWorkerArtifact({
+    rootAgentId,
+    path: objectPath,
+    ciphertextB64: encrypted.ciphertext.toString('base64'),
+    metadata: encrypted.metadata,
+  });
 }
