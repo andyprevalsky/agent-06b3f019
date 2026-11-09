@@ -2,7 +2,8 @@
   "provenance": {
     "source": "boxes.dev thread ph740ay1wnfqvp0r56kanj5jxx8h28x3 (--ai-- descend polar k3 · RCA I1 sharded 2h window, devbox 0d70611e): 'scripts/run-bench <20 polar-bu> -k 3 --concurrency 60 --timeout 7200 --check'",
     "recorded": "The refusal lines are scripts/run-bench's sharded-route strings ('HEAD … is not pushed to origin', 'tracked changes refused').",
-    "synthesized": "The full-selection banner (128 tasks x 2 = 256 copies routed to the sharded operator)."
+    "synthesized": "The full-selection banner (128 tasks x 2 = 256 copies routed to the sharded operator) and the unpushed-HEAD refusal for this replay; the 2026-10-22 run predates the `full` selector, so it left no recorded output in this CLI form.",
+    "prompt": "Real: Andy's message '/benchmark full' / 'it should use all benchmarks, where the last 3 runs are passes, and run at k  = 2' in thread thr_b79960c09ab54964866f6209ff8f9880 (ph7bcvvb2a5gxv4qt11s26qdp98grypn, 2026-10-22 21:02:00Z), from two search snippets with the same messageTimeMs and turn ordinal (the preview read omits it; a --full read pages back from the newest message and cannot reach it in this thread). That request is what the `full` selector now implements (last 3 runs passed, default -k 2), so the rules and rubric need no change."
   },
   "rules": [
     {

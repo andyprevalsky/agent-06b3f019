@@ -49,6 +49,8 @@ Scenario format (stable; other scenario authors depend on it). JSON object:
                                controller: "exit" (after the sleep, ask the controller to exit by itself),
                                stdout_after / stderr_after (printed after the sleep and exit)} ],
                  repeat_last: bool (default true; false -> the default response once exhausted)
+                 persist_groups: bool (default false; keep this match's named groups for every later
+                   placeholder: other rules' output and the controller's on_term_files / on_exit_files)
                A response with ``"refused": true`` (and every default response) is logged with refused=true.
   default      response used when no rule matches (default: exit 2 with a usage error on stderr)
   tools        optional {name: {path: repo-relative path (may be ../bin/<tool> for a PATH tool),
@@ -200,6 +202,10 @@ def placeholders(layout: Layout, scenario: dict[str, Any], call: int = 0, groups
         pass
     contract = layout.repo / ".claude" / "shared" / "benchmark-report-format.txt"
     values["REPORT_FORMAT"] = contract.read_text().rstrip("\n") if contract.is_file() else ""
+    try:  # named groups kept by a persist_groups rule (e.g. the task names a launch chose)
+        values.update(json.loads((layout.dir / "groups.json").read_text()))
+    except (OSError, ValueError):
+        pass
     values.update({k: v or "" for k, v in (groups or {}).items()})
     for _ in range(3):  # vars may reference built-ins or each other
         for key, value in (scenario.get("vars") or {}).items():
@@ -578,6 +584,11 @@ def dispatch(argv: list[str], tool: str = "run-bench", layout: Optional[Layout] 
         else:
             response = {**DEFAULT_RESPONSE, **(scenario.get("default") or {}), "refused": True}
         row.update(rule=chosen["id"], response_index=index)
+        if chosen.get("persist_groups"):
+            kept = {k: v for k, v in groups.items() if v is not None}
+            tmp = layout.dir / f".groups.json.tmp{os.getpid()}"
+            tmp.write_text(json.dumps(kept))
+            os.replace(tmp, layout.dir / "groups.json")
         if chosen.get("start_controller"):
             start_controller(layout, scenario)
     values = placeholders(layout, scenario, call, groups)
