@@ -1,0 +1,91 @@
+{
+  "status": "EXACT_CURRENT_BYTES_MATCH_AUTHENTICATED_TAIL_INVENTORY",
+  "observed_at": "2026-11-09T20:45:37.267007+00:00",
+  "path": "agents/providers/fast_cache/",
+  "files": 6,
+  "bytes": 150758,
+  "reason": "Native deletion detector collapses this directory containing only ignored bytecode; prior manifest listed a deeper spelling. Missing tracked source is not assumed reconstructible. All six actual files exactly match source rows already qualified by the finite tail inventory and authenticated carriers.",
+  "tail_inventory": "inventory.jsonl.gz",
+  "tail_inventory_archive_receipt": "receipts/receipt-tail.json",
+  "members": [
+    {
+      "path": "agents/providers/fast_cache/__pycache__/__init__.cpython-311.pyc",
+      "sha256": "81e42211789c7cd932a95ade0c11da30d09b9d43a76b81996bd8c9a8f6e9c32d",
+      "size": 966,
+      "basis": "fresh-hash-equal-prior-main-bytes",
+      "carrier": {
+        "archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
+        "receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+        "member": "rose/.context/report-bug-auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba/snapshot/rootfs/home/boxes/rose/agents/providers/fast_cache/__pycache__/__init__.cpython-311.pyc",
+        "size": 966,
+        "sha256": "81e42211789c7cd932a95ade0c11da30d09b9d43a76b81996bd8c9a8f6e9c32d"
+      }
+    },
+    {
+      "path": "agents/providers/fast_cache/__pycache__/browser_use_cache.cpython-311.pyc",
+      "sha256": "4c6d9f7c94f8ffedec897081fc7a1d763c76c87d8256f032c21c97db95b38d2c",
+      "size": 5207,
+      "basis": "fresh-hash-equal-prior-main-bytes",
+      "carrier": {
+        "archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
+        "receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+        "member": "rose/.context/report-bug-auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba/snapshot/rootfs/home/boxes/rose/agents/providers/fast_cache/__pycache__/browser_use_cache.cpython-311.pyc",
+        "size": 5207,
+        "sha256": "4c6d9f7c94f8ffedec897081fc7a1d763c76c87d8256f032c21c97db95b38d2c"
+      }
+    },
+    {
+      "path": "agents/providers/fast_cache/__pycache__/client.cpython-311.pyc",
+      "sha256": "80f2bd875adafb6e1877739a89903f9a6f54f32d12ba86de1d8febf9fea3ed04",
+      "size": 53167,
+      "basis": "fresh-hash-equal-prior-main-bytes",
+      "carrier": {
+        "archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
+        "receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+        "member": "rose/.context/report-bug-auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba/snapshot/rootfs/home/boxes/rose/agents/providers/fast_cache/__pycache__/client.cpython-311.pyc",
+        "size": 53167,
+        "sha256": "80f2bd875adafb6e1877739a89903f9a6f54f32d12ba86de1d8febf9fea3ed04"
+      }
+    },
+    {
+      "path": "agents/providers/fast_cache/__pycache__/context.cpython-311.pyc",
+      "sha256": "1f8d743f4f41c2b6db5f69242c717f0343498af5b366e6ef397485f722afff97",
+      "size": 5932,
+      "basis": "fresh-hash-equal-prior-main-bytes",
+      "carrier": {
+        "archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
+        "receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+        "member": "rose/.context/report-bug-auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba/snapshot/rootfs/home/boxes/rose/agents/providers/fast_cache/__pycache__/context.cpython-311.pyc",
+        "size": 5932,
+        "sha256": "1f8d743f4f41c2b6db5f69242c717f0343498af5b366e6ef397485f722afff97"
+      }
+    },
+    {
+      "path": "agents/providers/fast_cache/__pycache__/google_oauth_demo_fixture.cpython-311.pyc",
+      "sha256": "8398d1677bb50fd15c92f878da3dc564357d022eec4f369590f48af7df5de6d7",
+      "size": 8571,
+      "basis": "fresh-hash-equal-prior-main-bytes",
+      "carrier": {
+        "archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
+        "receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+        "member": "rose/.context/report-bug-auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba/snapshot/rootfs/home/boxes/rose/agents/providers/fast_cache/__pycache__/google_oauth_demo_fixture.cpython-311.pyc",
+        "size": 8571,
+        "sha256": "8398d1677bb50fd15c92f878da3dc564357d022eec4f369590f48af7df5de6d7"
+      }
+    },
+    {
+      "path": "agents/providers/fast_cache/__pycache__/normalize.cpython-311.pyc",
+      "sha256": "d5e454068ef14a25ca2e1e3159b1ca73a0cfd7cc06c33d80d388e272b6d1ce3e",
+      "size": 76915,
+      "basis": "fresh-hash-equal-prior-main-bytes",
+      "carrier": {
+        "archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
+        "receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+        "member": "rose/.context/report-bug-auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba/snapshot/rootfs/home/boxes/rose/agents/providers/fast_cache/__pycache__/normalize.cpython-311.pyc",
+        "size": 76915,
+        "sha256": "d5e454068ef14a25ca2e1e3159b1ca73a0cfd7cc06c33d80d388e272b6d1ce3e"
+      }
+    }
+  ],
+  "no_new_data_or_source_mutation": true
+}

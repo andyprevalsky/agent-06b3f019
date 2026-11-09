@@ -1,0 +1,34 @@
+{
+  "source": "06b65bc6c7339277a76719a5a2560dccf293db9e",
+  "source_digest": "83e8e46db6843f154be93497d347e6324a594e644363002231e2384b4fa5e91d",
+  "status": "HISTORICAL_06B_QUOTA_SNAPSHOT_SUPERSEDED_BY_DELIVERED_FINAL_REVIEW",
+  "code_review": {
+    "provider": "CodeRabbit",
+    "status": "SKIPPED",
+    "reason": "Organization usage spending cap; neutral rate-limited check; fallback disabled",
+    "check_run_id": 128889060470,
+    "issue_comment_id": 6721588951,
+    "observed_at": "2026-11-08T22:54:32.605180+00:00",
+    "review_pass": false,
+    "merged_unreviewed": "Historical pre-final-review risk only; final b7 review delivered clean before actual merge",
+    "receipt": {
+      "sha256": "0d9ce1afde7640a1884a26cb7bbb1b3783bb63a6a903612928a5b099acdedd79",
+      "bytes": 1772
+    }
+  },
+  "normal_main_ledger": {
+    "attempt_rows_moved_to_branch_shard": 11,
+    "duration_rows_moved_to_branch_shard": 3,
+    "superseded_rows_removed": 0,
+    "rows_lost": 0,
+    "spans_retained": 12637,
+    "native_values_rewritten": false,
+    "receipt": {
+      "sha256": "64ee124051297550bd15412619f28c073d4b6f9261ca0c0650c2349de1da9907",
+      "bytes": 746
+    }
+  },
+  "full_gates_started_at": "2026-11-08T23:00:54.594499+00:00",
+  "full_current_source_qualified": false,
+  "superseded_by": "proofs/final-merged-source-qualification.json"
+}
