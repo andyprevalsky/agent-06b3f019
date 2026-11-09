@@ -610,9 +610,7 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1866-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
