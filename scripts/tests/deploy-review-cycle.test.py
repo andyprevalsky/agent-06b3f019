@@ -1715,6 +1715,17 @@ class RetargetUnexecutedTest(unittest.TestCase):
             with self.subTest(case=case):
                 code,out=self.run_native();self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
 
+    def test_prior_review_comment_repositioned_to_slot_head_is_not_slot_feedback(self):
+        # GitHub moves an earlier review's unresolved comment commit_id to the newest PR head;
+        # its original_commit_id still names the reviewed commit, so the slot never executed.
+        self.data['review_comments']=[{'id':7,'user':{'login':MODULE.REVIEW_BOT},'commit_id':self.old,
+                                       'original_commit_id':'4'*40,'created_at':'2026-11-07T20:43:08Z'}]
+        self.save()
+        code,out=self.run_native();self.assertEqual(code,0,out)
+        last=json.loads(self.path.read_text())['cycles'][-1]
+        self.assertEqual((last['status'],last['head']),('open',self.new))
+        self.assertEqual(last['unexecuted_retargets'][0]['evidence'],self.data)
+
     def test_refuses_finished_slots_and_malformed_history(self):
         original=deepcopy(self.state)
         for case in ('clean','findings','unavailable','missing-prefix','malformed','wrong-marker'):

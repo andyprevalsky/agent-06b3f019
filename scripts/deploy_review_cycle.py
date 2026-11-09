@@ -1226,7 +1226,9 @@ def retarget_unexecuted(path, *, head, approved_head, approval, prior_ledger_sha
         refuse('missing authoritative not-executed reply')
     if (substantive_reviews(evidence['reviews'], old, evidence)
             or any(_is_bot(r) and r.get('commit_id') == old for r in evidence['reviews'])
-            or any(_is_bot(c) and old in (c.get('commit_id'), c.get('original_commit_id'))
+            # GitHub re-points an earlier review's unresolved comment `commit_id` at the newest
+            # PR head; only a comment that originated on the slot HEAD is feedback on it.
+            or any(_is_bot(c) and c.get('original_commit_id') == old
                    for c in evidence['review_comments'])):
         refuse('review or inline feedback already exists')
     runs = coderabbit_check_runs(evidence['check_runs'], old)
