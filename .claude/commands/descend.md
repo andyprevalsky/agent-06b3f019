@@ -23,7 +23,7 @@ One full-slice run reaches a 95% pass rate (passing copies over scored copies, e
 | 6 | `INFRA_REPAIR` | On a 5% stop: fix the infra blockers now (ship with `/push` if production needs it), then rerun the same batch | see **Stopping conditions** |
 | 7 | `RCA_FAILURES` | Start one `/RCA` per failed task as it fails; RCAs dedupe themselves | gap: `scripts/descend handoff <task>` |
 | 8 | `ITERATION_RETRO` | Name the slowest step and apply one speedup, or record why none exists | `python3 scripts/descend_step_log.py report --slice $SLICE --task-count $N --lane main --window 5` |
-| 9 | `NEXT_BATCH_OR_ROTATION` | When fixes are applied or time-boxed, go back to 3 | — |
+| 9 | `NEXT_BATCH_OR_ROTATION` | Only when every RCA's fix is applied or its 100-minute box has expired, go back to 3; an RCA that returned without a fix is resumed, never counted as done | — |
 | 10 | `RERUN_FULL_SLICE` | Once the batches have covered every task and pass at 95% or more, run the whole slice as one launch; below 95% returns to 7 | `scripts/run-bench <all tasks...> -k K --concurrency N` |
 | 11 | `FINAL_CHANGE_REVIEW` | Start `/deploy`; its approval step reviews the guarded changes | `/deploy` |
 | 12 | `DONE` / `BLOCKED` | Transition, then close the clock with verified counts | `python3 scripts/descend_step_log.py transition --step DONE ...` then `finish --status completed --run-terminal --detail scheduled_total=N --detail infra_failed=N` |
