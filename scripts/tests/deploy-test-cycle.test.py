@@ -6554,6 +6554,22 @@ class Round12InterruptedIsolation(unittest.TestCase):
         self.assertFalse(r['cleanup_complete']);self.assertFalse(r['credit_granted']);self.assertTrue(r['obligations_preserved'])
         self.assertIsNone(r['worker_result_sha256']);self.assertEqual(r['proof']['inherited_admissions'],self.inherited)
 
+    def test_composed_retirement_keeps_old_observation_and_rejects_replacement(self):
+        before = copy.deepcopy(self.p)
+        self.observer.return_value = {**self.obs, 'matched': []}
+        with patch.object(self.m, 'retired_hub', return_value=True):
+            result = self.m.validate_execution(self.r, self.owner, self.p, self.m.operation_spec(),
+                                               _covered_guest=True, _retired_hubs=True)
+            self.assertFalse(result['cleanup_complete']); self.assertFalse(result['credit_granted'])
+            self.assertEqual(self.p, before)
+            with self.assertRaises(ValueError): self.verify()  # Ordinary live-owner contract remains strict.
+            self.observer.return_value = {**self.obs, 'matched': [3912856]}
+            with self.assertRaises(ValueError):
+                self.m.validate_execution(self.r, self.owner, self.p, self.m.operation_spec(),
+                                          _covered_guest=True, _retired_hubs=True)
+        with self.assertRaises(ValueError):
+            self.m.validate_execution(self.r, self.owner, self.p, self.m.operation_spec(), _retired_hubs=True)
+
     def test_wrong_purpose_source_token_owner_and_original_failure_rejected(self):
         for key,val in [('purpose',None),('compatibility','other'),('source',{}),('request_token','other'),('owner',{})]:
             with self.subTest(key=key):
@@ -8693,6 +8709,58 @@ class TreasuryRequalification(unittest.TestCase):
         self.assertEqual({'blackbox:treasury-rails'},set(c.reuse_qualifications(self.state,self.gate,include_custody=False)))
         (self.folder/'output.log').write_text('tampered after renewal')
         with self.assertRaises(ValueError):c.reuse_qualifications(self.state,self.gate,include_custody=False)
+
+
+
+class BoundNativeHubRetirement(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        import deploy_test_round12_isolation as m
+        self.m = m; self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name); self.record = self.root / 'retirement.json'
+        self.producer = self.root / 'producer.py'; self.producer.write_text('native producer fixture')
+        rows = []
+        for i in range(6):
+            p = self.root / f'{i}.owner'
+            p.write_text(f'pid={2147483000+i}\npid_start=proc-start:fixture:{i+1}\nargv_sha256=argv\nstatus=live-transfer-required\n')
+            rows.append(dict(pid=2147483000+i,birth=f'proc-start:fixture:{i+1}',owner_file=str(p),
+                             owner_sha256=hashlib.sha256(p.read_bytes()).hexdigest(),signal='SIGTERM',
+                             exit_observed=True,owner_receipt_unchanged=True))
+        self.data=dict(started_at='2026-01-01T00:00:00+00:00',finished_at='2026-01-01T00:00:01+00:00',
+            status='OWNED_HUB_PROCESSES_RETIRED_EVIDENCE_RETAINED',native_cleanup_credit=False,
+            financial_settlement_credit=False,retained_evidence=True,hubs=rows)
+        c.write(self.record,self.data)
+        for name,value in [('HUB_RETIREMENT',self.record),('HUB_RETIREMENT_SHA256',c.sha_file(self.record)),
+                           ('HUB_RETIREMENT_PRODUCER',self.producer),('HUB_RETIREMENT_PRODUCER_SHA256',c.sha_file(self.producer))]:
+            p=patch.object(m,name,value);p.start();self.addCleanup(p.stop)
+        self.owner_path=Path(rows[0]['owner_file'])
+        self.owner=dict(line.split('=',1) for line in self.owner_path.read_text().splitlines())
+
+    def test_exact_packet_and_owner_only(self):
+        with patch('deploy_test_native_cleanup.retired_local_process') as retired:
+            self.assertTrue(self.m.retired_hub(self.owner_path,self.owner))
+            retired.assert_called_once_with({'pid':2147483000,'birth':'proc-start:fixture:1'})
+        with patch('deploy_test_native_cleanup.retired_local_process',side_effect=ValueError('live replacement')):
+            with self.assertRaises(ValueError): self.m.retired_hub(self.owner_path,self.owner)
+        for field in ('pid','pid_start','argv_sha256','status'):
+            with self.subTest(field=field),self.assertRaises(ValueError):
+                self.m.retired_hub(self.owner_path,{**self.owner,field:'changed'})
+
+    def test_missing_forged_packet_producer_and_owner_are_not_authority(self):
+        raw=self.record.read_bytes(); self.record.unlink()
+        self.assertFalse(self.m.retired_hub(self.owner_path,self.owner))
+        self.record.write_bytes(raw+b' ')
+        with self.assertRaises(ValueError): self.m.retired_hub(self.owner_path,self.owner)
+        self.record.write_bytes(raw); self.producer.write_text('forged')
+        with self.assertRaises(ValueError): self.m.retired_hub(self.owner_path,self.owner)
+        self.producer.write_text('native producer fixture'); self.owner_path.write_text('forged')
+        with self.assertRaises(ValueError): self.m.retired_hub(self.owner_path,self.owner)
+
+    def test_wrong_terminal_status_or_credit_rejected_even_when_sealed(self):
+        for field,value in [('status','RETIRING'),('native_cleanup_credit',True),('financial_settlement_credit',True)]:
+            data=copy.deepcopy(self.data);data[field]=value;c.write(self.record,data)
+            with patch.object(self.m,'HUB_RETIREMENT_SHA256',c.sha_file(self.record)),self.assertRaises(ValueError):
+                self.m.retired_hub(self.owner_path,self.owner)
 
 
 if __name__ == '__main__': unittest.main()

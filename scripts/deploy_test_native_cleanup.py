@@ -956,7 +956,7 @@ def dispatch_refusal(root, runs, campaign, request, receipt, adapter, confirmed,
     need(campaign_published(summary, campaign, adapter['started_at'], native), 'dispatch refusal publication closure')
 
 
-def validate(receipt, owner, proof):
+def validate(receipt, owner, proof, *, _retired_hubs=False):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     if proof.get('compatibility') == 'round12-interrupted-isolation-v1':
@@ -1232,7 +1232,7 @@ def validate(receipt, owner, proof):
     legacy_isolated=False
     if proof.get('compatibility') == 'f87-reserve-abort-isolation-v1':
         from deploy_test_f87_isolation import validate as validate_f87
-        legacy_isolated=validate_f87(receipt,adapter,proof,root,runs,participants,document,bound,tree)
+        legacy_isolated=validate_f87(receipt,adapter,proof,root,runs,participants,document,bound,tree, _retired_hubs=_retired_hubs)
     for fleet in sorted(participants):
         benches = json.loads(bound(fleet / '_batch/benches.json'))
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
@@ -1648,11 +1648,12 @@ def inherited_native_sources(state, entries, *, _historical_only=False):
         mode = proof.get('compatibility')
         if mode in known:
             actual = r12.validate_execution(receipt, receipt_owner(entry['gate'], receipt), proof,
-                                           known[mode].operation_spec(), _covered_guest=True)
+                                           known[mode].operation_spec(), _covered_guest=True, _retired_hubs=True)
             need(actual == {k:v for k,v in entry.items() if k != 'occurrence'}, 'historical native proof changed')
             request_path = Path(proof['original_request'])
         else:
-            need(still_bound(entry, receipt, receipt_owner(entry['gate'], receipt)), 'original native proof changed')
+            actual = validate(receipt, receipt_owner(entry['gate'], receipt), proof, _retired_hubs=True)
+            need(actual == {k:v for k,v in entry.items() if k != 'occurrence'}, 'original native proof changed')
             request_path = Path(receipt['worker_result']).parent / 'request.json'
         request = bounded_read(request_path, 'original native request')
         # The native validator already binds this exact original request. Keep

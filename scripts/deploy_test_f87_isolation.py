@@ -21,7 +21,7 @@ def hub_identity(pid):
     return birth,hashlib.sha256(b'\0'.join(argv[1:])).hexdigest()
 
 
-def validate(receipt, adapter, proof, root, runs, participants, document, bound, tree):
+def validate(receipt, adapter, proof, root, runs, participants, document, bound, tree, *, _retired_hubs=False):
     from deploy_test_native_cleanup import need, fields
     need(proof.get('purpose')=='isolated-validation' and proof.get('layout')=='campaign-v1'
          and proof.get('compatibility')=='f87-reserve-abort-isolation-v1'
@@ -55,9 +55,14 @@ def validate(receipt, adapter, proof, root, runs, participants, document, bound,
             need(not folder.exists() or folder.is_dir() and not folder.is_symlink() and not any(folder.iterdir()),
                  'original resource custody is ambiguous')
     need(len(hubs)==1,'ambiguous retained Hub')
-    hub=fields(bound(Path(next(iter(hubs)))))
-    pid=int(hub['pid']);birth,argv_hash=hub_identity(pid)
-    need(birth==hub['pid_start'] and argv_hash==hub['argv_sha256'], 'retained Hub incarnation changed')
+    hub_path=Path(next(iter(hubs)))
+    hub=fields(bound(hub_path))
+    from deploy_test_round12_isolation import retired_hub
+    retired=_retired_hubs and retired_hub(hub_path,hub)
+    pid=int(hub['pid'])
+    if not retired:
+        birth,argv_hash=hub_identity(pid)
+        need(birth==hub['pid_start'] and argv_hash==hub['argv_sha256'], 'retained Hub incarnation changed')
     relay=document(campaign/'shared-relay-location.json')['directory']
     pids={j['controller_pid'] for j in summary['jobs']}|{pid}
     scopes=[str(runs.parent),relay]
@@ -66,8 +71,8 @@ def validate(receipt, adapter, proof, root, runs, participants, document, bound,
          and receipt['finished_at']<=observation.get('observed_at',0)<=proof['confirmed_at'],
          'fresh investigator observation required')
     current=observe(pids,scopes);saved=observation.get('os',{})
-    need(all(saved.get(k)==current[k] for k in ('boot_id','uid','pids','scopes','matched','unreadable'))
-         and current['matched']==[pid] and current['unreadable']==[]
+    need(all(saved.get(k)==current[k] for k in ('boot_id','uid','pids','scopes','unreadable'))
+         and saved.get('matched')==[pid] and current['matched']==([] if retired else [pid]) and current['unreadable']==[]
          and receipt['finished_at']<=saved.get('observed_at',0)<=proof['confirmed_at'],
          'old execution is active or unknown')
     return True

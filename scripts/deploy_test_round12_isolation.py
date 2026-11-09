@@ -140,6 +140,50 @@ def guest_facts(observation):
             'guest': {k: v for k, v in g.items() if k != 'observed_at'}}
 
 
+
+# Original native pidfd retirement, independently retained after the old proofs.
+HUB_RETIREMENT = ROOT / '.context/cli-nov08-retirement/hub-retirement.json'
+HUB_RETIREMENT_SHA256 = 'b85c97fd547213339834ef4f8d359164afeeb87af88b19dd3d1e529cbddc98bb'
+HUB_RETIREMENT_PRODUCER = ROOT / '.context/cli-nov08-retirement/retire-owned-hubs.py'
+HUB_RETIREMENT_PRODUCER_SHA256 = '0f0d14fb2146e41d34198ff2f9b6538bc1207bef5ca0a927ac17e23bdc93e3bc'
+
+
+def retired_hub(path, owner):
+    """An exact original retirement can discharge only the live-process predicate."""
+    from datetime import datetime
+    from deploy_test_native_cleanup import retired_local_process, fields as owner_fields
+    if not HUB_RETIREMENT.exists():
+        check(not HUB_RETIREMENT.is_symlink(), 'retirement symlink')
+        return False
+    for artifact, digest in ((HUB_RETIREMENT, HUB_RETIREMENT_SHA256),
+                             (HUB_RETIREMENT_PRODUCER, HUB_RETIREMENT_PRODUCER_SHA256)):
+        check(artifact.is_file() and not artifact.is_symlink() and artifact.resolve() == artifact
+              and hashlib.sha256(artifact.read_bytes()).hexdigest() == digest, 'native Hub retirement binding')
+    record = json.loads(HUB_RETIREMENT.read_text())
+    rows = record['hubs']
+    check(record['status'] == 'OWNED_HUB_PROCESSES_RETIRED_EVIDENCE_RETAINED'
+          and record['native_cleanup_credit'] is False and record['financial_settlement_credit'] is False
+          and record['retained_evidence'] is True and len(rows) == 6
+          and len({r['owner_file'] for r in rows}) == len(rows)
+          and len({r['pid'] for r in rows}) == len(rows), 'native Hub retirement closure')
+    started = datetime.fromisoformat(record['started_at']).timestamp()
+    finished = datetime.fromisoformat(record['finished_at']).timestamp()
+    check(started <= finished <= time.time(), 'native Hub retirement clock')
+    matches = [r for r in rows if r['owner_file'] == str(path)]
+    if not matches:
+        return False
+    check(len(matches) == 1, 'ambiguous native Hub retirement')
+    row = matches[0]
+    check(path.is_file() and not path.is_symlink() and path.resolve() == path
+          and owner_fields(path.read_bytes()) == owner and owner.get('status') == 'live-transfer-required'
+          and row['owner_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
+          and row['pid'] == int(owner['pid']) and row['birth'] == owner['pid_start']
+          and row['signal'] == 'SIGTERM' and row['exit_observed'] is True
+          and row['owner_receipt_unchanged'] is True, 'retired Hub original owner changed')
+    retired_local_process({'pid': row['pid'], 'birth': row['birth']})
+    return True
+
+
 def operation_spec():
     return dict(token=TOKEN, source=SOURCE, mode=MODE, pins=PINS, receipt_path=RECEIPT,
                 interrupted=True, snapshot=snapshot, inherited_count=2, live_pid=3912856, adapter_sha=None)
@@ -149,7 +193,8 @@ def validate(receipt, owner, proof):
     return validate_execution(receipt, owner, proof, operation_spec())
 
 
-def validate_execution(receipt, owner, proof, operation, *, _covered_guest=False):
+def validate_execution(receipt, owner, proof, operation, *, _covered_guest=False, _retired_hubs=False):
+    check(not _retired_hubs or _covered_guest, 'retirement requires composed historical authority')
     token, source, mode = (operation[k] for k in ('token', 'source', 'mode'))
     pins, receipt_path = operation['pins'], operation['receipt_path']
     check(proof.get('kind') == 'native-cloud-cleanup-v1' and proof.get('compatibility') == mode
@@ -185,19 +230,23 @@ def validate_execution(receipt, owner, proof, operation, *, _covered_guest=False
     pids = {int(p.name.rsplit('-', 1)[-1]) for p in participants}
     retained = []
     live = []
+    original_live = []
     for path in debts:
         fields = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
         pid = int(fields['pid']); pids.add(pid)
         if fields.get('status') == 'live-transfer-required':
-            birth, argv = hub_identity(pid)
-            check((birth, argv) == (fields['pid_start'], fields['argv_sha256']), 'Hub incarnation changed')
-            live.append(pid)
+            original_live.append(pid)
+            if not (_retired_hubs and retired_hub(path, fields)):
+                birth, argv = hub_identity(pid)
+                check((birth, argv) == (fields['pid_start'], fields['argv_sha256']), 'Hub incarnation changed')
+                live.append(pid)
         retained.append({'path': str(path), 'sha256': pins[str(path)], 'owner': fields,
                          'disposition': 'retained-original-debt'})
     current = observe(pids, [str(root), relay])
     keys = ('boot_id', 'uid', 'pids', 'scopes', 'matched', 'unreadable')
-    check(live == [operation['live_pid']] and current['matched'] == live and current['unreadable'] == []
-          and all(local.get(k) == current[k] for k in keys)
+    check(original_live == [operation['live_pid']] and current['matched'] == live and current['unreadable'] == []
+          and local.get('matched') == original_live
+          and all(local.get(k) == current[k] for k in keys if k != 'matched')
           and receipt['finished_at'] <= local.get('observed_at', 0) <= confirmed
           and confirmed - local.get('observed_at', 0) <= 60, 'current local execution/identity')
     return {'kind': 'native-cloud-cleanup-v1', 'gate': receipt['gate'], 'token': token,
