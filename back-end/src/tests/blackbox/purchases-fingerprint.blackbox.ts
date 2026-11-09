@@ -371,59 +371,45 @@ async function testUnicodeParity(): Promise<void> {
   );
 }
 
-/** Owner decision 2026-11-08: rating and review count are optional; an absent one is omitted. */
+/** Owner decisions 2026-11-08: product URL, rating and review count are optional and omitted when absent. */
 async function testReviewlessItemParity(): Promise<void> {
-  const receipt = {
-    currency: 'USD',
-    lineItems: [
-      {
-        name: 'King room, 1 night',
-        imageUrl: 'https://example.test/room.png',
-        productUrl: 'https://example.test/hotels/king-room',
-        unitPriceCents: 30800,
-        quantity: 1,
-        lineTotalCents: 30800,
-      },
+  const cases: Array<[string, Record<string, unknown>, number, string]> = [
+    [
+      'King room, 1 night',
+      { productUrl: 'https://example.test/hotels/king-room' },
+      30800,
+      '489240d7ed3996a8db136ab77034810ec1652fa8349c05f9a91759e5a896d65c',
     ],
-    fees: [],
-    subtotalCents: 30800,
-    totalCents: 30800,
-  };
-  assert(
-    canonicalStoredPurchaseFingerprint({
+    ['Resort fee', {}, 4500, 'e7a65a3af733400db0f71a9724d03e278de9ebfb36d29d3e6f23ba7284963e2b'],
+  ];
+  for (const [name, extra, cents, expected] of cases) {
+    const image = `https://example.test/${name === 'Resort fee' ? 'fee' : 'room'}.png`;
+    const item = {
+      name,
+      imageUrl: image,
+      ...extra,
+      unitPriceCents: cents,
+      quantity: 1,
+      lineTotalCents: cents,
+    };
+    const receipt = {
+      currency: 'USD',
+      lineItems: [item],
+      fees: [],
+      subtotalCents: cents,
+      totalCents: cents,
+    };
+    const fingerprint = canonicalStoredPurchaseFingerprint({
       userId: 'fixture-user',
       merchant: 'Hotel Example',
       lineItemsJson: receipt,
-      totalCents: 30800,
-    }) === '489240d7ed3996a8db136ab77034810ec1652fa8349c05f9a91759e5a896d65c',
-    'a line item without rating or review count must fingerprint exactly like Python normalize_payment_payload'
-  );
-
-  // Owner decision 2026-11-08: product URL is optional too; an absent one is omitted.
-  const noProductUrl = {
-    currency: 'USD',
-    lineItems: [
-      {
-        name: 'Resort fee',
-        imageUrl: 'https://example.test/fee.png',
-        unitPriceCents: 4500,
-        quantity: 1,
-        lineTotalCents: 4500,
-      },
-    ],
-    fees: [],
-    subtotalCents: 4500,
-    totalCents: 4500,
-  };
-  assert(
-    canonicalStoredPurchaseFingerprint({
-      userId: 'fixture-user',
-      merchant: 'Hotel Example',
-      lineItemsJson: noProductUrl,
-      totalCents: 4500,
-    }) === 'e7a65a3af733400db0f71a9724d03e278de9ebfb36d29d3e6f23ba7284963e2b',
-    'a line item without a product URL must fingerprint exactly like Python normalize_payment_payload'
-  );
+      totalCents: cents,
+    });
+    assert(
+      fingerprint === expected,
+      `${name}: fingerprint must match Python normalize_payment_payload`
+    );
+  }
 }
 
 async function testBackfillBeyondTwenty(): Promise<void> {
