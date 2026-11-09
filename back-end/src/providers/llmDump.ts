@@ -16,7 +16,6 @@ import { createLogger } from './logger';
 import { currentTraceContext } from './tracing';
 import { archiveEnabled, encryptArtifact } from './traceArchive';
 import { storeWorkerArtifact } from './traceArchiveLifecycle';
-import { prisma } from './database';
 import { ownLlmCapture } from './llmCaptureTasks';
 
 const log = createLogger('LlmDump');
@@ -156,6 +155,7 @@ export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
 
 export function finishLlmCapture(capture: LlmCapture, patch: Record<string, unknown>): void {
   updateLlmDump(capture.localPath, patch);
+  if (!capture.value.root_agent_id) return;
   const task = persistLlmCapture(capture, patch).catch((error: unknown) => {
     log.warn('llm.context.archive_failed', {
       agent_id: capture.agentId,
@@ -172,15 +172,8 @@ async function persistLlmCapture(
   patch: Record<string, unknown>
 ): Promise<void> {
   if (!archiveEnabled()) return;
-  let rootAgentId = capture.value.root_agent_id;
-  if (!rootAgentId) {
-    const agent = await prisma.agent.findUnique({
-      where: { id: capture.agentId },
-      select: { busId: true },
-    });
-    if (!agent) return;
-    rootAgentId = agent.busId || capture.agentId;
-  }
+  const rootAgentId = capture.value.root_agent_id;
+  if (!rootAgentId) return;
   const value = {
     ...capture.value,
     ...patch,
@@ -190,7 +183,6 @@ async function persistLlmCapture(
     config: { ...capture.value.config, ...(patch.config as Record<string, unknown> | undefined) },
     extra: { ...capture.value.extra, ...(patch.extra as Record<string, unknown> | undefined) },
   };
-  updateLlmDump(capture.localPath, { root_agent_id: rootAgentId });
   const objectPath = `llm/${capture.value.dump_id}.json.gz.enc`;
   const encrypted = encryptArtifact(
     objectPath,

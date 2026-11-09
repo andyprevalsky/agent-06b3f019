@@ -79,9 +79,12 @@ Keep all plaintext APIs and production guards intact. Model streaming does not
 await network archival: a leaf registry tracks exact-agent pending promises;
 terminal lifecycle drains the end fixture's exact agent IDs before its fence and
 manifest. Failed enabled writes retain a failure that blocks the terminal drain.
-Reuse encrypted worker storage and late manifest reconciliation. Resolve stored
-Agent.busId with one indexed read, or honor explicit root binding; correct local
-root metadata through the existing guarded local updater. Preserve the real
+Reuse encrypted worker storage and late manifest reconciliation. Bind root identity explicitly in completion options from the already-loaded
+Agent.busId or the freshly created chat root. Capture never queries the database
+and only explicitly root-bound calls opt into encrypted archival. This avoids
+opening database pools in previously offline completion clients and avoids
+expanding archival to unrelated credential/SMS call sites. Local dumps receive
+correct root metadata at entry, without a later lookup or rewrite. Preserve the real
 recorded call-start clock in archive metadata so concurrent finish order cannot
 change latest-call selection. No model, prompt, task, deadline, concurrency or
 provider routing changes. Process-crash durability and arbitrary process-shutdown
@@ -89,23 +92,23 @@ joining are not claimed; terminal publication is the tested ownership boundary.
 
 The owning stream-contract suite uses real encrypted local storage and strict
 materialization with full messages, schema, config, actual model and output.
-It covers all three original call sites, root/child identity, delayed identity
-resolution, completed and consumer-closed streams under empty Fly, named Fly and
+It covers all three original call sites, explicit root/child identity, no implicit
+database access, completed and consumer-closed streams under empty Fly, named Fly and
 Render guards. It retains all original local capture assertions. The exact latest
 suite fails on the original producer with No archived LLM base calls and passes
 on the repaired producer. Native unchanged chat-mode and the normal archive-backed
 publisher now pass on repaired source; full deployment remains pending. Proxy
 fail/pass alone is not completion.
 
-At 10k agents each write is isolated by root and unique dump identity, with one
-indexed identity read and one encrypted submission per call; there is no serial
+At 10k agents each write is isolated by root and unique dump identity, with zero
+database identity reads and one encrypted submission per bound call; there is no serial
 global uploader, full scan or cross-root fan-in. Pending state scales with actual
 in-flight captures, settled tasks are removed, and failures retain one error per
 agent until their owning terminal publication can report them. Existing archive
 I/O bounds/retries remain unchanged. Golden reference: not applicable (no
 approval-gated hunk).
 
-Native outcome proof: unchanged chat-mode passed on f52e5708c8ec8c840176cfec9b1a554ea8f34f55,
+Historical candidate outcome proof: unchanged chat-mode passed on f52e5708c8ec8c840176cfec9b1a554ea8f34f55,
 then passed again on combined stabilization source fc731e92a72139e4d321784b02d6beebe855cd85.
 The second run recorded defined-empty Fly identity in the actual backend process,
 wrote no local plaintext root dump, and passed the normal full publisher through
@@ -119,7 +122,10 @@ command passed on terminal artifacts. No skip flags or synthetic histories.
 The existing archive suite also fails with terminal drain removed and passes
 unchanged after restoration; delayed child registration and failed-writer outcome
 are checked through actual direct finalization, in addition to stream coverage.
-Full deployment and independent additional-gate attribution remain in progress.
+The explicit-root simplification changes runtime source again, so those native
+roots are historical candidate evidence. Fresh native acceptance on the final
+combined source is mandatory and pending. Full deployment and independent
+additional-gate attribution remain in progress.
 
 ## Human feedback
 
@@ -131,3 +137,13 @@ Finish normal deploy through reviewed records closeout and deletion readiness.
 ## Reusable lesson
 
 Archive model evidence at its owning completion boundary independently of plaintext logging policy.
+
+The first deploy sweep retained an additional auth-options database-admission
+failure (17 passed, one failed) and later refused smoke because the coordinator
+source had advanced beyond that frozen snapshot; no smoke task executed in that
+refusal. Neither result is a PASS. A matched original-main coverage experiment
+is collecting server capacity/ownership evidence; a baseline auth-options PASS
+alone does not establish introduced causation. Separately, the owning stream
+suite reproduced the candidate's unwanted implicit Prisma access and passed
+unchanged after root identity moved to existing caller data. No server cap,
+pool limit, test concurrency, task or timeout was changed to hide pressure.

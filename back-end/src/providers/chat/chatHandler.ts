@@ -81,6 +81,7 @@ export interface ChatResult {
 // ============================================
 export async function handleChatMessage(config: {
   agentId: string;
+  rootAgentId?: string;
   userId: string;
   model: string;
 }): Promise<ChatResult> {
@@ -107,6 +108,7 @@ export async function handleChatMessage(config: {
   ) => {
     return callGeneratorLlm({
       agentId: config.agentId,
+      rootAgentId: config.rootAgentId,
       messages: generatorMessages,
       model: phaseModels.generator,
       providerRoute: phaseModels.generatorProviderRoute,
@@ -129,6 +131,7 @@ export async function handleChatMessage(config: {
   try {
     routerResponse = await callRouterLlm({
       agentId: config.agentId,
+      rootAgentId: config.rootAgentId,
       messages,
       model: phaseModels.router,
       providerRoute: phaseModels.routerProviderRoute,
@@ -304,6 +307,7 @@ export async function handleChatMessage(config: {
       generatorMessages = await loadChatModelMessages(chatContextConfig);
       const next = await routeAfterSearch({
         agentId: config.agentId,
+        rootAgentId: config.rootAgentId,
         userId: config.userId,
         messages: generatorMessages,
         phaseModels,
@@ -393,6 +397,7 @@ export async function handleChatMessage(config: {
  */
 async function routeAfterSearch(params: {
   agentId: string;
+  rootAgentId?: string;
   userId: string;
   messages: ChatMessage[];
   phaseModels: ChatPhaseModels;
@@ -415,6 +420,7 @@ async function routeAfterSearch(params: {
   try {
     routerResponse = await callRouterLlm({
       agentId: params.agentId,
+      rootAgentId: params.rootAgentId,
       messages: params.messages,
       model: params.phaseModels.router,
       providerRoute: params.phaseModels.routerProviderRoute,

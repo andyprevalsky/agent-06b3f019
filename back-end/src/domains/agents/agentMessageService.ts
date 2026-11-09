@@ -112,6 +112,8 @@ async function routeUserMessage(
   } else if (agentForChat !== null && agentForChat !== undefined) {
     handleChatMessage({
       agentId,
+      rootAgentId:
+        agentForChat.busId !== null && agentForChat.busId !== '' ? agentForChat.busId : agentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
     }).catch((err: unknown) => {

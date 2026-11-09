@@ -31,15 +31,10 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
   const originalFetch = global.fetch;
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-archive-contract-'));
   const originalFindAgent = prisma.agent.findUnique;
-  const roots = new Map<string, string>();
-  let waitForRoot: Promise<void> = Promise.resolve();
-  prisma.agent.findUnique = async (args) => {
-    const root = args.where.id && roots.get(args.where.id);
-    if (root) {
-      await waitForRoot;
-      return { busId: root } as Awaited<ReturnType<typeof originalFindAgent>>;
-    }
-    return originalFindAgent.call(prisma.agent, args);
+  let implicitLookups = 0;
+  prisma.agent.findUnique = async () => {
+    implicitLookups += 1;
+    throw new Error('Completion capture must use its caller-bound root identity');
   };
   let providerCalls = 0;
   try {
@@ -67,13 +62,9 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
       ] as const) {
         const agentId = randomUUID();
         const rootId = stage === 'after_search' ? randomUUID() : agentId;
-        roots.set(agentId, rootId);
-        let releaseRoot = () => {};
-        waitForRoot = new Promise<void>((resolve) => {
-          releaseRoot = resolve;
-        });
         const options = buildOptions({
           agentId,
+          rootAgentId: rootId,
           stage,
           model: 'rose-labs/rose-1-lite',
           messages: [{ role: 'user', content: 'Return the contract fixture' }],
@@ -81,7 +72,7 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
           providerFastMode: false,
         });
         assert(options.dump_context);
-        if (stage === undefined) options.dump_context.root_agent_id = rootId;
+
         let expectedOutput = fixture.expected_structured_content;
         const stream = await createStreamingCompletion(options);
         const accumulator = new StructuredOutputAccumulator();
@@ -100,20 +91,7 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
           false,
           `${mode} must never write plaintext dumps`
         );
-        let drained = false;
-        const drain = drainLlmCaptures([agentId]).then(() => {
-          drained = true;
-        });
-        await Promise.resolve();
-        const drainedBeforeRelease = drained;
-        const callsBeforeDrain = providerCalls;
-        releaseRoot();
-        await drain;
-        assert.equal(
-          providerCalls,
-          callsBeforeDrain,
-          'archive drain never starts a late provider call'
-        );
+        await drainLlmCaptures([agentId]);
         const recovered = await materializeArchiveLlmDumps(rootId, path.join(directory, agentId), {
           list: (root) => listArchivedObjects(root, { throwOnError: true }),
           read: (rootAgentId, objectPath) =>
@@ -121,8 +99,6 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
         });
         const dump = JSON.parse(fs.readFileSync(recovered.latest.path, 'utf8'));
         assert.equal(dump.root_agent_id, rootId);
-        if (stage !== undefined)
-          assert.equal(drainedBeforeRelease, false, 'terminal owner waits for pending archive');
         assert.equal(recovered.baseCallCount, 1);
         assert.equal(recovered.updateCount, 0);
         assert.equal(dump.agent_id, agentId);
@@ -139,6 +115,7 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
     const open = async (content: string) => {
       const options = buildGeneratorCompletionOptions({
         agentId: chronologyRoot,
+        rootAgentId: chronologyRoot,
         model: 'rose-labs/rose-1-lite',
         messages: [{ role: 'user', content }],
         providerRoute: 'direct-cerebras',
@@ -174,6 +151,7 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
       'latest call follows recorded start clock despite reverse completion order'
     );
     assert.equal(providerCalls, 11, 'archival never adds provider calls');
+    assert.equal(implicitLookups, 0, 'capture must not open database pools in completion clients');
   } finally {
     global.fetch = originalFetch;
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
