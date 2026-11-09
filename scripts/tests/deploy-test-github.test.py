@@ -1195,10 +1195,54 @@ class GitHubTerminalCleanup(unittest.TestCase):
         (self.folder/'result.json').write_bytes(self.original['result.json'])
         newer=copy.deepcopy(self.receipt);newer['token']='new-owner';self.state['attempts'].append({'results':[newer]})
         with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+    def test_stale_certificate_keeps_gate_owned_and_execution_fenced(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,None))
+        for key, value in [('credit_granted',True),('token','wrong'),('owner',{})]:
+            with self.subTest(key=key):
+                original=entry[key];entry[key]=value
+                self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,entry))
+                self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+                with self.assertRaisesRegex(ValueError,'cleanup owner'):self.c.reexecute(self.state,'failure')
+                entry[key]=original
+        self.assertEqual({p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()},self.original)
+
+    def test_missing_malformed_and_changed_native_evidence_keeps_gate_owned(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        artifact=self.artifact.read_bytes()
+        self.artifact.unlink()
+        self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,entry))
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+        self.artifact.write_bytes(artifact)
+        # Authenticate malformed retained process bytes to exercise bounded JSON rejection,
+        # rather than merely the earlier changed-file hash guard.
+        path=self.folder/'output.log.process.json';path.write_text('{malformed')
+        self.proof['original_files']['output.log.process.json']=self.c.sha_file(path)
+        self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,entry))
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+
+    def test_unrelated_programming_errors_propagate(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        for error in (RuntimeError('unexpected bug'),AssertionError('invariant bug'),ValueError('unrelated value bug')):
+            with self.subTest(error=type(error).__name__),patch.object(self.m,'validate',side_effect=error):
+                with self.assertRaises(type(error)):self.c.retained_owners(self.state,['semantic-stack'])
+
+    def test_expected_observation_refusal_keeps_gate_owned(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        try:
+            self.m.need(False,'remote unavailable')
+        except ValueError as error:
+            rejection=error
+        with patch.object(self.m,'observe',side_effect=rejection):
+            self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),[])
+
     def test_revalidation_and_remote_drift_refuse(self):
         self.c.reconcile(self.state,'failure',self.proof)
         self.seen['run']['run_attempt']=2
-        with self.assertRaises(ValueError):self.c.retained_owners(self.state,['semantic-stack'])
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
 
 if __name__ == '__main__':
     unittest.main()

@@ -10,19 +10,38 @@ REPO = 'Rose-Ai-Labs/rose'
 FILES = ('request.json', 'result.json', 'receipt.json', 'output.log.process.json')
 
 
+class EvidenceRejected(ValueError):
+    """An expected certificate, native evidence or remote observation refusal."""
+
+
 def need(ok, message):
+    """Refuse invalid evidence without granting cleanup or execution credit."""
     if not ok:
-        raise ValueError('GitHub cleanup: ' + message)
+        raise EvidenceRejected('GitHub cleanup: ' + message)
 
 
 def observe(run_id):
+    """Read the exact run's terminal evidence; transport failure leaves its owner held."""
     from deploy_test_github import GitHub, ROOT, load_token
-    gh = GitHub(load_token(ROOT), REPO, deadline=time.time())
-    return {name: gh.json(f'/actions/runs/{run_id}' + suffix)
-            for name, suffix in (('run', ''), ('jobs', '/jobs?per_page=100'), ('artifacts', '/artifacts?per_page=100'))}
+    try:
+        gh = GitHub(load_token(ROOT), REPO, deadline=time.time())
+        return {name: gh.json(f'/actions/runs/{run_id}' + suffix)
+                for name, suffix in (('run', ''), ('jobs', '/jobs?per_page=100'), ('artifacts', '/artifacts?per_page=100'))}
+    except (OSError, ValueError, RuntimeError) as error:
+        raise EvidenceRejected('GitHub cleanup: remote observation unavailable') from error
+
+
+def read_evidence(path, label):
+    """Convert the bounded native-file reader's expected refusal to evidence rejection."""
+    import deploy_test_cycle as c
+    try:
+        return c.bounded_read(path, label)
+    except ValueError as error:
+        raise EvidenceRejected('GitHub cleanup: invalid ' + label) from error
 
 
 def validate(state, receipt, owner, proof):
+    """Authenticate original custody and fresh remote terminal proof, with no PASS adoption."""
     import deploy_test_cycle as c
     from deploy_test_github import ARTIFACT, REMOTE_ROOT, tag_name
     need(set(proof) == {'kind', 'token', 'receipt_sha256', 'original_files', 'artifact', 'remote'}, 'proof fields')
@@ -37,11 +56,11 @@ def validate(state, receipt, owner, proof):
     for name in FILES:
         need(c.sha_file(folder / name) == proof['original_files'][name], 'original bytes changed: ' + name)
     need(proof['receipt_sha256'] == proof['original_files']['receipt.json']
-         and c.bounded_read(folder / 'receipt.json', 'original receipt') == receipt
+         and read_evidence(folder / 'receipt.json', 'original receipt') == receipt
          and receipt.get('worker_result') == str(folder / 'result.json'), 'receipt binding')
-    request = c.bounded_read(folder / 'request.json', 'original request')
-    adapter = c.bounded_read(folder / 'result.json', 'original adapter')
-    process = c.bounded_read(folder / 'output.log.process.json', 'local process')
+    request = read_evidence(folder / 'request.json', 'original request')
+    adapter = read_evidence(folder / 'result.json', 'original adapter')
+    process = read_evidence(folder / 'output.log.process.json', 'local process')
     need(all(doc.get(k) == receipt.get(k) for doc in (request, adapter) for k in ('token', 'source', 'gate'))
          and adapter.get('cleanup_owner') == owner and adapter.get('cleanup_complete') is False, 'adapter identity')
     need(process.get('quiescent') is True and process.get('orphaned_children') is False
@@ -109,6 +128,7 @@ def validate(state, receipt, owner, proof):
 
 
 def reconcile(state, occurrence, proof):
+    """Record cleanup-only eligibility for the latest incomplete UNVERIFIED owner."""
     import deploy_test_cycle as c
     failure = next((f for f in state['failures'] if f['id'] == occurrence), None)
     need(failure is not None and failure.get('native_result') == 'UNVERIFIED' and failure.get('complete') is False, 'occurrence')
@@ -124,7 +144,13 @@ def reconcile(state, occurrence, proof):
 
 
 def still_bound(state, receipt, owner, entry):
-    need(entry.get('credit_granted') is False and entry.get('token') == receipt.get('token')
-         and entry.get('owner') == owner, 'certificate identity')
-    validate(state, receipt, owner, entry['proof'])
-    return True
+    """Return false for stale evidence so the caller retains and names the owned gate."""
+    try:
+        need(isinstance(entry, dict), 'certificate shape')
+        need(entry.get('credit_granted') is False and entry.get('token') == receipt.get('token')
+             and entry.get('owner') == owner, 'certificate identity')
+        validate(state, receipt, owner, entry['proof'])
+        return True
+    except (EvidenceRejected, OSError, KeyError, TypeError, IndexError,
+            json.JSONDecodeError, zipfile.BadZipFile):
+        return False

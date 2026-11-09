@@ -5655,6 +5655,79 @@ class Cycle(unittest.TestCase):
         ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
         with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
 
+    def normal_failed_canary_state(self, zero=False):
+        import hashlib, shutil
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        old = parents[0].parent / 'canary'
+        fleet = old.with_name('20261103-080441-2147483001')
+        old.rename(fleet)
+        life_path = fleet / '_batch/lifecycle.json'
+        life = c.read(life_path); owner = life['fleet_owner_token']
+        audit = fleet / 'teardown-ownership'
+        canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+        for tree in (audit, canonical):
+            for p in tree.rglob('*'):
+                if p.is_file(): p.write_bytes(p.read_bytes().replace(b'run_id=canary', ('run_id='+fleet.name).encode()))
+        if zero:
+            for tree in (audit, canonical):
+                shutil.rmtree(tree / 'fresh')
+                (tree / 'owned-clones.ids').write_text('')
+                (tree / 'owned-clones.names').write_text('')
+            for n in ('execution-provenance.json','execution-task-matrix.json'): (fleet / n).unlink()
+        h=hashlib.sha256()
+        for p in sorted(audit.rglob('*'),key=lambda p:str(p.relative_to(audit))):
+            if p.is_file() and p.name!='source-audit':
+                for raw in (str(p.relative_to(audit)).encode(),p.read_bytes()): h.update(len(raw).to_bytes(8,'big')); h.update(raw)
+        life.update(run_id=fleet.name,status='failed',controller_exit_code=143 if zero else 1,audit_sha256=h.hexdigest());c.write(life_path,life)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+        names=[v['name'] for v in json.loads((fleet/'_batch/benches.json').read_text())]
+        c.write(fleet/'_batch/run.json',dict(run_id=fleet.name,status='failed',controller_exit_code=life['controller_exit_code'],tasks=[dict(name=n,status='INFRA_ERROR',passed=False,lifecycle_stage='released',failure_reason='no current run artifact produced') for n in names]))
+        log=Path(proof['campaign'])/'r001-j0003.log';log.write_text(log.read_text().replace(f'{self.root}/scripts/run-bench monitor {old}',f"ref : {state['source']['head']}\nmode: --infra-probe (strict barrier, no LLM / run_benchmark)\n{self.root}/scripts/run-bench monitor {fleet}\nowner: {owner}; private controller diagnostics stay in this run directory."))
+        proof['files']={str(p).replace(str(old),str(fleet)):v for p,v in proof['files'].items()}
+        proof['files']={p:c.sha_file(p) for p in proof['files'] if Path(p).is_file()}
+        return state,occurrence,paths,proof,fleet
+
+    def test_normal_failed_canary_preserves_no_credit(self):
+        state,occurrence,paths,proof,fleet=self.normal_failed_canary_state()
+        before=copy.deepcopy(state['attempts'])
+        c.reconcile(state,occurrence['id'],proof)
+        entry=state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(15,len(entry['participants']));self.assertFalse(entry['credit_granted'])
+        self.assertNotIn('purpose',entry);self.assertEqual(before,state['attempts'])
+        self.assertTrue(c._reconciled(state,state['attempts'][-1]['results'][0],proof['owner']))
+
+    def test_normal_zero_failed_canary_requires_absence(self):
+        state,occurrence,paths,proof,fleet=self.normal_failed_canary_state(zero=True)
+        before=copy.deepcopy(state)
+        path=fleet/'infra-probe/.cid';path.parent.mkdir(exist_ok=True);path.write_text('foreign')
+        with self.assertRaisesRegex(ValueError,'zero-allocation artifact'):c.reconcile(state,occurrence['id'],proof)
+        self.assertEqual(before,state);path.unlink()
+        c.reconcile(state,occurrence['id'],proof);self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+
+    def test_normal_failed_canary_rejects_missing_guards(self):
+        import deploy_test_native_cleanup as native
+        state,occurrence,paths,proof,fleet=self.normal_failed_canary_state()
+        before=copy.deepcopy(state); original={p:Path(p).read_bytes() for p in proof['files']}
+        for mutation in ('mode','source','guest','runtime','agent','status','live'):
+            with self.subTest(mutation=mutation):
+                candidate=copy.deepcopy(proof)
+                for p,raw in original.items():Path(p).write_bytes(raw)
+                if mutation in ('mode','source'):
+                    p=Path(proof['campaign'])/'r001-j0003.log';p.write_text(p.read_text().replace('mode: --infra-probe','mode: task') if mutation=='mode' else p.read_text().replace(state['source']['head'],'e'*40))
+                elif mutation in ('guest','runtime'):
+                    p=fleet/'_batch/disposable-cleanup.json';v=c.read(p);v['guest_cleanup_missing' if mutation=='guest' else 'runtime_evidence_missing']=True;c.write(p,v)
+                elif mutation in ('agent','status'):
+                    p=fleet/'_batch/run.json';v=c.read(p);v['tasks'][0]['agent_id' if mutation=='agent' else 'status']='unexpected';c.write(p,v)
+                candidate['files']={p:c.sha_file(p) for p in candidate['files']}
+                if mutation=='live':
+                    actual=native.subprocess.check_output
+                    def live(args,**kw):return '2147483001 2147483001 S\n' if args[:2]==['ps','-ax'] else actual(args,**kw)
+                    with patch.object(native.subprocess,'check_output',side_effect=live),self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],candidate)
+                else:
+                    with self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],candidate)
+                self.assertEqual(before,state)
+        for p,raw in original.items():Path(p).write_bytes(raw)
+
     def test_isolated_next_inventory_may_add_cases_without_releasing_original_debt(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         c.reconcile(state, failure['id'], proof)

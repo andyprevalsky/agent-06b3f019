@@ -1266,8 +1266,10 @@ def validate(receipt, owner, proof):
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
+        life = document(fleet / '_batch/lifecycle.json')
+        failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
         run_path = fleet / '_batch/run.json'
-        if isolated or preallocation or mixed or fleet in admission_parents:
+        if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
@@ -1289,10 +1291,8 @@ def validate(receipt, owner, proof):
             raw_remaining[0] -= verified_size
             used.add(str(run_path))
             run = None
-        life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
-        failed_canary = isolated and fleet not in parents and life.get('status') == 'failed'
         need(type(life.get('version')) is int and life['version'] == 1 and life['run_id'] == fleet.name
              and life['workspace_root'] == str(root) and life['hub_publication_failed'] is False
              and type(life['controller_exit_code']) is int
@@ -1331,6 +1331,20 @@ def validate(receipt, owner, proof):
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+            if not isolated:
+                # Normal release of a failed probe still requires exact execution retirement.
+                processes = subprocess.check_output(['ps', '-ax', '-o', 'pid=,pgid=,stat='], text=True)
+                pid = int(fleet.name.rsplit('-', 1)[-1])
+                need(pid > 1 and not any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
+                    for r in processes.splitlines() if not r.split()[2].startswith('Z')),
+                    'failed canary controller still active')
+                need(document(fleet / '_batch/disposable-cleanup.json').get('successful_runtime_inferred') is False,
+                     'failed canary runtime inference is not evidence')
+                if zero_allocation:
+                    for bench in benches:
+                        for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'):
+                            artifact = fleet / bench['name'] / name
+                            need(not artifact.exists() and not artifact.is_symlink(), 'failed canary zero-allocation artifact present')
         admission_parent = fleet in admission_parents
         if admission_parent:
             from deploy_test_native_admission import validate_parent
