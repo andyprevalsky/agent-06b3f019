@@ -3,6 +3,7 @@ import {
   AUTH_REJECTED_RESPONSE,
   LEASE_TIMEOUT_MS,
   TERMINAL_AGENT_STATUSES,
+  USER_CONTROL_TIMEOUT_MS,
   deadlineElapsed,
 } from './config';
 import type { Transaction, IPhoneLease, IPhoneDevice } from './types';
@@ -51,6 +52,8 @@ async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
     await closeLease(tx, lease.id, 'CANCELLED');
     return;
   }
+  // A paused agent cannot act on the phone; it must not starve the FIFO queue.
+  if (agent.status === 'PAUSED') return closeLease(tx, lease.id, 'RELEASED');
   if (lease.browserTaskId !== null) {
     const task = await tx.browserSession.findFirst({
       where: { id: lease.browserTaskId, agentId: lease.agentId, context: { userId: lease.userId } },
@@ -86,7 +89,8 @@ async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
     WHERE id = ${lease.attentionRequestId} AND "userId" = ${lease.userId}
       AND "agentId" = ${lease.agentId} FOR SHARE`;
   const now = await databaseNow(tx);
-  if (auth[0]?.userResponse === null) return;
+  // Pending auth outlives agent heartbeats only for the bounded user grace.
+  if (auth[0]?.userResponse === null) return expireHold(tx, lease, now, true);
   if (auth[0]?.userResponse === AUTH_REJECTED_RESPONSE) {
     await closeLease(tx, lease.id, 'RELEASED');
     return;
@@ -109,8 +113,15 @@ async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
       where: { id: lease.id },
       data: { attentionRequestId: null, revision: { increment: 1 } },
     });
-  if (lease.controlOwner !== 'user' && deadlineElapsed(lease.leaseExpiresAt, now))
-    await closeLease(tx, lease.id, 'EXPIRED');
+  await expireHold(tx, lease, now, lease.controlOwner === 'user');
+}
+/** Agent holds expire with heartbeats. User control and pending auth get a bounded grace past
+ * leaseExpiresAt, which only activity (commands, lease frames, heartbeats) renews. */
+async function expireHold(tx: Transaction, lease: IPhoneLease, now: Date, userHeld: boolean) {
+  const grace = userHeld ? USER_CONTROL_TIMEOUT_MS : 0;
+  const deadline =
+    lease.leaseExpiresAt === null ? null : new Date(lease.leaseExpiresAt.getTime() + grace);
+  if (deadlineElapsed(deadline, now)) await closeLease(tx, lease.id, 'EXPIRED');
 }
 export async function reconcile(tx: Transaction, device: IPhoneDevice, enabled: boolean) {
   if (!enabled) {

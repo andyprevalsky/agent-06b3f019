@@ -5,9 +5,12 @@
  *   openApp === 'phone' --> [SHOWN] just the iPhone, floating 24px from the
  *                           window's right edge, vertically centered; no
  *                           surrounding header, background or card
- *   [SHOWN] no owned phone interaction -> explicit empty state, no requests.
- *   [OWNED TASK] authenticated broker read -> private frame/control; API absence
- *           remains unavailable. Closing unmounts the reader and revokes frames.
+ *   [SHOWN] device view (iPhone row Connect/View, no agent, or no owned phone
+ *           task) -> read-only live screen via /iphone/device(+/frame) + holder;
+ *           never a lease or queue request (PhoneAppScreen / PhoneDeviceView).
+ *   [OWNED TASK] authenticated broker read -> private frame/control; a WAITING
+ *           lease shows the device's live screen + "Queued behind agent <id>".
+ *           Closing unmounts every reader and revokes frames.
  *   [SHOWN] --its icon again | Escape--> not rendered
  */
 

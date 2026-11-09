@@ -410,15 +410,27 @@ export function migrationObjectsFromSql(
 /** back-end/prisma/migrations from src/providers/schemaDrift (tsx) or dist/providers/schemaDrift. */
 export const DEFAULT_MIGRATIONS_DIR = path.resolve(__dirname, '../../../prisma/migrations');
 
+/**
+ * The squashed baseline (2026-07-06 pg_dump of prod). It subsumes every
+ * migration a database recorded before it, so those pre-squash names have no
+ * directory here by design.
+ */
+export const BASELINE_MIGRATION = '00000000000000_init';
+
+/** Migration directory names in replay order. */
+export function listMigrations(migrationsDir = DEFAULT_MIGRATIONS_DIR): string[] {
+  return fs
+    .readdirSync(migrationsDir)
+    .sort()
+    .filter((entry) => fs.existsSync(path.join(migrationsDir, entry, 'migration.sql')));
+}
+
 /** Replays every migration, or only those a target database recorded as applied. */
 export function loadMigrationObjects(
   migrationsDir = DEFAULT_MIGRATIONS_DIR,
   applied?: Set<string>
 ): MigrationObjects {
-  const migrations = fs
-    .readdirSync(migrationsDir)
-    .sort()
-    .filter((entry) => fs.existsSync(path.join(migrationsDir, entry, 'migration.sql')))
+  const migrations = listMigrations(migrationsDir)
     .filter((entry) => !applied || applied.has(entry))
     .map((entry) => ({
       name: entry,

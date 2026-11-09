@@ -133,6 +133,24 @@ the identity invariant, not a claim those projects implement Temporal handoff.
 The fresh snapshot-scoped golden review is retained with the deploy approval
 receipt; no prompt or schema text is changed.
 
+## November 9 live rollout confirmation
+
+A second report for agent `bc2c497f-0820-44c7-b0ce-cf006737ac4d` matched
+this exact repair. Retained worker logs locate its duplicate at01:12:11 UTC
+on old generation11240de78e7c, before continuation onto fixed generation
+72a8080f6bdc. This was an old-handler event during rollout, not evidence that
+the merged source was already handling that call.
+
+The second question call `48da192b-2784-4608-8a23-43faa400bd5e` subsequently
+parked and resumed unchanged across observed cutovers at03:02,06:41 and08:08
+UTC, with no third question reported by the independent API capture. The
+independent owning regression also failed on26f10d9a46 and passed unchanged
+on41e691341; the full owning suite passed28 checks. An initial missing-field
+fixture error was discarded as invalid evidence. Private timestamped logs and
+source-bound commands are retained in the closeout archive. This proves the
+observed pending-call continuity, not that a user answer was received. No
+second runtime fix or competing deployment was created.
+
 ## Human feedback
 
 The user required reading other active Bugs and Bug Report work before editing,

@@ -5,6 +5,9 @@
  *   [CLOSED] --click Browser icon | openAgentBrowser(agent, task)--> [BROWSER]
  *   Agent displays are not an app: they render inline in the chat (expandable).
  *   [CLOSED] --Phone icon--> [PHONE]   --Integrations icon--> [INTEGRATIONS]
+ *   [ANY] --openPhoneDevice() (iPhone row Connect/View)--> [PHONE + DEVICE VIEW]
+ *     (the device itself, whoever uses it; cleared by any toggleApp or a new
+ *     selected agent, after which the Phone app shows the selected agent again)
  *   [CLOSED] --left bar Feedback / Benchmarks / account row--> [FEEDBACK|BENCHMARKS|SETTINGS]
  *   [ANY] --click its trigger again | close button | Escape--> [CLOSED]
  *   [ANY] --another trigger--> that app
@@ -60,6 +63,7 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { PhoneLauncherContext, type PhoneLauncher } from '@/hooks/phoneLauncherContext';
 import type { Agent } from '../../hooks';
 import {
   appIconsInset,
@@ -207,6 +211,8 @@ export function RoseAppsProvider({
   const [openApp, setOpenApp] = useState<RoseApp | null>(
     publishLayout && localLink ? 'browser' : null,
   );
+  /** Phone app pinned to the device view (opened from the iPhone integration row). */
+  const [phoneDeviceView, setPhoneDeviceView] = useState(false);
   const [browserSelection, setBrowserSelection] = useState<{
     agentId: string;
     taskId: string;
@@ -287,11 +293,18 @@ export function RoseAppsProvider({
           return tab ? { agentId: tab.agentId, taskId: tab.taskId } : null;
         });
       }
+      setPhoneDeviceView(false);
       setOpenApp((prev) => (prev === app ? null : app));
     },
     [openApp, selectedAgentId],
   );
   const closeApp = useCallback(() => setOpenApp(null), []);
+  const openPhoneDevice = useCallback(() => {
+    setPhoneDeviceView(true);
+    setOpenApp('phone');
+  }, []);
+  useEffect(() => setPhoneDeviceView(false), [selectedAgentId]);
+  const phoneLauncher = useMemo<PhoneLauncher>(() => ({ openPhoneDevice }), [openPhoneDevice]);
 
   const openAgentBrowser = useCallback(
     (agentId: string, taskId: string) => {
@@ -373,6 +386,8 @@ export function RoseAppsProvider({
       reloadBrowser,
       toggleApp,
       closeApp,
+      phoneDeviceView,
+      openPhoneDevice,
       openAgentBrowser,
       openAgentBrowserTab,
       selectBrowserTab,
@@ -405,6 +420,8 @@ export function RoseAppsProvider({
       reloadBrowser,
       toggleApp,
       closeApp,
+      phoneDeviceView,
+      openPhoneDevice,
       openAgentBrowser,
       openAgentBrowserTab,
       selectBrowserTab,
@@ -423,8 +440,10 @@ export function RoseAppsProvider({
 
   return (
     <RoseAppsContext.Provider value={value}>
-      {children}
-      {typeof document !== 'undefined' && createPortal(<RoseAppDrawers />, document.body)}
+      <PhoneLauncherContext.Provider value={phoneLauncher}>
+        {children}
+        {typeof document !== 'undefined' && createPortal(<RoseAppDrawers />, document.body)}
+      </PhoneLauncherContext.Provider>
     </RoseAppsContext.Provider>
   );
 }

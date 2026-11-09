@@ -184,9 +184,10 @@ export const viewCases: Case[] = [
         ).status,
         200
       );
+      // Expired agent heartbeat, still inside the bounded user-control grace.
       await prisma.iPhoneLease.update({
         where: { id: f.leaseId },
-        data: { leaseExpiresAt: new Date(0) },
+        data: { leaseExpiresAt: new Date(Date.now() - 60_000) },
       });
       const heartbeat = await h.request(f.userId, `/leases/${f.leaseId}/heartbeat`, {
         method: 'POST',
