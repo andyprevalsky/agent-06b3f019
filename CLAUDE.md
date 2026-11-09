@@ -44,6 +44,8 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Never delete lockfiles or change dependency ranges to make an install work, and never reinstall dependencies into a `node_modules` or venv linked from another checkout.
 - Never give a foreground Bash command a timeout above 5 minutes; run anything longer in the background and watch it (rule 12).
 - Never treat a user pause as a bug's cause; users pause after noticing a problem (rule 11).
+- Never `git stash`: the stash ref is shared across all worktrees, so popping can pull another workspace's in-flight work; use `git diff HEAD > .git-wip.patch && git checkout -- .`, then `git apply .git-wip.patch && rm .git-wip.patch` (rule 21).
+- Never `pkill` by a pattern that could match a process you did not launch in this session (benchmark controllers and test runners may belong to other workspaces); to stop your own run, TERM exactly its controller PID and let its cleanup run, and surface a stuck run you don't own to the user (rule 27).
 
 ## Delegation and waiting
 
