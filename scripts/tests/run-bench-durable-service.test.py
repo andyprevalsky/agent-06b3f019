@@ -247,7 +247,7 @@ class DurableLaunchContract(DurableLaunchBase):
 
 def live_systemd_available() -> bool:
     return (os.getuid() != 0 and Path("/run/systemd/system").is_dir() and shutil.which("systemd-run")
-            and shutil.which("sudo")
+            and shutil.which("sudo") and shutil.which("setpriv")
             and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0)
 
 
@@ -271,8 +271,13 @@ class DurableLaunchSurvivesSessionScopeKill(DurableLaunchBase):
             # The session's own process (the agent CLI) keeps the scope alive.
             + f"setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > {json.dumps(str(self.state / 'anchor.pid'))}\n"
             + script)
-        self.root("systemd-run", "--scope", "--quiet", f"--unit={scope}", f"--uid={os.getuid()}",
-                  f"--gid={os.getgid()}", "--", "/bin/bash", str(wrapper))
+        # A login session carries the user's supplementary groups. `systemd-run --uid/--gid` does not
+        # initialize them (the scope kept root's group 0 and lost the user's own), so a sudoers grant
+        # by group (the Blacksmith runner image) refused the launcher's `sudo -n true` inside the
+        # scope. Drop to the user with initgroups(3) inside the scope instead.
+        self.root("systemd-run", "--scope", "--quiet", f"--unit={scope}", "--",
+                  "setpriv", f"--reuid={os.getuid()}", f"--regid={os.getgid()}", "--init-groups",
+                  "/bin/bash", str(wrapper))
         return scope
 
     def hard_dispose(self, scope: str):
