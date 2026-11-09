@@ -1,24 +1,31 @@
-/** Pending capture is owned by its agent; terminal archive publication joins it. */
+/** Pending capture is owned by its agent and archive root; publication joins it. */
 const pending = new Map<string, Set<Promise<void>>>();
 const failures = new Map<string, unknown>();
 
-export function ownLlmCapture(agentId: string, task: Promise<void>): void {
-  let tasks = pending.get(agentId);
-  if (!tasks) {
-    tasks = new Set();
-    pending.set(agentId, tasks);
-  }
+/** Register both identities synchronously, before the stream finalizer returns. */
+export function ownLlmCapture(agentId: string, task: Promise<void>, rootAgentId = agentId): void {
+  const owners = [...new Set([agentId, rootAgentId])].map((id) => {
+    let tasks = pending.get(id);
+    if (!tasks) {
+      tasks = new Set();
+      pending.set(id, tasks);
+    }
+    return { id, tasks };
+  });
   const owned = task
     .catch((error: unknown) => {
-      if (!failures.has(agentId)) failures.set(agentId, error);
+      for (const { id } of owners) if (!failures.has(id)) failures.set(id, error);
     })
     .finally(() => {
-      tasks.delete(owned);
-      if (tasks.size === 0) pending.delete(agentId);
+      for (const { id, tasks } of owners) {
+        tasks.delete(owned);
+        if (tasks.size === 0) pending.delete(id);
+      }
     });
-  tasks.add(owned);
+  for (const { tasks } of owners) tasks.add(owned);
 }
 
+/** Join writers, retaining lost-call failures so a later retry cannot certify completeness. */
 export async function drainLlmCaptures(agentIds: readonly string[]): Promise<void> {
   for (;;) {
     const tasks = agentIds.flatMap((id) => [...(pending.get(id) ?? [])]);

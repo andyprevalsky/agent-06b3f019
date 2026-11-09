@@ -1,5 +1,8 @@
 #!/usr/bin/env tsx
-import { testChatArchivedCompletionEvidence } from './llm-stream-archive.cases';
+import {
+  testChatArchivedCompletionEvidence,
+  testCaptureRootFailureOwnership,
+} from './llm-stream-archive.cases';
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -283,6 +286,7 @@ async function main(): Promise<void> {
     process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDirectory;
     await withIsolatedFundedKeyCooldowns(() => testChatArchivedCompletionEvidence());
     await withIsolatedFundedKeyCooldowns(() => testChatArchivedCompletionEvidence(true));
+    await testCaptureRootFailureOwnership();
     await testSharedFixtures();
     testAmbiguousFinalItemsFailTyped();
     await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);

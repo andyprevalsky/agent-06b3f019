@@ -524,7 +524,7 @@ export async function finalizeAgent(input: AgentFinalizeRequest): Promise<Finali
 async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeAgentResult> {
   const endFixture = await collectFixture(input.rootAgentId, 'end');
   assertArchiveFinalizable(input, endFixture);
-  await drainLlmCaptures(endFixture.agent_ids);
+  await drainLlmCaptures([input.rootAgentId, ...endFixture.agent_ids]);
   // Publish the durable fence before taking the object snapshot. A worker PUT
   // that finishes before this marker is strongly visible will be included by
   // the following R2 list; one that finishes afterward observes the marker and

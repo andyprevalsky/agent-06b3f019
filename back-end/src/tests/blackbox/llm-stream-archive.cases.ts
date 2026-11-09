@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
-import { drainLlmCaptures } from '../../providers/llmCaptureTasks';
+import { drainLlmCaptures, ownLlmCapture } from '../../providers/llmCaptureTasks';
 import { listArchivedObjects, readArchivedArtifactStrict } from '../../providers/traceArchive';
 import { materializeArchiveLlmDumps } from '../../providers/archiveLlmMaterialization';
 import { StructuredOutputAccumulator } from '../../providers/rose/structuredOutput';
@@ -158,5 +158,20 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
     Object.assign(process.env, originalEnv);
     prisma.agent.findUnique = originalFindAgent;
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A root finalizer must observe capture failure even outside its parent-ID inventory. */
+export async function testCaptureRootFailureOwnership(): Promise<void> {
+  const rootId = randomUUID();
+  const agentId = randomUUID();
+  const failure = new Error('explicit-root failed capture fixture');
+  ownLlmCapture(agentId, Promise.reject(failure), rootId);
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const ids of [[rootId], [rootId], [agentId]]) {
+    await assert.rejects(
+      () => drainLlmCaptures(ids),
+      (error: unknown) => error instanceof Error && error.cause === failure
+    );
   }
 }

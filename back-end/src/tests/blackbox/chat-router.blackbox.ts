@@ -6,6 +6,13 @@
 import 'dotenv/config';
 import './assertLocalDatabase';
 import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { drainLlmCaptures } from '../../providers/llmCaptureTasks';
+import { materializeArchiveLlmDumps } from '../../providers/archiveLlmMaterialization';
+import { listArchivedObjects, readArchivedArtifactStrict } from '../../providers/traceArchive';
 import {
   buildRouterSystemMessage,
   getWebSearchStreamTitleFromPartialRouterJson,
@@ -64,7 +71,10 @@ type ChatSystems = { router: string[]; generator: string[]; projectReads: number
  * only the provider boundary replaced. Returns every Router/Generator system
  * message and how many agent→project reads the turn made.
  */
-async function directAnswerTurn(project: { repoUrl: string | null } | null): Promise<ChatSystems> {
+async function directAnswerTurn(
+  project: { repoUrl: string | null } | null,
+  descendantBus?: 'missing' | 'custom'
+): Promise<ChatSystems> {
   const userId = randomUUID();
   const agentId = randomUUID();
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -74,9 +84,17 @@ async function directAnswerTurn(project: { repoUrl: string | null } | null): Pro
       : await prisma.project.create({
           data: { userId, name: 'Rose', repoUrl: project.repoUrl, syncSalt: randomUUID() },
         });
+  const rootId = descendantBus === undefined ? agentId : randomUUID();
+  if (rootId !== agentId) {
+    await prisma.agent.create({
+      data: { id: rootId, userId, goal: 'Archive tree root', status: 'COMPLETED' },
+    });
+  }
   await prisma.agent.create({
     data: {
       id: agentId,
+      parentAgentId: rootId === agentId ? null : rootId,
+      busId: descendantBus === 'custom' ? randomUUID() : null,
       userId,
       goal: 'Whats our rose repo loooking like?',
       status: 'ACTIVE',
@@ -86,6 +104,14 @@ async function directAnswerTurn(project: { repoUrl: string | null } | null): Pro
       verifier: { create: {} },
     },
   });
+  const originalEnv = { ...process.env };
+  const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-root-contract-'));
+  if (descendantBus !== undefined) {
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDir;
+    process.env.TRACE_ARCHIVE_ENCRYPTION_KEY_B64 = Buffer.alloc(32, 7).toString('base64');
+  }
   const seen: ChatSystems = { router: [], generator: [], projectReads: 0 };
   const originalFetch = globalThis.fetch;
   const originalFindUnique = prisma.agent.findUnique.bind(prisma.agent);
@@ -121,18 +147,49 @@ async function directAnswerTurn(project: { repoUrl: string | null } | null): Pro
       await sleep(25);
     }
     await sleep(100);
+    if (descendantBus !== undefined) {
+      await drainLlmCaptures([rootId, agentId]);
+      const materialized = await materializeArchiveLlmDumps(
+        rootId,
+        path.join(archiveDir, 'recovered'),
+        {
+          list: (root) => listArchivedObjects(root, { throwOnError: true }),
+          read: (rootAgentId, objectPath) =>
+            readArchivedArtifactStrict({ rootAgentId, objectPath }),
+        }
+      );
+      assert(
+        materialized.baseCallCount >= 2,
+        'router and generator are archived beneath the actual tree root'
+      );
+      for (const call of materialized.calls) {
+        const dump = JSON.parse(fs.readFileSync(call.path, 'utf8'));
+        assert.equal(dump.agent_id, agentId);
+        assert.equal(dump.root_agent_id, rootId);
+      }
+    }
     return seen;
   } finally {
     await __flushBroadcastQueueForTests();
     globalThis.fetch = originalFetch;
     prisma.agent.findUnique = originalFindUnique as typeof prisma.agent.findUnique;
     await prisma.toolUsage.deleteMany({ where: { agentId } });
-    await prisma.agent.deleteMany({ where: { id: agentId } });
+    await prisma.agent.deleteMany({ where: { id: { in: [agentId, rootId] } } });
+    for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+    fs.rmSync(archiveDir, { recursive: true, force: true });
     await prisma.user.deleteMany({ where: { userId } }); // cascades to the project
   }
 }
 
 const tests: Array<[string, () => Promise<void> | void]> = [
+  [
+    'Descendant chat archives follow the parent tree despite missing or custom bus IDs',
+    async () => {
+      await directAnswerTurn(null, 'missing');
+      await directAnswerTurn(null, 'custom');
+    },
+  ],
   [
     'Local chat keeps both synchronous phases on the local pool',
     () => {

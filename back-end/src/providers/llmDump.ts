@@ -164,7 +164,7 @@ export function finishLlmCapture(capture: LlmCapture, patch: Record<string, unkn
     });
     throw error;
   });
-  ownLlmCapture(capture.agentId, task);
+  ownLlmCapture(capture.agentId, task, capture.value.root_agent_id);
 }
 
 async function persistLlmCapture(

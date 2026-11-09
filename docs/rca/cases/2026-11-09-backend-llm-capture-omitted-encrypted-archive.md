@@ -76,11 +76,12 @@ cause remains open where effective environment was not recorded.
 Archive one complete encrypted BASE from the existing idempotent stream finalizer,
 including authentic input, config, actual model, output and partial/error state.
 Keep all plaintext APIs and production guards intact. Model streaming does not
-await network archival: a leaf registry tracks exact-agent pending promises;
-terminal lifecycle drains the end fixture's exact agent IDs before its fence and
+await network archival: a leaf registry tracks promises by actual agent and explicit archive root;
+terminal lifecycle drains that root and the end fixture's agent IDs before its fence and
 manifest. Failed enabled writes retain a failure that blocks the terminal drain.
 Reuse encrypted worker storage and late manifest reconciliation. Bind root identity explicitly in completion options from the already-loaded
-Agent.busId or the freshly created chat root. Capture never queries the database
+parent tree (the existing bounded, same-user graph resolver for descendant chat)
+or the freshly created chat root. The common completion capture never queries the database
 and only explicitly root-bound calls opt into encrypted archival. This avoids
 opening database pools in previously offline completion clients and avoids
 expanding archival to unrelated credential/SMS call sites. Local dumps receive
@@ -101,10 +102,12 @@ publisher now pass on repaired source; full deployment remains pending. Proxy
 fail/pass alone is not completion.
 
 At 10k agents each write is isolated by root and unique dump identity, with zero
-database identity reads and one encrypted submission per bound call; there is no serial
+database identity reads in the common completion wrapper and one encrypted
+submission per bound call; descendant chat routing uses the existing bounded
+same-user parent walk rather than a global lookup; there is no serial
 global uploader, full scan or cross-root fan-in. Pending state scales with actual
 in-flight captures, settled tasks are removed, and failures retain one error per
-agent until their owning terminal publication can report them. Existing archive
+agent/root for the process lifetime so reporting cannot erase a lost call. Existing archive
 I/O bounds/retries remain unchanged. Golden reference: not applicable (no
 approval-gated hunk).
 
@@ -166,3 +169,17 @@ regression also failed on missing root binding and passed unchanged after the
 metadata path was completed; compaction prompts and thresholds are untouched.
 These facts supersede pending final-native acceptance, not the original failure
 or the unhealthy intermediate candidate's native grades. Full deploy remains open.
+
+The exact-head CodeRabbit review on 8485406 exposed a descendant-chat binding
+gap: bus IDs may be absent or custom. The existing chat-router public-service
+fixture reproduced missing bases for the actual parent root, then passed with
+the same assertions after parent-tree resolution. Capture ownership now indexes
+both the explicit archive root and actual agent, so root publication observes
+writers even outside the collected parent-ID inventory. The existing stream
+contract first failed its root failure check, then passed, including repeated
+drains preserving the original error cause. Failures deliberately remain sticky:
+deleting a failure merely because it was read would let a later finalization
+certify a permanently incomplete archive. The process-lifetime failure registry
+remains an explicit outage-pressure limit; this is no claim of arbitrary crash
+or unbounded-load durability. All three existing owning suites passed together.
+Fresh full native acceptance on this reviewed stabilization source is pending.

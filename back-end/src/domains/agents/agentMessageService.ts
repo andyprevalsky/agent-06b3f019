@@ -22,6 +22,7 @@ import { buildUserMessageSignalValue } from './agentMessageSignal';
 export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
+import { findGraphRootId } from './repoGraph';
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -110,10 +111,14 @@ async function routeUserMessage(
     if (authoredByWorkflow) await signalUserResponse(agentId, workflowId, messageText);
     else await deliverUserMessageToWorkflow(agentId, workflowId, messageText);
   } else if (agentForChat !== null && agentForChat !== undefined) {
+    const rootAgentId =
+      agentForChat.parentAgentId === null
+        ? agentId
+        : await findGraphRootId(agentId, agentForChat.userId);
+    if (rootAgentId === null) throw new Error(`Chat archive root unavailable for ${agentId}`);
     handleChatMessage({
       agentId,
-      rootAgentId:
-        agentForChat.busId !== null && agentForChat.busId !== '' ? agentForChat.busId : agentId,
+      rootAgentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
     }).catch((err: unknown) => {
