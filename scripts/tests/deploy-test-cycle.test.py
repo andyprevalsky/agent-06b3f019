@@ -7158,7 +7158,40 @@ class GenericNativeInheritedAdmission(unittest.TestCase):
             validation_source=self.src,proof={'layout':'campaign-v1','receipt_sha256':'generic-hash',
             'files':{str(request):c.sha_file(request)},'owner':{'native_cleanup_reference':{'result':str(folder/'result.json')}}})
         self.entries.append(entry);self.receipts.append(receipt)
-        self.state['reconciled_owners']['generic-hash']=entry;self.baseline=copy.deepcopy(self.entries)
+        self.state['reconciled_owners']['generic-hash']=entry
+        for original in self.entries:original['owner']={'worker_root':str(self.root)}
+        self.baseline=copy.deepcopy(self.entries)
+        # These entries deliberately model ancestry, not complete provider
+        # evidence. Bind the synthetic originals at the current validation
+        # boundary; genuine successor receipts still use the real validator.
+        self.native_validate=self.n.validate
+        originals={r['token']:copy.deepcopy(r) for r in self.receipts}
+        expected={e['token']:copy.deepcopy(e) for e in self.baseline}
+        def synthetic_original(receipt,owner,proof,**kwargs):
+            token=receipt.get('token')
+            if token not in originals:
+                return self.native_validate(receipt,owner,proof,**kwargs)
+            self.n.need(kwargs=={'_retired_hubs':True} and receipt==originals[token]
+                        and owner==c.receipt_owner('smoke',originals[token])
+                        and proof==expected[token]['proof'], 'synthetic original native binding changed')
+            return copy.deepcopy(expected[token])
+        fixture=patch.object(self.n,'validate',side_effect=synthetic_original)
+        fixture.start();self.addCleanup(fixture.stop)
+    def test_synthetic_original_validator_binds_inputs_and_delegates_other_receipts(self):
+        receipt=self.receipts[-1];entry=self.entries[-1]
+        owner=c.receipt_owner('smoke',receipt)
+        self.assertEqual(self.n.validate(receipt,owner,entry['proof'],_retired_hubs=True),entry)
+        for changed in ({'receipt':{**receipt,'source':{}}},{'owner':{}},{'proof':{}},
+                        {'kwargs':{}},{'kwargs':{'_retired_hubs':False}}):
+            values={'receipt':receipt,'owner':owner,'proof':entry['proof'],'kwargs':{'_retired_hubs':True},**changed}
+            with self.subTest(changed=changed),self.assertRaises(ValueError):
+                self.n.validate(values['receipt'],values['owner'],values['proof'],**values['kwargs'])
+        with patch.object(self,'native_validate',return_value='real-boundary') as real:
+            self.assertEqual(self.n.validate({'token':'unknown'}, {}, {}),'real-boundary')
+            real.assert_called_once_with({'token':'unknown'}, {}, {})
+        with self.assertRaises((ValueError,KeyError)):
+            self.n.validate({'token':'unknown'}, {}, {})
+
     def test_seven_original_debts_and_clean_PASS_FAIL_successors(self):
         for status in ('PASS','FAIL'):
             self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),7)
