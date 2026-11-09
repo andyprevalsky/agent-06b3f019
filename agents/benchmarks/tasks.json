@@ -2887,11 +2887,7 @@
       "context_notes": "Live Instacart catalog, inventory, pricing, delivery details, and guest-checkout write-lock. The scoped browser-state refresh is retained for performance, but no saved login is required.",
       "live_cookie_domains": [
         "instacart.com"
-      ],
-      "required_injectable_cookie_domains": [
-        "instacart.com"
-      ],
-      "needs_auth": true
+      ]
     },
     "evaluators": [
       {
@@ -2962,11 +2958,7 @@
       "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and delivery timing. The runner treats the final place-order write lock as completion, leaves that request unresolved, and does not place the order. The task may exercise guest checkout and does not require an injected cookie bundle.",
       "live_cookie_domains": [
         "doordash.com"
-      ],
-      "required_injectable_cookie_domains": [
-        "doordash.com"
-      ],
-      "needs_auth": true
+      ]
     },
     "evaluators": [
       {

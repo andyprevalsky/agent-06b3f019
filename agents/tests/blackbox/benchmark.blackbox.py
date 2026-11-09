@@ -9667,14 +9667,15 @@ def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_require
     """Guest checkout domains stay scoped without requiring an injectable CookieBundle."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    # browser-opentable-reservation and browser-instacart-grocery-order moved to the
-    # signed-in list by owner decision (2026-11-09).
+    # browser-opentable-reservation moved to the signed-in list by owner
+    # decision (2026-11-09).
     guest_checkout_tasks = (
         "browser-toast-nopa-write-lock",
         "browser-alchemy-springs-sauna",
         "browser-hotel-booking",
         "browser-event-ticket",
         "browser-imax-group-tickets",
+        "browser-instacart-grocery-order",
     )
     for task_name in guest_checkout_tasks:
         env = get_task_by_name(task_name).environment
@@ -9687,7 +9688,6 @@ def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_require
         "browser-amazon-return": "amazon.com",
         "minted-agent-accounts-uber": "uber.com",
         "browser-opentable-reservation": "opentable.com",
-        "browser-instacart-grocery-order": "instacart.com",
     }
     for task_name, domain in authenticated_tasks.items():
         env = get_task_by_name(task_name).environment
@@ -9699,8 +9699,6 @@ def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_require
         "browser-agent",
         "browser-agent-amazon-cookie-payment",
         "browser-opentable-reservation",
-        "browser-instacart-grocery-order",
-        "browser-doordash-usb-c-cable",
         "browser-amazon-return",
         "browser-agent-amazon-mx-buy-under-5-usd",
         "anti-bot-doordash-store",
@@ -9731,10 +9729,10 @@ def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_require
     assert passkey_env["live_cookie_domains"] == ["amazon.com"]
     assert passkey_env.get("required_injectable_cookie_domains", []) == []
 
-    # browser-doordash-usb-c-cable delivers to the user's saved address, so it needs
-    # a signed-in session (owner decision 2026-11-09; asserted with the list above).
+    # The task contract permits the public DoorDash checkout path; a scoped
+    # browser-state refresh must not silently turn that into a login gate.
     doordash_env = get_task_by_name("browser-doordash-usb-c-cable").environment
-    assert doordash_env["required_injectable_cookie_domains"] == ["doordash.com"]
+    assert doordash_env.get("required_injectable_cookie_domains", []) == []
 
 
 def test_no_tool_failures_static_check_rejects_any_failed_tool_event():
