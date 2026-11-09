@@ -478,6 +478,7 @@ GATES = (
         "cloudbench-explicit-idle-admission",
         ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
     ),
+    Gate("cloudbench-cohort-reconcile", ("python3", "scripts/tests/cloudbench-cohort-reconcile.test.py")),
     Gate(
         "cloudbench-fixed-native-worker",
         ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
