@@ -1827,6 +1827,98 @@ class Cycle(unittest.TestCase):
         self.state['phase'] = 'final'
         self.assertEqual({'api','ui'}, {g['name'] for g in c.records(new, self.state)})
 
+    def graph_carry_fixture(self):
+        """api runs backend-unit tests and ui frontend-vitest ones; any other file is unmapped (ALL)."""
+        import deploy_test_plan, select_affected_tests
+        for path in ('back-end/api.ts', 'front-end/ui.tsx'):
+            (self.root / path).parent.mkdir(exist_ok=True); (self.root / path).write_text('original\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'graph fixture'], check=True)
+        self.plan['gates'][1]['category'] = 'backend-coverage-blackbox'
+        self.plan['gates'][2]['category'] = 'frontend-coverage-blackbox'
+        self.plan['source'] = c.source(self.root)
+        self.state = c.initialize(self.plan, self.root)
+        owners = {'back-end/api.ts': 'backend-unit', 'front-end/ui.tsx': 'frontend-vitest'}
+
+        class Graph:
+            def select(self, changed):
+                lanes = {lane: set() for names in deploy_test_plan.GRAPH_LANES.values() for lane in names}
+                for path in changed:
+                    if path in owners:
+                        lanes[owners[path]].add(path + ' test')
+                unknown = [path for path in changed if path not in owners]
+                return type('Selection', (), dict(all_lanes=bool(unknown), selected=lanes,
+                                                  reasons=['unmapped ' + path for path in unknown]))()
+        for patcher in (patch.object(select_affected_tests, 'ROOT', self.root),
+                        patch.object(deploy_test_plan, 'Selector', Graph)):
+            patcher.start(); self.addCleanup(patcher.stop)
+        return self.carryover_ready_fixture()
+
+    def graph_change(self, old, files):
+        for path, text in files.items():
+            (self.root / path).write_text(text)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c', 'user.email=test@example.com',
+                        'commit', '-qam', 'review fix'], check=True)
+        new = copy.deepcopy(old); new['source'] = c.source(self.root)
+        return new
+
+    def test_graph_carry_keeps_gate_the_delta_does_not_select_and_reruns_the_selected_gate(self):
+        old, native = self.graph_carry_fixture()
+        new = self.graph_change(old, {'back-end/api.ts': 'review fix\n'})
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual({'ui'}, set(self.state['carried_passes']))
+        entry = self.state['carried_passes']['ui']
+        self.assertEqual(c.GRAPH_CARRY_BASIS, entry['basis'])
+        self.assertEqual({'from_head': old['source']['head'], 'files': ['back-end/api.ts']}, entry['delta'])
+        self.assertEqual(['back-end/api.ts test'], entry['selector']['lanes']['backend-unit'])
+        self.assertEqual([], entry['selector']['lanes']['frontend-vitest'])
+        self.assertNotEqual(entry['native_input_fingerprint'], self.state['input_fingerprints']['ui'])
+        c.run_phase(new, self.state, self.directory, self.root)  # fresh quick
+        self.assertEqual(['api'], [g['name'] for g in c.records(new, self.state)])
+        c.run_phase(new, self.state, self.directory, self.root)  # api only
+        self.assertEqual(old['source'], c.latest_receipts(self.state)['ui']['source'])
+        self.assertEqual(new['source'], c.latest_receipts(self.state)['api']['source'])
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        # A second fix still measures the delta from ui's native execution.
+        newer = self.graph_change(new, {'back-end/api.ts': 'second review fix\n'})
+        c.refresh(self.state, new, newer, self.root)
+        self.assertEqual({'ui'}, set(self.state['carried_passes']))
+        self.assertEqual(old['source']['head'], self.state['carried_passes']['ui']['delta']['from_head'])
+        c.run_phase(newer, self.state, self.directory, self.root)
+        c.run_phase(newer, self.state, self.directory, self.root)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        self.assertEqual(native, self.state['attempts'][:len(native)])
+        receipt = Path(c.latest_receipts(self.state)['ui']['log']).parent / 'receipt.json'
+        receipt.write_bytes(receipt.read_bytes() + b' ')
+        self.assertEqual(5, c.verify_saved(self.directory, self.root))
+
+    def assert_graph_carries_nothing(self, old, new):
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual({}, self.state['carried_passes'])
+        self.state['phase'] = 'final'
+        self.assertEqual({'api', 'ui'}, {g['name'] for g in c.records(new, self.state)})
+
+    def test_graph_carry_refuses_delta_with_unmapped_file(self):
+        old, _ = self.graph_carry_fixture()
+        new = self.graph_change(old, {'back-end/api.ts': 'review fix\n', 'code': 'unmapped change'})
+        self.assert_graph_carries_nothing(old, new)
+
+    def test_graph_carry_refuses_changed_runtime_config(self):
+        old, _ = self.graph_carry_fixture()
+        with (self.root / '.git/info/exclude').open('a') as stream:
+            stream.write('.env\n')
+        (self.root / '.env').write_text('SETTING=changed\n')
+        new = self.graph_change(old, {'back-end/api.ts': 'review fix\n'})
+        self.assert_graph_carries_nothing(old, new)
+
+    def test_graph_carry_refuses_gate_with_pending_failure(self):
+        old, _ = self.graph_carry_fixture()
+        self.state['failures'].append(dict(id='pending-ui', gate='ui', check='ui/c'))
+        self.state.update(phase='triage', ready=False, pending=['pending-ui'])
+        new = self.graph_change(old, {'back-end/api.ts': 'review fix\n'})
+        self.assert_graph_carries_nothing(old, new)
+
     def test_same_source_full_pass_skips_duplicate_final_but_focused_subset_never_does(self):
         old, native = self.carryover_ready_fixture()
         self.state.update(phase='focused', ready=False, repair_gates=['api', 'ui'], focused={

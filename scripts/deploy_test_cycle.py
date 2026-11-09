@@ -146,7 +146,8 @@ def runtime_config_sha256(path: Path) -> str:
     return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
 
 
-def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None) -> dict:
+def source_files(root: Path) -> dict:
+    """Per-file content/mode digests of the current source inputs (output ledgers excluded)."""
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
     links = index_gitlinks(root)
@@ -165,6 +166,11 @@ def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None
             content = b"DELETED"
         mode = 0o160000 if raw in links else source_mode(path) if path.exists() or path.is_symlink() else None
         files[os.fsdecode(raw)] = digest([hashlib.sha256(content).hexdigest(), mode])
+    return files
+
+
+def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None, files: dict | None = None) -> dict:
+    files = source_files(root) if files is None else files
     # Runtime configuration is an input even when Git ignores its secrets and
     # the gate narrows its source globs. Never let source selection hide it.
     runtime_config = {}
@@ -309,8 +315,12 @@ def qualification_identity(skips: dict) -> dict:
     return result
 
 
-def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> dict | None:
-    """Latest FULL execution: native PASS subset plus exact existing qualified exclusions."""
+def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False,
+                      input_fingerprint: str | None = None) -> dict | None:
+    """Latest FULL execution: native PASS subset plus exact existing qualified exclusions.
+
+    input_fingerprint names the native execution's inputs when a graph carry proved they differ
+    from the current ones only outside this gate; by default they must be the current inputs."""
     latest = latest_receipts(state).get(gate['name'])
     if not latest or gate.get('quick'):
         return None
@@ -335,7 +345,7 @@ def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=Fal
             or receipt.get('cleanup_owner')
             or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
-            or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
+            or receipt.get('execution_binding') != {'input_fingerprint': input_fingerprint or state['input_fingerprints'].get(gate['name']),
                 'contract_digest': digest(gate), 'environment': state['environment']}):
         return None
     try:
@@ -376,7 +386,8 @@ def carried_pass(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -
     return (entry.get('validated_source') == state['source']
             and entry.get('input_fingerprint') == state['input_fingerprints'].get(gate['name'])
             and entry.get('contract_digest') == digest(gate)
-            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh) == entry.get('native_binding'))
+            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh,
+                                  input_fingerprint=entry.get('native_input_fingerprint')) == entry.get('native_binding'))
 
 
 def reusable_full_pass(state: dict, gate: dict) -> bool:
@@ -1998,6 +2009,82 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
+GRAPH_CARRY_BASIS = 'affected-test graph: delta selects no lane of this gate'
+GIT_MODES = {b'100644': stat.S_IFREG, b'100755': stat.S_IFREG | stat.S_IXUSR,
+             b'120000': stat.S_IFLNK | stat.S_IXUSR}  # source_mode() of a checked-out entry
+
+
+def native_inputs(root: Path, head: str, current: dict) -> tuple[list[str], dict]:
+    """Paths differing between the native commit and the current inputs, and that commit's file map.
+
+    The map is rebuilt from Git objects. Callers bind it to the native input fingerprint, so a dirty
+    or untracked native source, or any change outside this delta, fails that comparison."""
+    def git(*args: str, data: bytes | None = None) -> bytes:
+        return subprocess.run(['git', *args], cwd=root, check=True, capture_output=True, input=data).stdout
+    changed = set(git('diff', '--no-renames', '--name-only', '-z', head, '--').split(b'\0'))
+    changed |= set(git('ls-files', '-z', '--others', '--exclude-standard').split(b'\0'))
+    delta = sorted(os.fsdecode(p) for p in changed - {b''} if not p.startswith(b'agents/benchmarks/history/'))
+    tree = {}
+    for record in git('ls-tree', '-r', '-z', '--full-tree', head).split(b'\0'):
+        if record:
+            meta, path = record.split(b'\t', 1)
+            mode, _, oid = meta.split()
+            tree[os.fsdecode(path)] = (mode, oid)
+    blobs = [tree[p][1] for p in delta if p in tree and tree[p][0] != b'160000']
+    output, contents = git('cat-file', '--batch', data=b''.join(oid + b'\n' for oid in blobs)), {}
+    for oid in blobs:
+        header, output = output.split(b'\n', 1)
+        size = int(header.split()[2])
+        contents[oid], output = output[:size], output[size + 1:]
+    files = dict(current)
+    for path in delta:
+        files.pop(path, None)
+        if path in tree:
+            mode, oid = tree[path]
+            content = b'GITLINK\0' + oid if mode == b'160000' else contents[oid]
+            files[path] = digest([hashlib.sha256(content).hexdigest(),
+                                  0o160000 if mode == b'160000' else GIT_MODES[mode]])
+    return delta, files
+
+
+def graph_carries(state: dict, candidates: dict, gates: dict, new_source: dict, fingerprints: dict,
+                  root: Path) -> dict:
+    """Carry FULL passes whose native-to-current delta deploy_test_plan.select does not select.
+
+    Unknown impact carries nothing: run_all/unmapped files, a selector or Git error, or any
+    input outside the delta (runtime configuration included) that the native fingerprint rejects."""
+    import deploy_test_plan
+    import select_affected_tests
+    carried, deltas, graphs, selector = {}, {}, {}, None
+    try:
+        if Path(root).resolve() != select_affected_tests.ROOT.resolve():
+            return {}  # The graph describes its own checkout, not this root.
+        current = source_files(root)
+        for name, (binding, native) in candidates.items():
+            head = binding['native_source']['head']
+            if head not in deltas:
+                deltas[head] = native_inputs(root, head, current)
+            delta, files = deltas[head]
+            if input_fingerprints({'gates': [gates[name]]}, root, files=files)[name] != native:
+                continue
+            if tuple(delta) not in graphs:
+                selector = selector or deploy_test_plan.Selector()
+                graphs[tuple(delta)] = deploy_test_plan.affected(delta, selector)
+            graph = graphs[tuple(delta)]
+            plan = deploy_test_plan.select({'gates': [gates[name]]}, delta, graph, None)
+            if (graph['all'] or plan['gates']
+                    or [o.get('reason') for o in plan['omitted']] != ['no dependency or runtime-path trigger']):
+                continue
+            carried[name] = {'native_binding': binding, 'from_source': state['source'],
+                             'validated_source': new_source, 'input_fingerprint': fingerprints[name],
+                             'native_input_fingerprint': native, 'contract_digest': digest(gates[name]),
+                             'basis': GRAPH_CARRY_BASIS, 'delta': {'from_head': head, 'files': delta},
+                             'selector': graph}
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError):
+        return {}  # Unknown impact reruns every candidate.
+    return carried
+
+
 def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None,
             historical_no_retry_proof: dict | None = None) -> None:
     from deploy_test_historical_custody import known, prepare, apply, verify
@@ -2076,16 +2163,18 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
             and fingerprints == state["input_fingerprints"]):
         raise ValueError("refresh requires actual changed source or plan")
-    # No scope is inferred: absent input_paths means '*' and any source-file change reruns that gate.
-    # History-only/tree-identical syncs work for the current broad production plan; declared scopes may be selective.
-    carried, completed_repairs = {}, set()
+    # Absent input_paths means '*': identical inputs carry, and otherwise a gate carries only when the
+    # affected-test graph on the native-to-new delta selects none of its lanes. Unknown impact reruns.
+    carried, completed_repairs, candidates = {}, set(), {}
     pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}
     pending_gates.update(state.get('triage_repair_gates', []))
     if state['environment'] == environment_digest():
         for name, gate in old_gates.items():
             if name in removed:
                 continue
-            binding = full_pass_binding(state, gate, root=root, custody_refresh=True)
+            native = state.get('carried_passes', {}).get(name, {}).get('native_input_fingerprint',
+                                                                       state['input_fingerprints'].get(name))
+            binding = full_pass_binding(state, gate, root=root, custody_refresh=True, input_fingerprint=native)
             if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate, root=root, custody_refresh=True))
                     and digest(gate) == digest(new_gates[name])):
                 # Retire historical repair routing using the OLD validated FULL
@@ -2098,10 +2187,15 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
                             completed_repairs.add(name)
                     except (OSError, ValueError, KeyError, TypeError, StopIteration):
                         pass  # Unknown execution ownership cannot retire a repair.
-                if state['input_fingerprints'].get(name) == fingerprints.get(name):
+                if native == fingerprints.get(name):
                     carried[name] = {'native_binding': binding, 'from_source': state['source'],
                         'validated_source': new['source'], 'input_fingerprint': fingerprints[name],
                         'contract_digest': digest(new_gates[name]), 'basis': 'identical gate inputs and full execution contract'}
+                elif (name not in pending_gates and 'qualification_digest' not in binding
+                        and old['gates'] == new['gates']):
+                    candidates[name] = (binding, native)
+        if candidates:
+            carried.update(graph_carries(state, candidates, new_gates, new['source'], fingerprints, root))
     carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]

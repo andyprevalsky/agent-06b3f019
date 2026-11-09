@@ -56,6 +56,13 @@ ALWAYS = {
 }
 
 
+def affected(changed: list[str], selector: Selector | None = None) -> dict:
+    """The dependency-graph result select() consumes; deploy_test_cycle reuses it for refresh carries."""
+    selected = (selector or Selector()).select(changed)
+    return {'all': selected.all_lanes, 'reasons': selected.reasons,
+            'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
+
+
 def select(template: dict, changed: list[str], result: dict, binding: dict | None,
            base: str = 'origin/main') -> dict:
     """binding=None is selection-only: the same inclusions/omissions, no worker checks or plan validation."""
@@ -212,9 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.list_selected and args.output is None:
         parser.error('the following arguments are required: --output')
     changed = changed_files(args.base, None)
-    selected = Selector().select(changed)
-    result = {'all': selected.all_lanes, 'reasons': selected.reasons,
-              'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
+    result = affected(changed)
     template = json.loads(args.template.read_text()) if args.template else standard_template()
     if args.list_selected:
         selection = select(template, changed, result, None, base=args.base)
