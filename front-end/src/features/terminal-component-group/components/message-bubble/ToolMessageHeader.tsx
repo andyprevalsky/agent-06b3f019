@@ -4,6 +4,8 @@
  * [STATIC]
  *   - shows icon + title; a thought appends its recorded generation
  *     (duration · ↓ tokens · tok/s) when its producer recorded one
+ *   - a wait on agents titles each agent by task title with its agent icon
+ *     (WaitAgentTargets)
  *
  * [TOGGLEABLE] (hasMessage && isExpandable)
  *   - header receives click handler
@@ -14,6 +16,7 @@ import { cn } from '@/lib/utils';
 import { ChevronRight, Maximize2 } from 'lucide-react';
 import { ToolMessageIcon } from './ToolMessageIcon';
 import { ThoughtGenerationMetric } from '../ThoughtGenerationMetric';
+import { WaitAgentTargets } from '../WaitAgentTargets';
 import type { ToolMessageData } from './types';
 
 interface ToolMessageHeaderProps {
@@ -70,7 +73,17 @@ export function ToolMessageHeader({
         codeProvider={data.codeProvider}
       />
       <span className={cn('min-w-0 break-words', titleClassName)}>
-        {isThought ? (data.status === 'IN_PROGRESS' ? 'Thinking' : 'Thought') : titleText}
+        {isThought ? (
+          data.status === 'IN_PROGRESS' ? (
+            'Thinking'
+          ) : (
+            'Thought'
+          )
+        ) : data.waitAgents ? (
+          <WaitAgentTargets {...data.waitAgents} />
+        ) : (
+          titleText
+        )}
       </span>
       {isThought && data.generation && <ThoughtGenerationMetric generation={data.generation} />}
       {authTaskId && data.status === 'IN_PROGRESS' && (

@@ -145,17 +145,21 @@ def test_workflow_sandbox_keeps_worker_logging_configuration():
     previous = structlog.get_config()
     was_configured = structlog.is_configured()
     activity_events, records = [], []
+
     class Capture(logging.Handler):
         def emit(self, record):
             records.append(record)
+
     handler = Capture()
     base = workflow.logger.base_logger
     old_level = base.level
     base.addHandler(handler)
     base.setLevel(logging.DEBUG)
+
     def collect(logger, method, event):
         activity_events.append(event.copy())
         return event
+
     try:
         structlog.configure(processors=[collect], logger_factory=structlog.ReturnLoggerFactory())
         log = context_logger()
@@ -394,11 +398,26 @@ async def test_user_pause_refresh_keeps_original_result_order_and_error():
     from helpers.llm import collapse_duplicate_tool_results
     from unittest.mock import AsyncMock
     import copy
-    original = {"message_id": "result", "role": "TOOL", "timestamp": "2026-01-01T00:00:00+00:00",
-                "text": "Original error", "metadata": {"toolCallId": "call", "toolStatus": "ERROR",
-                    "error": True, "errorCode": "ORIGINAL", "workflowGeneration": "generation"}}
-    following = {"message_id": "next", "role": "ASSISTANT", "text": "Next turn",
-                 "timestamp": "2026-01-01T00:00:03+00:00"}
+
+    original = {
+        "message_id": "result",
+        "role": "TOOL",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "text": "Original error",
+        "metadata": {
+            "toolCallId": "call",
+            "toolStatus": "ERROR",
+            "error": True,
+            "errorCode": "ORIGINAL",
+            "workflowGeneration": "generation",
+        },
+    }
+    following = {
+        "message_id": "next",
+        "role": "ASSISTANT",
+        "text": "Next turn",
+        "timestamp": "2026-01-01T00:00:03+00:00",
+    }
     context = [copy.deepcopy(original), following]
     paused = copy.deepcopy(original)
     paused["text"] += "\n\n[User paused the browser agent.]"
@@ -411,8 +430,13 @@ async def test_user_pause_refresh_keeps_original_result_order_and_error():
     assert context[0]["metadata"]["errorCode"] == "ORIGINAL"
     assert len(collapse_duplicate_tool_results(context)) == 2
     from helpers.llm import build_llm_messages
-    declaration = {"role": "ASSISTANT", "text": "Browse", "timestamp": "2025-12-31T23:59:59+00:00",
-                   "metadata": {"tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "call", "goal": "Browse"}]}}
+
+    declaration = {
+        "role": "ASSISTANT",
+        "text": "Browse",
+        "timestamp": "2025-12-31T23:59:59+00:00",
+        "metadata": {"tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "call", "goal": "Browse"}]},
+    }
     projected = await build_llm_messages([declaration, *context], "system")
     tool_results = [m for m in projected if m.get("role") == "tool"]
     assert len(tool_results) == 1, projected
@@ -424,6 +448,7 @@ async def test_user_pause_refresh_keeps_original_result_order_and_error():
     # The workflow maintains its own context as well as run_agent's list.
     from workflows.agent_workflow import AgentWorkflow
     from unittest.mock import MagicMock, patch
+
     wf = AgentWorkflow.__new__(AgentWorkflow)
     wf.agent_id = "fixture"
     wf.context = [copy.deepcopy(original), following]
@@ -675,7 +700,11 @@ async def mock_release_compute_token_lineage_activity(lineage_key: str) -> bool:
 @activity.defn(name="fetch_agent_config")
 async def mock_fetch_agent_config(agent_id: str) -> Dict:
     if agent_id in CUTOVER_RESPONSE_SCHEMAS:
-        return {"context_gates": {}, "response_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id), "write_lock_enabled": True}
+        return {
+            "context_gates": {},
+            "response_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
+            "write_lock_enabled": True,
+        }
     return {"context_gates": {}, "response_schema": None, "write_lock_enabled": True}
 
 
@@ -989,10 +1018,7 @@ async def mock_check_progress(
         VERIFIER_SCHEMA_CAPTURE[agent_id].append(response_schema)
     # These scripted cutover scenarios require the new generation to make
     # its own completion request after the delegated tool resumes.
-    completion_requested = (
-        agent_id not in CUTOVER_RESPONSE_SCHEMAS
-        or CUTOVER_COMPLETION_REQUESTED.get(agent_id, False)
-    )
+    completion_requested = agent_id not in CUTOVER_RESPONSE_SCHEMAS or CUTOVER_COMPLETION_REQUESTED.get(agent_id, False)
     return {
         "score": 1.0 if completion_requested else 0.0,
         "reasoning": "Complete" if completion_requested else "Awaiting the scripted completion request",
@@ -1627,6 +1653,170 @@ async def _test_poll_exhaustion_ends_agent_failed(env) -> None:
     assert (result or {}).get("reason") == "workflow_error", f"unexpected terminal result: {result}"
 
 
+# A real wall-clock interval in which an unanswered question must stay open. The
+# time-skipping server does not advance workflow timers while the client only
+# signals/queries, so the 15-minute SMS fallback cannot end the wait here.
+QUESTION_SETTLE_SECONDS = 1.0
+
+
+async def _run_question_wait_scenario(env, agent_id: str, *, start_signal: Optional[str], before_reply) -> Dict:
+    """Root asks one send_message_to_user question; observe when its wait ends.
+
+    ``start_signal`` (a receive_user_response value) is delivered with the start,
+    before the first poll, so the model has read it when it asks. ``before_reply``
+    runs while the question is open; the user's reply follows.
+    """
+    question = "What discount should the Boxing and Muay Thai code apply, and should it cover the first month?"
+    reply = "Please do not ask me anymore questions. Use 10% off the first month."
+    CUTOVER_MESSAGES[agent_id] = []
+    CUTOVER_LLM_SCRIPTS[agent_id] = [[{"tool": "send_message_to_user", "message": question, "is_question": True}]]
+    WORKFLOW_ENV_ACTIVITY_COUNTS.pop(agent_id, None)
+
+    def question_rows(status: str) -> List[Dict[str, Any]]:
+        return [
+            row
+            for row in CUTOVER_MESSAGES[agent_id]
+            if row["metadata"].get("toolName") == "send_message_to_user" and row["metadata"].get("toolStatus") == status
+        ]
+
+    async def until(predicate, timeout: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if predicate():
+                return True
+            await asyncio.sleep(0.02)
+        return predicate()
+
+    async def settle(handle) -> None:
+        # Each query completes after a workflow task, then real time passes.
+        await handle.query(AgentWorkflow.get_status)
+        await asyncio.sleep(QUESTION_SETTLE_SECONDS)
+        await handle.query(AgentWorkflow.get_status)
+
+    start_kwargs: Dict[str, Any] = {}
+    if start_signal is not None:
+        start_kwargs = {"start_signal": "receive_user_response", "start_signal_args": [start_signal]}
+    handle = await env.client.start_workflow(
+        AgentWorkflow.run,
+        args=[
+            agent_id,
+            "user-test-1",
+            "Build the boxing gym client signup site",
+            "rose-labs/rose-1-flash",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+        ],
+        id=_next_wf_id("question-wait"),
+        task_queue=TASK_QUEUE,
+        **start_kwargs,
+    )
+    try:
+        asked = await until(lambda: bool(question_rows("IN_PROGRESS")), 30)
+        assert asked, f"the scripted question was never asked: {CUTOVER_MESSAGES[agent_id]}"
+        polls_before_question = WORKFLOW_ENV_ACTIVITY_COUNTS.get(agent_id, {}).get("poll_new_messages", 0)
+        assert polls_before_question >= 1, "the question's LLM turn must follow a poll"
+        await settle(handle)
+        observed = {"finished_before_reply": [dict(row) for row in question_rows("FINISHED")]}
+        if before_reply is not None:
+            await before_reply(handle)
+            await settle(handle)
+        observed["finished_after_other_signals"] = [dict(row) for row in question_rows("FINISHED")]
+        await handle.signal(AgentWorkflow.receive_user_response, reply)
+        await until(lambda: bool(question_rows("FINISHED")), 30)
+        observed["finished_after_reply"] = [dict(row) for row in question_rows("FINISHED")]
+        return observed
+    finally:
+        await _cancel_workflow(handle)
+        CUTOVER_MESSAGES.pop(agent_id, None)
+        CUTOVER_LLM_SCRIPTS.pop(agent_id, None)
+        CUTOVER_LLM_QUEUES.pop(agent_id, None)
+
+
+def _assert_question_answered_only_by_reply(observed: Dict, cause: str) -> None:
+    assert observed["finished_before_reply"] == [], (
+        f"send_message_to_user returned {[row['metadata'].get('title') for row in observed['finished_before_reply']]} "
+        f"with no reply: {cause} satisfied the question's wait"
+    )
+    assert observed["finished_after_other_signals"] == [], (
+        f"send_message_to_user returned {[row['metadata'].get('title') for row in observed['finished_after_other_signals']]} "
+        f"with no reply: {cause} satisfied the question's wait"
+    )
+    finished = observed["finished_after_reply"]
+    assert len(finished) == 1, f"the user's reply must complete the question exactly once: {finished}"
+    assert finished[0]["metadata"].get("title") == "User response received", finished[0]["metadata"]
+
+
+async def _test_question_ignores_user_message_read_before_it(env) -> None:
+    """A user message the model already read never answers a later question (H-72).
+
+    Epoch22 build-boxing-payment r3 (agent 1ead79ec): the attachment post's empty
+    receive_user_response at 02:14:12 set _has_new_messages and nothing cleared
+    it. The root's first question at 02:21:55 returned "User response received"
+    after 213 ms with no reply, so the agent asked again.
+    """
+    observed = await _run_question_wait_scenario(
+        env, "agent-question-stale-user-signal-h72", start_signal="", before_reply=None
+    )
+    _assert_question_answered_only_by_reply(observed, "the pre-question user-message signal")
+
+
+async def _test_question_ignores_agent_message_while_open(env) -> None:
+    """Another agent's message is not the user's reply (H-72 sibling); the reply still is."""
+
+    async def agent_message(handle) -> None:
+        await handle.signal(
+            AgentWorkflow.receive_agent_message,
+            {"message_id": "agent-msg-h72", "from_agent_id": "child-h72", "from_agent_path": "/root/research"},
+        )
+
+    observed = await _run_question_wait_scenario(
+        env, "agent-question-agent-message-h72", start_signal=None, before_reply=agent_message
+    )
+    _assert_question_answered_only_by_reply(observed, "an agent message")
+
+
+async def _test_question_cutover_rewaits_same_call_before_llm(env) -> None:
+    """A real continue_as_new preserves an unanswered published question's identity."""
+    from helpers.wait_condition_or_handoff import GENERATION_HANDOFF_SIGNAL
+    from temporalio.worker import Worker
+
+    agent_id = "agent-question-cutover-same-call"
+    workflow_ids = []
+
+    async def cutover(handle) -> None:
+        workflow_ids.append(handle.id)
+        CUTOVER_POINTER[handle.id] = CUTOVER_NEW_QUEUE
+        await handle.signal(GENERATION_HANDOFF_SIGNAL, CUTOVER_NEW_QUEUE)
+        for _ in range(400):
+            if (await handle.describe()).task_queue == CUTOVER_NEW_QUEUE:
+                break
+            await asyncio.sleep(0.05)
+        assert (await handle.describe()).task_queue == CUTOVER_NEW_QUEUE, "question did not migrate"
+        await handle.query(AgentWorkflow.get_status)
+        await asyncio.sleep(QUESTION_SETTLE_SECONDS)
+        rows = [row for row in CUTOVER_MESSAGES[agent_id] if row["metadata"].get("toolName") == "send_message_to_user"]
+        assert len(rows) == 1 and rows[0]["metadata"]["toolStatus"] == "IN_PROGRESS", rows
+        assert len(CUTOVER_LLM_QUEUES[agent_id]) == 1, "new generation re-entered LLM before the reply"
+
+    try:
+        async with Worker(
+            env.client,
+            task_queue=CUTOVER_NEW_QUEUE,
+            workflows=[AgentWorkflow],
+            activities=MOCK_ACTIVITIES,
+            workflow_runner=_WORKFLOW_RUNNER,
+            max_cached_workflows=0,
+        ):
+            observed = await _run_question_wait_scenario(env, agent_id, start_signal="", before_reply=cutover)
+        _assert_question_answered_only_by_reply(observed, "a cooperative deploy")
+        finished = observed["finished_after_reply"][0]
+        assert finished["task_queue"] == CUTOVER_NEW_QUEUE, finished
+    finally:
+        for workflow_id in workflow_ids:
+            CUTOVER_POINTER.pop(workflow_id, None)
+            CUTOVER_POINTER_FETCHES.pop(workflow_id, None)
+
+
 async def _run_all_workflow_tests() -> List[tuple]:
     """Run all workflow tests inside one WorkflowEnvironment.
 
@@ -1744,6 +1934,21 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 results.append((name, None))
             except Exception as e:
                 results.append((name, e))
+
+            # --- tests: a question's wait ends only on a user reply the model has not read (H-72) ---
+            for name, question_test in (
+                ("wf_question_ignores_user_message_read_before_it", _test_question_ignores_user_message_read_before_it),
+                ("wf_question_ignores_agent_message_while_open", _test_question_ignores_agent_message_while_open),
+                (
+                    "wf_question_cutover_rewaits_same_call_before_llm",
+                    _test_question_cutover_rewaits_same_call_before_llm,
+                ),
+            ):
+                try:
+                    await question_test(env)
+                    results.append((name, None))
+                except Exception as e:
+                    results.append((name, e))
 
             # --- test: pause/resume ---
             name = "wf_pause_resume"
@@ -2274,11 +2479,20 @@ def _assert_single_browser_chip_completed(agent_id: str, tool_call_id: str) -> N
 
 def _clear_cutover_test_state(agent_id: str, workflow_id: str) -> None:
     for capture in (
-        CUTOVER_MESSAGES, CUTOVER_LLM_SCRIPTS, CUTOVER_LLM_QUEUES,
-        CUTOVER_VERIFIER_CONTEXTS, CUTOVER_SMS, CUTOVER_USAGE,
-        CUTOVER_APPROVAL_REQUESTS, CUTOVER_BROWSER, CUTOVER_CODE,
-        CUTOVER_RESPONSE_SCHEMAS, CUTOVER_GENERATED_SCHEMAS, CUTOVER_COMPLETION_REQUESTED,
-        SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE,
+        CUTOVER_MESSAGES,
+        CUTOVER_LLM_SCRIPTS,
+        CUTOVER_LLM_QUEUES,
+        CUTOVER_VERIFIER_CONTEXTS,
+        CUTOVER_SMS,
+        CUTOVER_USAGE,
+        CUTOVER_APPROVAL_REQUESTS,
+        CUTOVER_BROWSER,
+        CUTOVER_CODE,
+        CUTOVER_RESPONSE_SCHEMAS,
+        CUTOVER_GENERATED_SCHEMAS,
+        CUTOVER_COMPLETION_REQUESTED,
+        SCHEMA_GENERATION_CAPTURE,
+        VERIFIER_SCHEMA_CAPTURE,
     ):
         capture.pop(agent_id, None)
     CUTOVER_POINTER.pop(workflow_id, None)
@@ -2376,18 +2590,40 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
                 receipt["losses"]["byte_cap_events_trimmed"] = low
                 raw = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
             if len(raw) > cap:
-                raw = json.dumps({
-                    "capture_gap": "byte_cap", "projected_bytes": len(raw), "byte_cap": cap,
-                    "name": bounded_text(name), "failure_observed_at": observed_at,
-                    "failure_observed_monotonic": observed_monotonic,
-                    "native_outcome": "failed", "error_type": type(error).__name__[:128],
-                    "losses": dict(losses), "details_omitted": True,
-                    "remote_summary": {key: receipt[key] for key in (
-                        "workflow_id", "run_id", "status", "history_length", "events_scanned",
-                        "events_dropped", "missing_tail", "history_complete", "history_scan_complete",
-                        "capture_gap", "close_events", "pending_activities", "pending_activities_dropped", "pending_workflow_task",
-                    ) if key in receipt},
-                }).encode("utf-8")
+                raw = json.dumps(
+                    {
+                        "capture_gap": "byte_cap",
+                        "projected_bytes": len(raw),
+                        "byte_cap": cap,
+                        "name": bounded_text(name),
+                        "failure_observed_at": observed_at,
+                        "failure_observed_monotonic": observed_monotonic,
+                        "native_outcome": "failed",
+                        "error_type": type(error).__name__[:128],
+                        "losses": dict(losses),
+                        "details_omitted": True,
+                        "remote_summary": {
+                            key: receipt[key]
+                            for key in (
+                                "workflow_id",
+                                "run_id",
+                                "status",
+                                "history_length",
+                                "events_scanned",
+                                "events_dropped",
+                                "missing_tail",
+                                "history_complete",
+                                "history_scan_complete",
+                                "capture_gap",
+                                "close_events",
+                                "pending_activities",
+                                "pending_activities_dropped",
+                                "pending_workflow_task",
+                            )
+                            if key in receipt
+                        },
+                    }
+                ).encode("utf-8")
             if len(raw) > cap:
                 raw = b'{"capture_gap":"metadata_byte_cap","details_omitted":true}'
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -2400,38 +2636,61 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
         # mkdtemp creates a unique directory with mode 0700.
         trace, walked, cursor = deque(maxlen=32), 0, error.__traceback__
         while cursor is not None and walked < 128:
-            trace.append({"file": project(cursor.tb_frame.f_code.co_filename),
-                          "function": project(cursor.tb_frame.f_code.co_name), "line": cursor.tb_lineno})
+            trace.append(
+                {
+                    "file": project(cursor.tb_frame.f_code.co_filename),
+                    "function": project(cursor.tb_frame.f_code.co_name),
+                    "line": cursor.tb_lineno,
+                }
+            )
             walked += 1
             cursor = cursor.tb_next
-        state = project({
-            "declared_schema": CUTOVER_RESPONSE_SCHEMAS.get(agent_id),
-            "persisted_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
-            "schema_generation": SCHEMA_GENERATION_CAPTURE.get(agent_id),
-            "verifier_schemas": VERIFIER_SCHEMA_CAPTURE.get(agent_id),
-            "completion_requested": CUTOVER_COMPLETION_REQUESTED.get(agent_id),
-            "remaining_script": CUTOVER_LLM_SCRIPTS.get(agent_id),
-            "llm_queues": CUTOVER_LLM_QUEUES.get(agent_id),
-            "browser": CUTOVER_BROWSER.get(agent_id), "code": CUTOVER_CODE.get(agent_id),
-            "messages": CUTOVER_MESSAGES.get(agent_id),
-            "verifier_contexts": (CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or [])[-1:],
-            "verifier_context_count": len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []),
-            "verifier_contexts_dropped": max(0, len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []) - 1),
-            "usage": CUTOVER_USAGE.get(agent_id), "sms": CUTOVER_SMS.get(agent_id),
-        })
-        initial = {"name": bounded_text(name), "agent_id": bounded_text(agent_id), "native_outcome": "failed",
-                   "workflow_id": bounded_text(getattr(handle, "id", "")),
-                   "requested_run_id": bounded_text(getattr(handle, "run_id", None) or ""),
-                   "first_execution_run_id": bounded_text(getattr(handle, "first_execution_run_id", None) or ""),
-                   "failure_observed_at": observed_at, "failure_observed_monotonic": observed_monotonic,
-                   "error_type": type(error).__name__[:128], "error_args": project(error.args),
-                   "traceback": list(trace), "traceback_frames_dropped": max(0, walked - 32),
-                   "traceback_tail_unknown": cursor is not None, "state": state, "losses": dict(losses)}
+        state = project(
+            {
+                "declared_schema": CUTOVER_RESPONSE_SCHEMAS.get(agent_id),
+                "persisted_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
+                "schema_generation": SCHEMA_GENERATION_CAPTURE.get(agent_id),
+                "verifier_schemas": VERIFIER_SCHEMA_CAPTURE.get(agent_id),
+                "completion_requested": CUTOVER_COMPLETION_REQUESTED.get(agent_id),
+                "remaining_script": CUTOVER_LLM_SCRIPTS.get(agent_id),
+                "llm_queues": CUTOVER_LLM_QUEUES.get(agent_id),
+                "browser": CUTOVER_BROWSER.get(agent_id),
+                "code": CUTOVER_CODE.get(agent_id),
+                "messages": CUTOVER_MESSAGES.get(agent_id),
+                "verifier_contexts": (CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or [])[-1:],
+                "verifier_context_count": len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []),
+                "verifier_contexts_dropped": max(0, len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []) - 1),
+                "usage": CUTOVER_USAGE.get(agent_id),
+                "sms": CUTOVER_SMS.get(agent_id),
+            }
+        )
+        initial = {
+            "name": bounded_text(name),
+            "agent_id": bounded_text(agent_id),
+            "native_outcome": "failed",
+            "workflow_id": bounded_text(getattr(handle, "id", "")),
+            "requested_run_id": bounded_text(getattr(handle, "run_id", None) or ""),
+            "first_execution_run_id": bounded_text(getattr(handle, "first_execution_run_id", None) or ""),
+            "failure_observed_at": observed_at,
+            "failure_observed_monotonic": observed_monotonic,
+            "error_type": type(error).__name__[:128],
+            "error_args": project(error.args),
+            "traceback": list(trace),
+            "traceback_frames_dropped": max(0, walked - 32),
+            "traceback_tail_unknown": cursor is not None,
+            "state": state,
+            "losses": dict(losses),
+        }
         # New primitives only; write ONCE before any await. Later state cannot overwrite it.
         stage = "initial_write"
         write_once(owned / "failure.json", initial, 65536)
-        remote = {"rpc_budget_seconds": 5, "rpc_started_at": datetime.now(timezone.utc).isoformat(),
-                  "failure_observed_at": observed_at, "history_complete": False, "missing_tail": True}
+        remote = {
+            "rpc_budget_seconds": 5,
+            "rpc_started_at": datetime.now(timezone.utc).isoformat(),
+            "failure_observed_at": observed_at,
+            "history_complete": False,
+            "missing_tail": True,
+        }
         rpc_started_monotonic = asyncio.get_running_loop().time()
         events, scanned = deque(maxlen=256), 0
 
@@ -2439,13 +2698,22 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
             return value.ToJsonString()[:64] if hasattr(value, "ToJsonString") else None
 
         def event_metadata(event):
-            row = {"event_id": event.event_id, "event_type": int(event.event_type),
-                   "timestamp": timestamp(event.event_time)}
+            row = {
+                "event_id": event.event_id,
+                "event_type": int(event.event_type),
+                "timestamp": timestamp(event.event_time),
+            }
             attribute = event.WhichOneof("attributes")
             row["event_type_name"] = attribute
             if attribute:
                 value = getattr(event, attribute)
-                for key in ("activity_id", "scheduled_event_id", "started_event_id", "timer_id", "new_execution_run_id"):
+                for key in (
+                    "activity_id",
+                    "scheduled_event_id",
+                    "started_event_id",
+                    "timer_id",
+                    "new_execution_run_id",
+                ):
                     field = getattr(value, key, None)
                     if field is not None:
                         row[key] = bounded_text(field) if isinstance(field, str) else field
@@ -2462,29 +2730,47 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
                 return
             remote["rpc_phase"] = "describe"
             description = await handle.describe(rpc_timeout=timedelta(seconds=5))
-            remote.update({"workflow_id": bounded_text(description.id), "run_id": bounded_text(description.run_id),
-                           "status": int(description.status), "history_length": description.history_length})
+            remote.update(
+                {
+                    "workflow_id": bounded_text(description.id),
+                    "run_id": bounded_text(description.run_id),
+                    "status": int(description.status),
+                    "history_length": description.history_length,
+                }
+            )
             if description.id != handle.id or not isinstance(description.run_id, str) or not description.run_id:
                 remote["capture_gap"] = "unresolved_execution_identity"
                 return
             raw = description.raw_description
             pending = raw.pending_activities
-            remote["pending_activities"] = [{"activity_id": bounded_text(item.activity_id),
-                "activity_type": bounded_text(item.activity_type.name), "state": int(item.state)} for item in pending[:16]]
+            remote["pending_activities"] = [
+                {
+                    "activity_id": bounded_text(item.activity_id),
+                    "activity_type": bounded_text(item.activity_type.name),
+                    "state": int(item.state),
+                }
+                for item in pending[:16]
+            ]
             remote["pending_activities_dropped"] = max(0, len(pending) - 16)
             task = raw.pending_workflow_task
-            remote["pending_workflow_task"] = {"present": raw.HasField("pending_workflow_task"),
-                "state": int(task.state), "attempt": task.attempt,
-                "scheduled_time": timestamp(task.scheduled_time), "started_time": timestamp(task.started_time)}
+            remote["pending_workflow_task"] = {
+                "present": raw.HasField("pending_workflow_task"),
+                "state": int(task.state),
+                "attempt": task.attempt,
+                "scheduled_time": timestamp(task.scheduled_time),
+                "started_time": timestamp(task.started_time),
+            }
             pinned = client.get_workflow_handle(description.id, run_id=description.run_id)
             remote["rpc_phase"] = "close_event"
-            close = await pinned.fetch_history(event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT,
-                                               rpc_timeout=timedelta(seconds=5))
+            close = await pinned.fetch_history(
+                event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT, rpc_timeout=timedelta(seconds=5)
+            )
             remote["close_events"] = [event_metadata(event) for event in close.events[:4]]
             remote["close_events_dropped"] = max(0, len(close.events) - 4)
             remote["rpc_phase"] = "history"
-            async for event in pinned.fetch_history_events(page_size=64, wait_new_event=False,
-                                                          rpc_timeout=timedelta(seconds=5)):
+            async for event in pinned.fetch_history_events(
+                page_size=64, wait_new_event=False, rpc_timeout=timedelta(seconds=5)
+            ):
                 events.append(event_metadata(event))
                 scanned += 1
                 if scanned == 1024:
@@ -2500,10 +2786,16 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
             await asyncio.wait_for(observe(), timeout=5)
         except (Exception, asyncio.CancelledError) as capture_error:
             remote["capture_gap"] = type(capture_error).__name__[:128]
-        remote.update({"rpc_finished_at": datetime.now(timezone.utc).isoformat(),
-                       "rpc_elapsed_seconds": asyncio.get_running_loop().time() - rpc_started_monotonic,
-                       "events_scanned": scanned, "events_dropped": max(0, scanned - len(events)),
-                       "events": list(events), "losses": dict(losses)})
+        remote.update(
+            {
+                "rpc_finished_at": datetime.now(timezone.utc).isoformat(),
+                "rpc_elapsed_seconds": asyncio.get_running_loop().time() - rpc_started_monotonic,
+                "events_scanned": scanned,
+                "events_dropped": max(0, scanned - len(events)),
+                "events": list(events),
+                "losses": dict(losses),
+            }
+        )
         stage = "remote_write"
         write_once(owned / "remote.json", remote, 32768)
     except (Exception, asyncio.CancelledError) as capture_error:
@@ -2959,6 +3251,12 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf._pending_approval_resume = {"request_id": "approval-1", "reminder_sent": True}
     wf._last_signal_response = "continue"
     wf._has_new_messages = True
+    from helpers.wait_wake import first_wake, has_user_message_since, note_context_snapshot, record_wake, wake_mark
+
+    record_wake(wf, "user_message")
+    note_context_snapshot(wf, wake_mark(wf))
+    record_wake(wf, "agent_message")
+    record_wake(wf, "user_message")
     wf._response_schema_feedback = ["add total"]
     wf._response_schema_revision = 3
     wf._response_schema_applied_revision = 2
@@ -2993,7 +3291,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.custom_system_prompt = "Be concise"
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
-    wf.project_context_section = "## Project\nYou are working in the user's project \"Rose\"."
+    wf.project_context_section = '## Project\nYou are working in the user\'s project "Rose".'
     wf.demo_cache_goal = "stable persisted goal"
     # A simulated agent's clock reads world time (two weeks before today here).
     wf.simulated_clock_offset_seconds = -1_209_600
@@ -3015,6 +3313,15 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.max_iterations is None
     assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (950, 680, 270)
     assert (restored.tree_tokens_in, restored.tree_tokens_out) == (900, 350)
+    assert restored._wait_wake_seq == 3, "continuation reset the reply sequence"
+    assert restored._context_wake_mark == 1
+    assert restored._wait_wake_events == wf._wait_wake_events
+    assert has_user_message_since(restored, 1), "continuation lost durable user progress"
+    assert first_wake(restored, 1, {"user_message"})["seq"] == 3, "continuation lost an unread reply"
+    next_generation = _bare_workflow_instance()
+    next_generation._restore_deployment_state(state)
+    record_wake(next_generation, "user_message")
+    assert wake_mark(next_generation) == 4, "new-generation reply reused an old sequence"
     assert restored._signal_responses == {"approval-1": "APPROVED"}
     assert restored._pending_approval_resume == {
         "request_id": "approval-1",
@@ -4364,22 +4671,31 @@ class _FakeWorkflowModule:
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
-    """Swap workflows.agent_workflow.workflow with a fake; returns original."""
+    """Swap the ``workflow`` module AgentWorkflow's code uses with a fake; returns original.
+
+    Its billing path lives in workflows.usage_tracking (UsageTrackingMixin), so that
+    module's ``workflow`` is swapped with agent_workflow's.
+    """
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     original = m.workflow
     m.workflow = fake
+    usage.workflow = fake
     return original
 
 
 def _restore_workflow(original):
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     m.workflow = original
+    usage.workflow = original
 
 
 async def test_pause_episode_preserves_user_intent_across_automatic_signals():
     from pause_control_provenance import prove_pause_episode_ordering
+
     await prove_pause_episode_ordering()
 
 
@@ -4403,6 +4719,7 @@ async def test_pause_provenance_fixture_restores_network_after_its_proof():
 
 async def test_pause_intent_ends_with_recovered_episode():
     from unittest.mock import AsyncMock
+
     wf = _bare_workflow_instance()
     wf.agent_id = "pause-episode"
     wf._update_tree_state = AsyncMock()
@@ -4443,6 +4760,7 @@ async def test_pause_intent_ends_with_recovered_episode():
             assert not wf.is_paused and not wf._user_pause_active
         # The transient-parent orphan exit and one-shot budget wrap-up also unpause.
         import workflows.agent_workflow as module
+
         wf._orphaned = False
         wf._paused_by_parent = True
         wf.is_paused = True
@@ -4457,8 +4775,9 @@ async def test_pause_intent_ends_with_recovered_episode():
         wf._user_pause_active = True
         wf.price_limit_cents = 10
         wf.subtree_cost_cents = 11
-        wf._maybe_arm_cost_limit_wrapup_after_browser(tool_name="spawn_browser_agent", result={"success": True},
-            paused_before=False, cost_limit_before=False)
+        wf._maybe_arm_cost_limit_wrapup_after_browser(
+            tool_name="spawn_browser_agent", result={"success": True}, paused_before=False, cost_limit_before=False
+        )
         assert not wf.is_paused and not wf._user_pause_active
     finally:
         _restore_workflow(original)
@@ -12178,8 +12497,12 @@ async def test_workflow_retained_output_dispatch_and_error_pairing():
     from tools.read_tool_output import preview_tool_output_activity
 
     registry_tree = ast.parse((Path(__file__).resolve().parents[2] / "worker.py").read_text())
-    registry = next(node.value for node in ast.walk(registry_tree) if isinstance(node, ast.Assign)
-                    and any(isinstance(target, ast.Name) and target.id == "registered_activities" for target in node.targets))
+    registry = next(
+        node.value
+        for node in ast.walk(registry_tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "registered_activities" for target in node.targets)
+    )
     registered_names = {node.id for node in registry.elts if isinstance(node, ast.Name)}
     for fn in (read_tool_output_activity, preview_tool_output_activity):
         assert fn.__temporal_activity_definition.name in registered_names
@@ -12190,8 +12513,14 @@ async def test_workflow_retained_output_dispatch_and_error_pairing():
     receipts = []
 
     async def handle(event, call_id, name):
-        receipts.append({"role": "TOOL", "text": event.message, "metadata": {
-            "toolCallId": call_id, "toolName": name, "toolStatus": event.status.value}})
+        receipts.append(
+            {
+                "role": "TOOL",
+                "text": event.message,
+                "metadata": {"toolCallId": call_id, "toolName": name, "toolStatus": event.status.value},
+            }
+        )
+
     wf._handle_tool_event = handle
 
     async def execute_activity(fn, *, args, **kwargs):
@@ -12204,10 +12533,22 @@ async def test_workflow_retained_output_dispatch_and_error_pairing():
         with retained_tool_output_fixture(), patch.object(reader.workflow, "execute_activity", execute_activity):
             preview = await preview_tool_text("body " * 25000 + "MAIN_TAIL", user_id="user", agent_id="agent")
             output_id = re.search(r'output_id="([a-f0-9]{32})"', preview)[1]
-            result = await wf._execute_tool("read_tool_output", {"output_id": output_id, "query": "MAIN_TAIL", "user_id": "attacker"}, "read-main")
+            result = await wf._execute_tool(
+                "read_tool_output", {"output_id": output_id, "query": "MAIN_TAIL", "user_id": "attacker"}, "read-main"
+            )
             assert not result.get("error"), result
-            context = [{"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
-                {"tool": "read_tool_output", "tool_call_id": "read-main", "output_id": output_id}]}}, receipts[-1]]
+            context = [
+                {
+                    "role": "ASSISTANT",
+                    "text": "",
+                    "metadata": {
+                        "tool_calls": [
+                            {"tool": "read_tool_output", "tool_call_id": "read-main", "output_id": output_id}
+                        ]
+                    },
+                },
+                receipts[-1],
+            ]
             messages = await build_llm_messages(context, "system", user_id="user", agent_id="agent")
             assert "MAIN_TAIL" in messages[-1]["content"]
             for args in ({"output_id": "invalid"}, {"output_id": "f" * 32}):
@@ -13825,19 +14166,55 @@ async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("wf_generic_browser_budget_wrapup", test_workflow_generic_browser_result_gets_existing_budget_wrapup)
-    await r.record_async("wf_background_browser_budget_notification", test_workflow_background_browser_budget_keeps_native_notification_and_result)
-    await r.record_async("browser_usage_child_cost_interleaving", test_workflow_browser_usage_arms_before_child_cost_interleaving)
-    await r.record_async("browser_pricing_preserves_intervening_cost_stop", test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop)
-    await r.record_async("inflight_refusal_preserves_unadmitted_browser_wrapup", test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup)
-    await r.record_async("browser_pricing_preserves_intervening_credit_pause", test_workflow_browser_pricing_preserves_intervening_credit_pause)
-    await r.record_async("browser_pricing_preserves_pause_after_credit_refresh", test_workflow_browser_pricing_preserves_credit_pause_after_refresh)
-    await r.record_async("browser_wrapup_restore_preserves_cached_credit_pause", test_workflow_browser_wrapup_restore_preserves_cached_credit_pause)
-    await r.record_async("armed_wrapup_keeps_refreshed_credit_pause_through_continuation", test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation)
-    await r.record_async("browser_wrapup_restore_requires_unpaused_provenance", test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance)
-    await r.record_async("wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup)
-    await r.record_async("wf_browser_budget_wrapup_pause_controls", test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses)
-    await r.record_async("wf_browser_budget_wrapup_work_and_restore", test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore)
+    await r.record_async(
+        "wf_generic_browser_budget_wrapup", test_workflow_generic_browser_result_gets_existing_budget_wrapup
+    )
+    await r.record_async(
+        "wf_background_browser_budget_notification",
+        test_workflow_background_browser_budget_keeps_native_notification_and_result,
+    )
+    await r.record_async(
+        "browser_usage_child_cost_interleaving", test_workflow_browser_usage_arms_before_child_cost_interleaving
+    )
+    await r.record_async(
+        "browser_pricing_preserves_intervening_cost_stop",
+        test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop,
+    )
+    await r.record_async(
+        "inflight_refusal_preserves_unadmitted_browser_wrapup",
+        test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup,
+    )
+    await r.record_async(
+        "browser_pricing_preserves_intervening_credit_pause",
+        test_workflow_browser_pricing_preserves_intervening_credit_pause,
+    )
+    await r.record_async(
+        "browser_pricing_preserves_pause_after_credit_refresh",
+        test_workflow_browser_pricing_preserves_credit_pause_after_refresh,
+    )
+    await r.record_async(
+        "browser_wrapup_restore_preserves_cached_credit_pause",
+        test_workflow_browser_wrapup_restore_preserves_cached_credit_pause,
+    )
+    await r.record_async(
+        "armed_wrapup_keeps_refreshed_credit_pause_through_continuation",
+        test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation,
+    )
+    await r.record_async(
+        "browser_wrapup_restore_requires_unpaused_provenance",
+        test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance,
+    )
+    await r.record_async(
+        "wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup
+    )
+    await r.record_async(
+        "wf_browser_budget_wrapup_pause_controls",
+        test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses,
+    )
+    await r.record_async(
+        "wf_browser_budget_wrapup_work_and_restore",
+        test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore,
+    )
     await r.record_async("wf_retained_output_dispatch", test_workflow_retained_output_dispatch_and_error_pairing)
 
     await r.record_async(
@@ -13993,7 +14370,9 @@ async def run_all_tests():
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
     await r.record_async("pause_intent_ends_with_recovered_episode", test_pause_intent_ends_with_recovered_episode)
     await r.record_async("pause_episode_ordering", test_pause_episode_preserves_user_intent_across_automatic_signals)
-    await r.record_async("pause_provenance_fixture_restores_network", test_pause_provenance_fixture_restores_network_after_its_proof)
+    await r.record_async(
+        "pause_provenance_fixture_restores_network", test_pause_provenance_fixture_restores_network_after_its_proof
+    )
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async(

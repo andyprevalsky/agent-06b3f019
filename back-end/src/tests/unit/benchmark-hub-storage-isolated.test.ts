@@ -322,3 +322,49 @@ test('isolated Hub reads return null for confirmed SDK 404 within the private pr
   assert.equal(await getObject('index.json'), null);
   assert.deepEqual(fixture.keys, [`benchmark-hub-isolated/${id}/index.json`]);
 });
+
+test('BENCHMARK_HUB_LOCAL_DIR gives each local Hub process its own index', () => {
+  // Concurrent coverage shards share one checkout but use separate databases,
+  // so their per-database index locks cannot serialize one shared index.json.
+  const module = path.resolve(__dirname, '../../providers/benchmarkHubStorage.ts');
+  const ownership = path.resolve(__dirname, '../../providers/benchmarkHubStorageOwnership.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-local-dir-'));
+  try {
+    const dirs = ['shard1', 'shard2'].map((name) => path.join(root, name));
+    for (const [index, dir] of dirs.entries()) {
+      const result = spawnSync(
+        process.execPath,
+        [
+          '--import',
+          'tsx',
+          '-e',
+          `const { putObject, getObjectStrict } = require(${JSON.stringify(module)});
+           const { withHubStorageOwnership } = require(${JSON.stringify(ownership)});
+           withHubStorageOwnership(async () => {
+             await putObject('index.json', ${JSON.stringify(`[{"shard":${index}}]`)});
+             process.stdout.write(String(await getObjectStrict('index.json')));
+           }).catch((error) => { console.error(error); process.exit(1); });`,
+        ],
+        {
+          cwd: process.cwd(),
+          env: {
+            PATH: process.env.PATH,
+            BENCHMARK_HUB_STORAGE: 'local',
+            BENCHMARK_HUB_LOCAL_DIR: dir,
+            RENDER: 'false',
+          },
+          encoding: 'utf8',
+          timeout: 30_000,
+        }
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, `[{"shard":${index}}]`);
+    }
+    assert.deepEqual(
+      dirs.map((dir) => fs.readFileSync(path.join(dir, 'index.json'), 'utf8')),
+      ['[{"shard":0}]', '[{"shard":1}]']
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

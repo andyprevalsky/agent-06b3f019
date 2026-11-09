@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1857-rca784d/20261108T233405Z-post-cutoff.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "bee3acbac05f6740f78119c1e04b017967e0c5f37cd504a777b348abf4ed48af",
+  "gzip_sha256": "ee7ce7f4195568b2bd6ce7d33efceca59738a61f8f64a396052cb18a6a45b455",
+  "stored_bytes": 35001,
+  "frames": 1,
+  "files": 16,
+  "original_bytes": 195487,
+  "manifest_sha256": "05abdb41ef634b6990dfa6cdf21ebcef0382f254a7161810ca6186299e1f5e0f",
+  "full_readback_verified": true
+}

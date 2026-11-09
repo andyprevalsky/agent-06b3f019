@@ -1,0 +1,37 @@
+{
+ "format": "PR-CLOSEOUT-V1",
+ "pr": 1826,
+ "merged_sha": "95d5350e1ffaae992feb47e1e6f2a9591ebac769",
+ "gated_source": "b33ba4784c4342ed9270e8a16c90898888c29842",
+ "source_digest": "a2fe6afd477b42108370d3b27cc83de32545a42a98bd15504a5098bceea71a2e",
+ "purpose": "whole-devbox deploy of rose-ui/subagent-row-fixes: 12 user-requested Rose UI and agent changes (C1-C12: waiting label removed, dock code-agent row truncation, task names, clickable dock rows, resizable pinned sidebar, task names in the left bar, 'Waiting for <Task Title>' with agent icons, 50-per-page newest-first work history, held agent-to-code-agent turns during direct chat, resume-on-message for stopped agents with container state, container resource light, code-agent model and speed in the query box)",
+ "criteria": "all 12 criteria cross-reviewed PASS before freeze; tracker archived in devbox-closeout-private/pr1826-95d5350e/final (.context/subagent-row-fixes/criteria.txt)",
+ "outcome": "completed with recorded exceptions: AgentCard production lifecycle is an external exception (credential or billing change only the user can make); smoke agent-payment-abandonment is the standing AgentCard release-stall resource_skip; CodeRabbit verification of the cycle-1 fixes and the main-sync resolution was blocked by the organization's usage spending cap",
+ "gates": "16/16 selected gates on b33ba4784 (round 9): 15 PASS incl. backend-coverage 255/255; smoke 12 PASS + agent-payment-abandonment SKIPPED (resource_skip agentcard_release_stall, never PASS); mac-app-coverage-blackbox and mac-app-static PLATFORM_OMITTED (unverified on Linux). Earlier rounds fixed: GitHub release-download outage in runner setup (authenticated cached fetch), Codex speed source pin, structural import, 20->50 Playwright specs, relay flyctl status stall (bounded retry), two host-buffer-dependent relay tests. Live Tilion parity failed rounds 5-8 with ERR_NAME_NOT_RESOLVED (NOT_INTRODUCED, unchanged browser code) and passed in round 9, so no handoff was needed",
+ "review": "CodeRabbit spending cap on most heads (skip usage-cap); one real review on 269fa4b38 with 7 inline + 1 outside-diff findings, all fixed in facc13c48 with regressions and answered [FIXED]; verification cycles on facc13c48 and b33ba4784 skipped (usage-cap): merged unreviewed by CodeRabbit for those changes. Substitute adversarial reviews ran earlier. AB-1 (agent-behavior) and Z-1 (Zod) approvals GROUNDED by golden-reference reviewers",
+ "production": {
+  "render": "PASS: live on 95d5350e1",
+  "fly": "PASS: deploy-agents run 42530084762 attempt 1, cutover job SUCCEEDED + monitor --verify",
+  "vercel": "PASS",
+  "mac_release": "PASS: v1.1.298 release run 42530114621",
+  "backend_probes": "PASS: /health + /api/agents 200, endpoint smoke passed, Render log clean",
+  "workflow_migration": "PASS",
+  "semantic": "PASS: chat-lifecycle-ratchet run 42531068530 success (first lane poll hit the GITHUB_TOKEN REST rate limit; lane rerun resumed the recorded run)",
+  "agentcard_production": "FAIL, external exception: production payment identity 00000000-0000-4000-8000-000000000107 has stripeLivemode=False; the run refused at preflight before minting a card or placing a hold (evidence/failure-report.json)"
+ },
+ "delegated": {},
+ "followups": [
+  "AgentCard production lifecycle needs a KYC-passed live-mode cardholder payer fixture from the user",
+  "AgentCard sandbox release stall recurring on smoke agent-payment-abandonment (closed card, balance 0, transfer consumed, releasedCents=0)",
+  "CodeRabbit organization usage spending cap blocked review on most heads (billing setting only the user can change)",
+  "Held-spawn history-boundary attribution of the user's later chat turns (C9 design trade-off, judged not user-visible)",
+  "Model-supplied '_'-prefixed tool args (pre-existing _fresh_conversation pattern) could inject resume attachments: hardening follow-up (no failed test, so not a deploy handoff)",
+  "Owner-woken browser resume: after a paused-then-finished run, the marker inbox number can be one low until the owner lists the new run",
+  "scripts/deploy merge re-prepends PATH, so a cycle launched outside scripts/deploy fails verify with exit 5; gates and merge should share one entrypoint"
+ ],
+ "evidence": {
+  "archives": "archive-receipts.json (core, cloud, final) under devbox-closeout-private/pr1826-95d5350e/",
+  "restore": "agents/venv/bin/python docs/handoffs/pr-1826-closeout/closeout_archive.py --env back-end/.env restore --receipt <receipt> --destination <dir>",
+  "failure_report": "evidence/failure-report.json"
+ }
+}

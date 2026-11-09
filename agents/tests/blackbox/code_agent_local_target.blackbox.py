@@ -198,10 +198,13 @@ async def test_spawn_agent_forwards_target_to_code_manager():
     with patch.object(spawn_handler, "get_code_manager", lambda: _Manager()):
         manager = spawn_handler.SpawnAgentManager()
         async for _ in manager._spawn_code(
-            instance, {"type": "code", "goal": "g", "output_schema": SCHEMA, "target": "local"}, "tc"
+            instance,
+            {"type": "code", "goal": "g", "output_schema": SCHEMA, "target": "local", "task_name": "fix_parser"},
+            "tc",
         ):
             pass
     assert seen["target"] == "local", seen
+    assert seen["task_name"] == "fix_parser", seen
     assert seen["tool"] == "spawn_claude_code_agent"
 
 

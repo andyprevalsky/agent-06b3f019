@@ -33,6 +33,7 @@ import {
   cleanupTerminalAgentWorkflowZombies,
   type WorkflowTerminalCleanupDependencies,
 } from './workflowTerminalCleanup';
+import { terminateCodeAgentResumeRuns } from './codeAgentResumeWorkflow';
 
 const log = createLogger('AgentKill');
 
@@ -210,6 +211,13 @@ async function deleteAgentRecursiveInternal(
       }
     }
 
+    // Code / browser agents the person resumed outside this agent's workflow end with it.
+    await terminateCodeAgentResumeRuns(agentId).catch((error: unknown) => {
+      log.warn('Terminating resume runs failed', {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     await cleanupAgentSessions(agentId);
 
     let ownWorkflowTerminated = true;

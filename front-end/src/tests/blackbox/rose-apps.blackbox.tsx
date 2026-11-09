@@ -15,6 +15,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import { makeItem as makePlaidItem } from './plaid.fixtures';
+import { resolvedLeft } from './rose-sidebar.fixtures';
 
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
@@ -194,7 +195,8 @@ describe('top-right app icons', () => {
     expect(drawer).toHaveAttribute('data-state', 'open');
     // Full height, from the left bar to the window's right edge; no close X.
     expect(drawer).toHaveAttribute('data-variant', 'full');
-    expect(drawer.style.left).toBe('64px');
+    // Left follows the Rose bar's published offset (a pinned bar's width), else 64px.
+    expect(resolvedLeft(drawer)).toBe('64px');
     expect(drawer.style.right).toBe('0px');
     expect(drawer.style.top).toBe('0px');
     expect(within(drawer).queryByRole('button', { name: /close/i })).toBeNull();

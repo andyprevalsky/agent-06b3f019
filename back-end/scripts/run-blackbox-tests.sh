@@ -108,6 +108,9 @@ export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/use
 # display-tool media (domains/display) uses the same hermetic local store.
 export DISPLAY_STORAGE_BACKEND=local
 export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/display-storage}"
+# Local Benchmark Hub index: its lock is per database, so a run beside another
+# stack on this checkout (different database) needs its own directory.
+export BENCHMARK_HUB_LOCAL_DIR="${BENCHMARK_HUB_LOCAL_DIR:-$ARTIFACT_DIR/benchmark-hub}"
 # User-tool handlers (POST /api/user-ui/tools/run) run in a local code-session
 # HOME instead of E2B; the backend refuses this mode in production.
 export USER_TOOLS_SESSION_SANDBOX=local
