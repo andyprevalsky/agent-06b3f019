@@ -917,6 +917,8 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
     try:
         payment_request = RequestPaymentCardBrowserTool.model_validate({"tool": context.action_name, **context.params})
         for item in payment_request.line_items:
+            if item.product_url is None:
+                continue
             validate_product_url_for_pages(
                 item.product_url,
                 [*(context.trusted_page_urls or []), context.current_url],

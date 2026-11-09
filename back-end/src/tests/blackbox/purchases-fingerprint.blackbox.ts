@@ -398,6 +398,32 @@ async function testReviewlessItemParity(): Promise<void> {
     }) === '489240d7ed3996a8db136ab77034810ec1652fa8349c05f9a91759e5a896d65c',
     'a line item without rating or review count must fingerprint exactly like Python normalize_payment_payload'
   );
+
+  // Owner decision 2026-11-08: product URL is optional too; an absent one is omitted.
+  const noProductUrl = {
+    currency: 'USD',
+    lineItems: [
+      {
+        name: 'Resort fee',
+        imageUrl: 'https://example.test/fee.png',
+        unitPriceCents: 4500,
+        quantity: 1,
+        lineTotalCents: 4500,
+      },
+    ],
+    fees: [],
+    subtotalCents: 4500,
+    totalCents: 4500,
+  };
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Hotel Example',
+      lineItemsJson: noProductUrl,
+      totalCents: 4500,
+    }) === 'e7a65a3af733400db0f71a9724d03e278de9ebfb36d29d3e6f23ba7284963e2b',
+    'a line item without a product URL must fingerprint exactly like Python normalize_payment_payload'
+  );
 }
 
 async function testBackfillBeyondTwenty(): Promise<void> {

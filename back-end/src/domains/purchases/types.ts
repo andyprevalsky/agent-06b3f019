@@ -10,7 +10,8 @@ export type { PurchaseSpend };
 export interface PurchaseLineItem {
   name: string;
   imageUrl?: string | null;
-  productUrl: string;
+  /** Optional: the item's own product page; absent when it has none (never a cart or checkout URL). */
+  productUrl?: string;
   /** Optional: shown only when the page shows a rating (any scale, as written). */
   rating?: string;
   /** Optional: shown only when the page shows a review count. */

@@ -119,10 +119,25 @@ them instead of passing "0 stars"/"0 reviews". Regressions:
 request-payment-card domain), `testReviewlessItemParity` (backend purchases-fingerprint
 blackbox) and the approval-card render test in `low-cov-chips.blackbox.tsx`.
 
+### Product URL optional too (owner decision, 2026-11-08)
+
+`product_url` is the item's own product page when it has one; an item with no page of its
+own (a hotel night, a fee, a service) is sent with its `image_url` or nothing, never the
+page where it was selected and never a cart or checkout URL. It is optional on
+`PaymentLineItem`, `WriteLockPurchaseItem` and both provider tool schemas. A given URL keeps
+the existing checks: a well-formed absolute http(s) URL and a host the browser visited (no
+page-type vocabulary filter; main removed that deliberately). An absent URL is omitted from
+the approval payload, the approval question prints no Product line, the approval card shows
+the image and no link, and backend approval reuse still requires a URL on every item, so such
+an item always gets a fresh approval. Regressions:
+`test_card_request_without_product_url_is_accepted_and_given_urls_stay_checked`, the
+no-product-URL case in `testReviewlessItemParity` and the approval-card no-link render test.
+
 ## Human feedback
 
 Andy (2026-11-08): rating and review count must not be required for a payment approval;
-when a rating is present, keep it exactly as the page shows it, on any scale.
+when a rating is present, keep it exactly as the page shows it, on any scale. Product URL
+is optional: the item's own product page, else its image URL or nothing.
 
 ## Reusable lesson
 

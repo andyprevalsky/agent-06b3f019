@@ -162,16 +162,10 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         else:
             raise AssertionError(f"PaymentLineItem accepted non-positive {field_name}")
 
-    # Rating and review count are optional (owner decision 2026-11-08); the product URL is not.
-    for required_field in ("product_url",):
-        invalid_item = {**valid_item}
-        invalid_item.pop(required_field)
-        try:
-            PaymentLineItem.model_validate(invalid_item)
-        except ValidationError:
-            pass
-        else:
-            raise AssertionError(f"PaymentLineItem accepted missing {required_field}")
+    # Product URL, rating and review count are optional (owner decisions 2026-11-08).
+    for optional_field in ("product_url", "rating", "review_count"):
+        item_without = {key: value for key, value in valid_item.items() if key != optional_field}
+        assert getattr(PaymentLineItem.model_validate(item_without), optional_field) is None, optional_field
 
     # product_url is validated for WELL-FORMEDNESS ONLY. Page-type inference
     # (product vs checkout vs storefront) was removed by decision: every merchant
@@ -463,21 +457,8 @@ def test_card_request_without_rating_or_reviews_is_accepted():
     line_item_schema = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"]
     assert "rating" not in line_item_schema["required"], line_item_schema["required"]
     assert "review_count" not in line_item_schema["required"], line_item_schema["required"]
-    assert "product_url" in line_item_schema["required"], line_item_schema["required"]
-
-    # The product URL is still required.
-    from pydantic import ValidationError
-
-    from browser_tools.schemas import PaymentLineItem
-
-    without_url = {**request["line_items"][0]}
-    without_url.pop("product_url")
-    try:
-        PaymentLineItem.model_validate(without_url)
-    except ValidationError:
-        pass
-    else:
-        raise AssertionError("PaymentLineItem accepted an item without product_url")
+    for still_required in ("name", "unit_price_cents", "quantity", "line_total_cents"):
+        assert still_required in line_item_schema["required"], line_item_schema["required"]
 
 
 def test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected():
@@ -502,6 +483,74 @@ def test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected():
             except ValidationError:
                 continue
             raise AssertionError(f"{model.__name__} accepted {nonsense!r} as rating {parsed.rating!r}")
+
+
+def test_card_request_without_product_url_is_accepted_and_given_urls_stay_checked():
+    """Owner decision (2026-11-08): product_url is optional.
+
+    An item without a page of its own (a hotel night, a fee, a service) is sent with
+    its image or nothing; the approval then shows no product link. When a URL is
+    given, the existing checks still apply: well-formed absolute http(s), and a host
+    the browser actually visited.
+    """
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import (
+        GenerateWriteLockNotificationTool,
+        PaymentLineItem,
+        WriteLockPurchaseItem,
+        validate_browser_tool_args,
+    )
+    from domains.request_payment_card.service import build_payment_question, normalize_payment_payload
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+    from utils.purchase_approval import validate_product_url_for_pages
+
+    request = _sample_tool_call()
+    for item in request["line_items"]:
+        item.pop("product_url")
+
+    parsed = validate_browser_tool_args("request_payment_card", request)
+    assert parsed["line_items"][0].get("product_url") is None, parsed["line_items"][0]
+    payload = normalize_payment_payload(request, "user-123")
+    item = payload["lineItems"][0]
+    assert "productUrl" not in item, item
+    assert item["imageUrl"] == "https://example.com/lamp.png"
+    question = build_payment_question(payload)
+    assert "Product:" not in question and "None" not in question, question
+
+    assert WriteLockPurchaseItem.model_validate({"title": "King room, 1 night"}).product_url is None
+    GenerateWriteLockNotificationTool.model_validate(
+        {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "book room",
+            "service": {"name": "Hotel", "domain": "hotel.example", "url": "https://hotel.example/checkout"},
+            "purchase": {"items": [{"title": "King room, 1 night"}]},
+        }
+    )
+
+    line_item_schema = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"]
+    assert "product_url" not in line_item_schema["required"], line_item_schema["required"]
+    write_lock_item_schema = BROWSER_USE_TOOLS["generate_write_lock_notification"]["params"]["purchase"][
+        "properties"
+    ]["items"]["items"]
+    assert write_lock_item_schema["required"] == ["title"], write_lock_item_schema["required"]
+
+    # A given URL is still checked: malformed is rejected...
+    valid_item = _sample_tool_call()["line_items"][0]
+    for malformed in ("not a url", "/checkout/session/123", "ftp://example.com/p/1"):
+        try:
+            PaymentLineItem.model_validate({**valid_item, "product_url": malformed})
+        except ValidationError:
+            continue
+        raise AssertionError(f"PaymentLineItem accepted malformed product_url {malformed!r}")
+    # ...and so is a host the browser never visited.
+    try:
+        validate_product_url_for_pages("https://attacker.example/p/1", ["https://example.com/checkout"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unvisited product_url host was accepted")
 
 
 def test_payment_tool_accepts_flexible_merchant_labels():
@@ -1304,6 +1353,10 @@ async def run_all_tests():
     result.record(
         "rating_any_scale_kept_nonsense_rejected",
         test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected,
+    )
+    result.record(
+        "card_request_without_product_url",
+        test_card_request_without_product_url_is_accepted_and_given_urls_stay_checked,
     )
     result.record(
         "flexible_merchant_labels",

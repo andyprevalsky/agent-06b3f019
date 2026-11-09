@@ -563,10 +563,11 @@ class PaymentLineItem(BaseModel):
         description="Product image URL if visible",
         validation_alias=AliasChoices("image_url", "imageUrl"),
     )
-    product_url: str = Field(
+    product_url: Optional[str] = Field(
+        default=None,
         description=(
-            "Canonical product-detail page URL for this item. This must link to the product itself, "
-            "never a cart, basket, checkout, payment, or order-confirmation page."
+            "This item's own product page URL, when it has one; omit it when the item has no page of its "
+            "own. Never a cart, basket, checkout, payment, or order-confirmation page."
         ),
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
@@ -601,7 +602,9 @@ class PaymentLineItem(BaseModel):
 
     @field_validator("product_url")
     @classmethod
-    def require_product_detail_url(cls, value: str) -> str:
+    def require_product_detail_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
         return validate_product_detail_url(value)
 
     @field_validator("rating")
@@ -633,9 +636,9 @@ class RequestPaymentCardBrowserTool(BaseModel):
     currency: Literal["USD"] = Field(default="USD", description="Purchase currency; currently only USD")
     line_items: List[PaymentLineItem] = Field(
         description=(
-            "Full itemized receipt. Every item must include its canonical product-detail URL, image URL "
-            "if visible, quantity, unit price, and line total, and its rating and review count when the "
-            "page shows them."
+            "Full itemized receipt. Every item must include its image URL if visible, quantity, unit price, "
+            "and line total, plus its own product page URL when it has one, and its rating and review count "
+            "when the page shows them."
         ),
         min_length=1,
         validation_alias=AliasChoices("line_items", "lineItems"),
@@ -738,8 +741,9 @@ class WriteLockPurchaseItem(BaseModel):
         validation_alias=AliasChoices("review_count", "reviewCount", "reviews"),
     )
     image_url: Optional[str] = Field(default=None, description="Best image URL for this item.")
-    product_url: str = Field(
-        description="Required canonical product-detail URL; never use a cart, checkout, payment, or order URL.",
+    product_url: Optional[str] = Field(
+        default=None,
+        description="This item's own product page URL, when it has one; never use a cart, checkout, payment, or order URL.",
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
     seller: Optional[str] = Field(default=None, description="Visible seller or merchant for this item.")
@@ -774,7 +778,9 @@ class WriteLockPurchaseItem(BaseModel):
 
     @field_validator("product_url")
     @classmethod
-    def require_product_detail_url(cls, value: str) -> str:
+    def require_product_detail_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
         return validate_product_detail_url(value)
 
 
@@ -972,6 +978,8 @@ class GenerateWriteLockNotificationTool(BaseModel):
         if self.trigger_type == "purchase" and self.purchase is not None:
             trusted_page_urls = (info.context or {}).get("trusted_page_urls")
             for item in self.purchase.items:
+                if item.product_url is None:
+                    continue
                 if trusted_page_urls:
                     validate_product_url_for_pages(item.product_url, trusted_page_urls)
                 else:

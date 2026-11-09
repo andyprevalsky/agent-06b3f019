@@ -596,10 +596,9 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert "told you not to use a saved payment method" in payment["description"]
     assert "valid saved payment method is already selected" in payment["description"]
     line_items = payment["input_schema"]["properties"]["line_items"]
-    # Rating and review count are optional per line item (owner decision 2026-11-08).
+    # Product URL, rating and review count are optional per line item (owner decisions 2026-11-08).
     assert line_items["items"]["required"] == [
         "name",
-        "product_url",
         "unit_price_cents",
         "quantity",
         "line_total_cents",
@@ -608,7 +607,7 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
 
     write_lock = tools[4]
     purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
-    assert purchase_item["required"] == ["title", "product_url"]
+    assert purchase_item["required"] == ["title"]
     review_count_description = purchase_item["properties"]["review_count"]["description"]
     assert "followed by 'reviews' or 'ratings'" in review_count_description
     assert "312 reviews" in review_count_description
@@ -842,32 +841,34 @@ def test_write_lock_notification_schema_normalizes_nested_total_aliases():
 
 
 def test_write_lock_purchase_schema_rejects_missing_product_context():
+    """Owner decisions 2026-11-08: product URL, rating and review count are optional;
+    an item still needs its title."""
     from pydantic import ValidationError
 
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
+    def notification(items):
+        return {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "buy item",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "url": "https://www.amazon.com/checkout",
+            },
+            "purchase": {"items": items},
+        }
+
+    parsed = GenerateWriteLockNotificationTool.model_validate(notification([{"title": "Beanie"}]))
+    item = parsed.purchase.items[0]
+    assert item.product_url is None and item.rating is None and item.review_count is None
     try:
-        GenerateWriteLockNotificationTool.model_validate(
-            {
-                "tool": "generate_write_lock_notification",
-                "trigger_type": "purchase",
-                "action": "buy item",
-                "service": {
-                    "name": "Amazon",
-                    "domain": "amazon.com",
-                    "url": "https://www.amazon.com/checkout",
-                },
-                "purchase": {"items": [{"title": "Beanie"}]},
-            }
-        )
+        GenerateWriteLockNotificationTool.model_validate(notification([{"product_url": "https://www.amazon.com/dp/B1"}]))
     except ValidationError as error:
-        message = str(error)
-        assert "product_url" in message
-        # Rating and review count are optional (owner decision 2026-11-08).
-        assert "rating" not in message
-        assert "review_count" not in message
+        assert "title" in str(error)
     else:
-        raise AssertionError("purchase approval accepted an item without a product URL")
+        raise AssertionError("purchase approval accepted an item without a title")
 
 
 def test_write_lock_purchase_schema_accepts_current_page_as_product_link():
@@ -3128,10 +3129,13 @@ def test_phone_off_matches_prephone_bytes():
     request_payment_card and write-lock purchase item schemas no longer require them and
     their descriptions say to include them when the page shows them. Only the tools
     hashes changed in both modes.
+    Re-pinned for optional product URL (owner decision, 2026-11-08): the line-item and
+    write-lock product_url descriptions ask for the item's own product page when it has
+    one, and neither schema requires it. Only the tools hashes changed in both modes.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('f07204c15469d8817c645ca6e92051ff5ca09df632bd0f274bad5aeff2a063c6', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('b889a56b4ebbbcf0f5e9754693a225c939708d779dd312b4c78eefe4a1f87a1f', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
+    expected = {'0': ('55b80d07e508a337b366498a0b3bec6926e247bb2c5ca69af5f70a53264583ef', 'f4dfd7f6b8659cbbba4ecc55efbd534674283beac410a9e0a7bf7430a57e41de', '550edd5d50673afe23ac73756bed079572c67ce007a3fd3b34feff42017881d5'), '1': ('6d5766628e2c25519fd1e92ac05f324348878ef04f5fe5ea46c1b28c34f18c6a', '7ec76365638b1b0ef34a43a7614dad8419330a8d13f240736b0253c2ca1fbac2', '0a28d1ad1849a993f24c543e4e149e019758d3e6f1494b4acafc97243cefdc4a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

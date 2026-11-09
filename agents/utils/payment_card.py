@@ -58,7 +58,8 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
         if not isinstance(item, dict):
             continue
-        product_url = validate_product_detail_url(item.get("product_url") or item.get("productUrl"))
+        raw_product_url = item.get("product_url") or item.get("productUrl")
+        product_url = validate_product_detail_url(raw_product_url) if str(raw_product_url or "").strip() else None
         rating = validate_product_rating(item.get("rating"))
         review_count = validate_product_review_count(item.get("review_count") or item.get("reviewCount"))
         line_item = {
@@ -71,8 +72,8 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
             "quantity": _to_int(item.get("quantity")) or 1,
             "lineTotalCents": _to_int(item.get("line_total_cents") or item.get("lineTotalCents")),
         }
-        # Rating and review count are optional; an absent one is omitted, never null.
-        for optional_key in ("rating", "reviewCount"):
+        # Product URL, rating and review count are optional; an absent one is omitted, never null.
+        for optional_key in ("productUrl", "rating", "reviewCount"):
             if line_item[optional_key] is None:
                 del line_item[optional_key]
         line_items.append(line_item)
@@ -266,7 +267,8 @@ def build_payment_question(payload: Dict[str, Any]) -> str:
         qty = item.get("quantity") or 1
         line_total = (item.get("lineTotalCents") or 0) / 100
         lines.append(f"- {name} x{qty}: ${line_total:.2f}")
-        lines.append(f"  Product: <{item.get('productUrl')}>")
+        if item.get("productUrl"):
+            lines.append(f"  Product: <{item.get('productUrl')}>")
         rating, review_count = item.get("rating"), item.get("reviewCount")
         if rating and review_count:
             lines.append(f"  Reviews: {_approval_plain_text(rating)} ({_approval_plain_text(review_count)})")

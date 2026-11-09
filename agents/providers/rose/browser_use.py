@@ -311,9 +311,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "payment method. Otherwise, if a valid saved payment method is already selected and no card entry is "
             "required, do not call this tool; continue with that saved method. Before typing any new card details, "
             "first read the full itemized receipt off "
-            "the page and visit each product page as needed. Every item MUST include its canonical product-detail "
-            "URL (never the cart or checkout URL), plus its name, image URL if visible, unit price in cents, "
-            "quantity, and line total in cents, and its rating and review count when the page shows them. "
+            "the page and visit each product page as needed. Every item MUST include its name, image URL if "
+            "visible, unit price in cents, quantity, and line total in cents, plus its own product page URL when "
+            "it has one (never the cart or checkout URL), and its rating and review count when the page shows "
+            "them. "
             "Include every fee, the "
             "subtotal, and the final total. After the user approves, the card is "
             "minted on demand and the one-time card refs are returned for you to type into the payment fields. "
@@ -329,7 +330,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "line_items": {
                 "type": "array",
                 "description": (
-                    "Full itemized receipt. Canonical product links are required for every item."
+                    "Full itemized receipt. Include each item's own product page link when it has one."
                 ),
                 "required": True,
                 "items": {
@@ -351,8 +352,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                         "product_url": {
                             "type": "string",
                             "description": (
-                                "Canonical product-detail URL. Never use a cart, basket, checkout, payment, "
-                                "or order-confirmation URL."
+                                "This item's own product page URL, when it has one; omit it when the item has "
+                                "no page of its own. Never a cart, basket, checkout, payment, or "
+                                "order-confirmation page."
                             ),
                         },
                         "rating": {
@@ -379,7 +381,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     },
                     "required": [
                         "name",
-                        "product_url",
                         "unit_price_cents",
                         "quantity",
                         "line_total_cents",
@@ -436,8 +437,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "purchase": {
                 "type": "object",
                 "description": (
-                    "Required when trigger_type is purchase. Every item MUST include a canonical product-detail URL, "
-                    "and its rating and review count when the page shows them. Never use the current cart or "
+                    "Required when trigger_type is purchase. Include each item's own product page URL when it has "
+                    "one, and its rating and review count when the page shows them. Never use the current cart or "
                     "checkout URL."
                 ),
                 "properties": {
@@ -478,12 +479,12 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                 "image_url": {"type": "string", "description": "Best visible product image URL"},
                                 "product_url": {
                                     "type": "string",
-                                    "description": "Required canonical product-detail URL; never cart or checkout",
+                                    "description": "This item's own product page URL, when it has one; never cart or checkout",
                                 },
                                 "seller": {"type": "string", "description": "Visible seller"},
                                 "shipping": {"type": "string", "description": "Visible delivery details"},
                             },
-                            "required": ["title", "product_url"],
+                            "required": ["title"],
                             "additionalProperties": False,
                         },
                     },
