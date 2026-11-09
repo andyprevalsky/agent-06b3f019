@@ -291,7 +291,7 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
             select: { preferredBrowserConfig: true },
           })
         )?.preferredBrowserConfig,
-      defaultProvider: () => 'steel',
+      defaultProvider: () => 'kernel',
       createKernel: async (_contextId, _agentId, location, _startUrl, options) => {
         kernelOptions.push(options);
         return {

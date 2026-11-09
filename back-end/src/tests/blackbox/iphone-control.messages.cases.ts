@@ -1,4 +1,5 @@
 import { messageSafetyCases } from './iphone-control.message-safety.cases';
+import { messageQueueCases } from './iphone-control.message-queue.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -6,6 +7,7 @@ import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { Case } from './iphone-control.cases';
 import { freshSetup, observe, verifierUsage } from './iphone-control.setup-fixtures';
 export const messageCases: Case[] = [
+  ...messageQueueCases,
   ...messageSafetyCases,
   [
     'approved message dispatch is one physical send and sent requires fresh verification',
@@ -115,6 +117,121 @@ export const messageCases: Case[] = [
         const final = await prisma.imessageQueue.findUniqueOrThrow({ where: { id: queue.id } });
         assert.ok(final.sentAt);
         assert.equal(final.lastError, null, 'Unknown verification downgraded sent');
+        const navigation = await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+          method: 'POST',
+          body: {
+            operationId: randomUUID(),
+            operation: 'input.tap',
+            args: { x: 5, y: 5 },
+            setupAttemptId: f.setup.attemptId,
+            setupRevision: f.setup.revision,
+          },
+        });
+        assert.equal(
+          navigation.status,
+          200,
+          'Verified terminal message permanently fenced logical task'
+        );
+        const api = async (path: string, body: unknown) => {
+          const response = await fetch(`${h.base}/api/imessage${path}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': process.env.BACKEND_API_KEY ?? '',
+              'X-User-Id': f.userId,
+            },
+            body: JSON.stringify(body),
+          });
+          return { status: response.status, data: await response.json() };
+        };
+        const second = await api('/queue', {
+          user_id: f.userId,
+          agent_id: f.agentId,
+          phone_number: '+15555550123',
+          message: 'Second approved message',
+          idempotency_key: randomUUID(),
+        });
+        assert.equal(second.status, 200);
+        const nextId = second.data.queue_id as string;
+        try {
+          assert.equal(
+            (
+              await api(`/queue/${nextId}/phone-bind`, {
+                user_id: f.userId,
+                browser_task_id: f.taskId,
+              })
+            ).status,
+            200,
+            'Second approved message could not bind same logical browser'
+          );
+          h.messageVerifier = async () => ({
+            status: 'allowed',
+            x: 50,
+            y: 70,
+            usage: verifierUsage,
+          });
+          h.observationResult = {
+            text: 'Messages To +15555550123 draft Second approved message Send',
+          };
+          const secondRead = await observe(h, f);
+          const secondBody = {
+            ...body,
+            operationId: randomUUID(),
+            args: { queueId: nextId },
+            expectedCursor: secondRead.cursor,
+          };
+          const secondSend = await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+            method: 'POST',
+            body: secondBody,
+          });
+          assert.equal(secondSend.data.operation?.status, 'SUCCEEDED');
+          const taps = h.physicalOperations.filter((op) => op.op === 'input.tap').length;
+          await send();
+          assert.equal(
+            h.physicalOperations.filter((op) => op.op === 'input.tap').length,
+            taps,
+            'Historical intent replay resent message'
+          );
+          assert.equal(
+            (
+              await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+                method: 'POST',
+                body: {
+                  ...secondBody,
+                  operationId: randomUUID(),
+                  operation: 'input.tap',
+                  args: { x: 5, y: 5 },
+                },
+              })
+            ).status,
+            409,
+            'Second unresolved dispatch lost raw input fence'
+          );
+          h.messageVerifier = async () => ({ status: 'sent', usage: verifierUsage });
+          h.observationResult = { text: 'Messages To +15555550123 sent Second approved message' };
+          const sentRead = await observe(h, f);
+          const proof = await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+            method: 'POST',
+            body: {
+              ...secondBody,
+              operationId: randomUUID(),
+              operation: 'messages.verify_sent',
+              expectedCursor: sentRead.cursor,
+            },
+          });
+          assert.equal(proof.data.operation?.status, 'SUCCEEDED');
+          assert.ok(
+            (await prisma.imessageQueue.findUniqueOrThrow({ where: { id: nextId } })).sentAt
+          );
+          assert.equal(
+            (await prisma.imessageQueue.findUniqueOrThrow({ where: { id: queue.id } }))
+              .phoneBrowserTaskId,
+            f.taskId,
+            'Old receipt binding was erased'
+          );
+        } finally {
+          await prisma.imessageQueue.delete({ where: { id: nextId } });
+        }
       } finally {
         await prisma.imessageQueue.delete({ where: { id: queue.id } });
       }

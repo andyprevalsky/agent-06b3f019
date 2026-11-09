@@ -8542,6 +8542,9 @@
 {"task": "spawn-sub-agents", "duration_seconds": 154.2, "cost_cents": 1.0, "timestamp": "2026-11-08T05:14:52+00:00", "agent_id": "8424f9c2-28cf-4baf-b6c0-634182a06685"}
 {"task": "background-agent-message-smoke", "duration_seconds": 76.6, "cost_cents": 4.0, "timestamp": "2026-11-08T05:14:52+00:00", "agent_id": "b3acc7be-8a2a-47cc-8e16-c30c30fc4cac"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 127.4, "cost_cents": 1.0, "timestamp": "2026-11-08T05:14:52+00:00", "agent_id": "29901bdc-532e-40c8-8970-1094703bdb0a"}
+{"task": "claude-code-agent", "duration_seconds": 88.8, "cost_cents": 0.0, "timestamp": "2026-11-08T05:03:18.000340+00:00", "agent_id": "75331fc5-c6f4-491a-82d9-28a75ed30683"}
+{"task": "code-bench-commit-locally-no-push", "duration_seconds": 113.8, "cost_cents": 0.0, "timestamp": "2026-11-08T05:03:18.000340+00:00", "agent_id": "93445397-bf68-4833-abf9-f5d5c5b50f56"}
+{"task": "code-agent-rose-repo", "duration_seconds": 482.1, "cost_cents": 1.0, "timestamp": "2026-11-08T06:50:33.890397+00:00", "agent_id": "fa6a39db-880c-420c-acaf-e578f313cbef"}
 {"task": "background-agent-message-smoke", "duration_seconds": 76.4, "cost_cents": 0.0, "timestamp": "2026-11-08T06:08:12.275680+00:00", "agent_id": "76b9860b-1042-4a05-94d1-12313652f873"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 142.0, "cost_cents": 2.0, "timestamp": "2026-11-08T06:08:32.943537+00:00", "agent_id": "b8ccd000-465e-44cd-bc4c-8ef99c48ae78"}
 {"task": "spawn-sub-agents", "duration_seconds": 198.9, "cost_cents": 1.0, "timestamp": "2026-11-08T06:08:15.269863+00:00", "agent_id": "8093dd2e-d437-4a46-b721-77c871324778"}

@@ -1556,9 +1556,10 @@ model ImessageQueue {
   attempts             Int       @default(0)
   failures             Int       @default(0)
   transport            String    @default("mac")
-  phoneBrowserTaskId   String?   @unique
+  phoneBrowserTaskId   String?
   phoneSendOperationId String?   @unique
 
+  @@index([phoneBrowserTaskId], map: "ImessageQueue_phoneBrowserTaskId_idx")
   @@index([userId])
   @@index([agentId])
   @@index([userId, sentAt, failedAt, dispatchedAt, expiresAt, claimedAt, createdAt], map: "ImessageQueue_send_claim_idx")

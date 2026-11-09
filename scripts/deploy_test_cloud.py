@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import runpy
 from pathlib import Path
 import sys
@@ -150,9 +151,15 @@ def campaign_width(checks, deadline=None):
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
+    requested = len(checks)
+    limit = os.environ.get('DEPLOY_CLOUD_CONCURRENCY')
+    if limit is not None:
+        if not re.fullmatch(r'[1-9][0-9]*', limit):
+            raise ValueError('DEPLOY_CLOUD_CONCURRENCY must be a positive integer')
+        requested = min(requested, int(limit))
     if deadline is None:
         deadline = time.time() + provider_headroom.DEFAULT_WAIT_SECONDS
-    return provider_headroom.admitted_width(len(checks), registry, probes=provider_headroom.live_probes(),
+    return provider_headroom.admitted_width(requested, registry, probes=provider_headroom.live_probes(),
                                             deadline=deadline)
 
 
@@ -326,11 +333,13 @@ def emit(name, status, *, detail='', log='', quarantine=None, attempts=None):
 
 def launch(request, root, base, campaign_id, checks, env, guidance=''):
     """One native campaign of `checks` under `base`; returns its collected attempt."""
-    runs = base / 'runs'
-    runs.mkdir(parents=True, exist_ok=False)
+    # Retain the adapter parent, but admit this attempt's namespace only after capacity is known.
+    base.parent.mkdir(parents=True, exist_ok=True)
     width = campaign_width(checks)
     if width < 1:
         raise ValueError('provider capacity cannot admit one smoke task')
+    runs = base / 'runs'
+    runs.mkdir(parents=True, exist_ok=False)
     campaign = base / 'campaigns' / campaign_id
     env = {**env, 'CLOUDBENCH_RUNS_ROOT': str(runs),
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name}

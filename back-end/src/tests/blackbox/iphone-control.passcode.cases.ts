@@ -5,6 +5,7 @@ import { setupState } from '../../providers/phoneSetupState';
 import { privacyState } from '../../providers/phoneInputPrivacy';
 import {
   freshSetup,
+  authorizeSyntheticSetup,
   observe,
   proveSettings,
   setupPost,
@@ -242,6 +243,7 @@ export const passcodeCases: Case[] = [
         },
       });
       assert.equal(configured.status, 200);
+      await authorizeSyntheticSetup(f);
       const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
       assert.ok(
         setupState(device.setupEncrypted).passcodeCreation,

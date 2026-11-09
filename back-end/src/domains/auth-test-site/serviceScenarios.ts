@@ -1,3 +1,4 @@
+import { phoneSmsPlan } from './servicePhoneSmsPlan';
 /**
  * Scenario seeds. Each scenario is only a set of site accounts, what the user
  * "has" saved for the site, and how the site behaves — nothing in it tells the
@@ -45,6 +46,7 @@ export interface PlanContext {
   mintedPhone: string | null;
   /** An inbox the user connected, whose codes the agent can read. */
   connectedInbox: string | null;
+  ownedPhone?: string;
 }
 
 export type MintedUse = 'none' | 'offered' | 'account';
@@ -341,6 +343,7 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
     expectedMemberNumber: null,
   }),
   expired_code: (ctx) => mintedAccountPlan(ctx, { emailSignIn: 'code_first_expired' }),
+  phone_sms_otp: phoneSmsPlan,
   minted_sms_otp: (ctx) =>
     mintedAccountPlan(ctx, { passwordSignIn: false, emailSignIn: 'off', smsSignIn: 'code' }),
   magic_link: (ctx) => mintedAccountPlan(ctx, { emailSignIn: 'link' }),

@@ -7,6 +7,10 @@ const BASE_URL = process.env.FRONTEND_URL ?? `http://localhost:${FRONTEND_PORT}`
 export default defineConfig({
   testDir: './tests-e2e',
   testMatch: /.*\.spec\.ts$/,
+  // The benchmark evaluator supplies the real root required by this dedicated spec.
+  testIgnore: process.env.CODE_AGENT_CHECK_ROOT_ID?.trim()
+    ? []
+    : ['**/tests-e2e/code-agent-render-check.spec.ts'],
   timeout: 180_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,

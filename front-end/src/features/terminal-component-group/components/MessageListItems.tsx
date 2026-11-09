@@ -112,6 +112,9 @@ function resolvePlanCharCount(
 }
 
 function getMessageRenderKey(message: Message): string {
+  // An optimistic send keeps one bubble while its server row swaps in.
+  const clientMessageId = message.metadata?.clientMessageId;
+  if (typeof clientMessageId === 'string' && clientMessageId) return clientMessageId;
   const toolName = message.metadata?.toolName;
   const toolCallId = message.metadata?.toolCallId;
   if (toolName === 'spawn_claude_code_agent' && typeof toolCallId === 'string' && toolCallId) {

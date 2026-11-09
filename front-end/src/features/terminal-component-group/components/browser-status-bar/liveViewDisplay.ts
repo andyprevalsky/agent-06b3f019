@@ -181,6 +181,26 @@ export function isKernelLiveViewUrl(url: string): boolean {
   }
 }
 
+/** Stable resource identity for metadata: viewer tokens and input flags are not a new exit. */
+export function liveViewSessionIdentity(url: string): string {
+  const tilion = tilionLiveViewSessionId(url);
+  if (tilion !== null) return `tilion:${tilion}`;
+  try {
+    const parsed = new URL(url);
+    const steel = isSteelLiveViewUrl(url)
+      ? /^\/v1\/sessions\/([^/]+)\/player(?:\/|$)/.exec(parsed.pathname)
+      : null;
+    if (steel !== null) return `steel:${steel[1]}`;
+    const kernel = isKernelLiveViewUrl(url)
+      ? /^\/browser\/live\/([^/]+)$/.exec(parsed.pathname)
+      : null;
+    if (kernel !== null) return `kernel:${kernel[1]}`;
+  } catch {
+    // Unknown viewer formats retain exact URL identity rather than risking stale metadata.
+  }
+  return url;
+}
+
 export function resolveLiveViewProvider(url: string | null | undefined): LiveViewProvider {
   if (!url) return 'other';
   if (isSteelLiveViewUrl(url)) return 'steel';

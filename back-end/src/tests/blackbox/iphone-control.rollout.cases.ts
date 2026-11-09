@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import type { Case } from './iphone-control.cases';
 import { fixture } from './auth-assistance.native-fixtures';
+import { syntheticConfiguration } from './iphone-control.synthetic-setup';
+import { authorizeSyntheticSetup } from './iphone-control.setup-fixtures';
 import { getTaskInfo } from '../../domains/browser-session/service.task-info';
 import { toUserSettings } from '../../domains/browser-session/service.serializers';
 import { ineligiblePhoneFixtureNumber } from './phone-fixture-users';
@@ -83,6 +85,9 @@ export const rolloutCases: Case[] = [
           where: { id: f.leaseId },
           data: { browserTaskId: f.taskId },
         });
+        // New positive lease fixture needs its own exact setup attempt and reservation.
+        await syntheticConfiguration(f.userId, f.leaseId);
+        await authorizeSyntheticSetup(f);
         assert.equal(
           (
             await h.request(f.userId, `/leases/${f.leaseId}/operations`, {

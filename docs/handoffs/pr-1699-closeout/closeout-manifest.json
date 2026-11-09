@@ -1,0 +1,248 @@
+{
+ "format": "PR1699-DELETION-READINESS-MANIFEST-V1",
+ "generated_at": "2026-11-09T17:56:12Z",
+ "deployment_pr": 1699,
+ "merged_sha": "8ed0be8b34c73c1785468fa6ebce9deccd1ebd65",
+ "validated_source": {
+  "head": "9fa86f9ef974249609d6faec41f34cd93b50d098",
+  "digest": "fe2eb72d640a7130b3397d690a801ee9c42c0b2daa170ebc9e52a5615801d190"
+ },
+ "source_recovery": {
+  "committed": "every intended change is in PR #1699 (front-end only, merged 8ed0be8b3) and main fix 8116062bc; no local-only source; 72 inherited Template-box branches + 1 stash preserved by the PR #1760 refs/stash archives (tips verified identical)",
+  "devbox_threads": "devbox 5fd89cbe had a single Rose thread (this one); one worktree; no other deliverables"
+ },
+ "gate_results_final_source": {
+  "agents-coverage-blackbox": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "PASS": 1
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "03e55f5aa1ed71ce44e6574247d3061ee07b00dadead2f7146a482326f2503f6"
+   }
+  ],
+  "backend-coverage-blackbox": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "PASS": 256
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "fdeda7af797ac0750630974f2bf0d6aceae3cc48ba7e2b0229dc17ac98f621eb"
+   }
+  ],
+  "cloudbench-controller": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "PASS": 1
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "a241b569684a451dd0cac663321a0c16f8875fe4c905bb1a9af62e21358c47f6"
+   }
+  ],
+  "deploy-command-structural": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "PASS": 1
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "e5780464e1b9bf560abfe6133387d1886791ec7a7bc8cf272945879abe4d0777"
+   }
+  ],
+  "e2b-smoke": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "PASS": 1
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "f523845cdffa1cbe16602a14fd8813ff2e02adb3ba35933af9e282e13b451368"
+   }
+  ],
+  "frontend-coverage-blackbox": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "PASS": 1
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "dce3434032503475b9c37886d64e4a8f85543f5bcb3289c94ef8bbb0ab96a460"
+   }
+  ],
+  "semantic-stack": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "PASS": 1
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "0c741e1d22aeb9d5d9818bb1fc579f6012047ae190c2ac392475e930705bf13e"
+   }
+  ],
+  "smoke": [
+   {
+    "attempt": "5",
+    "phase": "final",
+    "cases": {
+     "FAIL": 1,
+     "PASS": 12
+    },
+    "complete": true,
+    "cleanup_complete": true,
+    "receipt_sha256": "f764fd449e7d4281558ae91298fe452011abb9f2f8174c2b667c3e651377b410"
+   }
+  ]
+ },
+ "triage_reports": [
+  "deploy-pipeline/triage-report-2.json",
+  "deploy-pipeline/triage-report.json"
+ ],
+ "archived_cycles": [
+  "deploy-pipeline.attempt2-killed-by-service-restart-011244",
+  "deploy-pipeline.attempt3-triage-on-8a7d97b",
+  "deploy-pipeline.attempt4-stale-before-nov9-sync",
+  "deploy-pipeline.attempt5-host-suspend-unverified-3d9244a",
+  "deploy-pipeline.unrun-envdrift-005212"
+ ],
+ "durable_evidence": {
+  "path": "/project/pr1699-evidence",
+  "files": {
+   "agentcard-release-stall/cloudbench-run.json.gz": "a5fe657af55970b893a83d18ea763d31678179d5b7526b6faa5d9f5cfaa732fe",
+   "agentcard-release-stall/fleet-child.log.gz": "d37d3d50b1cdbfd61de7dc64ebb733406506b789bfb40436de7c6355bb10787f",
+   "agentcard-release-stall/primary.log.gz": "ab57b467fc67070c2b96d79dd18c5b41007d821771284ade8e1b718b9c0f6bfd",
+   "agentcard-release-stall/report-card.json.gz": "44ffe2d6d2bde5e78562146edd3544986c7d80ac8c26c48530c6567873470856",
+   "agentcard-release-stall/run.json.gz": "f5cad35dd378874eefd3657cc09648eba226c66e70a9020f3c814acb94a839d5",
+   "cycles.tgz": "589d547823ff5d805b3b4c3cef366dfe5946aa8088704c4e80f91dbab9777fee",
+   "cycles.tgz.sha256": "d36a834b7fb72a533a4ae56ee4991ff07d8d123cf3663efde06aa3a3a09615cc",
+   "message-record-planner/mrus-1.log": "92518c07f794bd0fb4f85a4b81727218d5119c3937375a3a5dc8dc5c4c5f4622",
+   "message-record-planner/mrus-2.log": "c4059e130ce241556db0d332c0eba59964f0c506a1dd0f8652313ad4b2b30dec",
+   "message-record-planner/mrus-3.log": "2cf33f681e193b4d77786959186ec5bb3996fc5250b2a1aae7615bdba4a8f5a2",
+   "message-record-planner/repro-alone-1.message-record-user-scope.log": "c88b0f60f79abc52e0eba5a659cf9ffd325eee730014336af4d299859836d338",
+   "message-record-planner/repro-alone-2.message-record-user-scope.log": "c88b0f60f79abc52e0eba5a659cf9ffd325eee730014336af4d299859836d338",
+   "message-record-planner/repro-alone-3.message-record-user-scope.log": "c88b0f60f79abc52e0eba5a659cf9ffd325eee730014336af4d299859836d338",
+   "message-record-planner/shard-1.log.gz": "f695019246e1596744d478a3ff82021cd6dd4ddf7fb0a2def6f030f66dbbeee3",
+   "payment-checkout-zip/cloudbench-driver.log.gz": "db1cc58a95f96e799f0f52e51e4bd7ee9549525ad8b2803932ac0504ba648679",
+   "payment-checkout-zip/run.json.gz": "e200e925d600cd2e5d141529417caaeaa683b25e10ed63d1ae89232fa033f94c"
+  }
+ },
+ "external_durable": {
+  "recordings": [
+   "https://boxes.dev/media/med_5a635240be0bd0e73d4b2adfb377ea31",
+   "https://boxes.dev/media/med_10157731c405a1ef05148fdce6dbf6ca"
+  ],
+  "benchmark_hub": "smoke run bundles uploaded by the run-bench CLI (deploy-cloud runs, hub ids in campaign logs)",
+  "factory_ledger": "published to main via scripts/factory_ledger.py publish",
+  "agent_memory": "/project/.claude/memory (local-keep-services-owner-watch, message-record-user-scope-planner-flake, watchdog + structural flake updates)"
+ },
+ "reproducible_unneeded": {
+  "/home/boxes/deploy-workers/*": "git clones of the frozen commit + npm installs (regenerate with scripts/deploy_test_worker.py --prepare-checkout)",
+  "/home/boxes/main-fix-blacksmith": "clone used for /push of 8116062bc (already on main)",
+  ".context/deploy-cloud raw bundles": "smoke run bundles (Hub copies) + regenerable boot payloads",
+  ".context/optimistic-send-demo": "demo stack scripts/recordings (recordings published to boxes.dev media)"
+ },
+ "configuration_recovery": "no env/config edits; agents/back-end/front-end .env unchanged (authoritative copies per CLAUDE.md)",
+ "host_changes_to_revert": [],
+ "host_changes_note": "the temporary /swapfile-deploy and vm.swappiness=150 are gone (swapon empty, swappiness 60, watermark_scale_factor 10 at 2026-11-09T17:50Z)",
+ "private_archives": {
+  "core": {
+   "name": "pr1699-8ed0be8b/core",
+   "key_prefix": "devbox-closeout-private/pr1699-8ed0be8b/core/",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "archive_sha256": "2ddc8f7ec9e41b563f48a8a3d2a75dacf5177e17af6aeb554ac44824ca54f2c8",
+   "archive_size_bytes": 721041739,
+   "parts": 11,
+   "chunk_size": 67108864,
+   "members": [
+    "/home/boxes/rose/.context/benchmark-hub",
+    "/home/boxes/rose/.context/benchmarks",
+    "/home/boxes/rose/.context/deploy-approval-batch.diff",
+    "/home/boxes/rose/.context/deploy-approval-batch.json",
+    "/home/boxes/rose/.context/deploy-collect.json",
+    "/home/boxes/rose/.context/deploy-env.sh",
+    "/home/boxes/rose/.context/deploy-merged.json",
+    "/home/boxes/rose/.context/deploy-pipeline",
+    "/home/boxes/rose/.context/deploy-pipeline.attempt2-killed-by-service-restart-011244",
+    "/home/boxes/rose/.context/deploy-pipeline.attempt3-triage-on-8a7d97b",
+    "/home/boxes/rose/.context/deploy-pipeline.attempt4-stale-before-nov9-sync",
+    "/home/boxes/rose/.context/deploy-pipeline.attempt5-host-suspend-unverified-3d9244a",
+    "/home/boxes/rose/.context/deploy-pipeline.unrun-envdrift-005212",
+    "/home/boxes/rose/.context/deploy-pr.json",
+    "/home/boxes/rose/.context/deploy-review-cycle.json",
+    "/home/boxes/rose/.context/deploy-review-dispositions.jsonl",
+    "/home/boxes/rose/.context/deploy-runs",
+    "/home/boxes/rose/.context/deploy-workers",
+    "/home/boxes/rose/.context/factory-events.jsonl",
+    "/home/boxes/rose/.context/fast-forward-cache",
+    "/home/boxes/rose/.context/fleet-infra-canary-preflight.transaction.lock",
+    "/home/boxes/rose/.context/fleet-infra-canary.last-pass",
+    "/home/boxes/rose/.context/frontend-builds",
+    "/home/boxes/rose/.context/ngrok.log",
+    "/home/boxes/rose/.context/optimistic-send-demo",
+    "/home/boxes/rose/.context/pr1634-archive-recovery.env",
+    "/home/boxes/rose/.context/services.json",
+    "/home/boxes/rose/.context/trace-archive-publication-locks",
+    "/home/boxes/rose/.context/tsbuildinfo",
+    "/home/boxes/rose/.llm-dumps",
+    "/home/boxes/rose/agents/benchmarks/runs",
+    "/home/boxes/rose/agents/providers/fast_cache",
+    "/home/boxes/rose/agents/navi-worker-log.txt",
+    "/home/boxes/rose/back-end/backend-logs.log",
+    "/home/boxes/rose/front-end/frontend-logs.log",
+    "/home/boxes/rose/hub-poller-logs.log",
+    "/home/boxes/rose/agents/.env.benchmark-temporal"
+   ],
+   "files": 21294,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+   "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+   "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+  },
+  "cloud": {
+   "name": "pr1699-8ed0be8b/cloud",
+   "key_prefix": "devbox-closeout-private/pr1699-8ed0be8b/cloud/",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "archive_sha256": "577f828d45afc40e56b5dd62fed3e037d80d7c22e076f3cad0dc6ea2cf575bd1",
+   "archive_size_bytes": 725755803,
+   "parts": 11,
+   "chunk_size": 67108864,
+   "members": [
+    "/home/boxes/rose/.context/deploy-cloud"
+   ],
+   "files": 4524,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+   "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+   "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+  }
+ },
+ "post_merge_repairs": [
+  {
+   "test": "smoke/agent-payment-abandonment",
+   "attribution": "NOT_INTRODUCED",
+   "repair_agent": "https://boxes.dev/thread/thr_2bfcc38c56ae440c88bde636f66c9e8e",
+   "devbox": "0b6db91a-aa40-4a8d-8423-0f22a90d7530",
+   "folder": "Bugs z57k17gzz4egv17ag6qqtasexs8h273j (verified rev 1)"
+  }
+ ],
+ "review": "cycle 1 findings (2 CodeRabbit, both FIXED in 6a1038e94); cycle 2 skipped: CodeRabbit org usage/spending cap reached",
+ "known_losses": [
+  "attempt-3 era: original failing backend shard-1.log for message-record-user-scope was overwritten by a later passing run in the same worker; verbatim error preserved in the archived triage report"
+ ]
+}

@@ -2,8 +2,9 @@
  * STATE MACHINE: DesktopIntegrations (Rose Desktop flag on; stock page unchanged when off)
  *
  *   [MOUNTED] → flat sections in the existing order:
- *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts · Meetings
- *     · Socials · File System
+ *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
+ *     · Socials · File System · Other (Granola; Pebble Index 01, whose Connect opens
+ *     its setup modal)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient

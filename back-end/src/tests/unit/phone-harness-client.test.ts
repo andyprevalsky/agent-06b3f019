@@ -574,3 +574,21 @@ for (const requestKey of ['a'.repeat(16), 'z'.repeat(128)]) {
     assert.equal(new Headers(calls[0].init.headers).get('Idempotency-Key'), requestKey);
   });
 }
+
+test('reset uses only account-owned device endpoint and never retries unknown outcomes', async () => {
+  const { client, calls } = fixture([json({ state: 'resetting', token: controlToken })]);
+  assert.deepEqual(await client.resetDevice('iph-reset-test'), { accepted: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.phone-harness.com/me/devices/iph-reset-test/reset');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(new Headers(calls[0].init.headers).get('Authorization'), `Bearer ${accountKey}`);
+  const unknown = fixture([new Error('private provider detail')]);
+  await safeFailure(() => unknown.client.resetDevice('iph-reset-test'), 'unknown');
+  assert.equal(unknown.calls.length, 1);
+});
+
+test('reset accepts empty successful acknowledgment without claiming reset completion', async () => {
+  const { client, calls } = fixture([new Response(null, { status: 204 })]);
+  assert.deepEqual(await client.resetDevice('iph-reset-test'), { accepted: true });
+  assert.equal(calls.length, 1);
+});

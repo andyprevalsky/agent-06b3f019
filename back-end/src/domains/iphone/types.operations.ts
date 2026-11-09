@@ -27,5 +27,6 @@ export interface CommandClaim {
   taskBound?: boolean;
   /** Server-only admission snapshot; never supplied by callers or reconstructed for replay. */
   executionGeneration?: string;
+  executionFirstExecutionRunId?: string;
 }
 export type PhoneClientFactory = () => PhoneHarnessClient;

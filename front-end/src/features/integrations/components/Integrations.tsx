@@ -15,6 +15,9 @@
  *                              v
  *                         [IDLE/READY]
  *
+ * Pebble Index 01 (last row/card) --Connect--> PebbleIndexSetupModal (guided
+ * webhook setup; state owned here, in both presentations).
+ *
  * File System is a FE-only section: website is Download for Mac; Mac app
  * plus click stays [IDLE/READY] (no hook).
  *
@@ -27,6 +30,7 @@
  * and wires up modals. All business logic lives in ../hooks/.
  */
 
+import { useState } from 'react';
 import { Loader2 } from 'lucide-react';
 
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
@@ -52,10 +56,35 @@ import DesktopIntegrations from './DesktopIntegrations';
 import IntegrationModals from './IntegrationModals';
 import IntegrationSections from './IntegrationSections';
 import FileInputs from './FileInputs';
+import PebbleIndexSetupModal from './PebbleIndexSetupModal';
+import IPhoneConnectionSection from './IPhoneConnectionSection';
+
+function IntegrationBanners({
+  error,
+  success,
+}: {
+  error: string | null | undefined;
+  success: string | null | undefined;
+}) {
+  return (
+    <>
+      {error && (
+        <div className="mb-6 p-4 bg-destructive/10 border border-destructive rounded-lg text-destructive text-sm">
+          {error}
+        </div>
+      )}
+      {success && (
+        <div className="mb-6 p-4 bg-green-500/10 border border-green-500 rounded-lg text-green-600 dark:text-green-400 text-sm">
+          {success}
+        </div>
+      )}
+    </>
+  );
+}
 
 export default function Integrations() {
   const handlers = useIntegrationHandlers();
-  const { isFullySignedIn } = useAuth();
+  const { isFullySignedIn, user } = useAuth();
 
   const accordion = useAccordion();
   const data = useIntegrationData();
@@ -67,6 +96,7 @@ export default function Integrations() {
   const gmail = useGmailConnect(data.fetchIntegrations);
   const plaid = usePlaidIntegration();
   const oauth = useOAuthRedirect(data.fetchIntegrations);
+  const [pebbleSetupOpen, setPebbleSetupOpen] = useState(false);
   const actions = useIntegrationActions({
     handleBrowserSync: browser.handleBrowserSync,
     handleChromePasswordsSync: passwords.handleChromePasswordsSync,
@@ -89,16 +119,7 @@ export default function Integrations() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="container max-w-3xl mx-auto pt-20 pb-12 px-4">
-        {displayError && (
-          <div className="mb-6 p-4 bg-destructive/10 border border-destructive rounded-lg text-destructive text-sm">
-            {displayError}
-          </div>
-        )}
-        {displaySuccess && (
-          <div className="mb-6 p-4 bg-green-500/10 border border-green-500 rounded-lg text-green-600 dark:text-green-400 text-sm">
-            {displaySuccess}
-          </div>
-        )}
+        <IntegrationBanners error={displayError} success={displaySuccess} />
 
         <FileInputs
           fileUpload={fileUpload}
@@ -106,6 +127,7 @@ export default function Integrations() {
         />
 
         <div className="space-y-3">
+          <IPhoneConnectionSection key={user?.id ?? 'signed-out'} />
           {data.loadingIntegrations ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -120,6 +142,7 @@ export default function Integrations() {
               isGptCodeAvailable={!!handlers.gptCode?.isAvailable}
               isFileSystemAvailable={window.api?.isElectron === true}
               isFullySignedIn={isFullySignedIn}
+              onPebbleIndexConnect={() => setPebbleSetupOpen(true)}
               accordion={accordion}
               data={data}
               browser={browser}
@@ -135,6 +158,7 @@ export default function Integrations() {
       </div>
 
       <IntegrationModals browser={browser} passwords={passwords} actions={actions} />
+      <PebbleIndexSetupModal open={pebbleSetupOpen} onClose={() => setPebbleSetupOpen(false)} />
     </div>
   );
 }

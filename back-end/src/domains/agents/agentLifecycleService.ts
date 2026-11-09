@@ -125,6 +125,8 @@ async function resolveSubAgentBenchmarkFlag(
 export interface CreateAgentOptions {
   /** Internal independent spawn: recorded atomically before its workflow starts. */
   graphSpawn?: { title: string; folderId: string; requestHash: string };
+  /** Trusted normal iPhone connection root; never accepted from public create bodies. */
+  phoneSetupHash?: string;
   /** Root repository for code sessions, persisted in the create transaction. */
   githubRepoUrl?: string;
   /**
@@ -235,6 +237,7 @@ export async function createAgent(
     projectId,
     folderId,
     ...graphSpawnFields(options),
+    ...(options.phoneSetupHash === undefined ? {} : { phoneSetupHash: options.phoneSetupHash }),
     taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
@@ -247,9 +250,9 @@ export async function createAgent(
     isSubAgent,
     agentId,
     verifier,
-    options.graphSpawn !== undefined
+    options.graphSpawn !== undefined || options.phoneSetupHash !== undefined
   );
-  if (options.graphSpawn !== undefined)
+  if (options.graphSpawn !== undefined || options.phoneSetupHash !== undefined)
     await repo.updateAgent(agentId, { temporalWorkflowStartPending: false });
 
   runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
@@ -313,7 +316,9 @@ async function launchAgentWorkflow(
 
 /** Soft-delete an agent tree via the canonical kill path (UI Archive / SMS /clear). */
 export async function deleteAgentRecursive(agentId: string): Promise<void> {
-  await killAgentRecursive(agentId, { terminateReason: 'Agent deleted by user' });
+  await killAgentRecursive(agentId, {
+    terminateReason: 'Agent deleted by user',
+  });
 }
 
 /** Delete an agent after verifying ownership. Returns true if found. */
