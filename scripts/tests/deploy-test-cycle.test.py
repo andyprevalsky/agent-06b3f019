@@ -6380,6 +6380,72 @@ class Cycle(unittest.TestCase):
             if path == meta: reseal(fleet, life_path)
             bind()
 
+    def test_retained_isolated_obligation_keeps_its_accepted_contract_without_fresh_credit(self):
+        import hashlib
+        import deploy_test_native_cleanup as native
+        state, paths, proof, gate, packet, receipt = self.renewal_state()
+        key = proof['receipt_sha256']
+        prior = copy.deepcopy(state['reconciled_owners'][key])
+        body = {k: v for k, v in proof.items() if k != 'validation_source'}
+        digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        old = subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT), 'show',
+            '52b7cc41f091286ce1c5d21d87aa7523f65b6814:scripts/deploy_test_native_cleanup.py'])
+        target = proof['validation_source']['head'] + ':scripts/deploy_test_native_cleanup.py'
+        original = subprocess.check_output
+        def source_bytes(argv, *args, **kwargs):
+            if argv[:4] == ['git', '--no-replace-objects', '-C', str(self.root)] and argv[-1] == target:
+                if argv[4:6] == ['cat-file', '-s']:
+                    return str(len(old)).encode()
+                if argv[4] == 'show':
+                    return old
+            return original(argv, *args, **kwargs)
+        total = sum(Path(p).stat().st_size for p in proof['files'] if p.endswith('/_batch/run.json'))
+        renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}
+        before = copy.deepcopy(state)
+        with patch.dict(getattr(native, 'RETAINED_ISOLATED_ACCEPTANCES', {}), {digest: proof['validation_source']}), \
+                patch.object(native.subprocess, 'check_output', side_effect=source_bytes), \
+                patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total - 1):
+            with self.assertRaisesRegex(ValueError, 'aggregate raw admission bound exceeded'):
+                native.validate(receipt, c.receipt_owner(gate['name'], receipt), proof)
+            self.assertTrue(native.still_bound(prior, receipt, c.receipt_owner(gate['name'], receipt)))
+            bad = copy.deepcopy(prior); bad['proof']['observed_by'] = 'not the accepted proof'
+            self.assertFalse(native.still_bound(bad, receipt, c.receipt_owner(gate['name'], receipt)))
+            c.reconcile(state, receipt['token'], renewed)
+            entry = state['reconciled_owners'][key]
+            self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+            self.assertTrue(entry['obligations_preserved'])
+            self.assertEqual(before['attempts'], state['attempts'])
+            self.assertEqual(before['failures'], state['failures'])
+            self.assertEqual(before['round'], state['round'])
+            self.assertEqual(entry['validation_source'], state['source'])
+            self.assertEqual(entry['original_obligation_contract']['proof_body_sha256'], digest)
+            self.assertTrue(native.still_bound(entry, receipt, c.receipt_owner(gate['name'], receipt)))
+            for field, value in [('version', True), ('validator_sha256', '0' * 64),
+                                 ('proof_body_sha256', '0' * 64), ('validation_source', {})]:
+                bad = copy.deepcopy(entry); bad['original_obligation_contract'][field] = value
+                self.assertFalse(native.still_bound(bad, receipt, c.receipt_owner(gate['name'], receipt)))
+            bad = copy.deepcopy(entry); bad['original_obligation_contract'] = 'not an object'
+            self.assertFalse(native.still_bound(bad, receipt, c.receipt_owner(gate['name'], receipt)))
+            saved = copy.deepcopy(state); c.reconcile(state, receipt['token'], renewed)
+            self.assertEqual(saved, state)
+            packet.write_text(packet.read_text() + ' ')
+            self.assertFalse(native.still_bound(entry, receipt, c.receipt_owner(gate['name'], receipt)))
+
+    def test_fresh_isolated_proof_cannot_select_a_historical_contract_to_bypass_budget(self):
+        import deploy_test_native_cleanup as native
+        state, occurrence, paths, proof, gate, packet = self.isolated_campaign_state()
+        total = sum(Path(p).stat().st_size for p in proof['files'] if p.endswith('/_batch/run.json'))
+        before = copy.deepcopy(state)
+        proof['original_obligation_contract'] = dict(version=1,
+            validation_source=dict(head='52b7cc41f091286ce1c5d21d87aa7523f65b6814',
+                digest='f2ac68cc13f3d93b9c03a81405bcb3055ffddcf990557990b19daabfdb25dc7d'),
+            validator_sha256='946e2f88acc6e175cf752f74305120f5578c9faac0bfd266589fc98aff29f550',
+            proof_body_sha256='73057ff465e9d696367f5c0eaceb0a52f8f8bed10a6bfb7abeba632d58975a26')
+        with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total - 1), \
+                self.assertRaisesRegex(ValueError, 'aggregate raw admission bound exceeded'):
+            c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
+
     def test_campaign_unloaded_run_records_share_aggregate_raw_allowance(self):
         # Ordinary participants verify run.json without loading it, yet still charge
         # the proof's one aggregate raw-run allowance shared with the bounded reader.

@@ -1637,7 +1637,7 @@ def renew_isolated_validation(state, request_token, proof):
          {k: v for k, v in prior['proof'].items() if k != 'validation_source'}, 'only validation_source may change')
     need(proof.get('validation_source') == state['source'] == state['plan'].get('source')
          == source(Path(owner['worker_root'])), 'current source binding')
-    entry = validate(receipt, owner, proof)
+    entry = validate_original_obligation(prior, receipt, owner, proof, renewal=True)
     entry['occurrence'] = prior['occurrence']
     if entry != prior:
         state.setdefault('reconciled_owner_history', []).append(copy.deepcopy(prior))
@@ -1690,9 +1690,88 @@ def reconcile(state, occurrence_id, proof):
     state.setdefault('reconciled_owners', {})[key] = entry
 
 
+# A retained operation admitted before the bounded-reader contract keeps its
+# exact original verifier. This is versioned debt replay, never fresh admission.
+RETAINED_ISOLATED_VALIDATORS = frozenset({
+    '946e2f88acc6e175cf752f74305120f5578c9faac0bfd266589fc98aff29f550',
+})
+# Bootstrap an earlier accepted obligation only from an independently pinned
+# acceptance body. A mutable local proof cannot authorize its own contract.
+RETAINED_ISOLATED_ACCEPTANCES = {
+    '73057ff465e9d696367f5c0eaceb0a52f8f8bed10a6bfb7abeba632d58975a26': {
+        'head': '52b7cc41f091286ce1c5d21d87aa7523f65b6814',
+        'digest': 'f2ac68cc13f3d93b9c03a81405bcb3055ffddcf990557990b19daabfdb25dc7d',
+    },
+}
+
+
+def original_obligation_contract(entry, receipt, owner):
+    if not (entry.get('kind') == KIND and entry.get('purpose') == 'isolated-validation'
+            and entry.get('credit_granted') is False and entry.get('cleanup_complete') is False
+            and entry.get('obligations_preserved') is True and entry.get('owner') == owner
+            and entry.get('token') == receipt.get('token') and entry.get('gate') == receipt.get('gate')):
+        need('original_obligation_contract' not in entry, 'historical obligation role changed')
+        return None
+    recorded = entry.get('original_obligation_contract')
+    need(recorded is None or isinstance(recorded, dict) and set(recorded) == {
+        'version', 'validation_source', 'validator_sha256', 'proof_body_sha256'}
+         and type(recorded.get('version')) is int and recorded['version'] == 1,
+        'historical obligation contract shape')
+    source = (recorded or {}).get('validation_source', entry.get('validation_source'))
+    need(isinstance(source, dict) and set(source) == {'head', 'digest'}
+         and re.fullmatch('[0-9a-f]{40}', str(source.get('head', '')))
+         and re.fullmatch('[0-9a-f]{64}', str(source.get('digest', ''))), 'historical obligation source')
+    root = Path(owner['worker_root'])
+    command = ['git', '--no-replace-objects', '-C', str(root)]
+    target = source['head'] + ':scripts/deploy_test_native_cleanup.py'
+    try:
+        size = subprocess.check_output([*command, 'cat-file', '-s', target],
+            stderr=subprocess.DEVNULL, timeout=30)
+        need(size.strip().isdigit() and 0 < int(size) <= 1024 * 1024, 'historical verifier size')
+        raw = subprocess.check_output([*command, 'show', target], stderr=subprocess.DEVNULL, timeout=30)
+        need(len(raw) == int(size), 'historical verifier size changed')
+    except (OSError, subprocess.SubprocessError):
+        need(recorded is None, 'historical obligation verifier unavailable')
+        return None
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest not in RETAINED_ISOLATED_VALIDATORS:
+        need(recorded is None, 'unsupported historical obligation verifier')
+        return None
+    proof = entry['proof']
+    need(proof.get('purpose') == 'isolated-validation'
+         and proof.get('validation_source') == entry.get('validation_source'), 'historical obligation binding')
+    body = {k: v for k, v in proof.items() if k != 'validation_source'}
+    body_digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    need(RETAINED_ISOLATED_ACCEPTANCES.get(body_digest) == source,
+         'historical obligation acceptance changed')
+    contract = dict(version=1, validation_source=copy.deepcopy(source), validator_sha256=digest,
+        proof_body_sha256=body_digest)
+    need(recorded is None or recorded == contract, 'historical obligation contract changed')
+    return raw, contract
+
+
+def validate_original_obligation(entry, receipt, owner, proof, *, renewal=False):
+    contract = original_obligation_contract(entry, receipt, owner)
+    if contract is None:
+        return validate(receipt, owner, proof)
+    raw, marker = contract
+    body = {k: v for k, v in proof.items() if k != 'validation_source'}
+    need(hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+         == marker['proof_body_sha256'], 'historical obligation proof changed')
+    scope = {'__name__': 'retained_isolated_obligation_v1',
+             '__file__': str(Path(__file__).resolve())}
+    exec(compile(raw, scope['__file__'], 'exec'), scope)
+    actual = scope['validate'](receipt, owner, proof)
+    need(actual.get('credit_granted') is False and actual.get('cleanup_complete') is False
+         and actual.get('obligations_preserved') is True, 'historical obligation changed debt')
+    if renewal or 'original_obligation_contract' in entry:
+        actual['original_obligation_contract'] = marker
+    return actual
+
+
 def still_bound(entry, receipt, owner):
     try:
-        actual = validate(receipt, owner, entry['proof'])
+        actual = validate_original_obligation(entry, receipt, owner, entry['proof'])
         return actual == {k: v for k, v in entry.items() if k != 'occurrence'}
     except (OSError, ValueError, KeyError, TypeError):
         return False

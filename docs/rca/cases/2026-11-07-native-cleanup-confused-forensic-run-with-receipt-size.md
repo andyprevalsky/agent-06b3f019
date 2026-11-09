@@ -104,3 +104,49 @@ unchanged. The file-reading allowance is unrelated to a spending budget.
 Separate control receipts from intact forensic payloads. Bound both explicitly,
 verify all original bytes, and preserve historical failure projections even when
 later evidence permits a new launch.
+
+
+## November 9 recurrence: retained acceptance replayed under a newer budget
+
+After PR #1865 source sync to `a8edc990749756a76ea286ea4ca6426a555a1718`,
+`prepare-historical-no-retry` refused with `smoke: original isolated-validation
+obligation changed; refuse launch/completion`. Calling the swallowed validator
+directly exposed `native artifact: aggregate raw admission bound exceeded`.
+The original accepted operation binds 18 participant run files totaling
+274,416,973 bytes. Its unchanged provider-pair observations, native files and
+proof remain valid under the exact accepted source-52 validator; that replay
+returns an identical entry in 3.17 seconds. The new 128 MiB fresh-proof budget
+is correct and is not increased.
+
+The first bad boundary reapplies a new proof-admission budget to an already
+accepted retained obligation during source renewal. This is an integration
+contract regression, not fresh execution evidence or proof that the original
+cleanup became complete. There is no narrower ordinary terminal proof: the
+original campaign's participant closure and all debt files remain mandatory.
+
+Retained recognition and source-only renewal now replay an explicitly versioned
+original obligation contract. Bootstrap requires both the fixed known verifier
+blob SHA256 and an independently pinned acceptance-body SHA256 bound to its
+original validation source. Git reads disable replacement objects and bound
+verifier code to 1 MiB. Only that exact allowlisted code executes; arbitrary
+proof-selected old revisions cannot select a validator. All native file hashes,
+receipt/owner/source facts and provider retirement checks still run. A durable
+marker keeps the original code and body anchors across later source renewals;
+only `validation_source` may vary. Fresh `validate` and `reconcile` admission
+remain unchanged and always enforce the current 128 MiB aggregate budget.
+
+The permanent retained-obligation regression is RED on a8ed (`still_bound` is
+false, 0.727 seconds) and GREEN with the correction (1.734 seconds). The existing
+aggregate-budget test and a fresh-proof forged-contract negative control pass
+unchanged with the focused three-test run. Independent controls reject changed
+acceptance bodies, file hashes, owners, sources, native receipts, malformed or
+changed markers, and non-integer versions. The physical 18-file proof passes
+recognition, historical no-remint preparation and renewed recognition without
+changing any original native file or provider fact. `cleanup_complete=false`,
+`credit_granted=false` and `obligations_preserved=true` remain explicit. Full
+coordinator and final source-bound deploy validation are tracked separately.
+
+This migration is control-plane work, not per-agent runtime work: at 10,000
+agents it adds no channels, sessions, network calls or database operations to
+agent execution. It neither admits a new paid fleet nor grants test, assertion
+or financial settlement credit.
