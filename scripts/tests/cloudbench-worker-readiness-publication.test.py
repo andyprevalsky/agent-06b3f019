@@ -78,6 +78,7 @@ class ReadinessPublication(unittest.TestCase):
             (tmp / "rb.sh").write_text(
                 f"export CLOUDBENCH_RUN_TOKEN={token}\n"
                 f"export REF={'a' * 40}\n"
+                "export BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=30\n"
                 "export BENCH_TASKS_B64=" + base64.b64encode(b"autoscaler-worker-never-ready").decode() + "\n"
             )
             provenance = runpy.run_path(str(ROOT / "scripts/cloudbench_execution_provenance.py"))

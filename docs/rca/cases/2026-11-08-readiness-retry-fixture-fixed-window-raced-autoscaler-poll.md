@@ -120,3 +120,38 @@ None recorded.
 ## Reusable lesson
 
 Bound a fixture's wait for controller progress by the controller's or task's own budget, never by a fixed window shorter than the controller's poll cadence path.
+
+
+## November 9 integration regression: dependent fixture omitted the staged budget
+
+PR #1865 source `805e2b6873fa756540885fe6c9590280aa2bcb6d` failed
+`cloudbench-worker-readiness-publication.test.py`: seven tests ran and three
+publication cases failed. The valid retry returned false and both rejection
+controls retained the initial failed fake Machine. Gate: INTRODUCED by combining
+the I-37 consumer change with the existing readiness-publication fixture.
+
+The first bad boundary was earlier than retirement or publication: the fixture's
+`rb.sh` had no `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS`. The updated real fake
+driver correctly logged `FATAL: staged driver carries no positive benchmark
+execution budget` and exited before its controlled clock reached retirement at
+22 seconds. The fixture itself is byte-identical to main
+`1eec7e4e5fd24ad67dcbf55f43b57e23a4367bb8`; keeping the current fleet helpers
+and fixture and swapping only main's pre-I-37 fake driver makes all three
+publication cases pass. This is a fixture producer/consumer mismatch, not a
+controller leak or a provider failure.
+
+Supply the missing staged execution-budget export in this isolated fixture as
+30 seconds: its pre-existing controlled window was explicitly 30 seconds, with
+replacement readiness at 27 and the next metrics poll at 32. No deadline, task
+condition, timeout, assertion, fake-provider ownership check or production
+function changes. The identical local seven-test command is RED (three failed,
+22.203 seconds) before the export and GREEN (seven passed, 22.334 seconds)
+afterward. All 28 unittest assertion-call ASTs are unchanged. The foreign-token
+and canceled-worker controls still reject success and retire only their exact
+owned fake worker. Captured red/green driver logs respectively show the missing
+budget error and successful publication at 27.0 seconds within the same
+30-second window. The mandatory multi-workstream gate already runs this
+owning suite; a full source-bound controller rerun remains required.
+
+This is test configuration only and adds no per-agent runtime operation, paid
+provider call, real resource allocation or concurrency change.

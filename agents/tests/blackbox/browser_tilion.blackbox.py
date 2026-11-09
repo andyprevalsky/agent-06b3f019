@@ -546,6 +546,9 @@ async def test_multiplexer_logs_who_closed_each_cdp_socket():
                     async def close(self) -> None:
                         return None
 
+                    async def wait_closed(self) -> None:
+                        return None
+
                 multiplexer._upstream, multiplexer._reader = _ClosedUpstream(), None
                 await multiplexer._close_upstream()
                 already = [line for line in records if "already closed when released" in line]

@@ -156,3 +156,43 @@ None recorded.
 ## Reusable lesson
 
 Before starting a library reconnect from outside its drop callback, end the dead client's still-running reader first: a reconnect that cancels a live reader re-arms itself forever.
+
+
+## Deploy regression follow-up — 2026-11-09
+
+PR #1865 agents coverage, source `805e2b6873fa756540885fe6c9590280aa2bcb6d`,
+round 27 `browser-tilion` failed its existing
+`test_multiplexer_logs_who_closed_each_cdp_socket` regression. Native evidence:
+`agents-coverage-20261109-211935-5010/browser-tilion.log` reports
+`AttributeError: '_ClosedUpstream' object has no attribute 'wait_closed'`
+at `cdp_multiplexer.py:451`, then repeats the same exception during final
+multiplexer cleanup. Other native-close/checkpoint controls passed.
+
+Gate: INTRODUCED by this branch's integration of H-47's diagnostic fixture
+with main's native-close ownership protocol. The diagnostic `_ClosedUpstream`
+fake advertised an already-closed socket (`close_code=1011`) and implemented
+`close()`, but omitted the real connection's `wait_closed()` method. Main now
+correctly awaits both methods before releasing custody. The first bad boundary
+is the incomplete test double, rather than the production close protocol.
+
+Archive searches: `_ClosedUpstream wait_closed` found the native pause/checkpoint
+case; `H-47 multiplexer socket closed fixture` found this original H-47 case
+and the retiring-gateway fixture case. This is an integration regression in
+this case's added logging regression, not a recurrence of the production
+reconnect storm.
+
+Causal proof uses the existing unchanged test against production source805:
+`agents/venv/bin/python3 -B <scratch>/focused.py` loads the existing blackbox
+module and executes `test_multiplexer_logs_who_closed_each_cdp_socket()`.
+Before the fixture repair it fails with the exact missing-method AttributeError;
+after adding only an asynchronous `wait_closed()` method to the already-closed
+fake, the identical command passes. The fake has no live transport to wait for,
+so both close methods complete immediately. Every existing diagnostic assertion
+is retained, including close code1011, keepalive reason, initiator and peer-client
+exit details. Production still awaits native closure, retains custody on failure
+and uses the same timeouts. No production or prompt code changes.
+
+Original logs are preserved in the deployment closeout under
+`rca-browser-tilion-805/red.log` and `green.log`; the original owning regression
+remains registered in `browser-tilion`, which agents coverage already executed.
+Full domain validation is recorded in the deployment repair receipt.
