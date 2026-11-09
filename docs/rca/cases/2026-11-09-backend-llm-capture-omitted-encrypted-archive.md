@@ -147,3 +147,11 @@ alone does not establish introduced causation. Separately, the owning stream
 suite reproduced the candidate's unwanted implicit Prisma access and passed
 unchanged after root identity moved to existing caller data. No server cap,
 pool limit, test concurrency, task or timeout was changed to hide pressure.
+
+The next explicit-root native task on 9fae724a72a259bc0eb6798931775f35b140c16c
+retains native PASS and publisher PASS, but is not healthy acceptance: its handler
+logged accumulateChatLlmUsage is not defined after a lint-driven helper extraction
+missed that local import. Typechecking independently reproduced TS2304 at the same
+call. The import was corrected; a fresh typecheck and native run are required.
+That run's one archived router call and two frontend messages are preserved as
+actual evidence, never relabeled as a full healthy chat trajectory.

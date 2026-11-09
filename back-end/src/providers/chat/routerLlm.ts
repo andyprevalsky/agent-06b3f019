@@ -39,6 +39,7 @@ import { isOaiDemoGoal } from '../demoCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
 import {
   applyChunkUsage,
+  accumulateChatLlmUsage,
   emptyChatLlmUsage,
   type ChatLlmUsage,
   type ChatCompletionParams,
