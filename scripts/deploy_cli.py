@@ -500,7 +500,6 @@ def is_harness_process(exe: str | None, argv: str = '') -> bool:
 
 
 CODEX_SERVER_PREFIX = '/opt/devbox-tools/codex/'
-CODEX_SESSIONS = Path.home() / '.codex' / 'sessions'
 
 
 def stat_fields(proc: Path, pid: int) -> list[str] | None:
@@ -557,39 +556,48 @@ def current_code_mode_host(pid: int, exe: str | None, proc: Path, mine: set[int]
         return False
 
 
-def idle_daemon_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc'),
-                             sessions: Path = CODEX_SESSIONS, parents: dict[int, int] | None = None) -> bool:
-    """The devbox daemon's shared `codex app-server`, started in the agent's cwd, serving no Codex session.
+def shared_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc')) -> bool:
+    """The devbox daemon's shared `codex app-server`, started in the agent's cwd, busy or idle.
 
-    It is held ready for Codex threads and holds no workspace state while idle. It stays live work, and keeps
-    blocking deletion, the moment it runs anything (any child process) or a Codex session has written a
-    rollout since it started. A codex binary not parented by the daemon is never exempt.
+    The daemon keeps one for every Codex thread on the box; it holds no workspace state. A daemon restart
+    orphans the old server to PID 1, which is still the same shared server. Work a Codex thread runs through it
+    (shells, test runners) is its own process and is still found as live work. A codex binary launched any
+    other way, or any other codex subcommand, is never exempt.
     """
-    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or 'app-server' not in argv.split():
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or Path(exe).name != 'codex':
+        return False
+    words = argv.split()
+    if len(words) < 3 or words[1] != 'app-server' or '--listen' not in words:
         return False
     fields = stat_fields(proc, pid)
-    if not fields or len(fields) < 20:
+    if not fields or len(fields) < 2:
         return False
+    if fields[1] == '1':
+        return True
     try:
-        daemon = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+        parent = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
     except OSError:
         return False
-    if f'{DAEMON_DIR}/' not in daemon:
+    return f'{DAEMON_DIR}/' in parent
+
+
+def shared_code_mode_host(pid: int, exe: str | None, proc: Path = Path('/proc')) -> bool:
+    """The shared Codex server's code-mode tool host: the same Codex install, parented by that server.
+
+    The tool processes it starts are their own processes and are still found as live work.
+    """
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or Path(exe).name != 'codex-code-mode-host':
         return False
-    if pid in (parent_map(proc) if parents is None else parents).values():
+    fields = stat_fields(proc, pid)
+    if not fields or len(fields) < 2:
         return False
     try:
-        btime = next(int(line.split()[1]) for line in (proc / 'stat').read_text().splitlines() if line.startswith('btime '))
-        started = btime + int(fields[19]) / os.sysconf('SC_CLK_TCK')
-    except (OSError, StopIteration, ValueError):
+        parent_exe = os.readlink(proc / fields[1] / 'exe')
+        parent_argv = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+    except OSError:
         return False
-    if sessions.is_dir():
-        try:
-            if any(path.is_file() and path.stat().st_mtime >= started for path in sessions.rglob('*')):
-                return False
-        except OSError:
-            return False
-    return True
+    return (Path(parent_exe).parent == Path(exe).parent
+            and shared_codex_server(int(fields[1]), parent_exe, parent_argv, proc))
 
 
 def live_processes(root: Path) -> list[dict]:
@@ -610,7 +618,8 @@ def live_processes(root: Path) -> list[dict]:
                 exe = os.readlink(entry / 'exe')
                 if (is_harness_process(exe, argv)
                         or current_code_mode_host(int(entry.name), exe, proc, mine, parents)
-                        or idle_daemon_codex_server(int(entry.name), exe, argv, proc, parents=parents)):
+                        or shared_codex_server(int(entry.name), exe, argv, proc)
+                        or shared_code_mode_host(int(entry.name), exe, proc)):
                     continue
             except OSError:
                 pass
