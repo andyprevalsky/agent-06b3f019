@@ -5927,40 +5927,6 @@ def test_completed_code_task_rejects_failed_placeholder_structured_response():
         assert _completed_child_task_structured_response([{"role": "TOOL", "metadata": metadata}], schema) is None
 
 
-def test_completed_child_handoff_yields_to_later_failed_action():
-    """A failure after the child blocks the fast path; a newer child after it does not."""
-    from helpers.llm import _completed_child_task_structured_handoff, _completed_child_task_structured_response
-
-    schema = {"fields": [{"name": "answer", "type": "str", "required": True}]}
-
-    def completed_child(tool_call_id, answer):
-        return {
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": tool_call_id,
-                "toolName": "spawn_claude_code_agent",
-                "toolStatus": "FINISHED",
-                "action_type": "task_complete",
-                "success": True,
-                "structured_response": {"answer": answer},
-            },
-        }
-
-    failed_display = {
-        "role": "TOOL",
-        "text": "Invalid media: chart.svg (SVG excluded)",
-        "metadata": {"toolCallId": "display-one", "toolName": "display", "toolStatus": "ERROR"},
-    }
-    context = [completed_child("code-one", "chart.svg"), failed_display]
-    assert _completed_child_task_structured_handoff(context, schema) is None
-    # The verifier's deterministic accept uses the same predicate.
-    assert _completed_child_task_structured_response(context, schema) is None
-    assert _completed_child_task_structured_handoff(context + [completed_child("code-two", "chart.png")], schema) == (
-        {"answer": "chart.png"},
-        "code-two",
-    )
-
-
 def test_rejected_completed_child_handoff_is_scoped_to_source_child():
     """A verifier rejection skips its child, without hiding an older valid one."""
     from helpers.llm import (
@@ -11537,10 +11503,6 @@ async def run_all_tests():
     r.record(
         "completed_code_task_rejects_failed_placeholder_structured_response",
         test_completed_code_task_rejects_failed_placeholder_structured_response,
-    )
-    r.record(
-        "completed_child_handoff_yields_to_later_failed_action",
-        test_completed_child_handoff_yields_to_later_failed_action,
     )
     r.record(
         "rejected_completed_child_handoff_is_scoped_to_source_child",

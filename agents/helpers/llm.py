@@ -5709,11 +5709,6 @@ def _completed_child_task_structured_handoff(
                     # qualifying child before it, so skip exactly that child.
                     rejected_legacy_handoffs += 1
         tool_name = metadata.get("toolName")
-        if message.get("role", "").upper() == "TOOL" and metadata.get("toolStatus") in {"ERROR", "FAILED"}:
-            # An action failed after every older completed child (e.g. the planned
-            # display of the child's chart). The parent model must see that failure
-            # and recover; the child's output no longer settles the goal on its own.
-            return None
         if tool_name not in {"spawn_claude_code_agent", "spawn_browser_agent"}:
             continue
         if metadata.get("toolStatus") != "FINISHED":
