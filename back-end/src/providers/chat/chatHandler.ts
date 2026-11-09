@@ -94,13 +94,18 @@ export async function handleChatMessage(config: {
 
   const initialContext = startInitialChatContext({
     agentId: config.agentId,
+    rootAgentId: config.rootAgentId,
     requestedModel: config.model,
   });
   const [messages, projectContext] = await Promise.all([
     initialContext.messages,
     loadRouterProjectContext(config.agentId),
   ]);
-  const chatContextConfig = { agentId: config.agentId, requestedModel: config.model };
+  const chatContextConfig = {
+    agentId: config.agentId,
+    rootAgentId: config.rootAgentId,
+    requestedModel: config.model,
+  };
 
   const runGenerator = async (
     generatorMessages: typeof messages,

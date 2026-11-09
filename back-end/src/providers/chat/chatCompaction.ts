@@ -137,7 +137,8 @@ async function summarizeMiddle(
   messages: ChatMessage[],
   middleIndices: number[],
   model: string,
-  agentId: string
+  agentId: string,
+  rootAgentId?: string
 ): Promise<string> {
   const middleText = formatMiddleForPrompt(messages, middleIndices);
   const prompt = `${NO_TOOLS_PREAMBLE}${PARTIAL_COMPACT_PROMPT}
@@ -158,6 +159,7 @@ ${NO_TOOLS_TRAILER}`;
     dump_context: {
       call_site: 'chat_compaction',
       agent_id: agentId,
+      root_agent_id: rootAgentId,
     },
   });
 
@@ -180,6 +182,7 @@ export async function compressChatContext(params: {
   messages: ChatMessage[];
   model: string;
   agentId: string;
+  rootAgentId?: string;
 }): Promise<ChatMessage[]> {
   const split = splitHeadMiddleTail(params.messages);
   if (!split) return params.messages;
@@ -188,7 +191,8 @@ export async function compressChatContext(params: {
     params.messages,
     split.middleIndices,
     params.model,
-    params.agentId
+    params.agentId,
+    params.rootAgentId
   );
   const syntheticSummary: ChatMessage = {
     role: 'USER',
@@ -250,6 +254,7 @@ async function persistCompactionCheckpoint(params: {
 
 export async function ensureChatContextWithinBudget(params: {
   agentId: string;
+  rootAgentId?: string;
   requestedModel: string;
   rawMessages: ChatMessage[];
   maxContextTokens?: number;
@@ -270,6 +275,7 @@ export async function ensureChatContextWithinBudget(params: {
         messages: projected,
         model: compactionModel,
         agentId: params.agentId,
+        rootAgentId: params.rootAgentId,
       });
       await persistCompactionCheckpoint({
         agentId: params.agentId,
