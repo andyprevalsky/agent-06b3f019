@@ -78,6 +78,6 @@
   ],
   "final_gates": "14 nativePASS/1 preserved nativeFAIL, qualified NOT_INTRODUCED and post-merge goal delivered; nativecomplete no pending handoffs",
   "production": "Exact mergedFlyPASS,semanticPASS; workflowmigrationnative42PASS3FAIL/45 qualifiedNOT_INTRODUCED and fullgoal+evidence deliveredindependentBugsrepair. NativeFAIL retained.",
-  "preservation": "Pending final cutoff and reviewed records publication",
+  "preservation": "Verified final authenticated archives and separate restores; nativeREADY receipt committed. Its publication condition is satisfied by the recordsPR merge and originalPR link, checked again after publication.",
   "merged_sha": "4e28dab648a66e70f513979cb11b59e614866424"
 }
