@@ -537,9 +537,6 @@ rm -rf "$BLACKBOX_ARTIFACT_DIR"
 mkdir -p "$BLACKBOX_ARTIFACT_DIR"
 export BLACKBOX_TEST_ARTIFACT_DIR="$BLACKBOX_ARTIFACT_DIR"
 export CONTRACT_TEST_ARTIFACT_DIR="$BLACKBOX_ARTIFACT_DIR"
-# Each shard (and the unit pass) has its own database, so its own advisory-lock
-# namespace: give each its own Benchmark Hub directory (see benchmarkHubStorage).
-export BENCHMARK_HUB_LOCAL_DIR="${BENCHMARK_HUB_LOCAL_DIR:-$BLACKBOX_ARTIFACT_DIR/benchmark-hub}"
 
 # ── Use local Postgres for coverage blackbox tests ──
 # Keep this in sync with run-blackbox-tests.sh so the instrumented backend and

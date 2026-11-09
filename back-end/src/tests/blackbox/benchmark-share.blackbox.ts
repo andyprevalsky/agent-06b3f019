@@ -36,27 +36,22 @@ async function expectStatus(url: string, status: number, shareToken?: string): P
  * The local Hub's index lock is a per-database Postgres advisory lock, so a
  * sibling coverage shard on another database sharing one Hub directory could
  * overwrite this run out of the index (cleanup then 404s). Uploads must land in
- * the runner's own artifact-scoped Hub directory, never the shared worktree one.
+ * the runner's own Hub directory (per coverage shard, or the standalone run's
+ * artifacts), never the shared worktree default.
  */
 function assertRunScopedHubStorage(runId: string): void {
   const hubDir = process.env.BENCHMARK_HUB_LOCAL_DIR;
-  const artifactDir = process.env.BLACKBOX_TEST_ARTIFACT_DIR;
-  if (!hubDir || !artifactDir) {
-    throw new Error('runner must export BENCHMARK_HUB_LOCAL_DIR and BLACKBOX_TEST_ARTIFACT_DIR');
-  }
-  const relative = path.relative(path.resolve(artifactDir), path.resolve(hubDir));
-  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw new Error(`Hub directory ${hubDir} is not scoped to the run artifacts ${artifactDir}`);
+  if (!hubDir) throw new Error('runner must export BENCHMARK_HUB_LOCAL_DIR');
+  const sharedDir = path.resolve(__dirname, '../../../../.context/benchmark-hub');
+  if (path.resolve(hubDir) === sharedDir) {
+    throw new Error(`Hub directory ${hubDir} is the shared worktree default`);
   }
   if (!existsSync(path.join(hubDir, 'runs', `${runId}.json`))) {
     throw new Error('backend did not store the upload in the run-scoped Hub directory');
   }
-  const shared = path.resolve(
-    __dirname,
-    '../../../../.context/benchmark-hub/runs',
-    `${runId}.json`
-  );
-  if (existsSync(shared)) throw new Error('upload reached the shared worktree Hub directory');
+  if (existsSync(path.join(sharedDir, 'runs', `${runId}.json`))) {
+    throw new Error('upload reached the shared worktree Hub directory');
+  }
 }
 
 async function main(): Promise<void> {
