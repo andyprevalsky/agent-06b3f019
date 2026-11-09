@@ -14,12 +14,16 @@ import { test } from 'node:test';
 import {
   compareCatalog,
   driftProblems,
+  replayGap,
   runSchemaDriftCheck,
+  SCHEMA_DRIFT_HINT,
   SCHEMA_DRIFT_LEASE_KEY,
   SCHEMA_DRIFT_LEASE_NAMESPACE,
+  SCHEMA_REPLAY_HINT,
   type Catalog,
   type DriftReport,
 } from '../../providers/schemaDrift';
+import { schemaHints, schemaProblems } from '../../../scripts/verify-schema-objects';
 
 const migrations = fs.mkdtempSync(path.join(os.tmpdir(), 'schema-drift-cron-'));
 fs.mkdirSync(path.join(migrations, '1_init'));
@@ -32,6 +36,7 @@ fs.writeFileSync(
 
 const healthy = (): Catalog => ({
   applied: new Set(['1_init']),
+  appliedAfterBaseline: new Set(['1_init']),
   indexes: new Map([['Agent_title_trgm_idx', true]]),
   triggers: new Set(),
   functions: new Set(),
@@ -151,6 +156,7 @@ test('an index left INVALID by a failed concurrent build is drift, even after IF
     const catalog = (valid: boolean): Catalog => ({
       ...healthy(),
       applied: new Set([migration]),
+      appliedAfterBaseline: new Set([migration]),
       indexes: new Map([
         [name, valid],
         ['Undeclared_leftover_idx', valid],
@@ -165,6 +171,79 @@ test('an index left INVALID by a failed concurrent build is drift, even after IF
     ]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a migrations source missing an applied drop reports the replay gap, never the dropped index as drift', async () => {
+  // 2026-11-09: the PR #1803 production lane replayed its pre-merge checkout,
+  // which lacked PR #1698's 20261105233000..2. Production had applied them, so
+  // the intentionally dropped ImessageQueue_phoneBrowserTaskId_key read as
+  // "missing" and the hint prescribed restoring it with a new migration.
+  const intents = '20261019071000_cloud_phone_message_intents';
+  const followUps = [
+    '20261105233000_cloud_message_unresolved_task',
+    '20261105233001_cloud_message_drop_historical_unique',
+    '20261105233002_cloud_message_task_history_index',
+  ];
+  const copy = (dir: string, names: string[]) => {
+    for (const name of names) {
+      fs.mkdirSync(path.join(dir, name));
+      fs.copyFileSync(
+        path.resolve(__dirname, '../../../prisma/migrations', name, 'migration.sql'),
+        path.join(dir, name, 'migration.sql')
+      );
+    }
+  };
+  const preMerge = fs.mkdtempSync(path.join(os.tmpdir(), 'schema-drift-pre-merge-'));
+  const merged = fs.mkdtempSync(path.join(os.tmpdir(), 'schema-drift-merged-'));
+  try {
+    copy(preMerge, [intents]);
+    copy(merged, [intents, ...followUps]);
+    // Production's catalog that morning (read-only query, 2026-11-09 08:17Z).
+    const production = (indexes: string[]): Catalog => ({
+      ...healthy(),
+      // Pre-squash history: recorded before the baseline, never a directory here.
+      applied: new Set(['20250127000000_add_feedback_table', intents, ...followUps]),
+      appliedAfterBaseline: new Set([intents, ...followUps]),
+      indexes: new Map(indexes.map((name) => [name, true])),
+      policies: new Map(),
+      rls: new Set(),
+    });
+    const live = [
+      'ImessageQueue_phoneSendOperationId_key',
+      'ImessageQueue_phoneBrowserTaskId_unresolved_key',
+      'ImessageQueue_phoneBrowserTaskId_idx',
+    ];
+
+    const stale = compareCatalog(production(live), preMerge);
+    assert.deepEqual(driftProblems(stale), []);
+    assert.deepEqual(stale.unreplayedMigrations, followUps);
+    assert.deepEqual(schemaProblems(stale), [
+      `unverified: the database recorded 3 applied migration(s) this migrations source lacks (${followUps.join(', ')}); migration-declared objects were not compared`,
+    ]);
+    assert.equal(replayGap(stale), schemaProblems(stale)[0]);
+    assert.deepEqual(schemaHints(stale), [SCHEMA_REPLAY_HINT]);
+    assert.ok(!schemaProblems(stale).join('\n').includes('ImessageQueue_phoneBrowserTaskId_key'));
+    // The hourly cron on a replica older than the database says the same.
+    const { calls, deps } = harness('token', () => production(live));
+    await runSchemaDriftCheck({ ...deps, migrationsDir: preMerge });
+    assert.deepEqual(calls.alerts, [schemaProblems(stale)]);
+
+    // The commit production runs replays the drop: the live catalog is exact.
+    const exact = compareCatalog(production(live), merged);
+    assert.deepEqual(schemaProblems(exact), []);
+    assert.deepEqual(schemaHints(exact), []);
+    assert.equal(exact.checked, live.length);
+
+    // Real drift stays drift: losing the partial unique index still fails.
+    const lost = compareCatalog(production(live.slice(0, 1).concat(live.slice(2))), merged);
+    assert.deepEqual(schemaProblems(lost), [
+      `missing indexes: ImessageQueue_phoneBrowserTaskId_unresolved_key (${followUps[0]})`,
+    ]);
+    assert.deepEqual(schemaHints(lost), [SCHEMA_DRIFT_HINT]);
+  } finally {
+    fs.rmSync(preMerge, { recursive: true, force: true });
+    fs.rmSync(merged, { recursive: true, force: true });
   }
 });
 
