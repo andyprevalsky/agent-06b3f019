@@ -28,18 +28,18 @@ Over 32 simultaneous copies (most `full` runs) route to the sharded operator, wh
 ### Running
 - Run on the cloud fleet by default; use `--local` only when the user asks, and `--local --use-existing` only when the user asks to reuse running services; never start `scripts/run.sh` for benchmarks.
 - `production_only` tasks (`agent-payment-production-*`) skip Fly and run against live production, and the purchase task can spend real money; run them only on explicit request.
-- Before a fleet run, with Node 22 and `agents/venv` active, run `(cd back-end && node --import tsx -e "require('./scripts/seed-dump-cache.ts')")` and fix any failure.
+- Before a fleet run, with Node 22 and `agents/venv` active, run `(cd back-end && node --import tsx -e "require('./scripts/seed-dump-cache.ts')")`; if it fails, install that package's dependencies from its own lockfile (`npm ci --workspaces=false` in `back-end/`) and rerun it, and never launch until it passes or hand that setup back to the user.
 - Gates run through Machine exec need `agents/venv` active and Node 22's bin first on `PATH`; the default selects Node 20.
 - Never build images or refresh dependencies for a source-only change; the CLI reuses verified snapshots.
 - Before refreshing cloud dependency snapshots, resolve the complete `agents/requirements.txt` and run `python -m pip check`; an old pool fingerprint never certifies a new environment.
 - Reuse an age-limited precheck only from its normal producer with its original bytes and timestamp; rerun it when it has expired or when startup would outlast its remaining lifetime.
 - A Benchmark Hub infrastructure experiment does not wait for `/deploy`, never writes outside its isolated prefix, and follows **Hub infrastructure experiments** in `agents/benchmarks/README.md`.
-- Every launch stops itself when `20 * infra_failed_jobs >= scheduled_total` (30 of 600); never recompute it from completed attempts.
+- Every launch stops itself when `20 * infra_failed_jobs >= scheduled_total` (30 of 600); never recompute it from completed attempts, never signal a run that has crossed it, and wait for its own exit.
 - Cloud startup, recovery, image builds and LIVE acceptance details are in the Operations Runbook in `agents/benchmarks/README.md`.
 
 ### Monitoring
-- A sub-agent owns each run: launch, monitoring, infra `/RCA` and exact-owner cleanup; it may adopt an already-launched run, and adoption counts only after its own first sample of that run's printed handle.
-- Watch with the exact printed handle until the controller exits and its release is verified; a stale observation never justifies a restart.
+- A sub-agent owns each run: launch, monitoring, infra `/RCA` and exact-owner cleanup, and its handoff carries all four; it starts `/RCA` on the first infra failure at once; it may adopt an already-launched run, and adoption counts only after its own first sample of that run's printed handle.
+- Whoever launches, checks or adopts a run owns it until its release is verified: watch the exact printed handle until the controller exits, or hand it to a sub-agent; never stop after one sample or ask whether to keep watching, and a stale observation never justifies a restart.
 - A `-k` campaign or sharded run is owned by its foreground process (no `--wait`), so launch it in the background; it prints `python3 -m json.tool <summary.json>` plus one handle per job, and `jobs[].controller_exit_code` reports each controller's exit.
 - Copy the first failure's logs and stop receipts before metadata rotates, and report it to the parent at once.
 - To stop your own run, read `pid` and `pid_start` from `<git-common>/cloudbench-fleet-ownership/<token>/meta` (for a campaign, the `run-bench-campaign.py` process, never the launcher's `$!`), confirm the process birth matches, then TERM only that PID and let its cleanup run; never kill its children or match processes by pattern.
@@ -54,7 +54,7 @@ Over 32 simultaneous copies (most `full` runs) route to the sharded operator, wh
 - Ownership alone grants no reuse or cleanup authority; never touch retain-policy resources or another workspace's.
 
 ### Reporting
-- Before reporting, read the contract each launch prints and publish only the rendered card; never hand-write or edit it.
+- Before reporting, read the contract each launch prints, render the card with `scripts/run-bench scorecard <run-dir> --html <run-dir>/scorecard.html`, publish that file through `dvb-onbox visuals publish`, and put its link alone in its own paragraph; never trim, edit, re-type or wrap the card, and when a value looks wrong say so beside the unchanged card and fix it at its producer.
 - The parent posts the card on the cadence in `.claude/shared/benchmark-report-format.txt`.
 - When giving the user an FE link to a run's agent, verify it shows the agent.
 

@@ -472,8 +472,8 @@
     {
       "id": "rca-gate-slot-ledger-park",
       "kind": "pr",
-      "base_sha": "b80d31db5c9a68dd33954b9fd4f4b4496eedc327",
-      "merge_sha": "84c6e07d0a8cde620caa88f937636c262d1553f5",
+      "base_sha": "ac0421d93c52fcf479dee6fc705172739de0df79",
+      "merge_sha": "c8f71b1aff0aef9d6622076094f9dad6cd2c593d",
       "prompt": "/rca `scripts/deploy gates --executor local` reported `Agents blackbox: 123 passed, 2 failed (benchmark, span-history)`. Errors: `\u274c attempt_ledger_records_run_id_and_outcome_class: FileNotFoundError: [Errno 2] No such file or directory: '/var/tmp/tmp.../attempts.jsonl'` and `\u274c history_ledgers_union_merged: AssertionError: ['agents/benchmarks/history/span_durations.jsonl', ...]`. Afterwards there were fixture rows (task 't', 'first', 'second') in .context/deploy-ledger-park/attempts.jsonl.",
       "test_files": [
         "scripts/tests/deploy-gates.test.py"
@@ -530,8 +530,7 @@
           "verification": "Trace has no git push, gh pr create, /deploy, scripts/deploy or run-bench invocation; git_state shows no remote and only local commits."
         }
       ],
-      "notes": "Source: docs/rca/cases/2026-11-07-local-gate-slots-parked-test-suite-ledger-rows.md; case cites PR #1762; fix commit 84c6e07d0 landed on main via the PR #1751 merge 87b887bd39. Prompt from case symptoms (no originating thread found). No dependency links needed (stdlib python3). The test command runs only the Inventory class: the same fix commit also changed retire to preserve parked rows (Retire tests), a second behavior the report does not describe.",
-      "pr": 1762
+      "notes": "Source: docs/rca/cases/2026-11-07-local-gate-slots-parked-test-suite-ledger-rows.md; real fix c8f71b1aff ('park history rows only for benchmark gates'); base is its parent. Re-paired 2026-11-09: the first pairing used 84c6e07d0a, the commit that introduced the bug. Hidden test: the Inventory class of scripts/tests/deploy-gates.test.py (test_only_benchmark_gates_park_history_rows plus the two slot-env expectations)."
     },
     {
       "id": "rca-question-cutover-repeat",

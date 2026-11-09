@@ -43,6 +43,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 ### Running benchmarks
 - Run every batch and rerun on the cloud fleet from the worktree holding the fixes; use `--local` only when the user asks.
 - Never split a batch across launches and never launch proof reruns; the next batch run is the outcome proof, and the only extra run is an RCA's granted single-task check under **Fixes**.
+- The run sub-agent works in the background so the parent stays free; it reads new failures from every sample (`summary.json` and the job logs) and the parent starts their RCAs at once, and every card is the CLI-rendered one published per `/benchmark` **Reporting**, never a hand-made table.
 - A sharded (>32-copy) run needs a clean pushed commit, its executed SHA must be verified, and fixes never move its launch ref while it runs.
 - Never build or activate images in an ordinary descent; cold-image and mass-demo runs happen only when explicitly requested.
 - Capacity and admission follow `/benchmark`'s capacity checks, and speedups respect provider rate limits: `scripts/cloudbench-provider-limits.json` (`python3 scripts/cloudbench-provider-capacity.py cap`) and Fly's `machines_per_org_limit`.
@@ -74,7 +75,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 ## RCA per failure
 
 - INFRA means the environment failed before a trustworthy verdict; HARNESS means a trustworthy verdict failed real criteria, including a fallback that masks the required path; issue classes and the timeout and provider-limit evidence rules are in `/rca` **Classify**.
-- As each task fails, start one muted `/RCA` thread for it via `boxes-delegated-threads`, with its own worktree and non-overlapping files, the task's run, attempt and agent IDs, FE link, evaluator output, source SHA, scope and a 100-minute time box (91% of 140 recorded RCA lanes finished within 100 minutes); fixing starts while the batch still runs.
+- As each task fails, start one muted `/RCA` thread for it via `boxes-delegated-threads`, with its own worktree and non-overlapping files, the task's run, attempt and agent IDs, FE link, evaluator output, source SHA, scope and a 100-minute time box (91% of 140 recorded RCA lanes finished within 100 minutes); fixing starts while the batch still runs; every failed task gets its RCA (never skip or defer one for budget), the time box is wall-clock time and never a tool-call or token cap, and when managed threads are unavailable the same handoff starts as a native background sub-agent.
 - RCAs dedupe themselves: each first checks the RCA ledger in state and `python3 scripts/rca_archive.py search <terms>` for the same defect and, if another RCA already owns it, hands its task to that owner with its evidence (run, attempt and agent IDs, FE link, the matching boundary) and stops; before writing a fix it posts its named defect (code site and mechanism) to the ledger, and the later of two RCAs naming the same site hands over the same way.
 - Never treat a shared symptom (failure string, evaluator, status, timeout, website or issue class) as the same defect.
 - Before blaming the agent, confirm the judge saw what the user sees and no inherited repo-default gate applies; prove evaluator defects with judge-only replays and count the verdicts they change.
@@ -84,6 +85,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 - At 90 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 100 minutes take what it handed back.
 - The next batch launches once every RCA's fix is applied or its time box expires; an expired RCA keeps its evidence, carries over, and never ships a guessed repair.
+- An RCA that returns before its box expires without an applied fix is resumed with its evidence; a diagnosis is not a fix, and the next batch still waits.
 - Each RCA proves its fix at the owning boundary with an isolated local repro and lands that regression in the owning suite; it never uses a full end-to-end benchmark rerun as proof.
 - When the fix needs an end-to-end check, the RCA asks the parent for a check slot; the parent grants it only when the task's recorded p90 plus 15 minutes of fleet startup ends before minute 85 and the provider and Fly budget hold the running batch plus every granted check.
 - With a slot, the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait` in the background, never `--local`, with `CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES` set to the batch's simultaneous width plus the granted checks; the check publishes no card and is not outcome proof, and if it is still running at minute 95 the RCA TERMs its exact controller and confirms release before handing back.

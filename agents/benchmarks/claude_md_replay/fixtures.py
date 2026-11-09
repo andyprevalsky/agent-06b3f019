@@ -111,10 +111,11 @@ def scenario_path(scenario: str) -> Path:
 
 
 def replay_cli(repo: Path, scenario: str) -> dict[str, Any]:
-    """Replace scripts/run-bench with the recorded-output stub for ``scenario`` (see the stub's docstring).
+    """Replace scripts/run-bench with a neutral launcher of the recorded-output stub (see the stub's docstring).
 
-    The real script moves to scripts/.run-bench.real; the stub and the refusing fleet/campaign shims are
-    marked skip-worktree so ``git status`` and ``git add -A`` leave them alone.
+    The real script moves to scripts/.run-bench.real; the launchers for run-bench, the refusing fleet/campaign
+    scripts and scenario tools are marked skip-worktree (tracked) or excluded locally (untracked) so
+    ``git status`` and ``git add -A`` leave them alone.
     """
     receipt = load_replay_cli_stub().install(repo, scenario_path(scenario))
     tracked = [
@@ -123,7 +124,8 @@ def replay_cli(repo: Path, scenario: str) -> dict[str, Any]:
     ]
     if tracked:
         git(repo, "update-index", "--skip-worktree", "--", *tracked)
-    exclude_locally(repo, ("scripts/.run-bench.real",))
+    untracked = tuple(rel for rel in receipt["hidden_tracked"] if rel not in tracked)
+    exclude_locally(repo, ("scripts/.run-bench.real", *untracked))
     receipt["skip_worktree"] = tracked
     return receipt
 

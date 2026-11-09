@@ -5,16 +5,20 @@ exec python3 -I "$0" "$@"
 
 Replay stub for a repository CLI (``scripts/run-bench`` by default) inside a skill-test sandbox.
 
-Installed by the ``replay_cli:<scenario>`` fixture (``fixtures.py``). The first lines make this
-file valid for ``scripts/run-bench``, ``bash scripts/run-bench`` and ``python3 scripts/run-bench``.
+Installed by the ``replay_cli:<scenario>`` fixture (``fixtures.py``) as a hidden dispatcher; the
+visible launchers (``launcher()``) work as ``scripts/run-bench``, ``bash scripts/run-bench`` and
+``python3 scripts/run-bench``, and pass the tool name as the dispatcher's first argument.
 
 Installed layout (``<gc>`` = ``git rev-parse --git-common-dir`` of the replay repository):
-  scripts/run-bench               this file (stub); the real script is moved to scripts/.run-bench.real
+  scripts/run-bench               neutral launcher: ``exec python3 -I <gc>/cloudbench-cli/run_bench.py run-bench "$@"``
+                                  (valid for sh, bash and python3); the real script moves to scripts/.run-bench.real
   scripts/run-bench-fleet, scripts/run-bench-campaign.py, scripts/run-bench-cloud
-                                  refusing shims: every direct call is logged and exits 1
-  <gc>/replay-cli/scenario.json   operational copy of skill_scenarios/<scenario>.json (provenance stripped)
-  <gc>/replay-cli/state.json      per-rule call counters (flock-guarded)
-  <gc>/replay-cli/<controller argv0 name>   copy of this file, run as the dummy controller
+                                  neutral launchers whose calls are logged with refused=true and exit 1
+  <gc>/cloudbench-cli/run_bench.py   this file without this docstring (the visible files never name the
+                                  sandbox, the scenario or the mocks directory)
+  <gc>/cloudbench-cli/scenario.json  operational copy of skill_scenarios/<scenario>.json (provenance stripped)
+  <gc>/cloudbench-cli/state.json  per-rule call counters (flock-guarded)
+  <gc>/cloudbench-cli/<controller argv0 name>   copy of run_bench.py, run as the dummy controller
   <repo>/../mocks/run-bench.jsonl          one row per call (also refused and delegated calls)
   <repo>/../mocks/controller.json          controller pid, pid_start, token, argv (written on start)
   <repo>/../mocks/controller-signals.jsonl every signal the controller (and its children) received, the
@@ -32,22 +36,26 @@ Scenario format (stable; other scenario authors depend on it). JSON object:
                on_term_files / on_exit_files: {path: content} written when it exits on TERM / by itself}
   delegate     list of regexes for read-only calls passed to scripts/.run-bench.real
                (default: a first word of list, --list or report-format, or any --help / -h word)
+               A rule with ``"delegate": true`` also runs the real script (scorecards render from the
+               scenario's own recorded artifacts that way); its row carries the rule id and delegated=true.
   rules        ordered list; the first rule whose ``match`` regex (re.search on the space-joined argv)
                matches and whose ``when`` holds is used:
                  id: str, match: regex, tool: "run-bench" (default) or another installed tool name,
-                 when: {"controller": "alive" | "exited" | "not_started"} (optional),
+                 when: {"controller": "alive" | "exited" | "not_started",
+                        "exit_reason": "term" | "self_exit" | ... (the exited controller's reason)} (optional),
                  start_controller: bool (start the controller before rendering the response),
                  responses: [ {stdout, stderr (printed at once), exit_code (0), files {path: content},
                                sleep_seconds (0; the call blocks like a foreground launcher),
                                controller: "exit" (after the sleep, ask the controller to exit by itself),
                                stdout_after / stderr_after (printed after the sleep and exit)} ],
                  repeat_last: bool (default true; false -> the default response once exhausted)
-  default      response used when no rule matches (default: exit 2 with a refusal on stderr)
+               A response with ``"refused": true`` (and every default response) is logged with refused=true.
+  default      response used when no rule matches (default: exit 2 with a usage error on stderr)
   tools        optional {name: {path: repo-relative path (may be ../bin/<tool> for a PATH tool),
                passthrough: bool}}: extra commands routed through the same rules (rule ``tool`` = name);
                with passthrough, an unmatched call execs the next ``name`` on PATH
 Placeholders ``{CONTROLLER_PID}``, ``{CONTROLLER_PID_START}``, ``{CONTROLLER_TOKEN}``, ``{REPO}``,
-``{GIT_COMMON}``, ``{MOCKS}``, ``{HEAD_SHA}``/``{HEAD_SHORT}``/``{HEAD_13}`` (the replay repo's HEAD), ``{CALL}`` (1-based call number), ``{CHILD_PID_<n>}``, ``{NOW_PST}``, ``{REPORT_FORMAT}`` (the replay repo's
+``{GIT_COMMON}``, ``{MOCKS}``, ``{NOW_EPOCH}``/``{NOW_ISO}`` (render time), ``{HEAD_SHA}``/``{HEAD_SHORT}``/``{HEAD_13}`` (the replay repo's HEAD), ``{CALL}`` (1-based call number), ``{CHILD_PID_<n>}``, ``{NOW_PST}``, ``{REPORT_FORMAT}`` (the replay repo's
 .claude/shared/benchmark-report-format.txt, as the real launch prints it), the matched rule's named regex
 groups (``(?P<HTML>[^ ]+)`` -> ``{HTML}``) and every ``vars`` key are replaced in stdout, stderr, file
 paths and file contents. The n-th call matching a rule gets responses[n-1].
@@ -69,11 +77,15 @@ from typing import Any, Optional
 
 DEFAULT_DELEGATE = (r"^(list|--list)(\s|$)", r"^report-format$", r"(^|\s)(--help|-h)(\s|$)")
 DEFAULT_RESPONSE = {
-    "stderr": "❌ run-bench: this invocation is not available in this environment; the call was recorded and refused.\n",
+    "stderr": "Usage: scripts/run-bench [--local] [--wait] <task|selector>... [-k K] [--concurrency N] [options]\n"
+              "       scripts/run-bench list | report-format | monitor <run-dir> | scorecard <run-dir> | --help\n"
+              "❌ run-bench: unsupported arguments: {ARGV}\n",
     "exit_code": 2,
 }
+IMPL_DIR = "cloudbench-cli"
+IMPL_NAME = "run_bench.py"
+CONTROLLER_FLAG, CHILD_FLAG = "--fleet-controller", "--fleet-child"
 REFUSED_SCRIPTS = ("run-bench-fleet", "run-bench-campaign.py", "run-bench-cloud")
-CONFIG_ENV = "REPLAY_CLI_CONFIG"
 SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2", "SIGALRM", "SIGCONT", "SIGTSTP")
 
 
@@ -93,7 +105,8 @@ class Layout:
     def __init__(self, repo: Path, git_common: Optional[Path] = None) -> None:
         self.repo = repo.resolve()
         self.git_common = (git_common or _git_common(self.repo)).resolve()
-        self.dir = self.git_common / "replay-cli"
+        self.dir = self.git_common / IMPL_DIR
+        self.impl = self.dir / IMPL_NAME
         self.scenario = self.dir / "scenario.json"
         self.state = self.dir / "state.json"
         self.lock = self.dir / "state.lock"
@@ -103,6 +116,12 @@ class Layout:
         self.pidfile = self.mocks / "controller.json"
         self.signals = self.mocks / "controller-signals.jsonl"
         self.real = self.repo / "scripts" / ".run-bench.real"
+
+    @classmethod
+    def from_impl(cls, impl: Path) -> "Layout":
+        """The layout of an installed ``<gc>/cloudbench-cli/run_bench.py`` (its ``root`` file names the repo)."""
+        here = impl.resolve().parent
+        return cls(Path((here / "root").read_text().strip()), here.parent)
 
 
 def _append(path: Path, row: dict[str, Any]) -> None:
@@ -134,6 +153,19 @@ def controller_info(layout: Layout) -> Optional[dict[str, Any]]:
         return None
 
 
+def controller_exit_reason(layout: Layout) -> str:
+    """The exited controller's own exit reason (``term``, ``self_exit``, ...) from its signal log."""
+    try:
+        lines = layout.signals.read_text().splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        row = json.loads(line) if line.strip() else {}
+        if row.get("role") == "controller" and row.get("event") == "exit":
+            return str(row.get("reason") or "")
+    return ""
+
+
 def controller_state(layout: Layout) -> str:
     info = controller_info(layout)
     if not info:
@@ -152,6 +184,8 @@ def placeholders(layout: Layout, scenario: dict[str, Any], call: int = 0, groups
         "GIT_COMMON": str(layout.git_common),
         "MOCKS": str(layout.mocks),
         "CALL": str(call),
+        "NOW_EPOCH": str(int(time.time())),
+        "NOW_ISO": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     head = head_sha(layout.repo)
     if head:  # recorded output names the replay repo's own HEAD, not the source run's commit
@@ -203,7 +237,7 @@ def write_files(layout: Layout, files: dict[str, Any], values: dict[str, str]) -
         path = path if path.is_absolute() else layout.repo / path
         path.parent.mkdir(parents=True, exist_ok=True)
         text = substitute(content, values) if isinstance(content, str) else json.dumps(_sub_json(content, values), indent=2) + "\n"
-        tmp = path.with_name(f".{path.name}.replay-tmp")
+        tmp = path.with_name(f".{path.name}.tmp{os.getpid()}")
         tmp.write_text(text)
         os.replace(tmp, path)
         written.append(str(path))
@@ -219,7 +253,7 @@ def _owner_meta(layout: Layout, ctl: dict[str, Any], pid: int, start: str) -> Pa
     token = str(ctl["token"])
     registry = layout.git_common / "cloudbench-fleet-ownership" / token
     audit = layout.git_common / "cloudbench-fleet-audits" / token
-    run_id = str(ctl.get("run_id") or "replay-run")
+    run_id = str(ctl.get("run_id") or "fleet-run")
     runs_root = layout.repo / ".context" / "fleet" / "runs"
     rows = [
         ("version", "2"),
@@ -273,7 +307,7 @@ def run_controller(layout: Layout, role: str) -> int:
         for _ in range(int(ctl.get("children", 1))):
             children.append(
                 subprocess.Popen(
-                    [sys.executable, "-I", sys.argv[0], "--replay-child", str(layout.repo), str(layout.git_common)],
+                    [sys.executable, "-I", sys.argv[0], CHILD_FLAG, str(layout.repo), str(layout.git_common)],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
             )
@@ -341,10 +375,10 @@ def start_controller(layout: Layout, scenario: dict[str, Any]) -> dict[str, Any]
     argv0 = str(ctl.get("argv0") or "run-bench-fleet")
     script = layout.dir / argv0
     if not script.is_file():
-        shutil.copyfile(Path(__file__).resolve(), script)
+        shutil.copyfile(layout.impl if layout.impl.is_file() else Path(__file__).resolve(), script)
         script.chmod(0o755)
     args = [str(a) for a in (ctl.get("args") or [])]
-    argv = [sys.executable, "-I", str(script), "--replay-controller", str(layout.repo), str(layout.git_common), *args]
+    argv = [sys.executable, "-I", str(script), CONTROLLER_FLAG, str(layout.repo), str(layout.git_common), *args]
     first = os.fork()
     if first == 0:
         os.setsid()
@@ -362,7 +396,7 @@ def start_controller(layout: Layout, scenario: dict[str, Any]) -> dict[str, Any]
         if info:
             return info
         time.sleep(0.05)
-    raise RuntimeError("replay controller did not publish its pidfile within 10s")
+    raise RuntimeError("fleet controller did not publish its pidfile within 10s")
 
 
 # ---------------------------------------------------------------------------
@@ -374,21 +408,33 @@ def operational(scenario: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in scenario.items() if k not in ("provenance", "description", "notes")}
 
 
-def _refuser(kind: str, layout: Layout, name: str) -> str:
-    if kind == "python":
-        return f'''#!/usr/bin/env python3
-import json, os, sys, time
-with open({str(layout.log)!r}, "a") as fh:
-    fh.write(json.dumps({{"ts": time.time(), "tool": {name!r}, "argv": sys.argv[1:], "cwd": os.getcwd(), "refused": True, "exit_code": 1}}) + "\\n")
-sys.stderr.write("❌ " + {name!r} + " must not be called directly; use scripts/run-bench.\\n")
-sys.exit(1)
-'''
-    return f'''#!/bin/sh
-python3 -I -c 'import json, os, sys, time
-open(sys.argv[1], "a").write(json.dumps({{"ts": time.time(), "tool": sys.argv[2], "argv": sys.argv[3:], "cwd": os.getcwd(), "refused": True, "exit_code": 1}}) + "\\n")' {str(layout.log)!r} {name!r} "$@"
-echo "❌ {name} must not be called directly; use scripts/run-bench." >&2
-exit 1
-'''
+def launcher(impl: Path, tool: str, python_only: bool = False) -> str:
+    """A neutral entrypoint that execs the hidden dispatcher; it names neither the sandbox nor the mocks.
+
+    ``python_only`` (``*.py`` targets) writes a plain Python script, as the real ``python3 scripts/x.py``
+    tools are; otherwise the file is valid for sh, bash and python3 alike.
+    """
+    if python_only:
+        return (
+            "#!/usr/bin/env python3\n"
+            "import os\nimport sys\n\n"
+            f"os.execv(sys.executable, [sys.executable, \"-I\", {str(impl)!r}, {tool!r}, *sys.argv[1:]])\n"
+        )
+    return (
+        "#!/bin/sh\n"
+        '""":"\n'
+        f"exec python3 -I '{impl}' '{tool}' \"$@\"\n"
+        '":"""\n'
+        "import os\nimport sys\n\n"
+        f"os.execv(sys.executable, [sys.executable, \"-I\", {str(impl)!r}, {tool!r}, *sys.argv[1:]])\n"
+    )
+
+
+def _impl_source() -> str:
+    """This file without its module docstring (the format notes stay in the harness, not the sandbox)."""
+    source = Path(__file__).resolve().read_text()
+    end = source.index('\n"""\n') + len('\n"""\n')
+    return '#!/usr/bin/env python3\n"""run-bench command dispatcher."""\n' + source[end:]
 
 
 def install(repo: Path, scenario_path: Path) -> dict[str, Any]:
@@ -404,26 +450,27 @@ def install(repo: Path, scenario_path: Path) -> dict[str, Any]:
     layout.log.touch()
     layout.scenario.write_text(json.dumps(operational(scenario), indent=2))
     layout.state.write_text("{}")
+    (layout.dir / "root").write_text(str(layout.repo) + "\n")
+    layout.impl.write_text(_impl_source())
+    layout.impl.chmod(0o755)
     stub = layout.repo / "scripts" / "run-bench"
     if not stub.is_file():
         raise ValueError(f"{stub} does not exist at the base commit")
     if not layout.real.exists():
         os.replace(stub, layout.real)
-    shutil.copyfile(Path(__file__).resolve(), stub)
+    stub.write_text(launcher(layout.impl, "run-bench"))
     stub.chmod(0o755)
     hidden = ["scripts/run-bench"]
     for name in REFUSED_SCRIPTS:
         target = layout.repo / "scripts" / name
         if target.exists():
-            target.write_text(_refuser("python" if name.endswith(".py") else "sh", layout, name))
+            target.write_text(launcher(layout.impl, name, python_only=name.endswith(".py")))
             target.chmod(0o755)
             hidden.append(f"scripts/{name}")
     for tool, spec in (scenario.get("tools") or {}).items():
         target = layout.repo / spec["path"]
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            f"#!/bin/sh\nREPLAY_CLI_TOOL={tool!r} REPLAY_CLI_TOOL_PATH=\"$0\" exec python3 -I {str(stub)!r} \"$@\"\n"
-        )
+        target.write_text(launcher(layout.impl, tool, python_only=target.name.endswith(".py")))
         target.chmod(0o755)
         if target.resolve().is_relative_to(layout.repo):
             hidden.append(target.resolve().relative_to(layout.repo).as_posix())
@@ -466,19 +513,28 @@ def _next_on_path(name: str, wrapper: str) -> Optional[str]:
     return None
 
 
-def dispatch(argv: list[str], tool: str = "run-bench") -> int:
-    layout = Layout(Path(__file__).resolve().parents[1])
+def _delegate(layout: Layout, row: dict[str, Any], argv: list[str]) -> int:
+    _append(layout.log, row)
+    proc = subprocess.run(["bash", str(layout.real), *argv])
+    _append(layout.log, {**row, "ts": time.time(), "delegated_exit_code": proc.returncode, "phase": "end"})
+    return proc.returncode
+
+
+def dispatch(argv: list[str], tool: str = "run-bench", layout: Optional[Layout] = None) -> int:
+    layout = layout or Layout.from_impl(Path(__file__))
     scenario = json.loads(layout.scenario.read_text())
     joined = " ".join(argv)
     row: dict[str, Any] = {"ts": time.time(), "tool": tool, "argv": argv, "joined": joined, "cwd": os.getcwd(), "pid": os.getpid()}
+    if tool in REFUSED_SCRIPTS:  # direct controller calls: logged, refused like the real guard
+        row.update(refused=True, exit_code=1)
+        _append(layout.log, row)
+        sys.stderr.write(f"❌ {tool} must not be called directly; use scripts/run-bench.\n")
+        return 1
     if tool == "run-bench":
         for pattern in scenario.get("delegate") or DEFAULT_DELEGATE:
             if re.search(pattern, joined):
                 row.update(delegated=True, rule=None, response_index=None)
-                _append(layout.log, row)
-                proc = subprocess.run(["bash", str(layout.real), *argv])
-                _append(layout.log, {**row, "ts": time.time(), "delegated_exit_code": proc.returncode, "phase": "end"})
-                return proc.returncode
+                return _delegate(layout, row, argv)
     state = controller_state(layout)
     chosen: Optional[dict[str, Any]] = None
     groups: dict[str, str] = {}
@@ -489,21 +545,28 @@ def dispatch(argv: list[str], tool: str = "run-bench") -> int:
         want = (rule.get("when") or {}).get("controller")
         if want and want != state:
             continue
+        reason = (rule.get("when") or {}).get("exit_reason")
+        if reason and (state != "exited" or controller_exit_reason(layout) != reason):
+            continue
         chosen, groups = rule, found.groupdict()
         break
     response: dict[str, Any]
     spec = (scenario.get("tools") or {}).get(tool) or {}
     if chosen is None and spec.get("passthrough"):
-        real = _next_on_path(tool, os.environ.get("REPLAY_CLI_TOOL_PATH", ""))
+        real = _next_on_path(tool, str(layout.repo / spec["path"]))
         row.update(rule=None, response_index=None, passthrough=real)
         _append(layout.log, row)
         if not real:
             sys.stderr.write(f"{tool}: command not found\n")
             return 127
         os.execv(real, [real, *argv])
+    if chosen is not None and chosen.get("delegate") and tool == "run-bench":
+        index, _call = _bump(layout, chosen["id"])
+        row.update(delegated=True, rule=chosen["id"], response_index=index)
+        return _delegate(layout, row, argv)
     if chosen is None:
         index, call = _bump(layout, "__default__")
-        response = scenario.get("default") or DEFAULT_RESPONSE
+        response = {**DEFAULT_RESPONSE, **(scenario.get("default") or {}), "refused": True}
         row.update(rule=None, response_index=None)
     else:
         index, call = _bump(layout, chosen["id"])
@@ -513,16 +576,19 @@ def dispatch(argv: list[str], tool: str = "run-bench") -> int:
         elif chosen.get("repeat_last", True):
             response = responses[-1]
         else:
-            response = scenario.get("default") or DEFAULT_RESPONSE
+            response = {**DEFAULT_RESPONSE, **(scenario.get("default") or {}), "refused": True}
         row.update(rule=chosen["id"], response_index=index)
         if chosen.get("start_controller"):
             start_controller(layout, scenario)
     values = placeholders(layout, scenario, call, groups)
+    values["ARGV"] = joined
     row["controller_state"] = controller_state(layout)
     row["controller_pid"] = values["CONTROLLER_PID"] or None
     row["files_written"] = write_files(layout, response.get("files") or {}, values)
     exit_code = int(response.get("exit_code", 0))
     row["exit_code"] = exit_code
+    if response.get("refused"):
+        row["refused"] = True
     _append(layout.log, row)
     sys.stdout.write(substitute(response.get("stdout", ""), values))
     sys.stderr.write(substitute(response.get("stderr", ""), values))
@@ -537,6 +603,7 @@ def dispatch(argv: list[str], tool: str = "run-bench") -> int:
             time.sleep(0.1)
     if response.get("stdout_after") or response.get("stderr_after"):
         values = placeholders(layout, scenario, call, groups)
+        values["ARGV"] = joined
         sys.stdout.write(substitute(response.get("stdout_after", ""), values))
         sys.stderr.write(substitute(response.get("stderr_after", ""), values))
         sys.stdout.flush()
@@ -545,9 +612,12 @@ def dispatch(argv: list[str], tool: str = "run-bench") -> int:
 
 
 def main(argv: list[str]) -> int:
-    if argv[:1] in (["--replay-controller"], ["--replay-child"]):
-        return run_controller(Layout(Path(argv[1]), Path(argv[2])), "controller" if argv[0] == "--replay-controller" else "child")
-    return dispatch(argv, os.environ.get("REPLAY_CLI_TOOL", "run-bench"))
+    if argv[:1] in ([CONTROLLER_FLAG], [CHILD_FLAG]):
+        return run_controller(Layout(Path(argv[1]), Path(argv[2])), "controller" if argv[0] == CONTROLLER_FLAG else "child")
+    if not argv:
+        sys.stderr.write("usage: run_bench.py <tool> [args...]\n")
+        return 2
+    return dispatch(argv[1:], argv[0])
 
 
 if __name__ == "__main__":

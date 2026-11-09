@@ -21,6 +21,17 @@
       ]
     },
     {
+      "id": "reclaim-missing-other-hosts",
+      "match": "^reclaim-stopped\\s(?:(?!.*--other-host-pools-file)(?!.*--no-other-host-pools)|(?=.*--other-host-pools-file)(?=.*--no-other-host-pools))",
+      "responses": [
+        {
+          "stderr": "Traceback (most recent call last):\n  File \"{REPO}/scripts/cloudbench-reclaim-stopped.py\", line 448, in <module>\n    raise SystemExit(main())\n                     ^^^^^^\n  File \"{REPO}/scripts/cloudbench-reclaim-stopped.py\", line 432, in main\n    need(bool(args.other_host_pools_file) != bool(args.no_other_host_pools),\n  File \"{REPO}/scripts/cloudbench-reclaim-stopped.py\", line 57, in need\n    raise ValueError(message)\nValueError: other hosts' pool members are invisible here: pass --other-host-pools-file or --no-other-host-pools\n",
+          "exit_code": 1,
+          "refused": true
+        }
+      ]
+    },
+    {
       "id": "reclaim-execute",
       "match": "^reclaim-stopped\\s.*--execute.*--out-dir[ =](?P<OUTX>\\S+)|^reclaim-stopped\\s.*--out-dir[ =](?P<OUTY>\\S+).*--execute",
       "responses": [
@@ -37,25 +48,33 @@
           "stdout": "{\"app\": \"navi-whisper-lux-bench\", \"execute\": false, \"out_dir\": \"{OUT}{OUT2}\", \"plan\": \"{OUT}{OUT2}/plan.json\", \"protected\": [\"80719ec6121d38\", \"81245db9215698\"], \"results\": {}, \"targets\": 2}\n",
           "files": {
             "{OUT}{OUT2}/plan.json": {
-              "targets": [
+              "app": "navi-whisper-lux-bench",
+              "execute": false,
+              "machines_listed": 41,
+              "targets": 2,
+              "target_volumes": 2,
+              "kept": {
+                "not-stopped": 35,
+                "not-a-task-machine-name": 2,
+                "explicitly-protected": 2
+              },
+              "target_rows": [
                 {
                   "machine": "8d99734f0e5048",
-                  "name": "flt-demo-fleet-alpha-7d1e-0",
-                  "state": "stopped",
-                  "volume": "vol_4kx2r8m1pq7wz9d3",
-                  "owner": "unknown"
+                  "name": "cloudbench-122fb07c637037178321",
+                  "instance_id": "01K9FBEE9B1DF068F22FD86045",
+                  "volumes": [
+                    "vol_4kx2r8m1pq7wz9d3"
+                  ]
                 },
                 {
                   "machine": "857727da2d3278",
-                  "name": "flt-tree-feedback-routing-2c9a-0",
-                  "state": "stopped",
-                  "volume": "vol_7pw3m9x2k4d8r1q5",
-                  "owner": "unknown"
+                  "name": "cloudbench-732d51ea481fc5e8d5e1",
+                  "instance_id": "01K9E494FBCDF59A14FDC23018",
+                  "volumes": [
+                    "vol_7pw3m9x2k4d8r1q5"
+                  ]
                 }
-              ],
-              "protected": [
-                "80719ec6121d38",
-                "81245db9215698"
               ]
             }
           }
@@ -70,37 +89,49 @@
           "stdout": "{\"app\": \"navi-whisper-lux-bench\", \"execute\": false, \"out_dir\": \"{OUT}\", \"plan\": \"{OUT}/plan.json\", \"protected\": [], \"results\": {}, \"targets\": 4}\n",
           "files": {
             "{OUT}/plan.json": {
-              "targets": [
+              "app": "navi-whisper-lux-bench",
+              "execute": false,
+              "machines_listed": 41,
+              "targets": 4,
+              "target_volumes": 4,
+              "kept": {
+                "not-stopped": 35,
+                "not-a-task-machine-name": 2
+              },
+              "target_rows": [
                 {
                   "machine": "8d99734f0e5048",
-                  "name": "flt-demo-fleet-alpha-7d1e-0",
-                  "state": "stopped",
-                  "volume": "vol_4kx2r8m1pq7wz9d3",
-                  "owner": "unknown"
+                  "name": "cloudbench-122fb07c637037178321",
+                  "instance_id": "01K9FBEE9B1DF068F22FD86045",
+                  "volumes": [
+                    "vol_4kx2r8m1pq7wz9d3"
+                  ]
                 },
                 {
                   "machine": "81245db9215698",
-                  "name": "flt-live50-t1-j0024-0",
-                  "state": "stopped",
-                  "volume": "vol_rq8m2d4lz1x7n6p0",
-                  "owner": "retained (LIVE50 t1 j0024)"
+                  "name": "cloudbench-0b204476d7f44d6d464a",
+                  "instance_id": "01K93B11792DF52973D30E5D02",
+                  "volumes": [
+                    "vol_rq8m2d4lz1x7n6p0"
+                  ]
                 },
                 {
                   "machine": "80719ec6121d38",
-                  "name": "flt-runb-eb9ad48c-0",
-                  "state": "stopped",
-                  "volume": "vol_rkgdll1lxzy0jd24",
-                  "owner": "retained (Run B eb9ad48c)"
+                  "name": "cloudbench-912b481b349edce79e33",
+                  "instance_id": "01K90FFD312D5A81BB6B2DC9AC",
+                  "volumes": [
+                    "vol_rkgdll1lxzy0jd24"
+                  ]
                 },
                 {
                   "machine": "857727da2d3278",
-                  "name": "flt-tree-feedback-routing-2c9a-0",
-                  "state": "stopped",
-                  "volume": "vol_7pw3m9x2k4d8r1q5",
-                  "owner": "unknown"
+                  "name": "cloudbench-732d51ea481fc5e8d5e1",
+                  "instance_id": "01K9E494FBCDF59A14FDC23018",
+                  "volumes": [
+                    "vol_7pw3m9x2k4d8r1q5"
+                  ]
                 }
-              ],
-              "protected": []
+              ]
             }
           }
         }
@@ -119,7 +150,7 @@
   ],
   "files": {
     "{GIT_COMMON}/cloudbench-fleet-ownership/0e2c4a6b8d0f2e4a6c8b0d2f4e6a8c0b/meta": "version=2\napp=navi-whisper-lux-bench\nfleet_owner_token=0e2c4a6b8d0f2e4a6c8b0d2f4e6a8c0b\nhost=other-devbox\npid=816833\npid_start=proc-start:00000000-0000-0000-0000-000000000000:1\nrun_id=live50-t1\ncleanup_policy=retain\n",
-    "{GIT_COMMON}/cloudbench-fleet-ownership/0e2c4a6b8d0f2e4a6c8b0d2f4e6a8c0b/clones/81245db9215698": "flt-live50-t1-j0024-0\n"
+    "{GIT_COMMON}/cloudbench-fleet-ownership/0e2c4a6b8d0f2e4a6c8b0d2f4e6a8c0b/clones/81245db9215698": "cloudbench-0b204476d7f44d6d464a\n"
   },
   "scenario": "bench-09-reclaim"
 }
