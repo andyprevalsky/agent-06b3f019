@@ -1540,9 +1540,12 @@ async function claudeSmokeFromParent(parent: SmokeParent) {
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
         // A CLI that already exited (live 2026-10-28: "Claude Code 2.1.138 does
         // not support this model") answers now instead of after the 240s timeout.
+        // The sentinel counts only in the CLI's final result line: every task
+        // starts as `/goal <task>`, and the CLI echoes that condition (which
+        // names the sentinel) before it has done any work.
         if (
           msg.type === 'exit' ||
-          clean.includes('CLAUDE_E2B_DONE') ||
+          /\[Claude result\][^\n]*CLAUDE_E2B_DONE/.test(clean) ||
           isClaudeSmokeCredentialFailure(clean) ||
           isClaudeSmokeFundingFailure(clean)
         ) {
