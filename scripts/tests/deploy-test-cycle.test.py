@@ -5287,6 +5287,117 @@ assert len(list(p.iterdir()))==2
 KIND = 'local-supervisor-cleanup-v1'
 
 
+class QuickTimeoutCleanup(unittest.TestCase):
+    """Offline quick-supervisor proofs never grant outcome or cleanup credit."""
+    def fixture(self, name='eslint'):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name) / 'cycle/attempts/55/quick' / name
+        folder.mkdir(parents=True)
+        gate = dict(name=name, category=name, quick=True, command=['native', name], checks=[name], cwd='.')
+        source = dict(head='a' * 40, digest='b' * 64)
+        request = dict(token='original-token', source=source, gate=name, checks=[name], skips={},
+                       phase='quick', custody_state=str(folder.parents[3] / 'cycle.json'))
+        receipt = dict(token=request['token'], source=source, gate=name, command=gate['command'],
+                       log=str(folder/'output.log'), stderr_log=str(folder/'stderr.log'),
+                       executed=True, complete=False, status='FAIL', cases={name:'UNVERIFIED'},
+                       case_complete={name:False}, timed_out=True, cancelled=False, lingering_group=True,
+                       lifecycle='owned', native_exit=-15, started_at=100, finished_at=230,
+                       execution_binding=dict(contract_digest=c.digest(gate), input_fingerprint='c'*64, environment='d'*64))
+        process = dict(supervisor_pid=2147483600, child_pid=2147483601, native_exit=-15, timed_out=True,
+                       cancelled=False, quiescent=True, orphaned_children=True, remaining=[], error=None,
+                       reaped=[dict(pid=2147483601,status=15)], term_sent=[2147483601], kill_sent=[])
+        tn = 'teardown/attempt-55-' + name + '.json'
+        teardown = dict(schema_version=2, attempt=55, token=request['token'], lane=name,
+                        lane_started_epoch=100, outcome='clean', owned=[], foreign=[], lingering=[],
+                        survivors=[], records=[], started_at='1970-01-01T00:03:45Z', finished_at='1970-01-01T00:03:46Z')
+        receipt['teardown'] = dict(receipt=str(folder/tn), outcome='clean', owned_pids=[], foreign_pids=[],
+                                  survivors=[], escalated=[], killed=[], eperm=[], set_aside=[])
+        docs = {'request.json':request, 'receipt.json':receipt, 'output.log.process.json':process, tn:teardown}
+        for n, v in docs.items(): c.write(folder/n,v)
+        for n in ['output.log','stderr.log']: (folder/n).write_text('original native timeout\n')
+        proof = dict(kind='local-supervisor-cleanup-v1', files={n:c.sha_file(folder/n) for n in [*docs,'output.log','stderr.log']},
+                     confirmed_at=231, observed_by='offline-independent-review')
+        failure = dict(id='timeout', gate=name, check=name+'/'+name, native_result='UNVERIFIED', complete=False,
+                       source=source, evidence=receipt['log'], worker_result=None, finished_at=230)
+        state = dict(plan={'gates':[gate]}, attempts=[dict(phase='quick',source=source,results=[receipt])],
+                     failures=[failure], phase='triage', pending=['timeout'], repair_gates=[],source=source,skips={},ready=False)
+        return state, proof, folder, docs
+
+    def test_exact_local_timeouts_reexecute_without_changing_outcomes(self):
+        for name in ['eslint', 'backend-structural']:
+            with self.subTest(gate=name):
+                state, proof, folder, docs = self.fixture(name)
+                original = copy.deepcopy(state['attempts'])
+                raw = {n:(folder/n).read_bytes() for n in proof['files']}
+                with self.assertRaisesRegex(ValueError, 'cleanup owner'): c.reexecute(state,'timeout')
+                c.reconcile(state,'timeout',proof)
+                self.assertEqual([], c.retained_owners(state,[name]))
+                c.reexecute(state,'timeout')
+                self.assertEqual(original,state['attempts'])
+                self.assertEqual('UNVERIFIED',state['failures'][0]['native_result'])
+                self.assertFalse(next(iter(state['reconciled_owners'].values()))['credit_granted'])
+                self.assertEqual(raw,{n:(folder/n).read_bytes() for n in raw})
+
+    def test_rehashed_bad_proofs_refuse_atomically(self):
+        changes = [('output.log.process.json','quiescent',False),
+                   ('output.log.process.json','remaining',[2147483601]),
+                   ('output.log.process.json','reaped',[]),
+                   ('output.log.process.json','reaped',[dict(pid=2147483601,status=127)]),
+                   ('output.log.process.json','native_exit',0),
+                   ('output.log.process.json','term_sent',[2147483599]),
+                   ('output.log.process.json','cancelled',True),
+                   ('output.log.process.json','orphaned_children',False),
+                   ('output.log.process.json','supervisor_pid',os.getpid()),
+                   ('output.log.process.json','error','unreadable'),
+                   ('request.json','token','foreign'),('request.json','source',{}),
+                   ('request.json','worker_recipe',{}),
+                   ('teardown/attempt-55-eslint.json','outcome','unknown'),
+                   ('teardown/attempt-55-eslint.json','survivors',[2147483601])]
+        for doc,key,value in changes:
+            with self.subTest(doc=doc,key=key,value=value):
+                state, proof, folder, docs = self.fixture()
+                docs[doc][key]=value; c.write(folder/doc,docs[doc]); proof['files'][doc]=c.sha_file(folder/doc)
+                original=copy.deepcopy(state)
+                with self.assertRaises(ValueError): c.reconcile(state,'timeout',proof)
+                self.assertEqual(original,state)
+
+    def test_changed_contract_and_remote_worker_refuse(self):
+        for key,value in [('command',['other']),('worker_transport','boxes-thread'),('quick',False)]:
+            with self.subTest(key=key):
+                state, proof, folder, docs=self.fixture()
+                state['plan']['gates'][0][key]=value
+                with self.assertRaises(ValueError): c.reconcile(state,'timeout',proof)
+
+    def test_running_receipt_and_missing_or_malformed_evidence_refuse(self):
+        for key,value in [('native_exit',None),('timed_out',False),('complete',True),('lifecycle','remote')]:
+            with self.subTest(field=key):
+                state, proof, folder, docs=self.fixture()
+                docs['receipt.json'][key]=value
+                c.write(folder/'receipt.json',docs['receipt.json'])
+                proof['files']['receipt.json']=c.sha_file(folder/'receipt.json')
+                with self.assertRaises(ValueError): c.reconcile(state,'timeout',proof)
+        for bad in [b'not-json',b'[]']:
+            state, proof, folder, docs=self.fixture()
+            (folder/'output.log.process.json').write_bytes(bad)
+            proof['files']['output.log.process.json']=c.sha_file(folder/'output.log.process.json')
+            with self.assertRaises(ValueError): c.reconcile(state,'timeout',proof)
+        state, proof, folder, docs=self.fixture()
+        (folder/'stderr.log').unlink()
+        with self.assertRaises(ValueError): c.reconcile(state,'timeout',proof)
+
+    def test_retained_proof_rechecks_every_artifact_and_live_pid(self):
+        state, proof, folder, docs=self.fixture()
+        c.reconcile(state,'timeout',proof)
+        for name in proof['files']:
+            old=(folder/name).read_bytes()
+            (folder/name).write_bytes(old+b' ')
+            with self.subTest(name=name), self.assertRaises(ValueError): c.retained_owners(state,['eslint'])
+            (folder/name).write_bytes(old)
+        with patch('deploy_test_local_cleanup.Path.stat', side_effect=PermissionError('not observable')):
+            with self.assertRaises(ValueError): c.retained_owners(state,['eslint'])
+
+
 class LocalCleanup(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

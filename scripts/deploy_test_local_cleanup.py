@@ -438,6 +438,107 @@ def interrupted_worker(state, receipt, proof):
     return gate
 
 
+def quick_timeout(state, receipt, proof):
+    """Permit reexecution after a proved, fully reaped local quick timeout."""
+    from datetime import datetime
+    from deploy_test_cycle import bounded_read, digest, sha_file
+    gates = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    need(len(gates) == 1, 'quick gate binding')
+    gate = gates[0]
+    name = gate['name']
+    need(gate.get('quick') is True and gate.get('category') == name
+         and name in {'eslint', 'format', 'typescript', 'backend-structural', 'application-structural', 'mac-app-static'}
+         and not any(gate.get(k) for k in ('worker', 'worker_root', 'worker_transport', 'worker_recipe',
+                                         'native_backend', 'native_cloud', 'case_protocol')),
+         'local quick execution only')
+    need(receipt.get('command') == gate['command'] and gate['checks'] == [name]
+         and receipt.get('lifecycle') == 'owned' and receipt.get('executed') is True
+         and receipt.get('status') == 'FAIL' and receipt.get('complete') is False
+         and receipt.get('cases') == {name: 'UNVERIFIED'}
+         and receipt.get('case_complete') == {name: False}
+         and receipt.get('timed_out') is True and receipt.get('cancelled') is False
+         and receipt.get('lingering_group') is True and not receipt.get('cleanup_owner')
+         and receipt.get('worker_result') is None and receipt.get('native_cleanup_reference') is None
+         and type(receipt.get('native_exit')) is int and receipt['native_exit'] in (-15, -9),
+         'original supervised quick timeout required')
+    binding = receipt.get('execution_binding', {})
+    need(binding.get('contract_digest') == digest(gate)
+         and all(isinstance(binding.get(k), str) and binding[k] for k in ('input_fingerprint', 'environment')),
+         'quick execution contract changed')
+    folder = Path(receipt['log']).parent
+    need(folder.is_absolute() and folder.resolve(strict=True) == folder
+         and folder.name == name and folder.parent.name == 'quick'
+         and folder.parent.parent.name.isdigit() and folder.parents[2].name == 'attempts',
+         'quick native directory changed')
+    teardown_name = 'teardown/attempt-' + folder.parent.parent.name + '-' + name + '.json'
+    names = {'request.json', 'receipt.json', 'output.log', 'stderr.log', 'output.log.process.json', teardown_name}
+    need(isinstance(proof['files'], dict) and set(proof['files']) == names
+         and receipt['log'] == str(folder/'output.log')
+         and receipt.get('stderr_log') == str(folder/'stderr.log'), 'quick artifact inventory')
+    docs = {}
+    for name in names:
+        path = folder/name
+        need(path.is_file() and not path.is_symlink() and path.resolve(strict=True) == path
+             and sha_file(path) == proof['files'][name], 'quick artifact changed: ' + name)
+        if name.endswith('.json'):
+            docs[name] = bounded_read(path, 'quick cleanup ' + name)
+    request, recorded, process, teardown = (docs[n] for n in
+        ('request.json', 'receipt.json', 'output.log.process.json', teardown_name))
+    name = gate['name']
+    owners = [(a, r) for a in state['attempts'] for r in a['results']
+              if r.get('token') == receipt['token']]
+    need(recorded == receipt and len(owners) == 1 and owners[0][1] == receipt
+         and owners[0][0]['phase'] == 'quick' and owners[0][0]['source'] == receipt['source']
+         and all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate'))
+         and request.get('phase') == 'quick' and request.get('checks') == [name]
+         and request.get('skips') == {} and 'worker_recipe' not in request
+         and request.get('custody_state') == str(folder.parents[3]/'cycle.json'),
+         'quick original request/attempt changed')
+    need(type(process.get('native_exit')) is int and process['native_exit'] == receipt['native_exit']
+         and process.get('timed_out') is True and process.get('cancelled') is False
+         and process.get('quiescent') is True and process.get('orphaned_children') is True
+         and process.get('remaining') == [] and process.get('error') is None,
+         'quick native process closure unknown')
+    child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
+    reaped = process.get('reaped')
+    need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
+         and isinstance(reaped, list) and bool(reaped)
+         and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
+                 and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
+                 and type(row['status']) is int and 0 <= row['status'] <= 65535
+                 and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in reaped),
+         'quick native reaping evidence invalid')
+    waits = {row['pid']: row['status'] for row in reaped}
+    need(len(waits) == len(reaped) and child in waits and os.WIFSIGNALED(waits[child])
+         and -os.WTERMSIG(waits[child]) == receipt['native_exit'], 'quick child exit unproven')
+    for field in ('term_sent', 'kill_sent'):
+        sent = process.get(field)
+        need(isinstance(sent, list) and all(type(pid) is int and pid in waits for pid in sent)
+             and len(set(sent)) == len(sent), 'quick signal targets not reaped')
+    for pid in {*waits, supervisor}:
+        try:
+            Path('/proc', str(pid)).stat()
+        except FileNotFoundError:
+            continue
+        need(False, 'quick recorded process still present')
+    need(teardown.get('schema_version') == 2 and teardown.get('attempt') == int(folder.parent.parent.name)
+         and teardown.get('token') == receipt['token'] and teardown.get('lane') == name
+         and teardown.get('lane_started_epoch') == receipt.get('started_at')
+         and teardown.get('outcome') == 'clean'
+         and all(teardown.get(k) == [] for k in ('owned', 'foreign', 'lingering', 'survivors', 'records'))
+         and receipt.get('teardown', {}).get('receipt') == str(folder/teardown_name)
+         and receipt['teardown'].get('outcome') == 'clean'
+         and all(receipt['teardown'].get(k) == [] for k in
+                 ('owned_pids', 'foreign_pids', 'survivors', 'escalated', 'killed', 'eperm', 'set_aside')),
+         'quick teardown not clean and token-bound')
+    start, finish = receipt.get('started_at'), receipt.get('finished_at')
+    need(all(type(t) in (int, float) and math.isfinite(t) for t in (start, finish))
+         and start <= datetime.fromisoformat(teardown['started_at'].replace('Z', '+00:00')).timestamp()
+         <= datetime.fromisoformat(teardown['finished_at'].replace('Z', '+00:00')).timestamp() <= finish,
+         'quick teardown chronology')
+    return gate
+
+
 def validate(state, receipt, proof):
     from deploy_test_cycle import bounded_read, digest, sha_file
     fields = {'kind', 'files', 'confirmed_at', 'observed_by'}
@@ -452,6 +553,9 @@ def validate(state, receipt, proof):
          and type(receipt.get('finished_at')) in (int, float)
          and receipt['finished_at'] <= confirmed <= time.time(), 'confirmation time')
     name = receipt['gate']
+    if (receipt.get('timed_out') is True and receipt.get('lifecycle') == 'owned'
+            and any(g.get('name') == name and g.get('quick') is True for g in state['plan']['gates'])):
+        return quick_timeout(state, receipt, proof)
     if receipt.get('cancelled') is True and receipt.get('lifecycle') == 'owned':
         return interrupted_worker(state, receipt, proof)
     if name == 'agentcard-lifecycle':
