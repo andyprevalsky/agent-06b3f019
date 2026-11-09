@@ -338,7 +338,8 @@ export function useMessageSending({
             title: 'Response sent',
             description: 'The agent will continue with your response',
           });
-          setMessageInput('');
+          // A staged send cleared the box already; keep any draft typed since.
+          if (staged === null) setMessageInput('');
           // The sidebar orders by the newest user message; re-read it now.
           noteTreeUserMessage(selectedAgentId, new Date().toISOString());
           void loadAgents();
@@ -350,7 +351,7 @@ export function useMessageSending({
         // A Browser-composer target goes straight to that browser task.
         const posted = await postMessage(selectedAgentId, messageInput, attachments, target);
         staged?.confirm(posted);
-        setMessageInput('');
+        if (staged === null) setMessageInput('');
         noteTreeUserMessage(selectedAgentId, posted.timestamp);
         void loadAgents();
         // Only a message to the agent itself lifts its pause.

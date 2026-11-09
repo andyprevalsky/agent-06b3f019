@@ -212,6 +212,31 @@ describe('optimistic send to a running agent', () => {
     expect(drop).toHaveBeenCalledTimes(1);
     expect(result.current.messageInput).toBe('helllo\nnext thought');
   });
+
+  it('a successful POST keeps a draft typed while it was pending', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/messages`, async () => {
+        await pending;
+        return HttpResponse.json(serverRow(), { status: 201 });
+      }),
+    );
+    const { props, confirm } = args();
+    const { result } = renderHook(() => useMessageSending(props));
+    act(() => result.current.setMessageInput('helllo'));
+    let send!: Promise<void>;
+    act(() => {
+      send = result.current.handleSendMessage();
+    });
+    act(() => result.current.setMessageInput('next thought'));
+    await act(async () => {
+      release();
+      await send;
+    });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(result.current.messageInput).toBe('next thought');
+  });
 });
 
 describe('optimistic USER row lifecycle', () => {
@@ -364,13 +389,19 @@ describe('user bubble meta line', () => {
     expect(meta.textContent).toBe(`Sending${time}`);
     expect(meta.firstElementChild).toBe(screen.getByTestId('user-message-delivery'));
     expect(meta.querySelector('time')?.getAttribute('dateTime')).toBe(SENT_AT);
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('Sending');
 
     rerender(<UserBubble message={{ ...serverRow(), metadata: { clientMessageId: 'c' } }} />);
     expect(screen.queryByTestId('user-message-delivery')).toBeNull();
     expect(screen.getByTestId('user-message-meta').textContent).toBe(time);
+    // The same live region announces the pickup.
+    expect(screen.getByRole('status')).toBe(status);
+    expect(status).toHaveTextContent('Delivered');
 
     rerender(<UserBubble message={serverRow({ message_id: 'history' })} />);
     expect(screen.getByTestId('user-message-meta').textContent).toBe(time);
+    expect(screen.queryByRole('status')).toBeNull();
     expect(screen.getByText('helllo')).toBeInTheDocument();
   });
 

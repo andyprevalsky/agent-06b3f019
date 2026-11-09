@@ -11,7 +11,8 @@
  *     Rose agent (metadata.resumedFrom): "Resuming…" → "Delivered" (its next row)
  *   else this browser's own send (metadata.clientDelivery):
  *     [SENDING] "Sending ◌  3:36 PM" --agent's next step picks it up--> "3:36 PM"
- *     (lifecycle: agent-context/hooks/optimisticUserMessages.ts)
+ *     (lifecycle: agent-context/hooks/optimisticUserMessages.ts); a screen-reader
+ *     live region stays mounted for the row and announces "Sending" → "Delivered".
  *
  * A Browser-composer message (metadata.browserTaskId + excludeFromModel) went
  * straight to that browser, not this agent: it reads "You → Browser: …" in the
@@ -53,7 +54,7 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
             config.border,
           )}
         >
-          <p className="text-sm whitespace-pre-wrap break-words">
+          <p data-testid="user-message-text" className="text-sm whitespace-pre-wrap break-words">
             {toBrowser && <span className="text-muted-foreground">You → Browser: </span>}
             {message.text}
           </p>
@@ -91,25 +92,31 @@ function MetaLine({ message }: { message: Message }) {
       </p>
     );
   }
+  const sending = message.metadata?.clientDelivery === 'sending';
   return (
-    <div
-      data-testid="user-message-meta"
-      className="-mt-1 flex items-center gap-2 pr-1 text-xs text-muted-foreground"
-    >
-      {message.metadata?.clientDelivery === 'sending' && (
-        <span
-          data-testid="user-message-delivery"
-          data-delivery-state="sending"
-          className="flex items-center gap-1.5"
-        >
-          Sending
+    <>
+      <div
+        data-testid="user-message-meta"
+        className="-mt-1 flex items-center gap-2 pr-1 text-xs text-muted-foreground"
+      >
+        {sending && (
           <span
             aria-hidden
-            className="h-3 w-3 motion-safe:animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
-          />
+            data-testid="user-message-delivery"
+            data-delivery-state="sending"
+            className="flex items-center gap-1.5"
+          >
+            Sending
+            <span className="h-3 w-3 motion-safe:animate-spin rounded-full border-[1.5px] border-current border-t-transparent" />
+          </span>
+        )}
+        {time}
+      </div>
+      {message.metadata?.clientMessageId !== undefined && (
+        <span role="status" data-testid="user-message-delivery-status" className="sr-only">
+          {sending ? 'Sending' : 'Delivered'}
         </span>
       )}
-      {time}
-    </div>
+    </>
   );
 }
