@@ -2403,6 +2403,7 @@
       "live_cookie_domains": [
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com"
       ]
@@ -2480,6 +2481,7 @@
       "live_cookie_domains": [
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com"
       ]
@@ -2781,7 +2783,11 @@
       "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved.",
       "live_cookie_domains": [
         "opentable.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "opentable.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -2881,7 +2887,11 @@
       "context_notes": "Live Instacart catalog, inventory, pricing, delivery details, and guest-checkout write-lock. The scoped browser-state refresh is retained for performance, but no saved login is required.",
       "live_cookie_domains": [
         "instacart.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "instacart.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -2952,7 +2962,11 @@
       "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and delivery timing. The runner treats the final place-order write lock as completion, leaves that request unresolved, and does not place the order. The task may exercise guest checkout and does not require an injected cookie bundle.",
       "live_cookie_domains": [
         "doordash.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "doordash.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -3744,6 +3758,7 @@
       "live_cookie_domains": [
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com"
       ]
@@ -11920,6 +11935,7 @@
         "amazon.com.mx",
         "amazon.com"
       ],
+      "needs_auth": true,
       "required_injectable_cookie_domains": [
         "amazon.com.mx",
         "amazon.com"
@@ -20815,7 +20831,11 @@
       ],
       "live_cookie_domains": [
         "doordash.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "doordash.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -21096,7 +21116,11 @@
       ],
       "live_cookie_domains": [
         "amazon.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -21173,7 +21197,11 @@
       ],
       "live_cookie_domains": [
         "x.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "x.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
@@ -21447,7 +21475,11 @@
       ],
       "live_cookie_domains": [
         "linkedin.com"
-      ]
+      ],
+      "required_injectable_cookie_domains": [
+        "linkedin.com"
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {
