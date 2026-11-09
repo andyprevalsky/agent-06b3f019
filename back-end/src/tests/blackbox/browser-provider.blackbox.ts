@@ -48,6 +48,7 @@ import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-pr
 import { assertStaleProxyCreateFailureIsLabeled } from './browser-provider-proxy-error-label.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
+import { tilionDnsWorkerCases } from './browser-provider.tilion-dns-worker.support';
 import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
   createBrowserUseRecoverySession,
@@ -429,6 +430,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'stale-proxy leg labels a rejected throwaway Kernel proxy create with the call, tier and config',
     assertStaleProxyCreateFailureIsLabeled,
   ],
+  ...tilionDnsWorkerCases,
   [
     'Kernel navigation retries only transient proxy failures',
     () => {
