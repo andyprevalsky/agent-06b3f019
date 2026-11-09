@@ -1,0 +1,41 @@
+{
+  "observed_at": "2026-11-08T15:49:50.591038+00:00",
+  "status": "CANDIDATES_RECHECK_AT_FINAL_CUT",
+  "authenticated_duplicate_sets": [
+    {
+      "kind": "stable-independent",
+      "files": 29339,
+      "bytes": 4842954646,
+      "receipt_sha256": "fa5791acfaf6c1bf2916b3721c144f6aedc7504def40bc762fad3b20e939369f",
+      "manifest_sha256": "9133c4cc89da8496807784de320c133084bdeaaf6c1482e054a3c301a4ba1dec",
+      "current_all_hashes_sizes_match": true
+    },
+    {
+      "kind": "additional-browser-independent",
+      "files": 3,
+      "bytes": 66598320,
+      "receipt_sha256": "8d4b044c98792d7abbd9b36038b55597c0a65ba6fed2eb3e10c456d630f8d4de",
+      "manifest_sha256": "37a7a3594ed9520acd5fa18f8a2132d36a6290f036c21331f81315b142418497",
+      "current_all_hashes_sizes_match": true
+    },
+    {
+      "kind": "inherited-branches",
+      "files": 4,
+      "bytes": 3347207,
+      "receipt_sha256": "463e718e7774286c0d53a13df4579cef0b211161eb23e0754224e4050b2fc957",
+      "manifest_sha256": "973009c1eb561ff31607aa4395fdfdc0fbb3c3e079ca2d1e36fc44ae4cee5a98",
+      "current_all_hashes_sizes_match": true
+    },
+    {
+      "kind": "inherited-stash",
+      "files": 2,
+      "bytes": 36134,
+      "receipt_sha256": "63fcc9c902c2c13b7fe980c16532fda8d641a46755ed7537e8b2c6e44ebcce94",
+      "manifest_sha256": "5f2ce5d452aea52e8985f57379b851a21e51e6ec1c426f385fa4bf2f51362888",
+      "current_all_hashes_sizes_match": true
+    }
+  ],
+  "excludable_member_files_plus_manifests": 29352,
+  "keep_verification_metadata": true,
+  "limits": "Only these exact authenticated recovery copies qualify. No blanket test/restore directory exclusion; recheck current hash/size before final cut. No deletion performed."
+}
