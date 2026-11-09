@@ -83,6 +83,8 @@ export const STUCK_CHAT_STATUS_MESSAGE =
 export interface LivenessCandidate {
   agentId: string;
   workflowId: string;
+  firstExecutionRunId: string | null;
+  replacementToken: string | null;
   status: AgentStatus;
   statusMessage: string | null;
 }
@@ -141,7 +143,14 @@ export async function findLivenessCandidates(
       status: { notIn: [...TERMINAL_AGENT_STATUSES] },
       updatedAt: { lt: new Date(deps.now() - MIN_QUIET_MS) },
     },
-    select: { id: true, temporalWorkflowId: true, status: true, statusMessage: true },
+    select: {
+      id: true,
+      temporalWorkflowId: true,
+      temporalFirstExecutionRunId: true,
+      workflowReplacementToken: true,
+      status: true,
+      statusMessage: true,
+    },
     orderBy: { updatedAt: 'asc' },
     take: deps.batchSize,
   });
@@ -153,6 +162,8 @@ export async function findLivenessCandidates(
           {
             agentId: row.id,
             workflowId: row.temporalWorkflowId,
+            firstExecutionRunId: row.temporalFirstExecutionRunId,
+            replacementToken: row.workflowReplacementToken,
             status: row.status,
             statusMessage: row.statusMessage,
           },
@@ -219,6 +230,8 @@ async function sealAgent(
       where: {
         id: candidate.agentId,
         temporalWorkflowId: candidate.workflowId,
+        temporalFirstExecutionRunId: candidate.firstExecutionRunId,
+        workflowReplacementToken: candidate.replacementToken,
         deletedAt: null,
         status: { notIn: [...TERMINAL_AGENT_STATUSES] },
       },
@@ -417,6 +430,18 @@ export async function reconcileWorkflowLiveness(
 
     const normalized = temporalStatus.replace(/^WORKFLOW_EXECUTION_STATUS_/, '').toUpperCase();
     if (normalized !== 'NOT_FOUND' && !CLOSED_TEMPORAL_STATUSES.has(normalized)) return;
+
+    // A reserved replacement is durable intent, not an execution. Temporal
+    // cannot find it until start acceptance; the claim owns that interval.
+    // Real closed executions still seal, and the terminal CAS also fences the
+    // exact chain/claim observed before describe so a concurrent acceptance wins.
+    if (
+      normalized === 'NOT_FOUND' &&
+      candidate.firstExecutionRunId === null &&
+      candidate.replacementToken !== null &&
+      candidate.workflowId === `${candidate.agentId}:replacement:${candidate.replacementToken}`
+    )
+      return;
 
     try {
       if (await sealAgent(candidate, normalized, deps, membership)) sealed++;

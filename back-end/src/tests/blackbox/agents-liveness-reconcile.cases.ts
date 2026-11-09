@@ -27,6 +27,11 @@ import {
   reconcileWorkflowLiveness,
 } from '../../providers/workflowLivenessReconciler';
 
+import {
+  claimWorkflowReplacement,
+  recordWorkflowReplacementStartAcceptance,
+} from '../../providers/workflowReplacementState';
+
 /**
  * Seed a workflow-backed row without HTTP create. createTestAgent starts a
  * chat-mode LLM whose later status/workflow writes can overwrite the fixture
@@ -378,5 +383,84 @@ test('reconciler is idempotent and never re-transitions a settled agent', async 
   assert(
     second.sealed === 0 || first.sealed >= second.sealed,
     'a settled agent must not be sealed twice'
+  );
+});
+
+test('reconciler preserves a durable prepared replacement until Temporal start acceptance', async () => {
+  const session = await createAnonymousSession('liveness-prepared');
+  const { agentId } = await seedLivenessAgent(session.user.id, 'prepared', 'PAUSED');
+  const claim = await claimWorkflowReplacement(agentId);
+  const before = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+  await makeEligible([agentId]);
+  await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async (id) => (id === claim.plannedWorkflowId ? 'NOT_FOUND' : 'RUNNING'),
+  });
+  const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+  assert(after.status === 'STARTING_UP', 'NOT_FOUND must not seal a durably planned execution');
+  assert(after.workflowReplacementToken === claim.token, 'exact claim custody must survive');
+  assert(
+    JSON.stringify(after.workflowReplacementState) ===
+      JSON.stringify(before.workflowReplacementState),
+    'liveness must preserve the original no-loss resume snapshot'
+  );
+  assert(after.temporalFirstExecutionRunId === null, 'planning is not execution acceptance');
+  assert(
+    await recordWorkflowReplacementStartAcceptance(claim, {
+      workflowId: claim.plannedWorkflowId,
+      firstExecutionRunId: randomUUID(),
+    }),
+    'the same prepared claim must still accept its actual start'
+  );
+});
+
+test('reconciler seals real closed prepared candidates and accepted missing chains', async () => {
+  const session = await createAnonymousSession('liveness-prepared-closed');
+  for (const temporalStatus of ['TERMINATED', 'FAILED', 'NOT_FOUND']) {
+    const { agentId } = await seedLivenessAgent(session.user.id, temporalStatus, 'PAUSED');
+    const claim = await claimWorkflowReplacement(agentId);
+    if (temporalStatus === 'NOT_FOUND') {
+      await recordWorkflowReplacementStartAcceptance(claim, {
+        workflowId: claim.plannedWorkflowId,
+        firstExecutionRunId: randomUUID(),
+      });
+    }
+    await makeEligible([agentId]);
+    await reconcileWorkflowLiveness({
+      batchSize: 1000,
+      describeStatus: async (id) => (id === claim.plannedWorkflowId ? temporalStatus : 'RUNNING'),
+    });
+    assert(
+      (await statusOf(agentId)) === 'FAILED',
+      `${temporalStatus} of an actual execution must still seal`
+    );
+  }
+});
+
+test('reconciler rejects a missing-chain observation raced by exact start acceptance', async () => {
+  const session = await createAnonymousSession('liveness-prepared-accept-race');
+  const { agentId } = await seedLivenessAgent(session.user.id, 'accept-race', 'PAUSED');
+  const claim = await claimWorkflowReplacement(agentId);
+  const firstExecutionRunId = randomUUID();
+  await makeEligible([agentId]);
+  await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async (id) => {
+      if (id !== claim.plannedWorkflowId) return 'RUNNING';
+      assert(
+        await recordWorkflowReplacementStartAcceptance(claim, {
+          workflowId: id,
+          firstExecutionRunId,
+        }),
+        'concurrent exact start should be accepted'
+      );
+      return 'NOT_FOUND';
+    },
+  });
+  const row = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+  assert(row.status === 'STARTING_UP', 'a pre-acceptance NOT_FOUND cannot seal the accepted chain');
+  assert(
+    row.temporalFirstExecutionRunId === firstExecutionRunId,
+    'exact execution receipt must survive'
   );
 });
