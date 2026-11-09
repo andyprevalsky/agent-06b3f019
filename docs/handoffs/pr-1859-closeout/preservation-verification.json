@@ -1,0 +1,52 @@
+{
+  "status": "VERIFIED",
+  "main_capture": {
+    "files_in_archive": 43228,
+    "original_bytes": 7187265227,
+    "ciphertext_bytes": 1339933517,
+    "full_authenticated_readback": true,
+    "encrypted_sidecar_authenticated": true,
+    "copy_errors": [],
+    "finite_prefix_changes": [
+      "/home/boxes/.devbox/daemon/sprite-daemon.log"
+    ]
+  },
+  "SQLite": {
+    "consistent_codex": 6,
+    "direct_browser_readonly": 17,
+    "private_copy_family_recovered": 16,
+    "all_integrity_checks": "ok",
+    "original_databases_written": false,
+    "whole_profile_atomicity_claimed": false
+  },
+  "native_processes": "All owned archive and restore commands completed; final native deletion-check verifies live processes.",
+  "preservation_root_exclusion": "Staging/restores are reconstructible duplicates bound to encryptedreceipts. Rootcontrolmetadata+scripts are captured by explicitfrozenhash list in final supplement. FinalGitmetadata/readiness staysinmergedrecordsPR, no recursive archive ofitself.",
+  "restores": {
+    "main": {
+      "files": 43228,
+      "log_sha256": "11d852bb449996d2a405fc43a2f9e73ace338d24c1196a7f627ad9b07c8cd7ef"
+    },
+    "profile": {
+      "files": 17,
+      "log_sha256": "b6264a65754d3512f2bbad16f83a756886e0d489f3d3f1eaece24cb49f9bbd82"
+    },
+    "supplement": {
+      "files": 119,
+      "log_sha256": "907e18d84fdbde42e251702946c46eef37c962c042741cff45d140a03454a115"
+    },
+    "separate_process": true,
+    "all_authenticated_member_hashes_checked": true
+  },
+  "historical_source": {
+    "local_only_branches": 72,
+    "stash": 1,
+    "exact_authenticated_identity_matches": 73,
+    "full_prior_bulk_source_readback": "Inherited from authenticated PR1634 source-bundle binding; current exacttips and remoteobjectHEAD checked, not a new2.8GBfullreadbackclaim.",
+    "unpublished_superseded_commit": "492b3a027b46fbfaed07ef39fc2abae31ae3805d rawGitcommit storedinmaincapture .context/rca-6f2f4117/source-records; hash-object reproducesexactSHA; treeidenticalpublished0fec andparentreachable."
+  },
+  "supplement": {
+    "files": 119,
+    "finite_prefix_change_count": 3,
+    "limits": "ChangingCodexWAL/daemontrace/log prefixes are bounded on-disk captures. TransactionallyconsistentmainDBbackups remaintherecoverybasis; no atomicwholeprofile/processmemoryclaim. Final needed records createdaftercutoff are committed inthisreviewedrecordsPR."
+  }
+}

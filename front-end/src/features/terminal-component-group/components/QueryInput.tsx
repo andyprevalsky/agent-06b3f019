@@ -42,7 +42,10 @@
  *                      [NORMAL] -> [FAST] -> [ULTRA (default)] -> [NORMAL]
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
- * SUBMISSION:          canSubmit prop decides send-vs-stop button
+ * SUBMISSION:          Send when canSubmit OR the box has a draft (text or files);
+ *                      Stop only for a running agent with an empty box. A draft sent
+ *                      mid-run is read at the agent's next step.
+ *   [STOP] --type/attach--> [SEND] --send/clear--> [STOP]
  * SURFACE:             the translucent drip surface (data-surface="translucent";
  *                      the mobile hug rule in index.css targets it)
  *   Rose dark (useRoseTheme().isDark, Rose Desktop accounts only):
@@ -221,6 +224,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
     browser,
   } = props;
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
+  const hasDraft = value.trim() !== '' || attachments.attachments.length > 0;
   const speed = browser
     ? undefined
     : (props.speedControl ??
@@ -245,7 +249,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         onSubmit={handleSubmit}
         onFilesPicked={(files) => void attachments.processFiles(files)}
         agentCompleted={agentCompleted}
-        canSubmit={browser || canSubmit}
+        canSubmit={browser || canSubmit || hasDraft}
         onPause={browser ? undefined : onPause}
         isPausing={isPausing}
         hasUploadingAttachments={attachments.hasUploading}

@@ -125,6 +125,7 @@ function makeContext(): AgentContextValue {
     stagePendingAgentCreation: () => undefined,
     reconcilePendingAgentCreation: async () => undefined,
     rollbackPendingAgentCreation: () => false,
+    stageUserMessage: () => ({ confirm: () => {}, drop: () => {} }),
     selectedAgentId: phonePreview ? 'phone-preview-agent' : null,
     setSelectedAgentId: () => undefined,
     messages: previewMessages,

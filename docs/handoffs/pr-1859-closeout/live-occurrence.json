@@ -1,0 +1,25 @@
+{
+  "format": "PR1859-LIVE-RELATED-OCCURRENCE-V1",
+  "recorded_at": "2026-11-09T16:03:27.147674+00:00",
+  "reporting_thread": "ph71tmxh5vf4jhnk769chdpdkx8hx5fe",
+  "agent": "bc2c497f-0820-44c7-b0ce-cf006737ac4d",
+  "old_question_call": "8e9d620c",
+  "old_question_finished_at": "2026-11-09T01:12:11.632Z",
+  "second_question_call": "48da192b-2784-4608-8a23-43faa400bd5e",
+  "second_question_at": "2026-11-09T01:12:21.637Z",
+  "worker_timeline_sha256": "8fac6935f107b9ee682bea7523d0a1a4483b62ed154a8db4367dd305f8acd643",
+  "source": "Other investigator captured retained ClickHouse rows; attached raw timestamped queue/run/machine metadata preserved privately. Parent read attached timeline and verified listed event sequence; no independent ClickHouse query by parent. API row claims supplied by investigator.",
+  "old_handler_generation": "11240de78e7c",
+  "first_fixed_generation": "72a8080f6bdc",
+  "observations": [
+    "Oldhandler generation emitted interruption/continue_as_new at01:12:11, then secondcallappeared01:12:21 onfixedgeneration.",
+    "Same fullsecondcall48da192b parked03:02:43 onfixed72a808 and resumed03:02:45 on34c60.",
+    "Samecallparked/resumedagain06:41 and08:08 underlatergenerations; no thirdquestion perinvestigatorAPIcapture."
+  ],
+  "proof_limits": [
+    "Liveevidenceprovespendingcallpreservation acrossobservedcutovers; it doesnotclaim ananswerwasreceived or allfuturebehavior.",
+    "Firstduplicateoccurredbeforeoldhandlerretired; mergedsourceexistencealone isnotworkerprovenance.",
+    "Otherinvestigatorcorrectedmistakenobservationclock17:26 tofactoryreceipt16:01:58; originalproducerclocks unchanged."
+  ],
+  "duplicate_repair_started": false
+}

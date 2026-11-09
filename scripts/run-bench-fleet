@@ -17978,9 +17978,9 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     return "$rc"
 }
 
-# Provisioners publish only unique per-worker outcomes. Readiness reconciliation and cleanup share
-# the worker-ledger lock, eliminating append-vs-rewrite loss and keeping desired-capacity state
-# authoritative over stale child outcomes.
+# Readiness publication, reconciliation and cleanup share the worker-ledger lock,
+# eliminating append-vs-rewrite loss and keeping desired-capacity state authoritative
+# over stale child outcomes.
 reconcile_worker_ready_outcomes() {  # <bench-output-dir>
     local out="$1" marker name wid rc=0
     worker_ledger_lock_acquire "$out" || return $?
@@ -18305,6 +18305,11 @@ PY
               printf '%s|%s|%s\n' "$wid" "$runtime_run_token" "$primary_id" > "$ready_tmp" \
                   && mv "$ready_tmp" "$out/worker-$wid.qualification-ready" || return 1
           fi
+          # A bounded readiness consumer must not wait for the next metrics
+          # scrape to see an already queue-ready worker. Reuse the same locked
+          # reconciler as cleanup and the autoscaler, including its cancellation
+          # and exact tracked-worker checks.
+          reconcile_worker_ready_outcomes "$out"
       }
       log_worker_stage() {
           printf '[%s] %s\n' \
@@ -18404,7 +18409,11 @@ PY
       while [ "$SECONDS" -lt "$ready_deadline" ]; do
           worker_provision_cancelled && finish_cancelled_worker_provision
           if worker_operational "$wid" "$out"; then
-              publish_worker_ready
+              if ! publish_worker_ready; then
+                  worker_provision_cancelled && finish_cancelled_worker_provision
+                  discard_replaceable_worker \
+                      "worker $wid could not publish queue readiness; see worker-$wid.stage.log"
+              fi
               worker_provision_cancelled && finish_cancelled_worker_provision
               rm -f "$out/worker-$wid.pending"
               echo "  ✅ [$bench] worker $wid joined queue navi-agent-tasks-$ws"

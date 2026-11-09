@@ -829,7 +829,8 @@ async function measureWindow(page, preview, workers, ms) {
   await sleep(ms);
   const snaps = await Promise.all(frames.map((f) => f.evaluate(() => (window.__roseProbe ? window.__roseProbe.snapshot() : null)).catch(() => null)));
   const workerSnaps = await workerCall(workers, () => (self.__roseWorkerProbe ? { raf: self.__roseWorkerProbe.raf, timers: self.__roseWorkerProbe.timers, frames: self.__roseWorkerProbe.frames.slice() } : null));
-  return { frames, snaps, workerSnaps: workerSnaps.filter(Boolean) };
+  // openHost only appends workers; preserve the registry index before filtering.
+  return { frames, snaps, workerSnaps: workerSnaps.map((snapshot, workerIndex) => snapshot && ({ ...snapshot, workerIndex })).filter(Boolean) };
 }
 
 async function hostBaseline(browser, preview, viewport) {
@@ -975,8 +976,18 @@ async function measureRoute(browser, preview, route, opts) {
       longTaskRecheck = (await tracedWindow(browser, run.page, preview, run.workers, opts.seconds * 1000)).tasks;
     }
     let fps = frameStats(snap.frames);
-    let workers = normal.workerSnaps.map((w) => ({ fps: frameStats(w.frames), callbacks: w.raf + w.timers }));
+    const workerMeasurement = (w) => ({ workerIndex: w.workerIndex, fps: frameStats(w.frames), callbacks: w.raf + w.timers });
+    let workers = normal.workerSnaps.map(workerMeasurement);
     const missesFps = (s) => s.frames >= 10 && s.p50 !== null && (s.p50 < DEFAULT_BUDGETS.fpsP50Min || s.p5 < DEFAULT_BUDGETS.fpsP5Min);
+    const eligibleFps = (s) => s.frames >= 10 && Number.isFinite(s.p50) && Number.isFinite(s.p5);
+    // A window that meets the fps budget beats one that misses it; among windows with the
+    // same verdict, higher p5 then higher p50 wins.
+    const betterFps = (next, first) => {
+      if (!eligibleFps(next)) return false;
+      if (!eligibleFps(first)) return true;
+      if (missesFps(next) !== missesFps(first)) return !missesFps(next);
+      return next.p5 > first.p5 || (next.p5 === first.p5 && next.p50 > first.p50);
+    };
     let fpsWindows = 1;
     if (opts.retryFps && [fps, ...workers.map((w) => w.fps)].some(missesFps)) {
       // Host noise (other processes, a software GPU) can cost a window; judge fps on
@@ -987,15 +998,18 @@ async function measureRoute(browser, preview, route, opts) {
       if (snap2) {
         const fps2 = frameStats(snap2.frames);
         result.firstWindowFps = fps;
-        if ((fps2.p5 || 0) > (fps.p5 || 0)) fps = fps2;
-        const workers2 = again.workerSnaps.map((w) => ({ fps: frameStats(w.frames), callbacks: w.raf + w.timers }));
-        workers = workers.map((w, i) => (workers2[i] && (workers2[i].fps.p5 || 0) > (w.fps.p5 || 0) ? workers2[i] : w));
+        if (betterFps(fps2, fps)) fps = fps2;
+        const workers2 = new Map(again.workerSnaps.filter((w) => Number.isInteger(w.workerIndex)).map((w) => [w.workerIndex, workerMeasurement(w)]));
+        workers = workers.map((w) => {
+          const next = Number.isInteger(w.workerIndex) ? workers2.get(w.workerIndex) : undefined;
+          return next && betterFps(next.fps, w.fps) ? next : w;
+        });
       }
     }
     result.normal = {
       fps,
       fpsWindows,
-      workers,
+      workers: workers.map((w) => ({ fps: w.fps, callbacks: w.callbacks })),
       longTasks: [...snap.longTasks.filter((t) => t.phase === 'load').map((t) => ({ phase: t.phase, duration: round(t.duration) })), ...normal.tasks],
       ...(longTaskRecheck ? { longTaskRecheck } : {}),
       cls: round(cumulativeLayoutShift(snap.shifts), 4),

@@ -177,3 +177,77 @@ export function validSetupChecks(value: unknown): value is SetupChecks {
       (p.expectedPhone === null || typeof p.expectedPhone === 'string')
   );
 }
+
+export type SetupStepStatus = 'pending' | 'in_progress' | 'done' | 'failed';
+export interface SetupProgress {
+  steps: Array<{ key: string; label: string; status: SetupStepStatus }>;
+}
+const PROGRESS_STEPS: ReadonlyArray<{
+  key: string;
+  label: string;
+  targets: readonly SetupTarget[];
+}> = [
+  { key: 'session', label: 'Phone booted', targets: [] },
+  { key: 'portrait_lock', label: 'Orientation locked', targets: ['portrait_lock'] },
+  { key: 'apple_account', label: 'Apple ID signed in', targets: ['apple_account'] },
+  {
+    key: 'icloud',
+    label: 'iCloud connected',
+    targets: ['icloud_messages', 'icloud_keychain', 'icloud_contacts'],
+  },
+  { key: 'imessage', label: 'iMessage on', targets: ['imessage', 'receive_address'] },
+  { key: 'gmail', label: 'Gmail connected', targets: ['gmail'] },
+  { key: 'passcode', label: 'Passcode set', targets: ['device_passcode'] },
+];
+/** Display projection of the stored checks for the connection screen; never a readiness grant.
+ * A current 'disabled' observation fails its step; a blocked setup fails its next open step. */
+export function setupProgress(
+  verification: ReturnType<typeof verificationDto>,
+  input: {
+    status: 'not_connected' | 'setting_up' | 'ready' | 'needs_reauth';
+    setupState: string;
+    providerState: string;
+    passcodeExceptionAllowed: boolean;
+  }
+): SetupProgress | null {
+  if (input.status === 'not_connected') return null;
+  const checks = verification.checks;
+  const confirmed = (target: SetupTarget) =>
+    checks[target].current && checks[target].status === 'confirmed';
+  const disabled = (target: SetupTarget) =>
+    checks[target].current && checks[target].status === 'disabled';
+  const booted =
+    input.providerState === 'READY' ||
+    SETUP_TARGETS.some((target) => checks[target].observedAt !== undefined);
+  const resolved = PROGRESS_STEPS.map((step): SetupStepStatus | null => {
+    if (input.status === 'ready') return 'done';
+    if (step.key === 'session') return booted ? 'done' : null;
+    if (step.key === 'passcode') {
+      if (verification.securityDisposition !== 'blocked') return 'done';
+      return disabled('device_passcode') && !input.passcodeExceptionAllowed ? 'failed' : null;
+    }
+    if (step.targets.every(confirmed)) return 'done';
+    if (
+      step.targets.some(disabled) ||
+      (step.key === 'apple_account' && input.status === 'needs_reauth')
+    )
+      return 'failed';
+    return null;
+  });
+  const next = resolved.indexOf(null);
+  return {
+    steps: PROGRESS_STEPS.map((step, index) => ({
+      key: step.key,
+      label: step.label,
+      status:
+        resolved[index] ??
+        (index !== next
+          ? 'pending'
+          : input.setupState === 'blocked'
+            ? 'failed'
+            : input.status === 'setting_up'
+              ? 'in_progress'
+              : 'pending'),
+    })),
+  };
+}

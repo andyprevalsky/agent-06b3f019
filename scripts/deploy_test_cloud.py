@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import runpy
 from pathlib import Path
 import sys
@@ -134,9 +135,15 @@ def campaign_width(checks, deadline=None):
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
+    requested = len(checks)
+    limit = os.environ.get('DEPLOY_CLOUD_CONCURRENCY')
+    if limit is not None:
+        if not re.fullmatch(r'[1-9][0-9]*', limit):
+            raise ValueError('DEPLOY_CLOUD_CONCURRENCY must be a positive integer')
+        requested = min(requested, int(limit))
     if deadline is None:
         deadline = time.time() + provider_headroom.DEFAULT_WAIT_SECONDS
-    return provider_headroom.admitted_width(len(checks), registry, probes=provider_headroom.live_probes(),
+    return provider_headroom.admitted_width(requested, registry, probes=provider_headroom.live_probes(),
                                             deadline=deadline)
 
 
@@ -309,11 +316,14 @@ def execute(request, root):
         if error.detail:
             print(f'DEPLOY_CLOUD custody detail: {error.detail}', file=sys.stderr)
         raise SourceRefusal(str(error), error.reason_code) from error
-    runs = directory / 'runs'
-    runs.mkdir(parents=True, exist_ok=False)
+    # Retain the adapter namespace without admitting this request's run until width is known.
+    directory.parent.mkdir(parents=True, exist_ok=True)
     width = campaign_width(checks)
     if width < 1:
         raise ValueError('provider capacity cannot admit one smoke task')
+    directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    runs = directory / 'runs'
+    runs.mkdir(parents=True, exist_ok=False)
     campaign = directory / 'campaigns' / ('deploy-' + directory.name)
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
            'DEPLOY_NATIVE_HUB_JOIN': '1',

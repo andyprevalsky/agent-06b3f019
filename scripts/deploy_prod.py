@@ -28,6 +28,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from typing import Callable
@@ -50,6 +51,7 @@ DEVBOX_GH = Path('/opt/devbox-tools/gh/current/bin/gh')
 EXISTING_PROCESS_DOC = 'docs/existing-worker-process-deployment.md'
 CLASSIFY = Path('scripts') / 'classify-agent-runtime-changes.sh'
 SMOKE_VARS = ('SMOKE_BASE_URL', 'SMOKE_HEALTH_URL', 'SMOKE_FRONTEND_URL')
+MIGRATIONS_PATH = 'back-end/prisma/migrations'
 REPORT = 'production-lanes.json'
 SCHEMA = 1
 
@@ -428,7 +430,11 @@ def planned_commands(name: str, ctx: Ctx) -> list[str]:
     if name == 'backend-probes':
         return [f'GET {BACKEND_URL}/health',
                 f'GET {BACKEND_URL}/api/agents (X-API-Key=back-end/.env BACKEND_API_KEY, X-User-Id={PROBE_USER_ID}; '
-                'retry 12x5s until 200)', s(SMOKE_ARGV, cwd=backend, drop=SMOKE_VARS),
+                'retry 12x5s until 200)',
+                f'git archive <render live_commit, else {sha}> {MIGRATIONS_PATH} -> '
+                f'{sd / "production-migrations"}/<commit>',
+                s(SMOKE_ARGV, cwd=backend, drop=SMOKE_VARS,
+                  extra={'SCHEMA_MIGRATIONS_DIR': f'<that dir>/{MIGRATIONS_PATH}'}),
                 f'GET {RENDER_LOGS_URL}?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=100&direction=backward '
                 f'(fail on {", ".join(RENDER_LOG_PATTERNS)})']
     if name == 'fly':
@@ -500,6 +506,42 @@ def render_log_scan(ctx: Ctx, lane: str = 'backend-probes') -> tuple[bool, str]:
     return (not bad), (f'{len(bad)} post-deploy error lines in the Render log' if bad else 'Render log clean')
 
 
+def production_migrations(ctx: Ctx, lane: str = 'backend-probes') -> tuple[Path | None, str]:
+    """(dir, '') holding the migrations of the commit Render serves (the merge, or the descendant that replaced it),
+    else (None, reason). The smoke replays them against the production catalog: this checkout is the pre-merge
+    source, and replaying it missed what other merges applied (2026-11-09: PR #1698's intentional index drop read
+    as drift in PR #1803's lane). A commit this checkout does not know yet gets one `git fetch origin main`."""
+    live = str((ctx.production_receipt().get('render') or {}).get('live_commit') or '')
+    commit = live if re.fullmatch(r'[0-9a-f]{40}', live) else ctx.sha
+    dest = ctx.state_dir / 'production-migrations' / commit
+    archive = ctx.state_dir / 'production-migrations' / f'{commit}.tar'
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    argv = ['git', 'archive', '--format=tar', '-o', str(archive), commit, MIGRATIONS_PATH]
+    ctx.note(lane, f'{shlex.join(argv)} && tar -x -C {dest}')
+    code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+    fetch_failure = ''
+    if code != 0:
+        fetched, _out, fetch_err = ctx.io.capture(['git', 'fetch', '--quiet', 'origin', 'main'], ctx.root,
+                                                  ctx.child_env())
+        if fetched == 0:
+            code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+        else:
+            fetch_failure = f'; git fetch origin main exited {fetched}: {ctx.redact(fetch_err.strip())[:200]}'
+    if code != 0:
+        return None, (f'git archive {commit[:12]} {MIGRATIONS_PATH} failed: {ctx.redact(err.strip())[:200]}'
+                      f'{fetch_failure}')
+    try:
+        with tarfile.open(archive) as tar:
+            tar.extractall(dest, filter='data')
+    except (OSError, tarfile.TarError) as error:
+        return None, f'cannot extract {MIGRATIONS_PATH} of {commit[:12]}: {error}'
+    finally:
+        archive.unlink(missing_ok=True)
+    ctx.emit(lane, f'schema replay source: {MIGRATIONS_PATH} at {commit[:12]} '
+                   f'({"Render live commit" if commit == live else "merge commit"})')
+    return dest / MIGRATIONS_PATH, ''
+
+
 def lane_backend_probes(ctx: Ctx) -> Result:
     lane, url = 'backend-probes', BACKEND_URL
     ctx.note(lane, f'GET {url}/health')
@@ -522,7 +564,11 @@ def lane_backend_probes(ctx: Ctx) -> Result:
         ctx.emit(lane, body[:500].decode('utf-8', 'replace'))
         return False, f'FUNCTIONAL CHECK FAILED: /api/agents -> {status}', 1
     ctx.emit(lane, '/api/agents -> 200 (DB/Prisma path healthy)')
-    smoke = ctx.sh(lane, SMOKE_ARGV, cwd=ctx.root / 'back-end', drop=SMOKE_VARS)
+    migrations, reason = production_migrations(ctx, lane)
+    if migrations is None:
+        return False, reason, 1
+    smoke = ctx.sh(lane, SMOKE_ARGV, cwd=ctx.root / 'back-end', drop=SMOKE_VARS,
+                   extra={'SCHEMA_MIGRATIONS_DIR': str(migrations)})
     scanned, scan_reason = render_log_scan(ctx, lane)
     if smoke != 0 or not scanned:
         failures = ([f'prod-endpoint-smoke exited {smoke}'] if smoke else []) + ([scan_reason] if not scanned else [])

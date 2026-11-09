@@ -14,6 +14,7 @@ import * as operations from './service.operations';
 import type { PhoneClientFactory } from './types.operations';
 import { interaction } from './service.interactions';
 import * as connection from './service.connection';
+import { errorBody, mountDeviceRoutes } from './routes.device';
 
 const log = createLogger('IPhone');
 
@@ -54,7 +55,7 @@ function handle(handler: Handler, status = 200) {
       } else res.status(status).json(result);
     } catch (error) {
       if (error instanceof IPhoneError) {
-        res.status(error.status).json({ error: error.message });
+        res.status(error.status).json(errorBody(error));
         return;
       }
       if (
@@ -259,6 +260,7 @@ export function createIPhoneRouter(options: IPhoneRouterOptions) {
     '/capability',
     handle((_req, userId) => service.capability(userId))
   );
+  mountDeviceRoutes(router, handle, clientFactory);
   router.put(
     '/device',
     handle(async (req, userId) => {

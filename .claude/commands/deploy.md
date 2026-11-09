@@ -112,6 +112,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Keep a per-step test report (step, status, summary) and put it in the commit message and PR body.
 - The PR body lists every override with its risk and the user's approval, every `GROUNDED` line, and "merged unreviewed" after a quota skip.
 - Never push while a review cycle is open; batch every review and gate fix and push once with `review-next`.
+- Narrow exception: after `deploy_review_cycle.py retarget-unexecuted` proves that the sole approved fifth slot never executed and atomically preserves its old entry/evidence, publish that slot's exact retargeted HEAD and request the already-authorized single full review. Keep the same open slot; do not start another cycle, infer a review result, or repeat the retarget. Delivered reviews are never eligible.
 - Never push an unreviewed commit before merge.
 - Move the related `docs/plans/active/` plan to `docs/plans/completed/` in the stabilization batch before the final review cycle.
 

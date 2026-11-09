@@ -46,6 +46,21 @@ export function connectionAgentId(
 export function currentConnection(state: SetupState) {
   return state.connection?.profileRevision === state.profileRevision ? state.connection : undefined;
 }
+/** Stored checks bound to the committed (or current) configuration attempt. */
+export function connectionVerification(device: ConnectionDevice, state: SetupState) {
+  const configuration = configurationState(state);
+  return verificationDto(configuration.verification, {
+    attemptId: configuration.attempt?.id,
+    profileRevision: configuration.profileRevision,
+    workflowId: configuration.attempt?.workflowId,
+    providerEpoch: device.providerEpoch,
+    expectedPhone: configuration.expectedPhone ?? null,
+    expectedGoogleIdentity: configuration.expectedGoogleIdentity,
+    allowGooglePasscodeException: configuration.allowGooglePasscodeException,
+    floorAt: configuration.attempt?.floorAt,
+    floorCursor: configuration.attempt?.floorCursor,
+  });
+}
 export function connectionDto(
   device: ConnectionDevice | null,
   state: SetupState | null,
@@ -61,18 +76,8 @@ export function connectionDto(
     connectionRevision: state?.claimRevision ?? 0,
   };
   if (!enabled || !device || !state) return { ...base, status: 'not_connected' };
+  const verification = connectionVerification(device, state);
   state = configurationState(state);
-  const verification = verificationDto(state.verification, {
-    attemptId: state.attempt?.id,
-    profileRevision: state.profileRevision,
-    workflowId: state.attempt?.workflowId,
-    providerEpoch: device.providerEpoch,
-    expectedPhone: state.expectedPhone ?? null,
-    expectedGoogleIdentity: state.expectedGoogleIdentity,
-    allowGooglePasscodeException: state.allowGooglePasscodeException,
-    floorAt: state.attempt?.floorAt,
-    floorCursor: state.attempt?.floorCursor,
-  });
   if (
     device.setupState === 'ready' &&
     configurationProvenanceBound(state) &&

@@ -5,6 +5,9 @@
  *   [CLOSED] --click Browser icon | openAgentBrowser(agent, task)--> [BROWSER]
  *   Agent displays are not an app: they render inline in the chat (expandable).
  *   [CLOSED] --Phone icon--> [PHONE]   --Integrations icon--> [INTEGRATIONS]
+ *   [ANY] --openPhoneDevice() (iPhone row Connect/View)--> [PHONE + DEVICE VIEW]
+ *     (the device itself, whoever uses it; cleared by any toggleApp or a new
+ *     selected agent, after which the Phone app shows the selected agent again)
  *   [CLOSED] --left bar Feedback / Benchmarks / account row--> [FEEDBACK|BENCHMARKS|SETTINGS]
  *   [ANY] --click its trigger again | close button | Escape--> [CLOSED]
  *   [ANY] --another trigger--> that app
@@ -13,6 +16,8 @@
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
  *   [ANY] --openAgentBrowserTab(agent) (task id unknown)--> [AGENT(agent's first tab)],
  *     else no selection + pending switch: the agent's tab takes over when it registers
+ *   [ANY] --openAgentBrowser(agent, task)--> [AGENT(agent, task)] and clears any pending
+ *     switch: a later-registering tab of that agent never replaces the explicit task
  *   [AGENT(id, taskId)] --click Root tab--> [ROOT]
  *   selectedAgentId changes | Browser opens --> [AGENT(selected)] if it has a
  *     browser tab, else [NO_SESSION] (an agent is selected) or [ROOT] (Home).
@@ -58,6 +63,7 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { PhoneLauncherContext, type PhoneLauncher } from '@/hooks/phoneLauncherContext';
 import type { Agent } from '../../hooks';
 import {
   appIconsInset,
@@ -185,6 +191,7 @@ function useDrawerWidthState() {
   return { drawerWidth, setDrawerWidth };
 }
 
+/** Coordinate app drawers and deferred browser-tab selection for the selected agent. */
 export function RoseAppsProvider({
   children,
   agents = [],
@@ -204,6 +211,8 @@ export function RoseAppsProvider({
   const [openApp, setOpenApp] = useState<RoseApp | null>(
     publishLayout && localLink ? 'browser' : null,
   );
+  /** Phone app pinned to the device view (opened from the iPhone integration row). */
+  const [phoneDeviceView, setPhoneDeviceView] = useState(false);
   const [browserSelection, setBrowserSelection] = useState<{
     agentId: string;
     taskId: string;
@@ -236,7 +245,7 @@ export function RoseAppsProvider({
   // may register after the selection, so a pending switch completes on register.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
-  const pendingSwitchRef = useRef<string | null>(null);
+  const pendingSwitchRef = useRef<string | null>(selectedAgentId);
   const isFirstSelectionRef = useRef(true);
   useEffect(() => {
     if (isFirstSelectionRef.current) {
@@ -272,6 +281,7 @@ export function RoseAppsProvider({
       if (app === 'browser' && openApp !== 'browser') {
         setBrowserRootChosen(false);
         const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
+        pendingSwitchRef.current = tab ? null : selectedAgentId;
         setBrowserSelection((current) => {
           if (
             current &&
@@ -283,17 +293,27 @@ export function RoseAppsProvider({
           return tab ? { agentId: tab.agentId, taskId: tab.taskId } : null;
         });
       }
+      setPhoneDeviceView(false);
       setOpenApp((prev) => (prev === app ? null : app));
     },
     [openApp, selectedAgentId],
   );
   const closeApp = useCallback(() => setOpenApp(null), []);
+  const openPhoneDevice = useCallback(() => {
+    setPhoneDeviceView(true);
+    setOpenApp('phone');
+  }, []);
+  useEffect(() => setPhoneDeviceView(false), [selectedAgentId]);
+  const phoneLauncher = useMemo<PhoneLauncher>(() => ({ openPhoneDevice }), [openPhoneDevice]);
 
   const openAgentBrowser = useCallback(
     (agentId: string, taskId: string) => {
       setBrowserMode('remote');
       focusTask(agentId, taskId);
       setBrowserRootChosen(false);
+      // An explicit task beats a pending agent switch: another task of that agent
+      // registering later must not replace it.
+      pendingSwitchRef.current = null;
       setBrowserSelection({ agentId, taskId });
       setOpenApp('browser');
     },
@@ -317,6 +337,7 @@ export function RoseAppsProvider({
         (t) => t.agentId === agentId && (taskId === undefined || t.taskId === taskId),
       );
       setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
+      pendingSwitchRef.current = null;
       setBrowserRootChosen(agentId === null);
       if (agentId !== null && agentId !== selectedAgentId) onSelectAgent?.(agentId);
     },
@@ -365,6 +386,8 @@ export function RoseAppsProvider({
       reloadBrowser,
       toggleApp,
       closeApp,
+      phoneDeviceView,
+      openPhoneDevice,
       openAgentBrowser,
       openAgentBrowserTab,
       selectBrowserTab,
@@ -397,6 +420,8 @@ export function RoseAppsProvider({
       reloadBrowser,
       toggleApp,
       closeApp,
+      phoneDeviceView,
+      openPhoneDevice,
       openAgentBrowser,
       openAgentBrowserTab,
       selectBrowserTab,
@@ -415,8 +440,10 @@ export function RoseAppsProvider({
 
   return (
     <RoseAppsContext.Provider value={value}>
-      {children}
-      {typeof document !== 'undefined' && createPortal(<RoseAppDrawers />, document.body)}
+      <PhoneLauncherContext.Provider value={phoneLauncher}>
+        {children}
+        {typeof document !== 'undefined' && createPortal(<RoseAppDrawers />, document.body)}
+      </PhoneLauncherContext.Provider>
     </RoseAppsContext.Provider>
   );
 }

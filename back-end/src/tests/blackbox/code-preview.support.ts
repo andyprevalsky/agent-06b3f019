@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
  * (sources copied so the test may edit them; dependencies and the 200 MB
  * `public/` linked), plus a real headless Chromium watching the preview DOM.
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, symlinkSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { copyFile, cp, mkdir, readdir, symlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 /** The checkout this test runs from (`back-end/..`). */
@@ -37,26 +38,26 @@ export const HMR_EDIT_TEXT = 'Privacy Policy';
  * linked one by one (never the shared `.vite` cache) and the workspace-root
  * node_modules resolves hoisted packages, as an npm-workspaces checkout does.
  */
-export function makeRoseFrontEndHome(home: string): string {
+export async function makeRoseFrontEndHome(home: string): Promise<string> {
   const frontEnd = join(home, 'workspace', 'front-end');
-  mkdirSync(join(frontEnd, 'node_modules'), { recursive: true });
+  await mkdir(join(frontEnd, 'node_modules'), { recursive: true });
   for (const entry of COPIED) {
     const source = join(FRONT_END, entry);
-    if (existsSync(source)) cpSync(source, join(frontEnd, entry), { recursive: true });
+    if (existsSync(source)) await cp(source, join(frontEnd, entry), { recursive: true });
   }
   // The app throws at import without VITE_SUPABASE_* (src/lib/supabase.ts), so
   // a checkout without the untracked front-end/.env rendered a blank preview.
   // Use the committed public example, never this host's private env file.
-  copyFileSync(join(FRONT_END, '.env.example'), join(frontEnd, '.env'));
-  symlinkSync(join(FRONT_END, 'public'), join(frontEnd, 'public'));
+  await copyFile(join(FRONT_END, '.env.example'), join(frontEnd, '.env'));
+  await symlink(join(FRONT_END, 'public'), join(frontEnd, 'public'));
   const localModules = join(FRONT_END, 'node_modules');
   if (existsSync(localModules)) {
-    for (const name of readdirSync(localModules)) {
+    for (const name of await readdir(localModules)) {
       if (name.startsWith('.vite')) continue;
-      symlinkSync(join(localModules, name), join(frontEnd, 'node_modules', name));
+      await symlink(join(localModules, name), join(frontEnd, 'node_modules', name));
     }
   }
-  symlinkSync(join(REPO_ROOT, 'node_modules'), join(home, 'workspace', 'node_modules'));
+  await symlink(join(REPO_ROOT, 'node_modules'), join(home, 'workspace', 'node_modules'));
   return frontEnd;
 }
 

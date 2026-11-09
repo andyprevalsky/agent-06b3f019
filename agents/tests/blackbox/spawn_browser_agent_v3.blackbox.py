@@ -38566,6 +38566,7 @@ async def run_all_tests():
     await r.record_async("phone_saved_credential_rejects_model_secret_routing_args", test_phone_saved_credential_rejects_model_secret_routing_args)
     await r.record_async("phone_task_availability_is_authoritative", test_phone_task_availability_is_authoritative)
     await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
+    await r.record_async("phone_busy_error_names_holder_agent", test_phone_busy_error_names_holder_agent)
     await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
     await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
     await r.record_async("phone_model_observation_and_account_isolation", test_phone_model_observation_and_account_isolation)
@@ -38623,6 +38624,44 @@ async def test_phone_durable_http_contract():
         acquire = next(body for method, path, body in calls if method == 'POST' and '/interactions/' in path)
         assert acquire['requestKey']
         assert 'agentId' not in acquire
+
+
+async def test_phone_busy_error_names_holder_agent():
+    """A queued acquire reports which agent holds the phone, and never sends a command."""
+    teardown_mock()
+    from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
+    import httpx
+    calls = []
+    view = {'lease': None, 'cursor': 0, 'lastOperation': None}
+    def backend(request):
+        calls.append((request.method, request.url.path))
+        if '/availability/' in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', 'enabled': True})
+        if '/interactions/' in request.url.path:
+            if request.method == 'POST':
+                view.update(lease={'id': 'lease-queued', 'status': 'WAITING'}, queuePosition=1,
+                            holder={'agentId': 'agent-holder-1', 'leaseId': 'lease-held', 'controlOwner': 'user'})
+            return httpx.Response(200, json=view)
+        raise AssertionError(request.url.path)
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        snapshot = await observe_phone(config, 'user', 'task', client=client)
+        kwargs = dict(config=config, user_id='user', agent_id='agent', task_id='task', decision_id='call', snapshot=snapshot, client=client)
+        result = await execute_phone({'mode': 'operation', 'operation': 'input.tap', 'args': {'x': 1, 'y': 2}}, **kwargs)
+    assert result['success'] is False
+    assert 'agent-holder-1' in result['error'] and 'queue position 1' in result['error'], result['error']
+    assert not any(path.endswith('/operations') for _, path in calls)
+    # Without holder details the error stays truthful and generic.
+    view.clear(); view.update(lease=None, cursor=0, lastOperation=None)
+    async def no_holder(request):
+        if '/availability/' in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', 'enabled': True})
+        return httpx.Response(200, json={'lease': {'id': 'lease-queued', 'status': 'WAITING'}, 'cursor': 0})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(no_holder)) as client:
+        snapshot = await observe_phone(config, 'user', 'task', client=client)
+        kwargs = dict(config=config, user_id='user', agent_id='agent', task_id='task', decision_id='call', snapshot=snapshot, client=client)
+        result = await execute_phone({'mode': 'operation', 'operation': 'input.tap', 'args': {'x': 1, 'y': 2}}, **kwargs)
+    assert result['success'] is False and result['error'].startswith('Phone is in use')
 
 
 async def test_phone_denied_before_dom_and_private_binding():
