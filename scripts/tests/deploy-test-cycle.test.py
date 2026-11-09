@@ -5923,6 +5923,27 @@ class RelayStartupEvidence(unittest.TestCase):
                 module['join_native_hubs'](self.base,runs.parent/'campaigns'/('deploy-'+runs.parent.name))
         self.assertEqual(calls,['2','3'])
 
+    def test_native_hub_join_owns_the_single_rerun_layout_and_nothing_else(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        request=self.base/'.context/deploy-cloud'/('b'*64)
+        joined=[]
+        def join(runs,campaign):
+            (runs/'_hub').mkdir(parents=True,exist_ok=True)
+            with patch.dict(os.environ,{'DEPLOY_NATIVE_HUB_JOIN':'1','CLOUDBENCH_RUNS_ROOT':str(runs)}), \
+                 patch.object(subprocess,'run',side_effect=lambda command,**_:joined.append(command[-4])):
+                return module['join_native_hubs'](self.base,campaign)
+        for base,campaign in [(request,'deploy-'+'b'*64),(request/'rerun','deploy-'+'b'*64+'-rerun')]:
+            self.assertTrue(join(base/'runs',base/'campaigns'/campaign),campaign)
+        for runs,campaign in [(request/'rerun/runs',request/'rerun/campaigns'/('deploy-'+'b'*64)),
+                              (request/'rerun/runs',request/'campaigns'/('deploy-'+'b'*64+'-rerun')),
+                              (request/'other/runs',request/'other/campaigns'/('deploy-'+'b'*64+'-rerun')),
+                              (request/'rerun/rerun/runs',request/'rerun/rerun/campaigns'/('deploy-'+'b'*64+'-rerun')),
+                              (self.base/'elsewhere'/('b'*64)/'rerun/runs',
+                               self.base/'elsewhere'/('b'*64)/'rerun/campaigns'/('deploy-'+'b'*64+'-rerun'))]:
+            with self.subTest(runs=runs,campaign=campaign),self.assertRaisesRegex(ValueError,'not request-owned'):
+                join(runs,campaign)
+
     def campaign_hub_cleanup_failure(self, cancel):
         import runpy,signal
         module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
