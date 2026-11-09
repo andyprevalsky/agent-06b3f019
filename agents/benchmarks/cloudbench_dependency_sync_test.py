@@ -28310,6 +28310,7 @@ def test_fleet_barrier_reads_the_authoritative_rotated_status_port(tmp_path: Pat
     """
     fleet = fleet_source_text()
     release = _extract_fleet_function(fleet, "release_start_barrier() {")
+    infra_stop = _extract_fleet_function(fleet, "fleet_infra_stop_check() {")
     child_out = tmp_path / "child"
     child_out.mkdir()
     (child_out / "fleet-child.log").write_text(
@@ -28336,6 +28337,8 @@ curl() {{
   printf 204
 }}
 sleep() {{ :; }}
+FLEET_INFRA_STOP_SENT=0
+{infra_stop}
 {release}
 release_start_barrier
 """

@@ -128,9 +128,11 @@ def test_existing_catalog_rows_unchanged():
     import subprocess
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
-    old = json.loads(subprocess.check_output(['git', 'show', '06416c4f9f50ecec4f5d2678620e20dc3c0fd3d0:agents/benchmarks/tasks.json'], cwd=root, text=True))
+    # Reviewed snapshot: main's rows plus the explicit `deploy_category: "none"` opt-outs that catalog
+    # validation requires (select_predeploy_benches.require_deploy_category).
+    old = json.loads(subprocess.check_output(['git', 'show', '5f9a8d94a9f584a8b16ead9be263827f84feac48:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
-    # Sync retains every row from the reviewed main snapshot; phone tasks append only.
+    # Sync retains every row from the reviewed snapshot; new tasks append only.
     assert current[:len(old)] == old
 
 
