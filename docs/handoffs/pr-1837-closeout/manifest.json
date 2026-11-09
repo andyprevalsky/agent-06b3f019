@@ -111,8 +111,8 @@
     },
     {
       "path": "proofs/finite-closure-policy.json",
-      "size": 1773,
-      "sha256": "e75cf7721e647597b30219c82c042491652ce719c272b843fb3b315c8d4aa3d9"
+      "size": 1881,
+      "sha256": "b0b1e70349efc81b4c30fd48d249defb96eea9bbf4cd80c9fe8f1ec29903db8f"
     },
     {
       "path": "proofs/finite-coverage-dispositions.json",
