@@ -351,6 +351,7 @@ GATES = (
     ),
     Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    Gate("canonical-seed-migration-readiness", ("python3", "scripts/tests/migrate-canonical-seed.test.py")),
     Gate(
         "canonical-seed-whatsapp-content",
         ("bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"),
