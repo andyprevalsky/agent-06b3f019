@@ -8,7 +8,7 @@ Use for any bug, flake, regression or "why did X happen". This skill is the whol
 
 ## Done
 
-A local repro failed on the buggy code and the identical command passes after the fix, with the assertion unweakened; the fix is landed with its regression in the owning suite; a case file is written and validated; and exactly one outcome event is recorded (`rca outcome fixed`, `rca outcome diagnosis-ready` or `rca outcome blocked`), with any failed event write reported. `fixed` needs the reported symptom itself reproduced and gone; when the link to what the user saw is unproven, record `diagnosis-ready` or an open gap. Without a repro, report preliminary findings plus an observability gap, add the missing capture and keep the RCA open.
+A local repro failed on the buggy code and the identical command passes after the fix, with the assertion unweakened; the fix is landed with its regression in the owning suite; a case file is written and validated; and exactly one outcome event is recorded (`rca outcome fixed`, `rca outcome diagnosis-ready` or `rca outcome blocked`), with any failed event write reported. `fixed` needs the reported symptom itself reproduced and gone; when the link to what the user saw is unproven, record `diagnosis-ready` or an open gap, and only after each live hypothesis was reproduced offline (the code's own builders or a captured replay). Without a repro, report preliminary findings plus an observability gap, add the missing capture and keep the RCA open.
 
 ## Process
 
@@ -16,14 +16,14 @@ A local repro failed on the buggy code and the identical command passes after th
 |---|------|-----------------|
 | 0 | Evidence: read logs, the exact error or response body and the raw DB rows, and run the **Tools** diagnostics on the agent; count specifics | `python3 scripts/record_factory_event.py rca stage evidence-trace` |
 | 0.25 | Read the root agent's own bug report | `curl -s <backend>/api/agents/<agent_id>/report-bug/by-agent -H "X-API-Key: <its BACKEND_API_KEY>"` |
-| 0.5 | Search the archive for the real symptom strings (at least two searches) | `python3 scripts/rca_archive.py search "<error text> <component> <symptom>"`, `show <case-id>`, `grep -ri "<literal>" docs/rca/cases/` |
+| 0.5 | Search the archive for the real symptom strings (at least two searches) before any source edit or named cause | `python3 scripts/rca_archive.py search "<error text> <component> <symptom>"`, `show <case-id>`, `grep -ri "<literal>" docs/rca/cases/` |
 | 1 | Write the critical path from source to sink | — |
 | 2 | Binary-search that path to the first point where the data is wrong | — |
 | 3 | Reproduce locally in the smallest environment that still exercises the mechanism | `python3 scripts/record_factory_event.py rca stage reproduce-diagnose`, then `rca repro-attempt <reproduced\|not-reproduced\|fix-verified\|fix-failed> --detail repro_attempt=N` after each run |
 | 4 | Classify the failure, and for benchmarks give it one issue class | see **Classify** |
 | 5 | State What, Where, Why, Proof and Problem; climb the why ladder | see **Hypothesis** |
 | 6 | Fix at the owning layer, simplest first, references checked for gated surfaces | see **Fix** |
-| 7 | Have a fresh sub-agent adversarially review the draft, evidence, cause and class; resolve its objections | `python3 scripts/record_factory_event.py rca stage verify-handoff` before post-fix verification |
+| 7 | Give a fresh sub-agent the symptom, evidence and repro but not your diagnosis; it names its own first bad boundary, then compares with yours, and you resolve every difference with evidence | `python3 scripts/record_factory_event.py rca stage verify-handoff` before post-fix verification |
 | 8 | Write and validate the case file, then record the outcome | `python3 scripts/rca_archive.py new <slug-naming-the-cause>`, fill it, `reindex`, `validate` (must exit 0); `record_factory_event.py rca outcome <fixed\|diagnosis-ready\|blocked>` |
 
 Re-run a stage command when looping back; if an event write fails, report it.
@@ -85,12 +85,13 @@ For a slow, stalled or failed agent, run the first three in parallel, then expan
 
 - Fix the class of bug at the most upstream point where the data is wrong, in the layer that owns it, reusing existing logic and adding no untested path.
 - First ask whether deleting redundant state or unifying to one source of truth removes the bug; otherwise add the narrowest guard, keeping the change as small as that allows.
+- Fix at the upstream site you traced the trigger to; a downstream guard may be added only alongside it, never instead.
 - Fix every same-class site you find in the same change, or record why one cannot be fixed now.
 - Never add a defensive fallback, a speculative handler or silent degradation; fail loudly.
-- Never edit the repro's own fixture or assertion to make it pass.
+- Never edit the repro's own fixture, assertion, timing or concurrency to make it pass, and never delete the repro: land it as the regression or keep it under `.context`.
 - Never choose a weaker point fix, fallback, test change or wrong-layer workaround to keep the diff approval-free.
 - Run the golden-reference check only when the fix changes an approval-gated surface (otherwise record `Golden reference: not applicable (no approval-gated hunk)`): open each reference harness's analog (`bash scripts/sync-reference-repos.sh` restores clones), record its `path:line` and behavior, and converge on their shared pattern or say why not.
-- Land the repro as a blackbox test in the suite that owns the first bad data (`back-end/src/tests/blackbox/<domain>.blackbox.ts`, `agents/tests/blackbox/<domain>.blackbox.py`, `front-end/src/tests/blackbox/<domain>.blackbox.tsx`), and verify `python3 scripts/select_affected_tests.py` maps the surface to it; when it maps to no lane, register it in its owning deploy gate and never argue another mode covers it. The regression also asserts the neighbouring behavior that must not change (a negative control), so an overbroad fix fails it.
+- Land the repro as a blackbox test in the suite that owns the first bad data (`back-end/src/tests/blackbox/<domain>.blackbox.ts`, `agents/tests/blackbox/<domain>.blackbox.py`, `front-end/src/tests/blackbox/<domain>.blackbox.tsx`), and verify `python3 scripts/select_affected_tests.py` maps the surface to it; when it maps to no lane, register it in its owning deploy gate (a `scripts/tests/*` suite gets a `Gate(...)` line in `scripts/run-deploy-structural-gates.py`) and never argue another mode covers it. The regression also asserts the neighbouring behavior that must not change (a negative control), so an overbroad fix fails it.
 
 ## Delivery
 

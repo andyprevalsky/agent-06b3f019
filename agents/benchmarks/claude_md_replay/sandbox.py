@@ -124,7 +124,7 @@ def export_tree(source_repo: Path, sha: str, dest: Path, exclude_paths: tuple[st
 
 
 def commit_root(repo: Path, source_repo: Path, sha: str) -> str:
-    """One root commit with the source commit's message, author and dates; no remote, no other refs."""
+    """One root commit with the source commit's author and dates and a neutral message; no remote, no other refs."""
     fmt = "%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B"
     an, ae, ad, cn, ce, cd, message = git(source_repo, "log", "-1", f"--format={fmt}", sha).split("\x00", 6)
     git(repo, "init", "-q", "-b", "main")
@@ -140,7 +140,8 @@ def commit_root(repo: Path, source_repo: Path, sha: str) -> str:
         "GIT_COMMITTER_EMAIL": ce,
         "GIT_COMMITTER_DATE": cd,
     }
-    git(repo, "commit", "-q", "--no-verify", "-F", "-", env=env, input_text=message.rstrip("\n") + "\n")
+    # A neutral message: the source commit's message can name the fix branch (a merge of fix/<cause>).
+    git(repo, "commit", "-q", "--no-verify", "-F", "-", env=env, input_text="Snapshot\n")
     return git(repo, "rev-parse", "HEAD").strip()
 
 
