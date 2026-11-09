@@ -9266,6 +9266,139 @@ class CleanupPrepareEvidence(unittest.TestCase):
                     self.reseal()
 
 
+    def current_prepare_fixture(self):
+        import hashlib
+        receipt, owner, proof = self.prepare_fixture('7b68f4f7cde6a8cd1c4edfcbe119f1514b706045')
+        folder = Path(receipt['log']).parent
+        source = dict(head='7b68f4f7cde6a8cd1c4edfcbe119f1514b706045',
+                      digest='b4caeead07132658dcc875c1231be33a9ec9c916ec36830d5e0ab7e2b53418a9')
+        checks = ['test-mass-agent-run-0', 'chat-mode', 'spawn-sub-agents', 'parallel-tool-calls',
+                  'background-agent-message-smoke', 'claude-code-agent', 'browser-smoke',
+                  'agent-payment-test-shop', 'agent-payment-setup-resume', 'agent-payment-idempotent-abandonment',
+                  'browser-biometrics-webdecoy', 'agent-payment-new-user-journey']
+        request = json.loads((folder/'request.json').read_text())
+        certificate = dict(kind='historical-agentcard-no-retry-v1', disposition='NO_RETRY_CUSTODY',
+                           source=source, original_failure={'id':'original-native-failure', 'native_result':'FAIL'},
+                           original_amount_cents=4396, current_execution='UNVERIFIED',
+                           current_financial_state='UNVERIFIED',
+                           credit=dict(test_execution=False, assertions=False, financial_release=False))
+        # Like this fixture's producer/publication adapters, replace only the test
+        # certificate pin. The actual proof separately checks the full native certificate.
+        import deploy_test_native_prepare as prepare
+        certificate_pin=patch.object(prepare, 'CURRENT_PREPARE_CUSTODY_SHA256', hashlib.sha256(
+            json.dumps(certificate, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest())
+        certificate_pin.start(); self.addCleanup(certificate_pin.stop)
+        request.update(source=source, checks=checks, skips={'agent-payment-abandonment':certificate})
+        self.save(folder/'request.json', request)
+        receipt.update(source=source, checks=checks, custody_skips=copy.deepcopy(request['skips']),
+                       cases={**dict.fromkeys(checks,'UNVERIFIED'),
+                                                        'agent-payment-abandonment':'SKIP'})
+        adapter_path = Path(receipt['worker_result']); adapter = json.loads(adapter_path.read_text())
+        adapter.update(source=source, checks=checks, cases=dict.fromkeys(checks,'UNVERIFIED'),
+                       native_command=['bash','scripts/run-bench',*checks,'--runs','1','--concurrency','12',
+                                       '--retry-infra','0','--ref',source['head']])
+        self.save(adapter_path,adapter)
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=12,task_count=12,total_jobs=12,
+                       cleanup_ticket_error=dict(type='ValueError',message='insufficient physical cleanup cohort floors'))
+        summary['jobs']=summary['jobs'][:12]
+        for row, task in zip(summary['jobs'],checks):
+            row.update(task=task,controller_command=['bash',str(self.base/'scripts/run-bench'),task,
+                                                    '--ref',source['head'],'--foreground'])
+        summary['cleanup_cohorts'][0]['expected_count']=12
+        self.save(self.campaign/'summary.json',summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',dict(cohort_id='c001',
+                  jobs=dict.fromkeys(row['job_id'] for row in summary['jobs'])))
+        for f in [self.campaign/'shared-inventory/publisher.private.log',
+                  self.campaign/'hub-group-publication.private.log']: f.write_bytes(b'')
+        reference=receipt['native_cleanup_reference']
+        reference['result_sha256']=hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+        self.save(folder/'receipt.json',receipt)
+        proof.update(source=source,receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=reference['result_sha256'])
+        self.reseal()
+        return receipt,owner,proof
+
+    def test_current_twelve_case_prepare_preserves_original_unknown_and_custody(self):
+        receipt,owner,proof=self.current_prepare_fixture()
+        originals={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([],entry['participants'])
+        self.assertEqual([],entry['retained_services'])
+        self.assertEqual(originals,{p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()})
+        self.assertEqual(12,list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP',receipt['cases']['agent-payment-abandonment'])
+
+    def test_current_prepare_rejects_wrong_inventory_refusal_credit_and_writer(self):
+        receipt,owner,proof=self.current_prepare_fixture()
+        for key,value in [('credit_granted',True),('financial_cleanup_credit',True),('transfer_credit',True)]:
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'cleanup only'):
+                self.validate_prepare_fixture(receipt,owner,{**proof,key:value})
+        forged=copy.deepcopy(receipt);forged['cases']['invented']='PASS'
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(forged,owner,proof)
+        changed=copy.deepcopy(proof);changed['source']={**proof['source'],'head':'f'*40}
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,changed)
+        producer=self.base/'scripts/run-bench';native=producer.read_bytes()
+        producer.write_bytes(native+b'\n# altered producer\n');self.reseal()
+        with self.assertRaisesRegex(ValueError,'producer changed'):
+            self.validate_prepare_fixture(receipt,owner,proof)
+        producer.write_bytes(native);self.reseal()
+        path=self.campaign/'summary.json';original=path.read_bytes()
+        for mutate in [lambda v:v.update(cleanup_ticket_error={'type':'ValueError','message':'other'}),
+                       lambda v:v['jobs'][0].update(controller_pid=os.getpid()),
+                       lambda v:v['jobs'].append(v['jobs'][0])]:
+            value=json.loads(original);mutate(value);self.save(path,value);self.reseal()
+            with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+            path.write_bytes(original);self.reseal()
+        for log in [self.campaign/'shared-inventory/publisher.private.log', path]:
+            with self.subTest(writer=log),log.open('a'):
+                with self.assertRaisesRegex(ValueError,'active writer'):
+                    self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_current_prepare_rejects_forged_custody(self):
+        import hashlib
+        receipt,owner,proof=self.current_prepare_fixture()
+        folder=Path(receipt['log']).parent
+        request=json.loads((folder/'request.json').read_text())
+        protected=request['skips']['agent-payment-abandonment']
+        protected['original_failure']={'id':'FORGED','native_result':'PASS'}
+        protected['credit']={'test_execution':True,'assertions':True,'financial_release':True}
+        protected['current_financial_state']='SETTLED'
+        self.save(folder/'request.json',request);self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+        # Even rewriting both copies and resealing must not replace the pinned certificate.
+        receipt['custody_skips']=request['skips']
+        self.save(folder/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest()
+        self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_current_prepare_rejects_contradictory_native_width(self):
+        import hashlib
+        receipt,owner,proof=self.current_prepare_fixture()
+        path=Path(receipt['worker_result']);adapter=json.loads(path.read_text())
+        adapter['native_command'][adapter['native_command'].index('--concurrency')+1]='1'
+        self.save(path,adapter)
+        reference=receipt['native_cleanup_reference']
+        reference['result_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof.update(worker_result_sha256=reference['result_sha256'],
+                     receipt_sha256=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest())
+        self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_prepare_grant_path_uses_actual_git_common_directory(self):
+        import deploy_test_native_prepare as prepare
+        common=self.base/'common';reserve=common/'cloudbench-fleet-ownership'
+        reserve.mkdir(parents=True,mode=0o700)
+        budget=self.base/'budget'
+        import deploy_test_native_cleanup as cleanup
+        with patch.object(cleanup,'fleet_git_common',return_value=common):
+            actual=prepare.grant_path(self.base,budget)
+        self.assertEqual(str(reserve.stat().st_dev),actual.parent.parent.name)
+
+
 class RecoveredNativeReceiptGuard(unittest.TestCase):
     """Exercise actual full-pass admission on real files; never launch a worker."""
     def setUp(self):

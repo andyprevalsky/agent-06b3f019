@@ -1,6 +1,7 @@
 """Cleanup-only proof for a full-width campaign refused before ticket preparation."""
 import copy
 import hashlib
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -24,8 +25,26 @@ REVIEWED_SOURCE_SETS = (REVIEWED_SOURCES, {
 })
 
 
+CURRENT_PREPARE_SOURCE = '7b68f4f7cde6a8cd1c4edfcbe119f1514b706045'
+CURRENT_PREPARE_PRODUCERS = {
+    'run-bench-campaign.py': '36af2da9ad2b18a9f5dcb98693bd532dad87e40ba6e28177ec5b018b57d9cba1',
+    'cloudbench-cleanup-tickets.py': 'b67ac4790306e542a06b2ad607d88b9582c8173f2eecc37cdcffc3df991b4734',
+    'run-bench': '3b7192bbbe15e6fa050c5d06cfc163149901b3b22917d6416fcd7e0d563661c4',
+    'deploy_test_cloud.py': '96badb95c00fd2a735a7ddeb7f1e5616eb336c389534ca85ae71264b1c808e29',
+}
+# Full original no-retry certificate, including its historical identities and zero-credit fields.
+CURRENT_PREPARE_CUSTODY_SHA256 = '70331adcc9f36c3dff5ee25828b890b517f94f88a78942805aec6ddaffb2bab2'
+CURRENT_PREPARE_CHECKS = (
+    'test-mass-agent-run-0', 'chat-mode', 'spawn-sub-agents', 'parallel-tool-calls',
+    'background-agent-message-smoke', 'claude-code-agent', 'browser-smoke',
+    'agent-payment-test-shop', 'agent-payment-setup-resume', 'agent-payment-idempotent-abandonment',
+    'browser-biometrics-webdecoy', 'agent-payment-new-user-journey',
+)
+
+
 def grant_path(root, budget):
-    reserve = root / '.git/cloudbench-fleet-ownership'
+    from deploy_test_native_cleanup import fleet_ownership_root
+    reserve = fleet_ownership_root(root)
     info = reserve.lstat()
     from deploy_test_native_cleanup import need
     need(reserve.is_dir() and not reserve.is_symlink() and reserve.resolve() == reserve
@@ -51,7 +70,12 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
         ['git', '--no-replace-objects', '-C', str(root), 'show', head + ':scripts/' + name])
         for name in REVIEWED_SOURCES}
     observed = {name: hashlib.sha256(raw).hexdigest() for name, raw in originals.items()}
-    need(any(observed == reviewed for reviewed in REVIEWED_SOURCE_SETS), 'prepare producer changed')
+    current = observed == CURRENT_PREPARE_PRODUCERS
+    need(current or any(observed == reviewed for reviewed in REVIEWED_SOURCE_SETS), 'prepare producer changed')
+    if current:
+        need(receipt['source'] == {'head': CURRENT_PREPARE_SOURCE,
+             'digest': 'b4caeead07132658dcc875c1231be33a9ec9c916ec36830d5e0ab7e2b53418a9'},
+             'prepare current source')
     for name, original in originals.items():
         need(bound(root / 'scripts' / name, historical_head=head) == original, 'prepare producer changed')
     campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
@@ -61,20 +85,45 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     request = document(Path(receipt['log']).parent / 'request.json')
     summary = document(campaign / 'summary.json')
     checks, jobs = request['checks'], summary.get('jobs')
-    need(isinstance(checks, list) and len(checks) == len(set(checks)) == 14 and not request.get('skips')
-         and receipt['cases'] == adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
+    need(isinstance(checks, list) and all(isinstance(c, str) for c in checks), 'prepare unexecuted cases')
+    count = 12 if current else 14
+    expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
+    if current:
+        skips = request.get('skips', {})
+        protected = skips.get('agent-payment-abandonment', {})
+        need(checks == list(CURRENT_PREPARE_CHECKS)
+             and set(skips) == {'agent-payment-abandonment'}
+             and protected.get('kind') == 'historical-agentcard-no-retry-v1'
+             and protected.get('disposition') == 'NO_RETRY_CUSTODY'
+             and protected.get('source') == receipt['source'], 'prepare current inventory/custody')
+        need(receipt.get('custody_skips') == skips
+             and hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(',', ':'),
+                                           allow_nan=False).encode()).hexdigest() == CURRENT_PREPARE_CUSTODY_SHA256,
+             'prepare full historical custody certificate')
+        need(adapter.get('native_command') == ['bash', 'scripts/run-bench', *checks,
+             '--runs', '1', '--concurrency', str(count), '--retry-infra', '0', '--ref', head],
+             'prepare exact native command')
+        expected_cases['agent-payment-abandonment'] = 'SKIP'
+        need(summary.get('cleanup_ticket_error') == {
+            'type': 'ValueError', 'message': 'insufficient physical cleanup cohort floors'},
+            'prepare positive refusal')
+        need(not any(proof.get(k) for k in ('credit_granted', 'financial_cleanup_credit', 'transfer_credit')),
+             'prepare cleanup only')
+    need(isinstance(checks, list) and len(checks) == len(set(checks)) == count
+         and (current or not request.get('skips'))
+         and receipt['cases'] == expected_cases and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
          and adapter.get('complete') is False and adapter.get('cleanup_complete') is False, 'prepare unexecuted cases')
     need(summary.get('campaign_id') == campaign.name and summary.get('status') == 'failed'
          and summary.get('cleanup_ticket_failure') == 'prepare'
          and type(summary.get('peak_concurrency')) is int and summary['peak_concurrency'] == 0
          and all(type(summary.get(k)) is int and summary[k] == value for k, value in
-                 [('runs', 1), ('retry_infra', 0), ('concurrency', 14), ('task_count', 14), ('total_jobs', 14)])
+                 [('runs', 1), ('retry_infra', 0), ('concurrency', count), ('task_count', count), ('total_jobs', count)])
          and not any(summary.get(k) for k in ('shared_inventory_failed', 'shared_transport_cleanup_pending',
                     'startup_cohorts', 'workspace_binding', 'e2e_timeout_exceeded'))
-         and isinstance(jobs, list) and len(jobs) == 14 and all(isinstance(j, dict) for j in jobs), 'prepare terminal manifest')
-    ids = {'r001-j%04d' % i for i in range(1, 15)}
+         and isinstance(jobs, list) and len(jobs) == count and all(isinstance(j, dict) for j in jobs), 'prepare terminal manifest')
+    ids = {'r001-j%04d' % i for i in range(1, count + 1)}
     need({j.get('job_id') for j in jobs} == ids and {j.get('task') for j in jobs} == set(checks)
-         and len({j.get('task') for j in jobs}) == 14, 'prepare job inventory')
+         and len({j.get('task') for j in jobs}) == count, 'prepare job inventory')
     for job in jobs:
         log = campaign / (job['job_id'] + '.log')
         need(job.get('status') == 'cancelled' and job.get('attempts') == []
@@ -98,7 +147,7 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     need(document(cohort / 'manifest.json') == {'cohort_id': 'c001', 'jobs': dict.fromkeys(sorted(ids))}, 'prepare cohort membership')
     cohort_rows = summary.get('cleanup_cohorts')
     need(cohort_rows == [dict(cohort_id='c001', status='queued', ready_count=0,
-         expected_count=14, failed_count=0, released_count=0, released_at=None)]
+         expected_count=count, failed_count=0, released_count=0, released_at=None)]
          and all(type(cohort_rows[0][key]) is int for key in
                  ('ready_count', 'expected_count', 'failed_count', 'released_count')), 'prepare cohort state')
     grant = grant_path(root, budget)
@@ -106,6 +155,17 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     supervision = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
     need(supervision['orphaned_children'] is False and supervision['term_sent'] == []
          and supervision['kill_sent'] == [], 'prepare exact retirement')
+    if current:
+        logs = [runs.parent / 'cli.log', campaign / 'shared-relay/broker.private.log',
+                campaign / 'shared-inventory/publisher.private.log', campaign / 'hub-group-publication.private.log']
+        for path in logs:
+            bound(path)
+        observed = logs + [campaign / 'summary.json', Path(receipt['log']).parent / 'request.json',
+                           Path(receipt['log']).parent / 'receipt.json', Path(receipt['worker_result']),
+                           cohort / 'manifest.json', budget / 'prepare.lock']
+        holders = subprocess.run(['lsof', '-t', '--', *map(str, observed)], capture_output=True, timeout=10)
+        need(holders.returncode == 1 and not holders.stdout and not holders.stderr,
+             'prepare active writer or unknown observation')
     for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):
         document(campaign / name)
     native = runpy.run_path(str(root / 'scripts/run-bench-campaign.py'))
