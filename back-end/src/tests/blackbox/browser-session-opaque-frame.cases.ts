@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type Frame } from 'playwright';
 import { prisma } from '../../providers/database';
 import {
   checkpointLogicalBrowser,
@@ -56,6 +56,8 @@ export async function runBrowserOpaqueFrameCheckpointCase(): Promise<void> {
     browser = native.browser;
     const origin = await serve();
     const frameOrigin = await serve();
+    const lateOrigin = await serve();
+    const earlyOrigin = await serve();
     const browserContext = browser.contexts()[0]!;
     const page = await browserContext.newPage();
     await page.goto(`${origin}/checkout`);
@@ -111,13 +113,201 @@ export async function runBrowserOpaqueFrameCheckpointCase(): Promise<void> {
       withSteelLifecycleClaim(row.id, async (_owned, _effect, mutate) =>
         checkpointLogicalBrowser(row.sessionId!, mutate)
       );
-    await capture();
+    await page.evaluate(async (frameOrigin) => {
+      await new Promise<void>((resolve) => {
+        const frame = document.createElement('iframe');
+        frame.id = 'transient';
+        frame.src = `${frameOrigin}/transient`;
+        frame.onload = () => resolve();
+        document.body.append(frame);
+      });
+    }, frameOrigin);
+    const transient = page.frames().find((frame) => frame.url() === `${frameOrigin}/transient`);
+    assert(transient);
+    await transient.evaluate(() => sessionStorage.setItem('unobserved-session', 'preserve-me'));
+    // A first-checkpoint origin is discovered successfully, then leaves
+    // during its second (IndexedDB) read. Its namespace must survive capture.
+    await page.evaluate(async (lateOrigin) => {
+      await new Promise<void>((resolve) => {
+        const frame = document.createElement('iframe');
+        frame.id = 'late-storage';
+        frame.src = `${lateOrigin}/stored`;
+        frame.onload = () => resolve();
+        document.body.append(frame);
+      });
+    }, lateOrigin);
+    const late = page.frames().find((frame) => frame.url() === `${lateOrigin}/stored`);
+    assert(late);
+    await late.evaluate(async () => {
+      sessionStorage.setItem('late-session', 'retained');
+      localStorage.setItem('late-local', 'retained');
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.open('late-state', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('cart');
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const db = request.result;
+          const transaction = db.transaction('cart', 'readwrite');
+          transaction.objectStore('cart').put('retained', 'value');
+          transaction.oncomplete = () => {
+            db.close();
+            resolve();
+          };
+          transaction.onerror = () => reject(transaction.error);
+        };
+      });
+    });
+    await page.evaluate(async (earlyOrigin) => {
+      await new Promise<void>((resolve) => {
+        const frame = document.createElement('iframe');
+        frame.id = 'early-storage';
+        frame.src = `${earlyOrigin}/stored`;
+        frame.onload = () => resolve();
+        document.body.append(frame);
+      });
+    }, earlyOrigin);
+    const early = page.frames().find((frame) => frame.url() === `${earlyOrigin}/stored`);
+    assert(early);
+    await early.evaluate(async () => {
+      sessionStorage.setItem('early-session', 'retained');
+      localStorage.setItem('early-local', 'retained');
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.open('early-state', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('cart');
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const db = request.result;
+          const transaction = db.transaction('cart', 'readwrite');
+          transaction.objectStore('cart').put('retained', 'value');
+          transaction.oncomplete = () => {
+            db.close();
+            resolve();
+          };
+          transaction.onerror = () => reject(transaction.error);
+        };
+      });
+    });
+    // Schedule the same real detach seen on Shef after frames() enumerated
+    // an iframe but before its storage read. Only control scheduling; keep
+    // Playwright's actual detached-frame exception and the checkpoint path.
+    const prototype = Object.getPrototypeOf(opaque) as Frame;
+    const evaluate = prototype.evaluate;
+    let detached = false;
+    let firstStorageDetached = false;
+    let detachedAfterStorage = false;
+    prototype.evaluate = async function (this: Frame, ...args: Parameters<Frame['evaluate']>) {
+      if (this.url() === `${frameOrigin}/transient` && !detached) {
+        detached = true;
+        const gone = this.page().waitForEvent('framedetached', (frame) => frame === this);
+        await this.parentFrame()!.evaluate(() => document.querySelector('#transient')!.remove());
+        await gone;
+        assert(this.isDetached());
+      }
+      if (
+        this.url() === `${earlyOrigin}/stored` &&
+        String(args[0]).includes('Object.entries(storage)')
+      ) {
+        const gone = this.page().waitForEvent('framedetached', (frame) => frame === this);
+        await this.parentFrame()!.evaluate(() =>
+          document.querySelector('#early-storage')!.remove()
+        );
+        await gone;
+        assert(this.isDetached());
+        firstStorageDetached = true;
+      }
+      if (
+        this.url() === `${lateOrigin}/stored` &&
+        String(args[0]).includes('indexedDB.databases')
+      ) {
+        const gone = this.page().waitForEvent('framedetached', (frame) => frame === this);
+        await this.parentFrame()!.evaluate(() => document.querySelector('#late-storage')!.remove());
+        await gone;
+        assert(this.isDetached());
+        detachedAfterStorage = true;
+      }
+      return Reflect.apply(evaluate, this, args);
+    } as Frame['evaluate'];
+    try {
+      await assert.rejects(capture(), /Frame was detached|frame was detached/i);
+      assert(detached, 'the first origin probe must exercise a real detach');
+      const unchanged = await prisma.browserSession.findUniqueOrThrow({ where: { id: row.id } });
+      assert.equal(unchanged.checkpointRevision, row.checkpointRevision);
+      assert.equal(unchanged.checkpointRef, row.checkpointRef);
+      assert.equal(unchanged.sessionId, row.sessionId);
+      assert.equal(unchanged.status, 'ACTIVE');
+      const retainedConnection = await chromium.connectOverCDP(native.endpoint);
+      connections.push(retainedConnection);
+      const retainedTab = retainedConnection
+        .contexts()[0]!
+        .pages()
+        .find((tab) => tab.url() === row.currentUrl);
+      assert(retainedTab);
+      await retainedTab.evaluate(async (frameOrigin) => {
+        await new Promise<void>((resolve) => {
+          const frame = document.createElement('iframe');
+          frame.src = `${frameOrigin}/transient`;
+          frame.onload = () => resolve();
+          document.body.append(frame);
+        });
+      }, frameOrigin);
+      const retainedFrame = retainedTab
+        .frames()
+        .find((frame) => frame.url() === `${frameOrigin}/transient`);
+      assert(retainedFrame);
+      assert.equal(
+        await retainedFrame.evaluate(() => sessionStorage.getItem('unobserved-session')),
+        'preserve-me'
+      );
+      await capture();
+      assert(detached, 'the checkpoint must exercise the real detach race');
+      assert(firstStorageDetached, 'the first storage read must exercise an actual iframe detach');
+      assert(
+        detachedAfterStorage,
+        'the first checkpoint must detach after successful DOM storage capture'
+      );
+    } finally {
+      prototype.evaluate = evaluate;
+    }
     const captured = await prisma.browserSession.findUniqueOrThrow({
       where: { id: row.id },
     });
     const saved = await readBrowserCheckpoint(userId, captured.checkpointRef!);
     assert.equal(saved.tabs.length, 1);
-    assert.equal(saved.tabs[0]!.frames!.length, 0);
+    assert.equal(saved.tabs[0]!.frames!.length, 3);
+    assert(
+      saved.tabs[0]!.frames!.find((frame) => frame.origin === frameOrigin)?.sessionStorage.some(
+        (entry) => entry.name === 'unobserved-session' && entry.value === 'preserve-me'
+      )
+    );
+    const lateSaved = saved.tabs[0]!.frames!.find((frame) => frame.origin === lateOrigin);
+    assert(lateSaved, 'a newly observed detached origin must be captured by the existing fallback');
+    assert(
+      lateSaved.sessionStorage.some(
+        (entry) => entry.name === 'late-session' && entry.value === 'retained'
+      )
+    );
+    assert(
+      lateSaved.localStorage?.some(
+        (entry) => entry.name === 'late-local' && entry.value === 'retained'
+      )
+    );
+    assert(lateSaved.indexedDB, 'detachment must not silently omit IndexedDB');
+    const earlySaved = saved.tabs[0]!.frames!.find((frame) => frame.origin === earlyOrigin);
+    assert(
+      earlySaved,
+      'a origin confirmed before its first storage read must be captured by the existing fallback'
+    );
+    assert(
+      earlySaved.sessionStorage.some(
+        (entry) => entry.name === 'early-session' && entry.value === 'retained'
+      )
+    );
+    assert(
+      earlySaved.localStorage?.some(
+        (entry) => entry.name === 'early-local' && entry.value === 'retained'
+      )
+    );
+    assert(earlySaved.indexedDB, 'detachment must not silently omit IndexedDB');
     assert(
       saved.storage.origins.some((origin) =>
         origin.localStorage.some((entry) => entry.name === 'cart' && entry.value === 'one')
@@ -136,6 +326,77 @@ export async function runBrowserOpaqueFrameCheckpointCase(): Promise<void> {
       assert.equal(
         await restored.pages()[0]!.evaluate(() => sessionStorage.getItem('approval')),
         'held'
+      );
+      const restoredPage = restored.pages()[0]!;
+      await restoredPage.evaluate(async (lateOrigin) => {
+        await new Promise<void>((resolve) => {
+          const frame = document.createElement('iframe');
+          frame.src = `${lateOrigin}/verify-restored`;
+          frame.onload = () => resolve();
+          document.body.append(frame);
+        });
+      }, lateOrigin);
+      const restoredLate = restoredPage
+        .frames()
+        .find((frame) => frame.url() === `${lateOrigin}/verify-restored`);
+      assert(restoredLate);
+      assert.deepEqual(
+        await restoredLate.evaluate(async () => {
+          const indexed = await new Promise<unknown>((resolve, reject) => {
+            const request = indexedDB.open('late-state');
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+              const db = request.result;
+              const result = db.transaction('cart').objectStore('cart').get('value');
+              result.onerror = () => reject(result.error);
+              result.onsuccess = () => {
+                db.close();
+                resolve(result.result);
+              };
+            };
+          });
+          return [
+            sessionStorage.getItem('late-session'),
+            localStorage.getItem('late-local'),
+            indexed,
+          ];
+        }),
+        ['retained', 'retained', 'retained']
+      );
+      await restoredPage.evaluate(async (earlyOrigin) => {
+        await new Promise<void>((resolve) => {
+          const frame = document.createElement('iframe');
+          frame.src = `${earlyOrigin}/verify-restored`;
+          frame.onload = () => resolve();
+          document.body.append(frame);
+        });
+      }, earlyOrigin);
+      const restoredEarly = restoredPage
+        .frames()
+        .find((frame) => frame.url() === `${earlyOrigin}/verify-restored`);
+      assert(restoredEarly);
+      assert.deepEqual(
+        await restoredEarly.evaluate(async () => {
+          const indexed = await new Promise<unknown>((resolve, reject) => {
+            const request = indexedDB.open('early-state');
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+              const db = request.result;
+              const result = db.transaction('cart').objectStore('cart').get('value');
+              result.onerror = () => reject(result.error);
+              result.onsuccess = () => {
+                db.close();
+                resolve(result.result);
+              };
+            };
+          });
+          return [
+            sessionStorage.getItem('early-session'),
+            localStorage.getItem('early-local'),
+            indexed,
+          ];
+        }),
+        ['retained', 'retained', 'retained']
       );
     } finally {
       await restored.close();
