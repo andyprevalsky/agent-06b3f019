@@ -99,7 +99,7 @@ from helpers.background_agents import (
 from helpers.generation_handoff import GenerationHandoffRequested
 from helpers.handle_tool_event import handle_tool_event
 from helpers.wait_condition_or_handoff import note_generation_handoff, wait_condition_or_generation_handoff
-from helpers.wait_wake import first_wake, record_wake, wait_baseline
+from helpers.wait_wake import MAX_WAKE_EVENTS, first_wake, record_wake, wait_baseline
 from loop.dag_executor import DagInterrupts
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
 from workflows.agent_control import child_result_status
@@ -188,7 +188,8 @@ class BackgroundAgentsMixin:
         self._background_settled: Set[str] = set()
         # receive_agent_message ids already accepted (a retried send re-signals).
         self._seen_agent_message_ids: List[str] = []
-        # Wake log for in-tool waits (helpers/wait_wake.py; this generation only).
+        # Bounded wake history and sequence travel together across continuation.
+        self._last_user_message_wake_seq: int = 0
         self._wait_wake_seq: int = 0
         self._wait_wake_events: List[Dict[str, Any]] = []
         # wake mark read before the last successful context poll (wait baseline).
@@ -203,11 +204,40 @@ class BackgroundAgentsMixin:
             "notified": sorted(self._background_notified),
             "retired_task_names": list(self._retired_task_names),
             "seen_agent_message_ids": list(self._seen_agent_message_ids),
+            "wait_wake": {
+                "seq": self._wait_wake_seq,
+                "user_message_seq": self._last_user_message_wake_seq,
+                "context_mark": self._context_wake_mark,
+                "events": [dict(event) for event in self._wait_wake_events],
+            },
         }
 
     def _restore_background_state(self, snapshot: Any) -> None:
         if not isinstance(snapshot, dict):
             return
+        wake = snapshot.get("wait_wake")
+        if isinstance(wake, dict):
+            seq = wake.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
+                self._wait_wake_seq = seq
+                for key, attribute in (
+                    ("user_message_seq", "_last_user_message_wake_seq"),
+                    ("context_mark", "_context_wake_mark"),
+                ):
+                    value = wake.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= seq:
+                        setattr(self, attribute, value)
+                events = wake.get("events")
+                if isinstance(events, list):
+                    self._wait_wake_events = [
+                        dict(event)
+                        for event in events
+                        if isinstance(event, dict)
+                        and isinstance(event.get("seq"), int)
+                        and not isinstance(event["seq"], bool)
+                        and 0 < event["seq"] <= seq
+                        and isinstance(event.get("kind"), str)
+                    ][-MAX_WAKE_EVENTS:]
         tasks = snapshot.get("tasks")
         if isinstance(tasks, dict):
             self._background_tasks = {str(key): dict(value) for key, value in tasks.items() if isinstance(value, dict)}
