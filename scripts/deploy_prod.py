@@ -500,12 +500,17 @@ def production_migrations(ctx: Ctx, lane: str = 'backend-probes') -> tuple[Path 
     argv = ['git', 'archive', '--format=tar', '-o', str(archive), commit, MIGRATIONS_PATH]
     ctx.note(lane, f'{shlex.join(argv)} && tar -x -C {dest}')
     code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+    fetch_failure = ''
     if code != 0:
-        fetched, _out, _err = ctx.io.capture(['git', 'fetch', '--quiet', 'origin', 'main'], ctx.root, ctx.child_env())
+        fetched, _out, fetch_err = ctx.io.capture(['git', 'fetch', '--quiet', 'origin', 'main'], ctx.root,
+                                                  ctx.child_env())
         if fetched == 0:
             code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+        else:
+            fetch_failure = f'; git fetch origin main exited {fetched}: {ctx.redact(fetch_err.strip())[:200]}'
     if code != 0:
-        return None, f'git archive {commit[:12]} {MIGRATIONS_PATH} failed: {ctx.redact(err.strip())[:200]}'
+        return None, (f'git archive {commit[:12]} {MIGRATIONS_PATH} failed: {ctx.redact(err.strip())[:200]}'
+                      f'{fetch_failure}')
     try:
         with tarfile.open(archive) as tar:
             tar.extractall(dest, filter='data')

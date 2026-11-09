@@ -23,7 +23,8 @@ export function runProductionSchemaDriftCheck(): Promise<SchemaDriftCheckResult>
     alert: (problems, report) =>
       alertError({
         source: 'schema_drift',
-        message: `${problems.length} schema drift problem(s): ${problems.join('; ')}`,
+        // A replay gap is not drift: the headline stays neutral, the lines and remedy say which.
+        message: `${problems.length} schema check problem(s): ${problems.join('; ')}`,
         context: {
           checked: report.checked,
           exposedTables: report.exposedTables.length,

@@ -57,12 +57,13 @@ class Fake:
     """Injected IO: records every command, gh call, HTTP request and output line."""
 
     def __init__(self, root: Path, changed: list[str], *, handler=None, http=None, gh=None, gh_exists=True,
-                 descendants=(), unknown=(), fetch_learns=False):
+                 descendants=(), unknown=(), fetch_learns=False, fetch_code=0, fetch_err=''):
         self.root, self.changed, self.handler, self.http, self.gh = root, changed, handler, http, gh
         self.gh_exists = gh_exists
         # `git merge-base --is-ancestor SHA <x>`: 0 for x in descendants, 128 for x in unknown (until a fetch of
         # origin main learns it when fetch_learns), else 1.
         self.descendants, self.unknown, self.fetch_learns = set(descendants), set(unknown), fetch_learns
+        self.fetch_code, self.fetch_err = fetch_code, fetch_err
         self.git: list[list[str]] = []
         self.archived: list[str] = []
         self.runs: list[tuple[list[str], Path, dict]] = []
@@ -106,6 +107,8 @@ class Fake:
             with self.lock:
                 self.git.append(list(argv))
             if argv[1] == 'fetch':
+                if self.fetch_code:
+                    return self.fetch_code, '', self.fetch_err
                 if self.fetch_learns:
                     self.unknown.clear()
                 return 0, '', ''
@@ -779,6 +782,19 @@ class BackendProbesTest(Base):
         self.assertEqual((passed, code), (False, 1))
         self.assertEqual(reason, f'git archive {live[:12]} back-end/prisma/migrations failed: '
                                  f'fatal: not a valid object name: {live}')
+        self.assertEqual(fake.runs, [])
+        self.assertEqual(fake.git, [['git', 'fetch', '--quiet', 'origin', 'main']])
+
+    def test_failed_fetch_is_reported_beside_the_archive_error(self) -> None:
+        live = 'abcdef0123456789abcdef0123456789abcdef01'
+        self.write_production(render={'status': 'verified-by-descendant', 'live_commit': live})
+        fake = Fake(self.root, [], http=lambda url, headers: (200, b'{"logs": []}'), unknown=[live], fetch_code=128,
+                    fetch_err=f'fatal: unable to access origin {SECRETS["GITHUB_TOKEN"]}')
+        passed, reason, _code = dp.lane_backend_probes(self.ctx(fake))
+        self.assertFalse(passed)
+        self.assertEqual(reason, f'git archive {live[:12]} back-end/prisma/migrations failed: '
+                                 f'fatal: not a valid object name: {live}; '
+                                 'git fetch origin main exited 128: fatal: unable to access origin ***')
         self.assertEqual(fake.runs, [])
 
 

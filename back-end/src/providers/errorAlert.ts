@@ -48,7 +48,7 @@ const SOURCE_LABEL: Record<FailureSource, string> = {
   agent_workflow: '🔴 Agent failed',
   backend_crash: '🔴 Backend crashing',
   agent_watchdog: '🔴 Agent stuck / silently died',
-  schema_drift: '🔴 Production schema drift (RLS / indexes / policies)',
+  schema_drift: '🔴 Production schema check failed (drift or unverified migration replay)',
   e2b_capacity: '🔴 E2B concurrent-sandbox limit reached — scale the E2B plan',
 };
 
