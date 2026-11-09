@@ -20,11 +20,13 @@ const GUARDS = ['authenticateInternal', 'requireInternal'];
 
 /** Every worker/agent-only route, as `<domain>/<file>` → routes. */
 const INTERNAL_ROUTES: Record<string, string[]> = {
+  'agents/routes.reportBug.ts': ['/:id/report-bug/by-agent'],
   'send-sms/routes.ts': ['/', '/direct', '/notify'],
   'vapi/routes.ts': ['/call', '/call/:id'],
   'demo-cache/routes.ts': ['/get', '/get-many', '/get-position', '/set', '/purge', '/agent-flag'],
   'archive/routes.ts': ['/artifacts', '/artifact'],
   'tool-usage/routes.ts': ['/'],
+  'agent-queue-pointer/routes.ts': ['/capabilities'],
   'external-http/routes.ts': ['/request'],
   'browser-session/routes.ts': [
     '/close',

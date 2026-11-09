@@ -9,7 +9,7 @@ vi.mock('@/lib/realtime', async (importOriginal) => {
   return { ...mod, subscribeToBus: vi.fn(), unsubscribe: vi.fn() };
 });
 
-import { useAgentTree } from '@/hooks/useAgentTree';
+import { noteTreeUserMessage, useAgentTree } from '@/hooks/useAgentTree';
 import * as RealtimeMod from '@/lib/realtime';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -25,6 +25,136 @@ describe('agent tree snapshot ordering', () => {
   afterEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
+  });
+
+  it('keeps the later lastUserMessageAt when a realtime node meets a newer snapshot', async () => {
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({ access_token: 'test-token', user: { id: 'user-1' } }),
+    );
+    let releaseSnapshot!: () => void;
+    const snapshotBlocked = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const row = (agent_id: string, parent_agent_id: string | null, last?: string) => ({
+      agent_id,
+      parent_agent_id,
+      goal: agent_id,
+      status: 'ACTIVE',
+      progress: 0,
+      tools_in_use: [],
+      message_count: 0,
+      tree_cost_cents: 0,
+      ...(last ? { last_user_message_at: last } : {}),
+    });
+    server.use(
+      http.get(`${API_BASE}/agents/tree`, async () => {
+        await snapshotBlocked;
+        // Another device messaged the child after this tab's own send.
+        return HttpResponse.json({
+          agents: [row('root', null), row('child', 'root', '2026-10-21T02:00:00.000Z')],
+        });
+      }),
+    );
+    let handlers: Parameters<typeof RealtimeMod.subscribeToBus>[1] = {};
+    vi.mocked(RealtimeMod.subscribeToBus).mockImplementation(async (_busId, nextHandlers) => {
+      handlers = nextHandlers;
+      return fakeChannel();
+    });
+    const { result, unmount } = renderHook(() => useAgentTree('stamp-race-bus'));
+    await waitFor(() => expect(handlers.onAgentStateChanged).toBeTypeOf('function'));
+    act(() => {
+      handlers.onAgentStateChanged?.({
+        agentId: 'child',
+        parentAgentId: 'root',
+        goal: 'child',
+        status: 'ACTIVE',
+        progress: 0,
+        toolsInUse: [],
+        messageCount: 1,
+        costCents: 0,
+      });
+    });
+    act(() => noteTreeUserMessage('child', '2026-10-21T01:00:00.000Z'));
+    expect(result.current.get('child')?.lastUserMessageAt).toBe('2026-10-21T01:00:00.000Z');
+
+    releaseSnapshot();
+    await waitFor(() => expect(result.current.has('root')).toBe(true));
+    expect(result.current.get('child')?.lastUserMessageAt).toBe('2026-10-21T02:00:00.000Z');
+    unmount();
+  });
+
+  it('keeps a send made during a reconnect snapshot for a REST-only child', async () => {
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({ access_token: 'test-token', user: { id: 'user-1' } }),
+    );
+    let requestCount = 0;
+    let releaseReconnectSnapshot!: () => void;
+    const reconnectSnapshotBlocked = new Promise<void>((resolve) => {
+      releaseReconnectSnapshot = resolve;
+    });
+    let markReconnectSnapshotStarted!: () => void;
+    const reconnectSnapshotStarted = new Promise<void>((resolve) => {
+      markReconnectSnapshotStarted = resolve;
+    });
+    const row = (agent_id: string, parent_agent_id: string | null, last?: string) => ({
+      agent_id,
+      parent_agent_id,
+      goal: agent_id,
+      status: 'ACTIVE',
+      progress: 0,
+      tools_in_use: [],
+      message_count: 0,
+      tree_cost_cents: 0,
+      ...(last ? { last_user_message_at: last } : {}),
+    });
+    server.use(
+      http.get(`${API_BASE}/agents/tree`, async () => {
+        requestCount += 1;
+        const currentRequest = requestCount;
+        if (currentRequest === 2) {
+          markReconnectSnapshotStarted();
+          await reconnectSnapshotBlocked;
+        }
+        // The reconnect snapshot was read before the send below, so its stamp is older.
+        return HttpResponse.json({
+          agents: [
+            row('root', null),
+            row('rest-child', 'root', '2026-10-21T00:00:00.000Z'),
+            ...(currentRequest === 2 ? [row('reconnect-only', 'root')] : []),
+          ],
+        });
+      }),
+    );
+    const handlerGenerations: Parameters<typeof RealtimeMod.subscribeToBus>[1][] = [];
+    vi.mocked(RealtimeMod.subscribeToBus).mockImplementation(async (_busId, handlers) => {
+      handlerGenerations.push(handlers);
+      return fakeChannel();
+    });
+    const { result, unmount } = renderHook(() => useAgentTree('rest-child-reconnect-bus'));
+    await waitFor(() => expect(result.current.has('rest-child')).toBe(true));
+    await waitFor(() => expect(handlerGenerations).toHaveLength(1));
+
+    let reconnect!: () => void;
+    const timeoutSpy = vi.spyOn(window, 'setTimeout').mockImplementation(((
+      callback: TimerHandler,
+    ) => {
+      reconnect = callback as () => void;
+      return 1;
+    }) as typeof window.setTimeout);
+    act(() => handlerGenerations[0].onDisconnect?.());
+    act(() => reconnect());
+    await reconnectSnapshotStarted;
+    timeoutSpy.mockRestore();
+
+    act(() => noteTreeUserMessage('rest-child', '2026-10-21T01:00:00.000Z'));
+    expect(result.current.get('rest-child')?.lastUserMessageAt).toBe('2026-10-21T01:00:00.000Z');
+    releaseReconnectSnapshot();
+
+    await waitFor(() => expect(result.current.has('reconnect-only')).toBe(true));
+    expect(result.current.get('rest-child')?.lastUserMessageAt).toBe('2026-10-21T01:00:00.000Z');
+    unmount();
   });
 
   it('does not overwrite a current-generation realtime node with an older initial snapshot', async () => {

@@ -12,7 +12,7 @@ import {
   PURCHASE_APPROVAL_CACHE_HOURS,
   PURCHASE_STALE_CHARGING_MS,
 } from './config';
-import { PurchaseError } from './errors';
+import { PurchaseError, toPurchaseBoundaryError } from './errors';
 import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
 import { resolveAndIssuePurchaseCard } from './issueCard';
@@ -111,12 +111,16 @@ async function tryReuseExistingPurchase(
   // Idempotent retry within the reuse window: hand back the held card while the provider reports availability
   // and the purchase remains HELD (e.g. a transient browser-agent error retried the identical cart).
   if (isReusableStatus(existing.status) && existing.cardId !== null) {
+    // An unreadable card preserves the purchase, but the mint caller must still see the provider's
+    // typed status/code: a raw AgentCard runtime error reaches the route as an untyped 500.
     const liveDetails = await tryGetLiveCardDetails(
       existing.userId,
       existing.agentId,
       existing.cardId,
       cardProvider
-    );
+    ).catch((error: unknown) => {
+      throw toPurchaseBoundaryError(error);
+    });
     if (
       liveDetails &&
       (!reuseOnly ||

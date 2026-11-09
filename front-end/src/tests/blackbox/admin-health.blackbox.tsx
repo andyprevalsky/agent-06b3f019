@@ -292,23 +292,32 @@ describe('AdminHealth page', () => {
   it('neutral-series tooltips use the theme popover tokens, so rows stay readable on dark', async () => {
     renderWithProviders(<AdminHealth embedded />);
     await screen.findByText('01 Primary Metric');
-    const charts = [
+    // Locate each chart by its ResponsiveContainer, which mounts with the
+    // metrics; the chart itself (.recharts-wrapper) paints only after the
+    // container's post-commit size measurement re-renders, which can land
+    // after '01 Primary Metric' under load.
+    const containers = [
       screen.getByText('Revenue over time'),
       screen.getByText('Verified-User Weekly Retention'),
       screen.getByRole('img', { name: 'GitHub commits over time' }),
     ].map((title) => {
       let node: HTMLElement | null = title;
-      while (node !== null && node.querySelector('.recharts-wrapper') === null) {
+      while (node !== null && node.querySelector('.recharts-responsive-container') === null) {
         node = node.parentElement;
       }
-      return node?.querySelector<HTMLElement>('.recharts-wrapper') ?? null;
+      return node?.querySelector<HTMLElement>('.recharts-responsive-container') ?? null;
     });
     let rows = 0;
-    for (const chart of charts) {
-      expect(chart).not.toBeNull();
-      fireEvent.mouseMove(chart!, { clientX: 300, clientY: 100 });
+    for (const container of containers) {
+      expect(container).not.toBeNull();
+      const chart = await waitFor(() => {
+        const painted = container!.querySelector<HTMLElement>('.recharts-wrapper');
+        expect(painted).not.toBeNull();
+        return painted!;
+      });
+      fireEvent.mouseMove(chart, { clientX: 300, clientY: 100 });
       const box = await waitFor(() => {
-        const found = chart!.querySelector<HTMLElement>('.recharts-default-tooltip');
+        const found = chart.querySelector<HTMLElement>('.recharts-default-tooltip');
         expect(found).not.toBeNull();
         return found!;
       });

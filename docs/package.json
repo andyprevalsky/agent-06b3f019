@@ -1,6 +1,9 @@
 {
   "name": "rose-docs",
   "private": true,
+  "engines": {
+    "node": "22.23.4"
+  },
   "scripts": {
     "dev": "mintlify dev --port 3003"
   },

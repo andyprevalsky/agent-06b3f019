@@ -7,8 +7,10 @@ import {
   createClaudeCodeSession,
   closeClaudeCodeSession,
   getClaudeCodeSession,
+  type ClaudeCodeSessionOptions,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
+import { GithubRateLimitedError } from '../../providers/githubRateLimit';
 import { resolveSessionProject } from '../../providers/projects/session';
 import { createLogger } from '../../providers/logger';
 import {
@@ -111,6 +113,21 @@ export async function resolveAgentContext(
   }
 }
 
+/** The spawn's options for createClaudeCodeSession (project, code session, CLI conversation, title). */
+function sessionOptions(
+  params: CreateSessionParams,
+  projectWorkspace: ClaudeCodeSessionOptions['projectWorkspace'],
+  codeSession: ClaudeCodeSessionOptions['codeSession']
+): ClaudeCodeSessionOptions {
+  return {
+    projectWorkspace,
+    codeSession,
+    freshConversation: params.fresh_conversation === true,
+    taskName: params.task_name ?? null,
+    cliSettings: params.cli_settings ?? null,
+  };
+}
+
 export async function createSession(params: CreateSessionParams): Promise<CreateSessionResult> {
   const { agent_id, goal, attachments, user_id } = params;
   let effectiveGithubRepoUrl = params.github_repo_url;
@@ -154,6 +171,8 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     }
 
     const accessCheck = await checkGithubRepoAccess(effectiveUserId, effectiveGithubRepoUrl);
+    if (accessCheck.rateLimit !== undefined)
+      throw new GithubRateLimitedError(accessCheck.rateLimit);
     if (!accessCheck.allowed) {
       log.info(`GitHub access denied for user ${effectiveUserId}: ${accessCheck.error ?? ''}`);
       throw new GitHubAccessDeniedError(accessCheck.error!);
@@ -191,7 +210,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
         normalizedRepoUrl,
         effectiveUserId,
         fastModeCacheEnabled,
-        { projectWorkspace, codeSession, freshConversation: params.fresh_conversation === true }
+        sessionOptions(params, projectWorkspace, codeSession)
       )
   );
 

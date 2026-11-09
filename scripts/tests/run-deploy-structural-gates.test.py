@@ -21,7 +21,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run-deploy-structural-gates.py"
-DEPLOY_MD = ROOT / ".claude" / "commands" / "deploy.md"
+# Gate registry floor: deleting a registration lowers the count. Raise it when gates
+# are added; lowering it is the deliberate, reviewable act of retiring a gate.
+MIN_REGISTERED_GATES = 96
 
 
 def _registry_commands() -> set[str]:
@@ -46,13 +48,22 @@ def _registry_commands() -> set[str]:
     return commands
 
 
-class StructuralGateDocumentationTests(unittest.TestCase):
-    """Step 4s lists its suites explicitly so a gate cannot be silently dropped.
+def _load_registry():
+    spec = importlib.util.spec_from_file_location("deploy_registry_guard", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
-    Several suites (approval-format, deploy-worktree-preflight, semantic-deploy,
-    check-agent-behavior-approval) assert their own command still appears in
-    deploy.md. Replacing that list with a registry pointer therefore removes
-    real coverage while still looking tidy. Pin both directions instead.
+
+class StructuralGateDocumentationTests(unittest.TestCase):
+    """The registry is the only gate list: deploy.md carries none by design.
+
+    `scripts/deploy gates` runs this registry, so a gate is dropped silently only if
+    its registration disappears. Without a doc to compare against, the guards here
+    keep the registry well-formed (unique names and commands, every script exists),
+    prevent it from shrinking unnoticed, and require the suites that own deploy
+    behavior to assert their own registration (several already do).
     """
 
     def test_frontend_coverage_requires_app_typecheck_before_vitest(self) -> None:
@@ -114,21 +125,55 @@ class StructuralGateDocumentationTests(unittest.TestCase):
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=60)
 
-    def test_deploy_md_lists_every_registered_gate(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)
+    def test_registry_names_and_commands_are_unique(self) -> None:
+        gates = _load_registry().GATES
+        names = [gate.name for gate in gates]
+        commands = [gate.command for gate in gates]
         self.assertEqual(
-            missing, [], f"deploy.md Step 4s is missing registered gate(s): {missing}"
+            sorted({n for n in names if names.count(n) > 1}), [], "duplicate gate names"
+        )
+        self.assertEqual(
+            sorted({" ".join(c) for c in commands if commands.count(c) > 1}),
+            [],
+            "one command registered under two gate names would run twice and hide a drop",
         )
 
-    def test_deploy_md_lists_no_unregistered_gate(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        registry = _registry_commands()
-        documented = {match.group(1) for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)}
-        stale = sorted(documented - registry)
-        self.assertEqual(
-            stale, [], f"deploy.md names gate(s) absent from the registry: {stale}"
+    def test_every_registered_command_points_at_existing_paths(self) -> None:
+        missing = []
+        for gate in _load_registry().GATES:
+            for token in gate.command[1:]:
+                if "/" in token and "*" not in token and not (ROOT / token).exists():
+                    missing.append(f"{gate.name}: {token}")
+        self.assertEqual(missing, [], f"registered gate(s) run a missing path: {missing}")
+
+    def test_registry_does_not_shrink_below_the_floor(self) -> None:
+        count = len(_load_registry().GATES)
+        self.assertGreaterEqual(
+            count,
+            MIN_REGISTERED_GATES,
+            f"{count} registered gates < floor {MIN_REGISTERED_GATES}: a gate registration was "
+            "removed; retire it deliberately by lowering MIN_REGISTERED_GATES in this test",
         )
+
+    def test_owning_suites_are_registered_once_with_their_exact_command(self) -> None:
+        """The suites that own deploy behavior also assert this about themselves."""
+        gates = _load_registry().GATES
+        owners = {
+            "deploy-structural-runner": ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
+            "cooperative-cutover-monitor": ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
+            "workflow-deployment-migration": ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
+            "durable-evidence-links": ("bash", "scripts/tests/durable-evidence-links.test.sh"),
+            "seed-memory-ratchet": ("bash", "scripts/tests/seed-memory-ratchet.test.sh"),
+            "deploy-worktree-preflight": ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
+            "semantic-deploy": ("bash", "scripts/tests/semantic-deploy-gate.test.sh"),
+        }
+        for name, command in owners.items():
+            registered = [g for g in gates if g.name == name or g.command == command]
+            self.assertEqual(
+                [(g.name, g.command) for g in registered],
+                [(name, command)],
+                f"{name} must be registered exactly once with {' '.join(command)}",
+            )
 
     def test_agents_blackbox_registration_guard_is_a_deploy_gate(self) -> None:
         self.assertIn(
@@ -138,12 +183,29 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         )
 
     def test_cloudbench_blackbox_is_not_duplicated_with_agents_coverage(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        step = deploy_md.split("## Step 4cb:", 1)[1].split("## Step 4c:", 1)[0]
-        self.assertIn('if [ -z "$CHANGED_AGENTS" ]; then', step)
-        self.assertIn("./venv/bin/python scripts/run_blackbox_tests.py benchmark", step)
-        self.assertIn("Step 4g's agents coverage already runs it", step)
-        self.assertIn("wait for Step 4g to finish before starting", step)
+        """The agents `benchmark` blackbox domain runs once, inside agents coverage."""
+        self.assertTrue((ROOT / "agents/tests/blackbox/benchmark.blackbox.py").is_file())
+        parallel = (ROOT / "agents/scripts/run_coverage_blackbox_parallel.py").read_text()
+        self.assertIn("TESTS_DIR = AGENTS_ROOT", parallel)
+        self.assertIn('"benchmark",', parallel)
+        controller = (ROOT / "scripts/run-cloudbench-controller-local.py").read_text()
+        self.assertNotIn("run_blackbox_tests.py", controller, "controller regressions must not rerun the benchmark domain")
+        for gate in _load_registry().GATES:
+            self.assertNotIn(
+                "run_blackbox_tests.py", " ".join(gate.command), f"{gate.name} reruns a blackbox domain"
+            )
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import deploy_test_plan as plan
+            runners = [
+                gate["name"]
+                for gate in plan.standard_template()["gates"]
+                if "run-coverage.sh" in " ".join(map(str, gate["command"]))
+                and gate.get("cwd") == "agents"
+            ]
+        finally:
+            sys.path.remove(str(ROOT / "scripts"))
+        self.assertEqual(runners, ["agents-coverage-blackbox"])
 
 
 class StructuralGatePortIsolationTests(unittest.TestCase):
@@ -360,7 +422,6 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 (scripts / "semantic-deploy-gate.test.sh").write_text(
                     "set -euo pipefail\n"
                     f"DESCEND_COMMAND_TEST={str(scripts / 'descend-command.test.sh')!r}\n"
-                    f"DEPLOY_COMMAND={str(DEPLOY_MD)!r}\n"
                     f"DEPLOY_STRUCTURAL_RUNNER={str(registry_path)!r}\n"
                     'fail() { echo "FAIL: $1" >&2; exit 1; }\n'
                     'require_text() { grep -Fq -- "$2" "$1" || fail "$3"; }\n'
@@ -464,6 +525,75 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     failure_state=module.ROOT / module.FAILURE_STATE,
                     durations_state=module.ROOT / module.DURATIONS_STATE,
                 )
+
+    def test_exclusive_group_jobs_never_overlap_while_other_gates_keep_running(self) -> None:
+        """Suites that park or scan unreadable same-user processes must not overlap.
+
+        deploy-test-cycle's quiet() refuses on any same-user process whose cwd it cannot read
+        for 2 s. deploy-test-plan and deploy-structural-runner park exactly such processes
+        (PR_SET_DUMPABLE=0 children) as fixtures, so running beside them failed the gate on a
+        Blacksmith VM (PR 1747, run 42394708631) and on PR 1751 before it. Jobs of one group run
+        one at a time; a gate outside the group still uses the free workers.
+        """
+        module = _load_registry()
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-exclusive-") as temporary:
+            root = Path(temporary)
+
+            def gate(name: str, group: str = "") -> object:
+                code = (
+                    "import time; from pathlib import Path; "
+                    f"p = Path({str(root / name)!r}); "
+                    "p.with_suffix('.start').write_text(repr(time.monotonic())); "
+                    "time.sleep(0.4); "
+                    "p.with_suffix('.end').write_text(repr(time.monotonic()))"
+                )
+                return module.Gate(name, (sys.executable, "-c", code), exclusive=group)
+
+            gates = (gate("g0", "g"), gate("g1", "g"), gate("g2", "g"), gate("plain"))
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                result = module.run_gates(gates, max_workers=4)
+            self.assertEqual(result, 0)
+
+            def span(name: str) -> tuple[float, float]:
+                return (
+                    float((root / f"{name}.start").read_text()),
+                    float((root / f"{name}.end").read_text()),
+                )
+
+            grouped = sorted((span(name) for name in ("g0", "g1", "g2")))
+            for (_, earlier_end), (later_start, _) in zip(grouped, grouped[1:]):
+                self.assertGreaterEqual(
+                    later_start, earlier_end, "two jobs of one exclusive group overlapped"
+                )
+            plain_start, _ = span("plain")
+            first_group_end = min(end for _, end in grouped)
+            self.assertLess(
+                plain_start,
+                first_group_end,
+                "a gate outside the group waited for the exclusive group",
+            )
+
+    def test_every_suite_with_a_non_dumpable_fixture_is_in_the_proc_observation_group(self) -> None:
+        registry = _load_registry()
+        by_command = {path: gate for gate in registry.GATES for path in gate.command}
+        fixtures = [
+            path
+            for path in sorted((ROOT / "scripts" / "tests").glob("*.test.*"))
+            if "prctl(4" in path.read_text() or "PR_SET_DUMPABLE" in path.read_text()
+        ]
+        self.assertGreaterEqual(len(fixtures), 3, "the fixture scan found no suites")
+        for path in fixtures:
+            relative = str(path.relative_to(ROOT))
+            gate = by_command.get(relative)
+            self.assertIsNotNone(gate, f"{relative} builds unreadable-process fixtures but is no gate")
+            self.assertEqual(
+                gate.exclusive,
+                registry.PROC_OBSERVATION,
+                f"{gate.name} parks unreadable same-user processes; it must not overlap the scanners",
+            )
 
     def test_gates_start_under_the_documented_umask_not_the_invokers(self) -> None:
         """The deploy lane runs the registry inside a transient systemd service
@@ -787,7 +917,7 @@ else: print('origin/fixture')
         env = {**os.environ, "PATH": str(transport)+os.pathsep+os.environ["PATH"],
                "FLY_API_TOKEN":"offline-fixture", "GITHUB_TOKEN":"offline-fixture",
                "CLOUDBENCH_GATE_REF":"a"*40, "WARM_IMAGE_REF":"fixture/immutable@sha256:"+"b"*64,
-               "CLOUDBENCH_GATE_NODE_VERSION":"v24.21.0", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
+               "CLOUDBENCH_GATE_NODE_VERSION":"v24.22.1", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
                "CLOUDBENCH_GATE_TIMEOUT_S":"0" if outcome=="timeout" else "30",
                "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
                "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE":keep_tmp,
@@ -1398,6 +1528,102 @@ def _load_runner(name: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class StructuralGateProgressTests(unittest.TestCase):
+    """DEPLOY_GATE_PROGRESS: one live row per suite, the result left unchanged."""
+
+    WATCH = "STRUCTURAL_PROGRESS_FIXTURE_WATCH"
+
+    def _gates(self, module):
+        # The waiter finishes only after the failing suite's FAIL row is in the
+        # file, so the row is written live, not when the runner exits. Without
+        # a watch path it exits at once with the same output.
+        waiter = (
+            "import json, os, sys, time\n"
+            "if os.environ.get('DEPLOY_GATE_PROGRESS'):\n"
+            "    sys.exit(7)\n"
+            f"watch = os.environ.get({self.WATCH!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while watch and time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+            "    except (OSError, ValueError):\n"
+            "        rows = []\n"
+            "    if any(row['unit'] == 'fails' and row['status'] == 'FAIL' for row in rows):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    if watch:\n"
+            "        sys.exit(9)\n"
+            "print('waiter done')\n"
+        )
+        return (
+            module.Gate("fails", ("bash", "-c", "echo fails-marker-output; exit 3")),
+            module.Gate(
+                "split",
+                ("bash", "-c", '[ "$DEPLOY_GATE_SHARD" != 2/2 ] || { echo split-shard-two-broke; exit 1; }'),
+                shards=2,
+            ),
+            module.Gate("whole-split", ("bash", "-c", "echo whole-split-ok"), shards=2),
+            module.Gate("waiter", (sys.executable, "-c", waiter)),
+        )
+
+    def _run(self, module, gates, extra_env):
+        env = {key: value for key, value in os.environ.items() if key not in {"DEPLOY_GATE_PROGRESS", self.WATCH}}
+        env.update(extra_env)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(os.environ, env, clear=True),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.run_gates(gates, max_workers=6)
+
+        def timeless(text: str) -> str:
+            return re.sub(r"\d+(?:\.\d+)?s\b", "Ns", text)
+
+        head, _, slowest = timeless(stdout.getvalue()).partition("Slowest deploy structural gates:")
+        return result, (head, sorted(slowest.splitlines())), sorted(timeless(stderr.getvalue()).splitlines())
+
+    def test_each_suite_reports_one_live_row_without_changing_the_result(self) -> None:
+        module = _load_runner("deploy_runner_progress")
+        gates = self._gates(module)
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-progress-") as temporary:
+            root = Path(temporary)
+            progress = root / "reported" / "progress.jsonl"
+            progress.parent.mkdir()
+            silent = root / "silent"
+            silent.mkdir()
+            reported = self._run(
+                module,
+                gates,
+                {"DEPLOY_GATE_PROGRESS": str(progress), "DEPLOY_GATE_CASE": "structural", self.WATCH: str(progress)},
+            )
+            unset = self._run(module, gates, {})
+            # A directory is not a writable progress file: reporting fails silently.
+            broken = self._run(module, gates, {"DEPLOY_GATE_PROGRESS": str(silent)})
+            self.assertEqual(reported[0], 1, reported)
+            self.assertEqual(reported, unset, "reporting changed the exit code or output")
+            self.assertEqual(broken, unset, "an unwritable progress file changed the run")
+            self.assertEqual(list(silent.iterdir()), [], "nothing is written without a writable progress file")
+            rows = [json.loads(line) for line in progress.read_text().splitlines()]
+        units = [row["unit"] for row in rows]
+        self.assertEqual(sorted(units), ["fails", "split", "waiter", "whole-split"], "one row per suite")
+        self.assertLess(units.index("fails"), units.index("waiter"), "the FAIL row precedes later suites")
+        by_unit = {row["unit"]: row for row in rows}
+        self.assertEqual({row["scope"] for row in rows}, {"suite"})
+        self.assertEqual({row["case"] for row in rows}, {"structural"})
+        self.assertEqual(
+            {unit: row["status"] for unit, row in by_unit.items()},
+            {"fails": "FAIL", "split": "FAIL", "whole-split": "PASS", "waiter": "PASS"},
+        )
+        self.assertIn("fails-marker-output", by_unit["fails"]["detail"])
+        self.assertTrue(by_unit["fails"]["log"].endswith("/fails.log"))
+        self.assertIn("split-shard-two-broke", by_unit["split"]["detail"])
+        self.assertTrue(by_unit["split"]["log"].endswith("/split[2-of-2].log"))
+        self.assertEqual((by_unit["whole-split"]["detail"], by_unit["whole-split"]["log"]), ("", ""))
+        self.assertTrue(by_unit["waiter"]["log"].endswith("/waiter.log"))
 
 
 class StructuralGateSchedulingTests(unittest.TestCase):

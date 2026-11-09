@@ -12,6 +12,7 @@ import {
   createUserMessageInTransaction,
   createWorkflowMessageGroup,
 } from '../../providers/messages';
+import { recordPersonMessage } from '../../providers/personMessageStamp';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
@@ -20,6 +21,7 @@ import { readTaskInboxMessages } from './agentToAgentService';
 import { buildUserMessageSignalValue } from './agentMessageSignal';
 export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
+import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -204,6 +206,20 @@ async function resolveBrowserTarget(
   return { browserTaskId };
 }
 
+/** A Browser-composer row: the live session's, else a paused browser's resume (agentMessageResume.ts). */
+async function targetedBrowserRow(
+  agentId: string,
+  body: PostMessageBody,
+  browserTarget: { browserTaskId: string } | null
+) {
+  if (browserTarget === null) return null;
+  const { browserTaskId } = browserTarget;
+  return (
+    (await createBrowserTargetedMessage(agentId, body, browserTaskId)) ??
+    resumeStoppedBrowser(agentId, browserTaskId, body.message, body.metadata)
+  );
+}
+
 /**
  * Store a Browser-composer message only while its session is ACTIVE, under a
  * FOR SHARE lock on that BrowserSession row. The browser's pause-close UPDATE
@@ -264,13 +280,18 @@ async function withPiggybackedInbox<T extends object>(
   return { ...posted, pending_inbox: pending };
 }
 
-/** Post a message to an agent (user or internal). */
+/**
+ * Post a message to an agent (user or internal). A non-internal USER post is
+ * a person's message unless `personAuthored: false` (a bot relaying alerts on
+ * the owner's behalf); only person-authored posts move the sidebar recency key.
+ */
 export async function postMessage(
   agentId: string,
   body: PostMessageBody,
   isInternal: boolean,
   userId?: string,
-  workflowGeneration?: string
+  workflowGeneration?: string,
+  options: { personAuthored?: boolean } = {}
 ) {
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
@@ -284,16 +305,16 @@ export async function postMessage(
 
   const browserTarget = await resolveBrowserTarget(agentId, body, role, isInternal);
   if (browserTarget !== null && 'error' in browserTarget) return browserTarget;
-  const targeted =
-    browserTarget === null
-      ? null
-      : await createBrowserTargetedMessage(agentId, body, browserTarget.browserTaskId);
+  const targeted = await targetedBrowserRow(agentId, body, browserTarget);
+  // A person's message to a stopped agent resumes it: the row says from what.
+  const resumedFrom =
+    role === 'USER' && !isInternal && targeted === null ? await stoppedAgentStatus(agentId) : null;
 
   const messageParams = {
     agentId,
     text: body.message,
     role,
-    metadata: body.metadata,
+    metadata: resumedFrom === null ? body.metadata : { ...(body.metadata ?? {}), resumedFrom },
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
   };
   let message;
@@ -351,6 +372,10 @@ export async function postMessage(
       buildUserMessageSignalValue(body.message, body.metadata),
       isInternal && workflowGeneration !== undefined
     );
+  }
+  // After delivery: the recency stamp is best-effort and never gates routing.
+  if (role === 'USER' && !isInternal && options.personAuthored !== false) {
+    await recordPersonMessage(message);
   }
 
   return withPiggybackedInbox(agentId, body, isInternal, {

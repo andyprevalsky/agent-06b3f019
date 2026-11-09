@@ -37,6 +37,8 @@ export interface TreeNode {
   createdAt?: string;
   /** ISO last lifecycle update (REST snapshot, or the realtime event's own timestamp). */
   updatedAt?: string;
+  /** ISO newest person-authored message (REST snapshot only; realtime updates preserve it). */
+  lastUserMessageAt?: string;
   /** In-activity background tasks (explore/browser/code) owned by this agent. */
   backgroundTasks?: TreeBackgroundTask[];
   /** Codex-style tree address, e.g. `/root/outreach/draft_a` (absent on older rows). */
@@ -75,6 +77,13 @@ export function parseBackgroundTasks(raw: unknown): TreeBackgroundTask[] | undef
     });
   }
   return tasks;
+}
+
+/** The later of two ISO timestamps (either may be absent). */
+function laterTimestamp(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Date.parse(b) > Date.parse(a) ? b : a;
 }
 
 function isoOrUndefined(value: unknown): string | undefined {
@@ -126,6 +135,7 @@ function apiToTreeNode(node: AgentTreeNode): TreeNode {
     failureContext: node.failure_context,
     createdAt: isoOrUndefined(node.created_at),
     updatedAt: isoOrUndefined(node.updated_at),
+    lastUserMessageAt: isoOrUndefined(node.last_user_message_at),
     backgroundTasks: parseBackgroundTasks(node.background_tasks),
     taskPath: typeof node.task_path === 'string' && node.task_path ? node.task_path : undefined,
   };
@@ -154,6 +164,7 @@ function realtimeToTreeNode(data: AgentStateChangedPayload, previous?: TreeNode)
     structuredOutput: data.structuredOutput,
     failureContext: data.failureContext,
     createdAt: previous?.createdAt,
+    lastUserMessageAt: previous?.lastUserMessageAt,
     backgroundTasks: parseBackgroundTasks(data.backgroundTasks) ?? previous?.backgroundTasks,
     taskPath:
       typeof data.taskPath === 'string' && data.taskPath ? data.taskPath : previous?.taskPath,
@@ -260,6 +271,8 @@ function fetchInitialTree(
         nodes.set(agentId, {
           ...node,
           createdAt: node.createdAt ?? snapshot?.createdAt,
+          // A person may have messaged from elsewhere: keep the later stamp.
+          lastUserMessageAt: laterTimestamp(node.lastUserMessageAt, snapshot?.lastUserMessageAt),
           taskPath: node.taskPath ?? snapshot?.taskPath,
           backgroundTasks: node.backgroundTasks ?? snapshot?.backgroundTasks,
           progressEstimate: mergeProgressEstimate(
@@ -278,6 +291,15 @@ function fetchInitialTree(
         if (node) nodes.set(id, withProgressUpdate(node, update));
       }
       subscription.pendingUpdates.clear();
+      // A send while the fetch was in flight patched the published node; a REST-only
+      // child has no realtime copy to reconcile, so keep its later stamp here.
+      for (const [id, node] of nodes) {
+        const stamp = laterTimestamp(
+          node.lastUserMessageAt,
+          subscription.nodes.get(id)?.lastUserMessageAt,
+        );
+        if (stamp !== node.lastUserMessageAt) nodes.set(id, { ...node, lastUserMessageAt: stamp });
+      }
       publishNodes(subscription, nodes);
     })
     .catch((error) => {
@@ -457,6 +479,26 @@ function releaseSubscription(
   if (subscription.reconnectTimeout !== null) clearTimeout(subscription.reconnectTimeout);
   if (subscription.healthCheckInterval !== null) clearInterval(subscription.healthCheckInterval);
   unsubscribe(subscription.channel);
+}
+
+/**
+ * The person just messaged `agentId`: move its sidebar recency key in every
+ * live tree that holds it. Only the REST snapshot carries the stamp and
+ * realtime updates keep it, so without this a messaged sub-agent would not
+ * reorder among its siblings until the tree resubscribed.
+ */
+export function noteTreeUserMessage(agentId: string, at: string): void {
+  for (const subscription of busSubscriptions.values()) {
+    const previous = subscription.nodes.get(agentId);
+    if (!previous) continue;
+    if (previous.lastUserMessageAt && Date.parse(previous.lastUserMessageAt) >= Date.parse(at))
+      continue;
+    const next = { ...previous, lastUserMessageAt: at };
+    const nodes = new Map(subscription.nodes);
+    nodes.set(agentId, next);
+    if (subscription.realtimeNodes.has(agentId)) subscription.realtimeNodes.set(agentId, next);
+    publishNodes(subscription, nodes);
+  }
 }
 
 export function listenToAgentTree(

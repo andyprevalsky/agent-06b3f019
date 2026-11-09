@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from fnmatch import fnmatchcase
 import fcntl
@@ -27,12 +27,13 @@ import threading
 import time
 import uuid
 
+import deploy_gate_progress as progress
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
 from deploy_test_isolation import validate as validate_isolation
 
 ROOT = Path(__file__).resolve().parents[1]
-QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural"}
+QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural", "mac-app-static"}
 REQUIRED_QUICK = {"format", "eslint", "typescript"}
 TERMINAL_OK = {"PASS", "SKIP"}
 NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -125,11 +126,26 @@ def source_mode(path: Path) -> int:
 
 
 def environment_digest() -> str:
-    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID"}
+    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
+                 "CODEX_TOOL_CALL_ID"}
     return digest({k: v for k, v in os.environ.items() if k not in transient})
 
 
-def input_fingerprints(plan: dict, root: Path) -> dict:
+ROTATING_CREDENTIAL = re.compile(rb"(?m)^([ \t]*(?:export[ \t]+)?GITHUB_TOKEN[ \t]*=).*$")
+
+
+def runtime_config_sha256(path: Path) -> str:
+    """Digest a runtime config file, ignoring only the rotating GitHub user token's value.
+
+    The devbox daemon rewrites ``GITHUB_TOKEN`` in the managed env files every time it refreshes
+    that short-lived credential (observed 3 times in 40 minutes on 2026-11-07), which made any
+    staged cycle longer than the refresh interval go stale. The key's presence and every other
+    byte stay bound, so adding, removing or changing any other setting still invalidates a cycle.
+    """
+    return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
+
+
+def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None) -> dict:
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
     links = index_gitlinks(root)
@@ -154,13 +170,13 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
     for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "agents/.env.benchmark-temporal",
                 "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
-            runtime_config[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            runtime_config[rel] = runtime_config_sha256(root / rel)
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
                             if any(fnmatchcase(p, glob) for glob in g.get("input_paths", ["*"]))},
                             "runtime_config": runtime_config,
                             "command": g["command"], "env": g.get("env", {}),
                             "worker": g.get("worker"), "checks": g["checks"],
-                            "environment": environment_digest()}) for g in plan["gates"]}
+                            "environment": environment_digest() if environment is None else environment}) for g in plan["gates"]}
 
 
 def command(value: object) -> list[str]:
@@ -170,6 +186,7 @@ def command(value: object) -> list[str]:
 
 
 def validate_plan(plan: dict, root: Path = ROOT) -> None:
+    """Refuse unsupported workers before allocating ownership or admitting native work."""
     gates = plan.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("plan needs gates")
@@ -179,6 +196,9 @@ def validate_plan(plan: dict, root: Path = ROOT) -> None:
         if not isinstance(name, str) or not NAME.fullmatch(name) or name in names:
             raise ValueError("gate names must be unique safe identifiers")
         names.add(name)
+        if (gate.get('native_cloud') is True
+                and gate.get('worker_transport') == 'benchmark-cloud-cli' and sys.platform != 'linux'):
+            raise ValueError(f'{name}: native cloud supervision requires Linux before adapter admission')
         command(gate.get("command"))
         if any("--reuse-passed" in arg for arg in gate["command"]):
             raise ValueError("staged runs require fresh execution, not pass-cache reuse")
@@ -235,7 +255,7 @@ def initialize(plan: dict, root: Path) -> dict:
             "input_fingerprints": input_fingerprints(plan, root)}
 
 
-def reuse_qualifications(state: dict, gate: dict) -> dict:
+def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=ROOT, custody_refresh=False) -> dict:
     """Replay existing dispositions; projected source fields never replace native proof."""
     from deploy_failure_report import decision
     revalidate_standing_skips(state)
@@ -261,26 +281,44 @@ def reuse_qualifications(state: dict, gate: dict) -> dict:
                 or warning['receipt_sha256'] != evidence['sha256']
                 or sha_file(evidence['path']) != evidence['sha256'] or case in expected):
             raise ValueError('reuse resource qualification changed')
+        if 'renewal' in warning:
+            from deploy_test_agentcard_renewal import validate_active
+            validate_active(state, warning)
         expected[case] = {'disposition': RESOURCE_SKIP, **warning}
+    if include_custody:
+        from deploy_test_historical_custody import guard, identical_inputs_binding
+        current = (identical_inputs_binding(state, root)
+                   if custody_refresh and state.get('historical_no_retry_custody') else None)
+        expected.update(guard(state, gate, root, expected, current=current))
     if not set(expected) <= set(gate['checks']):
         raise ValueError('reuse qualification outside full inventory')
     return expected
 
 
 def qualification_identity(skips: dict) -> dict:
-    # refresh changes ONLY these outer projection fields; nested native/RCA bytes stay bound.
-    return {key: {k: v for k, v in value.items() if k not in {'source', 'original_source'}}
-            for key, value in skips.items()}
+    # Only projection source/plan may change during an identical-input refresh.
+    # Native source, task, financial facts, environment and fingerprints remain bound.
+    result = copy.deepcopy(skips)
+    for value in result.values():
+        for field in ('source', 'original_source'):
+            value.pop(field, None)
+        if value.get('disposition') == 'NO_RETRY_CUSTODY':
+            for field in ('source', 'plan_digest'):
+                value['current_binding'].pop(field, None)
+    return result
 
 
-def full_pass_binding(state: dict, gate: dict) -> dict | None:
+def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> dict | None:
     """Latest FULL execution: native PASS subset plus exact existing qualified exclusions."""
     latest = latest_receipts(state).get(gate['name'])
     if not latest or gate.get('quick'):
         return None
     receipt = latest
+    # Recovered native evidence has no positive-adoption contract yet.
+    if receipt.get('kind') == 'recovered-native-execution-v1':
+        return None
     try:
-        skips = reuse_qualifications(state, gate)
+        skips = reuse_qualifications(state, gate, root=root, custody_refresh=custody_refresh)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         return None
     active = [case for case in gate['checks'] if case not in skips]
@@ -291,8 +329,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
             or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
-            or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
-            or receipt.get('lingering_group') or receipt.get('cleanup_owner')
+            or receipt['native_exit'] != 0
+            or any(receipt.get(flag) is not False for flag in ('timed_out', 'cancelled', 'lingering_group'))
+            or receipt.get('cleanup_owner')
             or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
             or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
@@ -308,6 +347,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
                 or request.get('checks') != active
                 or qualification_identity(request.get('skips', {})) != qualification_identity(skips)
                 or any(v.get('source') != receipt['source'] for v in request.get('skips', {}).values())
+                or any(receipt.get('case_complete', {}).get(k) is not False
+                       or receipt.get('current_execution', {}).get(k) != 'UNVERIFIED'
+                       for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY')
                 or request.get('worker_recipe') != gate.get('worker_recipe')):
             return None
         worker = receipt.get('worker_result')
@@ -326,14 +368,14 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
         return None
 
 
-def carried_pass(state: dict, gate: dict) -> bool:
+def carried_pass(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> bool:
     entry = state.get('carried_passes', {}).get(gate['name'])
     if not entry:
         return False
     return (entry.get('validated_source') == state['source']
             and entry.get('input_fingerprint') == state['input_fingerprints'].get(gate['name'])
             and entry.get('contract_digest') == digest(gate)
-            and full_pass_binding(state, gate) == entry.get('native_binding'))
+            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh) == entry.get('native_binding'))
 
 
 def reusable_full_pass(state: dict, gate: dict) -> bool:
@@ -429,9 +471,37 @@ def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failu
             gate, state, directory, root, host_admission=admission, host_timeout=remaining))
 
 
+def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, root: Path, attempt: int) -> dict:
+    """Reach the gate's own detached benchmark controllers once its process group ended.
+
+    benchmarks/local.py runs the runner and its isolated stack in sessions of their own, so the
+    gate's group TERM and ten-second group KILL never wait for their cleanup: on 2026-11-05 an
+    interrupted cycle left agentcard-lifecycle's controller running queued paid tasks for ~24
+    minutes. This is the legacy lane teardown bound to this request's token: only token-owned
+    owner records are signalled (the controller first, then its own published shutdown budget,
+    then the last-resort KILL), foreign runs are only reported, and run directories stay in place
+    for the interrupted-worker recovery protocol.
+    """
+    import run_deploy_pipeline as lanes
+    context = (root / gate.get('cwd', '.')).resolve() / '.context' / 'benchmarks'
+    receipt = lanes.teardown_lane(gate['name'], attempt=attempt, token=token, started_epoch=started,
+                                  state_dir=folder, context_root=context, reconcile_runs=False)
+    return lanes._teardown_summary(receipt)
+
+
 def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+    """Admit one source-bound gate, run it, and retain its native cleanup receipt."""
+    from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
+    if any(w.get('gate') == name and 'renewal' in w for w in state.get('resource_warnings', [])):
+        reuse_qualifications(state, gate)
+    from deploy_test_historical_custody import guard, state_identity, known
+    custody = {}
+    if ('historical_custody_import' in state or known(state, root)
+            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
+        legacy = reuse_qualifications(state, gate, include_custody=False, root=root)
+        custody = guard(state, gate, root, legacy)
     token = uuid.uuid4().hex
     case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
                   if key.startswith(name + "/") and value["source"] == state["source"]}
@@ -441,19 +511,23 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                  for w in state.get("resource_warnings", [])
                  if w["gate"] == name and w["source"] == state["source"]
                  and w.get("input_fingerprint") == state["input_fingerprints"].get(name)}
-    active = [c for c in gate["checks"] if c not in case_skips and c not in qualified]
+    active = [c for c in gate["checks"] if c not in case_skips and c not in qualified and c not in custody]
     if not active:
         return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
-                "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified}
+                "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified,
+                "custody_skips": custody, "case_complete": {c: False for c in custody},
+                "current_execution": {c: "UNVERIFIED" for c in custody}}
     # A worker must explicitly consume the case inventory, including exclusions.
     # Without a case-aware worker mixed skip/run would either rerun skipped tests
     # or silently omit checks, so reject it before launch.
-    if (case_skips or qualified) and not gate.get("case_protocol"):
+    if (case_skips or qualified or custody) and not gate.get("case_protocol"):
         raise ValueError(f"{name}: mixed skips require the worker's case protocol")
     folder = directory / "attempts" / str(state["round"]) / phase / name
     folder.mkdir(parents=True, exist_ok=False)
     request = {"token": token, "source": state["source"], "gate": name,
-               "checks": active, "skips": {**case_skips, **qualified}, "phase": phase}
+               "checks": active, "skips": {**case_skips, **qualified, **custody}, "phase": phase}
+    if custody or (directory / 'cycle.json').exists():
+        request.update(custody_state=str((directory / 'cycle.json').resolve()), custody_state_sha256=state_identity(state))
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
         request['worker_root'] = gate.get('worker_root', str((root / gate.get('cwd', '.')).resolve()))
@@ -461,7 +535,16 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
            "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
-           "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1"}
+           # Workers (and a remote gate's launcher mirror) append per-test rows as they finish.
+           progress.ENV: str(folder / "progress.jsonl"),
+           "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1",
+           # Teardown ownership of every process the gate starts (benchmark_teardown).
+           LANE_TOKEN_ENV: token}
+    if 'custody_state' in request:
+        from deploy_test_historical_custody import environment_identity, runtime_identity
+        request['custody_runtime'] = runtime_identity(root)
+        request['custody_child_environment'] = environment_identity(env)
+        write(folder / 'request.json', request)
     admission = isolated_request(state, gate, request, root, env)
     if admission:
         request['isolated_validation'] = admission
@@ -469,14 +552,10 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     started = time.time()
     timeout = gate.get("timeout_seconds", 120 if gate.get("quick") else None)  # declared wins; 120 s is the quick default
     timed_out = cancelled = lingering = False
-    if (gate.get("category") == "agentcard-lifecycle"
-            and gate.get("worker_transport") not in {"local-isolated", "boxes-thread"}):
-        raise ValueError("AgentCard native lifecycle requires its validated worker binding")
-    native_producer = (gate.get("native_cloud") is True
-                       or (gate.get("category") == "agentcard-lifecycle"
-                           and gate.get("worker_transport") in {"local-isolated", "boxes-thread"}))
+    native_producer = gate.get("native_cloud") is True
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
+    preallocation_refused = False
     worker_cleanup_owner = None
     host_admission = {} if host_admission is None else host_admission
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
@@ -498,7 +577,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         except OSError as error:
             output.write(str(error).encode())
             code = 127
-    cases = {c: "SKIP" for c in [*case_skips, *qualified]}
+    cases = {c: "SKIP" for c in [*case_skips, *qualified, *custody]}
     valid = False
     complete = False
     reason = None
@@ -528,8 +607,14 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                 }
             if isinstance(result.get('evidence'), dict):
                 worker_evidence = result['evidence']
-            raw_cases, complete = validate_result(result, request, code,
-                invalid_process=timed_out or cancelled or lingering)
+            from deploy_test_cloud_refusal import refused_before_admission
+            preallocation_refused = refused_before_admission(
+                result, request, gate, root, code, invalid_process=timed_out or cancelled or lingering)
+            if preallocation_refused:
+                raw_cases, complete = result['cases'], False
+            else:
+                raw_cases, complete = validate_result(result, request, code,
+                    invalid_process=timed_out or cancelled or lingering)
             cases.update(raw_cases)
             valid = True
         except (KeyError, TypeError, ValueError) as error:
@@ -540,6 +625,17 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         complete = True
     else:
         reason = "missing complete case receipt"
+    teardown = None
+    abnormal = timed_out or cancelled or lingering or any(
+        isinstance(row, dict) and any(row.get(k) is True for k in ('timed_out', 'cancelled', 'lingering_group'))
+        for row in worker_evidence.values())
+    if host_admission.get('started') is not False and abnormal:
+        try:
+            teardown = benchmark_teardown(gate, token, started, folder, root, state['round'])
+        except (OSError, ValueError) as error:
+            teardown = {'outcome': 'failed', 'error': f'{type(error).__name__}: {error}'}
+        if teardown['outcome'] not in ('clean', 'exited', 'terminated'):
+            lingering = True  # A KILLed or surviving owner leaves its resources unverified.
     if worker_cleanup_owner is not None:
         # The remote owner must be reconciled before any other token may use that worker
         # thread/root: no credit, and the existing resume guard refuses on lingering_group.
@@ -547,7 +643,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         valid = False
         complete = False
         reason = reason or 'worker reported a retained remote cleanup owner'
-    if native_producer and host_admission.get('started') is not False and (not valid or not complete):
+    if native_producer and host_admission.get('started') is not False and not preallocation_refused and (not valid or not complete):
         # Native producers can intentionally retain recovery resources. Unknown
         # native cleanup must be reconciled before another attempt can resume.
         lingering = True
@@ -559,7 +655,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
               "executed": host_admission.get('started', True), "complete": valid and complete,
               "reason": host_admission.get('reason', reason), "timed_out": timed_out,
-              "case_complete": {c: valid and v != 'UNVERIFIED' for c, v in cases.items()},
+              "case_complete": {c: valid and v != 'UNVERIFIED' and c not in custody for c, v in cases.items()},
+              "current_execution": {c: "UNVERIFIED" for c in custody}, "custody_skips": custody,
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
@@ -579,6 +676,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result['worker_evidence'] = worker_evidence
     result['resource_skips'] = qualified
     result['worker_result'] = str(result_path) if result_path.exists() else None
+    if teardown is not None:
+        result['teardown'] = teardown
     write(folder / "receipt.json", result)
     return result
 
@@ -652,6 +751,79 @@ def validate_assigned_repair(entry: dict, disposition: str) -> None:
 
 RESOURCE_SKIP = "SKIPPED_WITH_WARNING"
 RESOURCE_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified", "assigned_repair")
+# Standing AgentCard release stall (docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-
+# released.md): the exact runtime reason prefix of run_benchmark.AGENTCARD_RELEASE_SKIP_REASON, which records the
+# native SKIPPED row only for a catalog sandbox lifecycle task whose stall matched _agentcard_release_stalled.
+AGENTCARD_RELEASE_STALL_CODE = "agentcard_release_stall"
+AGENTCARD_RELEASE_STALL_REASON = ("AgentCard never released the closed card's org transfer (consumed, "
+                                  "releasedCents=0); skipped under the standing user-approved warning policy")
+
+
+@contextmanager
+def source_module(path: Path):
+    """Fresh source with an owned module identity, without process-global argv changes."""
+    import importlib.util
+    module_name = '_deploy_source_' + uuid.uuid4().hex
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        # Bypass timestamp/size based .pyc reuse, including same-size source edits.
+        exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
+        yield module
+    finally:
+        if sys.modules.get(module_name) is module:
+            del sys.modules[module_name]
+
+
+def agentcard_release_stall_task(name: object, root: Path = ROOT, production: bool = False) -> bool:
+    """The same literal catalog predicate the selector prints for this standing warning. Staged smoke qualifies
+    sandbox rows only (the default: production tasks never run there); scripts/deploy_prod.py's production
+    lane asks for the production task with production=True."""
+    with source_module(root / 'agents/benchmarks/select_predeploy_benches.py') as selector:
+        tasks = [task for task in selector.load_tasks(root / 'agents/benchmarks/tasks.json')
+                 if task.name == name and bool(task.production_only) is production]
+        rules = selector.standing_skip_eligibility(tasks, [name]).get(name, []) if tasks else []
+        return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+
+
+
+def unreleased_amount_text(transfer: object) -> str:
+    """The funds a standing release-stall leaves unreleased, from the runner's own typed org-transfer record:
+    transferredCents less releasedCents, with the provider mode (livemode false is the sandbox). An amount the
+    record does not state, or states inconsistently, is UNRECORDED, never zero. Shared by the staged cycle's
+    warning row and the production lane (scripts/deploy_prod.py)."""
+    try:
+        transferred, released = transfer['transferredCents'], transfer['releasedCents']
+        if any(type(v) is not int or v < 0 for v in (transferred, released)) or released > transferred:
+            raise ValueError('unreleased amount is not stated')
+    except (KeyError, TypeError, ValueError):
+        return 'Unreleased: UNRECORDED'
+    livemode = transfer.get('livemode')
+    mode = 'live' if livemode is True else 'sandbox' if livemode is False else 'mode UNRECORDED'
+    return (f"Unreleased: ${(transferred - released) / 100:.2f} {mode} "
+            f"(transferredCents {transferred} / releasedCents {released})")
+
+
+def agentcard_unreleased_text(state: dict, warning: dict) -> str:
+    """The funds a standing release-stall warning leaves unreleased, for its report row.
+
+    Read from the exact native run document the warning is bound to (its sha256 is checked), from the
+    runner's own typed org-transfer record (unreleased_amount_text). An amount the record does not state is
+    UNRECORDED, never zero.
+    """
+    failure = next((f for f in state['failures'] if f['id'] == warning['id']), {})
+    evidence = failure.get('worker_evidence') if isinstance(failure.get('worker_evidence'), dict) else {}
+    try:
+        path = evidence['path']
+        if sha_file(path) != warning['receipt_sha256']:
+            raise ValueError('native run document changed')
+        name = warning['native_row']['name']
+        task = next(t for t in bounded_read(path, 'native run document')['tasks'] if t.get('name') == name)
+        transfer = task['logs']['agentcard_release_stall_lifecycle']['orgTransfer']
+    except (KeyError, StopIteration, TypeError, ValueError, OSError):
+        return 'Unreleased: UNRECORDED'
+    return unreleased_amount_text(transfer)
 
 
 def sidecar_finished_at(failure: dict):
@@ -749,10 +921,11 @@ def revalidate_standing_skips(state: dict) -> None:
 
 
 def validate_resource_skip(entry: dict, failure: dict) -> None:
-    """Third-party compute-token exhaustion: the native SKIPPED row stays FAIL in the record and is
-    projected as a warning, never a pass. The confirmation must bind the exact row the same way
-    scripts/validate_predeploy_receipts.py does (its receipt predicate, lines 141-152), restricted to
-    reason_code compute_quota_exhausted for now.
+    """Third-party compute-token exhaustion, or the standing AgentCard release stall of a sandbox lifecycle
+    smoke task: the native SKIPPED row stays FAIL in the record and is projected as a warning, never a pass.
+    The confirmation must bind the exact row the same way scripts/validate_predeploy_receipts.py does (its
+    receipt predicate, lines 141-152), restricted to reason_code compute_quota_exhausted or
+    agentcard_release_stall.
     """
     from validate_predeploy_receipts import RESOURCE_CODES, finite
     proof = entry.get("resource_skip")
@@ -773,18 +946,24 @@ def validate_resource_skip(entry: dict, failure: dict) -> None:
     finished = failure.get("finished_at")
     if finished is None:
         finished = sidecar_finished_at(failure)
+    if proof.get("reason_code") == AGENTCARD_RELEASE_STALL_CODE:
+        # A sandbox AgentCard lifecycle smoke task's exact standing release stall: same warning projection.
+        cause = (isinstance(reason, str) and reason.startswith(AGENTCARD_RELEASE_STALL_REASON)
+                 and agentcard_release_stall_task(row.get("name")))
+    else:
+        cause = (proof.get("reason_code") in RESOURCE_CODES and proof.get("reason_code") == "compute_quota_exhausted")
     allowed = (isinstance(sha, str) and bool(sha) and proof.get("receipt_sha256") == sha
                and isinstance(reason, str) and bool(reason.strip()) and proof.get("receipt_reason") == reason
-               and proof.get("resource_scope") == "third_party"
-               and proof.get("reason_code") in RESOURCE_CODES and proof.get("reason_code") == "compute_quota_exhausted"
+               and proof.get("resource_scope") == "third_party" and cause
                and proof.get("exclusive_cause") is True
                and isinstance(proof.get("provider"), str) and bool(proof["provider"].strip())
                and isinstance(proof.get("evidence"), str) and bool(proof["evidence"].strip())
                and finite(proof.get("confirmed_at")) and finite(finished) and proof["confirmed_at"] >= finished)
     if not allowed:
         raise ValueError("resource confirmation does not bind the exact native SKIPPED row "
-                         "(receipt sha, exact reason, third_party compute_quota_exhausted, exclusive cause, "
-                         "provider, evidence, confirmed_at after the row finished)")
+                         "(receipt sha, exact reason, third_party compute_quota_exhausted or the sandbox "
+                         "agentcard_release_stall, exclusive cause, provider, evidence, confirmed_at after the row "
+                         "finished)")
 
 
 def adjudicate(state: dict, report: dict) -> None:
@@ -960,6 +1139,12 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
+            from deploy_test_cloud_refusal import still_bound
+            return still_bound(state, receipt, entry)
+        if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
+            from deploy_test_interrupted_cleanup import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get("kind") == "native-cloud-cleanup-v1":
             from deploy_test_native_cleanup import still_bound
             return still_bound(entry, receipt, owner)
@@ -1036,6 +1221,18 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'cloud-source-refusal-cleanup-v1':
+        from deploy_test_cloud_refusal import reconcile as reconcile_refusal
+        reconcile_refusal(state, occurrence_id, proof)
+        return
+    if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
+        from deploy_test_interrupted_cleanup import renew_policy_witness
+        renew_policy_witness(state, occurrence_id, proof)
+        return
+    if proof.get('kind') == 'interrupted-preallocation-cleanup-v1':
+        from deploy_test_interrupted_cleanup import reconcile as reconcile_interrupted
+        reconcile_interrupted(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'local-supervisor-cleanup-v1':
         from deploy_test_local_cleanup import reconcile as reconcile_local
         reconcile_local(state, occurrence_id, proof)
@@ -1242,18 +1439,89 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
     state["phase"] = "focused"
 
 
+RCA_INSTRUCTION = ("/RCA: diagnose this occurrence; return the evidence-backed "
+                   "INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. "
+                   "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
+                   "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently.")
+EARLY_POLL_SECONDS = 10.0
+EARLY_LIMIT = 10  # early occurrences per gate per round; later failures arrive with the gate's result
+
+
+def rca_request(directory: Path, failure: dict) -> Path:
+    path = directory / "rca" / (failure["id"] + ".json")
+    write(path, {**failure, "instruction": RCA_INSTRUCTION})
+    return path
+
+
 def rca_requests(state: dict, directory: Path) -> list[Path]:
     paths = []
     for failure in [*state["failures"], *state.get("live_failures", [])]:
         if failure["id"] not in [*state.get("pending", []), *[f["id"] for f in state.get("live_failures", [])]]:
             continue
-        path = directory / "rca" / (failure["id"] + ".json")
-        write(path, {**failure, "instruction": "/RCA: diagnose this occurrence; return the evidence-backed "
-                    "INTRODUCED/NOT_INTRODUCED gate under .claude/shared/deploy-failure-policy.md. "
-                    "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
-                    "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently."})
-        paths.append(path)
+        paths.append(rca_request(directory, failure))
     return paths
+
+
+def early_check(gate: dict, row: dict) -> str | None:
+    """The gate check a progress row belongs to, so its early occurrence and the final failure match.
+
+    None for a row naming no check of this gate: an early occurrence exists only for a check the
+    final result can fail. The final result reuses it, or supersedes it when that check passes.
+    """
+    for candidate in (row["unit"], "blackbox:" + row["unit"], row.get("case") or ""):
+        if candidate in gate["checks"]:
+            return candidate
+    return gate["checks"][0] if len(gate["checks"]) == 1 else None
+
+
+def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path,
+                   limit: int | None = None) -> list[tuple[dict, Path, dict]]:
+    """Open one occurrence (and RCA request) per newly failing check of a still-running gate.
+
+    Progress rows are advisory: they open an occurrence early, the gate's final result decides it
+    (a final failure of the same check reuses this id; a final PASS or an omitted check supersedes it).
+    Later rows for an already-open check open nothing and print nothing.
+    """
+    seen = {(f["gate"], f["check"]) for f in state.get("early_failures", []) if f.get("round") == state["round"]}
+    limit = EARLY_LIMIT if limit is None else limit
+    opened = []
+    for row in progress.failures(rows):
+        if len(seen) >= limit:
+            break  # bounded like a notice budget: the gate's final result reports the rest
+        mapped = early_check(gate, row)
+        if mapped is None:
+            continue
+        check = gate["name"] + "/" + mapped
+        if (gate["name"], check) in seen:
+            continue
+        seen.add((gate["name"], check))
+        occurrence = {"id": uuid.uuid4().hex, "check": check, "gate": gate["name"], "early": True,
+                      "native_result": row["status"], "scope": row["scope"], "unit": row["unit"],
+                      "detail": row.get("detail", ""), "evidence": row.get("log") or None,
+                      "source": state["source"], "phase": state["phase"], "round": state["round"],
+                      "complete": False, "detected_at": time.time(), "unit_finished_at": row["at"]}
+        state.setdefault("early_failures", []).append(occurrence)
+        opened.append((occurrence, rca_request(directory, occurrence), row))
+    return opened
+
+
+def settle_early(state: dict, result: dict, fresh: list[dict]) -> list[dict]:
+    """Bind a gate's final failures to its early occurrences: same id (one RCA), or superseded on PASS.
+
+    Returns the superseded occurrences, whose RCA (if one was started) should stop.
+    """
+    early = {f["check"]: f for f in state.get("early_failures", [])
+             if f["gate"] == result["gate"] and f.get("round") == state["round"] and "settled" not in f}
+    for failure in fresh:
+        match = early.pop(failure["check"], None)
+        if match is not None:
+            failure.update(id=match["id"], early_detected_at=match["detected_at"], early_unit=match["unit"])
+            match["settled"] = "reused by final " + failure["native_result"]
+    for match in early.values():
+        verdict = result["cases"].get(match["check"].split("/", 1)[1])
+        match["settled"] = (f"superseded: final {verdict}" if verdict
+                            else "superseded: final result omitted this check")
+    return list(early.values())
 
 
 def launch_rca(path: Path, launcher: list[str]) -> None:
@@ -1271,6 +1539,45 @@ def launch_rca(path: Path, launcher: list[str]) -> None:
         if not isinstance(value, dict) or value.get("ok") is not True:
             raise ValueError("RCA launcher did not confirm submission")
         write(receipt, value)
+
+
+CLOUD_SMOKE, CLOUD_SMOKE_PREREQUISITE = 'smoke', 'cloudbench-controller'
+
+
+def cloud_smoke_prerequisite(plan: dict, state: dict, selected: list[dict]) -> dict | None:
+    """The one cross-gate order in a phase: paid cloud smoke waits for the cloudbench-controller gate.
+
+    Original /deploy Step 4cb (DEPRECATED_deploy.md): when the cloudbench-controller gate is planned (it is selected only when
+    cloud benchmark scripts changed), its regressions must pass on this source before any paid cloud
+    run. Returns that planned gate while it is not already credited for this source and the phase runs
+    smoke; None otherwise. Every other gate stays unordered.
+    """
+    if not any(g.get('category') == CLOUD_SMOKE for g in selected):
+        return None
+    gate = next((g for g in plan['gates'] if g.get('category') == CLOUD_SMOKE_PREREQUISITE), None)
+    return None if gate is None or reusable_full_pass(state, gate) else gate
+
+
+def prerequisite_passed(result: dict, state: dict) -> bool:
+    """This phase's prerequisite receipt is a complete, clean PASS on the cycle's source."""
+    return (result.get('status') == 'PASS' and result.get('complete') is True
+            and result.get('executed') is not False and result.get('source') == state['source']
+            and not any(result.get(k) for k in ('timed_out', 'cancelled', 'lingering_group', 'cleanup_owner')))
+
+
+def cloud_smoke_held(gate: dict, why: str) -> dict:
+    """Trace of a smoke gate that was not started this phase (no paid cloud run, no pass credit)."""
+    return {"gate": gate["name"], "prerequisite": CLOUD_SMOKE_PREREQUISITE,
+            "reason": f"paid cloud smoke not started: {CLOUD_SMOKE_PREREQUISITE} has not passed on this source "
+                      f"({why}; the controller gate guards paid cloud smoke)"}
+
+
+def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
+    """Blocking, unexecuted smoke receipt for a prerequisite that neither passed cleanly nor failed a case,
+    so the phase cannot advance to READY without the paid run."""
+    return {"gate": gate["name"], "status": "FAIL", "complete": False, "executed": False,
+            "cases": {c: "UNVERIFIED" for c in gate["checks"]}, "source": state["source"],
+            "prerequisite": held["prerequisite"], "reason": held["reason"]}
 
 
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
@@ -1297,6 +1604,18 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                 raise ValueError('prior independent worker request has no terminal receipt')
     else:
         selected = records(plan, state)
+    held_rows = []
+    prerequisite = cloud_smoke_prerequisite(plan, state, selected)
+    held = next((g for g in selected if g.get('category') == CLOUD_SMOKE), None) if prerequisite else None
+    if prerequisite is not None and all(g['name'] != prerequisite['name'] for g in selected):
+        if independent:
+            # The prerequisite is itself under unresolved triage: observe everything else, never pay
+            # for cloud smoke on a source whose controller regressions have not passed.
+            selected = [g for g in selected if g is not held]
+            held_rows.append(cloud_smoke_held(held, 'it is pending triage'))
+            held = prerequisite = None
+        else:
+            selected = [*selected, prerequisite]  # run it first: smoke is held until it passes
     if state['phase'] in {'initial', 'failed-gates', 'final'}:
         selected_names = {g['name'] for g in selected}
         for gate in plan['gates']:
@@ -1325,25 +1644,81 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                       if g.get('worker_transport') == 'local-isolated'}
     with ThreadPoolExecutor(max_workers=max(1, len(selected))) as rc_pool:
         with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
-            futures = {pool.submit(execute, gate, state, directory, root,
-                local_failure=local_failures.get(local_admission_root(gate, root))
-                    if gate.get('worker_transport') == 'local-isolated' else None): gate for gate in selected}
-            for future in as_completed(futures):
-                gate = futures[future]
-                try:
-                    result = future.result()
-                except (ValueError, OSError) as error:
-                    result = {"gate": gate["name"], "status": "FAIL", "complete": False,
-                              "cases": {c: "UNVERIFIED" for c in gate["checks"]},
-                              "source": state["source"], "reason": str(error)}
+            def submit(gate):
+                return pool.submit(execute, gate, state, directory, root,
+                    local_failure=local_failures.get(local_admission_root(gate, root))
+                        if gate.get('worker_transport') == 'local-isolated' else None)
+
+            def record(result):
                 results.append(result)
                 fresh = failed_cases(state, [result])
+                for match in settle_early(state, result, fresh):
+                    if not launcher:  # only the agent started an RCA it must stop
+                        print(f"DEPLOY_GATE_EARLY_SUPERSEDED gate={match['gate']} check={match['check']} "
+                              f"id={match['id']} {match['settled']}: stop its /RCA", flush=True)
                 state["live_failures"].extend(fresh)
                 write(directory / "cycle.json", state)
                 # Publish and dispatch each failure while healthy siblings run.
                 for path in rca_requests(state, directory):
-                    if launcher and not CANCEL.is_set() and path.stem in {f["id"] for f in fresh}:
+                    # A smoke gate blocked by its prerequisite has nothing of its own to diagnose.
+                    if (launcher and not CANCEL.is_set() and not result.get('prerequisite')
+                            and path.stem in {f["id"] for f in fresh}):
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
+
+            offsets = {}
+            def scan(running):
+                # A still-running gate's first failing test opens its occurrence and RCA now.
+                for gate in running:
+                    path = (directory / "attempts" / str(state["round"]) / state["phase"] / gate["name"]
+                            / "progress.jsonl")
+                    rows, offsets[gate["name"]] = progress.read_new(path, offsets.get(gate["name"], 0))
+                    opened = early_failures(state, gate, rows, directory)
+                    if opened:
+                        write(directory / "cycle.json", state)
+                    for occurrence, path, row in opened:
+                        if launcher:
+                            # The cycle owns this RCA: launch it now; the deploy agent is not asked to.
+                            if not CANCEL.is_set():
+                                launched.append(rc_pool.submit(launch_rca, path, launcher))
+                        else:
+                            print(progress.describe(gate["name"], row, check=occurrence["check"],
+                                                    occurrence=occurrence["id"], request=str(path))
+                                  + " (start /RCA on this request now)", flush=True)
+                    if not launcher and opened and len([f for f in state.get("early_failures", [])
+                                                        if f["gate"] == gate["name"] and f.get("round") == state["round"]]) >= EARLY_LIMIT:
+                        print(f"DEPLOY_GATE_EARLY_LIMIT gate={gate['name']} limit={EARLY_LIMIT}: "
+                              "further failures of this gate arrive with its result", flush=True)
+
+            futures = {submit(gate): gate for gate in selected if gate is not held}
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, timeout=EARLY_POLL_SECONDS, return_when=FIRST_COMPLETED)
+                scan([futures[f] for f in pending])
+                for future in done:
+                    gate = futures[future]
+                    try:
+                        result = future.result()
+                    except (ValueError, OSError) as error:
+                        result = {"gate": gate["name"], "status": "FAIL", "complete": False,
+                                  "cases": {c: "UNVERIFIED" for c in gate["checks"]},
+                                  "source": state["source"], "reason": str(error)}
+                    record(result)
+                    if held is None or gate["name"] != prerequisite["name"]:
+                        continue
+                    if prerequisite_passed(result, state) and not CANCEL.is_set():
+                        started = submit(held)
+                        futures[started] = held
+                        pending.add(started)
+                    elif CANCEL.is_set():
+                        held_rows.append(cloud_smoke_held(held, 'the cycle was interrupted'))
+                    elif failed_cases(state, [result]):
+                        # The prerequisite's own failure blocks this phase; no smoke failure of its own.
+                        held_rows.append(cloud_smoke_held(held, f'its result was {result.get("status")}'))
+                    else:
+                        # Neither a clean pass nor a failed case: block, never advance to READY unpaid.
+                        reason = cloud_smoke_held(held, 'its receipt was not a complete clean pass')
+                        held_rows.append(reason)
+                        record(cloud_smoke_blocked(held, state, reason))
         failures = state.pop("live_failures")
         if independent:
             changed = (source(root) != state['source'] or environment_digest() != state['environment']
@@ -1365,6 +1740,8 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             state.update(phase="stale", ready=False)
         else:
             advance(state, results, failures)
+        if held_rows:
+            state['attempts'][-1]['held'] = held_rows
         for job in launched:
             try:
                 job.result()
@@ -1391,15 +1768,19 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
         preserve_contract(gate, after[name])
         if gate['checks'] != after[name]['checks']:
             raise ValueError('quick refresh must preserve every original check')
-    names = {'eslint', 'format', 'typescript', 'backend-structural'}
+    required = {'eslint', 'format', 'typescript', 'backend-structural'}
     quick = [g for g in plan['gates'] if g.get('quick')]
-    if {g['name'] for g in quick} != names or len(quick) != 4:
-        raise ValueError('only the four fixed non-live quick gates are allowed')
+    names = {g['name'] for g in quick}
+    # A darwin plan whose mac-app/ changed adds the conditional mac-app-static verifier (deploy_test_plan.py).
+    if names not in (required, required | {'mac-app-static'}) or len(quick) != len(names):
+        raise ValueError('only the four fixed non-live quick gates (plus mac-app-static) are allowed')
     typescript = ['bash', '-c', 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental '
                   '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']
+    mac_static = ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check']
     for gate in quick:
         name, argv = gate['name'], gate['command']
-        expected = typescript if name == 'typescript' else ['npm', 'run', 'test:structural']
+        expected = (typescript if name == 'typescript' else mac_static if name == 'mac-app-static'
+                    else ['npm', 'run', 'test:structural'])
         if name in {'eslint', 'format'}:
             expected = [argv[0], 'scripts/check_deploy_static.py', 'lint' if name == 'eslint' else 'format']
             if len(argv) == 5 and argv[3:] == ['--base', plan.get('base')]:
@@ -1407,7 +1788,8 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
             if argv[0] not in {sys.executable, '/usr/bin/python3'}:
                 raise ValueError('quick static interpreter changed')
         if (gate.get('category') != name or gate['checks'] != [name] or argv != expected
-                or gate.get('cwd', '.') != ('.' if name in {'eslint', 'format'} else 'back-end')
+                or gate.get('cwd', '.') != ('.' if name in {'eslint', 'format'}
+                                            else 'mac-app' if name == 'mac-app-static' else 'back-end')
                 or gate.get('env', {}) or any(gate.get(k) for k in
                     ('worker', 'worker_transport', 'worker_recipe', 'native_cloud', 'native_backend', 'case_protocol'))):
             raise ValueError('quick recipe is not the fixed non-live command')
@@ -1440,11 +1822,11 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
             or input_fingerprints(plan, root) != working['input_fingerprints']
             or digest(state) != original or (directory / 'cycle.json').read_bytes() != saved):
         raise ValueError('quick observation changed source/environment or original triage')
-    if (len(results) != 4 or {r['gate'] for r in results} != names or any(
+    if (len(results) != len(names) or {r['gate'] for r in results} != names or any(
             r.get('status') != 'PASS' or r.get('complete') is not True or r.get('executed') is not True
             or r.get('source') != plan['source'] or r.get('lingering_group') or r.get('cleanup_owner')
             or r.get('cancelled') or r.get('timed_out') or r.get('cases') != {r['gate']: 'PASS'} for r in results)):
-        raise ValueError('all four quick observations must complete; original triage retained')
+        raise ValueError('every quick observation must complete; original triage retained')
     state['attempts'].append({'phase': 'quick', 'source': plan['source'], 'results': results,
                               'triage_refresh': True, 'plan_digest': digest(plan)})
     # No source/plan/round/pending/owner rebinding and no advance() or readiness credit.
@@ -1521,7 +1903,7 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                     'front-end/.env', 'front-end/.env.local'):
             origin, destination = root / rel, Path(after['worker_root']) / rel
             if (origin.is_file() != destination.is_file()
-                    or origin.is_file() and sha_file(origin) != sha_file(destination)):
+                    or origin.is_file() and runtime_config_sha256(origin) != runtime_config_sha256(destination)):
                 raise ValueError('local worker runtime configuration differs from the frozen inputs')
         changed.append(name)
     if not changed:
@@ -1540,7 +1922,43 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
-def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
+def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None,
+            historical_no_retry_proof: dict | None = None) -> None:
+    from deploy_test_historical_custody import known, prepare, apply, verify
+    if historical_no_retry_proof is not None and election_proof is not None:
+        raise ValueError('historical custody cannot mix election flags')
+    if historical_no_retry_proof is not None:
+        if digest(historical_no_retry_proof) in state.get('historical_custody_refreshes', []):
+            from deploy_test_historical_custody import binding, verify
+            if (state['plan'] != new or historical_no_retry_proof['current_binding'] != binding(new, root)):
+                raise ValueError('historical custody replay differs from current binding')
+            verify(state, root)
+            return
+        rows = prepare(state, old, new, historical_no_retry_proof, root)
+        candidate = copy.deepcopy(state)
+        pending = copy.deepcopy(state.get('pending_post_merge', []))
+        _refresh(candidate, old, new, root)
+        protected = {r['original_failure']['id'] for r in rows}
+        candidate['pending_post_merge'] = [p for p in candidate.get('pending_post_merge', []) if p['id'] not in protected] + [p for p in pending if p['id'] in protected]
+        candidate['superseded_pending_post_merge'] = [p for p in candidate.get('superseded_pending_post_merge', [])
+                                                       if p['id'] not in protected]
+        for r in rows:
+            candidate['skips'].pop(r['original_failure']['check'], None)
+        candidate['resource_warnings'] = [w for w in candidate.get('resource_warnings', []) if w['id'] not in protected]
+        apply(candidate, rows, root)
+        candidate.setdefault('historical_custody_refreshes', []).append(digest(historical_no_retry_proof))
+        verify(candidate, root)  # Re-read native/current bindings before the one atomic publication.
+        state.clear(); state.update(candidate)
+        return
+    if known(state, root):
+        # Preserve ordinary same-input carry; changed inputs require explicit custody.
+        same = input_fingerprints(new, root) == state['input_fingerprints']
+        if not same or state.get('historical_no_retry_custody'):
+            raise ValueError('historical custody proof required before source refresh')
+    _refresh(state, old, new, root, election_proof=election_proof)
+
+
+def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=None) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -1556,15 +1974,25 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
-    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not interrupted_refresh:
+    unstarted_final = (state['phase'] == 'final' and not state.get('pending')
+                       and 'live_failures' not in state and not state.get('resume_phase')
+                       and not state.get('running')
+                       and not any(a.get('phase') == 'final' and a.get('source') == state['source']
+                                   and not a.get('stale') for a in state.get('attempts', [])))
+    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not unstarted_final and not interrupted_refresh:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")
     old_gates = {g["name"]: g for g in old["gates"]}
     new_gates = {g["name"]: g for g in new["gates"]}
-    if not old_gates.keys() <= new_gates.keys():
+    from deploy_test_election import prepare as prepare_election
+    election = prepare_election(state, old, new, election_proof)
+    removed = {election['gate']} if election else set()
+    if not old_gates.keys() <= new_gates.keys() | removed:
         raise ValueError("repair cannot silently remove originally selected gates")
     for name, gate in old_gates.items():
+        if name in removed:
+            continue
         preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
             raise ValueError("repair cannot silently remove originally selected checks")
@@ -1579,8 +2007,10 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     pending_gates.update(state.get('triage_repair_gates', []))
     if state['environment'] == environment_digest():
         for name, gate in old_gates.items():
-            binding = full_pass_binding(state, gate)
-            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
+            if name in removed:
+                continue
+            binding = full_pass_binding(state, gate, root=root, custody_refresh=True)
+            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate, root=root, custody_refresh=True))
                     and digest(gate) == digest(new_gates[name])):
                 # Retire historical repair routing using the OLD validated FULL
                 # receipt. This grants no new-source credit: changed inputs
@@ -1599,6 +2029,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]
+        if gate in removed:
+            continue  # Original qualification remains in superseded_skips below.
         if skip.get("input_fingerprint") == fingerprints.get(gate):
             carry[key] = {**skip, "source": new["source"], "original_source": skip["source"]}
         elif skip.get("disposition") == "pending post-merge":
@@ -1643,6 +2075,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
         state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
     state['repair_gates'] = [name for name in state['repair_gates']
                             if name not in carried and name not in completed_repairs]
+    from deploy_test_election import apply as apply_election
+    apply_election(state, election)
     if interrupted_refresh:
         state.pop('resume_phase')
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},
@@ -1671,6 +2105,10 @@ def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> No
 
 def pending_completion_block(state: dict) -> str | None:
     try:
+        from deploy_test_election import completion_block as election_block
+        blocked = election_block(state)
+        if blocked:
+            return blocked
         for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
                      if e.get('purpose') == 'isolated-validation'}:
             isolated_admissions(state, gate)
@@ -1707,6 +2145,10 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
         revalidate_standing_skips(state)
+        from deploy_test_historical_custody import verify as verify_custody
+        verify_custody(state, root)
+        from deploy_test_election import verify as verify_elections
+        verify_elections(state)
         for gate in plan['gates']:
             if gate['name'] in state.get('carried_passes', {}) and not carried_pass(state, gate):
                 return 5
@@ -1719,10 +2161,17 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry"])
+    parser.add_argument('--donor-state', type=Path,
+                        help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
+    parser.add_argument('--donor-index', type=Path)
+    parser.add_argument('--donor-sha256')
+    parser.add_argument('--donor-index-sha256')
+    parser.add_argument("--historical-no-retry-proof", type=Path)
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -1735,9 +2184,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
+        if args.historical_no_retry_proof is not None and args.action not in {'refresh', 'import-historical-no-retry'}:
+            raise ValueError('--historical-no-retry-proof applies only to refresh or import-historical-no-retry')
+        if args.donor_sha256 is not None and args.action not in {'prepare-historical-import', 'admit-historical-import', 'import-historical-custody'}:
+            raise ValueError('--donor-sha256 applies only to historical import')
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
+            journal = directory / 'settlement-journal.json'
+            if journal.exists():
+                committed = directory / 'settlement-committed.json'
+                if not committed.is_file() or read(committed) != {'journal_sha256': sha_file(journal)}:
+                    raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
             if args.action == "init" and state_path.exists():
@@ -1766,10 +2224,73 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "triage-quick":
                 with cancellation_handlers():
                     triage_quick(plan, state, directory, args.root)
+            elif args.action == 'prepare-agentcard-renewal':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import binding
+                if not args.occurrence:
+                    raise ValueError('--occurrence original warning id required')
+                print(json.dumps({**binding(state, args.occurrence, args.root), 'prepared_at': time.time()}))
+                return 0
+            elif args.action == 'renew-agentcard-warning':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import renew
+                if args.proof is None:
+                    raise ValueError('--proof read-only provider confirmation required')
+                renew(state, bounded_read(args.proof, 'AgentCard renewal'), args.root)
+            elif args.action in {'prepare-historical-import', 'admit-historical-import', 'import-historical-custody'}:
+                if plan != state['plan']:
+                    raise ValueError('historical import plan differs from fresh selection')
+                indexed = (args.action == 'import-historical-custody' or args.donor_state is not None
+                           or args.donor_index is not None or args.donor_index_sha256 is not None)
+                if indexed:
+                    from deploy_test_historical_custody import import_proof, import_history
+                    if (args.action == 'admit-historical-import' or args.input is not None
+                            or args.donor_state is None or args.donor_index is None
+                            or not args.donor_sha256 or not args.donor_index_sha256
+                            or args.historical_no_retry_proof is not None):
+                        raise ValueError('custody import requires explicit pinned donor, index and exact current plan')
+                    donor_args = (args.donor_state.absolute(), args.donor_index.absolute(),
+                                  args.donor_sha256, args.donor_index_sha256)
+                    if args.action == 'prepare-historical-import':
+                        print(json.dumps(import_proof(state, *donor_args, args.root)))
+                        return 0
+                    if args.proof is None:
+                        raise ValueError('custody import requires exact prepared --proof')
+                    import_history(state, *donor_args, read(args.proof), args.root)
+                else:
+                    from deploy_test_historical_custody import prepare_import, admit_import
+                    if args.input is None:
+                        raise ValueError('--input immutable historical donor cycle required')
+                    if args.donor_sha256 is None:
+                        raise ValueError('--donor-sha256 approved immutable donor-index hash required')
+                    if args.action == 'prepare-historical-import':
+                        print(json.dumps(prepare_import(state, args.input, directory, args.root, donor_sha256=args.donor_sha256)))
+                        return 0
+                    if args.proof is None:
+                        raise ValueError('--proof typed historical import preparation required')
+                    admit_import(state, bounded_read(args.proof, 'historical import proof'), args.input, directory, args.root,
+                                 donor_sha256=args.donor_sha256)
+            elif args.action == 'prepare-historical-no-retry':
+                if args.input is None:
+                    raise ValueError('--input previous plan required')
+                from deploy_test_historical_custody import build
+                print(json.dumps(build(state, read(args.input), plan, args.root)))
+                return 0
+            elif args.action == 'import-historical-no-retry':
+                if args.input is None or args.donor_state is None or args.historical_no_retry_proof is None:
+                    raise ValueError('--input donor plan, --donor-state and --historical-no-retry-proof required')
+                if plan != state['plan']:
+                    raise ValueError('custody transfer plan differs from fresh selection')
+                from deploy_test_historical_custody import adopt
+                adopt(state, read(args.donor_state), read(args.input), read(args.historical_no_retry_proof), args.root)
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
-                refresh(state, read(args.input), plan, args.root)
+                refresh(state, read(args.input), plan, args.root,
+                        election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None,
+                        historical_no_retry_proof=read(args.historical_no_retry_proof) if args.historical_no_retry_proof else None)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
@@ -1784,6 +2305,11 @@ def main(argv: list[str] | None = None) -> int:
                         job.result()
             elif args.action == "resolve":
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
+            elif args.action == 'accept-omitted-custody':
+                if args.input is None:
+                    raise ValueError('--input native operational acceptance required')
+                from deploy_test_election import accept
+                accept(state, bounded_read(args.input, 'omitted operational acceptance'))
             elif args.action == "reexecute":
                 reexecute(state, args.occurrence)
             elif args.action == "standing-skip":
@@ -1801,6 +2327,10 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"DEPLOY_CYCLE INCOMPLETE: {blocked}", file=sys.stderr)
                     return 1
             elif args.action == "verify":
+                from deploy_test_historical_custody import verify as verify_custody
+                verify_custody(state, args.root)
+                from deploy_test_election import verify as verify_elections
+                verify_elections(state)
                 if args.require_resolved and pending_completion_block(state):
                     raise ValueError(pending_completion_block(state))
                 if (not state["ready"] or state["phase"] != "ready"
@@ -1809,6 +2339,8 @@ def main(argv: list[str] | None = None) -> int:
                         or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
                     raise ValueError("cycle not complete on exact current source and plan")
             elif args.action == "report":
+                from deploy_test_historical_custody import verify as verify_custody
+                verify_custody(state, args.root)
                 from deploy_failure_report import render
                 failures = [{**f["rca"], "disposition": f["disposition"]}
                             for f in state["failures"] if "rca" in f]
@@ -1818,6 +2350,15 @@ def main(argv: list[str] | None = None) -> int:
                           f"Resource warnings: {len(state.get('resource_warnings', []))}\n")
                 # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
                 text = header + render({"failures": failures})
+                for election in state.get('elected_omissions', []):
+                    text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
+                             + election['reason'] + '\nNative: ' + election['native_result']
+                             + '\nOriginal financial/custody obligations remain recorded.\n')
+                for row in state.get('historical_no_retry_custody', []):
+                    f = row['original_failure']
+                    text += (f"\n{f['check']}: SKIPPED — historical no-retry custody; current-source behavior "
+                             f"and financial state UNVERIFIED. Original native {f['worker_evidence']['native_task']['benchmark_status']}; "
+                             f"historical unreleased {row['original_amount_cents']} cents. No execution or financial credit.\n")
                 warnings = state.get("resource_warnings", [])
                 if warnings:
                     text += "\nRESOURCE WARNINGS (third-party resource skipped with warning; no pass credit)\n"
@@ -1825,7 +2366,14 @@ def main(argv: list[str] | None = None) -> int:
                         proof = w["confirmation"]
                         text += (f"- {w['check']} — {proof['provider']}: {proof['receipt_reason']} [{proof['reason_code']}]"
                                  f" · Evidence: {proof['evidence']} · Confirmed at: {proof['confirmed_at']}"
-                                 f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}\n")
+                                 f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}")
+                        if proof['reason_code'] == AGENTCARD_RELEASE_STALL_CODE:
+                            text += f" · {agentcard_unreleased_text(state, w)} (followup: unreleased funds stay open)"
+                        if 'renewal' in w:
+                            renewal = w['renewal']
+                            text += (f" · Current-input exclusion renewed at: {renewal['finished_at']}"
+                                     f" · No new execution or financial cleanup credit")
+                        text += "\n"
                 (directory / "report.md").write_text(text)
                 print(text, end="")
                 return 0

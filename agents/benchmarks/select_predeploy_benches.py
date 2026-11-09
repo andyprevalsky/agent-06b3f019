@@ -30,6 +30,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+try:
+    from benchmarks import history_ledger
+except ImportError:  # loaded by file path: run as a script, or through importlib by a tool
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "benchmark_history_ledger", Path(__file__).resolve().with_name("history_ledger.py")
+    )
+    assert _spec and _spec.loader
+    history_ledger = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(history_ledger)
+
 DEFAULT_CAP = 20
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "tasks.json"
 DEFAULT_ATTEMPTS = Path(__file__).resolve().parent / "history" / "task_attempts.jsonl"
@@ -123,6 +135,13 @@ PATH_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         r"(^|/)agents/(domains|tools)/(prompts/)?display|(^|/)back-end/src/domains/agent-tools/display"
         r"|(^|/)back-end/src/providers/agentTools/display|(^|/)agents/benchmarks/display_check",
         ("display",),
+    ),
+    (
+        r"(^|/)back-end/src/providers/(codeSessions/|e2b[A-Za-z]*\.ts)"
+        r"|(^|/)back-end/src/domains/(code-sessions|projects)/"
+        r"|(^|/)e2b-templates/(claude|codex)-code/"
+        r"|(^|/)agents/benchmarks/code_agent",
+        ("claude-code",),
     ),
     (r"claude.?code|claude_code", ("claude-code",)),
     (r"(^|/)agents/(loop|workflows|helpers|activities)/", ("harness",)),
@@ -271,7 +290,7 @@ def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str])
                 "stall qualifies. Default enabled; BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0 "
                 "restores strict diagnostics. Record loud warning SKIP, unreleased amount and "
                 "pending refund; never PASS or financial/native cleanup credit. "
-                "See .claude/commands/deploy.md Step 6a and "
+                "See .claude/commands/deploy.md (Skippable tests: AgentCard) and "
                 "docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md."
             )
         if task.raw.get("requires_claude_code"):
@@ -284,7 +303,7 @@ def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str])
                 "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 on the permitted deploy path, "
                 "never silently enabled here. Shared ANTHROPIC_API_KEY fallback is not qualifying "
                 "user/pool evidence. Task correctness remains hard-gated. "
-                "See .claude/commands/deploy.md Step 6 pre-deploy smoke."
+                "See .claude/commands/deploy.md (Skippable tests: Claude Code smoke)."
             )
         if rules:
             eligibility[name] = rules
@@ -408,32 +427,30 @@ def counts_for_deploy_eligibility(entry: dict[str, Any]) -> bool:
 def load_attempt_passes(attempts_file: Path) -> dict[str, list[bool]]:
     """Return chronological pass/fail lists keyed by task name.
 
-    Reads `history/task_attempts.jsonl` (append-only). Entries are ordered by
-    file order, then by timestamp when present so out-of-order appends still
-    yield a stable recent window. Rows that do not count for deploy eligibility
-    (predeploy / active-worktree) are omitted.
+    Reads `history/task_attempts.jsonl` plus its per-writer shards (append-only,
+    see history_ledger.py). Entries are ordered by reader order, then by
+    timestamp when present so out-of-order appends still yield a stable recent
+    window. Rows that do not count for deploy eligibility (predeploy /
+    active-worktree) are omitted.
     """
-    if not attempts_file.exists():
-        return {}
     rows: list[tuple[str, bool, str]] = []
-    with attempts_file.open() as handle:
-        for index, raw_line in enumerate(handle):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not counts_for_deploy_eligibility(entry):
-                continue
-            task = entry.get("task")
-            if not isinstance(task, str) or not task:
-                continue
-            passed = bool(entry.get("passed"))
-            timestamp = str(entry.get("timestamp") or "")
-            # Stable tie-break on file order when timestamps collide/missing.
-            rows.append((task, passed, f"{timestamp}:{index:08d}"))
+    for index, raw_line in enumerate(history_ledger.read_lines(attempts_file)):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not counts_for_deploy_eligibility(entry):
+            continue
+        task = entry.get("task")
+        if not isinstance(task, str) or not task:
+            continue
+        passed = bool(entry.get("passed"))
+        timestamp = str(entry.get("timestamp") or "")
+        # Stable tie-break on reader order when timestamps collide/missing.
+        rows.append((task, passed, f"{timestamp}:{index:08d}"))
     rows.sort(key=lambda row: (row[0], row[2]))
     passes: dict[str, list[bool]] = {}
     for task, passed, _timestamp in rows:
@@ -631,6 +648,9 @@ def select_predeploy_benches(
             deduped_dropped.append(name)
 
     cap_hit = len(selected) >= cap and len(deduped_dropped) > 0
+    # A category scan also visits tasks the smoke floor already selected; those are
+    # selected, not history-skipped.
+    skipped_history = [name for name in skipped_history if name not in selected_set]
     return Selection(
         selected=selected,
         floor=floor,

@@ -98,3 +98,37 @@ execFileSync(
   ],
   { stdio: 'inherit', timeout: 60_000 }
 );
+
+// Concurrent shards and the unit pass each get their own local Benchmark Hub:
+// its index lock is per database, so a shared index.json lets one shard's
+// upload cycle drop another shard's run (benchmark-share DELETE -> 404).
+const hubDirExport = coverageScript.match(/^export BENCHMARK_HUB_LOCAL_DIR=.*$/m)?.[0];
+assert.ok(hubDirExport, 'coverage harness must export a per-shard BENCHMARK_HUB_LOCAL_DIR');
+assert.ok(
+  coverageScript.indexOf(hubDirExport) > coverageScript.indexOf('SHARD_SUFFIX="-units'),
+  'per-shard Benchmark Hub directory must be set after SHARD_SUFFIX is known'
+);
+const hubDirFor = (suffix: string, inherited?: string) =>
+  execFileSync('bash', ['-c', `${hubDirExport}; printf %s "$BENCHMARK_HUB_LOCAL_DIR"`], {
+    encoding: 'utf8',
+    env: {
+      PATH: process.env.PATH,
+      ROOT_DIR: '/repo',
+      SHARD_SUFFIX: suffix,
+      ...(inherited ? { BENCHMARK_HUB_LOCAL_DIR: inherited } : {}),
+    },
+  });
+const hubDirs = ['-shard1', '-shard2', '-units', '-units-probe'].map((suffix) => hubDirFor(suffix));
+assert.deepEqual(hubDirs, [
+  '/repo/.context/benchmark-hub-shard1',
+  '/repo/.context/benchmark-hub-shard2',
+  '/repo/.context/benchmark-hub-units',
+  '/repo/.context/benchmark-hub-units-probe',
+]);
+assert.equal(hubDirFor(''), '/repo/.context/benchmark-hub');
+assert.equal(hubDirFor('-shard1', '/explicit/hub'), '/explicit/hub');
+assert.match(
+  blackboxScript,
+  /^export BENCHMARK_HUB_LOCAL_DIR="\$\{BENCHMARK_HUB_LOCAL_DIR:-\$ARTIFACT_DIR\/benchmark-hub\}"$/m,
+  'standalone blackbox runs must keep their local Benchmark Hub index in their own artifact directory'
+);

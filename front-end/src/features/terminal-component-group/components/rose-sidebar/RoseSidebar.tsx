@@ -2,13 +2,18 @@
  * STATE MACHINE: RoseSidebar (Rose Desktop left bar; AppSidebar renders it when
  * useRoseDesktop() is true — the stock sidebar is unchanged otherwise)
  *
- * WIDTH (UI ledger row 21, no dragging):
- *   [COLLAPSED 64px] --pointer enters--> [EXPANDED 236px, full titles]
+ * WIDTH (UI ledger row 21; useSidebarExpansion):
+ *   [COLLAPSED 64px] --pointer enters--> [EXPANDED at the saved width (236px default), full titles]
  *   [EXPANDED] --pointer leaves (non-Mac, no menu/input)--> [COLLAPSED]
- *   Mac stays expanded after leaving; pointer in the left18% outside controls or a leftward drag collapses it.
+ *   Mac stays expanded after leaving; moving well right of the bar collapses it.
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
+ *   Right-edge handle (col-resize): drag → width follows the pointer, clamped
+ *   to [236, min(560, 50% window)]; release → [PINNED] (never auto-closes);
+ *   release left of 150px → [COLLAPSED]. Back unpins and collapses.
+ *   Width + pinned persist in localStorage. Titles ellipsize at the live width.
  *
  * LAYOUT (top → bottom, Andy 2026-10-28):
+ *   [Mac app only: a draggable title-bar strip so the row clears the traffic lights]
  *   Back (←, collapses the bar; expanded only) | Search — one row
  *   New project (folder-plus; collapsed keeps the icon in this top slot), then
  *   the created projects: each project row + its agents, divider lines between
@@ -44,6 +49,11 @@
  *   decides the pending project. The desktop composer labels that destination;
  *   project icons keep their normal appearance.
  *
+ * MOVE AGENT (right-click › Move to…, useAgentPlacementMoves):
+ *   [PLACED] --pick project/folder/Home--> [MOVING] row regrouped at once
+ *   [MOVING] --PATCH ok--> [PLACED at target] | --PATCH fails--> [PLACED at origin] + toast
+ *   Sub-agent rows move their root. One PATCH per move; the list is not refetched.
+ *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
  *
@@ -61,6 +71,7 @@ import type { CodeAgentListItem } from '@/lib/api/tree';
 import { cn } from '@/lib/utils';
 import { prewarmAdminHealth } from '@/pages/adminHealthPrewarm';
 
+import type { Agent } from '../../hooks';
 import type { AppSidebarProps } from '../AppSidebar';
 import ArchivedAgentsDialog from '../ArchivedAgentsDialog';
 import { matchesQuery, sortAgents } from '../agentListOrdering';
@@ -73,17 +84,22 @@ import { DeleteProjectDialog } from './DeleteProjectDialog';
 import { groupAgentsByProject } from './groupAgentsByProject';
 import RoseAgentGroups, { HOME_GROUP } from './RoseAgentGroups';
 import RoseProjectSettingsPanel from './RoseProjectSettingsPanel';
-import { RoseAccountRow, RoseNavRow, RoseSearchRow } from './RoseSidebarChrome';
 import {
-  ROSE_BAR_DURATION_MS,
-  ROSE_BAR_EASE,
-  ROSE_BAR_EXPANDED_WIDTH,
-  ROSE_BAR_WIDTH,
-} from './roseSidebarLayout';
+  RoseAccountRow,
+  RoseMacTitleBarInset,
+  RoseNavRow,
+  RoseSearchRow,
+} from './RoseSidebarChrome';
+import { ROSE_BAR_DURATION_MS, ROSE_BAR_EASE, ROSE_BAR_WIDTH } from './roseSidebarLayout';
 import { useNotYet, useRoseAgentMenuActions } from './useRoseAgentMenuActions';
 import { useRoseCodeAgents } from './useRoseCodeAgents';
 import { useRoseSidebarProjects } from './useRoseSidebarProjects';
 import { useAccountProfileName } from './useAccountProfileName';
+import {
+  agentPlacement,
+  useAgentPlacementMoves,
+  type AgentPlacement,
+} from './useAgentPlacementMoves';
 
 import { useSidebarExpansion } from './useSidebarExpansion';
 
@@ -91,10 +107,11 @@ const NO_ATTENTION: ReadonlySet<string> = new Set<string>();
 
 function useGroupedAgents(
   props: AppSidebarProps,
+  agents: AppSidebarProps['agents'],
   query: string,
   projects: Parameters<typeof groupAgentsByProject>[1],
 ) {
-  const search = useSidebarSearch(props.agents, query);
+  const search = useSidebarSearch(agents, query);
   const needle = query.trim().toLowerCase();
   const attention = props.attentionAgentIds ?? NO_ATTENTION;
   const visible = search.agents.filter((a) => matchesQuery(a, needle, search.contentMatchAgentIds));
@@ -216,7 +233,13 @@ function RoseSidebarBar(props: AppSidebarProps) {
       exits.onCreateAgent();
     },
   };
-  const { grouped, isFiltering, attention } = useGroupedAgents(props, query, projects.projects);
+  const placement = useAgentPlacementMoves(props.agents);
+  const { grouped, isFiltering, attention } = useGroupedAgents(
+    props,
+    placement.agents,
+    query,
+    projects.projects,
+  );
   const { handlers, renameDialog } = useAgentRowActions({
     onRefresh: async () => {
       setArchiveRefreshToken((t) => t + 1);
@@ -226,7 +249,21 @@ function RoseSidebarBar(props: AppSidebarProps) {
     selectedAgentId: props.selectedAgentId,
     onSelectAgent: props.onSelectAgent,
   });
-  const actionsFor = useRoseAgentMenuActions(handlers);
+  const baseActionsFor = useRoseAgentMenuActions(handlers);
+  const moveProjects = grouped.projects.map((g) => g.project);
+  const destinationName = ({ project_id, folder_id }: AgentPlacement) => {
+    const project = moveProjects.find((p) => p.id === project_id);
+    const folder = project?.folders?.find((f) => f.id === folder_id);
+    return folder?.name ?? project?.name ?? 'Home';
+  };
+  const actionsFor = (agent: Agent, root: Agent = agent) => ({
+    ...baseActionsFor(agent),
+    move: {
+      projects: moveProjects,
+      current: agentPlacement(root),
+      onMove: (target: AgentPlacement) => placement.move(root, target, destinationName(target)),
+    },
+  });
   const { codeAgentsFor, observeRoot, visibleRootIds } = useRoseCodeAgents(
     [...grouped.projects.flatMap((g) => g.agents), ...grouped.home],
     props.selectedAgentId,
@@ -249,6 +286,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
         <aside
           data-testid="rose-sidebar"
           data-expanded={isExpanded}
+          data-pinned={expansion.isPinned}
           data-surface="opaque"
           aria-label="Agents"
           {...expansion.surface}
@@ -257,10 +295,13 @@ function RoseSidebarBar(props: AppSidebarProps) {
             isExpanded && 'z-[110] shadow-[0_10px_40px_rgba(20,20,40,0.10)]',
           )}
           style={{
-            width: isExpanded ? ROSE_BAR_EXPANDED_WIDTH : ROSE_BAR_WIDTH,
-            transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
+            width: isExpanded ? expansion.width : ROSE_BAR_WIDTH,
+            transition: expansion.isDragging
+              ? 'none'
+              : `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
           }}
         >
+          <RoseMacTitleBarInset />
           <RoseSearchRow
             isExpanded={isExpanded}
             value={query}
@@ -333,6 +374,18 @@ function RoseSidebarBar(props: AppSidebarProps) {
               onLoginClick={props.onLoginClick}
             />
           </div>
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            aria-valuenow={expansion.width}
+            aria-valuemin={expansion.minWidth}
+            aria-valuemax={expansion.maxWidth}
+            tabIndex={0}
+            data-testid="rose-sidebar-resize-handle"
+            {...expansion.resizeHandle}
+            className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none transition-colors hover:bg-gray-300/60 focus-visible:bg-gray-300/60 dark:hover:bg-white/[0.12] dark:focus-visible:bg-white/[0.12] [-webkit-app-region:no-drag]"
+          />
         </aside>,
         document.body,
       )}
@@ -340,6 +393,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
         <RoseProjectSettingsPanel
           project={projects.openProject}
           barExpanded={isExpanded}
+          barExpandedWidth={expansion.width}
           onClose={projects.closeProjectSettings}
         />
       )}

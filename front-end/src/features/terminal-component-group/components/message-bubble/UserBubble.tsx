@@ -1,19 +1,32 @@
 /**
  * Right-aligned USER bubble with optional inline attachment row.
  *
- * META LINE (always, under the bubble): the local send time, with a day label
- * once it is before today (formatMessageSentAt). Delivery state sits to its left:
- *   [SENDING] "Sending ◌  3:36 PM" (metadata.clientDelivery, this browser's own sends)
- *   --agent's next step picks it up--> [DELIVERED] "3:36 PM"
- *   (lifecycle: agent-context/hooks/optimisticUserMessages.ts)
+ * META LINE (always, under the bubble): the local send time (formatMessageSentAt:
+ * day label once before today), with one state to its left:
+ *   resume (from real rows only, codeAgentResume.ts; live region, role="status"):
+ *     code agent (metadata.codeAgentResume, precomputed by the code-agent view):
+ *       "Resuming…" → "Starting container…" → "Delivered" | "Couldn't resume: <reason>"
+ *     paused browser (metadata.browserResume): "Resuming…" → "Starting browser…" →
+ *       "Delivered" | "Couldn't resume: <reason>" (the browser's rows after it)
+ *     Rose agent (metadata.resumedFrom): "Resuming…" → "Delivered" (its next row)
+ *   else this browser's own send (metadata.clientDelivery):
+ *     [SENDING] "Sending ◌  3:36 PM" --agent's next step picks it up--> "3:36 PM"
+ *     (lifecycle: agent-context/hooks/optimisticUserMessages.ts)
  *
  * A Browser-composer message (metadata.browserTaskId + excludeFromModel) went
  * straight to that browser, not this agent: it reads "You → Browser: …" in the
  * code-agent "You → <agent>" text style.
  */
+import { useContext } from 'react';
 import { formatMessageSentAt } from '@/lib/localDateTime';
 import { cn } from '@/lib/utils';
-import type { Message } from '../../hooks';
+import { AgentContext, type Message } from '../../hooks';
+import {
+  browserResumeState,
+  codeAgentResumeLabel,
+  roseResumeState,
+  type CodeAgentResumeState,
+} from '../../hooks/codeAgentResume';
 import { roleConfig } from './constants';
 import { AttachmentDisplay } from './AttachmentDisplay';
 
@@ -51,21 +64,41 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
           <AttachmentDisplay attachments={attachments} agentId={agentId} />
         </div>
       )}
-      <MetaLine
-        timestamp={message.timestamp}
-        sending={message.metadata?.clientDelivery === 'sending'}
-      />
+      <MetaLine message={message} />
     </div>
   );
 }
 
-function MetaLine({ timestamp, sending }: { timestamp: string; sending: boolean }) {
+function MetaLine({ message }: { message: Message }) {
+  const messages = useContext(AgentContext)?.messages ?? [];
+  const resume =
+    (message.metadata?.codeAgentResume as CodeAgentResumeState | undefined) ??
+    browserResumeState(messages, message) ??
+    roseResumeState(messages, message);
+  const time = (
+    <time dateTime={message.timestamp}>{formatMessageSentAt(message.timestamp)}</time>
+  );
+  if (resume) {
+    return (
+      <p
+        role="status"
+        data-testid="code-agent-resume-status"
+        data-resume-status={resume.status}
+        className={cn(
+          '-mt-1 pr-1 text-xs text-muted-foreground',
+          resume.status === 'failed' && 'text-red-500 dark:text-red-400',
+        )}
+      >
+        {time} · {codeAgentResumeLabel(resume)}
+      </p>
+    );
+  }
   return (
     <div
       data-testid="user-message-meta"
       className="-mt-1 flex items-center gap-2 pr-1 text-xs text-muted-foreground"
     >
-      {sending && (
+      {message.metadata?.clientDelivery === 'sending' && (
         <span
           data-testid="user-message-delivery"
           data-delivery-state="sending"
@@ -78,7 +111,7 @@ function MetaLine({ timestamp, sending }: { timestamp: string; sending: boolean 
           />
         </span>
       )}
-      <time dateTime={timestamp}>{formatMessageSentAt(timestamp)}</time>
+      {time}
     </div>
   );
 }

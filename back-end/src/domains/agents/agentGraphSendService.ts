@@ -22,12 +22,8 @@ import { takeSendBudget } from '../../providers/agentGraph/sendBudget';
 import { createLogger } from '../../providers/logger';
 import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import * as messageService from './agentMessageService';
-import {
-  codeLabel,
-  deliverToCodeAgent,
-  recordCodeTimelineRow,
-  type CodeTarget,
-} from './agentCodeTurnDelivery';
+import { codeLabel, recordCodeTimelineRow } from '../../providers/codeSessions/agentMessageRows';
+import { deliverToCodeAgent, type CodeTarget } from './agentCodeTurnDelivery';
 import * as graphRepo from './repoGraph';
 import {
   AgentGraphError,
@@ -47,7 +43,7 @@ export interface SendInput {
 
 export interface SendResult {
   message_id: string;
-  status: 'delivered' | 'duplicate';
+  status: 'delivered' | 'duplicate' | 'queued';
   to: { id: string; kind: 'agent' | 'code' };
 }
 
@@ -189,10 +185,12 @@ export async function sendGraphMessage(
 
   const title = `${fromLabel} → ${toLabel}`;
   if (!(await alreadyDelivered(target, key))) spendSendBudget(caller);
-  const status =
+  const delivered =
     target.kind === 'agent'
       ? await deliverToRoseAgent({ target, key, text, title, a2a })
       : await deliverToCodeAgent({ target, key, text, title, a2a, original: input.text });
+  // Held for a user's direct chat is an accepted, waiting turn: `queued` to the sender.
+  const status = delivered === 'held' ? 'queued' : delivered;
 
   if (caller.self.kind === 'code') {
     const chip = await graphRepo.findCodeSessionChip(caller.self.ownerAgentId, caller.self.id);

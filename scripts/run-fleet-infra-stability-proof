@@ -545,7 +545,7 @@ recover_proof_slice() {
   slice_recovery_attempted=1
   slice_recovery_rc=1
   if [ "$slice_identity_valid" != 1 ] \
-    || [ "$(cloudbench_process_group_state "$slice_pid")" != absent ] \
+    || ! cloudbench_process_group_state "$slice_pid" | grep -qx absent \
     || cloudbench_pid_exists "$slice_pid"; then
     write_slice_cleanup failed_retained
     return 1

@@ -29,13 +29,14 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -97,21 +98,38 @@ def write_plan(path: Path, lanes: list[dict], **extra: object) -> None:
     path.write_text(json.dumps({"lanes": [{"memory_mb": 1, **lane} for lane in lanes], **extra}))
 
 
+# Scenarios run with UNBOUNDED own their host sample as well: live MemAvailable
+# below the driver's 2 GiB reserve (a deploy's concurrent gates on a 15 GB box,
+# or the memory watchdog's own margin) leaves a 0 MB live budget that refuses
+# even a 1 MB lane, which is host load, not the behaviour under test.
+ROOMY_HOST = {"cpus": os.cpu_count() or 1, "mem_available_mb": 2 * 1048576}
+
+
+def driver_argv(*args: str, host: dict | None = None) -> list[str]:
+    """The driver CLI argv; a ``run`` with the UNBOUNDED budget gets ROOMY_HOST
+    unless the scenario supplies its own host sample."""
+    unbounded = args[:1] == ("run",) and any(
+        list(args[i:i + len(UNBOUNDED)]) == UNBOUNDED for i in range(len(args)))
+    if host is None and unbounded:
+        host = ROOMY_HOST
+    if host is None:
+        return [sys.executable, str(DRIVER), *args]
+    # Synthetic admission cases own both their reservations and host sample;
+    # keep the real CLI/process path and its caller-provided timeout.
+    bootstrap = (
+        "import importlib.util,json,sys; from pathlib import Path; "
+        "sys.path.insert(0,str(Path(sys.argv[1]).parent)); "
+        "spec=importlib.util.spec_from_file_location('fixture_pipeline',sys.argv[1]); "
+        "module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; "
+        "spec.loader.exec_module(module); "
+        "module.host_resources=lambda:json.loads(sys.argv[2]); "
+        "raise SystemExit(module.main(sys.argv[3:]))"
+    )
+    return [sys.executable, "-c", bootstrap, str(DRIVER), json.dumps(host), *args]
+
+
 def run_driver(*args: str, env: dict[str, str], host: dict | None = None, **kwargs) -> subprocess.CompletedProcess:
-    command = [sys.executable, str(DRIVER), *args]
-    if host is not None:
-        # Synthetic admission cases own both their reservations and host sample;
-        # keep the real CLI/process path and its caller-provided timeout.
-        bootstrap = (
-            "import importlib.util,json,sys; from pathlib import Path; "
-            "sys.path.insert(0,str(Path(sys.argv[1]).parent)); "
-            "spec=importlib.util.spec_from_file_location('fixture_pipeline',sys.argv[1]); "
-            "module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; "
-            "spec.loader.exec_module(module); "
-            "module.host_resources=lambda:json.loads(sys.argv[2]); "
-            "raise SystemExit(module.main(sys.argv[3:]))"
-        )
-        command = [sys.executable, "-c", bootstrap, str(DRIVER), json.dumps(host), *args]
+    command = driver_argv(*args, host=host)
     return subprocess.run(
         command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, **kwargs,
@@ -368,7 +386,7 @@ def check_wait_since_and_no_row_failures(tmp: Path, env: dict[str, str]) -> None
     ])
     since = time.time()
     supervisor = subprocess.Popen(
-        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED], env=env,
+        driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED), env=env,
     )
     started = time.monotonic()
     waited = run_driver("wait", "--state-dir", str(state), "--timeout", "15", "--since", str(since), env=env)
@@ -465,7 +483,7 @@ def check_watchdog_receipts(tmp: Path, env: dict[str, str]) -> None:
     before = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
     log.write_text(json.dumps({"at": before, "signal": "TERM", "pid": 1, "comm": "old"}) + "\n")
     supervisor = subprocess.Popen(
-        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED],
+        driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED),
         env={**env, "DEPLOY_PIPELINE_WATCHDOG_LOG": str(log)}, stderr=subprocess.PIPE, text=True,
     )
     # The receipt appears only after started_epoch is set, so a TERM written
@@ -519,7 +537,7 @@ def check_live_headroom_and_child_rusage(tmp: Path, env: dict[str, str]) -> None
     print("live headroom refusal + per-lane child rusage: ok")
 
 
-def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> None:
+def check_materialized_reservation_credit(tmp: Path, env: dict[str, str], holder_start_delay_s: float = 0.0) -> None:
     """Follow-up ah (#1640, 2026-10-30): live headroom already contains what
     the running lanes use, so charging their whole declarations against it
     again made the 4096 MB smoke lane wait 16 min beside the two coverage
@@ -531,17 +549,24 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
     lane keeps its whole declaration; every decision's inputs land in the
     receipt. Budget 300 at start, headroom 120 once the holder has allocated:
     holder (100) + joiner (60) exceed 120 declared, but 100 - ~70 observed + 60
-    fit, so joiner must start while holder is still running."""
+    fit, so joiner must start while holder is still running.
+    ``holder_start_delay_s`` replays a holder descheduled before it allocates:
+    on 2026-11-06 (load 10-18, MemoryHigh-throttled scope) the old 0.3 s gate
+    finished first, the joiner was admitted at headroom 300 with no deferral
+    and the holder was never sampled (KeyError ``tree_peak_anon_mb``)."""
     pipeline = load_module("pipeline_materialized_credit", DRIVER)
     marker = tmp / "holder-allocated"
     plan = tmp / "credit-plan.json"
     holder_command = [sys.executable, "-c",
-                      "import pathlib, time; block = b'x' * (60 * 1024 * 1024); "
+                      f"import pathlib, time; time.sleep({holder_start_delay_s}); block = b'x' * (60 * 1024 * 1024); "
                       f"pathlib.Path({str(marker)!r}).touch(); time.sleep(4); del block"]
 
     def write(joined: Path, unphased: Path) -> None:
+        # The gate exits once the holder has allocated (its marker), not after a
+        # sleep that the holder's interpreter startup can outlast on a loaded
+        # host: the joiner must always meet the post-allocation headroom.
         write_plan(plan, [
-            {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
+            {"name": "gate", "command": released_lane(marker), "reuse_passed": False, "group": "3", "memory_mb": 1},
             {"name": "holder", "command": holder_command, "reuse_passed": False, "group": "3", "memory_mb": 100},
             {"name": "joiner", "command": ["touch", str(joined)], "after": ["gate"], "reuse_passed": False,
              "group": "3", "memory_mb": 60},
@@ -568,6 +593,18 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
             seen_flag.append(os.environ.get("DEPLOY_ADMISSION_CREDIT", "<unset>"))
             for name, value in patches.items():
                 stack.enter_context(patch.object(pipeline, name, value))
+            if "sample_lane_tree_memory" not in patches:
+                # Real /proc samples count only from a scan started after the
+                # holder's marker, i.e. after its 60 MB block exists: under load
+                # a pass can land mid-allocation (40.8 MB on 2026-11-06), which
+                # the driver rightly credits as observed but which is not the
+                # materialized holder these arms describe.
+                allocated_sampler = pipeline.sample_lane_tree_memory
+
+                def sample_allocated(pids: set[int]) -> dict:
+                    return allocated_sampler(pids) if marker.exists() else {}
+
+                stack.enter_context(patch.object(pipeline, "sample_lane_tree_memory", side_effect=sample_allocated))
             if require_unknown_deferral:
                 # This arm asserts unknown -> deferred -> fresh -> admitted.
                 # A real sample may precede gate completion, so sequence the
@@ -682,6 +719,77 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
     print("materialized reservation credit: ok")
 
 
+# Admission scenarios run real lanes against a mocked sampler and host probe.
+# Their order is fixed by events (a lane exits only when the fixture releases
+# it; the fixture waits for the lane's allocation marker or its exit), never by
+# sleeps racing the 1 s sampling clock: under host load a lane's startup alone
+# can outlast a sampling pass. The limit only bounds a broken fixture.
+FIXTURE_EVENT_LIMIT_SECONDS = 120
+
+
+def await_fixture(condition, what: str) -> None:
+    deadline = time.monotonic() + FIXTURE_EVENT_LIMIT_SECONDS
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"fixture event never happened: {what}")
+        time.sleep(0.02)
+
+
+def released_lane(release: Path) -> list[str]:
+    """A lane that exits 0 once ``release`` exists (3 if it never does)."""
+    polls = int(FIXTURE_EVENT_LIMIT_SECONDS / 0.05)
+    return ["bash", "-c", f"for _ in $(seq {polls}); do [ -e {shlex.quote(str(release))} ] && exit 0; "
+                          "sleep 0.05; done; exit 3"]
+
+
+def allocating_lane(marker: Path, release: Path) -> list[str]:
+    """A lane that marks its allocation, then holds until ``release`` exists."""
+    return [sys.executable, "-c",
+            f"import pathlib, sys, time; pathlib.Path({str(marker)!r}).touch(); "
+            f"release, end = pathlib.Path({str(release)!r}), time.monotonic() + {FIXTURE_EVENT_LIMIT_SECONDS}\n"
+            "while not release.exists():\n"
+            "    if time.monotonic() > end: sys.exit(3)\n"
+            "    time.sleep(0.05)\n"]
+
+
+def lane_pid(pids: set[int], release: Path) -> int:
+    """The running lane whose command waits on ``release``."""
+    needle = os.fsencode(str(release))
+    found: list[int] = []
+
+    def match() -> bool:
+        for pid in pids:
+            try:
+                if needle in Path(f"/proc/{pid}/cmdline").read_bytes():
+                    found.append(pid)
+                    return True
+            except OSError:
+                continue
+        return False
+
+    await_fixture(match, f"a lane waiting on {release.name}")
+    return found[0]
+
+
+def lane_exited(pid: int) -> bool:
+    """The lane has exited; the pipeline has not reaped it yet (a zombie)."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return True
+
+
+@contextmanager
+def releasing(*releases: Path):
+    """Release every fixture lane on the way out, so a failed scenario leaves
+    no lane waiting out its bound (the deploy worker would see a survivor)."""
+    try:
+        yield
+    finally:
+        for release in releases:
+            release.touch()
+
+
 def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     """Review of f3127ca41: the credit must bind to a fresh, fully observed
     PSS sample. (1) Summed RSS is never a PSS substitute: shared pages count
@@ -694,30 +802,48 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     declaration; only fresh credits."""
     pipeline = load_module("pipeline_observation_validity", DRIVER)
     # (2) Stale after a sampling failure. The holder is observed once at 80 MB
-    # (first pass, ~1 s) and never again; the joiner becomes eligible only at
-    # ~2.5 s, by which time the failed passes must have made the holder unknown.
+    # (the first pass) and never again; the gate is released during the second
+    # (failed) pass, so the joiner becomes eligible only after a failed pass has
+    # made the holder unknown. The holder is released once the joiner has
+    # waited and a third pass has run.
+    record_waiting = pipeline._record_waiting
     marker = tmp / "validity-holder-allocated"
+    gate_release = tmp / "validity-gate-release"
+    holder_release = tmp / "validity-holder-release"
+    joined = tmp / "validity-joiner-started"
     plan = tmp / "validity-plan.json"
     state = tmp / "validity"
     write_plan(plan, [
-        {"name": "gate", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "3", "memory_mb": 1},
-        {"name": "holder", "command": [sys.executable, "-c",
-                                       f"import pathlib, time; pathlib.Path({str(marker)!r}).touch(); time.sleep(5)"],
+        {"name": "gate", "command": released_lane(gate_release), "reuse_passed": False, "group": "3",
+         "memory_mb": 1},
+        {"name": "holder", "command": allocating_lane(marker, holder_release),
          "reuse_passed": False, "group": "3", "memory_mb": 100},
-        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
-         "memory_mb": 60},
+        {"name": "joiner", "command": ["touch", str(joined)], "after": ["gate"], "reuse_passed": False,
+         "group": "3", "memory_mb": 60},
     ], schedule={"policy": "legacy"})
     calls: list[set[int]] = []
+    deferrals: list[str] = []
 
     def flaky_sampler(pids: set[int]) -> dict[int, dict | None]:
         calls.append(set(pids))
+        if len(calls) == 2:
+            await_fixture(marker.exists, "holder allocation")
+            gate_release.touch()  # the gate's exit is reaped after this failed pass
+        if len(calls) >= 3 and (deferrals or joined.exists()):
+            holder_release.touch()  # (an early joiner fails the start-order assertion below)
         return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(calls) == 1 else {}
+
+    def counted_waiting(lane_state: dict, inputs: dict, reason: str) -> None:
+        record_waiting(lane_state, inputs, reason)
+        deferrals.append(reason)
 
     def host() -> dict:
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if marker.exists() else 300)}
 
-    with patch.object(pipeline, "host_resources", side_effect=host), \
+    with releasing(gate_release, holder_release), \
+         patch.object(pipeline, "host_resources", side_effect=host), \
          patch.object(pipeline, "sample_lane_tree_memory", side_effect=flaky_sampler), \
+         patch.object(pipeline, "_record_waiting", side_effect=counted_waiting), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
          patch.dict(os.environ, env, clear=True):
         result = pipeline.run(plan, state, max_parallel=0)
@@ -769,25 +895,39 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     assert pipeline.sample_lane_tree_memory(set(), proc) == {}
     # A fresh observation with zero anonymous memory and a large file-backed
     # footprint credits nothing: the joiner must still wait for the holder.
+    # The gate exits once the holder has allocated; the holder is released once
+    # the joiner has waited on a fresh observation of it.
     anon_marker = tmp / "anon-holder-allocated"
+    anon_release = tmp / "anon-holder-release"
+    anon_joined = tmp / "anon-joiner-started"
     anon_plan = tmp / "anon-plan.json"
     anon_state = tmp / "anon"
     write_plan(anon_plan, [
-        {"name": "gate", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 1},
-        {"name": "holder", "command": [sys.executable, "-c",
-                                       f"import pathlib, time; pathlib.Path({str(anon_marker)!r}).touch(); "
-                                       "time.sleep(3.5)"],
+        {"name": "gate", "command": released_lane(anon_marker), "reuse_passed": False, "group": "3",
+         "memory_mb": 1},
+        {"name": "holder", "command": allocating_lane(anon_marker, anon_release),
          "reuse_passed": False, "group": "3", "memory_mb": 100},
-        {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
-         "memory_mb": 60},
+        {"name": "joiner", "command": ["touch", str(anon_joined)], "after": ["gate"], "reuse_passed": False,
+         "group": "3", "memory_mb": 60},
     ], schedule={"policy": "legacy"})
+
+    def anon_sampler(pids: set[int]) -> dict[int, dict | None]:
+        if anon_joined.exists():
+            anon_release.touch()  # an early joiner fails the start-order assertion below
+        return {pid: {"anon_mb": 0.0, "pss_mb": 95.0} for pid in pids}
 
     def anon_host() -> dict:
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if anon_marker.exists() else 300)}
 
-    with patch.object(pipeline, "host_resources", side_effect=anon_host), \
-         patch.object(pipeline, "sample_lane_tree_memory",
-                      side_effect=lambda pids: {pid: {"anon_mb": 0.0, "pss_mb": 95.0} for pid in pids}), \
+    def anon_waiting(lane_state: dict, inputs: dict, reason: str) -> None:
+        record_waiting(lane_state, inputs, reason)
+        if inputs.get("running", {}).get("holder", {}).get("observation") == "fresh":
+            anon_release.touch()
+
+    with releasing(anon_marker, anon_release), \
+         patch.object(pipeline, "host_resources", side_effect=anon_host), \
+         patch.object(pipeline, "sample_lane_tree_memory", side_effect=anon_sampler), \
+         patch.object(pipeline, "_record_waiting", side_effect=anon_waiting), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
          patch.dict(os.environ, env, clear=True):
         result = pipeline.run(anon_plan, anon_state, max_parallel=0)
@@ -804,15 +944,17 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     # pass takes 3.5 s (over the 3 s limit) and reports 80 MB when it returns;
     # the gate exits during that scan, so the joiner's first check runs right
     # after it and must see the holder stale (not fresh because the scan "just
-    # finished"), then unknown as later passes fail; it waits for the holder.
+    # finished"), then unknown as later passes fail; it waits for the holder,
+    # which is released once a failed pass has followed that check.
     slow_marker = tmp / "slow-holder-allocated"
+    slow_gate_release = tmp / "slow-gate-release"
+    slow_holder_release = tmp / "slow-holder-release"
     slow_plan = tmp / "slow-scan-plan.json"
     slow_state = tmp / "slow-scan"
     write_plan(slow_plan, [
-        {"name": "gate", "command": ["sleep", "4.0"], "reuse_passed": False, "group": "3", "memory_mb": 1},
-        {"name": "holder", "command": [sys.executable, "-c",
-                                       f"import pathlib, time; pathlib.Path({str(slow_marker)!r}).touch(); "
-                                       "time.sleep(6.5)"],
+        {"name": "gate", "command": released_lane(slow_gate_release), "reuse_passed": False, "group": "3",
+         "memory_mb": 1},
+        {"name": "holder", "command": allocating_lane(slow_marker, slow_holder_release),
          "reuse_passed": False, "group": "3", "memory_mb": 100},
         {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
          "memory_mb": 60},
@@ -822,14 +964,21 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     def slow_sampler(pids: set[int]) -> dict[int, dict | None]:
         slow_calls.append(time.monotonic())
         if len(slow_calls) == 1:
-            time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.5)
+            await_fixture(slow_marker.exists, "holder allocation")
+            gate = lane_pid(pids, slow_gate_release)
+            slow_gate_release.touch()
+            await_fixture(lambda: lane_exited(gate), "gate exit during the slow scan")
+            time.sleep(max(0.0, slow_calls[0] + pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.5 - time.monotonic()))
             return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids}
+        if len(slow_calls) >= 3:
+            slow_holder_release.touch()  # the joiner has waited through a failed pass
         return {}
 
     def slow_host() -> dict:
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if slow_marker.exists() else 300)}
 
-    with patch.object(pipeline, "host_resources", side_effect=slow_host), \
+    with releasing(slow_gate_release, slow_holder_release), \
+         patch.object(pipeline, "host_resources", side_effect=slow_host), \
          patch.object(pipeline, "sample_lane_tree_memory", side_effect=slow_sampler), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
          patch.dict(os.environ, env, clear=True):
@@ -879,40 +1028,53 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
                                                         "observed_age_s": None, "observation": "unknown"})
     assert pipeline.fresh_tree_anon_mb({"tree_anon_mb": 80.0, "tree_sampled_mono": time.monotonic()})[0] == 80.0, \
         "the default clock is monotonic, not wall time"
-    # A delayed host probe: the holder is observed fresh (80 MB) at ~1 s, the
-    # gate exits at ~1.5 s and the joiner's admission probe then takes 3.2 s.
-    # The classification must be made after that probe, at the decision point,
-    # where the sample is ~3.8 s old: stale, no credit, the joiner waits (later
-    # passes fail, so it keeps waiting for the holder). A prompt probe crediting
-    # a fresh sample is the first scenario of check_materialized_reservation_credit.
+    # A delayed host probe: the holder is observed fresh (80 MB), the gate exits
+    # just before that sampling pass and the joiner's admission probe, right
+    # after the pass, then takes 3.2 s. The classification must be made after
+    # that probe, at the decision point, where the sample is over 3.2 s old:
+    # stale, no credit, the joiner waits (later passes fail, so it keeps waiting
+    # until the holder is released). A prompt probe crediting a fresh sample is
+    # the first scenario of check_materialized_reservation_credit.
     probe_marker = tmp / "probe-holder-allocated"
-    gate_marker = tmp / "probe-gate-done"
+    probe_gate_release = tmp / "probe-gate-release"
+    probe_holder_release = tmp / "probe-holder-release"
     probe_plan = tmp / "probe-plan.json"
     probe_state = tmp / "probe"
     write_plan(probe_plan, [
-        {"name": "gate", "command": ["bash", "-c", f"sleep 1.5; touch {gate_marker}"], "reuse_passed": False,
+        {"name": "gate", "command": released_lane(probe_gate_release), "reuse_passed": False,
          "group": "3", "memory_mb": 1},
-        {"name": "holder", "command": [sys.executable, "-c",
-                                       f"import pathlib, time; pathlib.Path({str(probe_marker)!r}).touch(); "
-                                       "time.sleep(6.5)"],
+        {"name": "holder", "command": allocating_lane(probe_marker, probe_holder_release),
          "reuse_passed": False, "group": "3", "memory_mb": 100},
         {"name": "joiner", "command": ["true"], "after": ["gate"], "reuse_passed": False, "group": "3",
          "memory_mb": 60},
     ], schedule={"policy": "legacy"})
-    probe_calls: list[int] = []
+    probe_calls: list[set[int]] = []
+    gate_exited: list[float] = []
     slow_probes: list[float] = []
 
     def once_sampler(pids: set[int]) -> dict[int, dict | None]:
-        probe_calls.append(len(pids))
-        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(probe_calls) == 1 else {}
+        probe_calls.append(set(pids))
+        if len(probe_calls) >= 3:
+            probe_holder_release.touch()  # the joiner has waited through the delayed probe
+        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(probe_calls) <= 2 else {}
 
     def delayed_host() -> dict:
-        if gate_marker.exists() and not slow_probes:
+        if probe_calls and not gate_exited:
+            # The second pass's host sample (the joiner is not eligible yet, so
+            # nothing else probes): the gate exits now, the pass then observes
+            # the holder fresh and the joiner's decision follows in that loop.
+            await_fixture(probe_marker.exists, "holder allocation")
+            gate = lane_pid(probe_calls[0], probe_gate_release)
+            probe_gate_release.touch()
+            await_fixture(lambda: lane_exited(gate), "gate exit before the second pass")
+            gate_exited.append(time.monotonic())
+        elif gate_exited and not slow_probes:
             slow_probes.append(time.monotonic())
             time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.2)
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if probe_marker.exists() else 300)}
 
-    with patch.object(pipeline, "host_resources", side_effect=delayed_host), \
+    with releasing(probe_gate_release, probe_holder_release), \
+         patch.object(pipeline, "host_resources", side_effect=delayed_host), \
          patch.object(pipeline, "sample_lane_tree_memory", side_effect=once_sampler), \
          patch.object(pipeline, "SOURCE_ROOT", Path(env["DEPLOY_PIPELINE_SOURCE_ROOT"])), \
          patch.dict(os.environ, env, clear=True):
@@ -949,13 +1111,16 @@ def check_semantic_stack_beside_stack_owners(tmp: Path, env: dict[str, str]) -> 
     marker = tmp / "semantic-started"
     write_plan(plan, [
         {"name": "cov", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3"},
-        {"name": "smoke", "command": ["sleep", "1.5"], "reuse_passed": False, "group": "4", "phase": "coverage"},
-        {"name": "agentcard-lifecycle", "command": ["sleep", "1.0"], "reuse_passed": False, "group": "4",
+        # The stack owners run until semantic-stack has started (its marker), not
+        # for a fixed sleep racing cov's startup on a loaded host.
+        {"name": "smoke", "command": released_lane(marker), "reuse_passed": False, "group": "4", "phase": "coverage"},
+        {"name": "agentcard-lifecycle", "command": released_lane(marker), "reuse_passed": False, "group": "4",
          "phase": "coverage"},
         {"name": "semantic-stack", "command": ["touch", str(marker)], "after": ["cov"], "reuse_passed": False,
          "group": "4"},
     ], schedule={"policy": "legacy"})
-    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env, timeout=120)
+    with releasing(marker):
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, env=env, timeout=120)
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
     lanes = receipt["lanes"]
@@ -1140,8 +1305,12 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
                        "memory_mb": declared(3),
                        "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
                                    "scripts/run-deploy-structural-gates.py", "--max-workers", "3"]}])
+    # The scenario owns its host sample: on a loaded host (the deploy runs this
+    # beside its other gates) live MemAvailable alone can be below one worker,
+    # and the lane would be refused for host load instead of fitted to the budget.
+    roomy = {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + declared(9)}
     run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", str(declared(2) + 50), env=env)
+                     "--memory-budget-mb", str(declared(2) + 50), env=env, host=roomy)
     assert run.returncode == 0, run.stdout + run.stderr
     receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
     args = probe.read_text().split()
@@ -1151,7 +1320,7 @@ def check_exclusive_lane_resizes_to_free_memory(tmp: Path, env: dict[str, str]) 
         (receipt, run.stdout)
     assert receipt["memory_mb"] == declared(workers), receipt
     run = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", "1000", env=env)
+                     "--memory-budget-mb", "1000", env=env, host=roomy)
     receipt = json.loads((state / "receipt.json").read_text())["lanes"]["structural"]
     assert run.returncode == 1 and receipt["status"] == "failed" and receipt["note"].startswith("refused: needs"), receipt
     print("exclusive lane resize: ok")
@@ -1907,10 +2076,24 @@ def check_versioned_group4_lanes(tmp: Path) -> None:
     assert not {"semantic-stack", "e2b-smoke"} & set(projection["lanes"]), "unphased tails are not projected"
     assert isinstance(projection["phased_union_wall_s"], (int, float))
 
-    deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
-    for needle in ("plan --live-probes --semantic-stack", "--e2b-smoke", "scripts/run-deploy-semantic-stack.sh",
-                   "--e2b-smoke-only", "`bash scripts/tests/run-deploy-semantic-stack.test.sh`"):
-        assert needle in deploy_md, f"deploy.md must document {needle}"
+    # The old deploy.md Steps 5/6b/6c named these flags, the script, its standalone E2B mode and its
+    # regression. They are now anchored to the sources that execute them: the staged planner
+    # (deploy_test_plan.standard_template) calls the driver with the three flags and carries the three
+    # lanes with the driver's own commands; the script and its --e2b-smoke-only mode are the commands
+    # asserted above; the script's regression is a registered structural gate.
+    planner_text = (ROOT / "scripts" / "deploy_test_plan.py").read_text()
+    assert '"--live-probes", "--semantic-stack", "--e2b-smoke"' in planner_text, \
+        "the staged planner must request the versioned Group 4 lanes"
+    staged = {gate["name"]: gate for gate in staged_template()["gates"]}
+    for name in VERSIONED_TAIL_LANES:
+        assert name in staged, f"the staged template must carry the {name} lane"
+        assert staged[name]["command"] == lanes[name]["command"], (name, staged[name]["command"])
+        assert staged[name]["cwd"] == lanes[name]["cwd"], (name, staged[name]["cwd"])
+    assert staged["semantic-stack"]["command"] == ["bash", pipeline.SEMANTIC_STACK_SCRIPT]
+    assert staged["e2b-smoke"]["command"] == ["bash", pipeline.SEMANTIC_STACK_SCRIPT, "--e2b-smoke-only"]
+    registry = load_module("run_deploy_structural_gates_semantic_stack", STRUCTURAL_RUNNER)
+    semantic_gate = next(gate for gate in registry.GATES if gate.name == "deploy-semantic-stack")
+    assert tuple(semantic_gate.command) == ("bash", "scripts/tests/run-deploy-semantic-stack.test.sh"), semantic_gate
     print("versioned group 4 lanes: ok")
 
 
@@ -1936,22 +2119,24 @@ def check_stack_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
     plan = tmp / "stack-phase-plan.json"
     state = tmp / "stack-phase"
+    stack_semantic_started = tmp / "stack-phase-semantic-started"
     write_plan(plan, [
         {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
         {"name": "big", "command": ["sleep", "0.6"], "reuse_passed": False, "group": "3", "exclusive": True,
          "memory_mb": 80},
         {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 64},
-        # Long enough that quick -> big -> cov -> probe -> semantic (five admission
-        # passes) still end inside it on a loaded host.
-        {"name": "smoke", "command": ["sleep", "4"], "reuse_passed": False, "group": "4", "memory_mb": 104,
-         "phase": "stack"},
+        # Runs until semantic has started (quick -> big -> cov -> probe ->
+        # semantic, five admission passes), however long the loaded host takes.
+        {"name": "smoke", "command": released_lane(stack_semantic_started), "reuse_passed": False, "group": "4",
+         "memory_mb": 104, "phase": "stack"},
         {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
          "after": ["big", "cov"]},
-        {"name": "semantic", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10,
-         "after": ["big", "cov", "probe"]},
+        {"name": "semantic", "command": ["touch", str(stack_semantic_started)], "reuse_passed": False,
+         "group": "4", "memory_mb": 10, "after": ["big", "cov", "probe"]},
     ], schedule={"policy": "phased"})
-    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", "200", env=env, timeout=120)
+    with releasing(stack_semantic_started):
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                         "--memory-budget-mb", "200", env=env, timeout=120)
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
     lanes = receipt["lanes"]
@@ -2002,20 +2187,24 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
     plan = tmp / "defer-plan.json"
     state = tmp / "defer"
     # ``gate`` (unphased, admitted at attempt start) holds the exclusive lane
-    # back until the stack lane is running: in plan order the exclusive lane
-    # would otherwise be admitted first and resized alone.
+    # back until the stack lane is running (smoke's start marker, not a sleep
+    # racing quick's startup): in plan order the exclusive lane would otherwise
+    # be admitted first and resized alone.
+    smoke_started = tmp / "defer-smoke-started"
     write_plan(plan, [
         {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
-        {"name": "gate", "command": ["sleep", "0.8"], "reuse_passed": False, "group": "4", "memory_mb": 10},
+        {"name": "gate", "command": released_lane(smoke_started), "reuse_passed": False, "group": "4",
+         "memory_mb": 10},
         {"name": "big", "exclusive": True, "reuse_passed": False, "group": "3", "memory_mb": declared(6),
          "after": ["gate"],
          "command": ["bash", "-c", f"printf '%s\\n' \"$@\" > {probe}",
                      "scripts/run-deploy-structural-gates.py", "--max-workers", "6"]},
-        {"name": "smoke", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "4", "memory_mb": 4150,
-         "phase": "stack"},
+        {"name": "smoke", "command": ["bash", "-c", f"touch {shlex.quote(str(smoke_started))}; sleep 2.5"],
+         "reuse_passed": False, "group": "4", "memory_mb": 4150, "phase": "stack"},
     ], schedule={"policy": "phased"})
-    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", "6000", env=env, host=host, timeout=120)
+    with releasing(smoke_started):
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                         "--memory-budget-mb", "6000", env=env, host=host, timeout=120)
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["lanes"]["big"])
     big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
@@ -2213,7 +2402,7 @@ def main() -> int:
         since = time.time()
         started = time.monotonic()
         supervisor = subprocess.Popen(
-            [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED],
+            driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED),
             env=env,
         )
         waited = run_driver("wait", "--state-dir", str(state), "--timeout", "30", "--since", str(since), env=env)
@@ -2289,10 +2478,12 @@ def main() -> int:
         check_live_headroom_and_child_rusage(tmp, env)
         check_materialized_reservation_credit(tmp, env)
         # Control: the suite itself inherits the control run's flag and every
-        # credit scenario (default on, explicitly off, unobserved) still holds.
+        # credit scenario (default on, explicitly off, unobserved) still holds,
+        # with the holder starting 1.5 s late (past the old gate's 0.6-0.8 s
+        # margin) as on a loaded host.
         (tmp / "inherited-flag").mkdir()
         with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
-            check_materialized_reservation_credit(tmp / "inherited-flag", env)
+            check_materialized_reservation_credit(tmp / "inherited-flag", env, holder_start_delay_s=1.5)
         check_observation_validity(tmp, env)
         check_semantic_stack_beside_stack_owners(tmp, env)
         check_lane_scoped_reuse(tmp, env, source_root)
@@ -2426,7 +2617,9 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         "#!/usr/bin/env bash\n"
         'echo "$*" >> "$FAKE_GH_DIR/node-calls.log"\n'
         'case " $* " in\n'
-        '  *worker-deployment-queue.ts*) cat "$FAKE_GH_DIR/job.json" ;;\n'
+        '  *worker-deployment-queue.ts*) args="$*"; id="${args##*--job-id }"; id="${id%% *}"\n'
+        '    f="$FAKE_GH_DIR/job-$id.json"\n'
+        '    [ -f "$f" ] || f="$FAKE_GH_DIR/job.json"; cat "$f" ;;\n'
         '  *monitor-cooperative-cutover.ts*) exit "${FAKE_MONITOR_EXIT:-0}" ;;\n'
         '  *) echo "unexpected node $*" >&2; exit 1 ;;\n'
         "esac\n")
@@ -2440,7 +2633,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     def reset(list_rows: list[dict], views: list[dict], log: str = "") -> None:
         for stale in fake.glob("view-*"):
             stale.unlink()
-        for stale in (calls, fake / "node-calls.log"):
+        for stale in (calls, fake / "node-calls.log", *fake.glob("job-*.json")):
             stale.unlink(missing_ok=True)
         (fake / "list.json").write_text(json.dumps(list_rows))
         for index, view in enumerate(views, start=1):
@@ -2577,6 +2770,69 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         text=True, timeout=120)
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
+
+    # 7. The merged job never cut over itself: the queue coalesced it into a
+    #    queued git descendant (SUPERSEDED). The gate opens only on that
+    #    descendant's SUCCEEDED job + monitor --verify, recorded as verified by
+    #    descendant cutover; a pending, non-descendant or unlinked one blocks.
+    head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    tree = subprocess.run([*git, "rev-parse", f"{runtime}^{{tree}}"], check=True, stdout=subprocess.PIPE,
+                          text=True).stdout.strip()
+    later = subprocess.run([*git, "commit-tree", tree, "-p", runtime, "-m", "later main merge"], check=True,
+                           stdout=subprocess.PIPE, text=True).stdout.strip()
+    descendant_id = "d" * 64
+
+    def write_superseded(descendant_stage: str, descendant_source: str, link: object = descendant_id) -> None:
+        (fake / "job.json").write_text(json.dumps({
+            "jobId": job_id, "stage": "SUPERSEDED", "identity": {"app": "app", "sourceCommit": runtime,
+                                                                  "attempt": "123-1"},
+            "evidence": {"SUPERSEDED": {"supersededBy": link}}}))
+        (fake / f"job-{descendant_id}.json").write_text(json.dumps({
+            "jobId": descendant_id, "stage": descendant_stage,
+            "identity": {"app": "app", "sourceCommit": descendant_source, "attempt": "130-1", "surfaceHash": "c0ffee"}}))
+
+    done = {"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}
+    reset([running], [done], log)
+    write_superseded("SUCCEEDED", later)
+    ran = run_production(runtime, tmp / "production-state-7a")
+    assert ran.returncode == 0, ran.stdout
+    assert call_lines()[-1] == "dispatch", call_lines()
+    assert f"verified_by=descendant-cutover descendant={descendant_id}" in ran.stdout, ran.stdout
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[0].endswith(f"read --job-id {job_id}") and node_calls[1].endswith(f"read --job-id {descendant_id}")
+    assert node_calls[2].endswith(f"monitor-cooperative-cutover.ts --job-id {descendant_id} --verify"), node_calls
+    receipt = json.loads((tmp / "production-state-7a" / "production.json").read_text())
+    verified = receipt["cutover_verify"]
+    assert receipt["status"] == "passed" and receipt["fly"]["job_stage"] == "SUPERSEDED", receipt
+    assert verified["verified_by"] == "descendant-cutover" and verified["job_stage"] == "SUPERSEDED", verified
+    assert verified["descendant_job_id"] == descendant_id and verified["descendant_source_commit"] == later, verified
+    assert verified["chain"] == [job_id, descendant_id] and verified["job_id"] == job_id, verified
+    assert receipt["fly"]["verified_by_descendant"]["descendant_job_id"] == descendant_id, receipt["fly"]
+    for stage, source, link, expected in (
+            ("PREPARING", later, descendant_id, f"SUPERSEDED by {descendant_id}, which is PREPARING, not SUCCEEDED"),
+            ("SUCCEEDED", tests_only, descendant_id, f"commit {tests_only} is not a descendant of {runtime}"),
+            ("SUCCEEDED", "e" * 40, descendant_id, "could not be proven (missing history)"),
+            ("SUCCEEDED", later, None, "has no valid supersededBy link")):
+        reset([running], [done], log)
+        write_superseded(stage, source, link)
+        ran = run_production(runtime, tmp / f"production-state-7-{stage}-{source[:4]}-{link is None}")
+        assert ran.returncode == 1 and expected in ran.stdout, (expected, ran.stdout)
+        assert "dispatch" not in call_lines(), call_lines()
+        assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text(), "no monitor before proof"
+    assert subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+                          text=True).stdout.strip() == head, "the descendant fixture must not move HEAD"
+    # 8. The queue refused an older/diverged release instead of rolling the live one
+    #    back: blocked with the refusal, no resume advice, no monitor, no dispatch.
+    reset([running], [done], log)
+    (fake / "job.json").write_text(json.dumps({
+        "jobId": job_id, "stage": "ABORTED", "identity": {"app": "app", "sourceCommit": runtime, "attempt": "123-1"},
+        "evidence": {"ABORTED": {"reason": "ROLLBACK_REFUSED", "liveJobId": descendant_id,
+                                 "message": "Refused: could roll production back"}}}))
+    ran = run_production(runtime, tmp / "production-state-8")
+    assert ran.returncode == 1 and "was refused before cutover: Refused: could roll production back" in ran.stdout, ran.stdout
+    assert "production was not rolled back" in ran.stdout and "worker_pool_cutover.py" not in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines(), call_lines()
+    assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text()
     print("production fly wait: ok")
 
 
@@ -2591,8 +2847,15 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
     ancestor nor a descendant keeps waiting (only ancestry blocks); (d) a
     deploy for the merged SHA takes the exact-SHA path (live opens,
     build_failed blocks); (f) a live descendant with the identical backend is
-    equivalent, (g) a live descendant that changed the backend is refused;
-    (e) a Render API error or missing credentials fails closed (exit 2)
+    equivalent, (g) a live descendant that changed the backend is verified by
+    descendant (never source-equivalent, never RENDER_LIVE); (j) a merged
+    deploy Render canceled or (k) deactivated because a newer main commit
+    replaced it is verified by that live descendant once it is live, while
+    (l) a canceled merged deploy with only an older commit live, (m) a
+    descendant whose own deploy failed and (n) a deactivated merged deploy
+    replaced by a non-descendant (a rollback) block at once; (o) a live
+    descendant this checkout has not fetched is learned by one fetch of
+    origin main; (e) a Render API error or missing credentials fails closed (exit 2)
     without the follow-up. Every blocked receipt names the observed live
     commit. The lane never overwrites, and is never overwritten by, the Fly
     lane's receipt of the same merged SHA."""
@@ -2622,6 +2885,7 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
     backend_change = commit("backend v2", {"back-end/src/server.ts": "v2\n"})
     docs_after = commit("docs after", {"docs/after.md": "after\n"})
     root_manifest = commit("root manifest", {"package.json": '{"workspaces": ["back-end"]}\n'})
+    backend_v3 = commit("backend v3", {"back-end/src/server.ts": "v3\n"})
     branch = subprocess.run([*git, "rev-parse", "--abbrev-ref", "HEAD"], check=True, stdout=subprocess.PIPE,
                             text=True).stdout.strip()
     # `side` forks from the live commit with a docs-only change: its back-end
@@ -2827,11 +3091,113 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
         assert equivalence["live_commit"] == docs_after and equivalence["merged_sha"] == backend_change, equivalence
         assert equivalence["backend_diff"] == [] and equivalence["changed_files"] == ["docs/after.md"], equivalence
 
-        # (g) A descendant that changed the backend: the merged backend never ran
-        #     as-is, so the gate refuses (a manual decision), never equivalence.
-        render = blocked(docs_only, backend_change, tmp / "render-state-g", "live-descendant-backend-changed")
+        # (g) No deploy for the merged SHA and a live descendant that changed
+        #     the backend: the live backend contains the merge, so the gate opens
+        #     as verified-by-descendant, never as source-equivalent or RENDER_LIVE.
+        reset([deploy(backend_change, "live", "dep-later")])
+        state_g = tmp / "render-state-g"
+        ran = run_render(docs_only, state_g, "--timeout", "5")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={backend_change} merged={docs_only} "
+                "reason=live-descendant-backend-changed") in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and "RENDER_LIVE " not in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", ran.stdout
+        render = receipt_of(state_g)["render"]
+        assert render["status"] == "verified-by-descendant" and render["live_commit"] == backend_change, render
+        assert render["deploy_id"] == "dep-later" and render["deploy_status"] == "live", render
         assert render["backend_diff"] == ["back-end/src/server.ts"], render
-        assert render["equivalence"]["live_is_descendant"] is True and "manual decision" in render["equivalence"]["detail"]
+        assert render["equivalence"]["equivalent"] is False and render["equivalence"]["live_is_descendant"] is True
+        descendant = render["verified_by_descendant"]
+        assert descendant["reason"] == "live-descendant-backend-changed", descendant
+        assert descendant["live_commit"] == backend_change and descendant["merged_sha"] == docs_only, descendant
+        assert descendant["live_deploy_id"] == "dep-later" and descendant["merged_deploy_id"] is None, descendant
+
+        # (j) Render canceled the merged deploy because a newer main commit
+        #     replaced it: keep waiting while that descendant builds, then open
+        #     on it as verified-by-descendant (never relabelled an exact pass).
+        superseding = [deploy(backend_v3, "build_in_progress", "dep-v3"), deploy(backend_change, "canceled", "dep-mine"),
+                       deploy(live, "live", "dep-live")]
+        reset(superseding, [deploy(backend_v3, "live", "dep-v3"), deploy(backend_change, "canceled", "dep-mine"),
+                            deploy(live, "deactivated", "dep-live")])
+        state_j = tmp / "render-state-j"
+        ran = run_render(backend_change, state_j, "--timeout", "30")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={backend_v3} merged={backend_change} "
+                "reason=merged-deploy-canceled-live-descendant") in ran.stdout, ran.stdout
+        assert "RENDER_LIVE " not in ran.stdout and "RENDER_SOURCE_EQUIVALENT" not in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n" and len(requests()) == 2, ran.stdout
+        render = receipt_of(state_j)["render"]
+        assert render["status"] == "verified-by-descendant" and render["live_commit"] == backend_v3, render
+        assert render["deploy_id"] == "dep-v3" and render["deploy_status"] == "live", render
+        descendant = render["verified_by_descendant"]
+        assert descendant["reason"] == "merged-deploy-canceled-live-descendant", descendant
+        assert descendant["merged_deploy_id"] == "dep-mine" and descendant["merged_deploy_status"] == "canceled"
+        assert descendant["live_commit"] == backend_v3 and descendant["live_deploy_id"] == "dep-v3", descendant
+
+        # (k) The merged deploy went live and was deactivated by a newer
+        #     descendant: verified by that descendant at the first poll.
+        reset([deploy(backend_v3, "live", "dep-v3"), deploy(backend_change, "deactivated", "dep-mine")])
+        state_k = tmp / "render-state-k"
+        ran = run_render(backend_change, state_k, "--timeout", "5")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={backend_v3} merged={backend_change} "
+                "reason=merged-deploy-deactivated-live-descendant") in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n" and len(requests()) == 1, ran.stdout
+        render = receipt_of(state_k)["render"]
+        assert render["status"] == "verified-by-descendant" and render["polls"] == 1, render
+        assert render["verified_by_descendant"]["merged_deploy_status"] == "deactivated", render
+
+        def refused(merged: str, page: list[dict], state: Path, expected: str) -> dict:
+            reset(page)
+            ran = run_render(merged, state, "--timeout", "5")
+            assert ran.returncode == 1 and expected in ran.stdout, ran.stdout
+            assert "RENDER_VERIFIED_BY_DESCENDANT" not in ran.stdout and "RENDER_LIVE " not in ran.stdout, ran.stdout
+            assert not probes.exists() and len(requests()) == 1, ran.stdout
+            render = receipt_of(state)["render"]
+            assert render["status"] == "deploy-failed" and render["live_commit"] is None, render
+            assert "verified_by_descendant" not in render, render
+            return render
+
+        # (l) Canceled with only an older commit live and nothing newer
+        #     deploying: blocked at once, naming the live commit.
+        render = refused(backend_change, [deploy(backend_change, "canceled", "dep-mine"), deploy(live, "live", "dep-live")],
+                         tmp / "render-state-l", "Render deploy canceled for")
+        assert render["observed_live_commit"] == live and render["deploy_status"] == "canceled", render
+        assert live[:9] in render["error"] and "no newer descendant" in render["error"], render
+        # (m) The descendant that replaced it failed its own build: an unhealthy
+        #     rollout is never accepted.
+        render = refused(backend_change, [deploy(backend_v3, "build_failed", "dep-v3"),
+                                          deploy(backend_change, "canceled", "dep-mine"), deploy(live, "live", "dep-live")],
+                         tmp / "render-state-m", "Render deploy canceled for")
+        assert render["observed_live_commit"] == live, render
+        # (n) Deactivated by a commit that does not descend from the merge (a
+        #     rollback to an older commit): blocked at once.
+        render = refused(backend_change, [deploy(live, "live", "dep-rollback"),
+                                          deploy(backend_change, "deactivated", "dep-mine")],
+                         tmp / "render-state-n", "Render deploy deactivated for")
+        assert render["observed_live_commit"] == live and "not a descendant" in render["error"], render
+        # (o) The live descendant is a newer main merge this checkout has not
+        #     fetched yet: one `git fetch origin main` learns it, then it verifies.
+        origin = tmp / "render-origin.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(origin)], check=True)
+        work = tmp / "render-origin-work"
+        subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True)
+        (work / "back-end" / "src" / "server.ts").write_text("v4\n")
+        work_git = ["git", "-C", str(work), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+        subprocess.run([*work_git, "commit", "-qam", "backend v4 (newer main)"], check=True)
+        unfetched = subprocess.run([*work_git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+                                   text=True).stdout.strip()
+        subprocess.run([*work_git, "push", "-q", "origin", "HEAD:refs/heads/main"], check=True)
+        subprocess.run([*git, "remote", "add", "origin", str(origin)], check=True)
+        assert subprocess.run([*git, "cat-file", "-e", f"{unfetched}^{{commit}}"],
+                              stderr=subprocess.DEVNULL).returncode != 0, "the newer main merge must start unfetched"
+        reset([deploy(unfetched, "live", "dep-v4"), deploy(backend_v3, "canceled", "dep-mine")])
+        state_o = tmp / "render-state-o"
+        ran = run_render(backend_v3, state_o, "--timeout", "5")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={unfetched} merged={backend_v3} "
+                "reason=merged-deploy-canceled-live-descendant") in ran.stdout, ran.stdout
+        assert receipt_of(state_o)["render"]["status"] == "verified-by-descendant", receipt_of(state_o)
 
         # (e) A Render API error fails closed: exit 2, no follow-up, error
         #     recorded; missing credentials never reach the API.
@@ -3412,8 +3778,8 @@ def check_follow_source(tmp: Path, env: dict[str, str]) -> None:
     started = time.monotonic()
     since = time.time()
     supervisor = subprocess.Popen(
-        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
-         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"],
+        driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"),
         env=env, stdout=subprocess.PIPE, text=True,
     )
     first = subprocess.Popen(
@@ -3596,8 +3962,8 @@ def check_lane_teardown(tmp: Path, env: dict[str, str]) -> None:
     scenario_env = {**env, "DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS": "1",
                     "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS": "6"}
     supervisor = subprocess.Popen(
-        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
-         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"],
+        driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"),
         env=scenario_env, stdout=subprocess.PIPE, text=True,
     )
     owners: dict[str, int] = {}
@@ -4055,6 +4421,22 @@ def check_owner_run_preflight(tmp: Path, env: dict[str, str]) -> None:
         assert again.returncode == 0, (again.returncode, again.stderr)
         summary = json.loads((state / "receipt.json").read_text())["owner_runs"]
         assert summary["waited_s"] < 1.0 and summary["counts"]["bootstrapping"] == 1, summary
+        # waited_s reports a wait, not how long one classification pass took:
+        # on a loaded host a single /proc scan of this fixture took 2.9 s.
+        def slow_classify(*_args, **_kwargs) -> list[dict]:
+            time.sleep(1.2)
+            return [{"run_id": "1793428424-1-9", "classification": pipeline.OWNER_RUN_BOOTSTRAPPING,
+                     "reason": "fixture: still bootstrapping"}]
+
+        with patch.object(pipeline, "classify_owner_runs", side_effect=slow_classify):
+            foreign_only = pipeline.reconcile_owner_runs(context_root, tmp / "slow-scan-state", stage="slow-scan",
+                                                         wait_seconds=3.0, grace_seconds=2.0,
+                                                         own_run_ids=set(), poll_seconds=0.1)
+            own = pipeline.reconcile_owner_runs(context_root, tmp / "slow-scan-state", stage="slow-scan-own",
+                                                wait_seconds=1.5, grace_seconds=2.0,
+                                                own_run_ids={"1793428424-1-9"}, poll_seconds=0.1)
+        assert foreign_only["waited_s"] == 0.0 and foreign_only["foreign"] == ["1793428424-1-9"], foreign_only
+        assert own["waited_s"] >= 1.5 and own["refused"], own
         assert foreign_young.exists() and foreign.exists() and summary["set_aside"] == [], summary
         assert sorted(summary["foreign"]) == sorted([protected.name, foreign.name, foreign_young.name]), summary
     finally:
@@ -4086,8 +4468,8 @@ def check_owner_run_preflight(tmp: Path, env: dict[str, str]) -> None:
                        "command": ["bash", str(scripts / "lane.sh"), str(context_root), str(probe), str(marker)]}])
     state = tmp / "owner-runs-teardown-state"
     supervisor = subprocess.Popen(
-        [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
-         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"],
+        driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED,
+         "--follow-source", "--settle-seconds", "0.5", "--poll-seconds", "0.2", "--fix-loop-cap", "0"),
         env={**env, "DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS": "1", "DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS": "2",
              "BENCHMARK_STARTUP_GRACE_SECONDS": "0"},
         stdout=subprocess.PIPE, text=True)
@@ -4192,7 +4574,7 @@ def check_fix_loop_cap(tmp: Path, env: dict[str, str]) -> None:
 
     def run_once(*extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, *extra],
+            driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED, *extra),
             env=env, stdout=subprocess.PIPE, text=True, check=False,
         )
 
@@ -4247,16 +4629,44 @@ def check_env_cap(tmp: Path, env: dict[str, str], plan: Path) -> bool:
     state = tmp / "cap-env"
     for _ in range(3):
         result = subprocess.run(
-            [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED],
+            driver_argv("run", "--plan", str(plan), "--state-dir", str(state), *UNBOUNDED),
             env={**env, "DEPLOY_FIX_LOOP_CAP": "3"}, stdout=subprocess.PIPE, text=True, check=False,
         )
         assert result.returncode == 1, "DEPLOY_FIX_LOOP_CAP=3 admits three rounds"
     return json.loads((state / "receipt.json").read_text())["fix_loop"]["cap"] == 3
 
 
+def staged_template() -> dict:
+    """``deploy_test_plan.standard_template()``: the gate template ``scripts/deploy gates`` plans
+    from (this driver's lanes plus the gates the staged runner adds), built by the real planner
+    in a child interpreter so no planner import state leaks into this suite."""
+    code = "import json, deploy_test_plan; print(json.dumps(deploy_test_plan.standard_template()))"
+    return json.loads(subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT / "scripts", stdout=subprocess.PIPE, text=True, check=True,
+    ).stdout)
+
+
+def staged_quick_typescript_recipe() -> list[str]:
+    """The only ``typescript`` command the staged runner's quick-triage refresh accepts: the literal
+    ``typescript = [...]`` recipe in ``deploy_test_cycle.triage_quick`` (rejects any other argv)."""
+    tree = ast.parse((ROOT / "scripts" / "deploy_test_cycle.py").read_text())
+    for function in ast.walk(tree):
+        if isinstance(function, ast.FunctionDef) and function.name == "triage_quick":
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "typescript"
+                                                         for t in node.targets)):
+                    return ast.literal_eval(node.value)
+    raise AssertionError("deploy_test_cycle.triage_quick no longer pins the typescript quick recipe")
+
+
 def check_standard_plan_typescript() -> None:
     """The typescript lane is an incremental check with a per-worktree buildinfo
-    under .context, and deploy.md Step 3 runs the identical command."""
+    under .context. ``scripts/deploy gates`` plans the identical command
+    (deploy_test_plan.standard_template takes its lanes from this driver), the staged
+    runner's quick recipe accepts only that command, and the merge path requires the
+    staged receipt bound to HEAD (verify --require-staged), so the lane, the staged
+    gate and the merge proof cannot drift apart. The old deploy.md Step 3 / Phase 3
+    wording that pinned these is retired with that document."""
     standard = json.loads(subprocess.run(
         [sys.executable, str(DRIVER), "plan", "--group", "3"], stdout=subprocess.PIPE, text=True, check=True,
     ).stdout)
@@ -4264,10 +4674,34 @@ def check_standard_plan_typescript() -> None:
     command = " ".join(typescript["command"])
     assert "tsc --noEmit --incremental --tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo" in command, command
     assert typescript["cwd"] == "back-end", typescript
-    deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
-    assert typescript["command"][-1] in deploy_md, "deploy.md Step 3 must run the same incremental tsc command"
-    assert "run_deploy_pipeline.py verify --require-staged" in deploy_md, "Phase 3 must require the staged receipt bound to HEAD"
-    assert "--follow-source" in deploy_md and "FIX_LOOP_CAP" in deploy_md
+    # Anchor 1: the staged plan carries this lane's exact command and cwd.
+    staged = next(gate for gate in staged_template()["gates"] if gate["name"] == "typescript")
+    assert staged["command"] == typescript["command"], "the staged typescript gate must run the lane's incremental tsc command"
+    assert staged["cwd"] == typescript["cwd"] and staged["checks"] == ["typescript"], staged
+    # Anchor 2: the staged runner's fixed quick recipe is the same command.
+    assert staged_quick_typescript_recipe() == typescript["command"], \
+        "deploy_test_cycle.triage_quick must accept the same incremental tsc command the plan emits"
+    # Anchor 3: the merge path (scripts/deploy merge) and the gates path both require the staged
+    # receipt bound to HEAD, and merge runs it before require-mergeable.
+    for relative in ("scripts/deploy_cli.py", "scripts/deploy_gates.py"):
+        text = " ".join((ROOT / relative).read_text().split())
+        assert re.search(r"'verify', '--require-staged', '--state-dir', str\(\w+\), '--expect-head', \w+\]", text), \
+            f"{relative} must require the staged receipt bound to HEAD (verify --require-staged --expect-head)"
+    merge = " ".join((ROOT / "scripts" / "deploy_cli.py").read_text().split())
+    assert merge.index("'verify', '--require-staged'") < merge.index("'require-mergeable'"), \
+        "scripts/deploy merge must verify the staged receipt before require-mergeable"
+    with tempfile.TemporaryDirectory(prefix="require-staged-") as raw:
+        refused = run_driver("verify", "--require-staged", "--state-dir", raw, env=dict(os.environ))
+    assert refused.returncode == 2 and "PIPELINE_VERIFY status=no-staged-cycle exit=2" in refused.stdout, \
+        (refused.returncode, refused.stdout, refused.stderr)
+    # The driver keeps the fix-loop and speculative-source flags the retired deploy.md Phase 3 pinned by
+    # wording (--follow-source, FIX_LOOP_CAP / --fix-loop-cap / --after-rca, default of two failed rounds);
+    # their behavior is asserted by check_follow_source, check_fix_loop_cap and check_env_cap.
+    pipeline = load_module("run_deploy_pipeline_fix_loop_rule", DRIVER)
+    assert pipeline.DEFAULT_FIX_LOOP_CAP == 2, "two failed rounds refuse a blind rerun"
+    run_help = run_driver("run", "--help", env=dict(os.environ), check=True).stdout
+    for flag in ("--follow-source", "--fix-loop-cap", "--after-rca"):
+        assert flag in run_help, f"run_deploy_pipeline.py run must keep {flag}"
 
 
 def check_schedule_phases(tmp: Path, env: dict[str, str]) -> None:
@@ -4510,22 +4944,27 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
     plan = tmp / "declared-phase-plan.json"
     state = tmp / "declared-phase"
+    # smoke runs until semantic has started (a marker, not a sleep racing three
+    # lane startups on a loaded host); gating semantic behind smoke would hold
+    # smoke until its fixture bound and fail the overlap assertions below.
+    semantic_started = tmp / "declared-phase-semantic-started"
     # Budget 100: smoke (50) beside big (80) cannot fit; cov (30) beside smoke can.
     write_plan(plan, [
         {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
         {"name": "big", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "exclusive": True,
          "memory_mb": 80},
         {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 30},
-        {"name": "smoke", "command": ["sleep", "1.2"], "reuse_passed": False, "group": "4", "memory_mb": 50,
-         "phase": "coverage"},
+        {"name": "smoke", "command": released_lane(semantic_started), "reuse_passed": False, "group": "4",
+         "memory_mb": 50, "phase": "coverage"},
         {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
          "after": ["big", "cov"]},
-        {"name": "semantic", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10,
-         "after": ["big", "cov", "probe"]},
+        {"name": "semantic", "command": ["touch", str(semantic_started)], "reuse_passed": False, "group": "4",
+         "memory_mb": 10, "after": ["big", "cov", "probe"]},
         {"name": "g4-free", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10},
     ], schedule={"policy": "phased"})
-    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", "100", env=env, timeout=120)
+    with releasing(semantic_started):
+        ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
+                         "--memory-budget-mb", "100", env=env, timeout=120)
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["status"])
     lanes = receipt["lanes"]

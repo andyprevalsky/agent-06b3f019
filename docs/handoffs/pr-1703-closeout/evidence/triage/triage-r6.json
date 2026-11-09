@@ -1,0 +1,48 @@
+{
+ "failures": [
+  {
+   "id": "12b2076e63ff47c6a745da4e64e40f00",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-command-structural fails only under concurrent-gate load; passes alone on the same bytes",
+   "evidence": "Native exit 1 at 052ac6ce7 in the 11-gate sweep: run-deploy-pipeline.test.py check_observation_validity (line 927) expected a 'stale' memory observation but read 'unknown' with observed_age_s=0.0 and null tree PSS, a live /proc measurement of a fixture process that races under load (load ~22). The same file passes in isolation on these bytes (/var/tmp/webdecoy-rca/branch-deploy-pipeline.log 'all checks passed', 208 s) and the full structural gate passed at 052ac6ce7 in the focused run (attempt 6 receipt result PASS, 1 case). The diff touches no deploy tooling.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged gate; no waiver",
+   "assigned_evidence": "Native exit 1 at 052ac6ce7 in the 11-gate sweep: run-deploy-pipeline.test.py check_observation_validity (line 927) expected a 'stale' memory observation but read 'unknown' with observed_age_s=0.0 and null tree PSS, a live /proc measurement of a fixture process that races under load (load ~22). The same file passes in isolation on these bytes (/var/tmp/webdecoy-rca/branch-deploy-pipeline.log 'all checks passed', 208 s) and the full structural gate passed at 052ac6ce7 in the focused run (attempt 6 receipt result PASS, 1 case). The diff touches no deploy tooling."
+  },
+  {
+   "id": "1128bd5e64874adc9cb53edab03eecea",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/cloudbench/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/cloudbench",
+    "--stdio"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloudbench-controller fails only under concurrent-gate load; passes alone on the same bytes",
+   "evidence": "Native exit 1 at 052ac6ce7: step environment 'resolve_github_token returned empty despite available controller credentials' (live api.github.com check), plus autoscale UNVERIFIED. The identical step passes alone under the exact gate wrapper (sudo -u boxes, systemd scope, env -i): /var/tmp/webdecoy-rca/env-wrapped-1.log and -2.log rc=0, and the full gate passes alone (/var/tmp/webdecoy-rca/branch-cloudbench.log GATE_RESULT exit=0). It fails only when other gates run beside it (the failing log shows 'Cloud benchmark controller is busy' contention). The diff touches no cloudbench or GitHub-token code.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged gate; no waiver",
+   "assigned_evidence": "Native exit 1 at 052ac6ce7: step environment 'resolve_github_token returned empty despite available controller credentials' (live api.github.com check), plus autoscale UNVERIFIED. The identical step passes alone under the exact gate wrapper (sudo -u boxes, systemd scope, env -i): /var/tmp/webdecoy-rca/env-wrapped-1.log and -2.log rc=0, and the full gate passes alone (/var/tmp/webdecoy-rca/branch-cloudbench.log GATE_RESULT exit=0). It fails only when other gates run beside it (the failing log shows 'Cloud benchmark controller is busy' contention). The diff touches no cloudbench or GitHub-token code."
+  }
+ ]
+}

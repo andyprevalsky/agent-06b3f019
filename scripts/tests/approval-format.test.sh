@@ -7,6 +7,9 @@ DEPLOY="$ROOT_DIR/.claude/commands/deploy.md"
 RCA="$ROOT_DIR/.claude/commands/rca.md"
 RCA_GUIDE="$ROOT_DIR/docs/root-cause-analysis.md"
 DESCEND="$ROOT_DIR/.claude/commands/descend.md"
+DEPLOY_CLI="$ROOT_DIR/scripts/deploy_cli.py"
+APPROVAL_BATCH="$ROOT_DIR/scripts/deploy_approval_batch.py"
+STRUCTURAL_GATES="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -296,8 +299,18 @@ require_text "$FORMAT" "Operational approvals return \`HUMAN_REQUIRED\`" \
   "operational approvals must still reach the user after review"
 require_text "$FORMAT" "**Golden review:** verdict" \
   "an approval that reaches the user without its review verdict must be invalid"
-require_text "$DEPLOY" "golden-reference review GROUNDED <approval-id>" \
-  "/deploy guards must record a GROUNDED review instead of stopping"
+require_text "$DEPLOY" 'a `GROUNDED` verdict clears them: `scripts/deploy approval decide --decision grounded --evidence' \
+  "/deploy must record a GROUNDED golden-reference review instead of stopping"
+require_text "$DEPLOY" 'every `GROUNDED` line' \
+  "/deploy must list each GROUNDED review in the PR body"
+require_text "$DEPLOY_CLI" "approval.add_argument('--decision', choices=['approved', 'grounded', 'rejected'])" \
+  "scripts/deploy approval decide must accept a grounded decision"
+require_text "$DEPLOY_CLI" "if args.decision != 'grounded':" \
+  "a GROUNDED review must not emit the human-wait approval-decision factory event"
+require_text "$DEPLOY_CLI" "'mandatory-human-approval-retrieved=true'" \
+  "a covering approval decision must rerun each flagged guard with its mandatory flag"
+require_text "$APPROVAL_BATCH" 'if decision in {"approved", "grounded"}:' \
+  "a grounded decision must cover the approval batch like an approval"
 require_text "$RCA" "Golden-reference adversarial review" \
   "/rca must review approval-gated fixes before stopping"
 require_text "$DESCEND" "Fix approved (golden review)" \
@@ -312,12 +325,20 @@ require_text "$FORMAT" "Not applicable — <reason>" \
 for command in "$DEPLOY" "$RCA" "$DESCEND"; do
   require_text "$command" ".claude/shared/approval-format.md" \
     "$(basename "$command") must reference the shared approval format"
+done
+for command in "$RCA" "$DESCEND"; do
   require_text "$command" "Read it completely immediately before" \
     "$(basename "$command") must reload the shared format at approval time"
 done
+# deploy.md points at the shared format; the reload-at-approval-time rule for
+# /deploy is carried by the shared format itself, which names /deploy.
+require_text "$FORMAT" '`/RCA`, `/deploy`, and `/descend`. Read it completely immediately before' \
+  "the shared format must require /deploy to reload it at approval time"
+require_text "$DEPLOY" 'send one packet in `.claude/shared/approval-format.md` format, pasting the exact diff inline' \
+  "/deploy must send approval packets in the shared format with the exact diff inline"
 
-require_text "$DEPLOY" "bash scripts/tests/approval-format.test.sh" \
-  "/deploy must cement the shared approval format in its no-skip structural gate"
+require_text "$STRUCTURAL_GATES" 'Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh"))' \
+  "the shared approval format must stay cemented in the deploy structural gate registry"
 require_text "$DESCEND" 'main thread using `.claude/shared/approval-format.md`' \
   "/descend approvals must route through the parent and canonical contract"
 require_text "$DESCEND" 'its seven' \

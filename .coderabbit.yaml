@@ -64,8 +64,11 @@ reviews:
     # 3) Prompt strings (no logic)
     - "!agents/tools/prompts/**"
     # 4) Docs, markdown, harness config
-    - "!docs/**"
-    - "!**/*.md"
+    # Keep this recovery utility and its records in review scope.
+    - "!docs/!(handoffs)/**"
+    - "!docs/handoffs/!(pr-1831-closeout|pr-1857-closeout)/**"
+    - "!*.md"
+    - "!**/!(pr-1831-closeout|pr-1857-closeout)/*.md"
     - "!.claude/**"
     - "!.coderabbit.yaml"
     - "!.gitignore"

@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "f53a659b3fde46dd90e8dfbf375fba28",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "08b8054eadea2c182c525f62da5961eefe48c0ca",
+    "digest": "f966f33ff0f2f5f45dfdef4f1f6a6a610eb5ccb400b8f6dbbea5458fdc25496f"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-command-structural aggregate: scripts/tests/run-deploy-pipeline.test.py failed one timing-dependent assertion (\"DEPLOY_ADMISSION_CREDIT=0 must reserve the holder's whole declaration (no credit)\") while eleven other gates ran concurrently (load average above 15 on 8 cores). The same file failed a different timing assertion (check_observation_validity: holder observation 'unknown' instead of 'stale') in an earlier round of this deploy at load. Every other deploy-structural suite in the run exited 0.",
+   "evidence": "PR #1725 changes no file under scripts/ or any deploy tooling (git diff --name-only origin/main...HEAD: front-end display/tests, back-end display route + tests, one docs/rca case). The identical bound suite passed solo on this devbox at this tree (scripts/tests/run-deploy-pipeline.test.py exit 0, 'run-deploy-pipeline: all checks passed', 3m02s, evidence /var/tmp/disp-bb/pipeline-solo.log). Known load-flake family already carried by an existing repair handoff (boxes thread ph74cbynqsekb8nevh8ns0yh7d8hpw6r, Bugs folder) and open PR #1706. Native log: /home/boxes/deploy-workers/structural/.context/deploy-worker/527c5a18b521544c94d3c0095482ccd025077daca9303f5492311bffed7b2396/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps the repair for this deploy: re-run the bound deploy-command-structural gate solo (focused, no concurrent load) on the unchanged frozen source and require it to pass; the timing-dependent tests keep their existing post-merge repair owner.",
+   "assigned_evidence": "/home/boxes/deploy-workers/structural/.context/deploy-worker/527c5a18b521544c94d3c0095482ccd025077daca9303f5492311bffed7b2396/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log"
+  }
+ ]
+}

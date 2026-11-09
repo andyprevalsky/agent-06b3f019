@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "c3611ed4ffe44b29827bce102b03d3dd",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "b4fc555f6f0da68149c1130047affa6e6bd87c65",
+    "digest": "ba06924ca1cabf9fd26d3059959f374e9442d2518a2a01dfac3a5c760a3cee11"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment natively SKIPPED: the documented AgentCard release stall (closed card, zero balance, org transfer consumed, releasedCents=0). PR #1778 changes only scripts/run-deploy-semantic-stack.sh, its structural test and RCA docs; no payment/AgentCard path. Same stall in cycle A on the same source (agent 4d71311a).",
+   "evidence": "/home/boxes/rose/.context/deploy-cloud/12e75fe65871bbb51ff1399dc0adbe9d4637d5dbae98454a7955cb35ab779cfd/runs/20261108-021620-1273281/agent-payment-abandonment/cloudbench-run.json ; docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md ; agent 3ffd232b-82f3-4ded-91e4-c45ac33e5658",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "receipt_sha256": "520bea51fab6859a95f9ce72155b5d8e43a9186fcdc7f4330732f3e43b40e2ff",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_aede4d3efccc66cbf55ecce1\", \"cardId\": \"card_de553d09b16d45f652c0e2dc\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 3ffd232b-82f3-4ded-91e4-c45ac33e5658 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "evidence": "native SKIPPED row /home/boxes/rose/.context/deploy-cloud/12e75fe65871bbb51ff1399dc0adbe9d4637d5dbae98454a7955cb35ab779cfd/runs/20261108-021620-1273281/agent-payment-abandonment/cloudbench-run.json (sha256 520bea51fab6859a95f9ce72155b5d8e43a9186fcdc7f4330732f3e43b40e2ff); card CLOSED balance 0, transfer consumed releasedCents=0",
+    "confirmed_at": 1794106090.005284
+   }
+  }
+ ]
+}

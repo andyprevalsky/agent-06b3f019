@@ -66,6 +66,7 @@ from domains.message_person.repo import (
 )
 from domains.read_message_history.handler import read_message_history_activity
 from domains.reasoning.handler import execute_reasoning_activity
+from domains.report_bug.service import report_bug_activity
 from domains.request_payment_card.repo import (
     agentcard_status_activity,
     lookup_purchase_activity,
@@ -135,6 +136,7 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.activity_dispatch import ActivityDispatchLagInterceptor
 from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
@@ -163,11 +165,12 @@ from helpers.sms_activities import (
     send_direct_sms_activity,
 )
 from helpers.summarize import summarize_and_filter_links
-from helpers.update_tokens import update_agent_tree_cost_activity
+from helpers.update_tokens import apply_resume_cost_activity, update_agent_tree_cost_activity
 from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
+from helpers.worker_queue_capabilities import record_worker_queue_capabilities
 from helpers.workflow_sandbox import production_workflow_runner
 from helpers.world_model_runtime import (
     world_clock_activity,
@@ -179,6 +182,7 @@ from tools.people_search import people_search_activity  # not yet refactored int
 from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
 from tools.web_search import web_search_activity  # not yet refactored into domains/
 from workflows import AgentWorkflow
+from workflows.agent_workflow import COMPANION_WORKFLOWS
 
 # Configure unified structured logging
 # All log output (structlog + stdlib including Temporal's workflow.logger)
@@ -1577,6 +1581,7 @@ async def main():
         send_agent_message_activity,
         send_agent_message_to_address_activity,
         kill_agent_activity,
+        report_bug_activity,
         spawn_sub_agent_activity,
         spawn_sub_agents_batch_activity,
         fetch_parent_attachments_activity,
@@ -1660,6 +1665,7 @@ async def main():
         get_user_system_name,
         get_user_custom_system_prompt,
         update_agent_tree_cost_activity,
+        apply_resume_cost_activity,
         update_agent_tree_state,
         resolve_fast_cache_goal_activity,
         resolve_fast_cache_context_activity,
@@ -1689,7 +1695,7 @@ async def main():
         validation_worker = Worker(
             client,
             task_queue=validation_task_queue,
-            workflows=[AgentWorkflow],
+            workflows=[AgentWorkflow, *COMPANION_WORKFLOWS],
             activities=registered_activities,
             workflow_runner=production_workflow_runner(),
         )
@@ -1730,6 +1736,12 @@ async def main():
         surface_hash=os.getenv("TEMPORAL_WORKER_SURFACE_HASH") or None,
         production_task_queue=production_task_queue,
     )
+    # The backend starts newer workflow types (code/browser resume runs) only on a
+    # queue whose workers recorded them: background, best-effort, idempotent.
+    # Held in this frame for the worker's lifetime (never garbage-collected mid-flight).
+    _capabilities_task = asyncio.create_task(
+        record_worker_queue_capabilities(production_task_queue, [AgentWorkflow, *COMPANION_WORKFLOWS])
+    )
 
     # Warm the planner-RAG index (one encrypted object from the archive
     # backend) so the first set_plan on this worker does not pay the cold
@@ -1743,7 +1755,7 @@ async def main():
     worker = Worker(
         client,
         task_queue=production_task_queue,
-        workflows=[AgentWorkflow],
+        workflows=[AgentWorkflow, *COMPANION_WORKFLOWS],
         activities=registered_activities,
         tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,
@@ -1759,6 +1771,8 @@ async def main():
         workflow_runner=production_workflow_runner(),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
         graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
+        # Attribute a timed-out attempt whose body never ran to the worker.
+        interceptors=[ActivityDispatchLagInterceptor()],
     )
 
     logger.info(

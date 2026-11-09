@@ -1,0 +1,2 @@
+FAIL test_repeated_history_render_redacts_and_projects_each_input_once -> AssertionError 4 re-renders of a seen history repeated work: {'extra redaction pattern passes': 24, 'extra schema builds for one compiled model class': 16}
+FAIL test_per_turn_compute_lease_calls_reuse_the_pooled_client -> AssertionError 6 per-call AsyncClient(s) built for 6 per-turn lease calls

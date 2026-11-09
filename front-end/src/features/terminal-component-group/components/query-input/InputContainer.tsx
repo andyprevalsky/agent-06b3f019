@@ -26,6 +26,9 @@
  * right of the model selector (when `speed` is passed: Fast Mode operators),
  * and the dark-only glass send/stop button.
  *
+ * CORNER STATUS (cornerStatus, the code-agent view): pinned to the box's
+ * top-right corner beside the textarea, which keeps clear of it (pr-16).
+ *
  * ROSE DARK (roseDark = useRoseTheme().isDark): textarea text #f2f2ef with a
  * #8c8c86 placeholder and the model chip on #2f2f2c (mock panels/dark.js).
  * Light renders the exact stock classes.
@@ -40,6 +43,7 @@ import type React from 'react';
 import { Paperclip } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import type { SpeedControl } from './types';
 import * as analytics from '@/lib/analytics';
 import { SpeedToggle } from '../FastModeToggle';
 import { ModelSelector } from './ModelSelector';
@@ -69,7 +73,9 @@ interface InputContainerProps {
   /** Rose Desktop dark mode: dark textarea + model chip. */
   roseDark?: boolean;
   /** Rose Desktop speed toggle wiring; omitted when the account has no Fast Mode. */
-  speed?: { fastMode: boolean; onFastModeChange?: (enabled: boolean) => void };
+  speed?: SpeedControl;
+  /** Status at the box's top-right corner (direct channel); the textarea keeps clear of it. */
+  cornerStatus?: React.ReactNode;
   /** false = text only (code-agent direct channel): no paperclip. */
   attachable?: boolean;
   sessionControls?: React.ReactNode;
@@ -101,7 +107,7 @@ export function InputContainer(props: InputContainerProps) {
   return (
     <>
       <HiddenFileInput ref={fileInputRef} onPicked={onFilesPicked} />
-      <div className="relative px-3">
+      <TextareaArea cornerStatus={props.cornerStatus}>
         <TextareaRow
           ref={textareaRef}
           value={value}
@@ -111,7 +117,7 @@ export function InputContainer(props: InputContainerProps) {
           placeholder={placeholder}
           roseDark={roseDark}
         />
-      </div>
+      </TextareaArea>
       <div
         data-testid="query-input-controls"
         className={
@@ -135,10 +141,7 @@ export function InputContainer(props: InputContainerProps) {
           {props.sessionControls}
           <ReadOnlyModelLabel label={props.readOnlyModelLabel} />
           {speed && (
-            <SpeedToggle
-              fastMode={speed.fastMode}
-              onFastModeChange={speed.onFastModeChange ?? (() => {})}
-            />
+            <SpeedToggle {...speed} onFastModeChange={speed.onFastModeChange ?? (() => {})} />
           )}
         </div>
         <SubmitOrStopButton
@@ -153,6 +156,29 @@ export function InputContainer(props: InputContainerProps) {
         />
       </div>
     </>
+  );
+}
+
+/** The textarea's row; a corner status pins to its top right and the text keeps clear of it. */
+function TextareaArea({
+  cornerStatus,
+  children,
+}: {
+  cornerStatus?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={cornerStatus ? 'relative pl-3 pr-16' : 'relative px-3'}>
+      {cornerStatus && (
+        <div
+          data-testid="query-input-corner-status"
+          className="absolute right-0 top-0 z-10 flex items-center gap-1"
+        >
+          {cornerStatus}
+        </div>
+      )}
+      {children}
+    </div>
   );
 }
 

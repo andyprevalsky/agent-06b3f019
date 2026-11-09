@@ -1,0 +1,70 @@
+{
+ "recorded_at": "2026-11-06T07:13:03Z",
+ "attempt": ".context/deploy-pipeline/attempts/6/final",
+ "source": {
+  "head": "e51b56819a5d2333e247ccff692d97e3807d92c4",
+  "digest": "064799950d5e3270f2c387a38c74080e1a7d0226fb18bcab9098a82c618aeca8"
+ },
+ "interrupted_at": "2026-11-06T07:12:22Z",
+ "interrupt_reason": "parent superseded the source with bc31eb4 (CodeRabbit finding fix); TERM to exact coordinator pid 2801427",
+ "failures": [
+  {
+   "gate": "smoke",
+   "native_result": "UNVERIFIED (9/9 jobs exit=1 at preflight)",
+   "attribution": "NOT_INTRODUCED",
+   "classification": "preflight fetchability",
+   "error": "FATAL: requested benchmark commit e51b56819a5d2333e247ccff692d97e3807d92c4 is not fetchable from origin and local patch shipping is disabled",
+   "detail": "campaign started 06:54:33Z, before the parent's 06:57:21Z push of e51b568; no Machines allocated; all 9 controller pids exited; summary status failed",
+   "evidence": [
+    "attempts/6/final/smoke/receipt.json",
+    "attempts/6/final/smoke/result.json",
+    ".context/deploy-cloud/60056235fba508f6a10c2e86ec3a8029fabd77383b17a08de88ceaf440119130/cli.log"
+   ],
+   "resolution": "owner-resolved: PR head bc31eb4 is on origin"
+  },
+  {
+   "gate": "deploy-command-structural",
+   "native_result": "UNVERIFIED (exit 1 before suites)",
+   "attribution": "NOT_INTRODUCED",
+   "classification": "host tool missing",
+   "error": "deploy structural gates need host tools that are not installed: lsof (Linux: sudo apt-get install -y lsof)",
+   "evidence": [
+    "attempts/6/final/deploy-command-structural/result.json"
+   ],
+   "resolution": "owner-resolved: apt-get install -y lsof (/usr/bin/lsof)"
+  },
+  {
+   "gate": "frontend-coverage-blackbox",
+   "native_result": "UNVERIFIED (pretest exit 1)",
+   "attribution": "NOT_INTRODUCED",
+   "classification": "worker provisioning",
+   "error": "patch-ui-lifecycle.mjs: UI dependency directory is outside the workspace (symlinked node_modules)",
+   "evidence": [
+    "attempts/6/final/frontend-coverage-blackbox/result.json"
+   ],
+   "resolution": "owner-resolved: real copies of root/front-end/back-end node_modules in the frontend worker; patch script reports 10 entries verified, 0 updated"
+  }
+ ],
+ "passed_on_e51b568": [
+  "canonical-seed-whatsapp-content",
+  "e2b-smoke",
+  "live-probes",
+  "seed-cache-decision",
+  "seed-memory-ratchet",
+  "format",
+  "eslint",
+  "typescript",
+  "backend-structural"
+ ],
+ "interrupted_running": [
+  "backend-coverage-blackbox",
+  "agents-coverage-blackbox",
+  "cloudbench-controller",
+  "semantic-stack"
+ ],
+ "reconciliation": {
+  "local": "backend-coverage-blackbox, cloudbench-controller, semantic-stack reconciled with local-supervisor-cleanup-v1 proofs (evidence/cleanup-proof-*.json); /proc cwd scan found no process under /home/boxes/deploy-workers at 07:13Z",
+  "smoke": "native-cloud-cleanup-v1 cannot express a campaign whose 9 jobs failed at preflight before printing any fleet-monitor handle (requires a run-bench monitor line per job). Verified instead: all 9 controller pids exited; summary status failed; no run-bench/cloudbench/fleet process on the host at 07:16Z; navi-whisper-lux-bench Machines created after 06:54Z (12 at 07:03-07:13Z) carry no owner from this campaign and no local controller exists, so they belong to another owner and were left untouched.",
+  "successor": "This cycle (state .context/deploy-pipeline, last source e51b568) is closed in phase interrupted with its history retained. The bc31eb4 validation runs as a fresh cycle in .context/deploy-pipeline-bc31eb4 because the old cycle cannot refresh past the unreconcilable smoke owner."
+ }
+}

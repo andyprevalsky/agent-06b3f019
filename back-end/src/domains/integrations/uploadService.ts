@@ -11,6 +11,7 @@ import { IndexedDBUploadPayloadTooLargeError } from './types';
 export {
   processGenericUpload,
   processLinkedInUpload,
+  LinkedInArchiveWithoutConnectionsError,
   processContactsUpload,
   processEmailZipUpload,
 } from './uploadService.contacts';

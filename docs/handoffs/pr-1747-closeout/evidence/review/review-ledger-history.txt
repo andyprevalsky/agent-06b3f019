@@ -1,0 +1,10 @@
+PR #1747 review ledger history (the first ledger was reset by `open-pr --restart` on the final commit; reconstructed from `deploy_review_cycle.py status` output captured during the deploy)
+
+1  initial      fd110d1ca  skipped (usage-cap): CodeRabbit comment 6701153765 "Review limit reached ... usage spending cap", check run 128275442691 neutral
+1  initial      eadce7e999 closed unavailable (superseded)
+1  initial      26f1549126 findings (12 findings, all fixed in 78df4183e0)
+2  incremental  78df4183e0 closed unavailable (review rate limited; superseded)
+2  incremental  a1bcaa0988 closed unavailable (review rate limited; superseded by the main sync)
+2  incremental  768b04db49 findings (7 findings, all fixed in 7b0237a375; replies [FIXED] posted)
+3  verification ad8ddd0bbd clean (CodeRabbit "Review finished", no new findings)
+(restart) 1 initial 02eb65acf1 clean: CodeRabbit "Path filters excluded 1 file" (test-only commit, scripts/tests/devbox-teardown.test.sh); relies on the standing 2026-10-18 pre-authorization to proceed past three review rounds

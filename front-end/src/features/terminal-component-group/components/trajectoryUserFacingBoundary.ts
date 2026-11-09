@@ -33,8 +33,6 @@ export function isUserFacingWorkBoundary(message: Message): boolean {
     tool === 'display' ||
     executeTransition ||
     (tool === 'attempt_completion_with_result' && !failed) ||
-    // Existing code/preview cards must remain usable while the surrounding batch runs.
-    tool === 'spawn_claude_code_agent' ||
     metadata?.requestUserSignup ||
     (metadata?.requestUserAuthentication && !metadata?.authAssistanceDeclined) ||
     (pending &&

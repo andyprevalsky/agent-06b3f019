@@ -53,7 +53,11 @@ jobs:
       - uses: useblacksmith/checkout@v1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          # 64 commits of history (commits + trees only, ~3.4 MB with
+          # blob:none) let the queue CLI prove its release contains the queued
+          # and live releases (`git merge-base --is-ancestor`) so cutovers
+          # coalesce and an older release never rolls the live one back.
+          fetch-depth: 64
           # A full checkout downloads ~3.3 GB (2.8 GB is agents/benchmarks
           # history the worker image excludes) and cost ~4 min per run. Fetch
           # trees only and materialize everything except unused heavy paths.
@@ -69,7 +73,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
           cache-dependency-path: back-end/package-lock.json
 
@@ -117,6 +121,8 @@ jobs:
           DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
           DEPLOY_REUSE_ONLY: "1"
           APP: ${{ steps.flyapp.outputs.name }}
+          # Beyond the shallow history, prove ancestry with one GitHub compare per pair.
+          WORKER_DEPLOYMENT_ANCESTRY_GITHUB: "1"
         run: |
           set -euo pipefail
           release() {
@@ -151,7 +157,7 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
           cache-dependency-path: back-end/package-lock.json
       - name: Resume the saved FIFO head without rebuilding or enqueuing

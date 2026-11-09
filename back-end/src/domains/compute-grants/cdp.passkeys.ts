@@ -5,11 +5,13 @@
  * added to. The connect flow seeds on the claude.ai tab, but a "Sign in with
  * Google" ceremony opens in a SEPARATE popup window -- a different target the
  * original authenticator never reached, so Google reported "No passkeys
- * available". This seeds every existing page target; cdp.ts also arms
- * browser-level auto-attach so a popup is seeded before its ceremony runs.
+ * available". This seeds every existing page target and arms browser-level
+ * auto-attach so a popup is seeded before its ceremony runs. Every seeded target
+ * also records ceremony outcomes (see cdp.passkeyCeremonies).
  */
 
 import { createLogger } from '../../providers/logger';
+import { createPasskeyCeremonySync, observePasskeyCeremonies } from './cdp.passkeyCeremonies';
 
 const log = createLogger('ComputeGrants');
 
@@ -73,6 +75,12 @@ export async function seedTargetSession(
       { sessionId }
     );
   }
+  // This target now answers WebAuthn silently; make what it cannot answer visible.
+  await observePasskeyCeremonies(
+    send,
+    sessionId,
+    passkeys.map((pk) => pk.rpId)
+  );
   return true;
 }
 
@@ -119,4 +127,96 @@ export async function seedVirtualPasskeys(
     }
   }
   return seeded;
+}
+
+/**
+ * Seed passkeys the INSTANT a new page target attaches.
+ *
+ * A "Continue with Google" popup runs navigator.credentials.get() within ~1s of
+ * opening -- faster than any poll -- so a 2s re-seed loses the race. Auto-attach
+ * fires on target creation, before the page runs its ceremony. Returns a handle
+ * to arm/replace the passkeys to seed onto future targets.
+ */
+function armAutoAttachSeeding(
+  ws: WebSocket,
+  send: CdpSend,
+  memo: PasskeyTargetMemo
+): { set: (p: PasskeySeed[]) => void } {
+  const armed: { passkeys: PasskeySeed[] } = { passkeys: [] };
+  ws.addEventListener('message', (e: MessageEvent) => {
+    let msg: {
+      method?: string;
+      params?: { sessionId?: string; targetInfo?: { type?: string; targetId?: string } };
+    };
+    try {
+      msg = JSON.parse(String(e.data));
+    } catch {
+      return;
+    }
+    if (msg.method !== 'Target.attachedToTarget') return;
+    const sid = msg.params?.sessionId;
+    const info = msg.params?.targetInfo;
+    if (sid === undefined || info?.type !== 'page' || info.targetId === undefined) return;
+    if (armed.passkeys.length === 0 || memo.has(info.targetId)) return;
+    memo.add(info.targetId);
+    void seedTargetSession(send, sid, armed.passkeys)
+      .then((seeded) => {
+        if (!seeded) memo.delete(info.targetId as string);
+      })
+      .catch(() => memo.delete(info.targetId as string));
+  });
+  return { set: (p) => (armed.passkeys = p) };
+}
+
+/**
+ * Passkeys for one connect browser: seed the attached page, every other page and
+ * every future target, and read back the ceremony they could not answer.
+ * `evaluateMain` evaluates on the attached (main) page's existing session.
+ */
+export function createConnectPasskeys(
+  ws: WebSocket,
+  send: CdpSend,
+  page: { sessionId: string | undefined; targetId: string | undefined },
+  evaluateMain: (expression: string) => Promise<string | undefined>
+): {
+  seed: (passkeys: PasskeySeed[]) => Promise<number>;
+  syncCeremonies: () => Promise<string | undefined>;
+} {
+  const memo: PasskeyTargetMemo = new Set();
+  const armed = armAutoAttachSeeding(ws, send, memo);
+  const ceremonies = createPasskeyCeremonySync(evaluateMain);
+  return {
+    async seed(passkeys) {
+      // Seed current pages synchronously first. Enabling auto-attach can emit an
+      // immediate attached event for those same pages; doing it first made the
+      // handler reserve the target while seeding in the background, so this
+      // method returned 0 before any credential was actually present.
+      armed.set(passkeys);
+      ceremonies.setHeld(passkeys.map((pk) => pk.rpId));
+      let existing = 0;
+      if (
+        passkeys.length > 0 &&
+        page.sessionId !== undefined &&
+        page.targetId !== undefined &&
+        !memo.has(page.targetId)
+      ) {
+        if (await seedTargetSession(send, page.sessionId, passkeys)) {
+          memo.add(page.targetId);
+          existing += 1;
+        }
+      }
+      existing += await seedVirtualPasskeys(send, passkeys, memo);
+      if (passkeys.length > 0) {
+        // Browser-level (raw): catches future TOP-LEVEL popup windows too, not
+        // just children of the current page. Google's sign-in can be either.
+        await send(
+          'Target.setAutoAttach',
+          { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+          { raw: true }
+        );
+      }
+      return existing;
+    },
+    syncCeremonies: () => ceremonies.sync(),
+  };
 }

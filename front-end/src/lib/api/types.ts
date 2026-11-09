@@ -59,6 +59,8 @@ export interface Agent {
     | 'FAILED'
     | 'COST_LIMIT_REACHED';
   status_message: string | null;
+  /** Durable user pause/resume ordering; unrelated updates preserve it. */
+  user_control_revision?: number;
   temporal_workflow_id: string | null;
   token_count: number;
   tokens_in: number;
@@ -75,6 +77,8 @@ export interface Agent {
   world_model_mode?: 'real' | 'simulate' | 'shadow';
   created_at: string;
   updated_at: string;
+  /** Newest person-authored message; absent/null → never messaged after creation. */
+  last_user_message_at?: string | null;
   write_lock_enabled: boolean;
 }
 
@@ -249,6 +253,7 @@ export interface AgentTreeNode {
   tree_cost_cents: number;
   created_at?: string;
   updated_at?: string;
+  last_user_message_at?: string | null;
   /** Background explore/browser/code tasks owned by this agent (optional). */
   background_tasks?: unknown;
   /** Codex-style tree address, e.g. `/root/outreach/draft_a` (optional). */

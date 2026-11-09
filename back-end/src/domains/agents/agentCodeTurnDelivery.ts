@@ -7,12 +7,30 @@
  *   send_message_to_agent to a RUNNING  ├─▶ deliverToCodeAgent ─▶ CLI turn
  *   code background task ───────────────┘    (deliverToRunningCodeTask)
  *
+ * A message that arrives before the code agent's CLI runs is accepted, not
+ * refused: while the spawn's create is in flight it waits in the spawn's
+ * startup row (providers/codeSessions/startupTurns.ts); once the ws-server is
+ * up but the CLI has not been given its task, the ws-server holds it. Either
+ * way it becomes the CLI's next turn right after the task prompt, in arrival
+ * order, and the sender is told `queued`. Likewise while the user chats with
+ * the code agent directly: the message waits for the hand back (`queued`).
+ * A session that finished or closed is never "queued": that stays the
+ * truthful error.
+ *
  * No question path: code agents only receive messages here.
  */
-import { createHash } from 'node:crypto';
-import { createMessage } from '../../providers/messages';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { deliverUserTurnToCodeSession, type TurnDelivery } from '../../providers/codeSessionTurns';
+import {
+  agentMessageRowFields,
+  codeTurnId,
+  recordCodeTimelineRow,
+} from '../../providers/codeSessions/agentMessageRows';
+import {
+  enqueueStartupTurn,
+  publishedStartupTask,
+  startupTurnsKey,
+} from '../../providers/codeSessions/startupTurns';
 import { formatInboundAgentMessage } from './agentGraphMessageFormat';
 import { takeSendBudget } from '../../providers/agentGraph/sendBudget';
 import { createLogger } from '../../providers/logger';
@@ -31,17 +49,6 @@ export interface CodeTarget {
   toolCallId: string | null;
 }
 
-const PROVIDER_LABEL: Record<CodeProvider, string> = { claude: 'Claude Code', codex: 'Codex' };
-
-export function codeLabel(provider: CodeProvider | null): string {
-  return provider === null ? 'Code agent' : PROVIDER_LABEL[provider];
-}
-
-/** ws-server turn ids are bounded; derive a stable short id from the key. */
-function codeTurnId(key: string): string {
-  return `a2a-${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
-}
-
 function deliveryError(delivery: TurnDelivery, endedMessage?: string): AgentGraphError {
   if (delivery.status === 'unreachable') {
     return new AgentGraphError(502, 'Could not reach the code agent session');
@@ -50,11 +57,22 @@ function deliveryError(delivery: TurnDelivery, endedMessage?: string): AgentGrap
     return new AgentGraphError(409, endedMessage ?? 'Code agent session has finished');
   }
   if (delivery.reason === 'relay_paused') {
-    // The user holds the session in direct chat; agent turns wait for the hand back.
+    // Only a ws-server built before agent turns queued during a direct hold
+    // (a sandbox still on the older template) refuses a plain agent turn.
     return new AgentGraphError(
       409,
       'The user is talking to this code agent directly; send again after they hand it back'
     );
+  }
+  if (delivery.reason === 'relay_queue_full') {
+    return new AgentGraphError(
+      409,
+      'The user is talking to this code agent directly and its queue of waiting messages is full; send again once they hand it back'
+    );
+  }
+  if (delivery.reason === 'startup_queue_full') return new AgentGraphError(409, STARTUP_QUEUE_FULL);
+  if (delivery.reason === 'session_starting') {
+    return new AgentGraphError(409, 'Code agent is still starting; send again once it runs');
   }
   return new AgentGraphError(
     502,
@@ -62,44 +80,16 @@ function deliveryError(delivery: TurnDelivery, endedMessage?: string): AgentGrap
   );
 }
 
+/** The 409 text when a code agent that is still starting cannot hold another message. */
+const STARTUP_QUEUE_FULL =
+  'Code agent is still starting and its queue of waiting messages is full; send again once it runs';
+
 /**
- * Child-scoped chip row on the Rose agent that owns a code session, so the
- * code agent's own timeline shows the exchange. `subAgentId` keeps it out of
- * the owning agent's LLM context; there is no toolStatus because it is not a
- * lifecycle row of the spawn tool call.
+ * `queued`: waits for a code agent that is still starting; `held`: waits for the
+ * user to hand back a code agent they are chatting with directly. Both are
+ * accepted turns that become the CLI's next turn, never failures.
  */
-export async function recordCodeTimelineRow(args: {
-  ownerAgentId: string;
-  sessionId: string;
-  provider: CodeProvider | null;
-  toolCallId: string | null;
-  key: string;
-  title: string;
-  text: string;
-  a2a: Record<string, unknown>;
-  direction: 'sent' | 'received';
-  /** The CLI turn id this row was delivered as: the UI folds the session's own copy of it. */
-  codeTurnId?: string;
-}): Promise<void> {
-  await createMessage({
-    agentId: args.ownerAgentId,
-    role: 'TOOL',
-    text: args.text,
-    metadata: {
-      a2a: { ...args.a2a, direction: args.direction },
-      idempotencyKey: `${args.key}:${args.direction}`,
-      title: args.title,
-      task_id: args.sessionId,
-      subAgentId: args.sessionId,
-      action_type: 'agent_message',
-      ...(args.codeTurnId !== undefined ? { code_turn_id: args.codeTurnId } : {}),
-      ...(args.provider !== null ? { code_provider: args.provider } : {}),
-      ...(args.toolCallId !== null
-        ? { toolCallId: args.toolCallId, toolName: 'spawn_claude_code_agent' }
-        : {}),
-    },
-  });
-}
+export type CodeDeliveryStatus = 'delivered' | 'duplicate' | 'queued' | 'held';
 
 /**
  * Code agent target: the CLI's next user turn. The ws-server dedupes by turn
@@ -115,7 +105,7 @@ export async function deliverToCodeAgent(args: {
   original: string;
   /** The 409 text when the CLI turn already ended (defaults to "has finished"). */
   endedMessage?: string;
-}): Promise<'delivered' | 'duplicate'> {
+}): Promise<CodeDeliveryStatus> {
   const { target } = args;
   if (target.streamUrl === null || target.status !== 'ACTIVE') {
     throw new AgentGraphError(409, 'Code agent session is not running');
@@ -128,7 +118,11 @@ export async function deliverToCodeAgent(args: {
     text: args.text,
     sender: 'agent',
   });
-  if (delivery.status !== 'delivered' && delivery.status !== 'duplicate') {
+  if (
+    delivery.status !== 'delivered' &&
+    delivery.status !== 'duplicate' &&
+    delivery.status !== 'queued'
+  ) {
     throw deliveryError(delivery, args.endedMessage);
   }
   await recordCodeTimelineRow({
@@ -143,7 +137,10 @@ export async function deliverToCodeAgent(args: {
     direction: 'received',
     codeTurnId: turnId,
   });
-  return delivery.status;
+  // A turn held while the user chats with the code agent directly: `held`.
+  return delivery.status === 'queued' && delivery.reason === 'direct_hold'
+    ? 'held'
+    : delivery.status;
 }
 
 /** A background task's inbox address (`<tool call id>` or `<tool call id>.run<n>`) → its tool call id. */
@@ -151,12 +148,75 @@ function taskToolCallId(taskAddress: string): string {
   return taskAddress.replace(/\.run\d+$/, '');
 }
 
+/** The session of this run of the spawn, once it exists (published by its create, or announced by its rows). */
+async function findStartedCodeSession(
+  ownerAgentId: string,
+  toolCallId: string,
+  since: Date | null,
+  publishedTaskId: string | null
+): Promise<graphRepo.GraphCodeSessionRow | null> {
+  if (publishedTaskId !== null) {
+    // An earlier run's session (woken tasks keep their tool call id) predates `since`.
+    const published = await graphRepo.findGraphCodeSession(publishedTaskId);
+    if (
+      published !== null &&
+      published.agentId === ownerAgentId &&
+      (since === null || published.createdAt >= since)
+    ) {
+      return published;
+    }
+  }
+  return graphRepo.findCodeSessionForToolCall(ownerAgentId, toolCallId, since);
+}
+
+/**
+ * The agent-graph per-sender send budget, taken at most once for one message:
+ * a retry of a delivered message (its received row exists) is free.
+ */
+function sendBudgetOnce(senderId: string, receivedId: string): () => Promise<void> {
+  let taken = false;
+  return async () => {
+    if (taken) return;
+    taken = true;
+    if ((await graphRepo.findMessageById(receivedId)) !== null) return;
+    const budget = takeSendBudget(senderId);
+    if (!budget.ok) {
+      throw new AgentGraphError(
+        429,
+        `Too many agent messages from this sender; retry in ${budget.retryAfterSeconds}s`,
+        budget.retryAfterSeconds
+      );
+    }
+  };
+}
+
+function codeTargetOf(
+  session: graphRepo.GraphCodeSessionRow,
+  ownerAgentId: string,
+  toolCallId: string
+): CodeTarget {
+  return {
+    kind: 'code',
+    id: session.id,
+    ownerAgentId,
+    streamUrl: session.streamUrl,
+    status: session.status,
+    provider:
+      session.codeProvider === 'claude' || session.codeProvider === 'codex'
+        ? session.codeProvider
+        : null,
+    toolCallId,
+  };
+}
+
 /**
  * A Rose agent's message to a RUNNING code background task (spawn_agent
  * type=code): nothing reads the owner's task inbox for a CLI, so the message
  * is the live CLI's next user turn, exactly like an agent-graph send to that
- * code session. Throws AgentGraphError (409 when no live CLI turn can take
- * it) so the sender learns the message was not delivered.
+ * code session. A task whose session does not exist yet (its create is still
+ * running) takes the message into its startup row: `queued`. Throws
+ * AgentGraphError (409 when no live CLI turn can take it) so the sender
+ * learns the message was not delivered.
  */
 export async function deliverToRunningCodeTask(args: {
   ownerAgentId: string;
@@ -166,51 +226,10 @@ export async function deliverToRunningCodeTask(args: {
   sender: { id: string; label: string };
   key: string;
   text: string;
-}): Promise<{ message_id: string; status: 'delivered' | 'duplicate' }> {
+}): Promise<{ message_id: string; status: CodeDeliveryStatus }> {
   const toolCallId = taskToolCallId(args.taskAddress);
-  const session = await graphRepo.findCodeSessionForToolCall(
-    args.ownerAgentId,
-    toolCallId,
-    args.runStartedAt
-  );
-  if (session === null) {
-    throw new AgentGraphError(
-      409,
-      'Code agent session has not started yet; send again once it runs'
-    );
-  }
+  const spawnKey = startupTurnsKey(args.ownerAgentId, toolCallId);
   const receivedId = deterministicMessageId(args.ownerAgentId, `${args.key}:received`);
-  if ((await graphRepo.findMessageById(receivedId)) === null) {
-    // The agent-graph per-sender send budget; a retry of a delivered message is free.
-    const budget = takeSendBudget(args.sender.id);
-    if (!budget.ok) {
-      throw new AgentGraphError(
-        429,
-        `Too many agent messages from this sender; retry in ${budget.retryAfterSeconds}s`,
-        budget.retryAfterSeconds
-      );
-    }
-  }
-  const target: CodeTarget = {
-    kind: 'code',
-    id: session.id,
-    ownerAgentId: args.ownerAgentId,
-    streamUrl: session.streamUrl,
-    status: session.status,
-    provider:
-      session.codeProvider === 'claude' || session.codeProvider === 'codex'
-        ? session.codeProvider
-        : null,
-    toolCallId,
-  };
-  const toLabel = codeLabel(target.provider);
-  const a2a = {
-    kind: 'message',
-    message_id: args.key,
-    from: { id: args.sender.id, kind: 'agent', label: args.sender.label },
-    to: { id: target.id, kind: target.kind, label: toLabel },
-    text: args.text,
-  };
   const text = formatInboundAgentMessage({
     senderLabel: args.sender.label,
     senderId: args.sender.id,
@@ -218,11 +237,41 @@ export async function deliverToRunningCodeTask(args: {
     kind: 'message',
     text: args.text,
   });
+  const takeBudget = sendBudgetOnce(args.sender.id, receivedId);
+  const findStarted = (publishedTaskId: string | null) =>
+    findStartedCodeSession(args.ownerAgentId, toolCallId, args.runStartedAt, publishedTaskId);
+  let session = await findStarted(await publishedStartupTask(spawnKey));
+  if (session === null) {
+    const outcome = await enqueueStartupTurn(
+      spawnKey,
+      { key: args.key, text, original: args.text, sender: args.sender, toolCallId },
+      { findStarted, admit: takeBudget }
+    );
+    if (outcome.status === 'full') throw new AgentGraphError(409, STARTUP_QUEUE_FULL);
+    if (outcome.status === 'queued') {
+      log.info('Agent message queued for a code task that has not started', {
+        agent_id: args.ownerAgentId,
+        from_agent_id: args.sender.id,
+        recipient_task_id: args.taskAddress,
+        position: outcome.position,
+      });
+      return { message_id: receivedId, status: 'queued' };
+    }
+    session = outcome.session;
+  }
+  await takeBudget();
+  const target = codeTargetOf(session, args.ownerAgentId, toolCallId);
+  const { title, a2a } = agentMessageRowFields({
+    key: args.key,
+    sender: args.sender,
+    session: { id: target.id, provider: target.provider },
+    original: args.text,
+  });
   const status = await deliverToCodeAgent({
     target,
     key: args.key,
     text,
-    title: `${args.sender.label} → ${toLabel}`,
+    title,
     a2a,
     original: args.text,
     endedMessage:
@@ -245,7 +294,14 @@ export async function sendAgentMessageToRunningCodeTask(args: {
   idempotencyKey: string;
   text: string;
 }): Promise<
-  { message_id: string; delivered: true; task_running: true } | { error: string; status: number }
+  | {
+      message_id: string;
+      delivered: boolean;
+      queued?: true;
+      queued_reason?: 'direct_hold';
+      task_running: true;
+    }
+  | { error: string; status: number }
 > {
   const started = args.runStartedAt !== null ? new Date(args.runStartedAt) : null;
   try {
@@ -263,7 +319,20 @@ export async function sendAgentMessageToRunningCodeTask(args: {
       recipient_task_id: args.taskAddress,
       status: delivered.status,
     });
-    return { message_id: delivered.message_id, delivered: true, task_running: true };
+    // `queued`: accepted for a code agent still starting; it is its next turn once the CLI runs.
+    // `held`: accepted while the user chats with it directly; its next turn after the hand back.
+    if (delivered.status === 'held') {
+      return {
+        message_id: delivered.message_id,
+        delivered: false,
+        queued: true,
+        queued_reason: 'direct_hold',
+        task_running: true,
+      };
+    }
+    return delivered.status === 'queued'
+      ? { message_id: delivered.message_id, delivered: false, queued: true, task_running: true }
+      : { message_id: delivered.message_id, delivered: true, task_running: true };
   } catch (error) {
     if (error instanceof AgentGraphError) return { error: error.message, status: error.status };
     throw error;

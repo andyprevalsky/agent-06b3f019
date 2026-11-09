@@ -12,7 +12,7 @@ Covered:
     (``deliver_user_turn_to_code_session`` + ws-server dedupe by turn id);
   * turns need the per-session token;
   * while the user holds the session, Rose's ``sender="agent"`` turns are
-    rejected with ``relay_paused`` until the hand back, and the monitoring
+    acked ``queued`` and delivered after the hand back, and the monitoring
     activity neither writes to the CLI nor ends the session;
   * typed turn → first streamed token stays far under the 3 s p50 bar;
   * ws-server output for the recordings matches the committed event fixtures
@@ -30,7 +30,7 @@ import statistics
 import time
 from pathlib import Path
 from typing import Any, Optional
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import BlackboxResult, teardown_mock
 
@@ -97,11 +97,24 @@ def _check_or_write_fixture(path: Path, events: list[dict[str, Any]], home: str)
     )
 
 
+# The viewer socket of a loaded or instrumented test process attaches this long
+# after the ws-server listens. A stand-in CLI that streams meanwhile hands that
+# viewer the bounded replay instead of the live frames (see
+# test_late_viewer_replay_drops_only_superseded_partial_text), so the fixture
+# comparison below must not depend on how fast the viewer attaches.
+VIEWER_ATTACH_LAG_S = 0.5
+
+
 async def _claude_session_with_direct_turn(sandbox: LocalCodeSessionSandbox) -> SessionObserver:
     """Turn 1 replays while gated; the user's turn lands mid-turn; hand back ends the run."""
     await sandbox.start()
+    await asyncio.sleep(VIEWER_ATTACH_LAG_S)
     observer = SessionObserver(sandbox.ws_url)
     await observer.start()
+    # Attached: the server now registers this socket for live frames, so the
+    # held stand-in CLI may start streaming. Every recorded event reaches the
+    # viewer live, whatever the attach lag was.
+    sandbox.release_first_turn_output()
     # The stand-in CLI holds turn 1's `result` at the gate; wait until every
     # event before it is out so the user's turn lands at a fixed position.
     # Streamed text now creates many partial upserts. Wait for the final
@@ -134,7 +147,9 @@ async def _claude_session_with_direct_turn(sandbox: LocalCodeSessionSandbox) -> 
 
 
 async def test_claude_recording_through_ws_server_matches_event_fixture():
-    sandbox = LocalCodeSessionSandbox("claude", fixture=CLAUDE_RAW, gate_first_turn=True, goal=CLAUDE_GOAL)
+    sandbox = LocalCodeSessionSandbox(
+        "claude", fixture=CLAUDE_RAW, gate_first_turn=True, hold_first_turn_output=True, goal=CLAUDE_GOAL
+    )
     try:
         observer = await _claude_session_with_direct_turn(sandbox)
         assert observer.exit_code == 0, sandbox.log()
@@ -148,6 +163,46 @@ async def test_claude_recording_through_ws_server_matches_event_fixture():
         )
         await observer.close()
     finally:
+        sandbox.stop()
+
+
+async def test_late_viewer_replay_drops_only_superseded_partial_text():
+    """The two views of one session differ in exactly one documented way.
+
+    A viewer attached from the start receives every cumulative partial snapshot
+    live (the committed event fixture). A viewer that attaches later is served
+    the bounded replay, where each streamed item keeps only its latest
+    snapshot's ``text``; superseded snapshots keep their ``delta``, so history
+    grows with the output rather than its square. Nothing else may differ.
+    """
+    sandbox = LocalCodeSessionSandbox(
+        "claude", fixture=CLAUDE_RAW, gate_first_turn=True, hold_first_turn_output=True, goal=CLAUDE_GOAL
+    )
+    live: Optional[SessionObserver] = None
+    late: Optional[SessionObserver] = None
+    try:
+        live = await _claude_session_with_direct_turn(sandbox)
+        assert live.exit_code == 0, sandbox.log()
+        late = SessionObserver(sandbox.ws_url)
+        await late.start()
+        await late.wait_for(lambda: late.exit_code is not None)
+        assert len(late.events) == len(live.events), (len(late.events), len(live.events))
+        snapshots = [e for e in live.events if e.get("partial") is True and e.get("text")]
+        assert len(snapshots) >= 4, "the recording must stream several text snapshots"
+        compacted = 0
+        for seen_live, replayed in zip(live.events, late.events):
+            if seen_live == replayed:
+                continue
+            assert seen_live.get("partial") is True and seen_live.get("text"), (seen_live, replayed)
+            assert replayed == {key: value for key, value in seen_live.items() if key != "text"}, (seen_live, replayed)
+            assert replayed.get("delta") == seen_live.get("delta")
+            compacted += 1
+        # Every recorded item ends in a final block, so every snapshot was superseded.
+        assert compacted == len(snapshots), (compacted, len(snapshots))
+    finally:
+        for observer in (live, late):
+            if observer is not None:
+                await observer.close()
         sandbox.stop()
 
 
@@ -225,7 +280,14 @@ def test_claude_transcript_records_from_fixture():
 def test_ui_records_follow_the_transcript_tab_contract():
     events = json.loads(CLAUDE_EVENTS.read_text())
     ui = [to_ui_record(record) for record in build_code_transcript(events, "claude", goal=CLAUDE_GOAL)]
-    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control", "turn", "metrics"}
+    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control", "turn", "metrics", "session"}
+    # The code-agent view's query box: the CLI's model and speed (its init) and the
+    # latest model call's context over the model's window (its nub).
+    session = next(r for r in ui if r["type"] == "session")
+    assert (session["model"], session["speed"]) == ("claude-sonnet-5", "standard")
+    contexts = [r for r in ui if r["type"] == "metrics" and "context_tokens" in r]
+    assert contexts and all(0 < r["context_tokens"] < r.get("context_window", 10**9) for r in contexts)
+    assert any(r.get("context_window") == 1_000_000 for r in ui if r["type"] == "metrics")
     tools = [r["tool"] for r in ui if r["type"] == "tool"]
     assert [(t["name"], t["target"]) for t in tools] == [
         ("Read", "calc.py"),
@@ -318,6 +380,85 @@ async def test_direct_turn_reaches_cli_once_across_delivery_retry():
         sandbox.stop()
 
 
+async def _send_turn(sandbox: LocalCodeSessionSandbox, turn_id: str, text: str, sender: str = "agent"):
+    return await deliver_user_turn_to_code_session(
+        sandbox.ws_url, task_id="t", text=text, turn_id=turn_id, sender=sender, token=TEST_TURN_TOKEN
+    )
+
+
+async def test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once():
+    """C20: the ws-server is up but the CLI is not launched yet (a held project startup): an agent turn is
+    acked queued (not refused), a retry stays queued, and once the CLI starts the turns follow the task
+    prompt in arrival order, each written once."""
+    # The CLI holds its first turn (gate_first_turn) so the session is alive when the late retry below is sent: the
+    # fake CLI otherwise finishes and ends the session first under host load ("rejected: session_ended").
+    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True, gate_first_turn=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        first = await _send_turn(sandbox, "a-1", "ROSE: first")
+        retry = await _send_turn(sandbox, "a-1", "ROSE: first")
+        second = await _send_turn(sandbox, "a-2", "ROSE: second")
+        assert (first.status, retry.status, second.status) == ("queued", "queued", "queued"), (first, retry, second)
+        assert not first.reached_cli, "queued has not reached the CLI yet"
+        # A user's direct turn carries settings that must be confirmed at once: told to retry, never queued.
+        user = await _send_turn(sandbox, "u-1", "typed by the user", sender="user")
+        assert (user.status, user.reason) == ("rejected", "session_starting"), user
+        assert sandbox.cli_stdin_lines() == [], "nothing is written to a CLI that has no task yet"
+
+        sandbox.start_cli()
+        # The server has flushed both queued turns once it reports them; the held CLI logs a turn only when it reads it.
+        await observer.wait_for(lambda: observer.count("user_turn") >= 2)
+        # After the flush a retry of a queued id is a duplicate, not a second turn.
+        late = await _send_turn(sandbox, "a-1", "ROSE: first")
+        assert late.status == "duplicate", late
+        sandbox.finish_first_turn()
+        await observer.wait_for(lambda: len(sandbox.cli_stdin_lines()) >= 3)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "Task:\n" in texts[0] and texts[1:] == ["ROSE: first", "ROSE: second"], texts
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert texts.count("ROSE: first") == 1 and len(texts) == 3, texts
+        assert observer.count("user_turn_queued") == 2 and observer.count("user_turn") == 2, observer.events
+        assert observer.count("user_turn_undelivered") == 0
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
+async def test_startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss():
+    """C20: the startup queue holds at most 20 turns (the 21st is refused with a reason). A session that
+    ends before its CLI is launched never delivers them: the server says which turns were lost
+    (user_turn_undelivered), and later sends are refused or unreachable, never "queued"."""
+    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        for index in range(20):
+            sent = await _send_turn(sandbox, f"q-{index}", f"ROSE: waiting {index}")
+            assert sent.status == "queued", (index, sent)
+        over = await _send_turn(sandbox, "q-20", "ROSE: one too many")
+        assert (over.status, over.reason) == ("rejected", "startup_queue_full"), over
+        kept = await _send_turn(sandbox, "q-0", "ROSE: waiting 0")
+        assert kept.status == "queued", "a retry of a queued id is still accepted"
+
+        sandbox.end_session()
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        lost = [event for event in observer.events if event.get("type") == "user_turn_undelivered"]
+        assert len(lost) == 1 and lost[0]["turn_ids"] == [f"q-{index}" for index in range(20)], lost
+        assert lost[0]["reason"] == "session_ended", lost
+        for turn_id in ("q-3", "q-new"):
+            # The server is gone: the sender is told so (rejected or unreachable), never "queued".
+            after = await _send_turn(sandbox, turn_id, "ROSE: after the end")
+            assert after.status in ("rejected", "unreachable"), (turn_id, after)
+        assert sandbox.cli_stdin_lines() == [], "the CLI never got a turn"
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
 async def test_direct_turn_requires_the_session_token():
     sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
     try:
@@ -343,7 +484,10 @@ async def test_direct_turn_requires_the_session_token():
         sandbox.stop()
 
 
-async def test_agent_relay_paused_while_user_holds_session():
+async def test_agent_turns_queue_while_user_holds_session_and_follow_the_hand_back():
+    """A Rose agent's message to a code agent the user is chatting with directly is accepted, never refused:
+    acked ``queued`` (a retry stays queued), it does not reach the CLI during the hold, and after the hand
+    back it becomes the CLI's next turn exactly once, after the user's turn."""
     sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
     try:
         await sandbox.start()
@@ -352,34 +496,269 @@ async def test_agent_relay_paused_while_user_holds_session():
         user = await deliver_user_turn_to_code_session(
             sandbox.ws_url, task_id="t", text="use tabs not spaces", turn_id="u1", token=TEST_TURN_TOKEN
         )
-        relayed = await deliver_user_turn_to_code_session(
-            sandbox.ws_url,
-            task_id="t",
-            text="ROSE: also bump the version",
-            turn_id="a1",
-            sender="agent",
-            token=TEST_TURN_TOKEN,
-        )
-        assert user.status == "delivered" and (relayed.status, relayed.reason) == ("rejected", "relay_paused")
+        assert user.status == "delivered", user
+        relayed = await _send_turn(sandbox, "a1", "ROSE: also bump the version")
+        retry = await _send_turn(sandbox, "a1", "ROSE: also bump the version")
+        assert (relayed.status, retry.status) == ("queued", "queued"), (relayed, retry)
+        assert not relayed.reached_cli, "a held agent turn waits for the hand back"
+        await asyncio.sleep(0.2)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "ROSE: also bump the version" not in texts, texts
+
         assert await hand_back_code_session(sandbox.ws_url, task_id="t", token=TEST_TURN_TOKEN) == "released"
-        # After the hand back the same relayed turn goes through (the turn is still running).
-        resumed = await deliver_user_turn_to_code_session(
-            sandbox.ws_url,
-            task_id="t",
-            text="ROSE: also bump the version",
-            turn_id="a1",
-            sender="agent",
-            token=TEST_TURN_TOKEN,
-        )
-        assert resumed.status == "delivered", resumed
+        await observer.wait_for(lambda: observer.count("user_turn") >= 2)
+        late = await _send_turn(sandbox, "a1", "ROSE: also bump the version")
+        assert late.status == "duplicate", late
         sandbox.finish_first_turn()
         await observer.wait_for(lambda: observer.exit_code is not None)
         texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
         assert texts[1:] == ["use tabs not spaces", "ROSE: also bump the version"], texts
         assert [e.get("sender") for e in observer.events if e.get("type") == "user_turn"] == ["user", "agent"]
+        queued = [e for e in observer.events if e.get("type") == "user_turn_queued"]
+        assert len(queued) == 1 and queued[0].get("reason") == "direct_hold", queued
+        assert observer.count("user_turn_undelivered") == 0
         await observer.close()
     finally:
         sandbox.stop()
+
+
+async def _send_raw_turn(ws_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """One raw ``user_turn`` (fields the helper does not send, e.g. a spawn's ``attach``) → its ack."""
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(control_ws_url(ws_url)) as ws:
+            await ws.send_json({"type": "user_turn", **payload})
+            async for message in ws:
+                data = json.loads(message.data)
+                if data.get("type") == "user_turn_ack" and data.get("id") == payload["id"]:
+                    return data
+    raise AssertionError("no user_turn_ack")
+
+
+async def test_spawn_attaching_while_user_holds_session_is_held_not_refused():
+    """A resumed spawn attaching to the live CLI while the user chats with it directly is held, never
+    refused (a refusal made the backend stop the ws-server and end the user's chat): acked ``queued`` +
+    ``attached`` at once with its token adopted, a retry does not queue it twice, and its goal is the
+    first turn written after the hand back."""
+    import hashlib
+
+    sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        user = await deliver_user_turn_to_code_session(
+            sandbox.ws_url, task_id="t", text="use tabs not spaces", turn_id="u1", token=TEST_TURN_TOKEN
+        )
+        assert user.status == "delivered", user
+        spawn_token = "spawn-two-token-" + "x" * 16
+        attach = {
+            "token": spawn_token,
+            "credential": {"keys": [], "digest": hashlib.sha256(b"[]").hexdigest()},
+            "config": {},
+        }
+        payload = {
+            "id": "spawn-2",
+            "token": TEST_TURN_TOKEN,
+            "text": "Task:\nsecond goal",
+            "sender": "agent",
+            "attach": attach,
+        }
+        ack = await _send_raw_turn(sandbox.ws_url, payload)
+        retry = await _send_raw_turn(sandbox.ws_url, payload)
+        assert (ack["status"], ack.get("reason"), ack.get("attached")) == ("queued", "direct_hold", True), ack
+        assert isinstance(ack.get("history_events"), int), ack
+        assert (retry["status"], retry.get("attached")) == ("queued", True), retry
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "Task:\nsecond goal" not in texts, "the goal waits for the hand back"
+        # The spawn's own token is adopted at once: it can hand the session back itself.
+        assert await hand_back_code_session(sandbox.ws_url, task_id="t2", token=spawn_token) == "released"
+        await observer.wait_for(lambda: observer.count("user_turn") >= 2)
+        # A Temporal retry of the attach after the release: one goal, the same history boundary.
+        again = await _send_raw_turn(sandbox.ws_url, payload)
+        assert (again["status"], again.get("attached")) == ("duplicate", True), again
+        assert again.get("history_events") == ack["history_events"], (again, ack)
+        sandbox.finish_first_turn()
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert texts[1:] == ["use tabs not spaces", "Task:\nsecond goal"], texts
+        assert observer.count("user_turn_queued") == 1, observer.events
+        assert observer.count("user_turn_undelivered") == 0
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
+async def test_held_agent_turn_lost_when_the_session_ends_reaches_its_sender():
+    """The session ends while an agent turn waits for the user's hand back: the ws-server reports it
+    (user_turn_undelivered) and the code-session monitor tells the backend, which notifies the sender."""
+    from domains.spawn_claude_code_agent import service
+
+    sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
+    sink = _TranscriptSink()
+    report = AsyncMock()
+    try:
+        await sandbox.start()
+        with (
+            patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.3),
+            patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 30),
+            patch.object(service, "TRANSCRIPT_FLUSH_INTERVAL_S", 0.0),
+            patch.object(service, "save_claude_code_message", AsyncMock()),
+            patch.object(service, "save_code_transcript_batch", side_effect=sink.save),
+            patch.object(service, "report_undelivered_code_turns", report),
+            patch.object(service, "_log_code_agent_event", lambda event, **kw: None),
+            patch.object(service, "activity_drain_reason", AsyncMock(return_value=None)),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            loop = asyncio.create_task(_run_loop(service, sandbox.ws_url, sink))
+            await asyncio.sleep(0.3)
+            held = await deliver_user_turn_to_code_session(
+                sandbox.ws_url, task_id="task-1", text="rename add to plus", turn_id="u1", token=TEST_TURN_TOKEN
+            )
+            assert held.status == "delivered", held
+            relayed = await _send_turn(sandbox, "a-lost", "ROSE: also bump the version")
+            assert relayed.status == "queued", relayed
+            sandbox.end_session()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(loop, timeout=15)
+            if not loop.done():
+                loop.cancel()
+        assert report.await_count == 1, report.await_args_list
+        agent_id, task_id, turn_ids, reason = report.await_args.args
+        assert (agent_id, task_id, turn_ids, reason) == ("agent-1", "task-1", ["a-lost"], "session_ended")
+    finally:
+        sandbox.stop()
+
+
+async def test_spawn_create_waits_out_a_direct_hold_then_attaches():
+    """An older ws-server cannot hold an attaching spawn, so while the user chats with the live CLI the
+    backend answers 409 CODE_SESSION_HELD (and never stops that CLI). The spawn waits, heartbeating with a
+    capped backoff, and reposts the same create until the hand back; the create then succeeds once."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    created = httpx.Response(201, json={"task_id": "task-2", "resumed_from": "live_cli"})
+    post = AsyncMock(side_effect=[held, held, created])
+    sleep = AsyncMock()
+    with patch.object(repo.asyncio, "sleep", sleep), patch.object(repo, "safe_heartbeat") as beat:
+        response = await repo._create_waiting_out_direct_hold(post, "agent-1")
+    assert response is created and post.await_count == 3, post.await_args_list
+    assert beat.called, "the activity heartbeats while it waits"
+    waits = [call.args[0] for call in sleep.await_args_list]
+    assert waits and max(waits) <= 5.0, waits
+
+
+async def test_held_spawn_backoff_is_jittered():
+    """Spawns held by the same direct chat must not repost in lockstep: each backoff is jittered
+    (+/-20% around the capped exponential delay), as the reference retry loops do."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+    from domains.spawn_claude_code_agent.config import CODE_SESSION_HELD_BACKOFF_S
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    created = httpx.Response(201, json={"task_id": "task-2"})
+    base, _ = CODE_SESSION_HELD_BACKOFF_S
+    for factor in (0.8, 1.2):
+        post = AsyncMock(side_effect=[held, created])
+        sleep = AsyncMock()
+        uniform = MagicMock(return_value=factor)
+        with (
+            patch.object(repo.asyncio, "sleep", sleep),
+            patch.object(repo, "safe_heartbeat"),
+            patch.object(repo.random, "uniform", uniform),
+        ):
+            await repo._create_waiting_out_direct_hold(post, "agent-1")
+        uniform.assert_called_once_with(0.8, 1.2)
+        waited = sum(call.args[0] for call in sleep.await_args_list)
+        assert abs(waited - base * factor) < 1e-9, (factor, waited)
+
+
+async def test_spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait():
+    """Past the wait (which covers the ws-server's 10-minute idle release) the spawn fails non-retryably
+    with the true reason, instead of retrying a few times and claiming it would attach later."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+    from domains.spawn_claude_code_agent.config import CODE_SESSION_HELD_WAIT_S
+    from temporalio.exceptions import ApplicationError
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    post = AsyncMock(return_value=held)
+    clock = {"now": 1000.0}
+
+    def monotonic() -> float:
+        clock["now"] += 90.0
+        return clock["now"]
+
+    with (
+        patch.object(repo.asyncio, "sleep", AsyncMock()),
+        patch.object(repo, "safe_heartbeat"),
+        patch.object(repo.time, "monotonic", monotonic),
+    ):
+        try:
+            await repo._create_waiting_out_direct_hold(post, "agent-1")
+            raise AssertionError("expected CODE_SESSION_HELD")
+        except ApplicationError as error:
+            assert error.type == "CODE_SESSION_HELD" and error.non_retryable is True, error
+            assert "still chatting with it directly; spawn it again after they hand it back" in error.message
+    assert post.await_count >= CODE_SESSION_HELD_WAIT_S // 90 - 1, post.await_count
+
+
+async def test_cancelling_the_spawn_during_a_held_wait_stops_the_wait_and_the_pending_create():
+    """The agent is cancelled while its spawn waits out a direct hold: the wait ends at once, an in-flight
+    repost of the create is cancelled with it (not left running), and no create is sent afterwards."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    for phase in ("sleeping", "reposting"):
+        posts: list[str] = []
+        repost_started = asyncio.Event()
+        repost_cancelled = asyncio.Event()
+
+        async def slow_create() -> httpx.Response:
+            repost_started.set()
+            try:
+                await asyncio.Event().wait()  # a create the backend never answers
+            except asyncio.CancelledError:
+                repost_cancelled.set()
+                raise
+            raise AssertionError("unreachable")
+
+        async def post() -> httpx.Response:
+            posts.append(phase)
+            if len(posts) == 1:
+                return held
+            return await repo._post_with_heartbeats(slow_create(), "Starting the code-agent sandbox")
+
+        real_sleep = asyncio.sleep
+        sleeping = asyncio.Event()
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeping.set()
+            if phase == "sleeping":
+                await asyncio.Event().wait()  # cancelled here
+            await real_sleep(0)
+
+        with patch.object(repo.asyncio, "sleep", fake_sleep), patch.object(repo, "safe_heartbeat"):
+            task = asyncio.create_task(repo._create_waiting_out_direct_hold(post, "agent-1"))
+            await asyncio.wait_for((repost_started if phase == "reposting" else sleeping).wait(), 2)
+            task.cancel()
+            try:
+                await task
+                raise AssertionError("the wait must end with the cancellation")
+            except asyncio.CancelledError:
+                pass
+            if phase == "reposting":
+                await asyncio.wait_for(repost_cancelled.wait(), 2)
+            count = len(posts)
+            await real_sleep(0.05)
+        assert len(posts) == count == (1 if phase == "sleeping" else 2), (phase, posts)
 
 
 async def test_turn_merged_into_running_turn_still_ends_the_session():
@@ -661,15 +1040,51 @@ def test_attachment_only_turn_and_distinct_steers_remain_visible():
     assert ended["turn_outcome"] == "interrupted" and ended["turn_ended_at"] == "2026-10-20T00:00:02Z"
 
 
+def test_background_sub_agent_tool_row_stays_running_until_its_notification():
+    """A Claude sub-agent launched in the background (Task/Agent run_in_background)
+    returns `async_launched` at once; its row stays running (the code-agent view's
+    agents drawer lists it) until the CLI's task_notification names its outcome."""
+    builder = CodeTranscriptBuilder("claude")
+    builder.feed({"type": "turn_started", "turn_id": "t", "turn_started_at": "2026-11-06T00:00:00Z"}, 0)
+    for index, (tool_id, description) in enumerate((("toolu_bg", "Audit the open PRs"), ("toolu_fg", "Read the CI log")), 1):
+        builder.feed({"type": "tool_use", "turn_id": "t", "tool": "Task", "tool_use_id": tool_id,
+                      "input": {"description": description, "prompt": "go", "run_in_background": tool_id == "toolu_bg"}}, index)
+    builder.feed({"type": "tool_result", "turn_id": "t", "tool_use_id": "toolu_bg", "is_error": False,
+                  "tool_use_result": {"status": "async_launched", "agentId": "a1", "description": "Audit the open PRs"}}, 3)
+    builder.feed({"type": "tool_result", "turn_id": "t", "tool_use_id": "toolu_fg", "is_error": False,
+                  "tool_use_result": {"status": "completed", "content": []}}, 4)
+
+    def status(tool_id: str) -> tuple[str, str]:
+        record = to_ui_record(next(r for r in builder.records if r["id"] == f"tool:{tool_id}"))
+        return record["tool"]["name"], record["tool"]["result"]["status"]
+
+    assert status("toolu_bg") == ("Task", "running")
+    assert status("toolu_fg") == ("Task", "ok")
+    assert to_ui_record(next(r for r in builder.records if r["id"] == "tool:toolu_bg"))["tool"]["target"] == "Audit the open PRs"
+    out = builder.feed({"type": "cli_message", "cli_message": {"type": "system", "subtype": "task_notification",
+                        "task_id": "a1", "tool_use_id": "toolu_bg", "status": "failed"}}, 5)
+    assert [r["id"] for r in out] == ["tool:toolu_bg"]
+    assert status("toolu_bg") == ("Task", "error")
+    # A notification for an already-finished or unknown tool changes nothing.
+    assert builder.feed({"type": "cli_message", "cli_message": {"type": "system", "subtype": "task_notification",
+                         "task_id": "a2", "tool_use_id": "toolu_fg", "status": "failed"}}, 6) == []
+    assert status("toolu_fg") == ("Task", "ok")
+
+
 async def run_all_tests():
     print("code-session-direct-chat blackbox tests:")
     r = BlackboxResult()
     r.record("attachment_only_turn_and_distinct_steers_remain_visible", test_attachment_only_turn_and_distinct_steers_remain_visible)
+    r.record("background_sub_agent_tool_row_stays_running_until_its_notification", test_background_sub_agent_tool_row_stays_running_until_its_notification)
     await r.record_async("codex_native_app_server_contract", test_codex_native_app_server_contract)
     await r.record_async("claude_native_direct_chat_contract", test_claude_native_direct_chat_contract)
     await r.record_async(
         "claude_recording_through_ws_server_matches_event_fixture",
         test_claude_recording_through_ws_server_matches_event_fixture,
+    )
+    await r.record_async(
+        "late_viewer_replay_drops_only_superseded_partial_text",
+        test_late_viewer_replay_drops_only_superseded_partial_text,
     )
     await r.record_async(
         "codex_recording_through_ws_server_matches_event_fixture",
@@ -685,9 +1100,39 @@ async def run_all_tests():
     await r.record_async(
         "direct_turn_reaches_cli_once_across_delivery_retry", test_direct_turn_reaches_cli_once_across_delivery_retry
     )
+    await r.record_async(
+        "agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once",
+        test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once,
+    )
+    await r.record_async(
+        "startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss",
+        test_startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss,
+    )
     await r.record_async("direct_turn_requires_the_session_token", test_direct_turn_requires_the_session_token)
     await r.record_async(
-        "agent_relay_paused_while_user_holds_session", test_agent_relay_paused_while_user_holds_session
+        "agent_turns_queue_while_user_holds_session_and_follow_the_hand_back",
+        test_agent_turns_queue_while_user_holds_session_and_follow_the_hand_back,
+    )
+    await r.record_async(
+        "spawn_attaching_while_user_holds_session_is_held_not_refused",
+        test_spawn_attaching_while_user_holds_session_is_held_not_refused,
+    )
+    await r.record_async(
+        "held_agent_turn_lost_when_the_session_ends_reaches_its_sender",
+        test_held_agent_turn_lost_when_the_session_ends_reaches_its_sender,
+    )
+    await r.record_async(
+        "spawn_create_waits_out_a_direct_hold_then_attaches",
+        test_spawn_create_waits_out_a_direct_hold_then_attaches,
+    )
+    await r.record_async("held_spawn_backoff_is_jittered", test_held_spawn_backoff_is_jittered)
+    await r.record_async(
+        "spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait",
+        test_spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait,
+    )
+    await r.record_async(
+        "cancelling_the_spawn_during_a_held_wait_stops_the_wait_and_the_pending_create",
+        test_cancelling_the_spawn_during_a_held_wait_stops_the_wait_and_the_pending_create,
     )
     await r.record_async(
         "turn_merged_into_running_turn_still_ends_the_session",

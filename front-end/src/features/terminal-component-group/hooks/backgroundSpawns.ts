@@ -50,7 +50,10 @@ export interface BackgroundSpawn {
   busId: string | null;
   startedAt: string;
   finishedAt: string | null;
-  /** Latest in-progress row title/text (explore/browser/code activity). */
+  /**
+   * Latest in-progress row title/text (explore/browser/code activity); a code
+   * agent's start row contributes its title only, never the spawn goal.
+   */
   activity: string | null;
   /** Notification body or terminal row text once finished. */
   resultSummary: string | null;
@@ -279,7 +282,9 @@ function absorbToolRow(spawn: BackgroundSpawn, message: Message, children: Map<s
     spawn.resultSummary = spawn.resultSummary ?? (message.text.trim() || null);
   } else if (status === 'IN_PROGRESS') {
     const title = str(metadata.title);
-    const text = message.text.trim();
+    // A code agent's start row carries its whole spawn goal ("Goal: …"); the
+    // dock already names the task, so the activity is just "Claude Code Started".
+    const text = metadata.action_type === 'claude_code_started' ? '' : message.text.trim();
     spawn.activity = title && text && title !== text ? `${title}: ${text}` : title || text || null;
   }
 }

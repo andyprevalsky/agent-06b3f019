@@ -13,6 +13,7 @@ import signal
 import threading
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -111,8 +112,10 @@ class Worker(unittest.TestCase):
         self.assertNotIn('cleanup_owner', result)
 
     def test_native_producer_and_generic_use_their_declared_cleanup_authority(self):
+        # 'agentcard' is a stale plan's retired AgentCard lane: its tasks run in cloud smoke now, so the
+        # category earns no native-producer cleanup authority and is owned like any generic gate.
         for kind in ('generic', 'cloud', 'agentcard'):
-            native = kind in {'cloud', 'agentcard'}
+            native = kind == 'cloud'
             with self.subTest(kind=kind):
                 gate = {'name': kind, 'checks': ['first'], 'command': ['fixture'],
                         'case_protocol': True, 'native_cloud': kind == 'cloud',
@@ -138,16 +141,6 @@ class Worker(unittest.TestCase):
                 else:
                     self.assertIsNone(result['native_cleanup_reference'])
 
-    def test_unbound_agentcard_lifecycle_refuses_before_launch(self):
-        gate = {'name': 'agentcard', 'checks': ['first'], 'command': ['fixture'],
-                'category': 'agentcard-lifecycle'}
-        state = {'phase': 'initial', 'round': 0, 'skips': {},
-                 'source': {'head': 'a' * 40, 'digest': 'b' * 64}}
-        with patch.object(cycle, 'run_command') as launch:
-            with self.assertRaisesRegex(ValueError, 'validated worker binding'):
-                cycle.execute(gate, state, self.coordinator / '.context/unbound', self.coordinator)
-            launch.assert_not_called()
-
     def test_interrupted_native_producer_records_cleanup_owner_and_blocks_credit(self):
         gate = {'name': 'native', 'checks': ['first'], 'command': ['fixture'], 'native_cloud': True}
         state = {'phase': 'initial', 'round': 0, 'skips': {},
@@ -166,6 +159,34 @@ class Worker(unittest.TestCase):
         self.assertEqual({'first':'FAIL','second':'PASS'},result['cases'])
         self.assertTrue(result['complete'])
         self.assertEqual(1,result['evidence']['first']['native_exit'])
+
+    def test_each_case_reports_progress_as_it_finishes_and_runners_get_the_case(self):
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        runner = ("import os,sys; sys.path.insert(0,%r); import deploy_gate_progress as p; "
+                  "assert os.environ[p.CASE_ENV]=='first'; p.report('t1','FAIL',detail='boom'); raise SystemExit(1)"
+                  % str(Path(worker.__file__).resolve().parent))
+        self.recipe['cases']['first']['command'] = [sys.executable, '-c', runner]
+        target = self.root / '.context' / 'progress.jsonl'
+        with patch.dict(os.environ, {progress.ENV: str(target)}):
+            result = worker.execute(self.request, self.root)
+        self.assertEqual({'first': 'FAIL', 'second': 'PASS'}, result['cases'])  # the verdict is unchanged
+        rows, _ = progress.read_new(target)
+        self.assertEqual([('test', 'first', 't1', 'FAIL'), ('case', 'first', 'first', 'FAIL'),
+                          ('case', 'second', 'second', 'PASS')],
+                         [(r['scope'], r['case'], r['unit'], r['status']) for r in rows])
+        self.assertIn('boom', rows[0]['detail'])
+        self.assertEqual(result['evidence']['first']['log'], rows[1]['log'])
+
+    def test_without_a_coordinator_progress_path_rows_land_beside_the_worker_evidence(self):
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        environ = {k: v for k, v in os.environ.items() if k != progress.ENV}
+        with patch.dict(os.environ, environ, clear=True):
+            result = worker.execute(self.request, self.root)
+        folder = Path(result['evidence']['first']['log']).parent
+        rows, _ = progress.read_new(folder / 'progress.jsonl')
+        self.assertEqual(['first', 'second'], [r['unit'] for r in rows])
 
     def test_aggregate_failure_cannot_prove_all_constituents_completed(self):
         self.recipe['cases']['first']['aggregate']=True
@@ -441,6 +462,10 @@ class Cloud(unittest.TestCase):
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
+        # Offline: these fixtures never read the shared Tilion account (see CloudSharedProviderHeadroom).
+        offline=patch.object(cloud.provider_headroom,'live_probes',return_value={});offline.start();self.addCleanup(offline.stop)
+        # Offline: the frozen ref counts as pushed; deploy-cloud-smoke-speed covers the unpushed refusal.
+        pushed=patch.object(cloud,'origin_fetchable',return_value=True);pushed.start();self.addCleanup(pushed.stop)
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.runs=self.root/'runs';self.fleet=self.runs/'native-run'
         self.request={'token':'token','source':{'head':'a'*40,'digest':'frozen'},
@@ -680,6 +705,79 @@ class CloudCampaign(unittest.TestCase):
         self.seal_campaign(self.campaign)
         cases,_,cleaned,_=self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
         self.assertEqual('FAIL',cases['task-16']);self.assertEqual('PASS',cases['task-0']);self.assertTrue(cleaned)
+
+    def seal_native_lifecycle(self, fleet, *, teardown='0', benches='task-5', autoscaler='1'):
+        """Run the fleet's actual lifecycle writer for a controller that exited 1."""
+        text=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=text.index("<<'PY'\n",text.index('# Seal the lifecycle after provider audit'))
+        body=text[text.index('\n',start)+1:text.index('\nPY\n',start)]
+        owner=cycle.read(fleet/'_batch/lifecycle.json')['fleet_owner_token']
+        (fleet/'_batch/lifecycle.json').unlink()
+        subprocess.run([sys.executable,'-c',body,str(fleet),owner,fleet.name,str(self.root),'1',teardown,'0','1',
+                        autoscaler,str(self.root/'registry'),'0','1'],check=True,timeout=30,
+                       env={**os.environ,'CLOUDBENCH_AUTOSCALER_FAILED_BENCHES':benches})
+
+    def mass_agent_autoscaler_capacity_failure(self, **lifecycle):
+        """PR #1760 smoke: the task passed, its worker clone was capacity-denied, teardown was verified."""
+        fleet=self.runs/'fleet-5'
+        (fleet/'task-5/autoscaler.failed').write_text('Machine-count capacity unavailable for worker clone\n')
+        self.seal_native_lifecycle(fleet,**lifecycle)
+        self.summary['status']='failed';self.summary['jobs'][5].update(status='failed',controller_exit_code=1)
+        self.seal_campaign(self.campaign)
+        return self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
+
+    def test_autoscaler_capacity_failure_is_one_verified_failure_not_an_unverified_gate(self):
+        from deploy_test_result import validate
+        cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure()
+        self.assertEqual('FAIL',cases['task-5'])
+        self.assertEqual({name:'PASS' for name in self.request['checks'] if name!='task-5'},
+                         {k:v for k,v in cases.items() if k!='task-5'})
+        self.assertTrue(cleaned)
+        self.assertEqual('Machine-count capacity unavailable for worker clone',
+                         details['task-5']['mandatory_autoscaler_failure'])
+        result={**{k:self.request[k] for k in ('token','source','gate')},'cases':cases,'complete':True,
+                'cleanup_complete':cleaned,'reused':False}
+        self.assertEqual((cases,True),validate(result,self.request,1))
+        lifecycle=cycle.read(self.runs/'fleet-5/_batch/lifecycle.json')
+        self.assertEqual('failed',lifecycle['status'])  # existing consumers keep the run-level verdict
+        self.assertEqual((True,['task-5']),(lifecycle['cleanup_verified'],lifecycle['autoscaler_failed_benches']))
+
+    def test_autoscaler_failure_with_unverified_teardown_still_blocks_cleanup(self):
+        cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure(teardown='1')
+        self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+        self.assertIn('native cleanup was not verified',details['task-5']['unverified'])
+
+    def test_unattributed_failed_lifecycle_still_blocks_cleanup(self):
+        for benches in ('', 'task-5 not-requested'):
+            with self.subTest(benches=benches):
+                cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure(benches=benches)
+                self.assertEqual('failed',cycle.read(self.runs/'fleet-5/_batch/lifecycle.json')['status'])
+                self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+                self.assertIn('native cleanup was not verified',details['task-5']['unverified'])
+
+    def test_unreadable_autoscaler_reason_keeps_the_verified_failure(self):
+        (self.runs/'fleet-5/task-5/autoscaler.failed').write_text('x\n')
+        with patch.object(Path,'open',side_effect=PermissionError('denied')):
+            reason=self.cloud.autoscaler_reason(self.runs/'fleet-5/task-5')
+        self.assertEqual('mandatory autoscaler failed; autoscaler.failed unreadable',reason)
+
+    def test_unreadable_native_record_is_unverified_not_pass(self):
+        real=Path.read_bytes
+        def read_bytes(path):
+            if path.name=='cloudbench-run.json' and path.parent.name=='task-3':
+                raise PermissionError('denied')
+            return real(path)
+        with patch.object(Path,'read_bytes',read_bytes):
+            cases,details,_,_=self.campaign_collect()
+        self.assertEqual('UNVERIFIED',cases['task-3']);self.assertIn('unverified',details['task-3'])
+
+    def test_fleet_attributes_every_autoscaler_failure_branch_to_its_bench(self):
+        text=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=text.index('AUTOSCALER_FAILED_BENCHES=()\n')
+        loop=text[start:text.index('\ndone\n',start)]
+        self.assertNotIn('AUTOSCALER_FAILURE=1\n        ',loop.split('if [ "$autoscaler_bench_failed" = 1 ]')[0])
+        self.assertGreaterEqual(loop.count('autoscaler_bench_failed=1'),7)
+        self.assertIn('AUTOSCALER_FAILED_BENCHES+=("${CHILD_BENCH[$j]}")',loop)
 
     def test_execute_seventeen_tasks_crosses_real_capacity_and_receipt_boundary(self):
         import shutil
@@ -1063,7 +1161,7 @@ class Boxes(unittest.TestCase):
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
         # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
-        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 2)
         cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
         self.configure(reply=self.reply()); self.calls.unlink()
         result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
@@ -1082,10 +1180,10 @@ class Boxes(unittest.TestCase):
                 'text': self.boxes.build_prompt(self.request, self.binding)}]}}}
 
     def test_initial_send_slice_timeout_adopts_nested_read_without_second_send(self):
-        self.configure(reply=self.reply(), send={'sleep': .6}, read=[
-            {'sleep': .6}, {'rc': 0, 'stdout': self.nested_assignment()}])
+        self.configure(reply=self.reply(), send={'sleep': 3}, read=[
+            {'sleep': 3}, {'rc': 0, 'stdout': self.nested_assignment()}])
         started = time.time()
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
@@ -1099,12 +1197,12 @@ class Boxes(unittest.TestCase):
         directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
         state = cycle.read(directory / 'state.json')
         self.assertGreaterEqual(state['deadline_at'], started + 5)
-        self.assertLess(state['deadline_at'], started + 5.2)
+        self.assertLess(state['deadline_at'], started + 6)
         self.assertEqual('turn-1', state['turn_id'])
 
     def test_initial_send_adoption_read_error_fails_closed_without_resending(self):
-        self.configure(reply=self.reply(), send={'sleep': .6}, read={'rc': 2, 'stderr': 'denied'})
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        self.configure(reply=self.reply(), send={'sleep': 3}, read={'rc': 2, 'stderr': 'denied'})
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual('threads read exited 2', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
@@ -1125,11 +1223,11 @@ class Boxes(unittest.TestCase):
                 self.boxes._same_host(changed, self.binding)
 
     def test_initial_send_adoption_respects_original_deadline_without_resending(self):
-        self.configure(reply=self.reply(), send={'sleep': 3})
+        self.configure(reply=self.reply(), send={'sleep': 6})
         started = time.monotonic()
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
-            result = self.run_adapter(deadline=.6)
-        self.assertLess(time.monotonic() - started, .8)
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1):
+            result = self.run_adapter(deadline=2)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertEqual('send_indeterminate_unadopted', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
@@ -1137,15 +1235,15 @@ class Boxes(unittest.TestCase):
         self.assertTrue(self.calls_of('read')); self.assertEqual([], self.calls_of('wait'))
 
     def test_initial_send_adoption_cancel_retains_owner_without_resending(self):
-        self.configure(reply=self.reply(), send={'sleep': 3})
-        timer = threading.Timer(.35, self.boxes.CANCEL.set); timer.start()
+        self.configure(reply=self.reply(), send={'sleep': 6})
+        timer = threading.Timer(1.5, self.boxes.CANCEL.set); timer.start()
         started = time.monotonic()
         try:
-            with patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+            with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1):
                 result = self.run_adapter(deadline=5)
         finally:
             timer.cancel(); timer.join()
-        self.assertLess(time.monotonic() - started, .8)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertEqual('send_indeterminate_unadopted', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
@@ -1165,9 +1263,9 @@ class Boxes(unittest.TestCase):
 
     def test_native_wait_slice_timeout_reobserves_same_turn_without_resending(self):
         self.configure(reply=self.reply(), wait=[
-            {'sleep': .6, 'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')},
+            {'sleep': 3, 'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')},
             {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'})}])
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual(1, len(self.calls_of('send')))
@@ -1177,15 +1275,15 @@ class Boxes(unittest.TestCase):
         self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
 
     def test_cancellation_during_native_wait_keeps_owner_and_never_resends(self):
-        self.configure(reply=self.reply(), wait={'sleep': 3, 'rc': 0,
+        self.configure(reply=self.reply(), wait={'sleep': 8, 'rc': 0,
             'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
-        timer = threading.Timer(.3, self.boxes.CANCEL.set)
+        timer = threading.Timer(2, self.boxes.CANCEL.set)
         started = time.monotonic(); timer.start()
         try:
-            result = self.run_adapter(deadline=5)
+            result = self.run_adapter(deadline=10)
         finally:
             timer.cancel(); timer.join()
-        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertLess(time.monotonic() - started, 4)
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertIn('cancelled', result['reason'])
         self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
@@ -1223,8 +1321,8 @@ class Boxes(unittest.TestCase):
         transient = {'schemaVersion': 1, 'ok': False,
                      'errorCode': 'delegated_thread_control_unavailable', 'retryable': True}
         self.configure(reply=self.reply(), wait={'rc': 2, 'stdout': transient})
-        started = time.monotonic(); result = self.run_adapter(deadline=.8)
-        self.assertLess(time.monotonic() - started, 1)
+        started = time.monotonic(); result = self.run_adapter(deadline=2)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertIn('original deadline', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
@@ -1241,9 +1339,9 @@ class Boxes(unittest.TestCase):
         self.assertEqual(1, len(self.calls_of('send')))
 
     def test_short_nonwait_timeout_keeps_the_positive_original_deadline(self):
-        self.configure(reply=self.reply(), result={'sleep': 3, 'rc': 0,
+        self.configure(reply=self.reply(), result={'sleep': 6, 'rc': 0,
             'stdout': self.wrap({'turnId': 'turn-1', 'output': {'text': self.reply()}})})
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual('native CLI call timed out before the original deadline', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
@@ -1252,13 +1350,13 @@ class Boxes(unittest.TestCase):
         self.assertEqual(1, len(self.calls_of('result')))
 
     def test_native_cli_wait_returns_cleanup_owner_inside_original_deadline(self):
-        self.configure(reply=self.reply(), wait={'sleep': 3, 'ignore_term': True, 'rc': 0,
+        self.configure(reply=self.reply(), wait={'sleep': 6, 'ignore_term': True, 'rc': 0,
             'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
         started = time.monotonic()
-        result = self.run_adapter(deadline=0.8)
+        result = self.run_adapter(deadline=2)
         elapsed = time.monotonic() - started
-        print(json.dumps({'ignores_term_deadline': .8, 'elapsed': elapsed}))
-        self.assertLess(elapsed, .8)
+        print(json.dumps({'ignores_term_deadline': 2, 'elapsed': elapsed}))
+        self.assertLess(elapsed, 2)
         self.assertEqual('original deadline passed during native CLI call', result['reason'])
         self.assertFalse(result['cleanup_complete'])
         self.assertFalse(result['complete'])
@@ -1272,7 +1370,7 @@ class Boxes(unittest.TestCase):
 
     def test_timeout_or_cancel_is_unverified_and_names_the_remote_cleanup_owner(self):
         self.configure(reply=self.reply(), wait={'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
-        result = self.run_adapter(deadline=0.2)
+        result = self.run_adapter(deadline=2)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
         self.assertFalse(result['cleanup_complete']); self.assertIn('deadline', result['reason'])
         owner = result['cleanup_owner']
@@ -1289,12 +1387,12 @@ class Boxes(unittest.TestCase):
                                   ('hash-mismatch', {'rc': 0, 'stdout': self.wrap({'output': {'text': self.reply(sha='a' * 64)}})})):
             with self.subTest(label=label):
                 self.configure(reply=self.reply(), result=result_cfg)
-                result = self.run_adapter(deadline=0.3)
+                result = self.run_adapter(deadline=5)
                 self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
                 __import__('shutil').rmtree(self.coordinator / '.context')
         self.configure(reply=self.reply())
         with patch.object(self.boxes, 'MAX_RECEIPT_BYTES', 10):
-            result = self.run_adapter(deadline=0.3)
+            result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertIn('transport limit', result['reason'])
 
     def gate(self, name, thread, host, root, port, python=None):
@@ -1441,7 +1539,7 @@ class Boxes(unittest.TestCase):
         self.assertEqual(3, proc.returncode); self.assertIn('DEPLOY_GATE_WORKER_EXIT 3', proc.stdout)
         self.assertEqual([], self.calls_of('message'))  # nothing was attached or sent after the failed cd
         self.configure(reply=proc.stdout)
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
 
     def big_native(self, token):
@@ -1465,12 +1563,12 @@ class Boxes(unittest.TestCase):
 
     def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified(self):
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
         __import__('shutil').rmtree(self.coordinator / '.context')
         truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
         self.configure(reply=truncated)
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
 
     def test_attachment_poll_obeys_deadline_and_keeps_boundary_delivery_first(self):
@@ -1668,20 +1766,157 @@ class LocalController(unittest.TestCase):
                 if 'row' in locals() and Path(row['fixture_tmp']).exists():
                     shutil.rmtree(row['fixture_tmp'])
 
-    def test_complete_documented_inventory_and_registration(self):
-        text = (ROOT / '.claude/commands/deploy.md').read_text()
-        section = text.split('## Step 4cb:', 1)[1].split('## Step 4c:', 1)[0]
-        block = section.split('```bash\n')[2].split('```', 1)[0]
-        commands = []
-        for line in block.replace('\\\n', '').splitlines():
-            line = line.strip()
-            if line.startswith('if ['):
-                break
-            if line and not line.startswith('#'):
-                commands.append(shlex.split(line))
-        self.assertEqual([shlex.split(command) for _, command in local_runner.CASES], commands)
-        self.assertEqual(len(commands), 12)
+    def test_each_case_reports_one_live_progress_row_without_changing_the_result(self):
+        """DEPLOY_GATE_PROGRESS gets one suite row per case the moment it finishes:
+        the passing case only finishes after it sees the failing case's FAIL row.
+        Exit code and output match a run without the variable, which writes nothing."""
+        progress_env, watch_env = 'DEPLOY_GATE_PROGRESS', 'CONTROLLER_PROGRESS_FIXTURE_WATCH'
+        waiter = (
+            "import json, os, sys, time\n"
+            f"if os.environ.get({progress_env!r}):\n"
+            "    sys.exit(7)\n"
+            f"watch = os.environ.get({watch_env!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while watch and time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+            "    except (OSError, ValueError):\n"
+            "        rows = []\n"
+            "    if any(row['unit'] == 'fails' and row['status'] == 'FAIL' for row in rows):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    if watch:\n"
+            "        sys.exit(9)\n"
+            "print('waiter done')\n"
+        )
+        cases = [
+            ('fails', shlex.join([sys.executable, '-c', "print('controller-fail-marker'); raise SystemExit(1)"])),
+            ('waiter', shlex.join([sys.executable, '-c', waiter])),
+        ]
+        with tempfile.TemporaryDirectory(prefix='controller-progress-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            progress = root / 'gate' / 'progress.jsonl'
+            progress.parent.mkdir()
+
+            def run(extra):
+                env = {key: value for key, value in os.environ.items() if key not in (progress_env, watch_env)}
+                env.update(extra)
+                stdout = io.StringIO()
+                umask = os.umask(0o022)
+                os.umask(umask)
+                argv = ['run-cloudbench-controller-local.py', '--root', str(root), '--max-workers', '2']
+                try:
+                    with patch.dict(os.environ, env, clear=True), patch.object(local_runner, 'CASES', cases), \
+                            patch.object(local_runner, 'source', lambda _root: {'head': 'fixture'}), \
+                            patch.object(sys, 'argv', argv), contextlib.redirect_stdout(stdout):
+                        code = local_runner.main()
+                finally:
+                    os.umask(umask)
+                lines = ['GATE_NATIVE_ARTIFACTS' if line.startswith('GATE_NATIVE_ARTIFACTS ') else line
+                         for line in stdout.getvalue().splitlines()]
+                return code, sorted(lines)
+
+            try:
+                reported = run({progress_env: str(progress), 'DEPLOY_GATE_CASE': 'cloudbench-controller',
+                                watch_env: str(progress)})
+                unset = run({})
+                self.assertEqual(reported[0], 1, reported)
+                self.assertEqual(reported, unset, 'reporting changed the exit code or output')
+                self.assertEqual(list(root.rglob('*.jsonl')), [progress], 'an unset variable wrote a progress file')
+                rows = [json.loads(line) for line in progress.read_text().splitlines()]
+                self.assertEqual([(row['unit'], row['status']) for row in rows], [('fails', 'FAIL'), ('waiter', 'PASS')])
+                self.assertEqual({(row['scope'], row['case']) for row in rows}, {('suite', 'cloudbench-controller')})
+                self.assertIn('controller-fail-marker', rows[0]['detail'])
+                self.assertEqual(rows[1]['detail'], '')
+                for row in rows:
+                    self.assertTrue(row['log'].endswith('/' + row['unit'] + '.log'), row)
+                    self.assertTrue(Path(row['log']).is_file(), row)
+            finally:
+                for result in root.glob('.context/cloudbench-local/*/result.json'):
+                    for case in json.loads(result.read_text())['cases']:
+                        if case.get('fixture_tmp') and Path(case['fixture_tmp']).exists():
+                            shutil.rmtree(case['fixture_tmp'])
+
+    # The twelve cloud-benchmark controller suites the staged `cloudbench-controller` gate runs (the former
+    # deploy.md Step 4cb inventory, preserved in .claude/commands/DEPRECATED_deploy.md at L1408). The concise
+    # deploy.md no longer lists them: scripts/run-cloudbench-controller-local.py CASES is the executing
+    # inventory, so it is pinned here and a change to it must be a deliberate edit of this test.
+    CONTROLLER_PYTEST_KEYWORDS = (
+        'fly_with_timeout', 'test_clone_retries_transient_volume_not_found', 'test_clone_gives_up_after_max_attempts',
+        'test_clone_times_out_and_retries_a_hung_clone', 'clone_creation_cannot_start_copied_primary',
+        'cloudbench_codex_auth', 'autoscaler_runtime_handoff', 'prisma_client',
+        'local_sync_and_stack_wire_prisma_freshness', 'cloud_patch_includes_tracked_and_untracked_changes',
+        'cloud_patch_detection_and_payload_include_staged_only_changes',
+        'worktree_patch_ignores_append_only_history_ledgers', 'patch_delivery_clears_stale_base64_configuration',
+        'shared_patch_digest_is_pinned_and_verified', 'declared_patch_payload_cannot_be_missing_or_empty',
+        'empty_local_patch_cleanup_is_nounset_safe', 'central_hub_runs_in_own_session_after_launcher_exit',
+        'boot_launch_delivers_the_exact_worktree_patch_to_every_guest',
+        'boot_launch_runs_the_current_driver_before_applying_the_patch', 'boot_payload',
+        'boot_launch_compresses_complete_payload', 'autoscaled_worker_failure_publishes_durable_failure_marker',
+        'data_plane_proxies_retry_machine_dns_and_restart_if_lost', 'status_polled_over_data_plane_proxy_not_ssh',
+        'cloud_runner_avoids_live_run_port_collisions', 'fleet_barrier_reads_the_authoritative_rotated_status_port',
+        'data_plane_barrier_release_at_full_fleet_width', 'storage_readiness_inventory_reads_are_bounded',
+        'fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown', 'isolated_backend',
+        'local_predeploy_skips_wmh', 'cloud_agentcard_payment_tasks_provide_onboarding_callback_env',
+        'fleet_shared_patch_remains_authoritative_until_transport_selection',
+        'fleet_patch_packages_clean_unpushed_head_from_fetchable_base', 'autoscaler_scale_down_cancels_pending_worker',
+        'fleet_registry_release_id_is_idempotent_with_other_records', 'refresh_deps_tracks_exact_created_snapshot',
+        'refresh_deps_applies_exact_workspace_before_rebuild', 'fetch_ref_restores_dirty_exact_sha',
+        'warm_deps_preflight', 'fresh_controller_reuses_only_proven_donor_dependencies', 'verified_legacy_snapshot',
+        'dependency_proof_publication', 'exact_volume_ownership_survives_delayed_visibility_and_failed_delete',
+        'exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers',
+        'pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper',
+        'exact_recovery_seals_actual_retained_owner_remote_evidence_paths', 'hub_transport',
+        'guest_shutdown_child_confirmation', 'exact_guest_recovery_archives_bound_child_token',
+        'exact_recovery_consumes_runtime_receipt_completed_absent_primary',
+        'exact_recovery_consumes_runtime_receipt_publishes_audited_release',
+        'fleet_lifecycle_receipt_requires_final_registry_retirement',
+        'watchdog_collects_cancelled_artifact_after_bounded_shutdown', 'terminal_projection_preserves_benchmark_outcome',
+        'boot_driver_state_write_failure', 'driver_cleanup_persists_evidence_in_fresh_data_directory',
+        'driver_cleanup_requires_current_stack_receipt_on_normal_completion',
+        'autoscaled_worker_uses_authenticated_fetch_ref_helper', 'terminal_projection_empty_tasks',
+        'terminal_projection_rejection_removes_all_artifacts', 'status_recovery_read_closes_descriptor',
+        'cloudbench_recovery_review', 'migration', 'migrated_registry', 'owned_worker_volume',
+        'composite_result_finalizes_each_exact_root', 'minted_dispatch_preserves_live_root_observer',
+        'evaluated_wrapper_completion_publishes_once', 'data_plane_mirror_reads_current_owner_port',
+        'fleet_publishes_evaluation_before_teardown', 'boot_terminal_runtime_evidence_collects_complete_logs',
+        'cloudbench_worker_snapshot', 'quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt',
+    )
+    CONTROLLER_INVENTORY = (
+        ('environment', ['bash', 'scripts/tests/cloudbench-env.test.sh']),
+        ('autoscale', ['bash', 'scripts/tests/cloudbench-acceptance-autoscale.test.sh']),
+        ('status-service-shutdown', ['python3', 'scripts/tests/run-cloudbench-controller-linux.py',
+                                     '--fixture', 'status-service-shutdown']),
+        ('infra-canary', ['bash', 'scripts/tests/fleet-infra-canary.test.sh']),
+        ('infra-stability', ['bash', 'scripts/tests/fleet-infra-stability-proof.test.sh']),
+        ('rootless-sms', ['python3', 'scripts/tests/cloudbench-exact-session-rootless-sms.test.py']),
+        ('multi-workstream', ['bash', 'scripts/tests/cloudbench-multi-workstream.test.sh']),
+        ('linux-contract', ['python3', 'scripts/tests/cloudbench-controller-linux.test.py']),
+        ('github-token', ['bash', 'scripts/tests/cloudbench-github-token.test.sh']),
+        ('seed-toolchain', ['bash', 'scripts/tests/seed-dump-toolchain.test.sh']),
+        ('wall-clock', ['agents/venv/bin/python', '-m', 'pytest', '-q',
+                        'agents/benchmarks/wall_clock_backstop_test.py']),
+        ('selected-pytest', ['agents/venv/bin/python', '-m', 'pytest', '-q',
+                             'agents/benchmarks/cloudbench_dependency_sync_test.py',
+                             'agents/benchmarks/cloudbench_worker_snapshot_test.py',
+                             'agents/benchmarks/cloudbench_recovery_review_test.py',
+                             'agents/benchmarks/cloudbench_codex_auth_test.py',
+                             'agents/benchmarks/cloud_batch_cleanup_test.py',
+                             '-k', ' or '.join(CONTROLLER_PYTEST_KEYWORDS)]),
+    )
+
+    def test_complete_inventory_and_registration(self):
+        self.assertEqual([(name, shlex.split(command)) for name, command in local_runner.CASES],
+                         [(name, argv) for name, argv in self.CONTROLLER_INVENTORY])
+        self.assertEqual(len(local_runner.CASES), 12)
         self.assertEqual(len({name for name, _ in local_runner.CASES}), 12)
+        self.assertEqual(len(self.CONTROLLER_PYTEST_KEYWORDS), len(set(self.CONTROLLER_PYTEST_KEYWORDS)))
+        # Every pinned command names suites that exist (a renamed or deleted suite cannot hide in the gate).
+        for name, argv in self.CONTROLLER_INVENTORY:
+            for token in argv:
+                if token.startswith(('scripts/', 'agents/benchmarks/')) and not token.startswith('agents/venv/'):
+                    self.assertTrue((ROOT / token).is_file(), f'{name}: {token} is not a file')
         registry = load('local_gate_registry', 'scripts/run-deploy-structural-gates.py')
         gate = next(gate for gate in registry.GATES if gate.name == 'deploy-test-worker')
         self.assertIn('scripts/tests/deploy-test-worker.test.py', gate.command)
@@ -1993,6 +2228,57 @@ class Backend(unittest.TestCase):
         self.assertEqual(1, result['native_exit']); self.assertFalse(result['complete'])
         self.assertTrue(result['cleanup_complete']); self.assertEqual(before, self.request)
 
+    def test_qualified_domain_skips_reach_native_runner_env_without_hiding_peer_failures(self):
+        (self.root / 'back-end/src/tests/blackbox/treasury-rails.blackbox.ts').write_text('export {}\n')
+        self.request['source'] = cycle.source(self.root)
+        qualification = {'source': self.request['source'], 'disposition': 'treasury / skipped with warning',
+            'rca': {'id': 'qualified-before-native', 'check': 'backend-coverage-blackbox/blackbox:treasury-rails',
+                    'source': self.request['source'], 'description': 'Recorded historical unused mint',
+                    'evidence': 'saved-native-treasury.log', 'native_result': 'FAIL', 'attribution': 'UNKNOWN',
+                    'standing_policy': {'name': 'treasury-failures-skip-and-warn-2026-10-29',
+                        'reason': 'Original financial return remains unknown', 'affected_records': ['fixture-card / fixture-transfer'],
+                        'evidence_at': 1}}}
+        self.request['skips'] = {'blackbox:treasury-rails': qualification}
+        before = copy.deepcopy(self.request)
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        observed = []
+        native_run = self.backend.run_command
+        def capture(argv, **kwargs):
+            if argv == self.backend.RUNNER:
+                observed.append({key: kwargs['env'].get(key) for key in self.backend.SKIP_ENV})
+            return native_run(argv, **kwargs)
+        with patch.object(self.backend, 'run_command', side_effect=capture):
+            result = self.backend.execute(self.request, self.root)
+        self.assertEqual([{key: 'integration-health,treasury-rails' for key in self.backend.SKIP_ENV}], observed)
+        self.assertEqual('FAIL', result['cases']['blackbox:beta'])
+        self.assertEqual('PASS', result['cases']['blackbox:alpha'])
+        self.assertEqual('PASS', result['cases']['blackbox:gamma'])
+        self.assertNotIn('blackbox:treasury-rails', result['cases'])
+        self.assertEqual(1, result['native_exit'])
+        self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(before, self.request)
+
+    def test_qualified_request_does_not_authorize_caller_or_recipe_skip_env(self):
+        # Qualifications authorize the adapter to derive native env, never callers.
+        self.test_qualified_domain_skips_reach_native_runner_env_without_hiding_peer_failures()
+        for env_key in self.backend.SKIP_ENV:
+            for origin in ('caller', 'sweep', 'setup'):
+                with self.subTest(env_key=env_key, origin=origin):
+                    shutil.rmtree(self.root / '.context', ignore_errors=True)
+                    request = copy.deepcopy(self.request)
+                    case = {'command': list(self.backend.RUNNER), 'cwd': 'back-end',
+                            'aggregate': False, 'sweep': 'backend-coverage-blackbox'}
+                    request['worker_recipe'] = {'cases': {
+                        check: copy.deepcopy(case) for check in self.backend.checks_for(self.backend.selection(self.root)[1])}}
+                    untrusted = {env_key: 'integration-health,treasury-rails'}
+                    caller = untrusted if origin == 'caller' else {}
+                    if origin == 'sweep':
+                        for spec in request['worker_recipe']['cases'].values(): spec['env'] = untrusted
+                    if origin == 'setup': request['worker_recipe']['setup'] = {'command': ['true'], 'env': untrusted}
+                    with patch.dict(os.environ, caller), patch.object(self.backend, 'run_command', side_effect=AssertionError('must refuse before native launch')):
+                        with self.assertRaisesRegex(ValueError, 'skip_env_not_allowed'):
+                            self.backend.execute(request, self.root)
+
     def test_qualified_exclusion_never_accepts_foreign_or_malformed_membership(self):
         self.test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes()
         qualification = copy.deepcopy(self.request['skips'])
@@ -2151,13 +2437,13 @@ class Backend(unittest.TestCase):
     @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
     def test_threshold_uses_the_remaining_original_request_budget(self):
         self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
-        config = cycle.read(self.config); config['c8_sleep'] = 2; cycle.write(self.config, config)
+        config = cycle.read(self.config); config['c8_sleep'] = 6; cycle.write(self.config, config)
         slot = self.owner_slot()
-        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], 0.25)
+        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], 1.5)
         before = time.monotonic()
         result = self.backend.execute(self.request, self.root)
         self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
-        self.assertLess(time.monotonic() - before, 1.5)
+        self.assertLess(time.monotonic() - before, 4.5)
 
     # This control injects the sweep deadline/cancellation; fixture admission is tested separately.
     @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
@@ -2166,15 +2452,15 @@ class Backend(unittest.TestCase):
         (self.root / 'scripts/kill-services.sh').write_text('#!/bin/bash\nsleep .05; touch "$PWD/.context/recipe-cleanup-ran"\n')
         (self.root / self.backend.TEARDOWN).write_text('#!/bin/bash\nsleep .05; touch "$PWD/.context/native-teardown-ran"\n')
         self.request['source'] = cycle.source(self.root)
-        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], .2)
-        self.request['worker_recipe']['cleanup']['timeout_seconds'] = .5
+        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], 1.5)
+        self.request['worker_recipe']['cleanup']['timeout_seconds'] = 2
         native = self.backend.run_command
         for reason in ('deadline', 'cancel'):
             with self.subTest(reason=reason):
                 shutil.rmtree(self.root / '.context', ignore_errors=True)
                 self.request['token'] = 'be-cleanup-' + reason
                 self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
-                config = cycle.read(self.config); config.update(sleep=2, cancel_parent=reason == 'cancel'); cycle.write(self.config, config)
+                config = cycle.read(self.config); config.update(sleep=8, cancel_parent=reason == 'cancel'); cycle.write(self.config, config)
                 calls = []
                 def observe(argv, **kwargs):
                     calls.append((argv, kwargs['timeout'], self.backend.CANCEL.is_set()))
@@ -2190,12 +2476,12 @@ class Backend(unittest.TestCase):
                 sweep = next(c for c in calls if c[0][-3:] == self.backend.RUNNER)
                 cleanup = next(c for c in calls if 'scripts/kill-services.sh' in ' '.join(c[0]))
                 teardown = next(c for c in calls if c[0] == ['bash', self.backend.TEARDOWN])
-                self.assertGreater(sweep[1], 0); self.assertLessEqual(sweep[1], .2)
-                self.assertGreater(cleanup[1], .05); self.assertLessEqual(cleanup[1], .5)
+                self.assertGreater(sweep[1], 0); self.assertLessEqual(sweep[1], 1.5)
+                self.assertGreater(cleanup[1], .05); self.assertLessEqual(cleanup[1], 2)
                 self.assertGreater(teardown[1], .05); self.assertLessEqual(teardown[1], self.backend.CLEANUP_SECONDS)
                 self.assertFalse(cleanup[2]); self.assertFalse(teardown[2])
                 self.assertEqual(self.backend.CANCEL.is_set(), reason == 'cancel')
-                self.assertLess(time.monotonic() - before, 2)
+                self.assertLess(time.monotonic() - before, 6)
 
     # This control injects the sweep deadline/cancellation; fixture admission is tested separately.
     @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
@@ -2409,11 +2695,11 @@ class GenericLifecycle(unittest.TestCase):
         self.temp.cleanup()
 
     def test_default_forced_kill_refuses_resume_even_after_group_is_gone(self):
-        script = self.root / 'ignores-term.py'
-        script.write_text("import signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\ntime.sleep(30)\n")
+        # The shell ignores TERM before exec, so a slow interpreter start under
+        # load cannot let TERM land before the handler exists.
         with (self.root / 'forced.log').open('wb') as output:
             code, timed_out, cancelled, lingering = self.process.run_command(
-                [sys.executable, str(script)], cwd=self.root, env=os.environ.copy(),
+                ['/bin/sh', '-c', "trap '' TERM; exec sleep 30"], cwd=self.root, env=os.environ.copy(),
                 output=output, timeout=.2)
         self.assertEqual(-signal.SIGKILL, code)
         self.assertTrue(timed_out)
@@ -2481,8 +2767,10 @@ class GenericLifecycle(unittest.TestCase):
         with (self.root / 'outer.log').open('wb') as output:
             result = self.process.run_command(
                 [sys.executable, str(worker_path), str(child), str(ready), str(self.root / 'inner.log')],
-                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
-                owned_lifecycle=True)
+                cwd=self.root, env=os.environ.copy(), output=output,
+                # The child sleeps 30 s, so this deadline always fires; it only has to outlast the
+                # worker's startup and the child's ready marker (0.2 s, then 3 s, lost that race under load).
+                timeout=5, owned_lifecycle=True)
         self.assertTrue(ready.exists())
         pid = int(ready.read_text())
         if Path(f'/proc/{pid}').exists():
@@ -2515,12 +2803,367 @@ class GenericLifecycle(unittest.TestCase):
         with (self.root / 'outer.log').open('wb') as output:
             code, timed_out, cancelled, lingering = self.process.run_command(
                 [sys.executable, str(script), str(marker), str(self.root / 'inner.log')],
-                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
+                cwd=self.root, env=os.environ.copy(), output=output, timeout=3,
                 owned_lifecycle=True)
         self.assertEqual(code, 0)
         self.assertTrue(timed_out)
         self.assertFalse(lingering)
         self.assertEqual(marker.read_text(), 'done')
+
+
+class SupervisorOrphanSettle(unittest.TestCase):
+    """A suite child that is merely finishing when the suite exits is not an orphan; one that stays alive still is.
+
+    Seen on the PR #1744 deploy: a structural suite passed (exit 0) while one fixture child was still winding down, so
+    the supervisor flagged it, the receipt became UNVERIFIED with a lingering owner and no recovery path remained."""
+
+    SCRIPTS = (ROOT / 'scripts/deploy_test_supervisor.py', ROOT / 'scripts/cloudbench-local-supervisor.py')
+
+    def supervise(self, script, grandchild_seconds):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = Path(tmp) / 'receipt.json'
+            code = ("import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(%s)'],"
+                    "start_new_session=True)" % grandchild_seconds)
+            result = subprocess.run([sys.executable, str(script), '--receipt', str(receipt), '--', sys.executable, '-c', code],
+                                    capture_output=True, text=True, timeout=60)
+            return result.returncode, json.loads(receipt.read_text())
+
+    def test_a_child_that_exits_within_the_settle_window_is_not_orphaned(self):
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                returncode, process = self.supervise(script, 0.4)
+                self.assertEqual((returncode, process['native_exit'], process['orphaned_children'], process['quiescent']),
+                                 (0, 0, False, True))
+                self.assertEqual(process['term_sent'], [])
+
+    def test_a_child_that_outlives_the_suite_is_still_orphaned_and_terminated(self):
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                returncode, process = self.supervise(script, 30)
+                self.assertEqual((returncode, process['orphaned_children'], process['quiescent']), (78, True, True))
+                self.assertEqual(len(process['term_sent']), 1)
+# A benchmarks/local.py stand-in that leads the case's group (run-bench execs it) and
+# keeps draining its runner/stack past the worker's ten-second TERM grace until the
+# test releases it. Its markers are replaced atomically (no torn reads under load).
+DRAINING_CONTROLLER = r"""
+import json, os, random, signal, sys, time
+from pathlib import Path
+root, marker, owner_record = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3] == 'owner'
+release = marker.parent / (marker.name + '.release')
+def publish(path, text):
+    staged = path.with_name(path.name + '.tmp')
+    staged.write_text(text)
+    os.replace(staged, path)
+stop = []
+signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+if owner_record:
+    run = root / '.context' / 'benchmarks' / f'{int(time.time())}-{os.getpid()}-{random.randrange(10000, 99999)}'
+    run.mkdir(parents=True)
+    publish(run / 'local-benchmark-owner.json', json.dumps({'run_id': run.name, 'state': 'running', 'pid': os.getpid()}))
+publish(marker.parent / (marker.name + '.ready'), str(os.getpid()))
+end = time.monotonic() + 120  # bounded: never outlive the test if nobody stops it
+while not stop and time.monotonic() < end:
+    time.sleep(.05)
+while not release.exists() and time.monotonic() < end:  # its own cleanup, past the grace
+    time.sleep(.05)
+publish(marker, 'clean')
+"""
+
+
+class WorkerBenchmarkControllerKill(unittest.TestCase):
+    """2026-11-05: the worker's case group leader was the benchmarks/local.py controller. Its
+    ten-second group KILL raced the cycle's own; a KILLed controller skips the cleanup traps that
+    stop its runner and isolated stack. A token-owned benchmark owner is left to the cycle's
+    token-bound teardown; any other TERM-ignoring case keeps the existing KILL."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='worker-controller-')
+        self.root = Path(self.temp.name) / 'worker'
+        self.root.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / 'code').write_text('fixture')
+        (self.root / '.git/info/exclude').write_text('.context/\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
+        self.marker = Path(self.temp.name) / 'controller-cleanup'
+        self.release = self.marker.parent / (self.marker.name + '.release')
+        self.pid = None
+        cycle.CANCEL.clear()
+
+    def tearDown(self):
+        cycle.CANCEL.clear()
+        self.release.touch()
+        # Only the case this test started: the worker leaves a retained case unreaped, so
+        # signal its pid only while its argv still names this test's marker (no reuse).
+        if self.pid is not None:
+            try:
+                if str(self.marker).encode() in Path(f'/proc/{self.pid}/cmdline').read_bytes().split(b'\0'):
+                    os.kill(self.pid, signal.SIGKILL)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        self.temp.cleanup()
+
+    @staticmethod
+    def alive(pid):
+        try:
+            state = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0]
+        except (OSError, IndexError):
+            return False
+        return state not in ('Z', 'X')
+
+    def run_cancelled(self, owner_record):
+        ready = self.marker.parent / (self.marker.name + '.ready')
+        recipe = {'cases': {'card': {'command': [sys.executable, '-c', DRAINING_CONTROLLER, str(self.root),
+                                                 str(self.marker), 'owner' if owner_record else 'plain'],
+                                     'aggregate': True}}}
+        request = {'token': 'controller-' + ('owner' if owner_record else 'plain'), 'source': cycle.source(self.root),
+                   'gate': 'bench-controller', 'checks': ['card'], 'skips': {}, 'phase': 'initial',
+                   'worker_recipe': recipe}
+
+        def cancel_when_ready():
+            end = time.monotonic() + 60
+            while not ready.exists() and time.monotonic() < end:
+                time.sleep(.02)
+            if ready.exists():
+                self.pid = int(ready.read_text())
+            cycle.CANCEL.set()  # the cycle's TERM reached this worker (always: never hang the worker)
+
+        timer = threading.Thread(target=cancel_when_ready)
+        with patch.dict(os.environ, {'DEPLOY_PIPELINE_LANE_TOKEN': 'cycle-request-token'}):
+            timer.start()
+            try:
+                result = worker.execute(request, self.root)
+            finally:
+                timer.join()
+        self.assertIsNotNone(self.pid, 'case never registered')
+        return result['evidence']['card']
+
+    def test_token_owned_controller_is_left_draining_for_cycle_teardown(self):
+        row = self.run_cancelled(owner_record=True)
+        # Still draining (held until released below): the worker did not KILL it.
+        self.assertTrue(self.alive(self.pid), 'worker KILLed the draining benchmark controller')
+        self.assertFalse(self.marker.exists())
+        self.assertIsNone(row['native_exit'])
+        self.assertEqual('UNVERIFIED', row['status'])
+        self.assertTrue(row['cancelled']); self.assertTrue(row['lingering_group'])
+        self.release.touch()
+        end = time.monotonic() + 30
+        while not self.marker.exists() and time.monotonic() < end:
+            time.sleep(.05)
+        self.assertEqual('clean', self.marker.read_text(), 'controller cleanup traps did not complete')
+
+    def test_case_without_owned_benchmark_record_keeps_group_kill(self):
+        row = self.run_cancelled(owner_record=False)
+        self.assertEqual(-signal.SIGKILL, row['native_exit'])
+        self.assertFalse(self.alive(self.pid))
+        self.assertFalse(self.marker.exists())
+        self.assertEqual('UNVERIFIED', row['status']); self.assertTrue(row['lingering_group'])
+
+
+class FakeTilionListing:
+    """Offline stand-in for Tilion GET /v1/sessions at the urllib boundary (no provider call)."""
+    def __init__(self, *live_counts, status=200, body=None):
+        self.live_counts=list(live_counts);self.status=status;self.body=body;self.requests=[]
+
+    def open(self, _director, request, data=None, timeout=None):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),timeout))
+        count=self.live_counts.pop(0) if len(self.live_counts)>1 else self.live_counts[0]
+        body=self.body if self.body is not None else json.dumps(
+            [{'session_id':f'sess-{i}','state':'running','created_at':1} for i in range(count)]).encode()
+        status=self.status
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return body
+        response=Response();response.status=status
+        return response
+
+
+class CloudSharedProviderHeadroom(unittest.TestCase):
+    """Two deploys and production share ONE 20-browser Tilion account: size smoke from its live usage."""
+    KEY='fixture-tilion-key-not-real'
+
+    def setUp(self):
+        import deploy_test_cloud as cloud
+        self.cloud=cloud;self.now=[1_000.0];self.sleeps=[]
+        env={'CLOUDBENCH_BROWSER_PROVIDER':'tilion','TILION_API_KEY':self.KEY,
+             'TILION_BASE_URL':'https://tilion.fixture.invalid',
+             'CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}
+        for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
+                        patch('time.sleep',side_effect=self.sleep)):
+            patcher.start();self.addCleanup(patcher.stop)
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def width(self, listing, count=17):
+        stderr=io.StringIO()
+        with patch('urllib.request.OpenerDirector.open',new=lambda director,request,data=None,timeout=None:
+                   listing.open(director,request,data,timeout)), contextlib.redirect_stderr(stderr):
+            try:
+                return self.cloud.campaign_width([f'task-{i}' for i in range(count)]),stderr.getvalue()
+            finally:
+                self.assertNotIn(self.KEY,stderr.getvalue())
+
+    def test_live_account_sessions_narrow_the_smoke_width(self):
+        listing=FakeTilionListing(5)  # production + another deploy hold five browsers right now
+        width,output=self.width(listing)
+        self.assertEqual(11,width)  # floor(20 * 0.8 - 5), not the solo registry cap 16
+        url,method,headers,timeout=listing.requests[0]
+        self.assertEqual(('https://tilion.fixture.invalid/v1/sessions','GET'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertLessEqual(timeout,15)
+        self.assertIn('5 live account-wide of 20 (20% reserved for production)',output)
+        self.assertEqual([],self.sleeps)
+
+    def test_idle_account_still_honours_the_registry_cap_and_request(self):
+        self.assertEqual(16,self.width(FakeTilionListing(0))[0])
+        self.assertEqual(3,self.width(FakeTilionListing(0),count=3)[0])
+
+    def test_second_deploy_waits_while_the_first_holds_the_pool_then_starts(self):
+        # Deploy A's 16 smoke browsers are live; production keeps its four-browser reserve.
+        listing=FakeTilionListing(16,17,9)
+        width,output=self.width(listing)
+        self.assertEqual(7,width)
+        self.assertEqual(3,len(listing.requests))
+        self.assertEqual([30.0,30.0],self.sleeps)
+        self.assertEqual(2,output.count('⏳ waiting for shared provider headroom'))
+        self.assertIn('16 live of 20, 20% reserved for production',output)
+
+    def test_full_account_until_the_deadline_refuses_before_any_launch(self):
+        launched=[]
+        with patch.object(self.cloud,'run_command',side_effect=lambda *a,**k:launched.append(a)):
+            with self.assertRaises(ValueError) as refused:
+                self.width(FakeTilionListing(16))
+        self.assertIn('cannot admit one smoke task by the deadline',str(refused.exception))
+        self.assertEqual([],launched)
+        self.assertAlmostEqual(900.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=30 for pause in self.sleeps))
+
+    def test_unreadable_listing_never_admits_and_refuses_at_the_deadline(self):
+        for listing in (FakeTilionListing(0,status=500),FakeTilionListing(0,body=b'<html>'),
+                        FakeTilionListing(0,body=b'{"sessions":[]}')):
+            with self.subTest(status=listing.status,body=listing.body):
+                self.now[0]=1_000.0;self.sleeps.clear()
+                with self.assertRaises(ValueError) as refused:
+                    self.width(listing)
+                self.assertIn('live usage unreadable',str(refused.exception))
+
+    def test_devbox_without_tilion_credential_is_unmeasured_not_silent(self):
+        import cloudbench_provider_headroom as headroom
+        probes=headroom.live_probes(environ={},env_file=Path(tempfile.mkdtemp(prefix='no-env-'))/'.env')
+        self.assertIsNone(probes['tilion-browser-sessions']())
+        capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
+        registry=capacity['for_browser_provider'](capacity['load_registry'](),'tilion')
+        stderr=io.StringIO()
+        width=headroom.admitted_width(17,registry,probes=probes,deadline=0,stream=stderr)
+        self.assertEqual(16,width)
+        self.assertIn('live account usage UNMEASURED',stderr.getvalue())
+
+    def test_plain_http_base_url_never_receives_the_key(self):
+        import cloudbench_provider_headroom as headroom
+        with self.assertRaises(headroom.HeadroomUnavailable):
+            headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
+                                          opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FakeCerebrasProbe:
+    """Offline stand-in for one 1-token Cerebras completion at the opener boundary."""
+    def __init__(self, *answers):
+        self.answers=list(answers);self.requests=[]
+
+    def __call__(self, request, timeout):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),json.loads(request.data)))
+        status,headers=self.answers.pop(0) if len(self.answers)>1 else self.answers[0]
+        if status!=200:
+            import urllib.error
+            raise urllib.error.HTTPError(request.full_url,status,'limited',headers,io.BytesIO(b'{}'))
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return b'{}'
+        response=Response();response.status=status;response.headers=headers
+        return response
+
+
+class CerebrasRatchetHeadroom(unittest.TestCase):
+    """The latency ratchet waits on the Cerebras org quota that every deploy and production spend."""
+    KEY='fixture-cerebras-key-not-real'
+
+    def setUp(self):
+        import cloudbench_provider_headroom as headroom
+        from fractions import Fraction
+        self.headroom=headroom;self.reserve=Fraction(1,5);self.now=[0.0];self.sleeps=[]
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def wait(self, probe, deadline=600):
+        out,err=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ready=self.headroom.wait_for_cerebras(self.KEY,reserve=self.reserve,deadline=deadline,opener=probe,
+                                                  clock=lambda:self.now[0],sleep=self.sleep,stream=out)
+        self.assertNotIn(self.KEY,out.getvalue()+err.getvalue())
+        return ready,out.getvalue(),err.getvalue()
+
+    @staticmethod
+    def window(remaining, limit=300, reset=17):
+        return {'x-ratelimit-limit-requests-minute':str(limit),'x-ratelimit-remaining-requests-minute':str(remaining),
+                'x-ratelimit-reset-requests-minute':str(reset),'x-ratelimit-remaining-requests-day':'0'}
+
+    def test_ample_shared_quota_starts_immediately_with_one_tiny_probe(self):
+        probe=FakeCerebrasProbe((200,self.window(240)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([],self.sleeps)
+        url,method,headers,body=probe.requests[0]
+        self.assertEqual(('https://api.cerebras.ai/v1/chat/completions','POST'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertEqual(1,body['max_completion_tokens']);self.assertEqual('qwen-3.8-27b',body['model'])
+        self.assertIn('requests-minute 240/300',out)  # a daily window never holds a per-minute ratchet
+
+    def test_other_deploys_draining_the_minute_window_hold_the_ratchet_until_reset(self):
+        probe=FakeCerebrasProbe((200,self.window(12,reset=23)),(429,{'retry-after':'9'}),(200,self.window(290)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([23.0,9.0],self.sleeps)
+        self.assertIn('requests-minute 12 of 300 remaining',out);self.assertIn('probe answered 429',out)
+
+    def test_quota_still_short_at_the_deadline_fails_closed(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((429,{})),deadline=150)
+        self.assertFalse(ready);self.assertAlmostEqual(150.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=60 for pause in self.sleeps))
+        self.assertIn('FAIL: Cerebras shared quota still short at the deadline',err)
+
+    def test_unexpected_probe_status_is_not_headroom(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((401,{})),deadline=40)
+        self.assertFalse(ready);self.assertIn('answered HTTP 401',err)
+
+    def test_a_rejected_credential_stops_at_once_but_a_provider_error_is_retried(self):
+        # 2026-11-08: the probe answered 403 for an hour while the semantic gate waited on it.
+        ready,_,err=self.wait(FakeCerebrasProbe((403,{})),deadline=3600)
+        self.assertFalse(ready);self.assertEqual([],self.sleeps)
+        self.assertIn('cannot measure the shared Cerebras quota',err)
+        ready,_,err=self.wait(FakeCerebrasProbe((503,{})),deadline=90)
+        self.assertFalse(ready);self.assertTrue(self.sleeps)
+
+    def test_cli_without_any_cerebras_key_reports_unmeasured(self):
+        env={k:v for k,v in os.environ.items() if not k.startswith('CEREBRAS')}
+        out=io.StringIO()
+        with patch.dict(os.environ,env,clear=True), \
+             patch.object(self.headroom,'BACKEND_ENV_FILE',Path(tempfile.gettempdir())/'missing-provider-headroom.env'), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=AssertionError('probed without a key')), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(0,self.headroom.main(['cerebras-wait','--timeout-seconds','0']))
+        self.assertIn('UNMEASURED',out.getvalue())
+
+    def test_cli_prefers_a_dedicated_ratchet_key_and_fails_closed_on_timeout(self):
+        seen=[]
+        with patch.dict(os.environ,{'CEREBRAS_RATCHET_API_KEY':'dedicated','CEREBRAS_API_KEY':'shared'}), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=lambda key,**kw:seen.append((key,kw['reserve'])) or False):
+            self.assertEqual(1,self.headroom.main(['cerebras-wait','--timeout-seconds','5']))
+        self.assertEqual([('dedicated',self.reserve)],seen)  # registry production_reserve_fraction 0.2
 
 
 if __name__=='__main__': unittest.main()

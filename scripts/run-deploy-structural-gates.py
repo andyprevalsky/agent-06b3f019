@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Mapping, Sequence
@@ -56,6 +56,33 @@ def gate_environment() -> dict[str, str]:
     if venv_runs_the_gates():
         env["PATH"] = f"{VENV_BIN}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+# Live per-suite rows for the gate's worker (scripts/deploy_gate_progress.py).
+# Only this runner writes them: its suites run without the variable, so a suite
+# that exercises this runner with failing fixture gates cannot report those
+# fixtures as failures of the real gate.
+PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
+
+
+def report_progress(suite: str, status: str, *, detail: str = "", log: str = "") -> None:
+    """Append one suite row to the worker's progress file, if it named one.
+
+    Advisory: without the variable nothing is imported or written, and a
+    missing helper or unwritable file never changes the result or output.
+    """
+    if not os.environ.get(PROGRESS_ENV):
+        return
+    scripts = str(Path(__file__).resolve().parent)
+    try:
+        sys.path.insert(0, scripts)
+        try:
+            import deploy_gate_progress
+        finally:
+            sys.path.remove(scripts)
+        deploy_gate_progress.report(suite, status, scope="suite", detail=detail, log=log)
+    except (ImportError, OSError, ValueError):
+        return
 
 
 SIGNAL_GRACE_SECONDS = 1.0
@@ -120,6 +147,12 @@ class Gate:
     # Split into this many processes; each gets DEPLOY_GATE_SHARD=i/N and the
     # suite selects every N-th test (scripts/tests/deploy_gate_shard.py).
     shards: int = 1
+    # Jobs sharing a non-empty group never run at the same time. A suite that
+    # parks a real non-dumpable same-user child (PR_SET_DUMPABLE=0: unreadable
+    # cwd) as its fixture, or scans the whole /proc table and refuses on any
+    # such process, must not overlap another suite doing either: the scan
+    # cannot tell a sibling suite's fixture from a leaked process.
+    exclusive: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,6 +180,7 @@ class Job:
             env[SHARD_ENV] = f"{self.shard}/{self.gate.shards}"
         else:
             env.pop(SHARD_ENV, None)
+        env.pop(PROGRESS_ENV, None)
         return env
 
 
@@ -158,6 +192,15 @@ class RunningGate:
     output_path: Path
     started: float
     timed_out: bool = False
+
+
+def next_launchable(pending: Sequence[Job], running: Sequence[RunningGate]) -> Job | None:
+    """First pending job (queue order) whose exclusive group no running job holds."""
+    held = {item.gate.gate.exclusive for item in running if item.gate.gate.exclusive}
+    for job in pending:
+        if not job.gate.exclusive or job.gate.exclusive not in held:
+            return job
+    return None
 
 
 def expand_jobs(gates: Sequence[Gate], first: frozenset[str] = frozenset()) -> list[Job]:
@@ -274,11 +317,23 @@ def plan_gates(
     return planned
 
 
+# Suites that create or scan unreadable same-user processes (see Gate.exclusive):
+# deploy-test-cycle (local-cleanup quiet()), deploy-test-plan (namespace_quiet())
+# and deploy-structural-runner (a foreign non-dumpable sibling fixture).
+PROC_OBSERVATION = "proc-observation"
+
 GATES = (
-    Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py")),
-    Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py")),
+    Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
+    Gate("deploy-cli", ("python3", "scripts/tests/deploy-cli.test.py")),
+    Gate("deploy-gates", ("python3", "scripts/tests/deploy-gates.test.py")),
+    Gate("deploy-test-github", ("python3", "scripts/tests/deploy-test-github.test.py")),
+    Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
+    Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
+    Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
+    Gate("mac-app-release-drift", ("bash", "scripts/tests/mac-app-release-drift.test.sh")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",
@@ -288,10 +343,12 @@ GATES = (
     Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
     Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh"), expected_seconds=55),
+    Gate("devbox-teardown", ("bash", "scripts/tests/devbox-teardown.test.sh"), expected_seconds=15),
     Gate(
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
+    Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
     Gate(
         "canonical-seed-whatsapp-content",
@@ -308,6 +365,14 @@ GATES = (
     Gate(
         "benchmark-history-latest-only",
         ("python3", "scripts/tests/benchmark-history-latest-only.test.py"),
+    ),
+    Gate(
+        "benchmark-history-backfill",
+        ("python3", "scripts/tests/benchmark-history-backfill.test.py"),
+    ),
+    Gate(
+        "concurrent-pr-shared-paths",
+        ("python3", "scripts/tests/concurrent-pr-shared-paths.test.py"),
     ),
     Gate(
         "cloudbench-full-selection",
@@ -334,6 +399,11 @@ GATES = (
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
+    Gate(
+        "cloudbench-cross-devbox-admission",
+        ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
+    ),
+    Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -449,6 +519,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
     ),
     Gate(
+        "cloudbench-shared-transport-integration",
+        ("python3", "scripts/tests/cloudbench-shared-transport-integration.test.py"),
+    ),
+    Gate(
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"), expected_seconds=200, shards=2
     ),
@@ -493,7 +567,8 @@ GATES = (
     Gate("backend-coverage-sharded", ("bash", "scripts/tests/backend-coverage-sharded.test.sh")),
     Gate(
         "deploy-structural-runner",
-        ("python3", "scripts/tests/run-deploy-structural-gates.test.py"), expected_seconds=117
+        ("python3", "scripts/tests/run-deploy-structural-gates.test.py"), expected_seconds=117,
+        exclusive=PROC_OBSERVATION,
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
@@ -539,6 +614,9 @@ GATES = (
         "agents-blackbox-registration",
         ("python3", "agents/tests/structural/structural_test_registration.py"),
     ),
+    # Scripts rank GITHUB_TOKEN, GITHUB_TOKEN_2..9 and GITHUB_DISPATCH_TOKEN by
+    # remaining quota; one shared user token was drained twice in an hour.
+    Gate("github-token-pool", ("python3", "scripts/tests/github-token-pool.test.py")),
 )
 
 
@@ -636,6 +714,10 @@ def run_gates(
     running: list[RunningGate] = []
     results: dict[str, tuple[int, float, str]] = {}
     timed_out: set[str] = set()
+    # Jobs still to finish per suite, and suites whose progress row is written:
+    # a suite fails with its first failed shard and passes with its last shard.
+    unfinished = Counter(job.gate.name for job in jobs)
+    reported: set[str] = set()
     received_signal = 0
 
     def forward(signum: int, _frame: object) -> None:
@@ -660,7 +742,10 @@ def run_gates(
                     and not received_signal
                     and not repeated_failure
                 ):
-                    job = pending.popleft()
+                    job = next_launchable(pending, running)
+                    if job is None:
+                        break  # everything pending waits for a running exclusive job
+                    pending.remove(job)
                     output_path = output_root / (job.label.replace("/", "-of-") + ".log")
                     output = output_path.open("wb")
                     process = subprocess.Popen(
@@ -709,6 +794,16 @@ def run_gates(
                         file=sys.stderr,
                         flush=True,
                     )
+                    suite = item.gate.gate.name
+                    unfinished[suite] -= 1
+                    if suite not in reported and (exit_code != 0 or not unfinished[suite]):
+                        reported.add(suite)
+                        report_progress(
+                            suite,
+                            "PASS" if exit_code == 0 else "FAIL",
+                            detail="" if exit_code == 0 else rendered,
+                            log=str(item.output_path) if exit_code != 0 or not item.gate.shard else "",
+                        )
                     if exit_code != 0 and item.gate.gate.name in previously_failed:
                         repeated_failure = item.gate.label
 

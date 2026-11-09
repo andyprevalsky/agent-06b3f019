@@ -605,13 +605,13 @@ describe('Rose agent right-click menu', () => {
     mockProjectsApi([makeProject()]);
   });
 
-  it('lists exactly Archive · Pin · Rename · Copy (UI #26); removed items absent; Archive red', async () => {
+  it('lists exactly Archive · Pin · Rename · Move to… · Copy (UI #26); removed items absent; Archive red', async () => {
     renderBar();
     const menu = await openContextMenu(
       await screen.findByTestId('rose-agent-row-a-home'),
       'rose-agent-menu',
     );
-    expectAgentMenuEntries(menu);
+    expectAgentMenuEntries(menu, { move: true });
     expect(within(menu).getByRole('menuitem', { name: 'Archive agent' }).className).toContain(
       'text-[#e5484d]',
     );

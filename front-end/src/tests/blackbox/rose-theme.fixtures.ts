@@ -7,6 +7,9 @@
  * must keep rendering these exact bytes. header-desktop.html was re-captured
  * once for a non-dark-mode change: UI ledger row 66 removed the right app bar,
  * so the stock pill centers at left-1/2 without the --rose-apps-inset calc.
+ * background-mobile.html's energy layer was re-captured once for a
+ * non-dark-mode change: the full-screen per-frame canvas became 8
+ * CSS-animated pills (2026-11-05); the grid markup before it is unchanged.
  * query-box-desktop.html is the flagged (Rose Desktop) query box surface in
  * light mode, captured at ui-integration 511197ab0 just before the dark query
  * box surface / textarea / model chip (FE-13 visual pass) were added.

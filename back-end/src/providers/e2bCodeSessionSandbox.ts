@@ -76,6 +76,8 @@ export interface CodeAgentSessionResult {
   sandboxSize?: SandboxSize | null;
   /** Attached to a live CLI: its events before this spawn's goal are history. */
   historyEvents?: number;
+  /** How long the ws-server took to serve, and the repo clone inside that (null: none). */
+  startup?: { wsReadyMs: number; cloneMs: number | null };
 }
 
 /** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */
@@ -362,11 +364,20 @@ function spawnTurnId(codeSession: CodeSessionRow | null, taskId: string): string
  *   delivered / duplicate with `attached: true`
  *                         ─► attached: the in-flight turn, tools and background
  *                            processes continue; the goal is the CLI's next turn
+ *   queued (reason direct_hold) with `attached: true`
+ *                         ─► attached: the user is chatting with the CLI
+ *                            directly; the goal is its first turn after the
+ *                            hand back
+ *   relay_paused (a ws-server built before held attaches; the user holds the
+ *   CLI)                  ─► the live ws-server is NEVER stopped (that would
+ *                            end the user's chat and drop held turns): throws
+ *                            CodeSessionHeldError; the spawn's retry attaches
+ *                            after the hand back
  *   session_ended (stdin closed, CLI exited), credential_changed (the spawn
- *   leased another credential than the CLI holds), relay_paused (the user
- *   holds the CLI), unsupported_settings, unreachable, any other refusal, an
- *   ack without `attached` (a ws-server started before this support), or no
- *   previous task of this provider on the sandbox
+ *   leased another credential than the CLI holds), unsupported_settings,
+ *   unreachable, any other refusal, an ack without `attached` (a ws-server
+ *   started before this support), or no previous task of this provider on
+ *   the sandbox
  *                         ─► the stale ws-server is stopped; the caller starts
  *                            a new one (`--resume` of the conversation)
  *
@@ -394,6 +405,7 @@ export async function attachLiveCodeCli(
     if (live.attached) return live;
     reason = live.reason;
   } catch (error) {
+    if (error instanceof CodeSessionHeldError) throw error;
     // No turn token (BACKEND_API_KEY unset), a failed task lookup or delivery:
     // the restart path works without any of them, as before live attach.
     reason = `attach_error: ${error instanceof Error ? error.message : String(error)}`;
@@ -405,6 +417,20 @@ export async function attachLiveCodeCli(
   });
   await stopStaleWsServer(sandbox);
   return { attached: false, reason };
+}
+
+/**
+ * The user holds the live CLI in direct chat and its ws-server cannot hold an
+ * attaching spawn (an older build): the session must not be stopped, so the
+ * create fails retryably and the spawn attaches after the hand back.
+ */
+export class CodeSessionHeldError extends Error {
+  constructor() {
+    super(
+      'The user is chatting with this code session directly; the spawn attaches after they hand it back'
+    );
+    this.name = 'CodeSessionHeldError';
+  }
 }
 
 /** One attach attempt; throws on a missing token or a failed lookup (the caller restarts). */
@@ -445,7 +471,12 @@ async function deliverGoalToLiveCli(
       ),
     },
   });
-  const reached = delivery.status === 'delivered' || delivery.status === 'duplicate';
+  if (delivery.status === 'rejected' && delivery.reason === 'relay_paused') {
+    throw new CodeSessionHeldError();
+  }
+  // Held for the user's direct chat: attached, the goal waits for the hand back.
+  const held = delivery.status === 'queued' && delivery.reason === 'direct_hold';
+  const reached = delivery.status === 'delivered' || delivery.status === 'duplicate' || held;
   if (!reached || delivery.attached !== true) {
     return {
       attached: false,
@@ -550,6 +581,23 @@ export async function releaseSandboxAfterFailedStart(
 }
 
 /**
+ * A project restore that failed. A persistent session's sandbox may hold work
+ * newer than its last checkpoint (a resumed sandbox keeps its filesystem), so
+ * it is paused like any failed start and the retry resumes it; only a one-shot
+ * sandbox is killed, with the restore error kept if the kill itself fails.
+ */
+export async function releaseSandboxAfterFailedRestore(
+  sandbox: Sandbox,
+  codeSession: SpawnCodeSession | null
+): Promise<void> {
+  if (codeSession === null) {
+    await sandbox.kill().catch(() => undefined);
+    return;
+  }
+  await releaseSandboxAfterFailedStart(sandbox, codeSession);
+}
+
+/**
  * Branch the sandbox ws-server checks out before the CLI starts (plan §1b).
  * CODE_AGENT_BASE_BRANCH empty = cut from the repository's default branch.
  */
@@ -596,6 +644,7 @@ export async function createLocalCodeSessionFallback(
     projectWorkspace?: ProjectWorkspace | null;
     claudeTokenSource: string | null;
     claudeTokenIntegrationId: string | null;
+    taskName?: string | null;
   }
 ): Promise<CodeAgentSessionResult | null> {
   if (!isLocalClaudeCodeFallbackEligible(err)) return null;

@@ -36,6 +36,7 @@ import {
   testGenericUpload_withFile,
   testGenericUpload_missingIntegrationType,
   testLinkedinUpload_nonZipFile,
+  testLinkedinUpload_firstInstallmentWithoutConnections_422,
   testContactsUpload_nonVcfFile,
   testEmailArchiveUpload_nonZipFile,
   testPasswordsRequest_happyPath,
@@ -152,6 +153,10 @@ export function parallelTestsPart4() {
     },
     // File type validation
     { name: 'POST /linkedin/upload non-zip -> 400', fn: testLinkedinUpload_nonZipFile },
+    {
+      name: 'POST /linkedin/upload first installment without Connections.csv -> 422',
+      fn: testLinkedinUpload_firstInstallmentWithoutConnections_422,
+    },
     { name: 'POST /contacts/upload non-vcf -> 400', fn: testContactsUpload_nonVcfFile },
     { name: 'POST /email/upload non-zip -> 400', fn: testEmailArchiveUpload_nonZipFile },
     // Passwords request

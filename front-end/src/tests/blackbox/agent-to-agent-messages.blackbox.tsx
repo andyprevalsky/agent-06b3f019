@@ -188,7 +188,7 @@ describe('agent tool chips', () => {
       'Waiting up to 10m for /root/x, /root/y',
     );
     const { unmount } = renderBubble(<MessageBubble message={waiting} />);
-    expect(screen.getByText('Waiting for /root/x, /root/y')).toBeInTheDocument();
+    expect(screen.getByTestId('wait-agent-targets')).toHaveTextContent(/^Waiting for X, Y$/);
     // Not main's bulky WaitForChip card (that stays for timestamp/condition waits).
     expect(screen.queryByText('Checking')).not.toBeInTheDocument();
     unmount();
@@ -198,9 +198,13 @@ describe('agent tool chips', () => {
       'Woken by agent finished (/root/x) after 2m.\nAgents:\n- /root/x completed',
     );
     renderBubble(<MessageBubble message={done} />);
-    const title = 'Waited for /root/x, /root/y · woken by agent finished (/root/x) after 2m';
+    // Task titles (each with its agent icon when known) + what woke the wait.
+    const title = screen.getByTestId('wait-agent-targets');
+    expect(title).toHaveTextContent(
+      /^Waited for X, Y · woken by agent finished \(\/root\/x\) after 2m$/,
+    );
     expect(screen.queryByText('Complete')).not.toBeInTheDocument();
-    await expand(title);
+    await userEvent.click(title);
     expect(screen.getByText('/root/x completed')).toBeInTheDocument();
   });
 

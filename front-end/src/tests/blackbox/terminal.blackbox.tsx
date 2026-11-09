@@ -274,6 +274,39 @@ describe('Terminal page', () => {
       );
     });
 
+    it('anchors the opening caption inside the large grid tile on phones only', async () => {
+      setViewport(390, 844);
+
+      renderWithProviders(<Terminal />);
+
+      const loader = await screen.findByTestId('terminal-opening-loader');
+      const slot = await screen.findByTestId('terminal-opening-caption-slot');
+      expect(loader).toContainElement(slot);
+      expect(slot).toContainElement(screen.getByTestId('opening-message-display'));
+      expect(slot).toHaveClass('max-md:absolute', 'max-md:inset-x-0', 'max-md:!mt-0');
+      expect(slot.className).toContain('max-md:top-[calc(0.4*var(--app-height,100dvh)+214.5px');
+      // md+ (iPad, desktop) keeps the in-flow caption: only max-md: variants
+      // position it, and its base class is the original -mt-3.
+      expect(slot).toHaveClass('-mt-3');
+      const baseClasses = slot.className.split(/\s+/).filter((c) => !c.includes(':'));
+      expect(baseClasses).toEqual(['-mt-3']);
+    });
+
+    it('keeps the standalone PWA mobile header free of backdrop blur, with safe-area padding', async () => {
+      setViewport(390, 844);
+
+      renderWithProviders(<Terminal />);
+
+      await screen.findByTestId('terminal-opening-loader');
+      const header = document.querySelector('header.fixed.top-0');
+      expect(header).not.toBeNull();
+      expect(header).toHaveClass('pt-[var(--safe-area-inset-top)]');
+      expect(header).toHaveClass(
+        '[@media(display-mode:standalone)]:backdrop-blur-none',
+        '[@media(display-mode:standalone)]:bg-background',
+      );
+    });
+
     it('locks document scroll while mounted so the mobile query box stays fixed', async () => {
       setViewport(390, 844);
       const root = document.documentElement;
@@ -308,7 +341,9 @@ describe('Terminal page', () => {
 
       const asciiTransform = await screen.findByTestId('terminal-opening-ascii-transform');
       expect(asciiTransform).toHaveClass('scale-95');
-      expect(asciiTransform).toHaveClass('translate-y-[5%]');
+      expect(asciiTransform).toHaveClass('max-md:absolute', 'max-md:-translate-y-1/2');
+      expect(asciiTransform.className).toContain('max-md:top-[calc(0.4*var(--app-height,100dvh)');
+      expect(asciiTransform.className).not.toContain('zoom');
       expect(asciiTransform).toHaveClass('md:scale-100');
       expect(asciiTransform).toHaveClass('md:translate-y-0');
     });

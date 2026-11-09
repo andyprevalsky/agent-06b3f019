@@ -88,6 +88,7 @@ async def _run_single_iteration(
     build_messages_override=None,
     get_pending_background_status_override=None,
     completion_handoff_override=None,
+    llm_response_text="",
 ):
     from loop.run_agent import run_agent
 
@@ -167,7 +168,7 @@ async def _run_single_iteration(
             else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         )
         return (
-            _DummyLLMResult("", selected_tool_calls),
+            _DummyLLMResult(llm_response_text, selected_tool_calls),
             selected_usage,
             detected_tools_ordered,
         )
@@ -365,7 +366,7 @@ async def test_browser_budget_handoff_before_llm_preserves_unused_allowance():
     assert result["status"] == "generation_handoff", result
     assert not posted and not executed
     assert not wf._cost_limit_wrapup_consumed, "handoff spent an allowance without a model call"
-    state = wf._continuation_resume_state(result["context"])
+    state = wf._continuation_resume_state()
     restored = AgentWorkflow()
     restored._restore_deployment_state(state)
     with patch("loop.run_agent.activity.heartbeat"):
@@ -575,6 +576,116 @@ async def test_tool_only_assistant_turn_persists_tool_calls():
 
     assert len(executed) == 1
     assert executed[0]["tool_call_id"] == "tc-web-search-1"
+
+
+_MEASURED_USAGE = {
+    "prompt_tokens": 10,
+    "completion_tokens": 596,
+    "total_tokens": 606,
+    "generation_started_at_ms": 1_793_939_000_000,
+    "generation_ended_at_ms": 1_793_939_002_400,
+}
+
+
+async def _posted_thought(usage):
+    _result, posted, _executed = await _run_single_iteration(
+        [{"tool": "web_search", "query": "rose repo"}],
+        [("web_search", "tc-web-search-1", 1.0)],
+        llm_usages_sequence=[dict(usage)],
+        llm_response_text="Searching for the repo first.",
+    )
+    return [m for m in posted if m["role"] == "ASSISTANT"][0]
+
+
+async def test_assistant_thought_records_measured_generation():
+    """C6 (Andy 2026-11-06): the root thought row's tok/s comes from the call's
+    measured output tokens over its request -> stream-end window, never an estimate."""
+    assistant = await _posted_thought(_MEASURED_USAGE)
+    assert assistant["metadata"]["generation"] == {
+        "output_tokens": 596,
+        "started_at": "2026-11-06T04:23:20.000Z",
+        "ended_at": "2026-11-06T04:23:22.400Z",
+    }
+    assert assistant["metadata"]["tool_calls"][0]["tool_call_id"] == "tc-web-search-1"
+    estimated = {"prompt_tokens": 10, "completion_tokens": 596, "total_tokens": 606}
+    no_window = {**_MEASURED_USAGE, "generation_ended_at_ms": _MEASURED_USAGE["generation_started_at_ms"]}
+    for usage in (estimated, {**_MEASURED_USAGE, "from_fast_cache": True}, no_window):
+        assert "generation" not in ((await _posted_thought(usage))["metadata"] or {})
+    # C24: a response returned in one 50 ms flush is RECORDED (tokens and duration); the UI
+    # reader (thoughtGeneration) is the one judge that calls its implied rate a burst, so the
+    # producer carries no bound of its own.
+    burst = {**_MEASURED_USAGE, "generation_ended_at_ms": 1_793_939_000_050}
+    assert (await _posted_thought(burst))["metadata"]["generation"] == {
+        "output_tokens": 596,
+        "started_at": "2026-11-06T04:23:20.000Z",
+        "ended_at": "2026-11-06T04:23:20.050Z",
+    }
+
+
+async def test_thought_generation_metadata_is_invisible_to_every_llm_builder():
+    """metadata.generation is UI-only: the main loop, verifier/summary and planner
+    message builders produce identical requests with or without it."""
+    from domains.set_plan.service import build_planner_messages
+    from helpers.llm import build_llm_messages, convert_context_to_messages, llm_generation_metadata
+
+    def context(metadata):
+        return [
+            {"role": "USER", "text": "Whats our rose repo looking like?", "timestamp": "2026-11-06T04:23:00Z"},
+            {
+                "role": "ASSISTANT",
+                "text": "Searching for the repo first.",
+                "timestamp": "2026-11-06T04:23:22Z",
+                "metadata": metadata,
+            },
+            {
+                "role": "TOOL",
+                "text": "Rose-Ai-Labs/rose",
+                "timestamp": "2026-11-06T04:23:24Z",
+                "metadata": {"toolCallId": "tc-1", "toolName": "web_search", "toolStatus": "FINISHED"},
+            },
+        ]
+
+    plain = {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-1", "query": "rose repo"}]}
+    # A steady recording and a burst one (C24: 596 tokens in 50 ms, which the UI reader
+    # flags as not streamed): neither may change anything a model or planner reads.
+    steady_generation = llm_generation_metadata(_MEASURED_USAGE)
+    burst_generation = llm_generation_metadata({**_MEASURED_USAGE, "generation_ended_at_ms": 1_793_939_000_050})
+    assert steady_generation and burst_generation and burst_generation["ended_at"].endswith(":20.050Z")
+    for generation in (steady_generation, burst_generation):
+        recorded = {**plain, "generation": generation}
+        assert recorded["generation"]
+        assert await build_llm_messages(context(plain), "system") == await build_llm_messages(
+            context(recorded), "system"
+        )
+        for include_assistant in (False, True):
+            assert convert_context_to_messages(
+                context(plain), include_assistant=include_assistant
+            ) == convert_context_to_messages(context(recorded), include_assistant=include_assistant)
+        assert build_planner_messages(context(plain)) == build_planner_messages(context(recorded))
+
+        # The remaining readers of an ASSISTANT row's metadata: the context compactor's
+        # summary input and size estimate, and the planner-memory transcript trim.
+        from helpers.summarize import _format_middle_for_prompt, estimate_context_tokens
+        from providers.planner_memory.transcript import trim_rows
+
+        assert _format_middle_for_prompt(context(plain), [0, 1, 2]) == _format_middle_for_prompt(
+            context(recorded), [0, 1, 2]
+        )
+        assert estimate_context_tokens(context(plain)) == estimate_context_tokens(context(recorded))
+
+        def memory_rows(metadata):
+            return [
+                {
+                    "id": f"m{index}",
+                    "createdAt": row["timestamp"],
+                    "role": row["role"],
+                    "message": row["text"],
+                    "metadata": row.get("metadata"),
+                }
+                for index, row in enumerate(context(metadata))
+            ]
+
+        assert trim_rows(memory_rows(plain)) == trim_rows(memory_rows(recorded))
 
 
 async def test_rejected_completion_continues_with_stable_schema():
@@ -4737,6 +4848,14 @@ async def run_all_tests():
     await r.record_async(
         "attempt_completion_result_reaches_the_verifier_as_authored_work",
         test_attempt_completion_result_reaches_the_verifier_as_authored_work,
+    )
+    await r.record_async(
+        "assistant_thought_records_measured_generation",
+        test_assistant_thought_records_measured_generation,
+    )
+    await r.record_async(
+        "thought_generation_metadata_is_invisible_to_every_llm_builder",
+        test_thought_generation_metadata_is_invisible_to_every_llm_builder,
     )
     await flush_realtime_broadcasts_for_tests()
     teardown_mock()

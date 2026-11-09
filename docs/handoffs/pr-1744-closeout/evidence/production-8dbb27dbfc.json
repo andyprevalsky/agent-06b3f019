@@ -1,0 +1,79 @@
+{
+  "agent_cutover": {
+    "required": true,
+    "runtime_files": [
+      "agents/domains/agent_messaging/handler.py",
+      "agents/domains/agent_messaging/repo.py",
+      "agents/domains/agent_messaging/types.py",
+      "agents/domains/spawn_claude_code_agent/config.py",
+      "agents/domains/spawn_claude_code_agent/handler.py",
+      "agents/domains/spawn_claude_code_agent/repo.py",
+      "agents/domains/spawn_claude_code_agent/service.py",
+      "agents/helpers/background_agents.py",
+      "agents/helpers/code_session_turns.py",
+      "agents/helpers/llm.py",
+      "agents/loop/run_agent.py",
+      "agents/utils/code_transcript.py",
+      "agents/workflows/agent_workflow.py",
+      "agents/workflows/background_agents.py"
+    ],
+    "workflow_changed": false
+  },
+  "changed_files": 227,
+  "cutover_verify": null,
+  "error": "exact deploy-agents.yml run for 8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9 did not start within 600s; do not dispatch production semantics: check GitHub Actions for the merge commit or start it with `gh workflow run deploy-agents.yml --ref main -f expected_sha=8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9`",
+  "finished_at": "2026-11-07T22:14:05Z",
+  "fly": {
+    "attempt": null,
+    "conclusion": null,
+    "deployment_token": null,
+    "job_id": null,
+    "job_stage": null,
+    "required": true,
+    "run_id": null,
+    "status": null,
+    "url": null
+  },
+  "github_waits": [
+    {
+      "head": "8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9",
+      "kind": "run-start",
+      "outcome": "timeout",
+      "polls": 99,
+      "run_id": null,
+      "waited_s": 600.4,
+      "workflow": "deploy-agents.yml"
+    }
+  ],
+  "merged_sha": "8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9",
+  "render": {
+    "backend_diff": [],
+    "deploy_id": "dep-dbnq0hlg1s2s73fro2g0",
+    "deploy_status": "live",
+    "equivalence": null,
+    "finished_at": "2026-11-07T22:11:10Z",
+    "live_commit": "8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9",
+    "merged_sha": "8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9",
+    "observed_live_commit": "8dbb27dbfc8ce068ca82bdca9b70dd9a37d1eea9",
+    "observed_live_deploy_id": "dep-dbnq0hlg1s2s73fro2g0",
+    "polls": 43,
+    "provider": "render",
+    "service_paths": [
+      "back-end/",
+      "render.yaml",
+      "package.json",
+      "package-lock.json"
+    ],
+    "started_at": "2026-11-07T22:04:05Z",
+    "status": "live",
+    "then": null,
+    "waited_s": 424.9,
+    "wall_s": 424.9
+  },
+  "schema_version": 1,
+  "semantic_dispatch": null,
+  "started_at": "2026-11-07T22:04:05Z",
+  "started_epoch": 1794089045.414045,
+  "status": "failed",
+  "wall_s": 600.4
+}

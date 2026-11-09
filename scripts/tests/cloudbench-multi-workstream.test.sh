@@ -39,6 +39,9 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 # ownership and release with the minimum real allocation; the focused reserve
 # tests cover sizing and low-space behavior separately.
 export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
+python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-port-allocation.test.py" || exit 1
+python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-process-cleanup.test.py" || exit 1
+python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-catalog.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-hub-reaping.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" || exit 1
 # A quarantined owner whose natively stopped guest never received its shutdown
@@ -196,7 +199,9 @@ cleanup() {
     fi
     if [ "$hub_cleanup_failed" = "0" ] && [ -n "$PORT_CLAIM_DIR" ]; then
         rm -f "$PORT_CLAIM_DIR/owner" 2>/dev/null || true
-        rmdir "$PORT_CLAIM_DIR" 2>/dev/null || true
+        # Keep the lock inode stable: unlinking it lets another process lock
+        # a replacement inode while an earlier descriptor is still live.
+        [ -z "${PORT_CLAIM_FD:-}" ] || exec {PORT_CLAIM_FD}>&-
     fi
     if [ "$hub_cleanup_failed" = "1" ]; then
         echo "ℹ️  retained cloudbench fixture because exact Hub teardown did not verify: $TMP_ROOT" >&2
@@ -759,49 +764,51 @@ cp "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
 # Cloud routing resolves the same two-shard task namespace as the real runner.
 # Keep the synthetic Fleet tasks explicit so an unknown name or absent shard
 # remains a hard failure instead of being silently coerced to real mode.
+# Match the existing --timeout 240 fixture calls; shorter explicit caps still
+# govern cancellation cases, and the 9000s default-detach case stays distinct.
 cat > "$SANDBOX/agents/benchmarks/tasks.json" <<'TASKCATALOG'
 [
-  {"name":"bench-alpha"},
-  {"name":"bench-beta"},
+  {"name":"bench-alpha","timeout_seconds":240},
+  {"name":"bench-beta","timeout_seconds":240},
   {"name":"bench-default-detach","timeout_seconds":9000},
-  {"name":"bench-detached-wait"},
-  {"name":"bench-invalid-recovery"},
-  {"name":"bench-detached-cancel"},
-  {"name":"bench-group-term"},
-  {"name":"bench-group-term-undeliverable"},
-  {"name":"bench-group-term-slowdrain"},
-  {"name":"private-ip-proxy"},
-  {"name":"autoscaler-must-start"},
-  {"name":"autoscaler-waits-for-boot-release"},
-  {"name":"autoscaler-metrics-required"},
-  {"name":"autoscaler-worker-required"},
-  {"name":"autoscaler-worker-never-ready"},
-  {"name":"autoscaler-worker-clone-pending"},
-  {"name":"autoscaler-worker-oscillation"},
-  {"name":"autoscaler-worker-destroy-failure"},
-  {"name":"autoscaler-concurrent-ready-scale-down"},
-  {"name":"autoscaler-post-child-ready"},
-  {"name":"autoscaler-missing-terminal"},
-  {"name":"capacity-a"},
-  {"name":"capacity-b"},
-  {"name":"capacity-c"},
-  {"name":"capacity-d"},
-  {"name":"capacity-e"},
-  {"name":"capacity-f"},
-  {"name":"capacity-g"},
-  {"name":"capacity-h"},
-  {"name":"capacity-i"},
-  {"name":"orphan-source"},
-  {"name":"orphan-recovery"},
-  {"name":"busy-source"},
-  {"name":"must-not-launch"},
-  {"name":"must-wait-for-provider"},
-  {"name":"delayed-visible"},
-  {"name":"cross-pool-recovery"},
-  {"name":"pool-stop-failure"},
-  {"name":"safe-skips"},
-  {"name":"malformed-registry"},
-  {"name":"probe-error"}
+  {"name":"bench-detached-wait","timeout_seconds":240},
+  {"name":"bench-invalid-recovery","timeout_seconds":240},
+  {"name":"bench-detached-cancel","timeout_seconds":240},
+  {"name":"bench-group-term","timeout_seconds":240},
+  {"name":"bench-group-term-undeliverable","timeout_seconds":240},
+  {"name":"bench-group-term-slowdrain","timeout_seconds":240},
+  {"name":"private-ip-proxy","timeout_seconds":240},
+  {"name":"autoscaler-must-start","timeout_seconds":240},
+  {"name":"autoscaler-waits-for-boot-release","timeout_seconds":240},
+  {"name":"autoscaler-metrics-required","timeout_seconds":240},
+  {"name":"autoscaler-worker-required","timeout_seconds":240},
+  {"name":"autoscaler-worker-never-ready","timeout_seconds":240},
+  {"name":"autoscaler-worker-clone-pending","timeout_seconds":240},
+  {"name":"autoscaler-worker-oscillation","timeout_seconds":240},
+  {"name":"autoscaler-worker-destroy-failure","timeout_seconds":240},
+  {"name":"autoscaler-concurrent-ready-scale-down","timeout_seconds":240},
+  {"name":"autoscaler-post-child-ready","timeout_seconds":240},
+  {"name":"autoscaler-missing-terminal","timeout_seconds":240},
+  {"name":"capacity-a","timeout_seconds":240},
+  {"name":"capacity-b","timeout_seconds":240},
+  {"name":"capacity-c","timeout_seconds":240},
+  {"name":"capacity-d","timeout_seconds":240},
+  {"name":"capacity-e","timeout_seconds":240},
+  {"name":"capacity-f","timeout_seconds":240},
+  {"name":"capacity-g","timeout_seconds":240},
+  {"name":"capacity-h","timeout_seconds":240},
+  {"name":"capacity-i","timeout_seconds":240},
+  {"name":"orphan-source","timeout_seconds":240},
+  {"name":"orphan-recovery","timeout_seconds":240},
+  {"name":"busy-source","timeout_seconds":240},
+  {"name":"must-not-launch","timeout_seconds":240},
+  {"name":"must-wait-for-provider","timeout_seconds":240},
+  {"name":"delayed-visible","timeout_seconds":240},
+  {"name":"cross-pool-recovery","timeout_seconds":240},
+  {"name":"pool-stop-failure","timeout_seconds":240},
+  {"name":"safe-skips","timeout_seconds":240},
+  {"name":"malformed-registry","timeout_seconds":240},
+  {"name":"probe-error","timeout_seconds":240}
 ]
 TASKCATALOG
 printf '[{"name":"polar-fixture"}]\n' > "$SANDBOX/agents/benchmarks/polar_tasks.json"
@@ -3044,9 +3051,9 @@ assert_and_reset_retained_fake_benchmark() {
 # non-hub listener sitting on it. The test must therefore only ever point the
 # fleets at ports it PROBED free and then occupied with its own hub stubs —
 # never at a well-known port that could carry a real process on a dev machine.
-# Derive a process-specific search window from this run's random tmp root so
-# concurrent copies of this regression (for example, two Conductor workspaces)
-# do not both probe 42000 free and then race to own the same listener.
+# Every copy, including nested suites with private TMPDIRs, shares UID-owned
+# locks. Keep each flock descriptor through exact Hub teardown. Kernel client
+# allocation ignores filesystem locks, so exclude its ephemeral range too.
 PORT_WINDOW_SLOT="$(TMP_ROOT="$TMP_ROOT" python3 - <<'PY'
 import hashlib
 import os
@@ -3055,29 +3062,55 @@ digest = hashlib.sha256(os.environ["TMP_ROOT"].encode()).digest()
 print(int.from_bytes(digest[:4], "big") % 200)
 PY
 )"
-PORT_CLAIM_ROOT="${TMPDIR:-/tmp}/cloudbench-multi-workstream-port-claims"
-mkdir -p "$PORT_CLAIM_ROOT" || fail "could not initialize the cross-workspace port claim directory"
+command -v flock >/dev/null || fail "flock is required for fixture port ownership"
+PORT_CLAIM_ROOT="/tmp/cloudbench-multi-workstream-port-claims-$(id -u)"
+# Refuse links, foreign ownership and group/world-writable namespaces. Never
+# chmod or remove a pre-existing namespace to make a refusal pass.
+python3 - "$PORT_CLAIM_ROOT" <<'PY_CLAIM_ROOT' || fail "unsafe cross-workspace port claim directory"
+import os, stat, sys
+path = sys.argv[1]
+try:
+    os.mkdir(path, 0o700)
+except FileExistsError:
+    pass
+info = os.lstat(path)
+if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700):
+    raise SystemExit("refusing unsafe port claim namespace")
+PY_CLAIM_ROOT
+PORT_EPHEMERAL_RANGE="$(cat /proc/sys/net/ipv4/ip_local_port_range)" \
+    || fail "could not read kernel ephemeral port range"
+read -r PORT_EPHEMERAL_LOW PORT_EPHEMERAL_HIGH PORT_EPHEMERAL_EXTRA <<< "$PORT_EPHEMERAL_RANGE"
+[[ "$PORT_EPHEMERAL_LOW" =~ ^[0-9]+$ && "$PORT_EPHEMERAL_HIGH" =~ ^[0-9]+$ ]] \
+    && [ -z "$PORT_EPHEMERAL_EXTRA" ] \
+    && [ "$PORT_EPHEMERAL_LOW" -ge 1 ] \
+    && [ "$PORT_EPHEMERAL_HIGH" -le 65535 ] \
+    && [ "$PORT_EPHEMERAL_LOW" -le "$PORT_EPHEMERAL_HIGH" ] \
+    || fail "invalid kernel ephemeral port range"
 for port_attempt in $(seq 0 199); do
     port_slot=$(((PORT_WINDOW_SLOT + port_attempt) % 200))
-    port_base=$((40000 + port_slot * 64))
-    candidate_claim="$PORT_CLAIM_ROOT/$port_base"
-    if ! mkdir "$candidate_claim" 2>/dev/null; then
-        [ -f "$candidate_claim/owner" ] || continue
-        owner_pid="$(sed -n '1p' "$candidate_claim/owner" 2>/dev/null || true)"
-        owner_tmp="$(sed -n '2p' "$candidate_claim/owner" 2>/dev/null || true)"
-        if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null \
-            && [ -n "$owner_tmp" ] && [ -d "$owner_tmp" ]; then
-            continue
-        fi
-        rm -f "$candidate_claim/owner" 2>/dev/null || continue
-        rmdir "$candidate_claim" 2>/dev/null || continue
-        mkdir "$candidate_claim" 2>/dev/null || continue
-    fi
-    printf '%s\n%s\n' "$$" "$TMP_ROOT" > "$candidate_claim/owner" || {
-        rm -f "$candidate_claim/owner" 2>/dev/null || true
-        rmdir "$candidate_claim" 2>/dev/null || true
+    port_base=$((10000 + port_slot * 64))
+    # Cover the entire Hub window and both derived conductor ports.
+    if { [ "$port_base" -le "$PORT_EPHEMERAL_HIGH" ] \
+        && [ "$((port_base + 21))" -ge "$PORT_EPHEMERAL_LOW" ]; } \
+        || { [ "$((port_base - 5764))" -le "$PORT_EPHEMERAL_HIGH" ] \
+        && [ "$((port_base - 5763))" -ge "$PORT_EPHEMERAL_LOW" ]; }; then
         continue
-    }
+    fi
+    candidate_claim="$PORT_CLAIM_ROOT/$port_base"
+    mkdir -m 700 "$candidate_claim" 2>/dev/null || true
+    [ ! -L "$candidate_claim" ] && [ -d "$candidate_claim" ] \
+        && [ "$(stat -c '%u:%a' "$candidate_claim")" = "$(id -u):700" ] \
+        || fail "unsafe port claim: $candidate_claim"
+    [ ! -L "$candidate_claim/lock" ] \
+        && { [ ! -e "$candidate_claim/lock" ] || [ -f "$candidate_claim/lock" ]; } \
+        || fail "unsafe port lock: $candidate_claim"
+    exec {PORT_CLAIM_FD}>>"$candidate_claim/lock" || fail "could not open port lock"
+    if ! flock -n "$PORT_CLAIM_FD"; then
+        exec {PORT_CLAIM_FD}>&-
+        continue
+    fi
+    printf '%s\n%s\n' "$$" "$TMP_ROOT" > "$candidate_claim/owner" || fail "could not publish port claim"
     port_window_busy=0
     for candidate_port in "$port_base" "$((port_base + 1))" \
         "$((port_base + 20))" "$((port_base + 21))"; do
@@ -3088,7 +3121,7 @@ for port_attempt in $(seq 0 199); do
     done
     if [ "$port_window_busy" = "1" ]; then
         rm -f "$candidate_claim/owner" 2>/dev/null || true
-        rmdir "$candidate_claim" 2>/dev/null || true
+        exec {PORT_CLAIM_FD}>&-
         continue
     fi
     PORT_CLAIM_DIR="$candidate_claim"
@@ -5776,12 +5809,30 @@ print(" ".join(sorted(m["name"] for m in machines)))
 done
 echo "PASS: scenario 2g — lower demand retains missing evidence and drains captured staging"
 
+# The sealed lifecycle keeps the run verdict (status) separate from proven cleanup and
+# names the failed autoscaler's bench, so a deploy can keep its peers' verdicts.
+assert_autoscaler_lifecycle() {  # <since-marker> <bench|-> <cleanup_verified: True|False>
+    local lifecycle
+    lifecycle="$(find "$WS_A/.context/fleet/runs" -path '*/_batch/lifecycle.json' -newer "$1" -print 2>/dev/null)"
+    [ "$(printf '%s\n' "$lifecycle" | grep -c .)" = 1 ] ||
+        fail "expected exactly one new fleet lifecycle, got: $lifecycle"
+    python3 - "$lifecycle" "$2" "$3" <<'PY' || fail "autoscaler failure lifecycle evidence is wrong"
+import json, sys
+payload = json.loads(open(sys.argv[1]).read())
+assert payload["status"] == "failed" and payload["controller_exit_code"] == 1, payload
+# Retained resources keep the lifecycle unverified whether or not aggregation named the bench.
+assert sys.argv[2] == "-" or payload["autoscaler_failed_benches"] == [sys.argv[2]], payload
+assert payload["cleanup_verified"] is (sys.argv[3] == "True"), payload
+PY
+}
+
 # A provider destroy failure after cancellation cannot leave a tracked worker
 # permanently canceled if demand rebounds. The autoscaler must fail closed and
 # retain durable ownership for controller cleanup, which is allowed to retry.
 reset_fake_state
 : > "$FAKE_DIR/journal.log"
 : > "$FAKE_DIR/fail-worker-destroy-once"
+: > "$TMP_ROOT/destroy-failure.since"
 destroy_failure_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-destroy-failure.log" \
@@ -5800,6 +5851,7 @@ print(" ".join(sorted(m["name"] for m in machines)))
 ' "$FAKE_DIR/state.json")"
 [ "$remaining" = "cloudbench-warm" ] ||
     fail "destroy-failure cleanup leaked machines: $remaining"
+assert_autoscaler_lifecycle "$TMP_ROOT/destroy-failure.since" autoscaler-worker-destroy-failure True
 rm -f "$FAKE_DIR/fail-worker-destroy-once"
 echo "PASS: scenario 2h — scale-down destroy failure fails closed and remains recoverable"
 
@@ -5811,6 +5863,7 @@ reset_fake_state
 # refusal takes precedence over its single transient budget.
 : > "$FAKE_DIR/fail-worker-destroy-once"
 : > "$FAKE_DIR/fail-worker-destroy-always"
+: > "$TMP_ROOT/destroy-persistent.since"
 persistent_destroy_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-destroy-persistent.log" \
@@ -5826,6 +5879,7 @@ persistent_worker="$(sed -n 1p "$FAKE_DIR/markers/worker-clone-id" 2>/dev/null)"
 persistent_registry="$(grep -rlx "id=$persistent_worker" "$SANDBOX/.git/cloudbench-fleet-ownership"/*/clones 2>/dev/null | head -1)"
 [ -n "$persistent_registry" ] ||
     fail "a persistently refused worker destroy released its exact durable ownership"
+assert_autoscaler_lifecycle "$TMP_ROOT/destroy-persistent.since" - False
 # Remove only this asserted, test-owned retained fixture before later cases.
 persistent_token="$(basename "$(dirname "$(dirname "$persistent_registry")")")"
 rm -f "$TMP_ROOT/capacity-reservations/reservations/$persistent_token"-*
@@ -6005,6 +6059,15 @@ if max(updates[:7]) >= min(starts[:7]):
     raise SystemExit("a fleet machine started before every boot config update completed")
 if any("--skip-start" not in calls[index] for index in updates[:7]):
     raise SystemExit("boot config updates must explicitly keep every machine stopped")
+# Every primary's boot-config update publishes its admission lane so other workstreams'
+# controllers can count it; these fixture tasks are not DEMO-cache tasks, so they are
+# delegating. Warm-source sizing updates are not primaries and carry no lane.
+boot_updates = [index for index in updates if "CLOUDBENCH_BOOT=1" in calls[index]]
+if len(boot_updates) < 7:
+    raise SystemExit(f"expected seven boot-config updates, got {len(boot_updates)}")
+unlabelled = [calls[index][:240] for index in boot_updates if "rose_cloudbench_lane=delegating" not in calls[index]]
+if unlabelled:
+    raise SystemExit("boot config updates must label each primary with its admission lane: " + unlabelled[0])
 
 # Once every boot config is applied, all readiness pollers must consume the
 # controller-owned Machines/Volumes snapshots.  Direct provider inventory reads
@@ -6100,7 +6163,7 @@ PY
 # delays the same rejection while still exercising the retry loop.
 capacity_status=0
 CLOUDBENCH_SHARED_CPU_GOVERNOR=160 CLOUDBENCH_SHARED_CPU_HEADROOM=20 \
-CLOUDBENCH_APP_MACHINE_CEILING=1000 \
+CLOUDBENCH_APP_MACHINE_CEILING=1000 CLOUDBENCH_DELEGATING_PRIMARY_CEILING=1000 \
 CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=shared-cpu-2x \
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=10 \
 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
@@ -6120,6 +6183,81 @@ if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "an over-governor burst must be rejected BEFORE cloning"
 fi
 echo "PASS: scenario 4 — shared-CPU governor blocks an over-ceiling burst; stopped + perf excluded"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Scenario 4b — cross-workstream lane ceilings (the downstream capacity the old
+# 56-Machine ceiling used to imply). Every devbox's live primaries are counted from
+# the native app inventory: DEMO guests against the production-pooler budget, and
+# REAL/SIM ("delegating") guests against the widest proven-safe width. Stopped and
+# suspended Machines and performance-1x autoscaler workers never count; unlabelled
+# live primaries count as delegating. A denial happens before any clone.
+# ═════════════════════════════════════════════════════════════════════════════
+lane_fixture() {  # lane_fixture <demo-live> <delegating-labelled> <delegating-unlabelled>
+    reset_fake_state
+    rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pools" \
+        "$SANDBOX/.git/cloudbench-pool-claims" "$FAKE_DIR/markers"
+    mkdir -p "$FAKE_DIR/markers"
+    : > "$FAKE_DIR/journal.log"
+    reset_test_workspace_fleet_roots "$WS_A" "$WS_B"
+    FAKE_STATE="$FAKE_DIR/state.json" LANE_FIXTURE="$1 $2 $3" python3 - <<'PY'
+import json
+import os
+
+path = os.environ["FAKE_STATE"]
+demo, labelled, unlabelled = (int(v) for v in os.environ["LANE_FIXTURE"].split())
+with open(path) as fh:
+    state = json.load(fh)
+def machine(mid, st, kind, cpus, lane=None):
+    config = {"mounts": [], "guest": {"cpu_kind": kind, "cpus": cpus}}
+    if lane:
+        config["metadata"] = {"rose_cloudbench_lane": lane}
+    return {"id": mid, "name": f"lane-{mid}", "state": st, "region": "iad",
+            "private_ip": "fdaa::1", "config": config}
+rows = []
+rows += [machine(f"dm{i:010d}", "started", "shared", 4, "demo") for i in range(demo)]
+rows += [machine(f"dl{i:010d}", "started", "shared", 4, "delegating") for i in range(labelled)]
+rows += [machine(f"un{i:010d}", "started", "shared", 4) for i in range(unlabelled)]
+# Never counted: stopped/suspended DEMO guests, performance-1x workers, infra probes.
+rows += [machine(f"ds{i:010d}", "stopped", "shared", 4, "demo") for i in range(5)]
+rows += [machine(f"dz{i:010d}", "suspended", "shared", 4, "demo") for i in range(3)]
+rows += [machine(f"wk{i:010d}", "started", "performance", 1) for i in range(12)]
+rows += [machine(f"ip{i:010d}", "started", "shared", 4, "infra") for i in range(2)]
+state["machines"].extend(rows)
+with open(path, "w") as fh:
+    json.dump(state, fh)
+PY
+}
+
+lane_fixture 49 0 0
+lane_status=0
+CLOUDBENCH_SHARED_CPU_GOVERNOR=100000 CLOUDBENCH_APP_MACHINE_CEILING=100000 \
+CLOUDBENCH_LANE=demo CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-demo.log" \
+    capacity-a capacity-b --timeout 120 || lane_status=$?
+[ "$lane_status" -eq 1 ] || fail "a DEMO burst past the pooler budget must be refused (exit=$lane_status)"
+grep -qF "DEMO guest ceiling reached: 49 live + 2 requested > 50" "$TMP_ROOT/controller-lane-demo.log" ||
+    fail "DEMO refusal must count live DEMO guests only (stopped/suspended/workers/infra excluded)"
+if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
+    fail "a DEMO lane refusal must happen before cloning"
+fi
+
+lane_fixture 0 60 6
+lane_status=0
+CLOUDBENCH_SHARED_CPU_GOVERNOR=100000 CLOUDBENCH_APP_MACHINE_CEILING=100000 \
+CLOUDBENCH_LANE=delegating CLOUDBENCH_DELEGATING_PRIMARY_CEILING=67 \
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-delegating.log" \
+    capacity-a capacity-b --timeout 120 || lane_status=$?
+[ "$lane_status" -eq 1 ] || fail "a delegating burst past its ceiling must be refused (exit=$lane_status)"
+grep -qF "Delegating-guest ceiling reached: 66 live REAL/SIM primaries + 2 requested > 67" \
+    "$TMP_ROOT/controller-lane-delegating.log" ||
+    fail "delegating refusal must count labelled and unlabelled live primaries, not workers or infra"
+grep -qF "capacity admission remained blocked for 3s" "$TMP_ROOT/controller-lane-delegating.log" ||
+    fail "a lane refusal is retryable and must exhaust the admission wait before failing"
+if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
+    fail "a delegating lane refusal must happen before cloning"
+fi
+echo "PASS: scenario 4b — DEMO and delegating lane ceilings count every workstream's live primaries"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 5 — pre-ack quarantine survives deletion of the workspace-local ledger

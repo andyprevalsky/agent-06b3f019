@@ -108,7 +108,7 @@ def shard_runtime_env(*, machine_limit, other_app_objects, extra_destroying, pla
     ceiling = machine_limit - other_app_objects - extra_destroying
     need(ceiling > 0, 'no app Machine capacity left in the organization')
     return dict(CLOUDBENCH_APP_MACHINE_CEILING=str(ceiling),
-                CLOUDBENCH_SHARED_CPU_GOVERNOR=str(max(160, planned_shared_cpus + baseline_shared_cpus
+                CLOUDBENCH_SHARED_CPU_GOVERNOR=str(max(1000, planned_shared_cpus + baseline_shared_cpus
                                                        + headroom_shared_cpus)),
                 CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='1',
                 # K shards each list the whole app; keep the aggregate list rate near one feed's.

@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -20,6 +21,15 @@ def load_runner():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def no_inherited_gate_progress(monkeypatch):
+    """run-coverage.sh runs this file inside the agents coverage gate, whose
+    worker may set DEPLOY_GATE_PROGRESS; these fixtures' domains must never
+    write rows into that real gate's progress file."""
+    monkeypatch.delenv("DEPLOY_GATE_PROGRESS", raising=False)
+    monkeypatch.delenv("DEPLOY_GATE_CASE", raising=False)
 
 
 def test_each_domain_runs_in_its_own_coverage_process(tmp_path: Path, monkeypatch):
@@ -302,3 +312,74 @@ def test_explicit_diagnostic_coverage_reports_partial_scope(tmp_path: Path, monk
     assert summary["partial"] is True
     assert summary["selected_domains"] == ["alpha"]
     assert summary["total"] == 1
+
+
+def test_each_domain_reports_one_live_progress_row_without_changing_the_result(tmp_path: Path, monkeypatch, capsys):
+    """DEPLOY_GATE_PROGRESS gets one row per finished domain, written the moment
+    it finishes: the passing domain only finishes after it sees the failing
+    domain's FAIL row. Exit code and output match a run without the variable."""
+    runner = load_runner()
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for name in ("alpha", "omega"):
+        (tests / f"{name}.blackbox.py").touch()
+    watch_env = "COVERAGE_PROGRESS_FIXTURE_WATCH"
+    coverage = tmp_path / "coverage"
+    coverage.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, time\n"
+        "if os.environ.get('DEPLOY_GATE_PROGRESS'):\n"
+        "    sys.exit(7)\n"
+        "if sys.argv[-1] == 'alpha':\n"
+        "    print('alpha-marker-output')\n"
+        "    sys.exit(3)\n"
+        f"watch = os.environ.get({watch_env!r})\n"
+        "deadline = time.monotonic() + 60\n"
+        "while watch and time.monotonic() < deadline:\n"
+        "    try:\n"
+        "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+        "    except (OSError, ValueError):\n"
+        "        rows = []\n"
+        "    if any(row['unit'] == 'alpha' and row['status'] == 'FAIL' for row in rows):\n"
+        "        break\n"
+        "    time.sleep(0.05)\n"
+        "else:\n"
+        "    if watch:\n"
+        "        sys.exit(9)\n"
+        "print('omega done')\n"
+    )
+    coverage.chmod(0o755)
+    monkeypatch.setattr(runner, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(runner, "TESTS_DIR", tests)
+    monkeypatch.setenv("COVERAGE_BIN", str(coverage))
+    monkeypatch.setenv("AGENTS_COVERAGE_CONCURRENCY", "2")
+    monkeypatch.delenv("AGENTS_BLACKBOX_DOMAINS", raising=False)
+    progress = tmp_path / "gate" / "progress.jsonl"
+    progress.parent.mkdir()
+
+    def run(env: dict[str, str]):
+        with monkeypatch.context() as scoped:
+            for key, value in env.items():
+                scoped.setenv(key, value)
+            code = asyncio.run(runner.async_main())
+        out = capsys.readouterr()
+        normalized = re.sub(r"agents-coverage-\d{8}-\d{6}-\d+", "RUN", out.out)
+        normalized = re.sub(r"\d+\.\d+s\b", "Ns", normalized)
+        return code, sorted(normalized.splitlines()), out.err
+
+    reported = run({"DEPLOY_GATE_PROGRESS": str(progress), "DEPLOY_GATE_CASE": "agents", watch_env: str(progress)})
+    unset = run({})
+    assert reported[0] == 1, reported
+    assert reported == unset, "reporting changed the exit code or output"
+    assert sorted(path.name for path in progress.parent.iterdir()) == ["progress.jsonl"]
+    assert list(tmp_path.rglob("*.jsonl")) == [progress], "an unset variable wrote a progress file"
+
+    rows = [json.loads(line) for line in progress.read_text().splitlines()]
+    assert [(row["unit"], row["status"]) for row in rows] == [("alpha", "FAIL"), ("omega", "PASS")]
+    assert {(row["scope"], row["case"]) for row in rows} == {("domain", "agents")}
+    assert "alpha-marker-output" in rows[0]["detail"]
+    assert rows[1]["detail"] == ""
+    for row in rows:
+        assert row["log"].startswith(str(tmp_path / ".context" / "test-runs")), row
+        assert row["log"].endswith(f"/{row['unit']}.log")
+        assert Path(row["log"]).is_file()

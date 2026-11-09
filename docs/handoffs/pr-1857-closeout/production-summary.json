@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "sha": "5a0b1c6c150295da187c737f4ffa023907180e24",
+  "pr": 1857,
+  "status": "PASS",
+  "started_at": "2026-11-08T23:06:46Z",
+  "finished_at": "2026-11-08T23:17:41Z",
+  "lanes": {
+    "render": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent runtime or deploy-agents.yml change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "vercel": {
+      "status": "PASS",
+      "reason": "Vercel deployment 7643288244 success",
+      "applicable": true,
+      "started_at": "2026-11-08T23:06:46Z",
+      "finished_at": "2026-11-08T23:11:46Z",
+      "exit_code": 0
+    },
+    "mac-release": {
+      "status": "PASS",
+      "reason": "release-mac-app run 42533544106 success",
+      "applicable": true,
+      "started_at": "2026-11-08T23:06:46Z",
+      "finished_at": "2026-11-08T23:13:15Z",
+      "exit_code": 0
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "backend-probes": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end change",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent cutover",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+      "applicable": false,
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "semantic": {
+      "status": "PASS",
+      "reason": "chat-lifecycle-ratchet run 42533987430 success",
+      "applicable": true,
+      "started_at": "2026-11-08T23:11:46Z",
+      "finished_at": "2026-11-08T23:17:41Z",
+      "exit_code": 0
+    }
+  }
+}

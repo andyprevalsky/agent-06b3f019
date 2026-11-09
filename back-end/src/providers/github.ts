@@ -1,4 +1,15 @@
 import { prisma } from './database';
+import {
+  activeGithubRateLimit,
+  classifyGithubRateLimit,
+  githubApiBase,
+  githubFetch,
+  GithubRateLimitedError,
+  noteGithubRateLimit,
+  resetGithubRateLimitStateForTests,
+  type GithubRateLimitInfo,
+} from './githubRateLimit';
+import { githubPoolFetch } from './githubTokenPool';
 import { createLogger } from './logger';
 
 const log = createLogger('GitHub');
@@ -53,38 +64,52 @@ function githubApiAuthHeaders(): Record<string, string> {
   return headers;
 }
 
-type GithubRepoVisibility = 'public' | 'private' | 'missing' | 'unknown';
+type GithubRepoVisibility = 'public' | 'private' | 'missing' | 'unknown' | 'rate_limited';
 
 /**
  * Resolve whether a GitHub repo exists and is publicly cloneable.
  * Unauthenticated requests work for public repos; a configured token improves rate limits.
+ * `rate_limited` means GitHub answered nothing about the repo; it is not `unknown`
+ * (and never a denial): callers surface the limit.
  */
 export async function fetchGithubRepoVisibility(
   owner: string,
   repo: string
 ): Promise<GithubRepoVisibility> {
+  return (await lookupRepoVisibility(owner, repo)).visibility;
+}
+
+async function lookupRepoVisibility(
+  owner: string,
+  repo: string
+): Promise<{ visibility: GithubRepoVisibility; rateLimit?: GithubRateLimitInfo }> {
   try {
-    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers: githubApiAuthHeaders(),
-    });
-    if (response.status === 404) return 'missing';
+    const response = await githubFetch(
+      `${githubApiBase()}/repos/${owner}/${repo}`,
+      { headers: githubApiAuthHeaders() },
+      { component: 'GithubRepoVisibility', fetchImpl: githubPoolFetch() }
+    );
+    if (response.status === 404) return { visibility: 'missing' };
     if (!response.ok) {
       log.warn('GitHub repo visibility lookup failed', {
         owner,
         repo,
         status: response.status,
       });
-      return 'unknown';
+      return { visibility: 'unknown' };
     }
     const data = (await response.json()) as { private?: boolean };
-    return data.private === true ? 'private' : 'public';
+    return { visibility: data.private === true ? 'private' : 'public' };
   } catch (error) {
+    if (error instanceof GithubRateLimitedError) {
+      return { visibility: 'rate_limited', rateLimit: error.info };
+    }
     log.warn('GitHub repo visibility lookup errored', {
       owner,
       repo,
       error: error instanceof Error ? error.message : String(error),
     });
-    return 'unknown';
+    return { visibility: 'unknown' };
   }
 }
 
@@ -99,12 +124,14 @@ export async function fetchGithubBranchHeadSha(
   branch: string
 ): Promise<string | null> {
   try {
-    const response = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
+    // A change-watch poll: never wait for a limit, try again on the next tick.
+    const response = await githubFetch(
+      `${githubApiBase()}/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
       {
         headers: { ...githubApiAuthHeaders(), Accept: 'application/vnd.github.sha' },
         signal: AbortSignal.timeout(10_000),
-      }
+      },
+      { maxWaitMs: 0, component: 'GithubBranchHead', fetchImpl: githubPoolFetch() }
     );
     if (!response.ok) {
       log.warn('GitHub branch head lookup failed', {
@@ -118,6 +145,15 @@ export async function fetchGithubBranchHeadSha(
     const sha = (await response.text()).trim();
     return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   } catch (error) {
+    if (error instanceof GithubRateLimitedError) {
+      log.warn('GitHub branch head lookup rate limited', {
+        owner,
+        repo,
+        branch,
+        resetAt: error.resetAt,
+      });
+      return null;
+    }
     log.warn('GitHub branch head lookup errored', {
       owner,
       repo,
@@ -148,7 +184,13 @@ async function grantGithubRepoAccess(userId: string, repoUrl: string): Promise<v
 export async function checkGithubRepoAccess(
   userId: string,
   repoUrl: string
-): Promise<{ allowed: boolean; normalizedUrl: string | null; error?: string }> {
+): Promise<{
+  allowed: boolean;
+  normalizedUrl: string | null;
+  error?: string;
+  /** Set when GitHub's rate limit, not a denial, stopped the check. */
+  rateLimit?: GithubRateLimitInfo;
+}> {
   const normalizedUrl = normalizeGithubUrl(repoUrl);
 
   if (!normalizedUrl) {
@@ -175,7 +217,15 @@ export async function checkGithubRepoAccess(
   const parsed = parseGithubUrl(normalizedUrl);
   const repoName = parsed ? `${parsed.owner}/${parsed.repo}` : normalizedUrl;
   if (parsed) {
-    const visibility = await fetchGithubRepoVisibility(parsed.owner, parsed.repo);
+    const { visibility, rateLimit } = await lookupRepoVisibility(parsed.owner, parsed.repo);
+    if (rateLimit !== undefined) {
+      return {
+        allowed: false,
+        normalizedUrl,
+        rateLimit,
+        error: new GithubRateLimitedError(rateLimit).message,
+      };
+    }
     if (visibility === 'public') {
       await grantGithubRepoAccess(userId, normalizedUrl);
       log.info('Auto-granted public GitHub repo access', {
@@ -217,20 +267,16 @@ export async function checkGithubRepoAccess(
 const REPO_CREATE_MIN_INTERVAL_MS = Number(process.env.GITHUB_REPO_CREATE_MIN_INTERVAL_MS ?? 7_500);
 /** A create that cannot start within this wait is skipped; the session runs repo-less. */
 const REPO_CREATE_MAX_QUEUE_WAIT_MS = Number(process.env.GITHUB_REPO_CREATE_MAX_WAIT_MS ?? 20_000);
-/** GitHub asks for at least a minute when a secondary limit carries no Retry-After. */
-const SECONDARY_LIMIT_DEFAULT_BLOCK_MS = 60_000;
-
 const repoCreateState = {
   nextSlotAt: 0,
-  blockedUntil: 0,
   login: null as string | null,
 };
 
-/** Test hook: reset the pacer and block between cases. */
+/** Test hook: reset the pacer and the process-wide GitHub rate-limit block between cases. */
 export function resetGithubRepoCreateStateForTests(): void {
   repoCreateState.nextSlotAt = 0;
-  repoCreateState.blockedUntil = 0;
   repoCreateState.login = null;
+  resetGithubRateLimitStateForTests();
 }
 
 /** Agent repos are created only by production unless explicitly enabled. */
@@ -251,30 +297,18 @@ async function reserveRepoCreateSlot(): Promise<boolean> {
   return true;
 }
 
-function isRateLimited(status: number, body: string): boolean {
-  return (status === 403 || status === 429) && /rate limit/i.test(body);
-}
-
-function retryAfterMs(headers: Headers): number {
-  const retryAfter = Number(headers.get('retry-after'));
-  if (Number.isFinite(retryAfter) && retryAfter > 0) return retryAfter * 1000;
-  const reset = Number(headers.get('x-ratelimit-reset'));
-  if (headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) && reset > 0)
-    return Math.max(0, reset * 1000 - Date.now());
-  return SECONDARY_LIMIT_DEFAULT_BLOCK_MS;
-}
-
 /** The existing repo's URL when a create reports the name is taken (a retry or a race). */
 async function existingRepoUrl(token: string, repoName: string): Promise<string | null> {
   const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
   if (repoCreateState.login === null) {
-    const me = await fetch('https://api.github.com/user', { headers });
+    const me = await githubFetch(`${githubApiBase()}/user`, { headers }, { maxWaitMs: 0 });
     if (!me.ok) return null;
     repoCreateState.login = ((await me.json()) as { login: string }).login;
   }
-  const response = await fetch(
-    `https://api.github.com/repos/${repoCreateState.login}/${repoName}`,
-    { headers }
+  const response = await githubFetch(
+    `${githubApiBase()}/repos/${repoCreateState.login}/${repoName}`,
+    { headers },
+    { maxWaitMs: 0 }
   );
   return response.ok ? ((await response.json()) as { html_url: string }).html_url : null;
 }
@@ -303,10 +337,12 @@ export async function createGithubRepo(repoName: string): Promise<string | null>
     log.error('GITHUB_TOKEN not configured — cannot create repo');
     return null;
   }
-  if (Date.now() < repoCreateState.blockedUntil) {
-    log.warn('GitHub repo creation blocked by a secondary rate limit', {
+  const blocked = activeGithubRateLimit();
+  if (blocked !== null) {
+    log.warn('GitHub repo creation blocked by a rate limit', {
       repoName,
-      retryInMs: repoCreateState.blockedUntil - Date.now(),
+      retryInMs: blocked.resetAtMs - Date.now(),
+      resetAt: new Date(blocked.resetAtMs).toISOString(),
     });
     return null;
   }
@@ -320,7 +356,7 @@ export async function createGithubRepo(repoName: string): Promise<string | null>
   for (let index = 0; index < unique.length; index += 1) {
     const token = unique[index];
     try {
-      const response = await fetch('https://api.github.com/user/repos', {
+      const response = await fetch(`${githubApiBase()}/user/repos`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -344,13 +380,14 @@ export async function createGithubRepo(repoName: string): Promise<string | null>
 
       lastStatus = response.status;
       lastBody = await response.text();
-      if (isRateLimited(response.status, lastBody)) {
-        const waitMs = retryAfterMs(response.headers);
-        repoCreateState.blockedUntil = Date.now() + waitMs;
-        log.error('GitHub repo creation rate limited; pausing all creates', {
+      const limit = classifyGithubRateLimit(response.status, response.headers, lastBody);
+      if (limit !== null) {
+        noteGithubRateLimit(limit);
+        log.error('GitHub repo creation rate limited; pausing all GitHub calls', {
           repoName,
           status: response.status,
-          retryInMs: waitMs,
+          kind: limit.kind,
+          resetAt: new Date(limit.resetAtMs).toISOString(),
         });
         return null;
       }

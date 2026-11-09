@@ -494,7 +494,7 @@ test("Claude stdin failure never records delivery, holds the session or poisons 
     const deliveredTurnIds=new Map(),events=[];
     const tokenMatches=()=>true,turnAck=(id,status,reason)=>({id,status,reason});
     const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000;
-    const exitAnnounced=false,cliStdinOpen=true;
+    const exitAnnounced=false,cliStdinOpen=true,taskPromptReady=Promise.resolve();
     const cliChild={stdin:{write(line,callback){callback(new Error("EPIPE"));}}};
     const applyTurnSettings=async()=>{},stageTurnAttachments=()=>[],userMessageLine=text=>text;
     const startNativeTurn=()=>activeTurn={id:"failed-start"};
@@ -1221,8 +1221,11 @@ for (const [speed, expectedTier] of [
   test(`a ${speed} session funded by Azure alone starts GPT-6.1 Sol at ${expectedTier ?? "standard"}`, async () => {
     const { seen, calls, logs } = await runOAuthFailureFixture(
       {},
+      // The fake turn can end before the server emits "ready" (after turn/start returns).
       (events) =>
-        events.some((e) => e.type === "turn_ended" && e.status === "completed"),
+        events.some(
+          (e) => e.type === "turn_ended" && e.status === "completed",
+        ) && events.some((e) => e.type === "session" && e.status === "ready"),
       {
         oauth: false,
         model: "gpt-6.1-sol",

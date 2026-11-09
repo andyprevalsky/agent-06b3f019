@@ -33,13 +33,13 @@ const authState = {
 const ctxState = {
   agent: null as unknown,
   selectedAgentId: null as string | null,
-  messages: [],
+  messages: [] as Message[],
   streamingBubbles: new Map(),
   streamingPlan: null,
   streamingAttention: null,
   streamingTools: new Map(),
   streamedTextsRef: { current: new Set<string>() } as never,
-  applyAgentDetail: vi.fn(() => true),
+  applyAgentDetail: vi.fn((_id: string, _data: AgentDetailResponse) => true),
   setSelectedAgentId: vi.fn(),
   stagePendingAgentCreation: vi.fn(),
   reconcilePendingAgentCreation: vi.fn(async () => {}),
@@ -71,6 +71,8 @@ import { useMessageSending } from '@/features/terminal/hooks/useMessageSending';
 import { useTerminalAgents } from '@/features/terminal/hooks/useTerminalAgents';
 import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
 import { signOut } from '@/lib/supabase';
+import type { AgentDetailResponse, Message } from '@/lib/api';
+import { terminalPauseCases } from './terminal-pause.cases';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -498,6 +500,8 @@ describe('useTerminalAgents', () => {
     setCurrentView.mockReset();
     resetAnimationState.mockReset();
     ctxState.agent = null;
+    ctxState.messages = [];
+    ctxState.applyAgentDetail.mockImplementation(() => true);
     ctxState.selectedAgentId = null;
     ctxState.setSelectedAgentId.mockReset();
     authState.isAuthenticated = true;
@@ -515,6 +519,8 @@ describe('useTerminalAgents', () => {
   afterEach(() => {
     localStorage.clear();
   });
+
+  terminalPauseCases({ ctxState, setCurrentView, resetAnimationState });
 
   it('returns composed state with empty defaults', () => {
     const { result, unmount } = renderHook(() =>

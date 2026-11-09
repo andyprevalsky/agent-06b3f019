@@ -1,0 +1,6 @@
+  FAIL  messaging upload -- incremental sync keeps the total message count -- incremental sync keeps the total (expected 51 messages/2 contacts, got {"messages":1,"contacts":1}) (105ms)
+Results: 288 passed, 1 failed, 289 total
+   messaging upload -- incremental sync keeps the total message count: incremental sync keeps the total (expected 51 messages/2 contacts, got {"messages":1,"contacts":1})
+--- post-fix (final cycle backend coverage 250/250; RCA post-fix run):
+  PASS  messaging upload -- incremental sync keeps the total message count (112ms)
+Results: 289 passed, 0 failed, 289 total

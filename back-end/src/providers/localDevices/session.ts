@@ -203,6 +203,8 @@ export async function createLocalDeviceCodeSession(
     /** Caller-asserted owner; must match the agent's owner. */
     expectedUserId?: string;
     deviceId?: string;
+    /** The spawn's task_name, stored on the task row (the agents list title). */
+    taskName?: string | null;
   },
   hub: LocalDeviceHub = localDeviceHub()
 ): Promise<LocalDeviceSessionResult> {
@@ -268,6 +270,7 @@ export async function createLocalDeviceCodeSession(
         sandboxId,
         streamUrl: wsUrl,
         goal: params.goal,
+        taskName: params.taskName ?? null,
         status: 'ACTIVE',
         claudeTokenSource,
         claudeTokenIntegrationId: integrationId,
@@ -303,6 +306,7 @@ export async function createLocalCodeSessionResponse(params: {
   provider: LocalCodeProvider;
   expectedUserId?: string;
   deviceId?: string;
+  taskName?: string | null;
 }): Promise<{
   task_id: string;
   sandbox_id: string;
@@ -334,17 +338,19 @@ export async function createLocalCodeSessionResponse(params: {
 export async function closeLocalDeviceCodeSession(
   taskId: string,
   sandboxId: string,
-  hub: LocalDeviceHub = localDeviceHub()
+  hub: LocalDeviceHub = localDeviceHub(),
+  options?: { propagateStopFailure?: boolean }
 ): Promise<{ outputFiles: [] }> {
   // Best-effort: the session row is marked CLOSED even when the Mac is unreachable.
   await hub
     .stopSession(taskId, parseLocalDeviceSandboxId(sandboxId)?.deviceId ?? null)
-    .catch((error: unknown) =>
+    .catch((error: unknown) => {
+      if (options?.propagateStopFailure) throw error;
       log.warn('Local session stop failed; marking it closed', {
         task_id: taskId,
         error: error instanceof Error ? error.message : String(error),
-      })
-    );
+      });
+    });
   await prisma.claudeCodeSession.updateMany({
     where: { id: taskId, status: 'ACTIVE' },
     data: { status: 'CLOSED', closedAt: new Date() },

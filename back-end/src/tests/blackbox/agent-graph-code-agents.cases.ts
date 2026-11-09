@@ -45,6 +45,19 @@ export async function testCodeAgentProviderInTreeAndBatchedList(
       codeProvider: 'codex',
     },
   });
+  // A spawn's task_name is the code agent's title (the sidebar row), never its goal.
+  const named = randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: named,
+      agentId: ctx.ids.R,
+      sandboxId: `sb-${named}`,
+      goal: 'You are working in the Rose UI sandbox.\nTask: remove the border',
+      taskName: 'remove_rose_card_border',
+      status: 'ACTIVE',
+      codeProvider: 'claude',
+    },
+  });
   try {
     const tree = await get(ctx, `/api/agents/tree?busId=${ctx.ids.R}`, ctx.userA);
     assert(tree.status === 200, `tree: ${JSON.stringify(tree.data)}`);
@@ -70,9 +83,13 @@ export async function testCodeAgentProviderInTreeAndBatchedList(
     assert(item.owner_agent_id === ctx.ids.R && item.root_agent_id === ctx.ids.R, 'owner + root');
     assert(
       item.title === 'Fix the parser',
-      `title is the goal's first line: ${String(item.title)}`
+      `a legacy row without a task_name shows the goal's first line: ${String(item.title)}`
     );
     assert(item.status === 'ACTIVE' && typeof item.created_at === 'string', 'status + created_at');
+    assert(
+      byId.get(named)?.title === 'remove_rose_card_border',
+      `title is the spawn's task_name: ${String(byId.get(named)?.title)}`
+    );
     assert(byId.get(ctx.ids.S1)?.root_agent_id === ctx.ids.R, 'sub-agent sessions map to the root');
     assert(byId.get(ctx.ids.S1)?.owner_agent_id === ctx.ids.C, 'owned by the spawning sub-agent');
 
@@ -92,7 +109,7 @@ export async function testCodeAgentProviderInTreeAndBatchedList(
     const missing = await get(ctx, '/api/agents/code-agents', ctx.userA);
     assert(missing.status === 400, 'root_ids is required');
   } finally {
-    await prisma.claudeCodeSession.deleteMany({ where: { id: withProvider } });
+    await prisma.claudeCodeSession.deleteMany({ where: { id: { in: [withProvider, named] } } });
   }
 }
 

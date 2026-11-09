@@ -56,6 +56,7 @@ from providers.rose.errors import (
 from providers.rose.pools import PoolSpec
 from providers.rose.speed import anthropic_speed_for
 from providers.rose.streaming import parse_anthropic_sse
+from providers.rose.subscription_usage import observe as observe_subscription_usage
 from providers.rose.transforms import (
     _extract_tools_from_response_format,
     apply_anthropic_tool_config,
@@ -714,6 +715,7 @@ async def _attempt_with_token(
                 connect_timeout_s=ttft_timeout_s,
             ) as response:
                 status = response.status_code
+                observe_subscription_usage("claude", auth.token, response.headers)
 
                 if status == 200:
                     try:

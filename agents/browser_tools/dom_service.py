@@ -174,6 +174,13 @@ def drop_browser_use_serial_dom_probes() -> None:
 
 
 VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS = 10.0
+# browser-use's socket-drop callback starts its own reconnect once the CDP
+# reader exits. Wait this long for it before starting that same reconnect here.
+CDP_RECONNECT_START_GRACE_SECONDS = 1.0
+
+
+class BrowserCdpConnectionLost(RuntimeError):
+    """The browser's CDP socket is down and browser-use could not restore it."""
 
 
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
@@ -579,6 +586,28 @@ def offcenter_click_point(center_x: float, center_y: float, width: float, height
     )
 
 
+def keep_receipt_image_urls(receipt: Any, visible: Any, project: Any) -> None:
+    """Restore a payment receipt's typed HTTP(S) image URLs onto its projection.
+
+    Receipt image URLs are text the agent copied from the page, not raster
+    attachments; the private-entry media policy must not erase them from the
+    request it already made. Each URL still passes through ``project``.
+    """
+    if not isinstance(receipt, dict) or not isinstance(visible, dict):
+        return
+    items_key = "line_items" if "line_items" in receipt else "lineItems"
+    original_items = receipt.get(items_key)
+    visible_items = visible.get(items_key)
+    if not isinstance(original_items, list) or not isinstance(visible_items, list):
+        return
+    for original, visible_item in zip(original_items, visible_items):
+        if not isinstance(original, dict) or not isinstance(visible_item, dict):
+            continue
+        url = original.get("image_url")
+        if isinstance(url, str) and url.startswith(("https://", "http://")):
+            visible_item["image_url"] = project(url)
+
+
 @dataclass
 class ActionHistoryEntry:
     """A single action in the history with both index and coordinate representations.
@@ -651,6 +680,14 @@ class ActionHistory:
                     safe_entry[key]["formatted_state"] = self._dom_service.model_visible_value(value["formatted_state"])
                 else:
                     safe_entry[key] = self._dom_service.model_visible_value(value)
+        if entry.get("action") == "request_payment_card":
+            # Every history read re-projects; a later private entry must not
+            # rewrite the card request this step already made (agent ce9d2ae6).
+            project = self._dom_service.model_visible_value
+            keep_receipt_image_urls(entry.get("params"), safe_entry.get("params"), project)
+            result = entry.get("result")
+            if isinstance(result, dict) and isinstance(safe_entry.get("result"), dict):
+                keep_receipt_image_urls(result.get("payment_request"), safe_entry["result"].get("payment_request"), project)
         if not self._dom_service.secret_values_used and entry.get("screenshot"):
             safe_entry["screenshot"] = entry["screenshot"]
         # These are harness-owned mechanics, rather than page echoes. A CVV
@@ -1014,19 +1051,7 @@ class DOMService:
         if action_name == "request_payment_card":
             # Typed operational receipt text must survive every action projection,
             # before the activity's final return. Raster/media policy stays generic.
-            payment = result.get("payment_request")
-            visible_payment = safe.get("payment_request")
-            if isinstance(payment, dict) and isinstance(visible_payment, dict):
-                items_key = "line_items" if "line_items" in payment else "lineItems"
-                original_items = payment.get(items_key)
-                visible_items = visible_payment.get(items_key)
-                if isinstance(original_items, list) and isinstance(visible_items, list):
-                    for original, visible in zip(original_items, visible_items):
-                        if not isinstance(original, dict) or not isinstance(visible, dict):
-                            continue
-                        url = original.get("image_url")
-                        if isinstance(url, str) and url.startswith(("https://", "http://")):
-                            visible["image_url"] = self.model_visible_value(url)
+            keep_receipt_image_urls(result.get("payment_request"), safe.get("payment_request"), self.model_visible_value)
         if action_name in {"screenshot", "read_browser_state"} and not self.secret_values_used:
             # Only these action outputs contain trusted raster transport.
             # A coincidental CVV in PNG base64 is not a page-text readback.
@@ -1319,6 +1344,20 @@ class DOMService:
                 except (asyncio.CancelledError, Exception):
                     pass
             try:
+                # Stop this session's periodic storage writer before the final
+                # SaveStorageStateEvent. Python 3.11 wait_for can consume a
+                # cancellation when a CDP reply wins the race, leaving the
+                # native watchdog's one-shot cancel waiting on its next poll.
+                watchdog = getattr(session, "_storage_state_watchdog", None)
+                monitor = getattr(watchdog, "_monitoring_task", None)
+                if isinstance(monitor, asyncio.Task) and monitor is not asyncio.current_task():
+                    while not monitor.done():
+                        monitor.cancel()
+                        await asyncio.wait({monitor}, timeout=0.05)
+                    if not monitor.cancelled():
+                        error = monitor.exception()
+                        if error is not None:
+                            logger.warning(f"Storage monitor stopped with error: {error}")
                 # keep_alive prevents BrowserStopEvent from stopping a remote
                 # provider, including sessions discovered from their CDP URL.
                 await session.stop()
@@ -2475,6 +2514,62 @@ class DOMService:
             "title": str(await self._session.get_current_page_title() or ""),
         }
 
+    async def _browser_state_summary(self, *, include_screenshot: bool) -> Any:
+        """browser-use state fetch that survives a CDP socket drop.
+
+        While the socket is down and no reconnect is running, browser-use's
+        handlers skip silently and the fetch fails with a bare "no handler
+        returned a result" ValueError, which callers would otherwise treat as a
+        page problem. A failed fetch on a dead socket restores the connection
+        through browser-use's own reconnect and retries once.
+        """
+        session = self._session
+        try:
+            return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+        except Exception:
+            if session.is_cdp_connected or not await self._restore_cdp_connection(session):
+                raise
+        return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+
+    async def _restore_cdp_connection(self, session: Any) -> bool:
+        """Wait for or start browser-use's reconnect; True once the socket is open.
+
+        Raises BrowserCdpConnectionLost, naming the session flags and the
+        provider's close code, when the socket is still down afterwards.
+        """
+        if session._intentional_stop:
+            return False
+        flags = (
+            f"intentional_stop={session._intentional_stop} reconnecting={session.is_reconnecting} "
+            f"reconnect_pending={session._reconnect_pending}"
+        )
+        started_here = False
+        deadline = time.monotonic() + session.RECONNECT_WAIT_TIMEOUT
+        while not session.is_cdp_connected and time.monotonic() < deadline:
+            if session.is_reconnecting:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(session._reconnect_event.wait(), timeout=deadline - time.monotonic())
+                continue
+            # browser-use's own callback, or a reconnect it left pending, may be about to start one.
+            grace = time.monotonic() + CDP_RECONNECT_START_GRACE_SECONDS
+            while not (session.is_cdp_connected or session.is_reconnecting) and time.monotonic() < grace:
+                await asyncio.sleep(0.05)
+            if session.is_cdp_connected or session.is_reconnecting:
+                continue
+            if started_here:
+                break
+            started_here = True
+            logger.warning(f"CDP socket is down and no reconnect is running ({flags}); starting browser-use reconnect")
+            await session._auto_reconnect()
+        if not session.is_cdp_connected:
+            multiplexer = self.cdp_multiplexer
+            raise BrowserCdpConnectionLost(
+                f"Browser CDP connection lost and not restored ({flags}, "
+                f"provider close={getattr(multiplexer, 'last_upstream_close', None)})"
+            )
+        self._selector_map = {}
+        return True
+
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
 
@@ -2497,7 +2592,7 @@ class DOMService:
             raise RuntimeError("Not connected. Call connect() first.")
 
         capture_screenshot = include_screenshot and not self.secret_values_used
-        state = await self._session.get_browser_state_summary(include_screenshot=capture_screenshot)
+        state = await self._browser_state_summary(include_screenshot=capture_screenshot)
         self._runtime_current_url = str(state.url or "")
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
@@ -2635,7 +2730,7 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        state = await self._browser_state_summary(include_screenshot=False)
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
         current = self._remember_rendered_image_urls(state)
@@ -2761,7 +2856,7 @@ class DOMService:
         stable_hash = None
         with contextlib.suppress(Exception):
             stable_hash = element.compute_stable_hash()
-        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        state = await self._browser_state_summary(include_screenshot=False)
         selector_map = getattr(getattr(state, "dom_state", None), "selector_map", None) or {}
         if selector_map:
             self._selector_map = selector_map

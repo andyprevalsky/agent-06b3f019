@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -878,27 +880,403 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"number": 1, "kind": "initial", "replaces": HEAD_C})
 
-    def test_deploy_step10_derives_the_kind_from_next(self) -> None:
-        """deploy.md Step 10 must take the kind from ``next``: a count of ledger
-        entries says ``verification`` after [findings, unavailable], which the
-        ledger refuses for the superseding HEAD (PR 1656, 2026-10-31)."""
+    def test_deploy_review_next_derives_the_kind_from_next(self) -> None:
+        """``scripts/deploy review-next`` (deploy.md step 10) must take the kind
+        from ``next``: a count of ledger entries says ``verification`` after
+        [findings, unavailable], which the ledger refuses for the superseding
+        HEAD (PR 1656, 2026-10-31)."""
         deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
-        step10 = deploy_md.split("## Step 10: Handle review results", 1)[1].split("\n# Phase 3", 1)[0]
-        self.assertIn("REVIEW_NEXT=$(python3 scripts/deploy_review_cycle.py next)", step10)
-        self.assertNotIn('len(json.load(sys.stdin)["cycles"])', step10)
-        derivation = step10.split("REVIEW_NEXT=", 1)[1]
-        derivation = "REVIEW_NEXT=" + derivation.split("python3 scripts/deploy_review_cycle.py start", 1)[0]
-        derivation = derivation.replace("{\n", "{ exit 9\n", 1)  # never run the blocked branch here
+        self.assertIn("`scripts/deploy review-next`", deploy_md)
+        cli_source = (ROOT / "scripts" / "deploy_cli.py").read_text()
+        body = cli_source.split("def cmd_review_next(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("'scripts/deploy_review_cycle.py', 'next'", body)
+        self.assertIn("json.loads(nxt.stdout)['kind']", body)
+        self.assertNotIn("['cycles']", body)
+        self.assertNotIn("len(", body)
+
         MODULE.finish_cycle(self.state_path, head=HEAD_C, result="findings")
         MODULE.start_cycle(self.state_path, head="b" * 40, kind="incremental")
         MODULE.finish_cycle(self.state_path, head="b" * 40, result="unavailable")
-        cwd = self.root / "step10"
+        # The ledger refuses the count-derived kind for the superseding HEAD.
+        counted = self.run_cli("start", "--kind", "verification", "--head", "d" * 40)
+        self.assertNotEqual(counted.returncode, 0)
+        self.assertIn("must be incremental, not verification", counted.stderr)
+
+        # Execute the real cmd_review_next against the real ``next`` and ledger.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import deploy_cli
+        finally:
+            sys.path.remove(str(ROOT / "scripts"))
+        cwd = self.root / "review-next"
         (cwd / ".context").mkdir(parents=True)
         (cwd / "scripts").symlink_to(ROOT / "scripts")
         (cwd / ".context" / "deploy-review-cycle.json").write_bytes(self.state_path.read_bytes())
-        result = subprocess.run(["bash", "-c", derivation + 'printf %s "$REVIEW_KIND"'], cwd=cwd,
-                                capture_output=True, text=True, check=False)
-        self.assertEqual((result.returncode, result.stdout), (0, "incremental"), result.stderr)
+        calls: list[list[str]] = []
+        patches = [
+            patch.object(deploy_cli, "ROOT", cwd),
+            patch.object(deploy_cli, "read_json", return_value={"pr": 1656}),
+            patch.object(deploy_cli, "write_json"),
+            patch.object(deploy_cli, "uncommitted", return_value=[]),
+            patch.object(deploy_cli, "unapplied_ledger_rows", return_value=[]),
+            patch.object(deploy_cli, "head", return_value="d" * 40),
+            patch.object(deploy_cli, "factory"),
+            patch.object(deploy_cli, "run", side_effect=lambda argv, **_: calls.append(argv) or 0),
+        ]
+        for item in patches:
+            item.start()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = deploy_cli.cmd_review_next(type("Args", (), {"verification_approval": None})())
+        finally:
+            for item in patches:
+                item.stop()
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][1:], ["scripts/deploy_review_cycle.py", "start", "--kind", "incremental",
+                                        "--head", "d" * 40])
+
+
+# Projections of authenticated PR1828 API captures, 2026-11-08; bodies are unmodified.
+MODERN_QUOTA_DATA = {'issue_comments': [{'id': 6720503588,
+                     'issue_url': 'https://api.github.com/repos/Rose-Ai-Labs/rose/issues/1828',
+                     'body': '<!-- coderabbit-ai-generated:v1 -->\n'
+                             '\n'
+                             '<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n'
+                             '<!-- This is an auto-generated comment: skip review by coderabbit.ai -->\n'
+                             '\n'
+                             '> [!IMPORTANT]\n'
+                             '> ## Review skipped\n'
+                             '> \n'
+                             '> Review was skipped due to path filters\n'
+                             '> \n'
+                             '> <details>\n'
+                             '> <summary><strong>:no_entry: Files ignored due to path filters: '
+                             '7</strong></summary>\n'
+                             '> <dl>\n'
+                             '> <dd>\n'
+                             '> <br>\n'
+                             '> \n'
+                             '> * `back-end/src/tests/blackbox/code-session-inspect-cooldown.fixture.ts` is '
+                             'excluded by `!**/tests/**/!(browser_tilion.blackbox.py)`\n'
+                             '> * `back-end/src/tests/blackbox/code-session-inspect-isolation.blackbox.ts` '
+                             'is excluded by `!**/tests/**/!(browser_tilion.blackbox.py)`, '
+                             '`!**/*.blackbox.ts`\n'
+                             '> * `back-end/src/tests/blackbox/code-session-inspect.blackbox.ts` is excluded '
+                             'by `!**/tests/**/!(browser_tilion.blackbox.py)`, `!**/*.blackbox.ts`\n'
+                             '> * `back-end/src/tests/blackbox/code-session-usage-limit.blackbox.ts` is '
+                             'excluded by `!**/tests/**/!(browser_tilion.blackbox.py)`, `!**/*.blackbox.ts`\n'
+                             '> * `back-end/src/tests/blackbox/funded-key-cooldown.support.ts` is excluded '
+                             'by `!**/tests/**/!(browser_tilion.blackbox.py)`\n'
+                             '> * `back-end/src/tests/unit/funded-key-cooldown-isolation.test.ts` is '
+                             'excluded by `!**/tests/**/!(browser_tilion.blackbox.py)`, `!**/*.test.ts`\n'
+                             '> * '
+                             '`docs/rca/cases/2026-10-02-in-process-rose-tests-shared-funded-key-cooldown-row.md` '
+                             'is excluded by `!docs/**`, `!**/*.md`\n'
+                             '> \n'
+                             '> </dd>\n'
+                             '> </dl>\n'
+                             '> </details>\n'
+                             '> \n'
+                             '> CodeRabbit blocks several paths by default. You can override this behavior '
+                             'by explicitly including those paths in the path filters. For example, '
+                             'including `**/dist/**` will override the default block on the `dist` '
+                             'directory, by removing the pattern from both the lists.\n'
+                             '> \n'
+                             '> <details>\n'
+                             '> <summary><strong><picture><source media="(prefers-color-scheme: dark)" '
+                             'srcset="https://storage.googleapis.com/coderabbit_public_assets/review-comment-icons-v1/cog-dark.svg"><img '
+                             'src="https://storage.googleapis.com/coderabbit_public_assets/review-comment-icons-v1/cog.svg" '
+                             'width="16" height="16" align="absmiddle" alt=""></picture> Run '
+                             'configuration</strong></summary>\n'
+                             '> <dl>\n'
+                             '> <dd>\n'
+                             '> <br>\n'
+                             '> \n'
+                             '> - **Source mode**: Auto\n'
+                             '> - **Repository**: '
+                             '[Rose-Ai-Labs/rose](<https://github.com/Rose-Ai-Labs/rose>)\n'
+                             '> - **Branch**: '
+                             '[fix/inspection-cooldown-fixture-isolation](<https://github.com/Rose-Ai-Labs/rose/tree/fix%2Finspection-cooldown-fixture-isolation>)\n'
+                             '> - **File**: '
+                             '[.coderabbit.yaml](<https://github.com/Rose-Ai-Labs/rose/blob/b3a75f5183867198f931b24bb2ddbef68c59d55e/.coderabbit.yaml>)\n'
+                             '> - **Commit**: '
+                             '[b3a75f5](<https://github.com/Rose-Ai-Labs/rose/commit/b3a75f5183867198f931b24bb2ddbef68c59d55e>)\n'
+                             '> - **Layers**: Repository YAML\n'
+                             '> - **Review profile**: ASSERTIVE\n'
+                             '> - **Plan**: Team\n'
+                             '> - **Run ID**: `b8bba353-acb6-456d-a736-cc4e398d5bea`\n'
+                             '> \n'
+                             '> </dd>\n'
+                             '> </dl>\n'
+                             '> </details>\n'
+                             '> \n'
+                             '> You can disable this status message by setting the `reviews.review_status` '
+                             'to `false` in the CodeRabbit configuration file.\n'
+                             '> \n'
+                             '> Use the checkbox below for a quick retry:\n'
+                             '> - [ ] <!-- {"checkboxId":"e9bb8d72-00e8-4f67-9cb2-caf3b22574fe"} --> Trigger '
+                             'review\n'
+                             '\n'
+                             '<!-- end of auto-generated comment: skip review by coderabbit.ai -->\n'
+                             '\n'
+                             '<!-- autopilot:start -->\n'
+                             '- [ ] <!-- {"checkboxId":"2708ad07-9f24-4260-9c11-7dc76a49f2e3"} --> <strong '
+                             'title="Keep fixing CodeRabbit findings and required CI, and resolving merge '
+                             'conflicts">Autofix</strong> · Keep fixing CodeRabbit findings and required CI, '
+                             'and resolving merge conflicts\n'
+                             '<!-- autopilot:end -->',
+                     'created_at': '2026-11-08T10:44:26Z',
+                     'updated_at': '2026-11-08T10:45:44Z',
+                     'author_association': 'NONE',
+                     'user': {'login': 'coderabbitai[bot]', 'type': 'Bot'},
+                     'performed_via_github_app': {'slug': 'coderabbitai'}},
+                    {'id': 6720513816,
+                     'issue_url': 'https://api.github.com/repos/Rose-Ai-Labs/rose/issues/1828',
+                     'body': '@coderabbitai full review',
+                     'created_at': '2026-11-08T10:45:32Z',
+                     'updated_at': '2026-11-08T10:45:32Z',
+                     'author_association': 'MEMBER',
+                     'user': {'login': 'andyprevalsky', 'type': 'User'},
+                     'performed_via_github_app': {'slug': 'boxes-dev'}},
+                    {'id': 6720514622,
+                     'issue_url': 'https://api.github.com/repos/Rose-Ai-Labs/rose/issues/1828',
+                     'body': '<!-- coderabbit-ai-generated:v1 -->\n'
+                             '\n'
+                             '<!-- This is an auto-generated reply by CodeRabbit -->\n'
+                             '<!-- CodeRabbit review command invocation: '
+                             'v2:f8b3805c76b8f8b31daa79f8ed832664a65cfa455221f38b6dfb9369050f5854 -->\n'
+                             '<details>\n'
+                             '<summary>Action not completed</summary>\n'
+                             '<dl>\n'
+                             '<dd>\n'
+                             '<br>\n'
+                             '\n'
+                             'Path filters excluded 7 files from this review.\n'
+                             '\n'
+                             '---\n'
+                             '\n'
+                             'Your included review limit is currently reached under our [Fair Usage Limits '
+                             'Policy](https://docs.coderabbit.ai/management/rate-limits#fair-usage-limits-policy). '
+                             'Your current included review allowance is based on your included PR review '
+                             'attempts over the past 7 days. This review may still proceed through '
+                             'usage-based billing if eligible. Your next included review will be available '
+                             'in 59 minutes.\n'
+                             '\n'
+                             '</dd>\n'
+                             '</dl>\n'
+                             '</details>',
+                     'created_at': '2026-11-08T10:45:38Z',
+                     'updated_at': '2026-11-08T10:45:46Z',
+                     'author_association': 'NONE',
+                     'user': {'login': 'coderabbitai[bot]', 'type': 'Bot'},
+                     'performed_via_github_app': {'slug': 'coderabbitai'}}],
+ 'check_runs': [{'id': 128706968531,
+                 'head_sha': 'b3a75f5183867198f931b24bb2ddbef68c59d55e',
+                 'name': 'CodeRabbit',
+                 'status': 'completed',
+                 'conclusion': 'skipped',
+                 'started_at': '2026-11-08T10:44:27Z',
+                 'completed_at': '2026-11-08T10:44:27Z',
+                 'output': {'title': 'Path filters excluded 7 files from this review'},
+                 'app': {'slug': 'coderabbitai'}}],
+ 'reviews': [],
+ 'review_comments': [],
+ 'captured_at': '2026-11-08T10:50:12.523118+00:00'}
+MODERN_QUOTA_PR = {'number': 1828, 'state': 'open', 'head': {'sha': 'b3a75f5183867198f931b24bb2ddbef68c59d55e'}, 'base': {'repo': {'full_name': 'Rose-Ai-Labs/rose'}}}
+
+
+class ModernQuotaTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.state = Path(self.temp.name) / 'state.json'
+        self.receipts = Path(self.temp.name) / 'receipts.jsonl'
+        self.head = MODERN_QUOTA_PR['head']['sha']
+        MODULE.start_cycle(self.state, head=self.head, kind='initial', reset=True)
+        state = MODULE.read_state(self.state)
+        state['cycles'][0]['started_at'] = '2026-11-08T10:44:10.883437+00:00'
+        MODULE.write_state(self.state, state)
+        self.data = deepcopy(MODERN_QUOTA_DATA)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def skip(self, data=None, live=None):
+        def api(args):
+            self.assertEqual(args, ['api', 'repos/Rose-Ai-Labs/rose/pulls/1828'])
+            return deepcopy(MODERN_QUOTA_PR if live is None else live)
+        with patch.object(MODULE, '_gh_json', side_effect=api), \
+             patch.object(MODULE, 'now', return_value=self.data['captured_at']):
+            return MODULE.skip_cycle(self.state, head=self.head, pr='1828', reason='usage-cap',
+                evidence=MODULE.normalize_evidence(data or self.data, source='captured-gh-test'),
+                receipts_path=self.receipts)
+
+    def test_modern_quota_reply_binds_current_pr_cycle_and_configuration(self) -> None:
+        cycle = self.skip()
+        self.assertEqual(cycle['disposition'], 'skipped')
+        proof = cycle['evidence']['head_binding']
+        self.assertEqual(proof['method'], 'current-pr-command-config')
+        self.assertEqual(proof['request_comment_id'], 6720513816)
+        self.assertEqual(proof['configuration_comment_id'], 6720503588)
+        self.assertEqual(proof['current_pr_head'], self.head)
+        self.assertEqual(proof['invocation'], 'v2:f8b3805c76b8f8b31daa79f8ed832664a65cfa455221f38b6dfb9369050f5854')
+        self.assertIn('Skipped', cycle['report_row'])
+        self.assertNotIn('naming commit', cycle['report_row'])
+        self.assertEqual(MODULE.next_cycle(MODULE.read_state(self.state)['cycles'])['number'], 1)
+
+    def test_modern_ambiguous_or_stale_evidence_refuses_without_mutation(self) -> None:
+        cases = {}
+        for label in ['no-config', 'no-request', 'path-only', 'rate-only', 'no-marker',
+                      'wrong-config-head', 'wrong-pr', 'spoof-bot', 'stale-reply',
+                      'stale-config', 'edited-request', 'untrusted-request',
+                      'duplicate-request', 'request-after-reply', 'duplicate-token', 'no-exact-check', 'successful-check']:
+            cases[label] = deepcopy(self.data)
+        cases['no-config']['issue_comments'].pop(0)
+        cases['no-request']['issue_comments'].pop(1)
+        cases['path-only']['issue_comments'].pop(2)
+        cases['rate-only']['issue_comments'][2]['body'] = 'Action not completed. Review rate limited.'
+        cases['no-marker']['issue_comments'][2]['body'] = self.data['issue_comments'][2]['body'].replace('v2:', 'v3:')
+        cases['wrong-config-head']['issue_comments'][0]['body'] = self.data['issue_comments'][0]['body'].replace(self.head, 'd' * 40)
+        cases['wrong-pr']['issue_comments'][2]['issue_url'] += '9'
+        cases['spoof-bot']['issue_comments'][2]['performed_via_github_app']['slug'] = 'other'
+        cases['stale-reply']['issue_comments'][2]['created_at'] = '2026-11-08T10:43:00Z'
+        cases['stale-config']['issue_comments'][0]['updated_at'] = '2026-11-08T10:44:26Z'
+        cases['edited-request']['issue_comments'][1]['updated_at'] = '2026-11-08T10:45:33Z'
+        cases['untrusted-request']['issue_comments'][1]['author_association'] = 'NONE'
+        cases['duplicate-request']['issue_comments'].append(deepcopy(self.data['issue_comments'][1]))
+        cases['request-after-reply']['issue_comments'][1].update(created_at='2026-11-08T10:45:39Z', updated_at='2026-11-08T10:45:39Z')
+        cases['duplicate-token']['issue_comments'].append(deepcopy(self.data['issue_comments'][2]))
+        cases['no-exact-check']['check_runs'][0].pop('head_sha')
+        cases['successful-check']['check_runs'][0]['conclusion'] = 'success'
+        before = self.state.read_bytes()
+        for label, data in cases.items():
+            with self.subTest(label=label), self.assertRaises(MODULE.ReviewCycleError):
+                self.skip(data)
+            self.assertEqual(self.state.read_bytes(), before)
+            self.assertFalse(self.receipts.exists())
+        for changed in [dict(MODERN_QUOTA_PR, number=99),
+                        dict(MODERN_QUOTA_PR, head={'sha': 'd' * 40}),
+                        dict(MODERN_QUOTA_PR, state='closed')]:
+            with self.subTest(live=changed), self.assertRaises(MODULE.ReviewCycleError):
+                self.skip(live=changed)
+            self.assertEqual(self.state.read_bytes(), before)
+
+    def test_modern_incomplete_identities_and_expired_allowance_refuse(self) -> None:
+        before = self.state.read_bytes()
+        cases = []
+        for index in range(3):
+            missing = deepcopy(self.data)
+            missing['issue_comments'][index].pop('id')
+            cases.append(missing)
+        for key, value in [('app', {'slug': 'other'}), ('head_sha', 'e' * 40), ('status', 'in_progress')]:
+            changed = deepcopy(self.data)
+            changed['check_runs'][0][key] = value
+            cases.append(changed)
+        for timestamp in ['2026-11-08T11:45:38Z', '2026-11-08T10:43:00Z']:
+            changed = deepcopy(self.data)
+            changed['captured_at'] = timestamp
+            cases.append(changed)
+        for data in cases:
+            with self.subTest(data=data), self.assertRaises(MODULE.ReviewCycleError):
+                self.skip(data)
+            self.assertEqual(before, self.state.read_bytes())
+            self.assertFalse(self.receipts.exists())
+        for live in [None, [], {'head': None}, dict(MODERN_QUOTA_PR, base=None)]:
+            with patch.object(MODULE, '_gh_json', return_value=live), \
+                 patch.object(MODULE, 'now', return_value=self.data['captured_at']), \
+                 self.assertRaises(MODULE.ReviewCycleError):
+                MODULE.skip_cycle(self.state, head=self.head, pr='1828', reason='usage-cap',
+                    evidence=MODULE.normalize_evidence(self.data, source='test'), receipts_path=self.receipts)
+            self.assertEqual(before, self.state.read_bytes())
+
+    def test_modern_expired_notice_and_truncated_inventory_refuse(self) -> None:
+        data = deepcopy(self.data)
+        data['captured_at'] = '2026-11-08T11:45:38Z'
+        with patch.object(MODULE, 'now', return_value=data['captured_at']), \
+             self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.skip_cycle(self.state, head=self.head, pr='1828', reason='usage-cap',
+                evidence=MODULE.normalize_evidence(data, source='test'), receipts_path=self.receipts)
+        self.assertFalse(self.receipts.exists())
+        with patch.object(MODULE, '_gh_json', return_value=[{}]), \
+             patch.object(MODULE, 'GH_PAGE_SIZE', 1), patch.object(MODULE, 'GH_MAX_PAGES', 2), \
+             self.assertRaisesRegex(MODULE.ReviewCycleError, 'pagination'):
+            MODULE._gh_pages('repos/Rose-Ai-Labs/rose/issues/1828/comments')
+
+    def test_later_incremental_cycle_preserves_prior_quota_history(self) -> None:
+        # Synthetic later-cycle variation of the captured native shape, not a new API observation.
+        MODULE.finish_cycle(self.state, head=self.head, result='findings')
+        self.head = 'd' * 40
+        MODULE.start_cycle(self.state, head=self.head, kind='incremental')
+        state = MODULE.read_state(self.state)
+        state['cycles'][-1]['started_at'] = '2026-11-08T10:46:00Z'
+        MODULE.write_state(self.state, state)
+        prior = deepcopy(self.data['issue_comments'])
+        newer = deepcopy(prior)
+        for entry in newer:
+            entry['id'] += 100
+        newer[0]['body'] = newer[0]['body'].replace(MODERN_QUOTA_PR['head']['sha'], self.head)
+        newer[0]['body'] = newer[0]['body'].replace(MODERN_QUOTA_PR['head']['sha'][:7], self.head[:7])
+        newer[0]['updated_at'] = '2026-11-08T10:46:08Z'
+        newer[1].update(body='@coderabbitai review', created_at='2026-11-08T10:46:01Z', updated_at='2026-11-08T10:46:01Z')
+        newer[2]['body'] = newer[2]['body'].replace('f8b3805c76b8f8b31daa79f8ed832664a65cfa455221f38b6dfb9369050f5854', 'e' * 64)
+        newer[2].update(created_at='2026-11-08T10:46:03Z', updated_at='2026-11-08T10:46:10Z')
+        self.data['issue_comments'] = prior + newer
+        self.data['check_runs'][0].update(head_sha=self.head, started_at='2026-11-08T10:46:00Z', completed_at='2026-11-08T10:46:00Z')
+        live = deepcopy(MODERN_QUOTA_PR)
+        live['head']['sha'] = self.head
+        before = self.state.read_bytes()
+        stale_only = deepcopy(self.data)
+        stale_only['issue_comments'] = prior
+        with self.assertRaises(MODULE.ReviewCycleError):
+            self.skip(stale_only, live=live)
+        self.assertEqual(before, self.state.read_bytes())
+        cycle = self.skip(live=live)
+        self.assertEqual(cycle['evidence']['head_binding']['request_comment_id'], 6720513916)
+        self.assertEqual(cycle['evidence']['head_binding']['invocation'], 'v2:' + 'e' * 64)
+        self.assertEqual(len(MODULE.read_state(self.state)['cycles']), 2)
+
+    def test_r1_contradictory_reply_and_mixed_configuration_refuse_atomically(self) -> None:
+        # Synthetic contradictions added to unmodified native-shaped evidence.
+        cases = {}
+        for size in (7, 12, 40):
+            for reference in [f'Review request targets commit {"d" * size}.',
+                              f'HEAD: `{ "d" * size }`',
+                              f'https://github.com/Rose-Ai-Labs/rose/commit/{"d" * size}']:
+                data = deepcopy(self.data)
+                data['issue_comments'][2]['body'] += '\n' + reference
+                cases[reference] = data
+        for target in [f'- **Commit**: [ddddddd](<https://github.com/Rose-Ai-Labs/rose/commit/{"d" * 40}>)',
+                       '- **Commit**: [main](<https://github.com/Rose-Ai-Labs/rose/commit/main>)',
+                       f'- **File**: [.coderabbit.yaml](<https://github.com/Rose-Ai-Labs/rose/blob/{"d" * 40}/.coderabbit.yaml>)',
+                       '- **Commit**: ddddddd',
+                       f'- **File**: [.coderabbit.yaml](<https://github.com/another/repo/blob/{self.head}/.coderabbit.yaml>)']:
+            data = deepcopy(self.data)
+            data['issue_comments'][0]['body'] += '\nRun configuration\n' + target
+            cases[target] = data
+        before = self.state.read_bytes()
+        receipt = b'{"prior":"retained receipt"}\n'
+        for label, data in cases.items():
+            with self.subTest(label=label):
+                self.state.write_bytes(before)
+                self.receipts.write_bytes(receipt)
+                with self.assertRaises(MODULE.ReviewCycleError):
+                    self.skip(data)
+                self.assertEqual(before, self.state.read_bytes())
+                self.assertEqual(receipt, self.receipts.read_bytes())
+
+    def test_r1_contextual_head_prefix_and_opaque_tokens_remain_distinct(self) -> None:
+        self.data['issue_comments'][2]['body'] += (
+            f'\nReview request targets commit `{self.head[:7]}`.'
+            '\nOpaque identifier: `dddddddddddddddddddddddddddddddddddddddd`.'
+        )
+        cycle = self.skip()
+        self.assertEqual(cycle['disposition'], 'skipped')
+        self.assertEqual(cycle['evidence']['head_binding']['current_pr_head'], self.head)
+
+    def test_modern_quota_never_skips_a_substantive_review(self) -> None:
+        self.data['reviews'] = [review(999, self.head, 'Actionable comments posted: 1')]
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'substantive'):
+            self.skip()
+        self.assertFalse(self.receipts.exists())
 
 if __name__ == "__main__":
     unittest.main()

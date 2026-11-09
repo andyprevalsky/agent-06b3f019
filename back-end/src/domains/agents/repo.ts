@@ -69,11 +69,15 @@ export async function findAgentsByBusId(busId: string) {
       taskPath: true,
       createdAt: true,
       updatedAt: true,
+      lastUserMessageAt: true,
     },
   });
 }
 
-/** Fetch a single agent by ID with optional user ownership check. Includes verifier and tools. */
+/**
+ * Fetch a single agent by ID with optional user ownership check. Includes verifier,
+ * tools and its project summary (one PK join on the indexed projectId FK).
+ */
 export async function findAgentWithRelations(agentId: string, userId?: string) {
   return prisma.agent.findFirst({
     where: {
@@ -88,6 +92,7 @@ export async function findAgentWithRelations(agentId: string, userId?: string) {
           tool: true,
         },
       },
+      project: { select: { name: true, repoUrl: true, defaultBranch: true } },
     },
   });
 }

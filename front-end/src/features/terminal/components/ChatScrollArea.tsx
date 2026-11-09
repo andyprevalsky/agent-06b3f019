@@ -9,6 +9,7 @@
  *   OPENING_ANIMATION → centered inside the chat area above the input stack
  *   MOBILE_LOADER     → keeps the desktop ASCII scale and starts below the
  *                       full safe-area-aware mobile header
+ *   MOBILE_CAPTION    → opening caption sits inside the large grid tile (phone only)
  *   MOBILE_ASCII      → visual-only transform, no layout shift for text/input
  *   MESSAGE_LIST      → normal scrollable message area
  */
@@ -17,7 +18,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { AsciiLoader } from '@/features/terminal-component-group';
 import { MessageList } from '@/features/terminal-component-group';
 
-import { useOpeningAnimation } from '../hooks/useOpeningAnimation';
+import { useOpeningAnimationState, type OpeningAnimationStore } from '../hooks/useOpeningAnimation';
 import type { AgentSlice, DripSlice, DripStyles } from '../types';
 
 import { OpeningMessageDisplay } from './OpeningMessageDisplay';
@@ -25,9 +26,24 @@ import { OpeningMessageDisplay } from './OpeningMessageDisplay';
 interface ChatScrollAreaProps {
   agents: AgentSlice;
   drip: DripSlice;
-  opening: ReturnType<typeof useOpeningAnimation>;
+  opening: OpeningAnimationStore;
   messagesEndRef: React.RefObject<HTMLDivElement>;
 }
+
+/** Phone only: the caption is anchored inside the large grid tile (429px square
+ * centered at 40% of the shell), 5.5rem above its bottom edge; the loader box
+ * starts below the mobile header, so that offset is subtracted. md+ keeps the
+ * original in-flow caption under the ASCII art. */
+/** Phone only: the art is absolutely centered 2.5rem above the large tile's
+ * center (tile = 429px square at 40% of the shell; the loader box starts below
+ * the mobile header, so that offset is subtracted), leaving the tile's lower
+ * band to the caption. Short phones shrink it with a transform (no CSS zoom,
+ * which would also scale the offsets). md+ keeps the original centering. */
+const OPENING_ASCII_CLASS =
+  'relative scale-95 max-md:absolute max-md:left-1/2 max-md:top-[calc(0.4*var(--app-height,100dvh)-var(--mobile-terminal-header-height)-2.5rem)] max-md:-translate-x-1/2 max-md:-translate-y-1/2 max-md:[@media(max-height:720px)]:scale-[0.68] md:translate-y-0 md:scale-100';
+
+const OPENING_CAPTION_SLOT_CLASS =
+  '-mt-3 max-md:absolute max-md:inset-x-0 max-md:top-[calc(0.4*var(--app-height,100dvh)+214.5px-var(--mobile-terminal-header-height)-5.5rem)] max-md:!mt-0';
 
 export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: ChatScrollAreaProps) {
   const showLoader = !a.selectedAgentId || a.messages.length === 0;
@@ -68,10 +84,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         }}
       >
         <div className="space-y-6 text-center md:mb-[20vh]">
-          <div
-            data-testid="terminal-opening-ascii-transform"
-            className="relative translate-y-[5%] scale-95 max-md:[@media(max-height:720px)]:[zoom:0.72] md:translate-y-0 md:scale-100"
-          >
+          <div data-testid="terminal-opening-ascii-transform" className={OPENING_ASCII_CLASS}>
             <AsciiLoader
               showWarmingUp={false}
               size="large"
@@ -84,18 +97,14 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
             />
           </div>
           {showLoader && (
-            <div className="-mt-3">
+            <div data-testid="terminal-opening-caption-slot" className={OPENING_CAPTION_SLOT_CLASS}>
               {!a.selectedAgentId ||
               a.isLoadingAgent ||
               (a.selectedAgentId && a.agentDetail?.status === 'STARTING_UP') ? (
                 showNetworkDots ? (
                   <p className="text-muted-foreground">Loading AI Network{a.loadingDots}</p>
                 ) : (
-                  <OpeningMessageDisplay
-                    currentMessageIndex={opening.currentMessageIndex}
-                    animationPhase={opening.animationPhase}
-                    revealProgress={opening.revealProgress}
-                  />
+                  <OpeningCaption opening={opening} />
                 )
               ) : null}
             </div>
@@ -117,6 +126,19 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         <div ref={messagesEndRef} />
       </div>
     </ScrollArea>
+  );
+}
+
+/** The only subscriber to the opening cycle: its 20ms reveal ticks re-render
+ * this caption alone, not the chat column and composer around it. */
+function OpeningCaption({ opening }: { opening: OpeningAnimationStore }) {
+  const { currentMessageIndex, animationPhase, revealProgress } = useOpeningAnimationState(opening);
+  return (
+    <OpeningMessageDisplay
+      currentMessageIndex={currentMessageIndex}
+      animationPhase={animationPhase}
+      revealProgress={revealProgress}
+    />
   );
 }
 

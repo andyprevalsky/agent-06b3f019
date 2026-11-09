@@ -30,6 +30,7 @@ async function main(): Promise<void> {
 
   const cdp = {
     evaluateAnyTarget: async () => 'not-a-real-authorization-code#state',
+    syncPasskeyCeremonies: async () => undefined,
     close: () => {
       browserClosed += 1;
     },

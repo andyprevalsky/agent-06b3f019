@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "5d57dd83daa053857a901879487e54978fa708b8",
+      "status": "completed",
+      "started_at": "2026-11-06T09:58:07.035408+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-06T10:06:37.608661+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "f25d7c06405db10990b226e1ccf8de547b4120ec",
+      "status": "completed",
+      "started_at": "2026-11-06T10:32:23.345713+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-06T10:50:01.804558+00:00"
+    }
+  ]
+}

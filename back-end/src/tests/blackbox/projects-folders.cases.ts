@@ -263,6 +263,25 @@ test('folders: agent assignment, inheritance, moves and deletion preserve placem
       (rooted.data.agent as { folder_id: null }).folder_id === null,
     'null folder retains project'
   );
+  // Sidebar "Move to…" (agent right-click): project root, Home, foreign/invalid project.
+  expectStatus(await patch({ project_id: foreignProject.id }), 404, 'move rejects foreign project');
+  expectStatus(await patch({ project_id: 'invalid' }), 400, 'move validates project UUID');
+  const toProject = await patch({ project_id: project.id });
+  expectStatus(toProject, 200, 'move to another project root');
+  const toProjectAgent = toProject.data.agent as { project_id: string; folder_id: null };
+  assert(
+    toProjectAgent.project_id === project.id && toProjectAgent.folder_id === null,
+    'explicit project selects its root'
+  );
+  const toHome = await patch({ project_id: null });
+  expectStatus(toHome, 200, 'move to Home');
+  const toHomeAgent = toHome.data.agent as { project_id: null; folder_id: null };
+  assert(
+    toHomeAgent.project_id === null && toHomeAgent.folder_id === null,
+    'null project moves Home'
+  );
+  const homeRow = await prisma.agent.findUniqueOrThrow({ where: { id: rootId } });
+  assert(homeRow.projectId === null && homeRow.folderId === null, 'Home move persisted');
   await patch({ folder_id: folder.id });
   const list = await call('/api/agents', { headers: apiKeyHeaders(s.userId) });
   const item = (list.data.agents as Array<{ agent_id: string; folder_id: string }>).find(

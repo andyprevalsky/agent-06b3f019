@@ -732,6 +732,8 @@ class _ActionContext:
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
     prefetched_browser_state: Optional[Dict[str, Any]] = None
     model_params: Optional[Dict[str, Any]] = None
+    # The session's own browser provider; None only for adapters that do not know it.
+    provider: Optional[str] = None
 
 
 async def _refuse_navigation(
@@ -844,6 +846,7 @@ _INTERACTION_ACTIONS = {
     "select_dropdown",
     "upload_file",
     "drag",
+    "hover",
 }
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
 _INSPECTION_ACTIONS = {
@@ -1236,7 +1239,10 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             context.dom_service,
             context.action_history,
             context.params,
+            humanizer=context.humanizer,
         )
+    if context.action_name == "hover":
+        return await _execute_hover(context)
     if context.action_name == "scroll":
         direction = context.params.get("direction", "down")
         amount = context.params.get("amount", 300)
@@ -1334,6 +1340,8 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             current_auth_realm=context.current_auth_realm,
             prepare_credentials_for_url=context.prepare_credentials_for_url,
             browser_network_recorder=context.browser_network_recorder,
+            provider=context.provider,
+            user_id=context.user_id,
         )
     if context.action_name == "navback":
         guard = _navigation_guard_error(context, action="navback")
@@ -1734,6 +1742,7 @@ async def execute_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
     successful_secret_refs: Optional[set[str]] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve private values and report successful use privately to the caller."""
     if successful_secret_refs is not None:
@@ -1901,6 +1910,7 @@ async def _execute_resolved_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     model_params: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1968,6 +1978,7 @@ async def _execute_resolved_action(
             prepare_credentials_for_url=prepare_credentials_for_url,
             prefetched_browser_state=prefetched_browser_state,
             model_params=model_params,
+            provider=provider,
         )
         if action_name in _INTERACTION_ACTIONS:
             result = await _execute_interaction_action(context)
@@ -3673,6 +3684,42 @@ async def _execute_click(
         return {"success": False, "error": "Click requires either element index or coordinates"}
 
 
+async def _execute_hover(context: _ActionContext) -> Dict[str, Any]:
+    """Move the humanized pointer to an element or viewport point without pressing."""
+    index = context.index if context.index is not None else context.params.get("index")
+    target: Any = None
+    if index is not None:
+        target = await _maybe_await(context.dom_service.get_element_coordinates(index))
+        if target is None:
+            target = await _refresh_element_coordinates(context.dom_service, index)
+        if target is None:
+            return {"success": False, "error": f"Cannot hover element index {index}: no coordinates available"}
+    elif context.params.get("x") is not None and context.params.get("y") is not None:
+        target = (int(context.params["x"]), int(context.params["y"]))
+    else:
+        return {"success": False, "error": "hover requires index or both x and y"}
+    x, y = int(target[0]), int(target[1])
+    if context.humanizer:
+        await context.humanizer.hover(x, y)
+    else:
+        # Same fallback as an unhumanized click: one CDP pointer move, no press.
+        logger.warning("\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using a CDP pointer move")
+        cdp_session = await context.session.get_or_create_cdp_session()
+        await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+            params={"type": "mouseMoved", "x": x, "y": y},
+            session_id=cdp_session.session_id,
+        )
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="hover",
+        thinking=context.thinking,
+        index=index,
+        coordinates={"x": x, "y": y},
+        result={"success": True},
+    )
+    return {"success": True, "message": f"Pointer moved to ({x}, {y})"}
+
+
 def _input_success_result(display_text: str, credential_ref: Optional[Dict[str, str]]) -> Dict[str, Any]:
     result: Dict[str, Any] = {"success": True, "message": "", "typed_text": display_text}
     if credential_ref:
@@ -4082,8 +4129,15 @@ async def _execute_goto(
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
     browser_network_recorder: Optional[Any] = None,
+    provider: Optional[str] = None,
+    user_id: str = "",
 ) -> Dict[str, Any]:
-    """Prepare a target realm's credentials, then execute navigation."""
+    """Prepare a target realm's credentials, then execute navigation.
+
+    ``provider`` and ``user_id`` select the download's persistence path: the
+    session's own provider (never the ambient BROWSER_PROVIDER default) decides
+    between the session files API and Tilion's durable attachment copy.
+    """
     from browser_use.browser.events import NavigateToUrlEvent
 
     original_url = params.get("url", "")
@@ -4152,6 +4206,8 @@ async def _execute_goto(
                     url=url,
                     session_id=session_id,
                     config=config,
+                    provider=provider,
+                    **({"user_id": user_id} if user_id else {}),
                 )
             except Exception as persist_error:
                 logger.warning(

@@ -461,6 +461,122 @@ async def test_multiplexer_propagates_provider_close_code():
             await multiplexer.close()
 
 
+async def test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running():
+    """A provider socket drop whose browser-use drop callback never starts a reconnect.
+
+    browser-use's handlers skip silently while the socket is down and nothing is
+    reconnecting, so the state fetch fails with "Expected at least one handler to
+    return a non-None result" (agent-payment-new-user-journey, resumed Tilion
+    checkout, 2026-11-06). The state read must restore the connection itself.
+    """
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                try:
+                    await service.connect()
+                    session = service.session
+                    assert (await service.get_browser_state(include_screenshot=False))["url"] is not None
+                    session._intentional_stop = True  # the drop callback sees a deliberate stop and starts nothing
+                    await gateway.drop_all()
+                    for _ in range(100):
+                        if not session.is_cdp_connected:
+                            break
+                        await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.3)
+                    session._intentional_stop = False
+                    assert not session.is_cdp_connected and not session.is_reconnecting
+                    state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
+                    assert state["url"] is not None
+                    assert session.is_cdp_connected
+                finally:
+                    await _stop_dom_service(service)
+
+
+async def test_state_fetch_waits_for_a_reconnect_browser_use_left_pending():
+    """_auto_reconnect can return with the next cycle only scheduled; the read must not give up in that gap."""
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                try:
+                    await service.connect()
+                    session = service.session
+                    session._intentional_stop = True
+                    await gateway.drop_all()
+                    await asyncio.sleep(0.5)
+                    session._intentional_stop = False
+                    assert not session.is_cdp_connected and not session.is_reconnecting
+                    real_reconnect = type(session)._auto_reconnect
+                    loop = asyncio.get_running_loop()
+                    calls = []
+                    deferred_cycles: list = []
+
+                    async def deferred_reconnect(max_attempts: int = 3) -> None:
+                        calls.append(max_attempts)
+                        # The cycle that was running finished without a socket; the next one is only scheduled.
+                        loop.call_later(0.4, lambda: deferred_cycles.append(loop.create_task(real_reconnect(session))))
+
+                    session._auto_reconnect = deferred_reconnect
+                    state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
+                    assert state["url"] is not None and session.is_cdp_connected
+                    assert calls == [3], calls  # only the deferred cycle can restore the socket
+                    # Let that cycle finish its events before teardown, or it restarts the stopped event bus.
+                    await asyncio.wait_for(deferred_cycles[0], 30)
+                finally:
+                    await _stop_dom_service(service)
+
+
+async def test_state_fetch_reports_provider_close_when_the_socket_cannot_be_restored():
+    """A socket that stays down fails the read with the provider's close code, not a bare ValueError."""
+    from browser_tools.dom_service import BrowserCdpConnectionLost, DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                try:
+                    await service.connect()
+                    session = service.session
+                    session._intentional_stop = True
+                    await gateway.drop_all()
+                    await asyncio.sleep(0.5)
+                    session._intentional_stop = False
+                    gateway._server.close()  # the provider no longer accepts connections
+                    with contextlib.suppress(Exception):
+                        await gateway._server.wait_closed()
+                    try:
+                        await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 120)
+                    except BrowserCdpConnectionLost as error:
+                        assert "provider close=" in str(error) and "reconnecting=" in str(error), str(error)
+                    else:
+                        raise AssertionError("an unreachable provider must fail the state read")
+                finally:
+                    await _stop_dom_service(service)
+
+
+async def test_state_restore_relies_only_on_browser_use_attributes_that_exist():
+    """The restore path uses browser-use internals; a pin bump that renames one must fail here."""
+    from browser_use.browser.session import BrowserSession
+
+    for name in ("_reconnect_event", "_intentional_stop", "_reconnect_pending", "_reconnecting"):
+        assert name in BrowserSession.__private_attributes__, f"browser-use BrowserSession no longer has {name}"
+    assert callable(getattr(BrowserSession, "_auto_reconnect", None))
+    assert isinstance(BrowserSession.model_fields["RECONNECT_WAIT_TIMEOUT"].default, float)
+    assert isinstance(BrowserSession.is_cdp_connected, property)
+    assert isinstance(BrowserSession.is_reconnecting, property)
+
+
 # ----- URLs ------------------------------------------------------------------
 
 
@@ -618,6 +734,10 @@ async def test_tilion_regional_hosts_use_the_single_client_multiplexer():
 # ----- HTTP fixture site ----------------------------------------------------
 
 DOWNLOAD_BYTES = b"%PDF-1.4 tilion download fixture\n" + bytes(range(256)) * 8
+ARCHIVE_BYTES = b"PK\x03\x04 linkedin-shaped archive fixture\n" + bytes(range(256)) * 16
+ARCHIVE_FILENAME = "Basic_LinkedInDataExport_11-07-2026.zip"
+# Requests per fixture path: the archive endpoint must be hit once per click.
+FIXTURE_HITS: Dict[str, int] = {}
 UPLOAD_BYTES = b"tilion-upload-fixture:" + os.urandom(3000)
 
 
@@ -728,6 +848,34 @@ async def _fixture_site():
         )
 
     app.router.add_get("/rerendering-checkbox", rerendering_checkbox)
+
+    # LinkedIn's "Download archive": XHR the ZIP, then save it from a blob: URL
+    # that the page revokes shortly afterwards.
+    async def archive_page(_request):
+        return web.Response(
+            content_type="text/html",
+            text=(
+                "<title>download my data</title>"
+                '<button id="archive" onclick="(async () => {'
+                " const blob = await (await fetch('/api/archive')).blob();"
+                " const href = window.URL.createObjectURL(blob);"
+                " const link = document.createElement('a');"
+                f" link.href = href; link.download = '{ARCHIVE_FILENAME}';"
+                " document.body.appendChild(link); link.click(); link.remove();"
+                ' setTimeout(() => window.URL.revokeObjectURL(href), 1000); })()">Download archive</button>'
+            ),
+        )
+
+    async def archive(_request):
+        FIXTURE_HITS["/api/archive"] = FIXTURE_HITS.get("/api/archive", 0) + 1
+        return web.Response(
+            body=ARCHIVE_BYTES,
+            content_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{ARCHIVE_FILENAME}.zip"'},
+        )
+
+    app.router.add_get("/archive-page", archive_page)
+    app.router.add_get("/api/archive", archive)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -822,6 +970,56 @@ async def test_tilion_download_lands_in_worker_ledger_not_static_assets():
         assert gateway.rejected_4409 == 0
     tilion_worker.release_session(session_id)
     assert not tilion_worker.owns_download_session(session_id)
+
+
+async def test_tilion_blob_download_is_read_from_the_page_with_one_request():
+    """A page-built blob: download reaches the ledger without re-requesting the file.
+
+    LinkedIn's archive page fetches the ZIP and saves it from a blob: URL, so
+    Chrome's downloadWillBegin carries no http(s) URL. The persister dropped
+    such downloads ("missing http(s) URL"): the export agent could never hand
+    the archive to the upload step. The blob is read in the page that created
+    it, under Chrome's suggested name, and the archive endpoint (rate-limited
+    on LinkedIn: "Fuse limit exceeded") sees only the page's own request.
+    """
+    from domains.spawn_browser_agent_v3 import service as browser_service
+    from domains.spawn_browser_agent_v3 import tilion_worker
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    session_id = "tilion-blob-download-session"
+    FIXTURE_HITS.clear()
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+
+        async def no_backend(*_args, **_kwargs):
+            raise AssertionError("Tilion downloads must not use backend file routes mid-run")
+
+        with (
+            patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", no_backend),
+            patch("domains.spawn_browser_agent_v3.repo.download_session_file", no_backend),
+            patch.object(browser_service, "list_session_files", no_backend),
+        ):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=service.session,
+                session_id=session_id,
+                config=object(),
+                provider="tilion",
+            )
+            assert persister is not None
+            page = pw_browser.contexts[0].pages[0]
+            await page.goto(base + "/archive-page")
+            await page.click("#archive")
+            for _ in range(100):
+                if tilion_worker.list_downloads(session_id):
+                    break
+                await asyncio.sleep(0.1)
+            await persister.close()
+        files = tilion_worker.list_downloads(session_id)
+        assert [item["filename"] for item in files] == [ARCHIVE_FILENAME], files
+        stored = tilion_worker.read_download(session_id, files[0]["path"])
+        assert stored is not None and stored["content"] == ARCHIVE_BYTES
+        assert FIXTURE_HITS == {"/api/archive": 1}, FIXTURE_HITS
+        assert gateway.rejected_4409 == 0
+    tilion_worker.release_session(session_id)
 
 
 # ----- uploads ------------------------------------------------------------
@@ -3963,9 +4161,113 @@ async def test_held_gateway_starts_hold_at_transport_retirement():
                         await first.close()
 
 
+async def test_storage_writer_race_preserves_state_before_transport_release():
+    """Real CDP persistence survives a reply consuming the first stop request."""
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+    from domains.spawn_browser_agent_v3.config import BROWSER_DISCONNECT_TIMEOUT_SECONDS
+
+    entered = asyncio.Event()
+    reply = asyncio.get_running_loop().create_future()
+    cancellations = []
+    persisted_at_release = []
+    with tempfile.TemporaryDirectory(prefix="storage-writer-checkpoint-") as folder:
+        state_path = Path(folder) / "storage.json"
+
+        class PersistenceGateway(FakeTilionGateway):
+            def _release_transport_slot(self, downstream):
+                if downstream in self._sockets:
+                    persisted_at_release.append(json.loads(state_path.read_text()) if state_path.exists() else None)
+                super()._release_transport_slot(downstream)
+
+        async with _chromium() as (playwright, _browser, endpoint), _fixture_site() as site:
+            async with PersistenceGateway(endpoint) as gateway:
+                with _tilion_env(gateway):
+                    local_url, mux = await open_browser_cdp_connection(gateway.cdp_url)
+                    service = DOMService(cdp_url=local_url, cdp_multiplexer=mux)
+                    browser = None
+                    session = None
+                    monitor = None
+                    cleanup = None
+                    try:
+                        await service.connect()
+                        session = service._session
+                        assert session.is_cdp_connected, "fixture must exercise real storage persistence"
+                        browser = await playwright.chromium.connect_over_cdp(local_url)
+                        context = browser.contexts[0]
+                        page = context.pages[0]
+                        await page.goto(site)
+                        await context.add_cookies([{"name": "storage-stop-proof", "value": "retained", "url": site}])
+                        await page.evaluate("localStorage.setItem('storage-stop-proof', 'retained')")
+                        session.browser_profile.storage_state = state_path
+                        watchdog = session._storage_state_watchdog
+                        old_monitor = watchdog._monitoring_task
+                        old_monitor.cancel()
+                        await asyncio.gather(old_monitor, return_exceptions=True)
+                        indicator = service._captcha_indicator_task
+                        service._captcha_indicator_task = None
+                        if indicator is not None:
+                            indicator.cancel()
+                            await asyncio.gather(indicator, return_exceptions=True)
+
+                        async def cookie_rpc():
+                            entered.set()
+                            await asyncio.wait_for(reply, timeout=watchdog.auto_save_interval)
+                            cancellations.append(asyncio.current_task().cancelling())
+                            return False
+
+                        object.__setattr__(watchdog, "_have_cookies_changed", cookie_rpc)
+                        watchdog._monitoring_task = asyncio.create_task(watchdog._monitor_storage_changes())
+                        monitor = watchdog._monitoring_task
+                        await entered.wait()
+                        # This provider callback and owner shutdown are independent
+                        # scheduled work. The completed child future wins the first
+                        # cancellation inside the unmodified Python3.11 wait_for.
+                        asyncio.get_running_loop().call_soon(reply.set_result, False)
+                        cleanup = asyncio.create_task(mux.disconnect_confirmed(service.disconnect))
+                        done, _ = await asyncio.wait({cleanup}, timeout=BROWSER_DISCONNECT_TIMEOUT_SECONDS)
+                        assert cleanup in done, "storage writer did not acknowledge shutdown within the native deadline"
+                        await cleanup
+                        assert cancellations and cancellations[0] >= 1, "fixture did not consume a cancellation at the reply race"
+                        assert monitor.done() and monitor.cancelling() >= 2, "shutdown never redelivered the consumed cancellation"
+                        for _ in range(100):
+                            if persisted_at_release:
+                                break
+                            await asyncio.sleep(0.01)
+                        assert persisted_at_release, "no actual provider transport retirement"
+                        state = persisted_at_release[0]
+                        assert state and any(c["name"] == "storage-stop-proof" and c["value"] == "retained" for c in state["cookies"]), state
+                        assert any(item["name"] == "storage-stop-proof" and item["value"] == "retained" for origin in state["origins"] for item in origin.get("localStorage", [])), state
+                    finally:
+                        if monitor is not None and not monitor.done():
+                            monitor.cancel()
+                            await asyncio.gather(monitor, return_exceptions=True)
+                        if cleanup is not None:
+                            if not cleanup.done():
+                                await asyncio.wait({cleanup}, timeout=5)
+                            if not cleanup.done():
+                                cleanup.cancel()
+                            await asyncio.gather(cleanup, return_exceptions=True)
+                        if session is not None:
+                            session._intentional_stop = True
+                            reconnect = session._reconnect_task
+                            if reconnect is not None and not reconnect.done():
+                                reconnect.cancel()
+                                await asyncio.gather(reconnect, return_exceptions=True)
+                            client = session._cdp_client_root
+                            if client is not None:
+                                await client.stop()
+                            await session.event_bus.stop(clear=True, timeout=5)
+                        if browser is not None:
+                            with contextlib.suppress(Exception):
+                                await browser.close()
+                        await _stop_dom_service(service)
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("storage_writer_race_preserves_state_before_release", test_storage_writer_race_preserves_state_before_transport_release),
         ("fake_gateway_transport_slot_retirement", test_gateway_slot_tracks_closed_transport_while_bridge_retires),
         ("held_gateway_transport_slot_retirement", test_held_gateway_starts_hold_at_transport_retirement),
         ("chromium_native_port_discovery", test_chromium_native_discovery_waits_for_valid_port_file),
@@ -3984,11 +4286,16 @@ async def run_all_tests():
         ("tilion_live_view_native_session_identity", test_tilion_live_view_native_session_identity),
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
+        ("state_fetch_restores_dropped_cdp_socket", test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running),
+        ("state_fetch_waits_for_pending_reconnect", test_state_fetch_waits_for_a_reconnect_browser_use_left_pending),
+        ("state_fetch_reports_provider_close_when_unrestorable", test_state_fetch_reports_provider_close_when_the_socket_cannot_be_restored),
+        ("state_restore_browser_use_attributes_exist", test_state_restore_relies_only_on_browser_use_attributes_that_exist),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),
         ("tilion_regional_hosts_use_the_single_client_multiplexer", test_tilion_regional_hosts_use_the_single_client_multiplexer),
         ("worker_logs_never_carry_raw_browser_urls", test_worker_logs_never_carry_raw_browser_urls),
         ("click_coordinates_follow_re_rendered_element", test_click_coordinates_follow_an_element_the_page_re_rendered),
         ("tilion_download_lands_in_worker_ledger", test_tilion_download_lands_in_worker_ledger_not_static_assets),
+        ("tilion_blob_download_one_request", test_tilion_blob_download_is_read_from_the_page_with_one_request),
         ("tilion_upload_sets_worker_bytes_on_file_input", test_tilion_upload_sets_worker_bytes_on_file_input),
         ("tilion_worker_apply_contract", test_tilion_worker_apply_contract_sets_cookies_and_local_storage),
         (

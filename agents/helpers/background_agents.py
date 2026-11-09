@@ -221,21 +221,53 @@ RESUMABLE_TASK_TYPES = frozenset({"browser", "code"})
 FINISHED_TASK_STATUSES = frozenset({"completed", "failed"})
 PAUSED_TASK_STATUS = "paused"
 # Internal spawn args a resume sets (never model-supplied): see workflows/background_agents.py.
-RESUME_CONVERSATION_KEYS = frozenset({"_resume_paused_conversation", "_fresh_conversation"})
+RESUME_CONVERSATION_KEYS = frozenset(
+    {
+        "_resume_paused_conversation",
+        "_fresh_conversation",
+        "_user_attachments",
+        "_resume_code_provider",
+        "_resume_cli_settings",
+    }
+)
 
 
-def background_message_refusal(record: Dict[str, Any], continue_conversation: Optional[bool]) -> Optional[str]:
+def background_message_refusal(
+    record: Dict[str, Any], continue_conversation: Optional[bool], *, by_user: bool = False
+) -> Optional[str]:
     """Why send_message_to_agent cannot deliver to this own background task (None when it can).
 
-    Reads the task's structured type and status only. Running tasks and explore
-    tasks are always deliverable.
+    Reads the task's structured type, status and foreground flag only. Running
+    tasks and background explore tasks are always deliverable; a finished
+    foreground spawn never is (its result already is the spawn call's result).
+    ``by_user``: the owner typed to the code agent in its own view; a completed or
+    failed background code task then resumes its own conversation too (its
+    persistent session keeps the sandbox and the CLI conversation).
     """
     agent_type = record.get("agent_type")
     status = record.get("status")
+    address = record.get("path") or record.get("address") or "that agent"
+    if record.get("foreground") and status != "running":
+        resume = (
+            " To continue in its code session and branch, spawn a new code agent with the code_session_id "
+            "from its result."
+            if agent_type == "code"
+            else ""
+        )
+        return (
+            f"{address} is a {status} foreground {agent_type} agent: its result is the result of the spawn_agent "
+            f"call that ran it, and it takes no more messages. Spawn a new {agent_type} agent for new work.{resume}"
+        )
     if agent_type not in RESUMABLE_TASK_TYPES:
         return None
-    address = record.get("path") or record.get("address") or "that agent"
-    if status in FINISHED_TASK_STATUSES:
+    # A person's resume: a code agent continues its own CLI conversation; a finished
+    # browser kept no conversation, so it starts a fresh one carrying its earlier
+    # goal and result (the browser tool's continue_conversation=false recovery).
+    user_resume = by_user and (
+        (agent_type == "code" and continue_conversation is True)
+        or (agent_type == "browser" and continue_conversation is False)
+    )
+    if status in FINISHED_TASK_STATUSES and not user_resume:
         return (
             f"{address} is a {status} {agent_type} agent; completed browser and code agents cannot be "
             f"messaged. Spawn a new {agent_type} agent for new work."

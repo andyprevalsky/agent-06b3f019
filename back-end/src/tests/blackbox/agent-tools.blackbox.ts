@@ -51,7 +51,7 @@ import {
   userB,
   type BlackboxTest,
 } from './agent-tools.support';
-import { assertDisplayCsp, displayRendererCases } from './agent-tools-display.cases';
+import { assertDisplayCsp, displayRendererCases, servedHtml } from './agent-tools-display.cases';
 import { displayRenderCases } from './agent-tools-render.cases';
 import { displayScriptAllCases } from './agent-tools-display-script.cases';
 
@@ -190,7 +190,7 @@ const tests: BlackboxTest[] = [
         `served as html: ${page200.headers.get('content-type')}`
       );
       assertDisplayCsp(page200.headers.get('content-security-policy'), 'display page');
-      assert((await page200.text()) === page, 'exact html bytes');
+      assert((await page200.text()) === servedHtml(page), 'exact html bytes + height reporter');
       for (const path of [
         `/usercontent/display/${agentB}/${match[2]}.html`,
         `/usercontent/display/${otherA}/${'0'.repeat(64)}.html`,

@@ -27,6 +27,7 @@ from utils.prompts import (
     PLANNER_TASK_DEPENDS_ON_DESCRIPTION,
     PLANNER_TASK_GOAL_DESCRIPTION,
     PLANNER_TASK_IDX_DESCRIPTION,
+    PLANNER_TASK_TITLE_DESCRIPTION,
     PLANNER_TASK_TOOL_NAME_DESCRIPTION,
     SELF_CONTAINED_GOAL_RULE,
 )
@@ -34,6 +35,7 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
+from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS, GREP_TOOL_PROMPT
 from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 from utils.wait_for_bounds import (
@@ -96,6 +98,10 @@ EXECUTE_PHASE_TOOLS = [
     "kill_agent",
     "attempt_completion",
 ]
+
+# Root-only tools the workflow adds to both phases for eligible agents
+# (domains/report_bug/handler.with_report_bug); never in the shared phase lists.
+ROOT_ONLY_TOOLS = ["report_bug"]
 
 # Stable union of PLAN + EXECUTE tools for LLM schema generation.
 # Passing the same tool set in every call makes the Anthropic tools array
@@ -171,10 +177,24 @@ assert _plan_tool_values == _expected_tools, (
 # ============================================================================
 
 
-class PlannerTask(BaseModel):
+class _PlannerTaskBase(BaseModel):
+    """Shared validation for planner task models."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _untitled_legacy_task(cls, data: Any) -> Any:
+        # Plans recorded before per-task titles (Fast Mode replays) have no
+        # title; the schema still requires it from live planner calls.
+        if isinstance(data, dict) and "title" not in data:
+            return {**data, "title": ""}
+        return data
+
+
+class PlannerTask(_PlannerTaskBase):
     """A single task in the planner output."""
 
     task_idx: str = Field(description=PLANNER_TASK_IDX_DESCRIPTION)
+    title: str = Field(description=PLANNER_TASK_TITLE_DESCRIPTION)
     goal: str = Field(description=PLANNER_TASK_GOAL_DESCRIPTION)
     tool_name: PlanToolName = Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)
     depends_on: List[str] = Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION)
@@ -636,8 +656,55 @@ class ApiRequestTool(BaseModel):
         return value
 
 
+_GREP_FILTER_VALUE_TYPES: Dict[str, Any] = {
+    "person": str,
+    "since": str,
+    "until": str,
+    "path": str,
+    "role": Literal["USER", "ASSISTANT", "TOOL"],
+    "surface": Literal["WEB", "MAC_APP", "SMS", "WHATSAPP"],
+    "record_kind": Literal["message", "llm_output", "llm_context", "all"],
+    "account": str,
+    "min_amount": float,
+    "max_amount": float,
+    "status": Literal["posted", "pending", "all"],
+    "include_pending_in_totals": bool,
+    "document_source": str,
+    "tag": str,
+}
+
+
+class _GrepFilterObject(BaseModel):
+    """Closed filter object: strict tool surfaces cannot accept an open map, and an
+    unknown key is a validation error the model can correct rather than a silent drop."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_serializer(mode="wrap")
+    def _drop_unset(self, handler: Any) -> Dict[str, Any]:
+        # Absent keys stay absent: a None filter value is not a filter.
+        return {key: value for key, value in handler(self).items() if value is not None}
+
+
+def _grep_filter_model(name: str, keys: Any) -> Type[BaseModel]:
+    fields: Dict[str, Any] = {key: (Optional[_GREP_FILTER_VALUE_TYPES[key]], None) for key in keys}
+    return create_model(name, __base__=_GrepFilterObject, **fields)
+
+
+_GREP_FLAT_FILTER_KEYS = tuple(dict.fromkeys(key for keys in GREP_SOURCE_FILTER_KEYS.values() for key in keys))
+GrepFilters = create_model(
+    "GrepFilters",
+    __base__=_GrepFilterObject,
+    **{key: (Optional[_GREP_FILTER_VALUE_TYPES[key]], None) for key in _GREP_FLAT_FILTER_KEYS},
+    **{
+        source: (Optional[_grep_filter_model(f"GrepFilters_{source}", keys)], None)
+        for source, keys in GREP_SOURCE_FILTER_KEYS.items()
+    },
+)
+
+
 class GrepTool(BaseModel):
-    """Search local data sources with regex grep semantics."""
+    # The docstring is the shared contract's description; it is assigned below.
 
     tool: Literal["grep"]
     pattern: Optional[str] = Field(
@@ -697,8 +764,7 @@ class GrepTool(BaseModel):
             "then use the concrete channel source to inspect exact message text. Thread identifiers "
             "in the summary are valid contact identifiers when no human-readable name is stored. "
             "If a named source's connector isn't connected, the search returns a 'source not "
-            "connected' notice and the user is automatically asked to connect it - do NOT retry "
-            "that source; continue with the sources you can reach."
+            "connected' notice - do NOT retry that source; continue with the sources you can reach."
         ),
     )
     source: Optional[
@@ -808,7 +874,7 @@ class GrepTool(BaseModel):
         default=None,
         description="Allow regex patterns to match across newlines within a record.",
     )
-    filters: Optional[Dict[str, Any]] = Field(
+    filters: Optional[GrepFilters] = Field(
         default=None,
         description=(
             "Per-source filters. Each source accepts only its own keys:\n"
@@ -852,6 +918,9 @@ class GrepTool(BaseModel):
         ),
     )
     model_config = ConfigDict(populate_by_name=True)
+
+
+GrepTool.__doc__ = GREP_TOOL_PROMPT
 
 
 class InspectCodeTool(BaseModel):
@@ -1185,7 +1254,8 @@ class SpawnAgentTool(BaseModel):
             "Optional when type='code'. GitHub repository URL to clone and sync to. "
             "Ignored for every other type. Only provide this when the user supplied a real, "
             "accessible repository URL; do not invent placeholder repositories. If omitted, "
-            "the GitHub repo defaults to a repo automatically created for this agent tree."
+            "uses the current project's repo when the agent is in a project, otherwise a repo "
+            "created for this agent tree."
         ),
     )
     code_session_id: Optional[str] = Field(
@@ -1541,6 +1611,20 @@ class KillAgentTool(BaseModel):
     to: str = Field(description="Address of one of your descendants or background tasks (see your environment block).")
 
 
+class ReportBugTool(BaseModel):
+    """Report a bug in Rose itself, the same as the user's Report Bug button: a separate engineering agent investigates your run and fixes it.
+
+    Use it only after you have confirmed that Rose's own tools, sub-agents or harness malfunction: a tool keeps failing on valid arguments, returns a result that contradicts its inputs, a sub-agent crashes or loops, or a capability you were given does not work. First rule out your own arguments and transient errors that a retry clears. Do not use it for problems outside Rose, such as a website being down, a person not replying or missing information from the user. A run files at most one report, so file it once you have evidence and describe every problem you saw, then continue your task."""
+
+    tool: Literal["report_bug"]
+    description: str = Field(
+        description=(
+            "What went wrong: the tool or agent involved, what you called it with, the exact error or "
+            "wrong result, and what you expected. The investigator reads only this and your run's logs."
+        )
+    )
+
+
 class SetPlanTool(BaseModel):
     """Signal readiness for plan generation; the planner LLM produces the DAG."""
 
@@ -1639,6 +1723,8 @@ TOOL_MODELS: ToolRegistry = {
     "list_agents": ListAgentsTool,
     "send_message_to_agent": SendMessageToAgentTool,
     "kill_agent": KillAgentTool,
+    # Root-only (ROOT_ONLY_TOOLS)
+    "report_bug": ReportBugTool,
     # Plan phase tools
     "set_plan": SetPlanTool,
     # Universal completion tool (available in both phases)
@@ -1832,13 +1918,14 @@ def get_planner_response_model() -> Type[BaseModel]:
     task_model = create_model(
         "PlannerTaskNoGP",
         task_idx=(str, Field(description=PLANNER_TASK_IDX_DESCRIPTION)),
+        title=(str, Field(description=PLANNER_TASK_TITLE_DESCRIPTION)),
         goal=(str, Field(description=PLANNER_TASK_GOAL_DESCRIPTION)),
         tool_name=(filtered_enum, Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)),
         depends_on=(
             List[str],
             Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION),
         ),
-        __base__=BaseModel,
+        __base__=_PlannerTaskBase,
     )
     return create_model(
         "PlannerResponseNoGP",

@@ -610,6 +610,320 @@ async def test_send_to_browser_and_code_tasks_follows_their_lifecycle():
         await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
 
 
+async def test_user_message_resumes_a_completed_code_task_in_its_conversation():
+    """The owner typing in a stopped code agent's view resumes it (Andy 2026-11-08).
+
+    The backend signals the owner (directChatResume.ts) with from_user and
+    continue_conversation: a COMPLETED background code task starts its next run,
+    the CLI continues its own conversation and the typed text is its next turn.
+    The same signal from another agent (no from_user) still cannot wake it.
+    """
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        runs = []
+        gate = asyncio.Event()
+
+        async def _executor(tool_name, tool_args, tool_call_id):
+            runs.append((tool_call_id, dict(tool_args)))
+            if len(runs) == 1:
+                await gate.wait()
+            return {"success": True, "message": "done"}
+
+        wf._execute_tool = _executor
+        await wf._execute_tool_once("spawn_agent", dict(CODE_ARGS), "toolu_c")
+        for _ in range(200):
+            if runs:
+                break
+            await asyncio.sleep(0.002)
+        gate.set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        assert wf._background_finished["toolu_c"]["status"] == "completed"
+
+        # Another agent's continue signal: refused (completed code agents take no agent messages).
+        await wf.receive_agent_message(
+            {
+                "message_id": "m-agent",
+                "from_agent_path": "/root/peer",
+                "wake_task_id": "toolu_c",
+                "message": "Agent asks for more.",
+                "continue_conversation": True,
+            }
+        )
+        await asyncio.sleep(0.01)
+        assert len(runs) == 1 and "toolu_c" in wf._background_finished
+
+        # The owner's own typed turn: the next run continues the CLI conversation.
+        signal = {
+            "message_id": "m-user",
+            "wake_task_id": "toolu_c",
+            "message": "Also update the changelog.",
+            "continue_conversation": True,
+            "from_user": True,
+        }
+        await wf.receive_agent_message(signal)
+        for _ in range(200):
+            if len(runs) == 2:
+                break
+            await asyncio.sleep(0.002)
+        assert len(runs) == 2, "the user's message started the next run"
+        tool_call_id, args = runs[-1]
+        assert tool_call_id == "toolu_c", "same spawn: the view folds the runs into one conversation"
+        assert args["goal"] == "Also update the changelog.", "the typed text is the next CLI turn"
+        assert "_fresh_conversation" not in args
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+        # A retried send (same deterministic message id) never starts a second run.
+        await wf.receive_agent_message(signal)
+        await asyncio.sleep(0.01)
+        assert len(runs) == 2
+
+
+async def test_a_finished_browser_resumes_fresh_for_the_person_and_tree_entries_say_wakeable():
+    """A person's message to a finished background browser starts a fresh conversation.
+
+    A finished browser kept no conversation: the browser tool's own recovery
+    (continue_conversation=false) carries the message, its goal and result. An
+    agent sender still cannot message it. Tree entries mark finished records the
+    owner can wake (`wakeable`); a foreground spawn is never wakeable.
+    """
+    from helpers.agent_addressing import background_tree_entries
+    from helpers.background_agents import CHILD_WORKFLOW_AGENT_TYPES
+
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        runs = []
+        gate = asyncio.Event()
+
+        async def _executor(tool_name, tool_args, tool_call_id):
+            runs.append((tool_call_id, dict(tool_args)))
+            if len(runs) == 1:
+                await gate.wait()
+            return {"success": True, "message": "Ordered the oat latte."}
+
+        wf._execute_tool = _executor
+        await wf._execute_tool_once("spawn_agent", dict(BROWSER_ARGS), "toolu_b")
+        for _ in range(200):
+            if runs:
+                break
+            await asyncio.sleep(0.002)
+        gate.set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        wf._background_finished["toolu_fg"] = {"agent_type": "code", "status": "completed", "foreground": True}
+        entries = {
+            e["address"]: e
+            for e in background_tree_entries(wf._background_tasks, CHILD_WORKFLOW_AGENT_TYPES, wf._background_finished)
+        }
+        assert entries["toolu_b"].get("wakeable") is True, entries["toolu_b"]
+        assert "wakeable" not in entries["toolu_fg"], "a foreground spawn is never wakeable"
+
+        base = {"wake_task_id": "toolu_b", "message": "Now add a croissant.", "continue_conversation": False}
+        await wf.receive_agent_message({**base, "message_id": "m-agent", "from_agent_path": "/root/peer"})
+        await asyncio.sleep(0.01)
+        assert len(runs) == 1, "an agent cannot message a finished browser"
+        await wf.receive_agent_message({**base, "message_id": "m-person", "from_user": True})
+        for _ in range(200):
+            if len(runs) == 2:
+                break
+            await asyncio.sleep(0.002)
+        assert len(runs) == 2, "the person's message started its next run"
+        args = runs[-1][1]
+        assert args["goal"].startswith("Now add a croissant.") and BROWSER_ARGS["goal"] in args["goal"], args
+        assert "_resume_paused_conversation" not in args
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+        # A refused resume of a browser is labelled as a browser (not a code agent).
+        wf._cost_limit_reached = True
+        await wf.receive_agent_message({**base, "message_id": "m-capped", "from_user": True})
+        posts = [args for name, args in harness.activities if name == "post_agent_message"]
+        assert posts[-1][3]["toolName"] == "spawn_browser_agent", posts[-1][3]
+        assert posts[-1][3]["title"] == "Browser could not resume", posts[-1][3]
+
+
+async def test_owner_sums_its_own_spend_and_a_resume_runs_spend_once():
+    """A live owner adds a resume run's spend under its fixed key (idempotent) to its own.
+
+    The run re-sends its running total under resume:<workflow id>; the owner keeps one
+    entry per key, so its tree cost is own + run, however often the run reports.
+    """
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        wf.own_cost_cents = 10.0
+        for total in (4.0, 7.0, 7.0):  # the run's running total, re-sent
+            await wf.child_cost_update({"child_agent_id": "resume:code-resume:a:m1", "subtree_cost_cents": total})
+        wf.own_cost_cents += 5.0  # the owner keeps spending concurrently
+        await wf._update_cost_and_signal_parent()
+        assert wf.subtree_cost_cents == 22.0, wf.subtree_cost_cents
+
+
+async def test_user_resume_carries_attachments_and_reports_a_refusal():
+    """A user resume carries the typed turn's files; a refused one posts a UI-only failure row.
+
+    The backend wakes the owner (directChatResume.ts) with the turn's attachments:
+    the next run's spawn args carry them for the handler to forward. When the owner
+    cannot start the run (cost limit), the spawn gets an ERROR row excluded from
+    every model context, so the turn reads "Couldn't resume: <reason>".
+    """
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        runs = []
+        gate = asyncio.Event()
+
+        async def _executor(tool_name, tool_args, tool_call_id):
+            runs.append((tool_call_id, dict(tool_args)))
+            if len(runs) == 1:
+                await gate.wait()
+            return {"success": True, "message": "done"}
+
+        wf._execute_tool = _executor
+        await wf._execute_tool_once("spawn_agent", dict(CODE_ARGS), "toolu_c")
+        for _ in range(200):
+            if runs:
+                break
+            await asyncio.sleep(0.002)
+        gate.set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+        pointer = {"id": "f-1", "storage_path": "u/notes.txt", "original_filename": "notes.txt"}
+        wf._cost_limit_reached = True
+        refused = {
+            "message_id": "m-refused",
+            "wake_task_id": "toolu_c",
+            "message": "Try again.",
+            "continue_conversation": True,
+            "from_user": True,
+        }
+        await wf.receive_agent_message(refused)
+        await asyncio.sleep(0.01)
+        assert len(runs) == 1, "a refused wake starts nothing"
+        posts = [args for name, args in harness.activities if name == "post_agent_message"]
+        assert posts, harness.activities
+        agent_id, text, role, metadata = posts[-1][:4]
+        assert role == "TOOL" and metadata["toolStatus"] == "ERROR", metadata
+        assert metadata["toolCallId"] == "toolu_c", "the failure lands on the stopped spawn's rows"
+        assert metadata["excludeFromModel"] is True and metadata["codeAgentResume"] == "refused"
+        assert "cost limit" in text, text
+
+        # No record of that task on this owner: still a refusal row, never a silent drop.
+        await wf.receive_agent_message({**refused, "message_id": "m-unknown", "wake_task_id": "toolu_gone.run3"})
+        posts = [args for name, args in harness.activities if name == "post_agent_message"]
+        assert posts[-1][3]["toolCallId"] == "toolu_gone" and posts[-1][3]["toolStatus"] == "ERROR", posts[-1]
+        assert "no longer tracks" in posts[-1][1], posts[-1][1]
+
+        wf._cost_limit_reached = False
+        await wf.receive_agent_message({**refused, "message_id": "m-files", "attachments": [pointer]})
+        for _ in range(200):
+            if len(runs) == 2:
+                break
+            await asyncio.sleep(0.002)
+        assert runs[-1][1]["_user_attachments"] == [pointer], runs[-1][1]
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        await wf.receive_agent_message({**refused, "message_id": "m-next", "message": "One more."})
+        for _ in range(200):
+            if len(runs) == 3:
+                break
+            await asyncio.sleep(0.002)
+        assert "_user_attachments" not in runs[-1][1], "a later run never re-sends these files"
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+
+async def test_resume_workflow_continues_a_stopped_code_session_outside_its_owner():
+    """CodeAgentResumeWorkflow: the owner finished (or the spawn was foreground).
+
+    The real code-spawn handler runs in the workflow sandbox on the stopped
+    session's code_session_id with the typed text as the next turn, keeps the
+    session's CLI (provider), forwards the turn's files, and posts its rows on
+    the owner under the same tool call id, excluded from every model context.
+    """
+    from temporalio import activity
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    from helpers.workflow_sandbox import production_workflow_runner
+    from workflows.code_agent_resume import CodeAgentResumeWorkflow
+
+    spawns, posted = [], []
+
+    @activity.defn(name="resolve_code_agent_provider_activity")
+    async def fake_provider(default_provider):
+        return default_provider
+
+    @activity.defn(name="spawn_claude_code_activity")
+    async def fake_spawn(*args):
+        spawns.append(args)
+        return {"success": True, "message": "Changelog updated.", "task_id": "task-new", "code_provider": args[9]}
+
+    @activity.defn(name="post_agent_message")
+    async def fake_post(*args):
+        posted.append(args)
+        return {"id": f"row-{len(posted)}"}
+
+    pointer = {
+        "id": "f-1",
+        "storage_path": "u/notes.txt",
+        "original_filename": "notes.txt",
+        "mime_type": "text/plain",
+        "size_bytes": 5,
+        "created_at": "2026-11-08T00:00:00Z",
+    }
+    request = {
+        "agent_id": "owner-1",
+        "user_id": "user-1",
+        "model": "rose-labs/rose-1-ultra",
+        "tool_call_id": "toolu_code_spawn",
+        "task_name": "remove_rose_card_border",
+        "code_session_id": "6f8f8f4d-c670-4bc8-b5df-e2c785c4a908",
+        "code_provider": "codex",
+        "message": "Also update the changelog.",
+        "message_id": "m-row",
+        "attachments": [pointer],
+    }
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="code-agent-resume",
+            workflows=[CodeAgentResumeWorkflow],
+            activities=[fake_provider, fake_spawn, fake_post],
+            workflow_runner=production_workflow_runner(),
+        ):
+            result = await asyncio.wait_for(
+                env.client.execute_workflow(
+                    CodeAgentResumeWorkflow.run,
+                    request,
+                    id="code-resume:owner-1:m-row",
+                    task_queue="code-agent-resume",
+                ),
+                timeout=60,
+            )
+    assert len(spawns) == 1, spawns
+    args = spawns[0]
+    assert (args[0], args[1], args[2], args[3]) == (
+        "user-1",
+        "owner-1",
+        "Also update the changelog.",
+        "toolu_code_spawn",
+    )
+    assert args[5] == [pointer], "the typed turn's files reach the resumed CLI"
+    assert args[9] == "codex", "the stopped session's CLI is kept so its conversation continues"
+    assert args[16] == {
+        "code_session_id": "6f8f8f4d-c670-4bc8-b5df-e2c785c4a908",
+        "task_name": "remove_rose_card_border",
+    }, args[16]
+    assert result["tool_call_id"] == "toolu_code_spawn"
+    tool_rows = [row for row in posted if row[2] == "TOOL"]
+    assert tool_rows, posted
+    for row in tool_rows:
+        assert row[0] == "owner-1" and row[3]["excludeFromModel"] is True, row
+        assert row[3]["toolCallId"] == "toolu_code_spawn", row[3]
+    assert any(row[3].get("action_type") == "task_complete" and row[3].get("success") for row in tool_rows)
+
+
 async def test_send_to_finished_explore_task_wakes_its_next_run():
     """A message to a finished own explore task starts its next run at the same path (user decision 2026-10-20)."""
     from domains.agent_messaging.handler import send_message_to_agent
@@ -861,6 +1175,61 @@ async def test_wait_for_parent_wakes_on_the_parents_message():
             {"message_id": "msg-10", "from_agent_id": "agent-root", "from_agent_path": "/root"}
         )
         await asyncio.wait_for(waiter, 2)
+
+
+async def test_queued_send_to_a_starting_code_agent_reaches_the_tool_result():
+    """C20: the backend queued the message for a code agent whose session does not exist yet. The
+    `queued` flag must survive the HTTP helper and the sender's result must say it was queued (a live
+    run answered "Message sent" because the helper dropped the flag)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.agent_messaging import repo
+    from domains.agent_messaging.handler import send_message_to_agent
+
+    body = {
+        "message_id": "msg-q",
+        "delivered": False,
+        "queued": True,
+        "task_running": True,
+        "to": {"agent_id": "agent-mid", "path": "/root/coder", "recipient_task_id": "toolu_code"},
+    }
+    response = MagicMock(status_code=201)
+    response.json.return_value = body
+    client = MagicMock(post=AsyncMock(return_value=response))
+    with patch.object(repo, "get_http_client", return_value=client), patch.object(repo, "_headers", return_value={}):
+        result = await repo.post_agent_message_to_address("agent-mid", {"to": "/root/coder"}, "user-1")
+    assert result["queued"] is True and result["delivered"] is False and result["task_running"] is True, result
+    # A delivered send carries no queued flag.
+    response.json.return_value = {**body, "delivered": True, "queued": None}
+    with patch.object(repo, "get_http_client", return_value=client), patch.object(repo, "_headers", return_value={}):
+        assert "queued" not in await repo.post_agent_message_to_address("agent-mid", {"to": "/root/coder"}, "user-1")
+
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        harness.activity_results["send_agent_message_to_address_activity"] = result
+        status, text = await send_message_to_agent(wf, {"to": "/root/coder", "message": "Also add a test."}, "toolu_q")
+        assert status.value == "FINISHED", status
+        assert text == (
+            "Message queued for /root/coder: its code agent is still starting. It will receive this as its next "
+            "turn as soon as its CLI runs, in the order you sent it; do not send it again."
+        ), text
+
+    # Held while the user chats with that code agent directly (queued_reason direct_hold): the helper keeps
+    # the reason and the sender is told it waits for the hand back, not that the agent is starting.
+    response.json.return_value = {**body, "queued_reason": "direct_hold"}
+    with patch.object(repo, "get_http_client", return_value=client), patch.object(repo, "_headers", return_value={}):
+        held = await repo.post_agent_message_to_address("agent-mid", {"to": "/root/coder"}, "user-1")
+    assert held["queued"] is True and held["queued_reason"] == "direct_hold", held
+    with _env(harness):
+        wf = _workflow(harness)
+        harness.activity_results["send_agent_message_to_address_activity"] = held
+        status, text = await send_message_to_agent(wf, {"to": "/root/coder", "message": "Also add a test."}, "toolu_h")
+        assert status.value == "FINISHED", status
+        assert text == (
+            "Message queued for /root/coder: the user is chatting with its code agent directly. It will receive "
+            "this as its next turn as soon as they hand it back, in the order you sent it; do not send it again."
+        ), text
 
 
 async def test_message_guard_refusals_reach_the_tool_result():
@@ -1155,6 +1524,23 @@ async def run_all_tests():
         test_send_to_browser_and_code_tasks_follows_their_lifecycle,
     )
     await r.record_async(
+        "user_message_resumes_completed_code_task",
+        test_user_message_resumes_a_completed_code_task_in_its_conversation,
+    )
+    await r.record_async(
+        "finished_browser_resumes_fresh_for_person",
+        test_a_finished_browser_resumes_fresh_for_the_person_and_tree_entries_say_wakeable,
+    )
+    await r.record_async("owner_sums_own_and_resume_spend", test_owner_sums_its_own_spend_and_a_resume_runs_spend_once)
+    await r.record_async(
+        "user_resume_carries_attachments_reports_refusal",
+        test_user_resume_carries_attachments_and_reports_a_refusal,
+    )
+    await r.record_async(
+        "resume_workflow_continues_stopped_code_session",
+        test_resume_workflow_continues_a_stopped_code_session_outside_its_owner,
+    )
+    await r.record_async(
         "paused_code_endings_recorded_paused_resumable",
         test_paused_code_task_endings_are_recorded_paused_and_resumable,
     )
@@ -1167,6 +1553,10 @@ async def run_all_tests():
     )
     await r.record_async("send_wakes_finished_explore_task", test_send_to_finished_explore_task_wakes_its_next_run)
     await r.record_async("message_guard_refusals_reach_tool_result", test_message_guard_refusals_reach_the_tool_result)
+    await r.record_async(
+        "queued_send_to_a_starting_code_agent_reaches_tool_result",
+        test_queued_send_to_a_starting_code_agent_reaches_the_tool_result,
+    )
     r.record("prompts_schemas_registration", test_prompts_schemas_and_registration)
     await r.record_async("wait_for_parent_wakes_on_parent_message", test_wait_for_parent_wakes_on_the_parents_message)
     await r.record_async("control_tools_decode_in_real_sandbox", test_control_tools_decode_results_in_real_sandbox)

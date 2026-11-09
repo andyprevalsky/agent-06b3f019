@@ -1,0 +1,26 @@
+Title this thread exactly: " --ai-- Test repair: parallel-tool-calls smoke exceeded its 549s task timeout" (set it with `dvb-onbox threads set-title --title " --ai-- Test repair: parallel-tool-calls smoke exceeded its 549s task timeout"` as soon as you start, verify it with get-title, and keep the `--ai--` prefix on any later rename).
+
+/goal Fix smoke/parallel-tool-calls (benchmark task parallel-tool-calls) within the root agent live research fan-out (web_fetch retries / planner latency) in the parallel-tool-calls task; do NOT raise the 549s task timeout (CLAUDE.md rule 25): diagnose with agents/benchmarks/agent_latency.py and fix the stall or retry cost, make the original failing command pass, and finish /deploy through merge, production verification, cleanup and a completed deploy scorecard.
+
+Failed test: smoke/parallel-tool-calls (benchmark task parallel-tool-calls)
+Command: bash scripts/run-bench <task> --runs 1 (cloud fleet, exact ref); the deploy ran it as: scripts/run-bench test-mass-agent-run-0 chat-mode spawn-sub-agents parallel-tool-calls background-agent-message-smoke claude-code-agent browser-smoke browser-biometrics-webdecoy agent-payment-new-user-journey --runs 1 --concurrency 9 --retry-infra 0 --ref 2731bfe53f7ace99196021906b423b2a6296766a (via scripts/deploy_test_cloud.py)
+Scope: the root agent live research fan-out (web_fetch retries / planner latency) in the parallel-tool-calls task; do NOT raise the 549s task timeout (CLAUDE.md rule 25): diagnose with agents/benchmarks/agent_latency.py and fix the stall or retry cost
+Exact error: Timeout after 553s (task timeout=549s) | Investigate: python agents/benchmarks/agent_latency.py f6899445-88bc-4b28-890a-75aed858d46c | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED); log shows repeated "Web fetch failed for https://www.visitlisboa.com/en/regions".
+Failure evidence: Benchmark Hub run 20261106-105813-889402-mfa70829f6947 (task run_id 008089f5-e5e8-4f6e-b80c-051cf28f5a4b, agent f6899445-88bc-4b28-890a-75aed858d46c); same task passed twice earlier in this deploy (wall 1699.9s in the initial sweep of the same cycle, 924.8s in the preceding cycle) so wall time varies widely.
+Failed source: 2731bfe53f7ace99196021906b423b2a6296766a (PR #1725 sync head; the same task passed on the immediately preceding tree of the same deploy, and this PR changes no agents/ or scripts/ file)
+Originating merge: d5d852e5b0c8beb12e1d215c2c8bfa88fe416046 (PR #1725, merged to main 2026-11-06 ~11:31Z)
+Originating devbox: c8cc9f58-7058-4394-a3b3-c8c96d57208c; this repair must run elsewhere
+
+Read CLAUDE.md and follow /RCA. Work autonomously from current main;
+before repair work, verify this is a different devbox and its project-folder
+membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and
+all deployment coordination here; never depend on the originating box staying
+open. Retain every needed artifact here or in accessible durable storage.
+Do not ask questions or depend on human replies. Resolve implementation
+choices using the existing instructions and evidence. Prove the assigned
+test passes, then carry the fix through /deploy to its completed scorecard.
+An OPEN diagnosis, observability report, draft PR or stopped investigation
+does not complete this goal. Do not waive or re-delegate the assigned test
+as a substitute for fixing it. Preserve test intent, assertions, timeouts
+and existing permissions; never fabricate success. Keep working until
+the goal is achieved, including ordinary review and production work.

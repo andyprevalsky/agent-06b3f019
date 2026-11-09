@@ -411,20 +411,33 @@ const REMOVED_AGENT_MENU_LABELS = [
 ];
 
 /**
- * The agent row menu is exactly: Archive agent | Pin agent, Rename agent | Copy ›.
+ * The agent row menu is exactly: Archive agent | Pin agent, Rename agent
+ * [, Move to… on the desktop bar] | Copy ›.
  * Separators sit only between groups: never first, last or doubled.
  */
-export function expectAgentMenuEntries(menu: HTMLElement) {
+export function expectAgentMenuEntries(menu: HTMLElement, { move = false } = {}) {
+  const middle = move ? ['Pin agent', 'Rename agent', 'Move to…'] : ['Pin agent', 'Rename agent'];
   const children = Array.from(menu.children).map((el) =>
     el.getAttribute('role') === 'separator' ? '—' : el.textContent,
   );
-  expect(children).toEqual(['Archive agent', '—', 'Pin agent', 'Rename agent', '—', 'Copy']);
+  expect(children).toEqual(['Archive agent', '—', ...middle, '—', 'Copy']);
   expect(
     within(menu)
       .getAllByRole('menuitem')
       .map((i) => i.textContent),
-  ).toEqual(['Archive agent', 'Pin agent', 'Rename agent', 'Copy']);
+  ).toEqual(['Archive agent', ...middle, 'Copy']);
   for (const label of REMOVED_AGENT_MENU_LABELS) {
     expect(within(menu).queryByText(label)).toBeNull();
   }
+}
+
+/**
+ * An element's inline `left`, with a `var(--x, fallback)` resolved against the
+ * root the way the browser would: the published value, else the fallback.
+ * Full-width drawers sit at `var(--rose-bar-offset, 64px)`.
+ */
+export function resolvedLeft(el: HTMLElement): string {
+  const match = /^var\((--[\w-]+),\s*([^)]+)\)$/.exec(el.style.left);
+  if (!match) return el.style.left;
+  return document.documentElement.style.getPropertyValue(match[1]) || match[2].trim();
 }
