@@ -78,24 +78,9 @@
     "research/.env": "managed: boxes.dev project-managed env (research/.env)",
     "scripts/__pycache__/": "reproducible: Python bytecode cache"
   },
-  "live_processes": [
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794239910922-mb4u2r.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
-      "cwd": "/home/boxes/rose",
-      "pid": 1524597
-    },
-    {
-      "argv": "rm -rf --one-file-system /home/boxes/deploy-workers /home/boxes/main-fix-blacksmith",
-      "cwd": "/home/boxes/rose",
-      "pid": 1524598
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-1699-closeout/deletion-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1699-closeout/archive-receipts.json, docs/handoffs/pr-1699-closeout/closeout-manifest.json, docs/handoffs/pr-1699-closeout/closeout_archive.py, docs/handoffs/pr-1699-closeout/deletion-manifest.json",
-    "live process 1524597 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794239910922-mb4u2r.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
-    "live process 1524598 in this checkout: rm -rf --one-file-system /home/boxes/deploy-workers /home/boxes/main-fix-blacksmith"
-  ],
+  "open_items": [],
   "pr": 1699,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -610,21 +595,15 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr-1699-closeout",
+      "branch": "refs/heads/main",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1699-closeout/archive-receipts.json",
-        "docs/handoffs/pr-1699-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-1699-closeout/closeout_archive.py",
-        "docs/handoffs/pr-1699-closeout/deletion-manifest.json",
-        "docs/handoffs/pr-1699-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
