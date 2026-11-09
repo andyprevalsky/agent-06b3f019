@@ -102,28 +102,23 @@ The isolated reproduction should:
 
 If a unit-level reproduction would lose the behavior under investigation, use the narrowest local integration test, recorded-response replay, or benchmark checkpoint that preserves it. Do not use a full benchmark as the only reproduction when a smaller local test can prove the same causal mechanism.
 
-### Exact benchmark outcome gate
+### Benchmark end-to-end check
 
 When the symptom being diagnosed is a benchmark failure, the isolated
-reproduction above is necessary but not sufficient. It answers "did we fix the
-suspected mechanism?" It does not answer "does the reported benchmark now pass?"
+reproduction above proves the fix of the suspected mechanism; it does not show
+that the reported benchmark now passes.
 
-Before describing a benchmark issue as fixed, approval-ready, verified, or
-complete, run the exact task through the canonical local entrypoint on both sides
-of the change:
+When the fix needs an end-to-end check, run only the exact task once on the
+cloud fleet, never `--local` and never a whole-benchmark rerun:
 
 ```bash
-scripts/run-bench --local <exact-existing-task-name>
+scripts/run-bench <exact-existing-task-name> --wait
 ```
 
-Required evidence:
-
-1. On the buggy revision, the exact task fails locally with the reported outcome
-   or the same first-bad causal boundary.
-2. On the fixed revision, the exact same command and task definition pass.
-3. The prompt, evaluator, expected tools, fixtures, timeout, and pass criteria are
-   byte-for-byte unchanged between those runs.
-4. The run artifacts and working FE link are recorded for both runs.
+In `/descend` that check needs a parent-granted check slot, and the next batch
+run is the outcome proof. The prompt, evaluator, expected tools, fixtures,
+timeout and pass criteria stay byte-for-byte unchanged, and the run artifacts
+and working FE link are recorded.
 
 Unit tests, blackbox tests, mocked browser states, simulators, recorded-response
 replays, and benchmark checkpoints remain valuable causal and regression proof,
@@ -131,9 +126,7 @@ but they are **proxy evidence** for the task outcome. A proxy test may never be
 reported as proof that the benchmark passes. A test whose fixture simply supplies
 the desired post-fix result proves only that the harness can consume that result.
 
-If the buggy revision cannot reproduce the exact failure locally, record an
-outcome-reproduction gap and keep the RCA open. If the fixed revision still fails
-the benchmark, treat that run as new primary evidence and continue iterating; do
+If the fixed revision still fails the benchmark, treat that run as new primary evidence and continue iterating; do
 not stop at the passing proxy test.
 
 ### Permanent deploy regression coverage

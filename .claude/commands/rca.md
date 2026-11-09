@@ -260,26 +260,26 @@ findings + an observability gap". Say so, add the missing capture, keep it open.
 Never present a theory, a code read, a production correlation, or a
 third-party-state explanation as a completed RCA.
 
-### Benchmark failures have a second, non-substitutable gate
+### Benchmark failures: causal proof and the end-to-end check
 
 When the reported symptom is a benchmark failure, distinguish two proofs:
 
 1. **Causal proof:** the smallest owning-boundary repro fails before the fix and
    passes afterward. This proves the proposed cause and prevents regression.
-2. **Outcome proof:** the exact unchanged benchmark task fails locally before the
-   fix and passes locally afterward through `scripts/run-bench --local <exact-task-name>`.
-   This proves the fix resolves the failure the user actually reported.
+2. **End-to-end check (when the fix needs one):** the exact unchanged task runs
+   once on the cloud fleet through `scripts/run-bench <exact-task-name> --wait`,
+   never `--local` and never a whole-benchmark rerun; in `/descend` it needs a
+   parent-granted check slot, and the next batch run is the outcome proof.
 
-Both are mandatory before saying the benchmark issue is fixed, approval-ready,
-or complete. A unit test, mocked browser state, simulator, fixture replay,
+The causal proof is mandatory before saying the benchmark issue is fixed,
+approval-ready, or complete. A unit test, mocked browser state, simulator, fixture replay,
 provider-contract test, or renamed "benchmark-like" test is supporting evidence
 only. It may prove a mechanism, but it may never substitute for the exact
 benchmark outcome. Do not claim that a benchmark will pass from proxy evidence.
 
 Run the exact benchmark unchanged: do not edit its prompt, evaluator, expected
-tools, fixture, timeout, or pass criteria to manufacture the pass. If the exact
-benchmark cannot be made to fail locally on the buggy revision, keep the RCA open
-as an outcome-reproduction gap. If it fails after the proposed fix, continue the
+tools, fixture, timeout, or pass criteria to manufacture the pass. If the
+end-to-end check fails after the proposed fix, continue the
 RCA/fix loop from that new run; do not ask for approval or report success.
 
 **Never come back to the user with "I think it's X" or "it's probably load / a

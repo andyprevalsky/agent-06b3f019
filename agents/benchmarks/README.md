@@ -116,7 +116,7 @@ with HOME and PATH set in the script.
 
 `scripts/run-bench process` (alias `process-bench`) selects exactly ten synthetic
 process cases; `scripts/run-bench list` shows their `Process Bench` titles.
-`scripts/run-bench eval --bench process-bench` uses the ordinary evaluator
+Those cases use the ordinary evaluator
 runtime. Cases execute the attached, network-free business fixture in a code
 sandbox. Reading fixture data or writing a completion summary is not execution.
 
@@ -197,7 +197,7 @@ healthy peers continue and neither clock resets.
 Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
 exact-image activation every trial. LIVE autoscale remains 15; the cached mass
 profile's maximum 2 and allocation deadline do not apply. Keep the original
-hundred-task result complete, exact thirty-second monitoring, grouped early
+hundred-task result complete, exact-handle monitoring, grouped early
 verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
 with accepted LIVE latency. The existing stability wrapper's width-32 cap does
 not restrict this ordinary fleet; do not substitute smaller slices.
@@ -205,7 +205,7 @@ not restrict this ordinary fleet; do not substitute smaller slices.
 Ordinary source-only runs reuse verified dependency images and completed
 snapshots. Before an image-build-to-fleet measurement, complete the dependency
 reuse and actual backend seed-cache import check in `.claude/commands/benchmark.md`
-(**Backend seed-cache import check**) before recording the image clock. An image-only publication needs
+(**Running**) before recording the image clock. An image-only publication needs
 no backend dependency check. For an explicitly requested cold build/push
 measurement, use
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
@@ -1880,3 +1880,70 @@ rewrite. Preserve unrelated keys, mode 0600 and existing dotenv symlinks. The
 hermetic concurrent-export controls run in
 `scripts/tests/cloudbench-github-token.test.sh` under `/deploy` Step 4cb and the
 cloudbench change-selected `scripts/test.sh` suite.
+
+### Hub infrastructure experiments
+
+An infrastructure experiment must not wait for the entire `/deploy` workflow.
+Qualify the affected Hub code and its owning controls, then verify that the
+**actual endpoint used by the experiment** serves that source. Keep unrelated
+application deployment gates pending; production promotion still follows its
+normal authorization, qualification and rollback requirements.
+
+The existing endpoint override is `BENCHMARK_HUB_UPLOAD_URL`. Set it inside the
+source-bound remote controller command: `run-cloudbench-controller-gate` does
+not automatically forward the caller's environment to the Machine. The
+campaign publisher inherits that environment; nested canary preflight clears
+parent/group run IDs but retains the endpoint; fleet registration, visibility
+checks and final aggregate publication use it. Guest tasks retain the owned
+parent run ID rather than creating duplicate registrations. Keep authentication
+in the existing managed secret files, never command arguments or public logs.
+Record source, endpoint, storage scope and the normal visibility/publication
+receipts; an environment setting alone is not service-alignment evidence.
+
+A localhost/127.0.0.1 override does not remove durable-publication or canonical
+evidence requirements. Individual result uploads retain their normal mirror,
+but the fleet/campaign aggregate CLI currently publishes only to the configured
+endpoint: it does not invoke that mirror. An override alone therefore does not
+prove durable aggregate publication. Do not bypass that unsupported boundary.
+The conditional-write publication codec requires compatible readers and a
+compatible rollback: an isolated experiment must not write envelopes into an
+old-reader production bucket. A local-file Hub does not qualify the R2 fence.
+An explicitly authorized real-R2 experiment can use
+`BENCHMARK_HUB_STORAGE=r2-isolated` with `BENCHMARK_ISOLATED_RUN=true`, a fresh
+root-issued `BENCHMARK_RUN_ID=hubxp_<32 lowercase hex digits>`, complete existing
+R2 credentials, and `BENCHMARK_HUB_ISOLATION_INTENT` naming its root-owned,
+read-only regular scope file. The intent binds schema
+`benchmark-hub-r2-isolation-v1`, mode, run ID and bucket. The caller must issue
+it with a fresh UUID and exclusive creation; syntax alone does not prove
+freshness. All five Hub key families use the disjoint
+`benchmark-hub-isolated/<run-id>/` prefix in the existing bucket. Do not spoof
+`RENDER`, create a bucket, or fall back to local storage on invalid configuration.
+
+Before and after the experiment, account for every original physical attempt
+in a sealed manifest: its real canonical bundle and existing-CLI publication
+receipt, or an explicit missing-canonical-bundle reason with original ledger
+custody. Preserve all original grades, clocks, identity and private endpoint
+ACKs. Publish each real canonical attempt bundle plus the group afterward with
+existing `hub_upload.py --upload-final`, explicitly targeting production and
+preserving the original publication/group environment. Never copy private
+wire envelopes to the production prefix or fabricate missing/no-agent rows.
+The normal publisher's diagnostic stripping/body limits remain visible; full
+originals stay archived. Use the existing per-agent evidence publisher for
+actual roots/recordings/last LLM dumps. `--verify-visible` alone proves run ID
+visibility, not full-body equality.
+
+If the compatible service/storage or complete original custody/publication
+manifest is unavailable, report that specific prerequisite instead of launching
+against the old Hub, inventing a publisher, creating an unapproved external
+service/bucket, or queuing the full app deployment as an experiment dependency.
+An authorized infrastructure experiment may use the supported owned local
+isolated backend/database and authenticated tunnel. Keep normal source, native
+capacity, ownership, clocks and physical resource guards unchanged.
+
+### Exact-owner cancellation credentials
+
+Exact-owner cancellation reads the browser provider credentials from the
+authoritative env files. Its loader accepts a symlink to a regular env file,
+while cleanup evidence stays symlink-free. If an older controller rejects linked
+env files, materialize private `0600` copies before retrying its exact-owner
+recovery.

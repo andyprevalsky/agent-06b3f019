@@ -210,7 +210,7 @@ concrete names and `--retry-infra 1 --concurrency 50 --strict-barrier
 published INFRA attempt may be retried without restarting healthy peers or either
 clock; retain every physical attempt in its original logical group. Genuine
 task FAIL remains valid and is not retried. Keep LIVE autoscale maximum
-15, scoped native admission, thirty-second exact-handle monitoring and grouped
+15, scoped native admission, exact-handle monitoring and grouped
 early task verdicts. Intermediate observations warn/retry; usable stage handoffs
 and the whole-run limit remain authoritative. Compare generous fixed historical
 LIVE stage targets and avoid paid deploy overlap with accepted LIVE latency.

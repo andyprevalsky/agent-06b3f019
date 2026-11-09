@@ -84,7 +84,7 @@ require_text 'use `--local` only when the user asks' "/descend must require an e
 if grep -Fq 'scripts/run-bench --local <task>' "$DESCEND_COMMAND"; then
   fail "/descend must not hardcode --local for benchmark reruns"
 fi
-require_text 'Never split a batch across launches and never launch proof reruns; the next batch run is the outcome proof.' \
+require_text 'Never split a batch across launches and never launch proof reruns; the next batch run is the outcome proof' \
   "/descend must launch each batch once and use the next batch as outcome proof"
 require_text 'A sharded (>32-copy) run needs a clean pushed commit' "/descend must pin sharded runs to a clean pushed commit"
 require_text 'copy its evidence, TERM its exact owner, and wait for its resources to be released before relaunching' \
@@ -134,14 +134,18 @@ require_section_text "$RCA_PER_FAILURE" 'Every RCA names a concrete defect at a 
 FIXES="$(section_text '## Fixes' '## Final change review')"
 require_section_text "$FIXES" 'At 90 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 100 minutes take what it handed back.' \
   "/descend must warn RCA owners at 90 minutes and collect at 100"
-require_section_text "$FIXES" 'the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait`, never `--local`, starting it by minute 70' \
-  "an RCA's end-to-end check must be one cloud run of its own task inside the time box"
+require_section_text "$FIXES" 'the RCA asks the parent for a check slot; the parent grants it only when the task' \
+  "an RCA's end-to-end check must be admitted by the parent"
+require_section_text "$FIXES" 'the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait` in the background, never `--local`, with `CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES` set to' \
+  "an RCA's end-to-end check must be one cloud run counted against the batch's provider budget"
+require_section_text "$FIXES" 'if it is still running at minute 95 the RCA TERMs its exact controller and confirms release before handing back' \
+  "an RCA's end-to-end check must be released inside the time box"
 require_section_text "$FIXES" "The next batch launches once every RCA's fix is applied or its time box expires" "/descend must not wait past the RCA time box"
 require_section_text "$FIXES" 'an expired RCA keeps its evidence, carries over, and never ships a guessed repair' "an expired RCA must carry over without a guessed fix"
 require_section_text "$FIXES" 'it never uses a full end-to-end benchmark rerun as proof' "RCA fixes must be proven by isolated repros, not benchmark reruns"
 require_section_text "$FIXES" 'lands that regression in the owning suite' "RCA fixes must land a regression"
 require_section_text "$FIXES" 'Never run `scripts/setup-db.sh` from a child worktree' "RCA worktrees must not reset shared databases"
-require_section_text "$FIXES" 'Workers never contact the user, change the active benchmark snapshot, launch batches or deploy' \
+require_section_text "$FIXES" 'RCA workers never contact the user, change the active benchmark snapshot, launch batches or deploy' \
   "/descend workers must leave users, runs and deploys to the parent"
 require_section_text "$FIXES" 'its own row-tagged commit on the descent branch so it can be ablated' "/descend must apply each fix as an ablatable commit"
 require_section_text "$FIXES" 'Never `/deploy` to test a change; infra blockers that production needs ship with `/push`, everything else waits for the end.' \
