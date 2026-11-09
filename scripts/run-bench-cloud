@@ -2046,19 +2046,19 @@ inject_secrets() {
     if [ "${MODE:-}" = setup ] && [ -n "$(resolve_machine_id)" ]; then
         local setup_targets setup_role setup_machine setup_state
         setup_targets="$(environment_activation_targets)" || {
-            release_app_environment_lock; exit 1
+            if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
         }
         while IFS=$'\t' read -r setup_role setup_machine; do
             [ "$setup_role" = warm ] || continue
             assert_app_environment_lock_ownership || {
-                release_app_environment_lock; exit 1
+                if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
             }
             setup_state="$(machine_state_for_activation "$setup_machine")" || {
-                release_app_environment_lock; exit 1
+                if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
             }
             if [ "$setup_state" != stopped ]; then
                 stop_machine_strict "$setup_machine" || {
-                    release_app_environment_lock; exit 1
+                    if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
                 }
             fi
         done <<< "$setup_targets"
@@ -2068,7 +2068,9 @@ inject_secrets() {
     if [ "$status" -eq 0 ] && [ "${CLOUDBENCH_HOLD_APP_ENV_LOCK:-0}" = "1" ]; then
         return 0
     fi
-    release_app_environment_lock
+    # The setup EXIT trap records failure under the original native lease.
+    # Non-maintenance callers still release their own injection lease here.
+    if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi
     [ "$status" -eq 0 ] || exit "$status"
     return "$status"
 }

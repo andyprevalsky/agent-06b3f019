@@ -29,6 +29,50 @@ def function(name):
     return text[start:text.index('\n}\n',start)+3]
 
 
+class InjectionLeaseOrdering(unittest.TestCase):
+    def test_failure_paths_finish_before_release_and_preserve_exit(self):
+        for stage in ('targets', 'ownership', 'state', 'stop', 'inject'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp); pointer=root/'pointer';pointer.write_text('{}')
+                script="""set -uo pipefail
+ROOT_DIR="$1"
+MAINTENANCE_POINTER="$ROOT_DIR/pointer"
+MODE=setup
+CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+held=1
+resolve_machine_id() { echo warm; }
+acquire_app_environment_lock() { held=1; }
+assert_app_environment_lock_ownership() { [ "$STAGE" != ownership ]; }
+environment_activation_targets() { [ "$STAGE" != targets ] || return 1; printf 'warm\twarm\n'; }
+machine_state_for_activation() { [ "$STAGE" != state ] || return 1; echo started; }
+stop_machine_strict() { [ "$STAGE" != stop ]; }
+_inject_secrets_locked() { return 7; }
+release_app_environment_lock() { echo release >> "$ROOT_DIR/order"; held=0; }
+python3() { [ "$held" = 1 ] || return 99; echo finish >> "$ROOT_DIR/order"; return 1; }
+"""+function('setup_release')+'\n'+function('inject_secrets')+"""
+trap 'status=$?; setup_release "$status"; exit "$?"' EXIT
+inject_secrets
+"""
+                result=subprocess.run(['bash','-c',script,'fixture',str(root)],env={**os.environ,'STAGE':stage},capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,7 if stage=='inject' else 1,result.stderr)
+                self.assertEqual((root/'order').read_text().splitlines(),['finish','release'])
+
+    def test_nonmaintenance_failure_releases_without_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            script="""set -uo pipefail
+MAINTENANCE_POINTER=''
+MODE=refresh
+CLOUDBENCH_HOLD_APP_ENV_LOCK=0
+acquire_app_environment_lock() { return 0; }
+_inject_secrets_locked() { return 7; }
+release_app_environment_lock() { echo release; }
+"""+function('inject_secrets')+'\ninject_secrets\n'
+            result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,7,result.stderr)
+            self.assertEqual(result.stdout,'release\n')
+
+
 class NativeTransition(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
@@ -88,7 +132,7 @@ m.get=get
 c.isolated_admissions=lambda state,gate:list(state['reconciled_owners'].values())
 r16.hub_socket=lambda **kw:{'pid':777,'port':1777,'inodes':['88']}
 ''')
-        functions='\n'.join(function(n) for n in ('maintenance_begin','maintenance_targets','maintenance_prestart','setup_release'))
+        functions='\n'.join(function(n) for n in ('maintenance_begin','maintenance_targets','maintenance_prestart','setup_release','inject_secrets'))
         script='''#!/usr/bin/env bash
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -105,12 +149,15 @@ BENCH_REF="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 APP=navi-whisper-lux-bench
 WARM_PARKED_VM_SIZE=shared-cpu-1x
 WARM_PARKED_VM_MEMORY=2048
+resolve_machine_id() { return 0; }
+_inject_secrets_locked() { return 7; }
 environment_activation_targets() { printf 'warm\\twarm\\n'; }
 '''+functions+'''
 acquire_app_environment_lock || exit 1
 trap 'native_status=$?; setup_release "$native_status"; exit "$?"' EXIT
 maintenance_begin || exit 1
 maintenance_targets "$(environment_activation_targets)" || exit 1
+if [ "${FIXTURE_INJECT_FAILURE:-0}" = 1 ]; then inject_secrets; fi
 # Mutation is synthetic; only the original shell can proceed past intent.
 printf after > "$ROOT_DIR/.context/phase"
 maintenance_prestart || exit 1
@@ -139,6 +186,22 @@ exit "${FIXTURE_NATIVE_EXIT:-0}"
     def run_native(self,status=0):
         return subprocess.run(['bash',str(self.root/'scripts/run-bench-cloud'),'--setup'],env={**self.env,'FIXTURE_NATIVE_EXIT':str(status)},
                               text=True,capture_output=True,timeout=15)
+
+    def test_failed_secret_injection_finishes_under_original_lease(self):
+        self.env['FIXTURE_INJECT_FAILURE']='1'
+        completed=self.run_native()
+        self.assertEqual(completed.returncode,7,completed.stderr)
+        state=c.read(self.context/'cycle.json')
+        record=state['native_maintenance'][-1]
+        self.assertIn('result_sha256',record,completed.stderr)
+        result=c.read(Path(record['directory'])/'result.json')
+        self.assertEqual(result['native_exit'],7)
+        self.assertFalse(result['qualified'])
+        self.assertFalse(result['cleanup_complete'])
+        self.assertFalse(result['credit_granted'])
+        self.assertFalse((self.root/'.git/cloudbench-app-env.lock').exists())
+        self.assertFalse((self.context/'start-marker').exists())
+        self.assertEqual(self.state['reconciled_owners'],state['reconciled_owners'])
 
     def consumer(self,state=None):
         state=state or c.read(self.context/'cycle.json')
@@ -800,5 +863,77 @@ class Quiescence(unittest.TestCase):
                 self.assertTrue(m.quiescent(native_pid=77))
                 (proc/'77/cmdline').write_bytes(b'python3\0/scripts/run-bench-campaign.py\0')
                 with self.assertRaises(ValueError):m.quiescent(native_pid=77)
+
+class InterruptedMaintenance(unittest.TestCase):
+    setUp=NativeTransition.setUp
+    run_native=NativeTransition.run_native
+
+    def prepare_orphan(self):
+        self.assertEqual(self.run_native(7).returncode,7)
+        state=c.read(self.context/'cycle.json');record=state['native_maintenance'][-1]
+        directory=Path(record['directory']);(directory/'result.json').unlink()
+        for key in ('result_sha256','native_exit','qualified','prestart_sha256'):record.pop(key,None)
+        if (directory/'prestart.json').exists():(directory/'prestart.json').unlink()
+        c.write(self.context/'cycle.json',state)
+        intent=c.read(directory/'intent.json')
+        witness=self.context/'terminal.json'
+        c.write(witness,dict(status='FAILED_WITH_UNFINISHED_INTENT',source=intent['source'],
+            intent_sha256=hashlib.sha256((directory/'intent.json').read_bytes()).hexdigest(),producer=intent['producer'],native_exit_observed=1,
+            qualified=False,cloud_tasks_started=False))
+        log=self.context/'terminal.log';log.write_text('synthetic original terminal evidence')
+        seals={str(p.relative_to(self.root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in (witness,log)}
+        self.addCleanup(patch.stopall)
+        patch.object(m,'ORPHAN_NONCE',record['nonce']).start()
+        patch.object(m,'ORPHAN_EVIDENCE',seals).start()
+        return state,record,directory
+
+    def test_exact_interruption_is_separate_no_credit_record(self):
+        state,record,directory=self.prepare_orphan();original=(directory/'intent.json').read_bytes()
+        with patch.object(m,'quiescent'):
+            m.reconcile_interrupted(argparse.Namespace(root=self.root,state=self.context/'cycle.json'))
+        after=c.read(self.context/'cycle.json');saved=after['native_maintenance'][-1]
+        self.assertTrue(m.validate_interrupted(self.root,saved))
+        self.assertEqual(original,(directory/'intent.json').read_bytes())
+        self.assertFalse((directory/'result.json').exists())
+        self.assertEqual(after['reconciled_owners'],state['reconciled_owners'])
+        self.assertEqual({k:v for k,v in saved.items() if k!='interrupted_sha256'},record)
+        self.assertFalse((self.root/'.git/cloudbench-app-env.lock').exists())
+        value=c.read(directory/'interrupted.json')
+        for flag in ('qualified','cleanup_complete','credit_granted'):self.assertFalse(value[flag])
+        value['qualified']=True;c.write(directory/'interrupted.json',value)
+        with self.assertRaises(ValueError):m.validate_interrupted(self.root,saved)
+
+    def test_changed_evidence_and_cycle_cannot_reconcile(self):
+        state,record,directory=self.prepare_orphan()
+        (self.context/'terminal.log').write_text('changed')
+        with self.assertRaises(ValueError):m.interrupted_evidence(self.root,record)
+        self.assertFalse((directory/'interrupted.json').exists())
+
+    def test_original_pointer_debt_schema_and_extra_fields_are_bound(self):
+        state,record,directory=self.prepare_orphan()
+        for key,value in (('debt_sha256','0'*64),('schema','wrong'),('unexpected',True)):
+            changed=copy.deepcopy(record);changed[key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                m.interrupted_evidence(self.root,changed)
+
+    def test_changed_cycle_and_debt_cannot_reconcile(self):
+        state,record,directory=self.prepare_orphan()
+        state['ready']=True;c.write(self.context/'cycle.json',state)
+        with patch.object(m,'quiescent'),self.assertRaises(ValueError):
+            m.reconcile_interrupted(argparse.Namespace(root=self.root,state=self.context/'cycle.json'))
+        self.assertFalse((directory/'interrupted.json').exists())
+        self.assertFalse((self.root/'.git/cloudbench-app-env.lock').exists())
+
+    def test_live_producer_or_progress_cannot_reconcile(self):
+        state,record,directory=self.prepare_orphan()
+        original=m.Path.read_text
+        def live(path,*args,**kwargs):
+            if str(path)==f"/proc/{record['producer']['pid']}/stat":return 'live or reused'
+            return original(path,*args,**kwargs)
+        with patch.object(m.Path,'read_text',live),self.assertRaises(ValueError):
+            m.interrupted_evidence(self.root,record)
+        (directory/'prestart.json').write_text('{}')
+        with self.assertRaises(ValueError):m.interrupted_evidence(self.root,record)
+
 
 if __name__=='__main__':unittest.main()

@@ -390,6 +390,8 @@ def original_owned_baseline(state, root, entries):
     """An original failed intent/result can bind scope without becoming success."""
     candidates=[]
     for record in state.get('native_maintenance',[]):
+        if 'interrupted_sha256' in record:
+            validate_interrupted(root,record);continue
         directory=Path(record['directory'])
         need(directory==common(root)/'cloudbench-maintenance'/record['nonce']
              and directory.resolve()==directory and not directory.is_symlink(),'original custody operation path')
@@ -423,6 +425,8 @@ def native_cache_baseline(state, root, entries):
     if not state.get('native_maintenance'):return None
     original,_=original_owned_baseline(state,root,entries)  # verifies ALL state/file seals
     for record in state['native_maintenance']:
+        if 'interrupted_sha256' in record:
+            validate_interrupted(root,record);continue
         directory=Path(record['directory']);intent=read(directory/'intent.json')
         before=intent['before']['warm'];addition=intent['before'].get('cache_addition')
         # Never derive authority from a renewal generation or its after-state.
@@ -622,13 +626,103 @@ def prestart(args):
     write(Path(intent['state_path']),state)
 
 
+# Exact parent-captured evidence for the observed pre-mutation lost-lease failure.
+# This is not a generic caller-attested completion or a native result substitute.
+ORPHAN_EVIDENCE = {
+    '.context/cli-nov09-native-activation-0115/result.json': '34e2e817cf4fad7176cafd908e2be71bb19dfd0c1cfbf65e6437fe9dc33f3e9e',
+    '.context/cli-nov09-native-activation-0115/image-activate.log': '12e202c8bc16ac1e441339d509368334a6a0736d4fec9c6f72a78c71cfecf909',
+}
+ORPHAN_NONCE = '629baabebc3a37a6fa9a33d78bf6cec0'
+
+
+def interrupted_evidence(root, record):
+    directory=Path(record['directory']);intent=read(directory/'intent.json')
+    need(record['nonce']==ORPHAN_NONCE and directory==common(root)/'cloudbench-maintenance'/ORPHAN_NONCE,
+         'unknown interrupted maintenance')
+    original={k:v for k,v in record.items() if k!='interrupted_sha256'}
+    expected=dict(schema=SCHEMA,directory=str(directory),intent_sha256=digest(intent),
+                  nonce=intent['nonce'],producer=intent['producer'],source=intent['source'],
+                  debt_sha256=intent['debt_sha256'])
+    need(original==expected and intent['schema']==SCHEMA and intent['root']==str(root),
+         'interrupted original binding')
+    need(not (directory/'result.json').exists() and not (directory/'prestart.json').exists()
+         and 'prestart_sha256' not in record, 'interrupted operation already progressed')
+    for name,expected in ORPHAN_EVIDENCE.items():
+        path=root/name
+        need(path.resolve()==path and not path.is_symlink() and
+             hashlib.sha256(path.read_bytes()).hexdigest()==expected,'interrupted terminal evidence changed')
+    witness=read(root/next(iter(ORPHAN_EVIDENCE)))
+    need(witness['status']=='FAILED_WITH_UNFINISHED_INTENT' and witness['source']==intent['source']
+         and witness['intent_sha256']==hashlib.sha256((directory/'intent.json').read_bytes()).hexdigest() and witness['producer']==intent['producer']
+         and witness['native_exit_observed']==1 and witness['qualified'] is False
+         and witness['cloud_tasks_started'] is False, 'interrupted terminal observation')
+    # Authenticate the immutable original producer scripts against its Git tree,
+    # not the subsequently repaired scripts in the current checkout.
+    need(set(intent['scripts'])==set(SCRIPTS) and all(hashlib.sha256(subprocess.check_output(
+         ['git','-C',str(root),'show',intent['source']['head']+':'+name],stderr=subprocess.PIPE)).hexdigest()==sha
+         for name,sha in intent['scripts'].items()),'interrupted original scripts')
+    try:
+        Path('/proc',str(intent['producer']['pid']),'stat').read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+    else:
+        need(False,'interrupted producer PID remains present or was reused')
+    return intent
+
+
+def validate_interrupted(root, record):
+    intent=interrupted_evidence(root,record)
+    value=read(Path(record['directory'])/'interrupted.json')
+    need(record.get('interrupted_sha256')==digest(value) and value==dict(
+         schema='cloudbench-interrupted-maintenance-v1',nonce=intent['nonce'],
+         intent_sha256=digest(intent),producer=intent['producer'],evidence=ORPHAN_EVIDENCE,
+         native_exit_observed=1,qualified=False,cleanup_complete=False,credit_granted=False),
+         'interrupted reconciliation seal')
+    return True
+
+
+def reconcile_interrupted(args):
+    # Acquire the same real app lease and cycle flock; never impersonate the old
+    # producer or fabricate its native result. No provider observation is needed.
+    import fcntl
+    from deploy_test_cycle import write
+    root=args.root.resolve();state_path=args.state
+    need(args.root==root and state_path.resolve()==state_path and state_path.is_relative_to(root/'.context'),
+         'interrupted physical state path')
+    lock=common(root)/'cloudbench-app-env.lock'
+    with (state_path.parent/'lock').open('a') as handle:
+        fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        subprocess.run(['shlock','-p',str(os.getpid()),'-f',str(lock)],check=True)
+        try:
+            state=read(state_path);records=state.get('native_maintenance',[])
+            need(records and 'result_sha256' not in records[-1] and 'interrupted_sha256' not in records[-1],
+                 'exact unfinished last maintenance required')
+            record=records[-1];intent=interrupted_evidence(root,record)
+            need(intent['state_path']==str(state_path),'interrupted original state path')
+            previous=copy.deepcopy(state);previous['native_maintenance'].pop()
+            if not previous['native_maintenance'] and not intent['previous_native_maintenance_present']:
+                previous.pop('native_maintenance')
+            need(digest(previous)==intent['state_sha256'],'interrupted original cycle changed')
+            quiescent(native_pid=os.getpid())
+            need(digest(debts(state,intent['gate']))==intent['debt_sha256'],'interrupted original debts changed')
+            need(lock.read_text().strip()==str(os.getpid()),'interrupted reconciliation lease lost')
+            value=dict(schema='cloudbench-interrupted-maintenance-v1',nonce=intent['nonce'],
+                       intent_sha256=digest(intent),producer=intent['producer'],evidence=ORPHAN_EVIDENCE,
+                       native_exit_observed=1,qualified=False,cleanup_complete=False,credit_granted=False)
+            write_once(Path(record['directory'])/'interrupted.json',value)
+            records[-1]={**record,'interrupted_sha256':digest(value)}
+            write(state_path,state)
+        finally:
+            if lock.is_file() and not lock.is_symlink() and lock.read_text().strip()==str(os.getpid()):lock.unlink()
+
+
 def begin(args):
     from deploy_test_cycle import source, isolated_admissions
     root = args.root.resolve(); state = read(args.state)
     need(args.root == root and not args.root.is_symlink(), 'physical original root required')
     current = source(root)
     need(args.requested_ref == current['head'], 'exact requested setup source')
-    need(all('result_sha256' in record for record in state.get('native_maintenance', [])),
+    need(all('result_sha256' in record or validate_interrupted(root,record) for record in state.get('native_maintenance', [])),
          'unfinished original maintenance must be reconciled, not discarded')
     need(state['source'] == state['plan']['source'] == current, 'frozen original source')
     gate = next(g for g in state['plan']['gates'] if g['name'] == args.gate)
@@ -747,6 +841,8 @@ def validate_current(state, entries, anchor, operation):
     # second successful authority or prevent a fresh, independently qualified
     # operation. An unfinished intent, however, is not an authenticated failure.
     for record in matching:
+        if 'interrupted_sha256' in record:
+            validate_interrupted(root,record);continue
         directory = Path(record['directory'])
         need(directory == common(root)/'cloudbench-maintenance'/record['nonce']
              and directory.resolve() == directory and not directory.is_symlink(), 'native attempt path')
@@ -760,7 +856,7 @@ def validate_current(state, entries, anchor, operation):
              and prior_result['qualified'] == record['qualified']
              and prior_result['cleanup_complete'] is False and prior_result['credit_granted'] is False,
              'preserved native attempt seal')
-    candidates = [record for record in matching if record['native_exit'] == 0 and record['qualified'] is True]
+    candidates = [record for record in matching if record.get('native_exit') == 0 and record.get('qualified') is True]
     need(len(candidates) == 1, 'unique successful original maintenance producer required')
     record = candidates[0]
     directory = Path(record['directory'])
@@ -829,13 +925,15 @@ def validate_current(state, entries, anchor, operation):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('operation', choices=('begin','prestart','finish')); p.add_argument('--pointer',type=Path,required=True)
-    p.add_argument('--pid',type=int,required=True); p.add_argument('--root',type=Path)
+    p.add_argument('operation', choices=('begin','prestart','finish','reconcile-interrupted')); p.add_argument('--pointer',type=Path)
+    p.add_argument('--pid',type=int); p.add_argument('--root',type=Path)
     p.add_argument('--state',type=Path); p.add_argument('--gate'); p.add_argument('--build',type=Path)
     p.add_argument('--requested-ref'); p.add_argument('--image'); p.add_argument('--targets'); p.add_argument('--app')
     p.add_argument('--native-exit',type=int,default=1); p.add_argument('--state-fd',type=int)
     args = p.parse_args()
-    {'begin':begin,'prestart':prestart,'finish':finish}[args.operation](args)
+    if args.operation != 'reconcile-interrupted' and (args.pid is None or args.pointer is None):
+        p.error('--pid and --pointer are required for native operations')
+    {'begin':begin,'prestart':prestart,'finish':finish,'reconcile-interrupted':reconcile_interrupted}[args.operation](args)
 
 if __name__ == '__main__':
     main()
