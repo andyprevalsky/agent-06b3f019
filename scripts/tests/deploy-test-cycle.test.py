@@ -5796,6 +5796,68 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
 
+    def test_clean_successor_renewal_binds_historical_gate_for_selection_metadata_only(self):
+        from deploy_test_historical_custody import state_identity
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        gate['selection_evidence']=['runtime/contract path trigger']
+        successor['execution_binding']['contract_digest']=c.digest(gate)
+        c.write(folder/'receipt.json',successor)
+        snapshot=copy.deepcopy(state)
+        snapshot['source']=copy.deepcopy(successor['source'])
+        snapshot['plan']['source']=copy.deepcopy(successor['source'])
+        snapshot['plan_digest']=c.digest(snapshot['plan'])
+        snapshot['input_fingerprints'][gate['name']]=successor['execution_binding']['input_fingerprint']
+        snapshot_path=folder/'admitted-state.json'; c.write(snapshot_path,snapshot)
+        request=c.read(folder/'request.json')
+        request.update(custody_state=str(snapshot_path),custody_state_sha256=state_identity(snapshot))
+        c.write(folder/'request.json',request)
+        witness=dict(kind='historical-clean-successor-v1',request_token=successor['token'],
+            receipt_sha256=c.sha_file(folder/'receipt.json'),
+            custody_state=dict(path=str(snapshot_path),sha256=c.sha_file(snapshot_path)))
+        gate['selection_evidence']=['run_all trigger: Dockerfile.cloudbench-warm','runtime/contract path trigger']
+        renewed={**proof,'validation_source':copy.deepcopy(state['source'])}
+        original_state=copy.deepcopy(state)
+        raw={p:c.sha_file(p) for p in [*paths.values(),*folder.glob('*.json')]}
+        changes=[
+            ('missing-witness',lambda s,w:w.clear()),
+            ('wrong-kind',lambda s,w:w.update(kind='untyped')),
+            ('wrong-successor',lambda s,w:w.update(request_token='foreign')),
+            ('receipt-tamper',lambda s,w:w.update(receipt_sha256='0'*64)),
+            ('snapshot-tamper',lambda s,w:w['custody_state'].update(sha256='0'*64)),
+            ('current-command-change',lambda s,w:next(g for g in s['plan']['gates'] if g['name']==gate['name']).update(command=['false'])),
+            ('current-check-removal',lambda s,w:next(g for g in s['plan']['gates'] if g['name']==gate['name']).update(checks=[])),
+            ('current-env-change',lambda s,w:next(g for g in s['plan']['gates'] if g['name']==gate['name']).update(env={'RELAX_CHECKS':'1'})),
+            ('selection-type',lambda s,w:next(g for g in s['plan']['gates'] if g['name']==gate['name']).update(selection_evidence=[True])),
+            ('boolean-type-change',lambda s,w:next(g for g in s['plan']['gates'] if g['name']==gate['name']).update(native_cloud=1)),
+            ('unknown-execution-field',lambda s,w:next(g for g in s['plan']['gates'] if g['name']==gate['name']).update(unrecognized=True)),
+        ]
+        for name,mutate in changes:
+            with self.subTest(name=name):
+                candidate,control=copy.deepcopy(original_state),copy.deepcopy(witness)
+                mutate(candidate,control); before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):
+                    c.reconcile(candidate,original['token'],renewed,renewal_witness=control or None)
+                self.assertEqual(before,candidate)
+        for field,value in [('source',{'head':'foreign','digest':'foreign'}),('environment','foreign'),
+                            ('input_fingerprints',{gate['name']:'foreign'}),('plan_digest','foreign')]:
+            with self.subTest(snapshot_field=field):
+                altered=copy.deepcopy(snapshot); altered[field]=value; c.write(snapshot_path,altered)
+                control=copy.deepcopy(witness); control['custody_state']['sha256']=c.sha_file(snapshot_path)
+                with self.assertRaises(ValueError):
+                    c.reconcile(state,original['token'],renewed,renewal_witness=control)
+                self.assertEqual(original_state,state)
+        c.write(snapshot_path,snapshot)
+        c.reconcile(state,original['token'],renewed,renewal_witness=witness)
+        entry=state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(original_state['attempts'],state['attempts'])
+        self.assertEqual(original_state['failures'],state['failures'])
+        self.assertEqual(raw,{p:c.sha_file(p) for p in raw})
+        self.assertIn('full coverage',c.pending_completion_block(state))
+        before=copy.deepcopy(state)
+        c.reconcile(state,original['token'],renewed,renewal_witness=witness)
+        self.assertEqual(before,state)
+
     def test_isolated_successor_renewal_rejects_bad_or_tampered_successors_atomically(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
         renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}

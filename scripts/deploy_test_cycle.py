@@ -1252,11 +1252,13 @@ def retained_owners(state: dict, gates) -> list[str]:
     return sorted(owned)
 
 
-def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> None:
+def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None, renewal_witness=None) -> None:
     """Typed, receipt-backed cleanup reconciliation for a boxes-thread owner: clears the owner for launch
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if renewal_witness is not None and proof.get('kind') != 'native-cloud-cleanup-v1':
+        raise ValueError('historical successor witness requires native cleanup renewal')
     if proof.get('kind') == 'round49-launch-debt-retirement-v1':
         from deploy_test_round49_retirement import reconcile as retire_round49
         retire_round49(state, occurrence_id, proof, persist=persist)
@@ -1279,7 +1281,7 @@ def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> 
         return
     if proof.get("kind") == "native-cloud-cleanup-v1":
         from deploy_test_native_cleanup import reconcile as reconcile_native
-        reconcile_native(state, occurrence_id, proof)
+        reconcile_native(state, occurrence_id, proof, renewal_witness=renewal_witness)
         return
     required = ("receipt_sha256", "worker_result_sha256", "request_token", "owner", "platform_result", "native_audit",
                 "process", "confirmed_at", "observed_by")
@@ -2550,7 +2552,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.proof is None:
                     raise ValueError("--proof cleanup proof required")
                 reconcile(state, args.occurrence, bounded_read(args.proof, "cleanup proof"),
-                          persist=lambda: write(state_path, state))
+                          persist=lambda: write(state_path, state),
+                          renewal_witness=bounded_read(args.input, 'historical successor witness') if args.input else None)
             elif args.action == "complete":
                 # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
                 blocked = pending_completion_block(state)

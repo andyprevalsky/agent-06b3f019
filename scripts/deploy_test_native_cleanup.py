@@ -1447,7 +1447,46 @@ def validate(receipt, owner, proof):
     return result
 
 
-def clean_isolated_successor(state, prior, original, successor):
+def historical_successor_gate(witness, successor, request, current_gate):
+    """Recover the exact admitted inputs; only selection explanation may differ now."""
+    from deploy_test_cycle import bounded_read, digest, sha_file, MAX_RECEIPT_BYTES
+    from deploy_test_historical_custody import state_identity
+    need(isinstance(witness, dict) and set(witness) ==
+         {'kind', 'request_token', 'receipt_sha256', 'custody_state'}
+         and witness['kind'] == 'historical-clean-successor-v1'
+         and witness['request_token'] == successor['token']
+         and witness['receipt_sha256'] == sha_file(Path(successor['log']).parent / 'receipt.json'),
+         'historical successor witness identity')
+    locator = witness['custody_state']
+    need(isinstance(locator, dict) and set(locator) == {'path', 'sha256'}
+         and isinstance(locator['path'], str), 'historical successor snapshot locator')
+    path = Path(locator['path'])
+    need(path.is_absolute() and path.resolve() == path and not path.is_symlink()
+         and path.is_file() and path.stat().st_size <= MAX_RECEIPT_BYTES
+         and sha_file(path) == locator['sha256'], 'historical successor snapshot bytes')
+    snapshot = bounded_read(path, 'historical successor admission')
+    need(snapshot.get('plan_digest') == digest(snapshot.get('plan'))
+         and state_identity(snapshot) == request.get('custody_state_sha256')
+         and snapshot.get('source') == request['source'] == successor['source']
+         and snapshot['plan'].get('source') == snapshot['source'], 'historical successor admission binding')
+    candidates = [g for g in snapshot['plan']['gates'] if g.get('name') == current_gate['name']]
+    need(len(candidates) == 1, 'historical successor gate identity')
+    historical = candidates[0]
+    need(set(historical) == set(current_gate)
+         and all(isinstance(g.get('selection_evidence'), list)
+             and all(isinstance(reason, str) for reason in g['selection_evidence'])
+             for g in (historical, current_gate))
+         and digest({k: v for k, v in historical.items() if k != 'selection_evidence'}) ==
+             digest({k: v for k, v in current_gate.items() if k != 'selection_evidence'}),
+         'historical successor execution contract changed')
+    need(successor.get('execution_binding') == {
+        'contract_digest': digest(historical), 'environment': snapshot.get('environment'),
+        'input_fingerprint': snapshot.get('input_fingerprints', {}).get(current_gate['name'])},
+        'historical successor execution inputs changed')
+    return historical
+
+
+def clean_isolated_successor(state, prior, original, successor, renewal_witness=None):
     """A later full native result may close execution without clearing historical debt or FAILs."""
     from deploy_test_cycle import bounded_read, digest, receipt_owner, sha_file, validate_result
     gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
@@ -1462,8 +1501,12 @@ def clean_isolated_successor(state, prior, original, successor):
     need(len(rows) == 1 and rows[0][0].get('phase') in {'initial', 'focused', 'failed-gates', 'final', 'triage'}
          and not rows[0][0].get('interrupted')
          and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
+    folder = Path(successor['log']).parent
+    request = bounded_read(folder / 'request.json', 'successor request')
+    admitted_gate = (historical_successor_gate(renewal_witness, successor, request, gate)
+                     if renewal_witness is not None else gate)
     binding = successor.get('execution_binding', {})
-    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
+    need(binding.get('contract_digest') == digest(admitted_gate) and binding.get('environment') == state['environment']
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     folder = Path(successor['log']).parent
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
@@ -1596,7 +1639,7 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
-def renew_isolated_validation(state, request_token, proof):
+def renew_isolated_validation(state, request_token, proof, renewal_witness=None):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
     need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
@@ -1616,9 +1659,12 @@ def renew_isolated_validation(state, request_token, proof):
     latest = latest_receipts(state).get(prior['gate'])
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
+            need(renewal_witness is None, 'historical witness requires complete successor')
             reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
         else:
-            clean_isolated_successor(state, prior, receipt, latest)
+            clean_isolated_successor(state, prior, receipt, latest, renewal_witness)
+    else:
+        need(renewal_witness is None, 'historical witness requires successor')
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
     need(still_bound(prior, receipt, owner), 'prior native proof changed')
@@ -1631,16 +1677,21 @@ def renew_isolated_validation(state, request_token, proof):
     if entry != prior:
         state.setdefault('reconciled_owner_history', []).append(copy.deepcopy(prior))
         state['reconciled_owners'][key] = entry
+        if renewal_witness is not None:
+            state.setdefault('native_successor_renewals', []).append({
+                'original_request_token': request_token, 'validation_source': copy.deepcopy(state['source']),
+                'witness': copy.deepcopy(renewal_witness)})
 
 
-def reconcile(state, occurrence_id, proof):
+def reconcile(state, occurrence_id, proof, renewal_witness=None):
     """Record verified retirement while preserving the original native result and credit."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
         if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
                 and proof.get('purpose') == 'isolated-validation'):
-            return renew_isolated_validation(state, occurrence_id, proof)
+            return renew_isolated_validation(state, occurrence_id, proof, renewal_witness)
+        need(renewal_witness is None, 'historical witness requires isolated source renewal')
         if failure is None and state.get('phase') == 'stale':
             # A source refresh can finish a full attempt before its failures are
             # promoted to triage. Its retained owner still requires exact proof.

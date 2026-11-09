@@ -156,6 +156,20 @@ does not allocate outside the existing CLI or invent a cleanup receipt.
 If no appropriate worker is bound, planning refuses; it does not quietly
 serialize the suite locally.
 
+At an isolated native cleanup source-renewal boundary, a completed historical
+successor may have a different selection explanation while every execution field
+remains identical. Keep the generated current plan and original proof unchanged.
+Use `reconcile --proof <original-proof-with-new-validation-source> --input
+<historical-successor-witness>` with a separate
+`historical-clean-successor-v1` witness. It binds the successor request token,
+receipt SHA256, and a canonical `custody_state` path/SHA256 for the recovered
+admission snapshot. The snapshot must match the original request's admission
+seal and all historical source/plan/environment/input bindings. Only the
+string-list `selection_evidence` field may differ; execution changes refuse.
+This renews launch authority with zero test or cleanup credit. Original failures
+and obligations remain, and the final source must earn fresh full coverage.
+Missing authentic historical authority fails closed.
+
 Before a cloud launch, a genuine local Claude credential SKIP can be admitted
 through `deploy_test_cycle.py standing-skip --proof <proof.json>` with the
 normal `--plan`, `--state-dir`, and `--root` arguments. This uses the existing
