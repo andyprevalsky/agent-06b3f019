@@ -184,7 +184,7 @@ for removed in ("UPD", "<ring>", "BENCHMARK PROGRESS", "ACTIVE RUN ·", "LAST SL
     assert removed not in template, removed
 assert "America/Los_Angeles" in expected
 for rule in ("20 * infra_failed_jobs >= scheduled_total", "10800", "Continuously",
-             "/RCA", "/deploy", "immutable", "No prose before or after", "30 seconds"):
+             "/RCA", "/deploy", "immutable", "No prose before or after", "background-task cadence"):
     assert rule in expected, rule
 assert "scripts/run-bench report-format" in (root / "CLAUDE.md").read_text()
 assert "scripts/run-bench report-format" in (root / ".claude/commands/benchmark.md").read_text()

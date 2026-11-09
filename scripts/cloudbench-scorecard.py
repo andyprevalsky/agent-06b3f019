@@ -1223,7 +1223,7 @@ def render_html(card: dict) -> str:
     else:
         lis = '<li class="ok">✅ No open issues recorded.</li>'
     out.append(f'<section data-section="issues"><h2>ISSUES / NEXT ACTION</h2><ul>{lis}</ul></section>')
-    reason = exp.get("state_reason") or {"RUNNING": "observe every 30s; card every 15 min", "COMPLETE": "results final, resources released"}.get(state, "")
+    reason = exp.get("state_reason") or {"RUNNING": "observing; card every 15 min", "COMPLETE": "results final, resources released"}.get(state, "")
     out.append(f'<footer data-section="footer"><span class="{STATE_CLASS[state]}">{STATE_ICON[state]} {e(state)}</span>'
                + (f" · {e(reason)}" if reason else "") +
                f'<div class="gen">Rendered by scripts/run-bench scorecard ({FORMAT}) at {e(pacific(card["generated_at"]))} from recorded artifacts.</div></footer>')

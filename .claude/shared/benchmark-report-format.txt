@@ -47,7 +47,7 @@ Timing, cost and lifecycle
 
 Maintain the run (this card is not a stopping point)
 - Continuously advance the authorized goal (observe, delegate, diagnose, fix, verify, publish, run the next slice); never return after merely launching a run or sending a card, and end only when the goal is complete or the user stops the work.
-- The assigned operational owner polls the exact CLI-printed monitor every 30 seconds, reading controller exit and cleanup receipts on every observation even when the card is stale; campaign `summary.json` and each child's printed monitor handle are distinct.
+- The assigned operational owner polls the exact CLI-printed monitor on CLAUDE.md's background-task cadence, reading controller exit and cleanup receipts on every observation even when the card is stale; campaign `summary.json` and each child's printed monitor handle are distinct.
 - Reread missing or stale observations; they never authorize a restart, broader cleanup, a clock reset or cancelling healthy siblings.
 - Stop the exact owned run through its normal controller when `scheduled_total > 0` and `20 * infra_failed_jobs >= scheduled_total`: exactly 5% stops (30 of 600; 1/600 and 29/600 continue); never use completed attempts as the denominator or count a retried job twice, and preserve the first breach, original clocks and every physical attempt.
 - Iterate through `/descend`: one `/RCA` per failure as it appears, never blocking the next run on a full `/deploy`.

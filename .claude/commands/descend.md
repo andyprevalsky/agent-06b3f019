@@ -74,7 +74,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 ## RCA per failure
 
 - INFRA means the environment failed before a trustworthy verdict; HARNESS means a trustworthy verdict failed real criteria, including a fallback that masks the required path; issue classes and the timeout and provider-limit evidence rules are in `docs/root-cause-analysis.md`.
-- As each task fails, start one muted `/RCA` thread for it via `boxes-delegated-threads`, with its own worktree and non-overlapping files, the task's run, attempt and agent IDs, FE link, evaluator output, source SHA, scope and a 60-minute time box (84% of 140 recorded RCA lanes finished within 60 minutes); fixing starts while the batch still runs.
+- As each task fails, start one muted `/RCA` thread for it via `boxes-delegated-threads`, with its own worktree and non-overlapping files, the task's run, attempt and agent IDs, FE link, evaluator output, source SHA, scope and a 100-minute time box (91% of 140 recorded RCA lanes finished within 100 minutes); fixing starts while the batch still runs.
 - RCAs dedupe themselves: each first checks the RCA ledger in state and `python3 scripts/rca_archive.py search <terms>` for the same defect and, if another RCA already owns it, hands its task to that owner with its evidence (run, attempt and agent IDs, FE link, the matching boundary) and stops; before writing a fix it posts its named defect (code site and mechanism) to the ledger, and the later of two RCAs naming the same site hands over the same way.
 - Never treat a shared symptom (failure string, evaluator, status, timeout, website or issue class) as the same defect.
 - Before blaming the agent, confirm the judge saw what the user sees and no inherited repo-default gate applies; prove evaluator defects with judge-only replays and count the verdicts they change.
@@ -82,11 +82,12 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 ## Fixes
 
-- At 50 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 60 minutes take what it handed back.
+- At 90 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 100 minutes take what it handed back.
 - The next batch launches once every RCA's fix is applied or its time box expires; an expired RCA keeps its evidence, carries over, and never ships a guessed repair.
-- Each RCA proves its fix at the owning boundary with an isolated repro and lands that regression in the owning suite; it never uses a full end-to-end benchmark rerun as proof.
+- Each RCA proves its fix at the owning boundary with an isolated local repro and lands that regression in the owning suite; it never uses a full end-to-end benchmark rerun as proof.
+- When the fix needs an end-to-end check, the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait`, never `--local`, starting it by minute 70 so it ends inside the time box; it is a check, not outcome proof (fleet readiness targets 15 minutes; task runs are p90 about 6 minutes).
 - Never run `scripts/setup-db.sh` from a child worktree; give each its own identity, ports and Postgres so its `/sync` cannot reset the controller's or the shared `victoria` database.
-- Workers never contact the user, change the active benchmark snapshot, launch paid runs or deploy; the parent applies each fix as its own row-tagged commit on the descent branch so it can be ablated.
+- Workers never contact the user, change the active benchmark snapshot, launch batches or deploy; the parent applies each fix as its own row-tagged commit on the descent branch so it can be ablated.
 - Any change may be applied; guarded hunks (prompts, agent behavior, trajectory injection, Zod schemas) and task-definition edits are approved in **Final change review** before deploying.
 - Never `/deploy` to test a change; infra blockers that production needs ship with `/push`, everything else waits for the end.
 - In the next batch run, a task that passes confirms its fix; a task that still fails gets a fresh RCA from its newest run, and a later first-bad boundary (the earliest point where the run goes wrong) is recorded as partial progress.

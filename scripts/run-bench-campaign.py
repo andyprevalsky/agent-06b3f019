@@ -1697,7 +1697,7 @@ def main() -> int:
             "headroom; controller count does not prove task execution overlap."
         )
     print(
-        "   monitor every 30s: python3 -m json.tool " + shlex.quote(str(summary_path))
+        "   monitor: python3 -m json.tool " + shlex.quote(str(summary_path))
     )
     print(
         "   follow each job log's exact printed fleet-monitor command; "

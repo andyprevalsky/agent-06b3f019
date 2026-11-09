@@ -119,7 +119,7 @@ RCA_PER_FAILURE="$(section_text '## RCA per failure' '## Fixes')"
 require_section_text "$RCA_PER_FAILURE" 'INFRA means the environment failed before a trustworthy verdict; HARNESS means a trustworthy verdict failed real criteria' \
   "/descend must define INFRA and HARNESS"
 require_section_text "$RCA_PER_FAILURE" 'As each task fails, start one muted `/RCA` thread for it' "/descend must start one /RCA per failed task"
-require_section_text "$RCA_PER_FAILURE" 'a 60-minute time box' "/descend must time-box each RCA at 60 minutes"
+require_section_text "$RCA_PER_FAILURE" 'a 100-minute time box' "/descend must time-box each RCA at 100 minutes"
 require_section_text "$RCA_PER_FAILURE" 'fixing starts while the batch still runs' "/descend must start RCAs before the batch ends"
 require_section_text "$RCA_PER_FAILURE" 'RCAs dedupe themselves' "/descend RCAs must deduplicate themselves"
 require_section_text "$RCA_PER_FAILURE" 'hands its task to that owner with its evidence (run, attempt and agent IDs, FE link, the matching boundary) and stops' \
@@ -132,14 +132,16 @@ require_section_text "$RCA_PER_FAILURE" 'Every RCA names a concrete defect at a 
   "every RCA must name a concrete defect"
 
 FIXES="$(section_text '## Fixes' '## Final change review')"
-require_section_text "$FIXES" 'At 50 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 60 minutes take what it handed back.' \
-  "/descend must warn RCA owners at 50 minutes and collect at 60"
+require_section_text "$FIXES" 'At 90 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 100 minutes take what it handed back.' \
+  "/descend must warn RCA owners at 90 minutes and collect at 100"
+require_section_text "$FIXES" 'the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait`, never `--local`, starting it by minute 70' \
+  "an RCA's end-to-end check must be one cloud run of its own task inside the time box"
 require_section_text "$FIXES" "The next batch launches once every RCA's fix is applied or its time box expires" "/descend must not wait past the RCA time box"
 require_section_text "$FIXES" 'an expired RCA keeps its evidence, carries over, and never ships a guessed repair' "an expired RCA must carry over without a guessed fix"
 require_section_text "$FIXES" 'it never uses a full end-to-end benchmark rerun as proof' "RCA fixes must be proven by isolated repros, not benchmark reruns"
 require_section_text "$FIXES" 'lands that regression in the owning suite' "RCA fixes must land a regression"
 require_section_text "$FIXES" 'Never run `scripts/setup-db.sh` from a child worktree' "RCA worktrees must not reset shared databases"
-require_section_text "$FIXES" 'Workers never contact the user, change the active benchmark snapshot, launch paid runs or deploy' \
+require_section_text "$FIXES" 'Workers never contact the user, change the active benchmark snapshot, launch batches or deploy' \
   "/descend workers must leave users, runs and deploys to the parent"
 require_section_text "$FIXES" 'its own row-tagged commit on the descent branch so it can be ablated' "/descend must apply each fix as an ablatable commit"
 require_section_text "$FIXES" 'Never `/deploy` to test a change; infra blockers that production needs ship with `/push`, everything else waits for the end.' \

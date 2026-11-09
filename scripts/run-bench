@@ -328,8 +328,9 @@ Monitoring:
   report-format retrieves that same contract without starting services or tasks.
   Every launch also prints its exact `scripts/run-bench scorecard <run-dir> --html <file>`
   command. Publish that CLI-rendered card; hand-written cards are non-compliant.
-  Every launch prints its exact monitoring handle. Poll every 30 seconds,
-  checking terminal lifecycle on every observation, including stale cards.
+  Every launch prints its exact monitoring handle. Poll it on CLAUDE.md's
+  background-task cadence, checking terminal lifecycle on every observation,
+  including stale cards.
   Controller status is separate from task PASS/FAIL; retain genuine task FAIL.
   Retry transient observations with the original owner; preserve actual fatal
   status. Observe required terminal publication and exact browser/provider/local

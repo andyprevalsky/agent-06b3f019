@@ -7,8 +7,8 @@ Spawns real agents against prod or localhost, polls for completion, evaluates pa
 `tasks.json` contains the ordinary suites, and the sibling `polar_tasks.json` contains Polar tasks. The shared catalog loader combines both for selection (see CLAUDE.md "Benchmarks" and **Eval Suite operations** below). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
 
 **How evaluators pass/fail** (Layer 1 harness contract → Layer 2 `evaluators[]`,
-tree-aware semantic evidence, Blue Bottle worked example): see the `/benchmark`
-skill at `.claude/commands/benchmark.md` → **Evaluators**.
+tree-aware semantic evidence): see the `/benchmark` skill at
+`.claude/commands/benchmark.md` → **Evaluators**.
 
 ```bash
 # From the repository root: every ready benchmark eval on an isolated local stack
@@ -169,7 +169,7 @@ from the saved task1 observations, without claiming a task1 cause or fix.
 
 Every detached launcher prints the private log and exact controller exit marker.
 The controller log prints `scripts/run-bench monitor <run-directory>` for its
-own run. Poll that command every 30 seconds; its `--controller-status` marker
+own run. Poll that command on CLAUDE.md's background-task cadence; its `--controller-status` marker
 reports the actual controller exit independently of card freshness and cleanup.
 Follow the Operations Runbook's "Monitor every cloud launch" guidance (below) through resource release.
 
@@ -366,8 +366,8 @@ two worker slots. This profile creates no idle resources and changes no default
 ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
 50 copies in one ready cohort; controller occupancy does not prove execution overlap.
 
-Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
-seconds, then follow each job log's exact printed fleet-monitor handle through
+Poll the printed campaign `summary.json` with `python3 -m json.tool` on
+CLAUDE.md's background-task cadence, then follow each job log's exact printed fleet-monitor handle through
 controller exit and owned teardown. The campaign directory itself is not a
 fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 Foreground campaigns may print no `--controller-status` marker; use only the
@@ -1758,8 +1758,8 @@ units, above the default 160-unit governor less its 20 production units; the
 campaign planner derives the required governor from the actual task shapes. Native CPU kinds/counts and live workstream reservations
 must fit as well as the Machine count; the CLI rechecks both during admission.
 
-Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
-seconds, then follow each job log's exact printed fleet-monitor handle through
+Poll the printed campaign `summary.json` with `python3 -m json.tool` on
+CLAUDE.md's background-task cadence, then follow each job log's exact printed fleet-monitor handle through
 controller exit and owned teardown. The campaign directory itself is not a
 fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 Foreground campaigns may print no `--controller-status` marker; use only the
@@ -1826,7 +1826,7 @@ these boundaries in the normal deploy gates.
 and exact controller exit marker. Its controller log's "Monitor this exact fleet"
 section prints the complete metrics command; retain it:
 `scripts/run-bench monitor <run-directory> --controller-status <exit-marker>`
-(the exit marker is available with or without `--wait`). Poll every 30 seconds and inspect
+(the exit marker is available with or without `--wait`). Poll on CLAUDE.md's background-task cadence and inspect
 terminal status on every observation, even when the progress card stops changing.
 The read-only command reports exclusive stage counts, card age, task outcomes,
 final lifecycle cleanup and controller exit separately, without dumping private

@@ -1803,7 +1803,7 @@ exit "$status"
     fi
     echo "🛰️  fleet controller detached (own session; survives launcher exit)"
     echo "    log: tail -f $DETACH_LOG"
-    echo "    monitor every 30s; the log prints the exact run-bench monitor command."
+    echo "    monitor it; the log prints the exact run-bench monitor command."
     echo "    check terminal lifecycle on every poll; task PASS/FAIL precedes cleanup."
     echo "    stale observations require read-only reconciliation, never an automatic restart."
     printf '    controller exit marker: %q (check on every poll, even if logs stop growing)\n' "$DETACH_STATUS"
@@ -15888,7 +15888,7 @@ fleet_registry_init || {
     echo "❌ could not atomically publish durable fleet ownership under $FLEET_OWNERSHIP_ROOT; refusing provider mutation" >&2
     exit 1
 }
-echo "📡 Monitor this exact fleet every 30s, through terminal status AND resource release:"
+echo "📡 Monitor this exact fleet through terminal status AND resource release:"
 printf '    %q monitor %q' "$ROOT_DIR/scripts/run-bench" "$FLEET_DIR"
 if [ -n "${CLOUDBENCH_DETACHED_STATUS_FILE:-}" ]; then
     printf ' --controller-status %q' "$CLOUDBENCH_DETACHED_STATUS_FILE"
