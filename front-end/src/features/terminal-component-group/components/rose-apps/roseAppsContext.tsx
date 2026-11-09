@@ -13,6 +13,8 @@
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
  *   [ANY] --openAgentBrowserTab(agent) (task id unknown)--> [AGENT(agent's first tab)],
  *     else no selection + pending switch: the agent's tab takes over when it registers
+ *   [ANY] --openAgentBrowser(agent, task)--> [AGENT(agent, task)] and clears any pending
+ *     switch: a later-registering tab of that agent never replaces the explicit task
  *   [AGENT(id, taskId)] --click Root tab--> [ROOT]
  *   selectedAgentId changes | Browser opens --> [AGENT(selected)] if it has a
  *     browser tab, else [NO_SESSION] (an agent is selected) or [ROOT] (Home).
@@ -296,6 +298,9 @@ export function RoseAppsProvider({
       setBrowserMode('remote');
       focusTask(agentId, taskId);
       setBrowserRootChosen(false);
+      // An explicit task beats a pending agent switch: another task of that agent
+      // registering later must not replace it.
+      pendingSwitchRef.current = null;
       setBrowserSelection({ agentId, taskId });
       setOpenApp('browser');
     },

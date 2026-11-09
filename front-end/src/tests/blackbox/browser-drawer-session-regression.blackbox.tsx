@@ -9,6 +9,7 @@ import type { AgentContextValue } from '@/features/agent-context/types';
 import type { Message } from '@/lib/api';
 import { useBrowserStatusBarState } from '@/features/terminal-component-group/components/browser-status-bar/useBrowserStatusBarState';
 import { RoseAppIcons } from '@/features/terminal-component-group/components/rose-apps/RoseAppIcons';
+import { useRoseApps } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { renderWithProviders } from './test-wrapper';
 import { agentBrowser, openBrowserDrawer, settle } from './rose-apps-root-browser.fixtures';
 import { mockTerminalHookSession } from './terminal-hooks.fixtures';
@@ -48,6 +49,32 @@ function wrapper(messages: Message[]) {
   } as unknown as AgentContextValue;
   return ({ children }: { children: ReactNode }) => (
     <AgentContext.Provider value={value}>{children}</AgentContext.Provider>
+  );
+}
+
+const PENDING_AGENT = 'agent-a';
+/** Reads the real RoseApps selection and drives its pending-switch transitions. */
+function SelectionProbe() {
+  const apps = useRoseApps();
+  if (apps === null) return null;
+  return (
+    <>
+      <output data-testid="browser-selection">{`${apps.browserTabAgentId}:${apps.browserTabTaskId}`}</output>
+      <button type="button" onClick={() => apps.openAgentBrowserTab(PENDING_AGENT)}>
+        open agent tab
+      </button>
+      <button type="button" onClick={() => apps.openAgentBrowser(PENDING_AGENT, 'task-1')}>
+        open task 1
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          apps.registerAgentBrowser({ agentId: PENDING_AGENT, taskId: 'task-2', live: true })
+        }
+      >
+        register task 2
+      </button>
+    </>
   );
 }
 
@@ -125,4 +152,21 @@ describe('Browser session presentation regressions', () => {
     await waitFor(() => expect(within(drawer).getByTitle('Browser')).toHaveAttribute('src', URL_A));
     expect(screen.getByTestId(`browser-tab-${agent}`)).toHaveAttribute('aria-selected', 'true');
   });
+  it.each([
+    ['selecting the agent', false],
+    ['openAgentBrowserTab', true],
+  ])(
+    'an explicitly opened task keeps the selection when a pending switch (from %s) sees another task register',
+    async (_source, viaAgentTab) => {
+      const user = userEvent.setup();
+      // The selected agent has no registered tab yet, so its switch is pending.
+      renderWithProviders(<SelectionProbe />, { selectedAgentId: PENDING_AGENT });
+      if (viaAgentTab) await user.click(screen.getByRole('button', { name: 'open agent tab' }));
+      expect(screen.getByTestId('browser-selection')).toHaveTextContent('null:null');
+      await user.click(screen.getByRole('button', { name: 'open task 1' }));
+      expect(screen.getByTestId('browser-selection')).toHaveTextContent(`${PENDING_AGENT}:task-1`);
+      await user.click(screen.getByRole('button', { name: 'register task 2' }));
+      expect(screen.getByTestId('browser-selection')).toHaveTextContent(`${PENDING_AGENT}:task-1`);
+    },
+  );
 });

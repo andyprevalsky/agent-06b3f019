@@ -980,8 +980,14 @@ async function measureRoute(browser, preview, route, opts) {
     let workers = normal.workerSnaps.map(workerMeasurement);
     const missesFps = (s) => s.frames >= 10 && s.p50 !== null && (s.p50 < DEFAULT_BUDGETS.fpsP50Min || s.p5 < DEFAULT_BUDGETS.fpsP5Min);
     const eligibleFps = (s) => s.frames >= 10 && Number.isFinite(s.p50) && Number.isFinite(s.p5);
-    const betterFps = (next, first) => eligibleFps(next) && (!eligibleFps(first) ||
-      next.p5 > first.p5 || (next.p5 === first.p5 && next.p50 > first.p50));
+    // A window that meets the fps budget beats one that misses it; among windows with the
+    // same verdict, higher p5 then higher p50 wins.
+    const betterFps = (next, first) => {
+      if (!eligibleFps(next)) return false;
+      if (!eligibleFps(first)) return true;
+      if (missesFps(next) !== missesFps(first)) return !missesFps(next);
+      return next.p5 > first.p5 || (next.p5 === first.p5 && next.p50 > first.p50);
+    };
     let fpsWindows = 1;
     if (opts.retryFps && [fps, ...workers.map((w) => w.fps)].some(missesFps)) {
       // Host noise (other processes, a software GPU) can cost a window; judge fps on

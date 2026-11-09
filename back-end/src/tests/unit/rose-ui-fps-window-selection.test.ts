@@ -16,6 +16,16 @@ const samples = JSON.parse(
   readFileSync(resolve(__dirname, '../fixtures/user-ui/fps-windows.json'), 'utf8')
 );
 type Frames = number[] | null;
+// rAF timestamps for the given frame deltas (ms); frameStats sorts deltas, so order is irrelevant.
+const cadence = (deltas: number[]) =>
+  deltas.reduce((times, delta) => [...times, times[times.length - 1] + delta], [1000]);
+const vsync = 1000 / 60;
+// 50/50 fps p50/p5: steady 50 Hz misses only the p50 budget.
+const steady50 = cadence(Array(40).fill(20));
+// 60/30 fps p50/p5: one missed refresh at p95 meets both budgets.
+const passing60 = cadence([...Array(36).fill(vsync), ...Array(4).fill(2 * vsync)]);
+// 60/20 fps p50/p5: two missed refreshes at p95 miss the p5 budget.
+const failing60 = cadence([...Array(36).fill(vsync), ...Array(4).fill(3 * vsync)]);
 
 // Browser IO is replaced; actual measureWindow, workerCall, measureRoute and budgets run.
 async function measure(options: {
@@ -113,6 +123,25 @@ for (const worker of [true, false]) {
       samples.slow.length
     );
     assert.ok(verdict.violations.some((v) => v.rule === 'fps-p50'));
+  });
+  test(`${worker ? 'worker' : 'main'} passing retry beats failing window with higher p5`, async () => {
+    const { result, verdict } = await measure(
+      worker ? { workers: [[steady50, passing60]] } : { main: [steady50, passing60], workers: [] }
+    );
+    const fps = worker ? result.normal.workers[0].fps : result.normal.fps;
+    assert.deepEqual([fps.p50, fps.p5], [60, 30]);
+    assert.deepEqual(Array.from(verdict.violations), []);
+  });
+  test(`${worker ? 'worker' : 'main'} two failing windows keep p5 ranking`, async () => {
+    const { result, verdict } = await measure(
+      worker ? { workers: [[steady50, failing60]] } : { main: [steady50, failing60], workers: [] }
+    );
+    const fps = worker ? result.normal.workers[0].fps : result.normal.fps;
+    assert.deepEqual([fps.p50, fps.p5], [50, 50]);
+    assert.deepEqual(
+      Array.from(verdict.violations, (v) => v.rule),
+      ['fps-p50']
+    );
   });
 }
 test('missing retry worker A cannot borrow healthy worker B', async () => {
