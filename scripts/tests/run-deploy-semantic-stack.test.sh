@@ -253,4 +253,40 @@ run_e2b_case 143 "$CREDENTIAL_LOG" 143
 expect_output "E2B_SMOKE_VERDICT FAIL" "an interrupted runner is not a SKIPPED and keeps its native exit"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
 
+# Native semantic startup must select the existing canonical seed consumer.
+# The fake child exits before services start; these cases only inspect the actual
+# launch environment and the production cache-selection helper.
+cat > "$FIXTURE/scripts/run.sh" <<'SEED_CHILD'
+#!/usr/bin/env bash
+printf '%s\n%s\n' "${BENCHMARK_SEED_DUMP:-}" "${BENCHMARK_REQUIRE_SEED_DUMP:-}" > "$FAKE_SEED_ENV"
+exit 7
+SEED_CHILD
+for tool in curl sleep; do printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMS/$tool"; chmod +x "$SHIMS/$tool"; done
+. "$ROOT_DIR/scripts/lib/seed-cache.sh"
+seed_case() {
+    local expected_dump="$1" token="$2" configured="$3" native_flag
+    rm -f "$FIXTURE/.context/seed-env"
+    expect_exit 1 env -u DEPLOY_SEMANTIC_TOKEN -u DEPLOY_SEMANTIC_ARTIFACT_DIR \
+        -u BENCHMARK_SEED_DUMP -u BENCHMARK_REQUIRE_SEED_DUMP \
+        CONDUCTOR_PORT=40000 PATH="$SHIMS:$PATH" FAKE_SEED_ENV="$FIXTURE/.context/seed-env" \
+        DEPLOY_SEMANTIC_TOKEN="$token" BENCHMARK_SEED_DUMP="$configured" BENCHMARK_REQUIRE_SEED_DUMP=0 \
+        bash scripts/run-deploy-semantic-stack.sh
+    [ -f "$FIXTURE/.context/seed-env" ] || fail "seed case never reached its fake run.sh"
+    mapfile -t seed_env < "$FIXTURE/.context/seed-env"
+    [ "${seed_env[0]}" = "$expected_dump" ] || fail "canonical path missing or configured path replaced"
+    native_flag=0
+    [ -z "$token" ] || native_flag=1
+    [ "${seed_env[1]}" = "$native_flag" ] || fail "native canonical requirement not enforced or manual caller changed"
+}
+seed_case "$FIXTURE_PHYS/.context/seed-cache/semantic-base.dump" native-token ''
+seed_case "$FIXTURE_PHYS/configured-seed.dump" native-token "$FIXTURE_PHYS/configured-seed.dump"
+seed_case '' '' ''
+seed_case "$FIXTURE_PHYS/manual-seed.dump" '' "$FIXTURE_PHYS/manual-seed.dump"
+# A missing object must be requested, never silently treated as a valid restore;
+# the native child's REQUIRE=1 makes run.sh refuse its existing cold-sync branch.
+[ "$(seed_cache_decision "$FIXTURE_PHYS/missing.dump" schema 1 canonical)" = consult-remote ] \
+    || fail "missing canonical object must consult remote cache"
+require_text "$ROOT_DIR/scripts/run.sh" 'if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then' \
+    "required unavailable canonical fixture must fail closed before cold-sync"
+
 echo "run-deploy-semantic-stack: all checks passed"
