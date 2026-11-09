@@ -17,6 +17,7 @@ import { currentTraceContext } from './tracing';
 import { archiveEnabled, encryptArtifact } from './traceArchive';
 import { storeWorkerArtifact } from './traceArchiveLifecycle';
 import { prisma } from './database';
+import { ownLlmCapture } from './llmCaptureTasks';
 
 const log = createLogger('LlmDump');
 
@@ -133,87 +134,64 @@ export function updateLlmDump(dumpPath: string | null, patch: Record<string, unk
   }
 }
 
-/** The encrypted archive is independent of the production plaintext-dump policy. */
+/** Archive completion at the finalizer; model streaming never waits on archive I/O. */
 export interface LlmCapture {
   localPath: string | null;
-  rootAgentId: string;
   agentId: string;
-  dumpId: string;
-  archived: boolean;
+  value: LlmDumpPayload & { span_id: string; dump_id: string };
+  startedAtMs: number;
 }
 
-export async function startLlmCapture(payload: LlmDumpPayload): Promise<LlmCapture> {
+export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
   const trace = currentTraceContext();
   const agentId = payload.agent_id || trace?.agent_id || 'unbound';
-  const dumpId = randomUUID();
   const value = {
     ...payload,
     agent_id: agentId,
-    root_agent_id: payload.root_agent_id || agentId,
     span_id: payload.span_id || trace?.span_id || randomUUID(),
-    dump_id: dumpId,
+    dump_id: randomUUID(),
   };
-  const capture: LlmCapture = {
-    localPath: dumpLlmContext(value),
-    rootAgentId: value.root_agent_id,
-    agentId,
-    dumpId,
-    archived: false,
-  };
-  try {
-    if (!archiveEnabled()) return capture;
-    if (!payload.root_agent_id) {
-      const agent = await prisma.agent.findUnique({
-        where: { id: agentId },
-        select: { busId: true },
-      });
-      if (!agent) return capture;
-      capture.rootAgentId = agent.busId || agentId;
-      value.root_agent_id = capture.rootAgentId;
-    }
-    await archiveCaptureValue(capture.rootAgentId, `llm/${dumpId}.json.gz.enc`, value);
-    capture.archived = true;
-  } catch (error) {
-    log.warn('llm.context.archive_failed', {
-      agent_id: agentId,
-      dump_id: dumpId,
-      error: error instanceof Error ? error.name : 'unknown',
-    });
-  }
-  return capture;
+  return { localPath: dumpLlmContext(value), agentId, value, startedAtMs: Date.now() };
 }
 
-export async function finishLlmCapture(
+export function finishLlmCapture(capture: LlmCapture, patch: Record<string, unknown>): void {
+  updateLlmDump(capture.localPath, patch);
+  const task = persistLlmCapture(capture, patch).catch((error: unknown) => {
+    log.warn('llm.context.archive_failed', {
+      agent_id: capture.agentId,
+      dump_id: capture.value.dump_id,
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+    throw error;
+  });
+  ownLlmCapture(capture.agentId, task);
+}
+
+async function persistLlmCapture(
   capture: LlmCapture,
   patch: Record<string, unknown>
 ): Promise<void> {
-  updateLlmDump(capture.localPath, patch);
-  if (!capture.archived) return;
-  try {
-    await archiveCaptureValue(
-      capture.rootAgentId,
-      `llm-updates/${capture.dumpId}-${randomUUID()}.json.gz.enc`,
-      {
-        ...patch,
-        agent_id: capture.agentId,
-        root_agent_id: capture.rootAgentId,
-        dump_id: capture.dumpId,
-      }
-    );
-  } catch (error) {
-    log.warn('llm.context.archive_update_failed', {
-      agent_id: capture.agentId,
-      dump_id: capture.dumpId,
-      error: error instanceof Error ? error.name : 'unknown',
+  if (!archiveEnabled()) return;
+  let rootAgentId = capture.value.root_agent_id;
+  if (!rootAgentId) {
+    const agent = await prisma.agent.findUnique({
+      where: { id: capture.agentId },
+      select: { busId: true },
     });
+    if (!agent) return;
+    rootAgentId = agent.busId || capture.agentId;
   }
-}
-
-async function archiveCaptureValue(
-  rootAgentId: string,
-  objectPath: string,
-  value: unknown
-): Promise<void> {
+  const value = {
+    ...capture.value,
+    ...patch,
+    agent_id: capture.agentId,
+    root_agent_id: rootAgentId,
+    dump_id: capture.value.dump_id,
+    config: { ...capture.value.config, ...(patch.config as Record<string, unknown> | undefined) },
+    extra: { ...capture.value.extra, ...(patch.extra as Record<string, unknown> | undefined) },
+  };
+  updateLlmDump(capture.localPath, { root_agent_id: rootAgentId });
+  const objectPath = `llm/${capture.value.dump_id}.json.gz.enc`;
   const encrypted = encryptArtifact(
     objectPath,
     Buffer.from(safeJson(value)),
@@ -221,6 +199,8 @@ async function archiveCaptureValue(
     true
   );
   if (!encrypted) throw new Error('LLM archive encryption unavailable');
+  // This is the captured call-start clock, not upload/finish order.
+  encrypted.metadata.created_at_ms = capture.startedAtMs;
   await storeWorkerArtifact({
     rootAgentId,
     path: objectPath,

@@ -73,25 +73,36 @@ cause remains open where effective environment was not recorded.
 
 ## Solution
 
-Add encrypted base and final-update capture to the existing wrapper; await
-completion so stream return/error/consumer close cannot leave a detached write.
-Keep local dump functions and their Render/Fly guards intact. Reuse encrypted
-worker artifact storage, including late manifest reconciliation. Explicit root
-binding is accepted; otherwise resolve stored Agent.busId with a single indexed
-identity read, rather than treating every child as its own root. Retain original
-provider errors and best-effort capture behavior, with safe identity-only failure
-logs. No model, prompt, task, deadline, concurrency or provider routing changes.
+Archive one complete encrypted BASE from the existing idempotent stream finalizer,
+including authentic input, config, actual model, output and partial/error state.
+Keep all plaintext APIs and production guards intact. Model streaming does not
+await network archival: a leaf registry tracks exact-agent pending promises;
+terminal lifecycle drains the end fixture's exact agent IDs before its fence and
+manifest. Failed enabled writes retain a failure that blocks the terminal drain.
+Reuse encrypted worker storage and late manifest reconciliation. Resolve stored
+Agent.busId with one indexed read, or honor explicit root binding; correct local
+root metadata through the existing guarded local updater. Preserve the real
+recorded call-start clock in archive metadata so concurrent finish order cannot
+change latest-call selection. No model, prompt, task, deadline, concurrency or
+provider routing changes. Process-crash durability and arbitrary process-shutdown
+joining are not claimed; terminal publication is the tested ownership boundary.
 
-The owning stream-contract suite exercises the real encrypted storage and strict
-materializer with full messages, schema, config, actual model and output; it
-keeps all original local capture and consumer-close assertions. Native unchanged
-chat-mode plus normal publisher acceptance and full deployment remain pending;
-proxy fail/pass alone is not completion.
+The owning stream-contract suite uses real encrypted local storage and strict
+materialization with full messages, schema, config, actual model and output.
+It covers all three original call sites, root/child identity, delayed identity
+resolution, completed and consumer-closed streams under empty Fly, named Fly and
+Render guards. It retains all original local capture assertions. The exact latest
+suite fails on the original producer with No archived LLM base calls and passes
+on the repaired producer. Native unchanged chat-mode plus normal publisher and
+full deployment remain pending; proxy fail/pass alone is not completion.
 
-At 10k agents capture is isolated by root and unique dump identity, one indexed
-identity read and two encrypted artifact submissions per call, no shared global
-queue, cache, full scan or fan-in. Existing late-manifest reconciliation applies
-only after finalization. Golden reference: not applicable (no approval-gated hunk).
+At 10k agents each write is isolated by root and unique dump identity, with one
+indexed identity read and one encrypted submission per call; there is no serial
+global uploader, full scan or cross-root fan-in. Pending state scales with actual
+in-flight captures, settled tasks are removed, and failures retain one error per
+agent until their owning terminal publication can report them. Existing archive
+I/O bounds/retries remain unchanged. Golden reference: not applicable (no
+approval-gated hunk).
 
 ## Human feedback
 

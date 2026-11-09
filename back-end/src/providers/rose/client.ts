@@ -170,7 +170,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   };
 
   if (opts.options.dump_context) {
-    dumpCapture = await startLlmCapture({
+    dumpCapture = startLlmCapture({
       call_site: opts.options.dump_context.call_site,
       agent_id: opts.options.dump_context.agent_id,
       root_agent_id: opts.options.dump_context.root_agent_id,
@@ -218,12 +218,12 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
 
   let dumpFinalized = false;
-  const finalizeDump = async (error?: unknown, consumerClosed = false) => {
+  const finalizeDump = (error?: unknown, consumerClosed = false) => {
     if (!dumpCapture || dumpFinalized) return;
     dumpFinalized = true;
     const actualModelRaw = acc.metadata.actual_model || '';
     const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
-    await finishLlmCapture(dumpCapture, {
+    finishLlmCapture(dumpCapture, {
       model: actualModel ?? opts.options.model,
       config: {
         actual_model: actualModel,
@@ -260,7 +260,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         callSite: opts.callSite,
       });
     } catch (error) {
-      await finalizeDump(error);
+      finalizeDump(error);
       throw error;
     }
     const foundryRequest = () =>
@@ -299,10 +299,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         }
       } catch (error) {
         const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-        await finalizeDump(cause);
+        finalizeDump(cause);
         throw cause;
       }
-      await finalizeDump();
+      finalizeDump();
       return;
     }
 
@@ -328,7 +328,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         }
       } catch (error) {
         const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-        await finalizeDump(cause);
+        finalizeDump(cause);
         throw cause;
       }
 
@@ -337,7 +337,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         pool: opts.pool,
         elapsed_ms: Date.now() - startedAt,
       });
-      await finalizeDump();
+      finalizeDump();
       return;
     }
 
@@ -347,12 +347,12 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       const sharedOpenAiKey = openAiApiKey();
       if (!sharedOpenAiKey) {
         const error = new Error('Rose shared-openai-priority route requires GPT_API_KEY');
-        await finalizeDump(error);
+        finalizeDump(error);
         throw error;
       }
       if (await isGptApiKeyOnCooldown()) {
         const error = new Error('Rose shared-openai-priority route is on GPT_API_KEY cooldown');
-        await finalizeDump(error);
+        finalizeDump(error);
         throw error;
       }
 
@@ -382,7 +382,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         ) {
           await markGptApiKeyOnCooldown(cause.name);
         }
-        await finalizeDump(cause);
+        finalizeDump(cause);
         throw cause;
       }
 
@@ -391,7 +391,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         pool: opts.pool,
         elapsed_ms: Date.now() - startedAt,
       });
-      await finalizeDump();
+      finalizeDump();
       return;
     }
 
@@ -415,11 +415,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           log,
         });
       } catch (err) {
-        await finalizeDump(err);
+        finalizeDump(err);
         throw err;
       }
       if (subscriptions.served) {
-        await finalizeDump();
+        finalizeDump();
         return;
       }
       claudeAuthFailed = subscriptions.claudeAuthFailed;
@@ -460,7 +460,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           claude_auth_failed: claudeAuthFailed?.name ?? null,
           gpt_auth_failed: gptAuthFailed?.name ?? null,
         });
-        await finalizeDump();
+        finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -473,7 +473,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             reason: err.cause.name,
           });
         } else {
-          await finalizeDump(err);
+          finalizeDump(err);
           throw err;
         }
       }
@@ -521,7 +521,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           claude_auth_failed: claudeAuthFailed?.name ?? null,
           gpt_auth_failed: gptAuthFailed?.name ?? null,
         });
-        await finalizeDump();
+        finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -538,7 +538,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             reason: err.cause.name,
           });
         } else {
-          await finalizeDump(err);
+          finalizeDump(err);
           throw err;
         }
       }
@@ -566,7 +566,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           model: poolSpec.cerebrasModel,
           elapsed_ms: Date.now() - startedAt,
         });
-        await finalizeDump();
+        finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -576,7 +576,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             model: poolSpec.cerebrasModel,
           });
         } else {
-          await finalizeDump(err);
+          finalizeDump(err);
           throw err;
         }
       }
@@ -593,7 +593,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           emit: emitChunk,
         });
         log.info('foundry.done', { request_id: opts.requestId, pool: opts.pool });
-        await finalizeDump();
+        finalizeDump();
         return;
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
@@ -603,7 +603,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             reason: err.cause.name,
           });
         } else {
-          await finalizeDump(err);
+          finalizeDump(err);
           throw err;
         }
       }
@@ -620,7 +620,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         gptAuthFailed ??
         claudeAuthFailed ??
         new Error('Rose waterfall disabled');
-      await finalizeDump(error);
+      finalizeDump(error);
       throw error;
     }
 
@@ -645,10 +645,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       });
     } catch (err) {
       if (err instanceof PreContentFallThroughError) {
-        await finalizeDump(err.cause);
+        finalizeDump(err.cause);
         throw err.cause;
       }
-      await finalizeDump(err);
+      finalizeDump(err);
       throw err;
     }
     log.info('waterfall.done', {
@@ -661,13 +661,13 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
       foundry_failed: foundryFailed?.name ?? null,
     });
-    await finalizeDump();
+    finalizeDump();
   } catch (error) {
-    await finalizeDump(error);
+    finalizeDump(error);
     throw error;
   } finally {
     // Async-generator return skips ordinary trailing code. Preserve the partial
     // response before the caller can seal/archive the terminated chat stream.
-    await finalizeDump(undefined, true);
+    finalizeDump(undefined, true);
   }
 }
