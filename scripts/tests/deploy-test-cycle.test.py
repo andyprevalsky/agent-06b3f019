@@ -5856,6 +5856,95 @@ class Cycle(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],renewed)
         self.assertEqual(before,candidate)
 
+    def test_isolated_renewal_requires_pinned_prelaunch_refusal_before_old_successor(self):
+        import deploy_test_native_cleanup as native
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        number = len(state['attempts']) + 1
+        row = dict(gate=gate['name'], status='FAIL', complete=False,
+                   cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=state['source'],
+                   reason='native cleanup: next source/inventory binding')
+        directory = Path(original['log']).parents[4]
+        refused = directory/'attempts'/str(number)/'focused'/gate['name']
+        refused.mkdir(parents=True)
+        request = dict(token='5'*32, source=state['source'], gate=gate['name'], checks=gate['checks'],
+                       skips={}, phase='focused', custody_state=str(directory/'cycle.json'))
+        c.write(refused/'request.json', request)
+        state['attempts'].append(dict(phase='focused', source=state['source'], results=[row]))
+        pin = {(original['token'], number, c.digest(row)):c.sha_file(refused/'request.json')}
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        with patch.object(native,'ISOLATED_ADMISSION_REFUSALS_V1',pin,create=True):
+            before = copy.deepcopy(state)
+            c.reconcile(state, original['token'], renewed)
+            self.assertEqual(before['attempts'], state['attempts'])
+            self.assertEqual(before['failures'], state['failures'])
+            self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+            for mode in ('token', 'coherent-token', 'source', 'executed', 'command', 'output', 'process', 'native'):
+                candidate = copy.deepcopy(before)
+                request_path = refused/'request.json'; raw = request_path.read_bytes()
+                added = None
+                if mode in ('token', 'coherent-token', 'source'):
+                    value = c.read(request_path)
+                    if mode == 'source':value['source'] = dict(head='f'*40,digest='e'*64)
+                    else:value['token'] = '6'*32
+                    if mode == 'coherent-token':value['custody_child_environment'] = 'b'*64
+                    c.write(request_path,value)
+                elif mode in ('executed','command'):
+                    candidate['attempts'][-1]['results'][0][mode] = True if mode=='executed' else ['true']
+                elif mode == 'native':
+                    added = self.root/'.context/deploy-cloud'/__import__('hashlib').sha256(request['token'].encode()).hexdigest()
+                    added.mkdir(parents=True)
+                else:
+                    added = refused/('output.log' if mode=='output' else 'output.log.process.json');added.write_text('{}')
+                unchanged = copy.deepcopy(candidate)
+                try:
+                    with self.subTest(mode=mode),self.assertRaises(ValueError):
+                        c.reconcile(candidate,original['token'],renewed)
+                    self.assertEqual(unchanged,candidate)
+                finally:
+                    request_path.write_bytes(raw)
+                    if added is not None:
+                        added.rmdir() if added.is_dir() else added.unlink()
+            with patch.dict(native.ISOLATED_ADMISSION_REFUSALS_V1, {}, clear=True),self.assertRaises(ValueError):
+                c.reconcile(copy.deepcopy(before),original['token'],renewed)
+
+    def test_isolated_successor_no_retry_custody_never_becomes_execution_credit(self):
+        import deploy_test_historical_custody as custody
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        request = c.read(folder/'request.json');name = next(iter(request['skips']))
+        historical = dict(original_failure=dict(id='bound-custody',check=gate['name']+'/'+name),native_sha256='a'*64)
+        row = dict(kind=custody.KIND,disposition=custody.DISPOSITION,**historical,source=successor['source'],
+            current_binding=dict(source=successor['source'],environment=successor['execution_binding']['environment'],
+                 input_fingerprints={gate['name']:successor['execution_binding']['input_fingerprint']}),
+            current_execution='UNVERIFIED',current_financial_state='UNVERIFIED',
+            credit=dict(test_execution=False,assertions=False,financial_release=False))
+        state['historical_custody_history'] = [historical]
+        request['skips'][name] = row;c.write(folder/'request.json',request)
+        successor.update(custody_skips={name:row},current_execution={name:'UNVERIFIED'})
+        successor['case_complete'][name] = False;c.write(folder/'receipt.json',successor)
+        with patch.object(custody,'historical',return_value=historical):
+            before = copy.deepcopy(state)
+            c.reconcile(state,original['token'],{**proof,'validation_source':copy.deepcopy(state['source'])})
+            self.assertEqual(before['attempts'],state['attempts'])
+            self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+            for mode in ('credit-true','credit-zero','source','fingerprint','environment','kind','missing-history','ordinary-incomplete'):
+                candidate=copy.deepcopy(before);latest=candidate['attempts'][-1]['results'][0]
+                req=copy.deepcopy(request);saved_row=copy.deepcopy(row)
+                if mode.startswith('credit-'):req['skips'][name]['credit']['test_execution']=True if mode=='credit-true' else 0
+                elif mode=='source':req['skips'][name]['current_binding']['source']=dict(head='f'*40,digest='e'*64)
+                elif mode=='fingerprint':req['skips'][name]['current_binding']['input_fingerprints'][gate['name']]='changed'
+                elif mode=='environment':req['skips'][name]['current_binding']['environment']='changed'
+                elif mode=='kind':req['skips'][name]['kind']='foreign'
+                elif mode=='missing-history':candidate['historical_custody_history']=[]
+                else:latest['case_complete'][next(iter(req['checks']))]=False
+                latest['custody_skips']={name:req['skips'][name]};c.write(folder/'request.json',req);c.write(folder/'receipt.json',latest)
+                unchanged=copy.deepcopy(candidate)
+                try:
+                    with self.subTest(mode=mode),self.assertRaises(ValueError):
+                        c.reconcile(candidate,original['token'],{**proof,'validation_source':copy.deepcopy(candidate['source'])})
+                    self.assertEqual(unchanged,candidate)
+                finally:
+                    c.write(folder/'request.json',request);c.write(folder/'receipt.json',successor)
+
     def test_isolated_source_renewal_refusals_are_atomic(self):
         state, paths, proof, gate, packet, receipt = self.renewal_state()
         renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}

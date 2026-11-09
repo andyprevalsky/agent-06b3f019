@@ -150,3 +150,50 @@ This migration is control-plane work, not per-agent runtime work: at 10,000
 agents it adds no channels, sessions, network calls or database operations to
 agent execution. It neither admits a new paid fleet nor grants test, assertion
 or financial settlement credit.
+
+
+## 2026-11-09 source-target renewal follow-up
+
+PR1865 source5510 round29 smoke failed before dispatch at
+`isolated_request`: `native cleanup: next source/inventory binding`. The
+retained original operation still targeted52b7cc41/f2ac while the newly
+frozen request targeted5510f010/4e9b. All18 original task names remained
+in the inventory. Only request.json existed: no adapter, output, receipt,
+process or native campaign was created. All18 UNVERIFIED outcomes remain
+in the original attempt; none is a failed executed task or a PASS.
+
+Native renewal then failed at `failed successor execution` because the latest
+coordinator-only refusal hid the actual complete round23 successor. That
+successor also legitimately marked the historical AgentCard NO_RETRY_CUSTODY
+case as unexecuted, whereas the cleanup-successor validator required every
+case_complete flag to be true. Both barriers are reproduced on immutable
+state copies. Gate: INTRODUCED by deployment integration without renewing
+the source target; the recovery defects are repaired in this deployment.
+
+The narrow historical-refusal compatibility binds original operation6428b1...,
+round29, the exact recorded refusal-row digest and independently reviewed
+request SHA7d65926e... . Only this exact witnessed refusal may be traversed
+when finding the last real execution. Its canonical directory must contain
+only the same request, without an admitted-isolation field or native root.
+Unknown refusals, changed tokens/bytes, output/process artifacts and later
+executed or incomplete results still block; no attempt is erased. The last
+real successor still undergoes the full existing native closure validation.
+
+A NO_RETRY_CUSTODY omission remains SKIP/current_execution UNVERIFIED and
+case_complete false. It is accepted as historical debt only after its native
+obligation exactly matches canonical custody history and the recorded
+source/environment/input binding. All credit fields must be actual false
+booleans; ordinary incomplete checks and numeric impostors are rejected.
+Neither execution nor financial/cleanup credit is granted.
+
+The exact real18-check renewal and admission passes on an explicitly offline
+quiescent projection; the live independent round30 was never mutated. Two
+permanent deploy-test-cycle regressions cover the witnessed-refusal boundary
+and custody omission, with token/artifact/executed/ordinary-incomplete and
+forged-credit/source/history negatives. Independent review additionally ran
+21 boundary controls. Production application must wait for a real quiescent
+boundary. After any new freeze, refresh the native plan with current custody,
+run only through the pending quick-to-triage boundary, generate a proof that
+changes only validation_source to the actual frozen HEAD/digest, and native-
+reconcile it before reexecution/focus can launch cloud smoke. No reset or
+manual cycle surgery is authorized.
