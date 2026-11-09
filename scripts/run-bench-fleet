@@ -19397,6 +19397,12 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CHILD_STARTS[$slot]="$child_start"
     CHILD_MACHINE[$slot]="$cid"
     fi
+    # Register first so EXIT cleanup retains ownership if the launch cannot be
+    # tracked. A supervisor that already published completion needs no watch.
+    if [ -z "$child_start" ] && [ ! -e "$out/benchmark-child.finished" ]; then
+        echo "❌ [$bench] could not capture launched child $child_pid start identity; stopping fleet" >&2
+        exit 1
+    fi
     # Boot-launch is one bounded update/start pair and has exponential retry; it
     # no longer performs the old seven-SSH launch sequence. Feed pooled Machines
     # into that parallel bring-up at four launches/second, so all 30 are submitted
@@ -19647,25 +19653,23 @@ sys.exit(runpy.run_path(sys.argv[1])["fleet_infra_stop_main"](sys.argv[2:]))' \
     kill -TERM "${BASHPID:-$$}"
 }
 
-# Whether a launched child is still running. This watch has no deadline, so a
-# PID reused after the child exited (by an unrelated process or by a later
-# child of this controller) must never keep it open: when the child's start
-# identity (fleet_pid_start_time) was recorded at launch, only that same
-# process counts. Without one, a
-# PID counts while `jobs -pr` lists it or, when a loaded controller's
-# `jobs -pr` misses it, while it is still this controller's own child.
-fleet_child_pid_is_ours() {  # fleet_child_pid_is_ours <pid> [<start>]
-    local pid="${1:-}" start="${2:-}" parent
+# Only a recorded launch identity can identify a child; jobs/PPID membership
+# cannot distinguish a PID reused by another child of this controller. A failed
+# later observation is unknown, not exit: keep the infra-stop watch active until
+# the identity differs or both ps and kill confirm the PID is absent.
+fleet_child_pid_is_ours() {  # fleet_child_pid_is_ours <pid> <start>
+    local pid="${1:-}" start="${2:-}"
     case "$pid" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    if [ -n "$start" ]; then
-        fleet_pid_matches_start "$pid" "$start"
-        return
-    fi
-    fleet_job_running "$pid" && return 0
-    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
-    [ -n "$parent" ] && [ "$parent" = "$$" ]
+    [ -n "$start" ] || return 1
+    # The shared birth-state reader normalizes legacy ps whitespace, whereas
+    # fleet_pid_start_time preserves internal spacing for older owner records.
+    case "$start" in
+        proc-start:*) ;;
+        *) start="$(printf '%s\n' "$start" | awk '{$1=$1; print}')" ;;
+    esac
+    [ "$(cloudbench_pid_birth_state "$pid" "$start")" != absent ]
 }
 
 # Watch the children until each has finished, re-evaluating the infra stop

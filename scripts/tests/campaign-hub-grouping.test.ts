@@ -2184,7 +2184,8 @@ test("the fleet child watch ignores a live PID that is no longer its own child",
     `#!/usr/bin/env bash
 set -uo pipefail
 FLEET_SOURCE="$1"; FLEET_DIR="$2/fleet"; FOREIGN="$3"
-for name in fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+source "$(dirname "$FLEET_SOURCE")/lib/cloudbench-env.sh"
+for name in fleet_pid_start_time fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
     body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
     [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
     eval "$body"
@@ -2193,6 +2194,7 @@ FLEET_INFRA_STOP_SENT=0; INFRA_PROBE=0; RUN_BENCH_CAMPAIGN_CHILD=1
 mkdir -p "$FLEET_DIR/own" "$FLEET_DIR/reused"
 ( sleep 0.3 ) &
 CHILD_PIDS=("$!" "$FOREIGN"); CHILD_OUT=("$FLEET_DIR/own" "$FLEET_DIR/reused")
+CHILD_STARTS=("$(fleet_pid_start_time "\${CHILD_PIDS[0]}")" "")
 fleet_wait_children_for_infra_stop
 echo "RETURNED"
 `,
@@ -2272,6 +2274,221 @@ kill "$reused" 2>/dev/null
   assert.match(result.stdout, /RETURNED_WHILE_REUSED_PID_LIVE/);
 });
 
+for (const capture of ["failed", "finished", "captured"]) {
+  test(`the fleet launch handles ${capture} identity capture with child ownership intact`, () => {
+    const work = path.join(workRoot, `fleet-launch-identity-${capture}`);
+    mkdirSync(work, { recursive: true, mode: 0o700 });
+    const driver = path.join(work, "driver.sh");
+    writeFileSync(
+      driver,
+      `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; FLEET_DIR="$2"; CAPTURE="$3"
+source "$(dirname "$FLEET_SOURCE")/lib/cloudbench-env.sh"
+for name in fleet_pid_start_time launch_fleet_bench_child; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+done
+eval "$(declare -f fleet_pid_start_time | sed '1s/fleet_pid_start_time/native_fleet_start/')"
+fleet_pid_start_time() {
+    trap - EXIT
+    case "$CAPTURE" in
+        captured) native_fleet_start "$1" ;;
+        finished) : > "$FLEET_DIR/bench/benchmark-child.finished" ;;
+        failed) return 1 ;;
+    esac
+}
+CATALOG_MODES=(real); CATALOG_TIMEOUTS=(60)
+CHILD_PIDS=(); CHILD_STARTS=(); CHILD_OUT=(); CHILD_BENCH=(); CHILD_MODE=(); CHILD_PORT=()
+CHILD_MACHINE=(); CHILD_RUN_TOKEN=(); CHILD_BENCH_INDEX=()
+DASH_BASE=10000; RUN_TIMEOUT=60; RUN_TIMEOUT_OPERATOR_SET=0
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=60; BACKSTOP_OPERATOR_SET=0
+SYNCHRONIZED_START=0; FLEET_OWNER_TOKEN=fixture; RUN_ID=fixture
+INVENTORY_INDEX="$FLEET_DIR"; SNAPSHOT_LOOP_PID=$$; SNAPSHOT_LOOP_TOKEN=fixture
+BARRIER_RELEASE_TOKEN=fixture; START_BARRIER_WAIT_SECONDS=60
+FIRST_RUN_STACK_WAIT_SECONDS=60; BOOT_CONFIG_BARRIER="$FLEET_DIR/barrier"
+BOOT_UPDATE_CAPACITY_WAIT_SECONDS=60; BOOT_CONFIG_BARRIER_WAIT_SECONDS=60
+FLEET_PATCH_FILE=""; FLEET_PATCH_SHA256=""; EXECUTION_PROVENANCE_FILE=""
+RUN_BENCH_CLOUD_BIN=unused; BENCH_REF=fixture; SKIP_AUTOSCALER=1; CLOUDBENCH_LAUNCH_STAGGER_SECONDS=0
+is_sim_on() { return 1; }
+cloudbench_fleet_workspace_name() { echo fixture; }
+bench_execution_budget() { echo 60; }
+primary_clone_storage_mode() { echo fresh; }
+run_fleet_child_supervised() {
+    trap - EXIT
+    while [ ! -e "$1" ]; do command sleep 0.01; done
+}
+controller_pid=$BASHPID
+cleanup() {
+    status=$?
+    [ "$BASHPID" = "$controller_pid" ] || return 0
+    trap - EXIT
+    printf '%s\\n' "\${#CHILD_PIDS[@]}" > "$FLEET_DIR/registered"
+    for pid in "\${CHILD_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+    exit "$status"
+}
+trap cleanup EXIT
+mkdir -p "$FLEET_DIR/bench"
+printf 'fresh fixture-machine\\n' > "$FLEET_DIR/bench/.cid"
+launch_fleet_bench_child 0 bench
+echo "LAUNCH_RETURNED"
+`,
+    );
+    const result = spawnSync(
+      "bash",
+      [driver, path.join(sourceRoot, "scripts/run-bench-fleet"), work, capture],
+      {
+        encoding: "utf8",
+        timeout: 20_000,
+      },
+    );
+    assert.equal(
+      result.status,
+      capture === "failed" ? 1 : 0,
+      result.stdout + result.stderr,
+    );
+    assert.equal(
+      readFileSync(path.join(work, "registered"), "utf8").trim(),
+      "1",
+      "EXIT cleanup retains the launched child",
+    );
+    if (capture === "failed") {
+      assert.match(
+        result.stderr,
+        /could not capture launched child .* start identity/,
+      );
+      assert.doesNotMatch(result.stdout, /LAUNCH_RETURNED/);
+    } else {
+      assert.match(result.stdout, /LAUNCH_RETURNED/);
+      assert.doesNotMatch(result.stderr, /could not capture/);
+    }
+  });
+}
+
+test("the fleet child watch rejects an uncaptured identity even for a reused controller child", () => {
+  const work = path.join(workRoot, "fleet-watch-missing-identity");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+for name in fleet_job_running fleet_child_pid_is_ours; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$1")"
+done
+sleep 60 &
+reused=$!
+trap 'kill "$reused" 2>/dev/null; wait "$reused" 2>/dev/null' EXIT
+# Same parent and jobs-table membership cannot identify the original launch.
+fleet_job_running "$reused" || exit 90
+if fleet_child_pid_is_ours "$reused" ""; then
+    echo "UNCAPTURED_REUSED_PID_COUNTED"
+    exit 1
+fi
+echo "UNCAPTURED_REUSED_PID_REJECTED"
+`,
+  );
+  const result = spawnSync(
+    "bash",
+    [driver, path.join(sourceRoot, "scripts/run-bench-fleet")],
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /UNCAPTURED_REUSED_PID_REJECTED/);
+});
+
+test("the fleet child watch preserves legacy start identity whitespace compatibility", () => {
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      `
+set -uo pipefail
+source "$1/scripts/lib/cloudbench-env.sh"
+eval "$(sed -n '/^fleet_child_pid_is_ours() {/,/^}/p' "$1/scripts/run-bench-fleet")"
+cloudbench_pid_start_time_like() { printf 'Mon Nov 9 12:30:00 2026\\n'; }
+fleet_child_pid_is_ours "$$" 'Mon Nov  9 12:30:00 2026' || exit 1
+if fleet_child_pid_is_ours "$$" 'Mon Nov  9 12:29:59 2026'; then exit 2; fi
+`,
+      "bash",
+      sourceRoot,
+    ],
+    { encoding: "utf8", timeout: 20_000 },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test("the fleet child watch keeps evaluating infra stop after an unknown identity observation", () => {
+  const work = path.join(workRoot, "fleet-watch-unknown-identity");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; ROOT_DIR="$2"; FLEET_DIR="$3"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+for name in fleet_job_running fleet_pid_start_time fleet_pid_matches_start fleet_child_pid_is_ours fleet_wait_children_for_infra_stop; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+done
+mkdir -p "$FLEET_DIR/known" "$FLEET_DIR/unknown"
+command sleep 60 &
+known=$!
+command sleep 60 &
+unknown=$!
+trap 'kill "$known" "$unknown" 2>/dev/null; wait "$known" "$unknown" 2>/dev/null' EXIT
+CHILD_PIDS=("$known" "$unknown"); CHILD_OUT=("$FLEET_DIR/known" "$FLEET_DIR/unknown")
+CHILD_STARTS=("$(fleet_pid_start_time "$known")" "$(fleet_pid_start_time "$unknown")")
+# Replay an unreadable /proc observation for the last unmarked live child.
+eval "$(declare -f cloudbench_proc_pid_observation | sed '1s/cloudbench_proc_pid_observation/native_proc_observation/')"
+cloudbench_proc_pid_observation() {
+    [ "$1" != "$unknown" ] || return 1
+    native_proc_observation "$1"
+}
+eval "$(declare -f fleet_pid_start_time | sed '1s/fleet_pid_start_time/native_fleet_start/')"
+fleet_pid_start_time() {
+    [ "$1" != "$unknown" ] || return 0
+    native_fleet_start "$1"
+}
+checks=0
+fleet_infra_stop_check() {
+    checks=$((checks + 1))
+    if [ -e "$FLEET_DIR/known/benchmark-child.finished" ]; then
+        echo "INFRA_REEVALUATED_WITH_UNKNOWN_CHILD"
+        : > "$FLEET_DIR/unknown/benchmark-child.finished"
+    fi
+}
+sleep() {
+    : > "$FLEET_DIR/known/benchmark-child.finished"
+}
+fleet_wait_children_for_infra_stop
+[ "$checks" -eq 2 ] || { echo "PREMATURE_WATCH_EXIT checks=$checks"; exit 1; }
+# Once a later read gives a different birth, the reused PID must not count.
+CHILD_STARTS[1]="\${CHILD_STARTS[1]}-replaced"
+fleet_pid_start_time() { native_fleet_start "$1"; }
+cloudbench_proc_pid_observation() { native_proc_observation "$1"; }
+if fleet_child_pid_is_ours "$unknown" "\${CHILD_STARTS[1]}"; then exit 91; fi
+`,
+  );
+  const result = spawnSync(
+    "bash",
+    [
+      driver,
+      path.join(sourceRoot, "scripts/run-bench-fleet"),
+      sourceRoot,
+      work,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /INFRA_REEVALUATED_WITH_UNKNOWN_CHILD/);
+});
+
 test(
   "a plain fleet continues at 1/40 infra jobs and stops itself through its TERM trap at 2/40",
   { timeout: 120_000 },
@@ -2287,7 +2504,8 @@ test(
       `#!/usr/bin/env bash
 set -uo pipefail
 FLEET_SOURCE="$1"; WORK="$2"; ROOT_DIR="$3"; FLEET_DIR="$WORK/fleet"
-for name in fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+for name in fleet_pid_start_time fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
     body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
     [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
     eval "$body"
@@ -2295,7 +2513,7 @@ done
 FLEET_INFRA_STOP_SENT=0
 INFRA_PROBE=0
 unset RUN_BENCH_CAMPAIGN_CHILD CLOUDBENCH_SCRIPT_SNAPSHOT
-BENCHES=(); CHILD_PIDS=(); CHILD_OUT=()
+BENCHES=(); CHILD_PIDS=(); CHILD_STARTS=(); CHILD_OUT=()
 for i in $(seq -w 0 39); do BENCHES+=("b$i"); done
 cleanup() {
     local status=$? pid
@@ -2313,6 +2531,7 @@ for bench in "\${BENCHES[@]}"; do
         while [ ! -e "$out/benchmark-child.finished" ]; do sleep 0.05; done
     ) &
     CHILD_PIDS+=("$!"); CHILD_OUT+=("$out")
+    CHILD_STARTS+=("$(fleet_pid_start_time "\${CHILD_PIDS[\${#CHILD_PIDS[@]}-1]}")")
 done
 : > "$WORK/driver.ready"
 fleet_wait_children_for_infra_stop

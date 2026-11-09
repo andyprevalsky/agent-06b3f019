@@ -1174,6 +1174,8 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'github-actions-cleanup-v1':
+            return github_cleanup_evidence(state, receipt, entry['proof']) == entry
         if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
             from deploy_test_cloud_refusal import still_bound
             return still_bound(state, receipt, entry)
@@ -1251,11 +1253,93 @@ def retained_owners(state: dict, gates) -> list[str]:
     return sorted(owned)
 
 
+def github_cleanup_evidence(state: dict, receipt: dict, proof: dict) -> dict:
+    """Read-only GitHub terminal/worker proof; no cancellation, receipt rewrite or test credit."""
+    import base64
+    from datetime import datetime
+    import io
+    import zipfile
+    from deploy_test_github import tag_name
+
+    def need(ok, reason):
+        if not ok:
+            raise ValueError('github cleanup: ' + reason)
+
+    need(proof.get('kind') == 'github-actions-cleanup-v1' and not any(k in proof for k in RECONCILE_EXCLUSIVE),
+         'typed cleanup proof only')
+    owner = receipt_owner(receipt['gate'], receipt)
+    need(isinstance(owner, dict) and owner.get('transport') == 'github-actions'
+         and type(owner.get('run_id')) is int and set(owner) == {'transport', 'run_id', 'url'}, 'exact GitHub owner')
+    folder = Path(receipt['log']).parent
+    need(read(folder / 'receipt.json') == receipt and proof.get('receipt_sha256') == sha_file(folder / 'receipt.json'),
+         'original coordinator receipt changed')
+    adapter = bounded_read(receipt['worker_result'], 'original adapter')
+    request = bounded_read(folder / 'request.json', 'original request')
+    need(proof.get('worker_result_sha256') == sha_file(receipt['worker_result'])
+         and proof.get('request_token') == receipt['token'] and proof.get('owner') == owner
+         and adapter.get('cleanup_owner') == owner and receipt.get('complete') is False
+         and all(adapter.get(k) == request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate')),
+         'original request/adapter/owner binding')
+    files = {}
+    for key in ('platform_result', 'artifact', 'native_audit', 'process'):
+        item = proof.get(key)
+        need(isinstance(item, dict) and set(item) == {'path', 'sha256'} and sha_file(item['path']) == item['sha256'],
+             key + ' hash')
+        files[key] = bounded_read(item['path'], key)
+    api, audit, process = files['platform_result'], files['native_audit'], files['process']
+    run = api.get('run', {})
+    remote = adapter.get('remote', {})
+    tag = remote.get('tag')
+    gate = next(g for g in state['plan']['gates'] if g['name'] == receipt['gate'])
+    runner = gate['command'][gate['command'].index('--runner') + 1]
+    need(tag == tag_name(runner, receipt['gate'], receipt['token']) and run.get('id') == owner['run_id']
+         and run.get('html_url') == owner['url'] and run.get('head_sha') == receipt['source']['head']
+         and run.get('head_branch') == tag and run.get('status') == 'completed'
+         and run.get('run_attempt') == int(remote['run_attempt']), 'terminal original run identity')
+    jobs = api.get('jobs', {}).get('jobs', [])
+    need(jobs and all(j.get('run_id') == run['id'] and j.get('status') == 'completed'
+                     and j.get('run_attempt') == run['run_attempt'] for j in jobs), 'terminal run jobs')
+    need(any(j.get('runner_name') == remote.get('runner_name') for j in jobs), 'original runner identity')
+    artifacts = [a for a in api.get('artifacts', {}).get('artifacts', []) if a.get('name') == 'deploy-gate-result']
+    need(len(artifacts) == 1 and artifacts[0].get('workflow_run', {}).get('id') == run['id']
+         and artifacts[0].get('workflow_run', {}).get('head_sha') == run['head_sha'], 'original Actions artifact')
+    raw = base64.b64decode(files['artifact']['bytes'], validate=True)
+    need(len(raw) <= MAX_RECEIPT_BYTES and 'sha256:' + hashlib.sha256(raw).hexdigest() == artifacts[0].get('digest'),
+         'Actions artifact digest')
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        need(archive.getinfo('result.json').file_size <= MAX_RECEIPT_BYTES
+             and archive.getinfo('request.json').file_size <= MAX_RECEIPT_BYTES, 'bounded native evidence')
+        need(archive.read('result.json') == Path(proof['native_audit']['path']).read_bytes()
+             and json.loads(archive.read('request.json')) == request, 'exact native request/result bytes')
+    need(audit.get('complete') is True and audit.get('cleanup_complete') is True, 'native terminal cleanup')
+    native_exit = audit.get('native_exit')
+    need(type(native_exit) is int, 'native exit')
+    validate_result(audit, request, native_exit)
+    need(process.get('quiescent') is True and process.get('orphaned_children') is False
+         and process.get('remaining') == [] and process.get('error') is None
+         and proof['process']['path'] == str(folder / 'output.log.process.json'), 'original launcher quiescence')
+    completed = datetime.fromisoformat(run['updated_at'].replace('Z', '+00:00')).timestamp()
+    need(_finite(proof.get('confirmed_at')) and proof['confirmed_at'] >= max(receipt['finished_at'], completed)
+         and isinstance(proof.get('observed_by'), str) and proof['observed_by'].strip(), 'observation time/owner')
+    return {'kind': proof['kind'], 'gate': receipt['gate'], 'token': receipt['token'], 'owner': owner,
+            'worker_result_sha256': proof['worker_result_sha256'], 'proof': proof, 'credit_granted': False}
+
+
 def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> None:
     """Typed, receipt-backed cleanup reconciliation for a boxes-thread owner: clears the owner for launch
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'github-actions-cleanup-v1':
+        failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
+        if failure is None or failure.get('native_result') != 'UNVERIFIED' or failure.get('complete'):
+            raise ValueError('github cleanup requires an original incomplete occurrence')
+        receipt = latest_receipts(state).get(failure['gate'])
+        if not receipt or receipt.get('token') != proof.get('request_token'):
+            raise ValueError('github cleanup requires the latest original receipt')
+        entry = github_cleanup_evidence(state, receipt, proof)
+        state.setdefault('reconciled_owners', {})[proof['receipt_sha256']] = entry
+        return
     if proof.get('kind') == 'round49-launch-debt-retirement-v1':
         from deploy_test_round49_retirement import reconcile as retire_round49
         retire_round49(state, occurrence_id, proof, persist=persist)

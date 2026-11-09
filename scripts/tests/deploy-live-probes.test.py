@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "run_deploy_live_probes.py"
 
@@ -213,6 +215,99 @@ class DeployLiveProbeTests(unittest.TestCase):
         self.assertEqual({(row["scope"], row["case"], row["log"]) for row in rows}, {("suite", "live-probes", "")})
         self.assertEqual(by_unit["fails"]["detail"], "live probe fails: exit=4")
         self.assertEqual(by_unit["waiter"]["detail"], "")
+
+    def test_native_receipt_retains_failure_and_sibling_passes(self) -> None:
+        import deploy_test_worker as worker
+        from deploy_test_result import validate
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = (
+                module.Command("credential-health", (sys.executable, "-c", "print('credential ok')"), root),
+                module.Command("amplitude-live", (sys.executable, "-c", "print('amplitude ok')"), root),
+                module.Command("chat-router-failover-live", (sys.executable, "-c",
+                    "print('AssertionError: expected escalated, got apology'); raise SystemExit(1)"),
+                    root, after="amplitude-live"),
+                module.Command("migration-preflight", (sys.executable, "-c", "print('migration ok')"), root),
+            )
+            frozen = {"head": "test", "digest": "test"}
+            with patch.object(module, "deploy_commands", return_value=commands), \
+                    patch.dict(sys.modules, {"run_deploy_live_probes": module}), \
+                    patch("deploy_test_cycle.source", return_value=frozen), \
+                    patch.object(worker, "source", return_value=frozen):
+                recipe = module.recipe(root)
+                request = dict(token="native-repro", source=frozen, gate="live-probes", phase="initial",
+                               checks=list(recipe["cases"]), skips={}, worker_recipe=recipe, worker_root=str(root))
+                result = worker.execute(request, root)
+            expected = dict.fromkeys(request["checks"], "PASS")
+            expected["chat-router-failover-live"] = "FAIL"
+            expected["live-probes"] = "FAIL"
+            self.assertEqual(result["cases"], expected)
+            self.assertEqual(validate(result, request, 1), (expected, True))
+            failed = result["evidence"]["chat-router-failover-live"]
+            self.assertEqual(failed["native_exit"], 1)
+            self.assertIn("AssertionError", Path(failed["log"]).read_text())
+            self.assertGreaterEqual(failed["started_at"], result["evidence"]["amplitude-live"]["finished_at"])
+
+    def test_native_concurrency_and_unverified_exit_are_preserved(self) -> None:
+        import threading
+        import deploy_test_worker as worker
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = (module.Command("a", ("true",), root), module.Command("b", ("false",), root),
+                        module.Command("after-b", ("true",), root, after="b"))
+            frozen = {"head": "test", "digest": "test"}
+            barrier = threading.Barrier(2, timeout=5)
+            completed = set()
+
+            def run_step(name, spec, _root, folder):
+                if name in {"a", "b"}:
+                    barrier.wait()  # Both independent probes must start before either can finish.
+                else:
+                    self.assertIn("b", completed)
+                completed.add(name)
+                return {"status": "UNVERIFIED" if name == "b" else "PASS", "native_exit": 2 if name == "b" else 0}
+
+            with patch.object(module, "deploy_commands", return_value=commands), \
+                    patch("deploy_test_cycle.source", return_value=frozen), \
+                    patch.object(worker, "run_step", side_effect=run_step):
+                recipe = module.recipe(root)
+                request = dict(token="native-concurrency", source=frozen, gate="live-probes", phase="initial",
+                               checks=list(recipe["cases"]), worker_recipe=recipe, worker_root=str(root))
+                result = module.execute(request, root)
+            self.assertEqual(result["cases"], {"live-probes": "UNVERIFIED", "a": "PASS", "b": "UNVERIFIED", "after-b": "PASS"})
+            self.assertFalse(result["complete"])
+            self.assertTrue(result["cleanup_complete"])
+
+    def test_native_plan_registration_and_portable_recipe(self) -> None:
+        import deploy_test_plan as planner
+        from deploy_test_bindings import generate
+        module = _load_module()
+        lanes = {"lanes": [{"name": "live-probes", "command": ["python3", "scripts/run_deploy_live_probes.py"]}]}
+        with patch.object(planner.subprocess, "run", return_value=type("Result", (), {"stdout": json.dumps(lanes)})()):
+            gate = next(g for g in planner.standard_template()["gates"] if g["name"] == "live-probes")
+        self.assertEqual(gate["checks"], ["live-probes", "credential-health", "amplitude-live",
+                                          "chat-router-failover-live", "migration-preflight"])
+        self.assertTrue(gate["case_protocol"])
+        inventory = {"live-probes": dict(transport="github-actions", worker_root="/home/runner/_work/rose/rose",
+                     id="live-worker", runner="blacksmith-2vcpu-ubuntu-2404", timeout_seconds=14400)}
+        binding = generate({"gates": [gate]}, inventory, ROOT)["live-probes"]
+        self.assertEqual(binding["recipe"], module.recipe())
+        self.assertEqual(binding["timeout_seconds"], 14400)
+        from deploy_test_result import preserve_contract
+        original = {"checks": ["live-probes"], "worker_recipe": {
+            "cases": {"live-probes": binding["recipe"]["cases"]["live-probes"]}}}
+        updated = {"checks": gate["checks"], "worker_recipe": binding["recipe"]}
+        preserve_contract(original, updated)
+        self.assertEqual(binding["recipe"]["cases"]["live-probes"]["command"],
+                         ["python3", "scripts/run_deploy_live_probes.py"])
+        for name, spec in binding["recipe"]["cases"].items():
+            if name == "live-probes":
+                continue
+            self.assertNotIn("aggregate", spec)
+            self.assertEqual(spec["cwd"], "back-end")
+            self.assertFalse(any(arg.startswith(str(ROOT)) for arg in spec["command"]))
 
     def test_credential_health_uses_workspace_tsx_not_npx(self) -> None:
         module = _load_module()

@@ -9607,4 +9607,91 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
 
 
+class GithubCleanupReconciliation(unittest.TestCase):
+    """Pure recorded-boundary tests: no Git, network, processes or real state writes."""
+    def fixture(self):
+        import base64, hashlib, io, zipfile
+        from deploy_test_github import tag_name
+        source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        token, name, folder = 'f' * 32, 'semantic-stack', '/fixture'
+        owner = {'transport': 'github-actions', 'run_id': 123, 'url': 'https://github.com/org/repo/actions/runs/123'}
+        runner = 'blacksmith-8vcpu-ubuntu-2404'
+        tag = tag_name(runner, name, token)
+        request = dict(token=token, source=source, gate=name, checks=[name], skips={})
+        audit = dict(request, cases={name: 'PASS'}, complete=True, cleanup_complete=True,
+                     native_exit=0, reused=False)
+        raw = json.dumps(audit).encode()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('result.json', raw); z.writestr('request.json', json.dumps(request))
+        sha = hashlib.sha256(archive.getvalue()).hexdigest()
+        adapter = dict(request, cases={name: 'UNVERIFIED'}, complete=False, cleanup_complete=False,
+                       cleanup_owner=owner, remote=dict(tag=tag, run_attempt='1', runner_name='runner-original'))
+        receipt = dict(gate=name, token=token, source=source, complete=False, cases={name: 'UNVERIFIED'},
+                       log=folder+'/output.log', worker_result=folder+'/result.json', finished_at=100,
+                       lingering_group=True, cleanup_owner={'worker_cleanup_owner': owner})
+        run = dict(id=123, html_url=owner['url'], head_sha=source['head'], head_branch=tag,
+                   run_attempt=1, status='completed', updated_at='1970-01-01T00:01:40Z')
+        api = dict(run=run, jobs={'jobs':[dict(run_id=123, run_attempt=1, status='completed', runner_name='runner-original')]},
+                   artifacts={'artifacts':[dict(name='deploy-gate-result', digest='sha256:'+sha,
+                                                workflow_run={'id':123, 'head_sha':source['head']})]})
+        self.documents = {folder+'/receipt.json':receipt, folder+'/result.json':adapter,
+            folder+'/request.json':request, folder+'/audit.json':audit, folder+'/api.json':api,
+            folder+'/artifact.json':{'bytes':base64.b64encode(archive.getvalue()).decode()},
+            folder+'/output.log.process.json':dict(quiescent=True, orphaned_children=False, remaining=[], error=None,
+                                                  timed_out=True)}
+        self.raw = raw
+        def read(path, *args): return copy.deepcopy(self.documents[str(path)])
+        def digest(path): return hashlib.sha256(json.dumps(self.documents[str(path)],sort_keys=True).encode()).hexdigest()
+        self.patchers = [patch.object(c,'read',side_effect=read), patch.object(c,'bounded_read',side_effect=read),
+                         patch.object(c,'sha_file',side_effect=digest), patch.object(Path,'read_bytes',return_value=raw)]
+        for p in self.patchers:p.start();self.addCleanup(p.stop)
+        proof = dict(kind='github-actions-cleanup-v1', receipt_sha256=digest(folder+'/receipt.json'),
+            worker_result_sha256=digest(folder+'/result.json'),request_token=token,owner=owner,confirmed_at=101,observed_by='fixture')
+        for key, file in [('platform_result','api.json'),('native_audit','audit.json'),('artifact','artifact.json'),('process','output.log.process.json')]:
+            proof[key]={'path':folder+'/'+file,'sha256':digest(folder+'/'+file)}
+        failure=dict(id='f',gate=name,check=name+'/'+name,native_result='UNVERIFIED',complete=False)
+        state=dict(plan={'gates':[dict(name=name,command=['python','--runner',runner])]},
+                   attempts=[{'results':[receipt]}],failures=[failure],pending=['f'],phase='triage',repair_gates=[],ready=False)
+        return state,proof
+
+    def test_github_terminal_cleanup_preserves_original_failure_and_only_allows_retry(self):
+        state,proof=self.fixture();before=copy.deepcopy(state)
+        c.reconcile(state,'f',proof)
+        self.assertEqual([],c.retained_owners(state,['semantic-stack']))
+        self.assertEqual(before['attempts'],state['attempts']);self.assertEqual(before['failures'],state['failures'])
+        self.assertFalse(state['ready']);self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        saved=copy.deepcopy(state);c.reconcile(state,'f',proof);self.assertEqual(saved,state)
+        c.reexecute(state,'f');self.assertEqual('UNVERIFIED',state['failures'][0]['native_result'])
+        self.assertEqual(['semantic-stack'],state['repair_gates'])
+
+    def test_github_cleanup_refuses_bad_identity_and_nonterminal_evidence_atomically(self):
+        state,proof=self.fixture()
+        variants=[dict(proof,request_token='wrong'),dict(proof,owner={**proof['owner'],'run_id':456}),
+                  dict(proof,receipt_sha256='wrong'),dict(proof,confirmed_at=0),dict(proof,observed_by=''),
+                  dict(proof,repair_agent='https://boxes.dev/thread/fake')]
+        for key in ('platform_result','artifact','native_audit','process'):
+            variants.append(dict(proof,**{key:{**proof[key],'sha256':'wrong'}}))
+        for variant in variants:
+            trial=copy.deepcopy(state)
+            with self.subTest(proof=variant),self.assertRaises(ValueError):c.reconcile(trial,'f',variant)
+            self.assertEqual(state,trial)
+        for key,change in [('platform_result',lambda d:d['run'].update(status='in_progress')),
+                           ('platform_result',lambda d:d['run'].update(run_attempt=2)),
+                           ('platform_result',lambda d:d['jobs']['jobs'][0].update(runner_name='foreign')),
+                           ('native_audit',lambda d:d.update(cleanup_complete=False)),
+                           ('process',lambda d:d.update(remaining=[99]))]:
+            path=proof[key]['path'];original=copy.deepcopy(self.documents[path]);change(self.documents[path])
+            variant=copy.deepcopy(proof);variant[key]['sha256']=c.sha_file(path);trial=copy.deepcopy(state)
+            with self.subTest(key=key),self.assertRaises(ValueError):c.reconcile(trial,'f',variant)
+            self.assertEqual(state,trial);self.documents[path]=original
+
+    def test_github_cleanup_certificate_rechecks_the_original_evidence(self):
+        state,proof=self.fixture();c.reconcile(state,'f',proof)
+        self.documents[proof['platform_result']['path']]['run']['status']='in_progress'
+        with self.assertRaises(ValueError):c.retained_owners(state,['semantic-stack'])
+
+
+
+
 if __name__ == '__main__': unittest.main()

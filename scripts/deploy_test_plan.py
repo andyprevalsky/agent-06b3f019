@@ -162,6 +162,9 @@ def standard_template(host: tuple = ()) -> dict:
             gate.update(checks=checks_for(selection(ROOT)[1]), native_backend=True, case_protocol=True,
                         runner_command=gate['command'], cwd='.',
                         command=[sys.executable, str(ROOT / 'scripts/deploy_test_backend.py')])
+        if gate['name'] == 'live-probes':
+            from run_deploy_live_probes import recipe
+            gate.update(checks=list(recipe()['cases']), native_live_probes=True, case_protocol=True)
         if gate['name'] == 'smoke':
             tasks = subprocess.run(['bash', 'scripts/run-predeploy-cloud', '--list'], cwd=ROOT,
                                    check=True, capture_output=True, text=True,

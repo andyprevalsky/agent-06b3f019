@@ -186,7 +186,8 @@ class GitHub:
         self.deadline = deadline  # epoch the caller must be done by; a rate-limit wait never passes it
         self.until = None  # epoch every request must finish by (the stop-cancel bound); None: 60 s per request
 
-    def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
+    def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True,
+                wait_on_rate_limit: bool = True):
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
         req = urllib.request.Request(url, method=method, headers={
             'Authorization': f'Bearer {self.token}', 'Accept': 'application/vnd.github+json',
@@ -211,6 +212,8 @@ class GitHub:
                 if error.code in (301, 302, 303, 307, 308) and not redirect:
                     return error.code, error.headers, b''
                 if error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower():
+                    if not wait_on_rate_limit:
+                        raise  # Advisory liveness must not block the authoritative R2 result poll.
                     now = time.time()
                     pause = rate_limit_pause(error.headers, now)
                     if self.deadline is not None:
@@ -232,8 +235,8 @@ class GitHub:
                 STOP.wait(2 ** attempt)
         raise RuntimeError(f'GitHub API {method} {path} kept failing')
 
-    def json(self, path: str, conditional: bool = False):
-        status, _, body = self.request('GET', path, conditional=conditional)
+    def json(self, path: str, conditional: bool = False, *, wait_on_rate_limit: bool = True):
+        status, _, body = self.request('GET', path, conditional=conditional, wait_on_rate_limit=wait_on_rate_limit)
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
         return self.cache[url] if status == 304 else json.loads(body)
 
@@ -668,7 +671,7 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
             # A run that ended without done.json (VM lost, setup died early) must not wait out the deadline.
             checked = time.time()
             try:
-                run = gh.json(f"/actions/runs/{receipt['run_id']}", conditional=True)
+                run = gh.json(f"/actions/runs/{receipt['run_id']}", conditional=True, wait_on_rate_limit=False)
             except urllib.error.HTTPError:
                 run = {}
             if run.get('status') == 'completed' and channel.get(name, 'done.json') is None:
