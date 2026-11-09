@@ -1,0 +1,4 @@
+{"task": "agent-payment-test-shop", "duration_seconds": 230.6, "cost_cents": 2.0, "timestamp": "2026-11-09T17:30:47.448417+00:00", "agent_id": "6da7aa0c-0ca8-4533-8bd4-433bc650810b"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 241.2, "cost_cents": 2.0, "timestamp": "2026-11-09T17:54:31.356995+00:00", "agent_id": "e5bc6521-20d9-4bda-a059-285b221f3f8d"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 500.7, "cost_cents": 4.0, "timestamp": "2026-11-09T18:00:18.526966+00:00", "agent_id": "68c27a55-d8b2-4b00-ab6e-860ea41e235b"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 207.7, "cost_cents": 2.0, "timestamp": "2026-11-09T18:10:24.496525+00:00", "agent_id": "69b3b64e-6c18-47cc-9c89-431207d70034"}
