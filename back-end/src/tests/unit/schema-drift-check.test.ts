@@ -247,4 +247,36 @@ test('a migrations source missing an applied drop reports the replay gap, never 
   }
 });
 
+test('a source far behind lists a bounded replay gap and keeps concurrent drift in the alert', async () => {
+  // CodeRabbit on #1872: a long gap line must not push invalid-index or
+  // exposed-table names past the alert's message limit.
+  const behind = Array.from(
+    { length: 40 },
+    (_, i) => `2026111${String(i).padStart(4, '0')}00_m${i}`
+  );
+  const catalog = (): Catalog => ({
+    ...healthy(),
+    appliedAfterBaseline: new Set(['1_init', ...behind]),
+    indexes: new Map([
+      ['Agent_title_trgm_idx', true],
+      ['Stale_idx', false],
+    ]),
+    exposed: ['Waitlist'],
+  });
+  const { calls, deps } = harness('token', catalog);
+  await runSchemaDriftCheck(deps);
+  const [gap, ...drift] = calls.alerts[0] ?? [];
+  assert.equal(
+    gap,
+    `unverified: the database recorded 40 applied migration(s) this migrations source lacks (${behind
+      .slice(0, 5)
+      .join(', ')} and 35 more); migration-declared objects were not compared`
+  );
+  assert.ok((gap ?? '').length < 400);
+  assert.deepEqual(drift, [
+    'INVALID index: Stale_idx',
+    'RLS disabled on anon/authenticated-readable table: Waitlist',
+  ]);
+});
+
 test.after(() => fs.rmSync(migrations, { recursive: true, force: true }));

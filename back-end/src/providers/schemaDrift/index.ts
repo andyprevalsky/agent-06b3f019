@@ -260,13 +260,21 @@ export function compareCatalog(catalog: Catalog, migrationsDir?: string): DriftR
   };
 }
 
+/** Names listed in the replay-gap line: a source far behind must not crowd drift out of a bounded alert. */
+export const REPLAY_GAP_LISTED_MIGRATIONS = 5;
+
 /** The replay-gap line (SCHEMA_REPLAY_HINT applies), or null when the source holds every applied migration. */
 export function replayGap(report: DriftReport): string | null {
   const names = report.unreplayedMigrations;
   if (names.length === 0) return null;
+  const listed = names.slice(0, REPLAY_GAP_LISTED_MIGRATIONS).join(', ');
+  const more =
+    names.length > REPLAY_GAP_LISTED_MIGRATIONS
+      ? ` and ${names.length - REPLAY_GAP_LISTED_MIGRATIONS} more`
+      : '';
   return (
     `unverified: the database recorded ${names.length} applied migration(s) this migrations ` +
-    `source lacks (${names.join(', ')}); migration-declared objects were not compared`
+    `source lacks (${listed}${more}); migration-declared objects were not compared`
   );
 }
 
