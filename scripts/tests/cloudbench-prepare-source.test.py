@@ -129,6 +129,8 @@ class NativeLifecycle(unittest.TestCase):
         receipt=creator['envelope'](intent,dict(outcome='ready-for-prepare',app=binding['app'],machine_id=self.mid,
             volume_id=self.vid,instance_id=self.machine['instance_id'],machine_name=self.machine['name'],
             donor_machine_id=donor['machine_id'],donor_volume_id=donor['volume_id'],snapshot_id='vs_old',
+            config_sha256=self.m['sha'](self.m['canonical'](self.config)),
+            env_sha256=self.m['sha'](self.m['canonical'](self.config.get('env') or {})),
             journal=str(journal),journal_sha256=creator['authority_digest'](journal)))
         creator['save'](journal/'result.json',receipt)
         self.request.pop('predecessor')
@@ -224,10 +226,25 @@ class NativeLifecycle(unittest.TestCase):
         manifest=self.m['verify_prepared_source'](self.root/'request.json',self.root/'output/result.json',self.root/'output/source-manifest.json',
             source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
         self.assertEqual(manifest['machine_id'],self.mid);self.assertEqual(manifest['snapshot_id'],'vs_new')
+        self.assertEqual(manifest['guest_env_sha256'],self.request['guest_env_sha256'])
         self.assertEqual(self.machine['state'],'stopped');self.assertIsNone(self.nonce)
         self.assertGreater(self.foreign_changes,10)
         self.assertTrue(all(self.m['allowed_call'](method,path,self.mid,self.vid,(self.shared['id'],))
                             for method,path,body,nonce in self.calls))
+
+    def test_resealed_manifest_cannot_change_prepared_guest_environment(self):
+        result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
+        path=self.root/'output/source-manifest.json'
+        manifest=self.m['load'](path)
+        manifest['guest_env_sha256']['AGENTS_ENV_B64']='7'*64
+        self.m['save'](self.root/'changed-manifest.json',manifest)
+        receipt=self.m['load'](self.root/'output/result.json')
+        receipt['manifest']=self.m['descriptor'](self.root/'changed-manifest.json')
+        self.m['save'](self.root/'output/resealed-result.json',receipt)
+        with self.assertRaises(ValueError):
+            self.m['verify_prepared_source'](self.root/'request.json',self.root/'output/resealed-result.json',
+                self.root/'changed-manifest.json',source_ref=self.request['source_ref'],image_ref=self.image,
+                node_fingerprint='b'*64,python_fingerprint='c'*64)
 
     def test_guest_dependency_failure_stops_owned_target_and_emits_failed_receipt(self):
         self.fault='deps';result=self.invoke();self.assertNotEqual(result.returncode,0)

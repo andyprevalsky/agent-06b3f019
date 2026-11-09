@@ -115,6 +115,9 @@ def read_request(path):
     for key, pattern in [('nonce', '[a-f0-9]{32}'), ('source_ref', '[a-f0-9]{40}'),
                          ('node_fingerprint', '[a-f0-9]{64}'), ('python_fingerprint', '[a-f0-9]{64}')]:
         need(isinstance(value.get(key), str) and re.fullmatch(pattern, value[key]), key)
+    need(isinstance(value.get('guest_env_sha256'), dict) and set(value['guest_env_sha256']) == ENV_KEYS
+         and all(isinstance(item, str) and re.fullmatch('[a-f0-9]{64}', item)
+                 for item in value['guest_env_sha256'].values()), 'expected effective guest environment hashes')
     need(re.fullmatch(r'registry\.fly\.io/navi-whisper-lux-bench[^\s]*@sha256:[a-f0-9]{64}',
                       value.get('image_ref', '')), 'immutable app image')
     if 'ownership' in value:
@@ -127,6 +130,7 @@ def read_request(path):
              and machine['config']['metadata'].get('cloudbench_source_create_nonce') == authority['intent']['nonce'],
              'versioned native source lease protocol required')
         predecessor = dict(version=2, lease_protocol='cloudbench-source-lease-v1', creation_nonce=authority['intent']['nonce'],
+                           guest_env_sha256=copy.deepcopy(value['guest_env_sha256']),
                            app='navi-whisper-lux-bench', owner_token=authority['intent']['binding']['owner_token'],
                            machine_id=machine['id'], instance_id=machine['instance_id'], machine_name=machine['name'],
                            volume_id=authority['volume']['id'], region=machine['region'],
@@ -148,9 +152,6 @@ def read_request(path):
          'protected native resource')
     for key in ('config_sha256', 'env_sha256'):
         need(re.fullmatch('[a-f0-9]{64}', native[key]), key)
-    need(set(value['guest_env_sha256']) == ENV_KEYS
-         and all(re.fullmatch('[a-f0-9]{64}', item) for item in value['guest_env_sha256'].values()),
-         'expected effective guest environment hashes')
     build = described(value['build'])
     need(build.get('schema') == 'cloudbench-image-build-v1'
          and build.get('image_ref') == value['image_ref']
@@ -609,7 +610,8 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             need(isinstance(snapshot_id, str) and re.fullmatch('vs_[A-Za-z0-9]+', snapshot_id), 'exact created snapshot ID')
             successor = dict(predecessor, instance_id=after['instance_id'], image_digest=request['image_ref'].rsplit('@', 1)[1],
                              snapshot_id=snapshot_id, verified_at=guest['finished_epoch'],
-                             node_fingerprint=request['node_fingerprint'], python_fingerprint=request['python_fingerprint'])
+                             node_fingerprint=request['node_fingerprint'], python_fingerprint=request['python_fingerprint'],
+                             guest_env_sha256=copy.deepcopy(guest['guest_env_sha256']))
             deadline = time.monotonic() + 120
             while True:
                 snapshots = api.request('GET', '/volumes/' + predecessor['volume_id'] + '/snapshots')
@@ -669,6 +671,7 @@ def verify_prepared_source(request_path, result_path, manifest_path, *, source_r
     need(successor['image_digest'] == image_ref.rsplit('@', 1)[1], 'successor image digest')
     need(successor['node_fingerprint'] == node_fingerprint and successor['python_fingerprint'] == python_fingerprint,
          'successor dependency set')
+    need(successor['guest_env_sha256'] == request['guest_env_sha256'], 'successor effective guest environment')
     before, after = described(result['before']), described(result['after'])
     need(before['instance_id'] == predecessor['instance_id']
          and sha(canonical(before['config'])) == request['native']['config_sha256'], 'original native source')

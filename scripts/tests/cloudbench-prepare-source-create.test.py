@@ -131,22 +131,33 @@ class Boundary(unittest.TestCase):
             if method == 'GET': return 200, list(self.volumes.values())
             if self.mode == 'volume-ambiguous': return 503, {'private': 'never-print-this'}
             row = {'id': 'vol_owned', 'name': body['name'], 'region': 'iad', 'state': 'created',
-                   'size_gb': 40, 'attached_machine_id': None}
+                   'size_gb': 40, 'encrypted': True, 'attached_machine_id': None, 'created_at': datetime.now(timezone.utc).isoformat()}
             if self.mode == 'protected-volume': row['id'] = VOL
             self.volumes[row['id']] = row
+            if self.mode == 'lost-volume-ack':
+                row['state'] = 'restoring'
+                return 503, {}
             return 202, row
         if suffix == '/machines' and method == 'POST':
             # Durable volume receipt MUST already exist at this first Machine write.
-            self.assert_volume_journal = (self.root / 'journal/volume.created.json').exists()
+            self.assert_volume_journal = any((self.root / ('journal/'+name)).exists() for name in
+                                             ('volume.created.json', 'volume.reconciled.json'))
             if self.mode == 'machine-ambiguous': return 503, {'private': 'never-print-this'}
             if self.mode == 'quota': return 429, {'error': 'quota never-print-this'}
             if self.mode == 'interrupt-machine':
                 self.pause.set()
                 self.release.wait(5)
             row = {'id': '22222222222222', 'instance_id': 'newinstance', 'state': 'created',
-                   'image_ref': {'digest': 'sha256:' + 'e' * 64}, **body}
+                   'created_at': datetime.now(timezone.utc).isoformat(),
+                   'image_ref': {'digest': 'sha256:' + 'e' * 64}, **copy.deepcopy(body)}
+            if self.mode in ('normalized-machine', 'lost-machine-ack'):
+                row['config'].pop('auto_destroy')
+                if not row['config']['env']: row['config'].pop('env')
+                row['config']['mounts'][0].update(name='cbs_' + OWNER[:26], size_gb=40, encrypted=True)
+                row['state'] = 'stopped'
             self.machines[row['id']] = row
             self.volumes['vol_owned']['attached_machine_id'] = row['id']
+            if self.mode == 'lost-machine-ack': return 503, {}
             return 201, row
         if suffix == '/volumes/' + VOL + '/snapshots': return 200, self.snapshots
         if suffix.startswith('/machines/'):
@@ -204,6 +215,157 @@ class Boundary(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.writes())
         self.assertIn('/v1/apps/other/machines?summary=true', [c[1] for c in self.calls])
+
+    def test_native_machine_omitted_defaults_and_volume_metadata(self):
+        self.machines[DONOR]['config']['env'] = {}
+        self.mode = 'normalized-machine'
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.writes()), 2)
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertEqual(len(self.writes()), 2)
+
+    def make_ambiguous_machine(self):
+        self.machines[DONOR]['config']['env'] = {}
+        self.mode = 'lost-machine-ack'
+        self.assertNotEqual(self.run_cli().returncode, 0)
+        self.mode = ''
+        journal = self.root/'journal'
+        self.assertTrue((journal/'machine.pending.json').exists())
+        self.assertFalse((journal/'machine.created.json').exists())
+        self.assertEqual(len(self.writes()), 2)
+        return journal
+
+    def test_lost_machine_ack_explicit_get_only_receipt_then_prepare_authority(self):
+        journal = self.make_ambiguous_machine()
+        original = {p.name:p.read_bytes() for p in journal.glob('*.json')}
+        before = len(self.calls)
+        result = self.run_cli(['reconcile-machine', *self.args[1:]])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(call[0] == 'GET' for call in self.calls[before:]))
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt['authority_kind'], 'reconciled-ambiguous-machine-create')
+        self.assertFalse((journal/'machine.created.json').exists())
+        for name, raw in original.items(): self.assertEqual((journal/name).read_bytes(), raw)
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertEqual(len(self.writes()), 2)
+        helper = runpy.run_path(str(CLI))
+        authority = helper['verify_created_source'](journal/'result.json')
+        self.assertEqual(authority['machine_authority'], 'reconciled-ambiguous-machine-create')
+        native = self.machines['22222222222222']['config']
+        self.assertEqual(authority['machine']['config'], native)
+        self.assertEqual(json.loads((journal/'result.json').read_text())['config_sha256'],
+                         hashlib.sha256(json.dumps(native, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+
+    def test_reconcile_machine_real_preparer_and_authenticated_retirement(self):
+        self.machine_reconcile_before_prepare = True
+        self.test_real_creator_preparer_and_authenticated_successor_retirement()
+
+    def test_reconciled_machine_stdout_never_discloses_inventory_environment(self):
+        self.make_ambiguous_machine()
+        self.machines['33333333333333'] = dict(id='33333333333333', name='foreign',
+            config={'env': {'PRIVATE': 'never-print-this'}})
+        result=self.run_cli(['reconcile-machine',*self.args[1:]])
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout)['id'],'22222222222222')
+
+    def test_reconcile_machine_forged_native_identity_config_defaults_and_mount_refuse(self):
+        journal = self.make_ambiguous_machine()
+        original = copy.deepcopy(self.machines['22222222222222'])
+        volume = copy.deepcopy(self.volumes['vol_owned'])
+        mutations = ['owner','nonce','intent','protocol','image','digest','region','instance','active',
+                     'init','guest','guest-type','restart','extra-config','extra-mount','mount-extra','mount-name',
+                     'mount-size','mount-encryption','default-true','default-zero','env-null','env-change',
+                     'protected','wrong-time','attachment','duplicates']
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.machines = {DONOR:self.machines[DONOR], '22222222222222':copy.deepcopy(original)}
+                self.volumes['vol_owned'] = copy.deepcopy(volume)
+                row=self.machines['22222222222222'];config=row['config'];mount=config['mounts'][0]
+                if mutation in ('owner','nonce','intent','protocol'):
+                    key={'owner':'owner','nonce':'create_nonce','intent':'create_intent','protocol':'protocol'}[mutation]
+                    config['metadata']['cloudbench_source_'+key]='forged'
+                elif mutation=='image':config['image']='registry.fly.io/bench@sha256:'+'f'*64
+                elif mutation=='digest':row['image_ref']['digest']='sha256:'+'f'*64
+                elif mutation=='region':row['region']='ams'
+                elif mutation=='instance':row['instance_id']=''
+                elif mutation=='active':row['state']='started'
+                elif mutation=='init':config['init']={'cmd':['echo','unsafe']}
+                elif mutation=='guest':config['guest']['cpus']=2
+                elif mutation=='guest-type':config['guest']['cpus']=True
+                elif mutation=='restart':config['restart']={'policy':'always'}
+                elif mutation=='extra-config':config['services']=[]
+                elif mutation=='extra-mount':config['mounts'].append(dict(mount))
+                elif mutation=='mount-extra':mount['unrecognized']=False
+                elif mutation=='mount-name':mount['name']='foreign'
+                elif mutation=='mount-size':mount['size_gb']=True
+                elif mutation=='mount-encryption':mount['encrypted']=False
+                elif mutation=='default-true':config['auto_destroy']=True
+                elif mutation=='default-zero':config['auto_destroy']=0
+                elif mutation=='env-null':config['env']=None
+                elif mutation=='env-change':config['env']={'NEW':'foreign'}
+                elif mutation=='protected':row['id']=DONOR
+                elif mutation=='wrong-time':row['created_at']='2026-01-01T00:00:00Z'
+                elif mutation=='attachment':self.volumes['vol_owned']['attached_machine_id']=DONOR
+                elif mutation=='duplicates':self.machines['33333333333333']=dict(row,id='33333333333333')
+                before=len(self.writes())
+                self.assertNotEqual(self.run_cli(['reconcile-machine', *self.args[1:]]).returncode,0)
+                self.assertEqual(len(self.writes()),before)
+                self.assertFalse((journal/'machine.reconciled.json').exists())
+
+    def test_reconcile_machine_original_inventory_failure_and_receipt_tamper_refuse(self):
+        journal=self.make_ambiguous_machine()
+        for name in ('machine.pending.json','machine.failed.json'):
+            path=journal/name;original=path.read_bytes();value=json.loads(original)
+            if 'failed' in name:value['outcome']='native-rejected';value['native_http_status']=429
+            else:value['precreate']['sha256']='0'*64
+            path.write_text(json.dumps(value))
+            self.assertNotEqual(self.run_cli(['reconcile-machine',*self.args[1:]]).returncode,0)
+            path.write_bytes(original)
+        self.assertEqual(self.run_cli(['reconcile-machine',*self.args[1:]]).returncode,0)
+        path=journal/'machine.reconciled.json';value=json.loads(path.read_bytes())
+        value['response']['config']['metadata']['cloudbench_source_owner']='f'*32
+        value['response_sha256']=runpy.run_path(str(CLI))['sha'](value['response'])
+        path.write_text(json.dumps(value))
+        before=len(self.writes());self.assertNotEqual(self.run_cli().returncode,0)
+        self.assertEqual(len(self.writes()),before)
+
+    def test_successful_native_response_is_saved_before_semantic_refusal(self):
+        actual=self.respond
+        def wrong(method,path,body):
+            status,row=actual(method,path,body)
+            if method=='POST' and path.endswith('/machines') and status==201:
+                row['config']['services']=[]
+            return status,row
+        self.respond=wrong
+        self.assertNotEqual(self.run_cli().returncode,0)
+        journal=self.root/'journal'
+        raw=json.loads((journal/'machine.response.raw.json').read_bytes())
+        self.assertEqual(raw['id'],'22222222222222')
+        self.assertTrue((journal/'machine.response.json').exists())
+        self.assertFalse((journal/'machine.created.json').exists())
+        self.assertNotEqual(self.run_cli().returncode,0)
+        self.assertEqual(len(self.writes()),2)
+
+    def test_ready_native_get_shape_is_authoritative_and_sealed(self):
+        self.machines[DONOR]['config']['env'] = {}
+        actual=self.respond
+        def normalized_get(method,path,body):
+            status,row=actual(method,path,body)
+            if method=='GET' and path.endswith('/machines/22222222222222'):
+                row=copy.deepcopy(row);row['config'].pop('auto_destroy',None);row['config'].pop('env',None)
+                row['config']['mounts'][0].update(name='cbs_'+OWNER[:26],size_gb=40,encrypted=True)
+            return status,row
+        self.respond=normalized_get
+        result=self.run_cli();self.assertEqual(result.returncode,0,result.stderr)
+        helper=runpy.run_path(str(CLI));journal=self.root/'journal'
+        authority=helper['verify_created_source'](journal/'result.json')
+        self.assertNotIn('env',authority['machine']['config'])
+        self.assertIn('name',authority['machine']['config']['mounts'][0])
+        ready=journal/'machine.ready.json';changed=json.loads(ready.read_bytes())
+        changed['response']['config']['metadata']['cloudbench_source_owner']='forged';ready.write_text(json.dumps(changed))
+        before=len(self.writes());self.assertNotEqual(self.run_cli().returncode,0)
+        self.assertEqual(before,len(self.writes()))
 
     def test_incomplete_scope_or_snapshot_refuses_before_write(self):
         for mode in ['missing-app', 'snapshot']:
@@ -435,6 +597,210 @@ class Boundary(unittest.TestCase):
         self.assertNotEqual(self.run_cli(['cleanup', *self.args[1:]]).returncode, 0)
         self.assertEqual(len(self.writes()), count)
 
+    def test_absolute_response_deadline_preserves_class_phase_without_status_invention(self):
+        creator = runpy.run_path(str(CLI))
+        class Response:
+            status = 202
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, *_): raise creator['DEADLINES']['Deadline']('controller action deadline')
+        class Opener:
+            def open(self, *_args, **_kwargs): return Response()
+        native = object.__new__(creator['Native'])
+        native.auth, native.opener = 'Bearer fake', Opener()
+        with self.assertRaises(creator['Refusal']) as caught:
+            native.request('POST', 'https://example.invalid/volumes', {'name': 'local-only'})
+        self.assertEqual(caught.exception.native_status, 202)
+        self.assertEqual(caught.exception.diagnostic['exception_class'], 'Deadline')
+        self.assertEqual(caught.exception.diagnostic['response_phase'], 'body')
+        self.assertEqual(caught.exception.diagnostic['reason'], 'absolute-response-deadline')
+        self.assertFalse(self.calls)
+
+    def make_ambiguous_volume(self):
+        self.mode = 'lost-volume-ack'
+        self.assertNotEqual(self.run_cli().returncode, 0)
+        self.mode = ''
+        journal = self.root/'journal'
+        self.assertTrue((journal/'volume.pending.json').exists())
+        self.assertFalse((journal/'volume.created.json').exists())
+        self.assertFalse((journal/'machine.pending.json').exists())
+        return journal
+
+    def test_owned_snapshot_fork_survives_unrelated_donor_image_activation(self):
+        journal = self.make_ambiguous_volume()
+        result = self.run_cli(['reconcile-volume', *self.args[1:]])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = json.loads((journal/'intent.json').read_text())['donor']
+        self.volumes['vol_owned']['state'] = 'created'
+        self.machines[DONOR]['instance_id'] = 'different-image-activation'
+        self.machines[DONOR]['config']['image'] = 'registry.fly.io/bench@sha256:' + '7'*64
+        self.machines[DONOR]['image_ref']['digest'] = 'sha256:' + '7'*64
+        before = len(self.writes())
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.writes()), before + 1)
+        self.assertEqual(self.writes()[-1][1], '/v1/apps/' + APP + '/machines')
+        self.assertEqual(self.writes()[-1][2]['config']['image'], original['image'])
+        self.assertEqual(self.writes()[-1][2]['config']['mounts'], [{'volume':'vol_owned','path':'/data'}])
+        self.assertFalse((journal/'volume.created.json').exists())
+        self.assertTrue((journal/'volume.failed.json').exists())
+
+    def test_owned_fork_still_refuses_snapshot_environment_mount_or_volume_tampering(self):
+        self.make_ambiguous_volume()
+        result = self.run_cli(['reconcile-volume', *self.args[1:]])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.volumes['vol_owned']['state'] = 'created'
+        original_machine = copy.deepcopy(self.machines[DONOR])
+        original_snapshot = copy.deepcopy(self.snapshots)
+        original_volume = copy.deepcopy(self.volumes['vol_owned'])
+        before = len(self.writes())
+        for kind in ('snapshot', 'environment', 'mount', 'owned-encryption'):
+            with self.subTest(kind=kind):
+                self.machines[DONOR] = copy.deepcopy(original_machine)
+                self.snapshots = copy.deepcopy(original_snapshot)
+                self.volumes['vol_owned'] = copy.deepcopy(original_volume)
+                if kind == 'snapshot': self.snapshots[0]['digest'] = '0'*64
+                elif kind == 'environment': self.machines[DONOR]['config']['env']['TARGET'] = 'changed'
+                elif kind == 'mount': self.machines[DONOR]['config']['mounts'][0]['volume'] = 'vol_foreign'
+                else: self.volumes['vol_owned']['encrypted'] = False
+                self.assertNotEqual(self.run_cli().returncode, 0)
+                self.assertEqual(len(self.writes()), before)
+
+    def test_lost_ack_reconcile_is_get_only_preserves_receipts_and_waits_for_created(self):
+        journal = self.make_ambiguous_volume()
+        original = {name: (journal/name).read_bytes() for name in ('intent.json', 'volume.pending.json', 'volume.failed.json')}
+        writes = len(self.writes())
+        result = self.run_cli(['reconcile-volume', *self.args[1:]])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.writes()), writes)
+        self.assertFalse((journal/'volume.created.json').exists())
+        receipt = json.loads((journal/'volume.reconciled.json').read_text())
+        self.assertEqual(receipt['authority_kind'], 'reconciled-ambiguous-volume-create')
+        self.assertEqual(receipt['id'], 'vol_owned')
+        self.assertFalse(receipt['snapshot_lineage_verified'])
+        self.assertEqual(receipt['snapshot_provenance'], 'original-writeahead-request')
+        self.assertNotEqual(self.run_cli().returncode, 0)
+        self.assertEqual(len(self.writes()), writes)
+        self.volumes['vol_owned']['state'] = 'created'
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertEqual(len([c for c in self.writes() if c[1].endswith('/volumes')]), 1)
+        for name, raw in original.items(): self.assertEqual((journal/name).read_bytes(), raw)
+        creator = runpy.run_path(str(CLI))
+        authority = creator['verify_created_source'](journal/'result.json')
+        self.assertEqual(authority['volume_authority'], 'reconciled-ambiguous-volume-create')
+        self.assertEqual(authority['volume']['id'], 'vol_owned')
+
+    def test_reconciled_real_creator_preparer_verification_chain(self):
+        self.reconcile_before_prepare = True
+        self.test_real_creator_preparer_and_authenticated_successor_retirement()
+
+    def test_reconcile_rejects_wrong_time_duplicates_protected_and_native_rejection(self):
+        journal = self.make_ambiguous_volume()
+        row = self.volumes['vol_owned']; original = dict(row)
+        writes = len(self.writes())
+        for mutation in ('wrong-time', 'duplicates', 'protected', 'attached', '4xx'):
+            with self.subTest(mutation=mutation):
+                self.volumes['vol_owned'] = dict(original)
+                row = self.volumes['vol_owned']
+                failed_path = journal/'volume.failed.json'; failed_raw = failed_path.read_bytes()
+                if mutation == 'wrong-time': row['created_at'] = '2020-01-01T00:00:00Z'
+                if mutation == 'duplicates': self.volumes['vol_other'] = dict(row, id='vol_other')
+                if mutation == 'protected': row['id'] = VOL
+                if mutation == 'attached': row['attached_machine_id'] = DONOR
+                if mutation == '4xx':
+                    failed = json.loads(failed_raw); failed.update(outcome='native-rejected', native_http_status=429)
+                    failed_path.write_text(json.dumps(failed)); failed_path.chmod(0o600)
+                result = self.run_cli(['reconcile-volume', *self.args[1:]])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((journal/'volume.reconciled.json').exists())
+                self.assertEqual(len(self.writes()), writes)
+                self.volumes.pop('vol_other', None); failed_path.write_bytes(failed_raw)
+
+    def test_reconcile_rejects_missing_false_or_wrongtype_encryption(self):
+        journal = self.make_ambiguous_volume()
+        row = self.volumes['vol_owned']
+        for value in (False, None, 'true', 1):
+            with self.subTest(encrypted=value):
+                if value is None: row.pop('encrypted', None)
+                else: row['encrypted'] = value
+                result = self.run_cli(['reconcile-volume', *self.args[1:]])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((journal/'volume.reconciled.json').exists())
+
+    def assert_reconciled_live_encryption_change_refuses(self, action):
+        journal = self.make_ambiguous_volume()
+        result = self.run_cli(['reconcile-volume', *self.args[1:]])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.volumes['vol_owned'].update(state='created', encrypted=False)
+        writes = len(self.writes())
+        result = self.run_cli([action, *self.args[1:]])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.writes()), writes)
+        self.assertFalse((journal/'machine.pending.json').exists())
+
+    def test_reconciled_current_encryption_loss_blocks_machine_admission(self):
+        self.assert_reconciled_live_encryption_change_refuses('create')
+
+    def test_reconciled_current_encryption_loss_blocks_cleanup(self):
+        self.assert_reconciled_live_encryption_change_refuses('cleanup')
+
+    def test_reconcile_rejects_postdated_or_stale_precreate_inventory(self):
+        journal = self.make_ambiguous_volume()
+        pending_path = journal/'volume.pending.json'
+        pending = json.loads(pending_path.read_text())
+        proof_path = journal/pending['precreate']['name']
+        original = json.loads(proof_path.read_text())
+        for observed in (time.time()+86400, time.time()-3600, float('nan'), True):
+            with self.subTest(observed=observed):
+                proof = dict(original, observed_epoch=observed)
+                proof_path.write_text(json.dumps(proof))
+                pending['precreate']['sha256'] = hashlib.sha256(proof_path.read_bytes()).hexdigest()
+                pending_path.write_text(json.dumps(pending))
+                result = self.run_cli(['reconcile-volume', *self.args[1:]])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((journal/'volume.reconciled.json').exists())
+
+    def test_reconcile_rejects_encryption_detail_disagreement_and_resealed_tamper(self):
+        journal = self.make_ambiguous_volume()
+        actual = self.respond
+        def mismatched(method, path, body):
+            status, value = actual(method, path, body)
+            if method == 'GET' and path.endswith('/volumes/vol_owned'):
+                value = dict(value, encrypted=False)
+            return status, value
+        self.respond = mismatched
+        self.assertNotEqual(self.run_cli(['reconcile-volume', *self.args[1:]]).returncode, 0)
+        self.assertFalse((journal/'volume.reconciled.json').exists())
+        self.respond = actual
+        result = self.run_cli(['reconcile-volume', *self.args[1:]])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = journal/'volume.reconciled.json'
+        receipt = json.loads(path.read_text())
+        receipt['observed_volume']['encrypted'] = False
+        for row in receipt['inventory']:
+            if row['id'] == 'vol_owned': row['encrypted'] = False
+        creator = runpy.run_path(str(CLI))
+        receipt['inventory_sha256'] = creator['sha'](receipt['inventory'])
+        path.write_text(json.dumps(receipt)); self.volumes['vol_owned']['state'] = 'created'
+        writes = len(self.writes())
+        self.assertNotEqual(self.run_cli().returncode, 0)
+        self.assertEqual(len(self.writes()), writes)
+        self.assertFalse((journal/'machine.pending.json').exists())
+
+    def test_reconcile_rejects_missing_or_tampered_original_precreate_invocation(self):
+        journal = self.make_ambiguous_volume()
+        pending_path = journal/'volume.pending.json'; raw = pending_path.read_bytes()
+        pending = json.loads(raw)
+        precreate = journal/pending['precreate']['name']
+        original = precreate.read_bytes()
+        precreate.write_text('{}')
+        self.assertNotEqual(self.run_cli(['reconcile-volume', *self.args[1:]]).returncode, 0)
+        precreate.write_bytes(original)
+        pending.pop('precreate'); pending_path.write_text(json.dumps(pending))
+        self.assertNotEqual(self.run_cli(['reconcile-volume', *self.args[1:]]).returncode, 0)
+        self.assertFalse((journal/'volume.reconciled.json').exists())
+        self.assertEqual(len([c for c in self.writes() if c[1].endswith('/volumes')]), 1)
+
     def prepare_response(self, method, path, body):
         mid = '22222222222222'
         target = '/machines/' + mid
@@ -474,6 +840,13 @@ class Boundary(unittest.TestCase):
         return None
 
     def test_real_creator_preparer_and_authenticated_successor_retirement(self):
+        if getattr(self, 'machine_reconcile_before_prepare', False):
+            self.make_ambiguous_machine()
+            self.assertEqual(self.run_cli(['reconcile-machine', *self.args[1:]]).returncode, 0)
+        if getattr(self, 'reconcile_before_prepare', False):
+            self.make_ambiguous_volume()
+            self.assertEqual(self.run_cli(['reconcile-volume', *self.args[1:]]).returncode, 0)
+            self.volumes['vol_owned']['state'] = 'created'
         self.assertEqual(self.run_cli().returncode, 0)
         helper = runpy.run_path(str(ROOT / 'scripts/cloudbench-prepare-source.py'))
         created = json.loads((self.root / 'journal/result.json').read_text())

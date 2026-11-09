@@ -1,6 +1,131 @@
+diff --git a/scripts/deploy_test_cloud.py b/scripts/deploy_test_cloud.py
+index 41d630f99..edea2d573 100644
+--- a/scripts/deploy_test_cloud.py
++++ b/scripts/deploy_test_cloud.py
+@@ -133,6 +133,9 @@ def collect_fleet(request, root, fleet, started, native_exit):
+     details = {}
+     provenance = load_provenance(fleet / 'execution-provenance.json')
+     verify_source_transport(request, root, provenance)
++    if 'private_source_binding' in request:
++        from deploy_test_private_source import verify_fleet
++        verify_fleet(request, root, fleet)
+     lifecycle = read(fleet / '_batch/lifecycle.json')
+     audit_rows = [line.split('=', 1) for line in
+                   (fleet / 'teardown-ownership/source-audit').read_text().splitlines()]
+@@ -406,6 +409,9 @@ def execute(request, root):
+     for key in ('CLOUDBENCH_LOCAL_PATCH_SOURCE', 'CLOUDBENCH_LOCAL_PATCH_SHA256', 'CLOUDBENCH_LOCAL_PATCH_BASE_REF'):
+         env.pop(key, None)
+     env.update(source_transport_environment(binding))
++    if 'private_source_binding' in request:
++        from deploy_test_private_source import environment
++        env.update(environment(request, root, directory))
+     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
+     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
+     catalog = root / 'agents/benchmarks/tasks.json'
+@@ -436,6 +442,8 @@ def execute(request, root):
+         cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
+         reason = str(error)
+     result = {k: request[k] for k in ('token', 'source', 'gate')}
++    if 'private_source_binding' in request:
++        result['private_source_binding'] = request['private_source_binding']
+     result.update(preallocation_evidence=preallocation_evidence, source_transport=binding, cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
+                   cleanup_complete=cleaned, reused=False, native_exit=code, native_command=argv,
+                   evidence=details, reason=reason, fleet_directory=fleet,
+diff --git a/scripts/deploy_test_cycle.py b/scripts/deploy_test_cycle.py
+index 730a33ed6..84644a752 100644
+--- a/scripts/deploy_test_cycle.py
++++ b/scripts/deploy_test_cycle.py
+@@ -687,6 +687,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
+     result['execution_binding'] = {'input_fingerprint': state['input_fingerprints'].get(name),
+                                    'contract_digest': digest(gate), 'environment': state['environment']}
+     result['isolated_validation'] = admission
++    if 'private_source_binding' in request:
++        result['private_source_binding'] = request['private_source_binding']
+     result['host_admission'] = host_admission
+     result['lifecycle'] = lifecycle
+     result['native_cleanup_reference'] = native_cleanup_reference
+@@ -1290,6 +1292,9 @@ def isolated_admissions(state: dict, gate: str, *, _with_sources=False):
+ 
+ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: dict) -> list[dict]:
+     admitted = isolated_admissions(state, gate['name'], _with_sources=True)
++    if 'private_source_binding' in state and state['private_source_binding']['gate'] == gate['name']:
++        from deploy_test_private_source import bind_request
++        bind_request(state, admitted[0], request, root)
+     entries, covered = admitted if isinstance(admitted, tuple) else (admitted, {})
+     if not entries:
+         return []
+@@ -2480,7 +2485,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
+ def main(argv: list[str] | None = None) -> int:
+     """Dispatch a validated cycle transition and persist its evidence."""
+     parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-completed-local"])
++    parser.add_argument("action", choices=["prepare-private-source-transport", "prepare-private-source", "init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-completed-local"])
+     parser.add_argument('--donor-state', type=Path,
+                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
+     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
+@@ -2514,7 +2519,18 @@ def main(argv: list[str] | None = None) -> int:
+             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
+             if args.action == "init" and state_path.exists():
+                 raise ValueError("existing cycle must not be reset")
+-            if args.action in {"run", "resume"}:
++            if args.action == 'prepare-private-source-transport':
++                if args.input is None:
++                    raise ValueError('--input exact private transport operation required')
++                from deploy_test_private_source import prepare_transport
++                print(json.dumps(prepare_transport(state, plan, args.root, bounded_read(args.input, 'private transport'))))
++                return 0
++            elif args.action == 'prepare-private-source':
++                if args.input is None:
++                    raise ValueError('--input exact private preparation operation required')
++                from deploy_test_private_source import prepare_cycle
++                prepare_cycle(state, plan, args.root, state_path, bounded_read(args.input, 'private preparation'))
++            elif args.action in {"run", "resume"}:
+                 if args.action == "resume":
+                     if state["phase"] != "interrupted":
+                         raise ValueError("resume requires an interrupted cycle")
+diff --git a/scripts/deploy_test_native_cleanup.py b/scripts/deploy_test_native_cleanup.py
+index b19772a2e..1dea89217 100644
+--- a/scripts/deploy_test_native_cleanup.py
++++ b/scripts/deploy_test_native_cleanup.py
+@@ -1421,6 +1421,9 @@ def clean_isolated_successor(state, prior, original, successor):
+     request = bounded_read(folder / 'request.json', 'successor request')
+     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
+          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
++    if 'private_source_binding' in request:
++        need(successor.get('private_source_binding') == request['private_source_binding'],
++             'successor private source binding changed')
+     checks, skips = request['checks'], request['skips']
+     need(isinstance(checks, list) and checks and isinstance(skips, dict)
+          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
+@@ -1438,6 +1441,9 @@ def clean_isolated_successor(state, prior, original, successor):
+     result_path = folder / 'result.json'
+     need(successor.get('worker_result') == str(result_path), 'successor result locator')
+     result = bounded_read(result_path, 'successor native result')
++    if 'private_source_binding' in request:
++        need(result.get('private_source_binding') == request['private_source_binding'],
++             'native private source binding changed')
+     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
+     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
+          and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
+@@ -1625,7 +1631,11 @@ def inherited_native_sources(state, entries, *, _historical_only=False):
+     anchors = [e for e in entries if e['proof'].get('compatibility') in {r16.MODE, r19.MODE}]
+     need(anchors, 'current shared partition authority missing')
+     native_source_covered=False
+-    if not clean and not _historical_only and candidate['validation_source']!=state['source']:
++    if not clean and not _historical_only and 'private_source_binding' in state:
++        from deploy_test_private_source import validate_binding
++        validate_binding(state, entries, Path(candidate['owner']['worker_root']))
++        native_source_covered=True
++    if not clean and not _historical_only and not native_source_covered and candidate['validation_source']!=state['source']:
+         from cloudbench_maintenance import validate_current, anchor_for
+         maintenance_anchor,operation=anchor_for(entries)
+         try:
+diff --git a/scripts/deploy_test_private_source.py b/scripts/deploy_test_private_source.py
+new file mode 100644
+index 000000000..080ecab20
 --- /dev/null
 +++ b/scripts/deploy_test_private_source.py
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,342 @@
 +"""Read-only parent admission for an independently prepared fleet source.
 +
 +cycle/debt seals -> native prepare verifier -> versioned manifest -> captured fleet base.
@@ -129,6 +254,8 @@
 +    need(manifest.get('version') == 2 and manifest.get('lease_protocol') == 'cloudbench-source-lease-v1'
 +         and re.fullmatch('[0-9a-f]{32}', manifest.get('creation_nonce', '')) is not None,
 +         'versioned source consumer protocol required')
++    need(isinstance(request.get('guest_env_sha256'), dict)
++         and manifest.get('guest_env_sha256') == request['guest_env_sha256'], 'requested guest environment')
 +    need(manifest['shared_machine_id'] == '683e47df5094d8'
 +         and manifest['shared_volume_id'] == protected['683e47df5094d8'], 'shared base identity')
 +    excluded = dict(protected)
@@ -341,125 +468,11 @@
 +    need(re.fullmatch('[a-f0-9]{32}', operation['nonce']), 'transport nonce')
 +    directory.mkdir(mode=0o700)
 +    return prepare_source_transport({'source': state['source'], 'token': operation['nonce']}, root, directory)
---- a/scripts/deploy_test_cycle.py
-+++ b/scripts/deploy_test_cycle.py
-@@ -687,6 +687,8 @@
-     result['execution_binding'] = {'input_fingerprint': state['input_fingerprints'].get(name),
-                                    'contract_digest': digest(gate), 'environment': state['environment']}
-     result['isolated_validation'] = admission
-+    if 'private_source_binding' in request:
-+        result['private_source_binding'] = request['private_source_binding']
-     result['host_admission'] = host_admission
-     result['lifecycle'] = lifecycle
-     result['native_cleanup_reference'] = native_cleanup_reference
-@@ -1290,6 +1292,9 @@
- 
- def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: dict) -> list[dict]:
-     admitted = isolated_admissions(state, gate['name'], _with_sources=True)
-+    if 'private_source_binding' in state and state['private_source_binding']['gate'] == gate['name']:
-+        from deploy_test_private_source import bind_request
-+        bind_request(state, admitted[0], request, root)
-     entries, covered = admitted if isinstance(admitted, tuple) else (admitted, {})
-     if not entries:
-         return []
-@@ -2480,7 +2485,7 @@
- def main(argv: list[str] | None = None) -> int:
-     """Dispatch a validated cycle transition and persist its evidence."""
-     parser = argparse.ArgumentParser(description=__doc__)
--    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-completed-local"])
-+    parser.add_argument("action", choices=["prepare-private-source-transport", "prepare-private-source", "init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-completed-local"])
-     parser.add_argument('--donor-state', type=Path,
-                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
-     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
-@@ -2514,7 +2519,18 @@
-             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
-             if args.action == "init" and state_path.exists():
-                 raise ValueError("existing cycle must not be reset")
--            if args.action in {"run", "resume"}:
-+            if args.action == 'prepare-private-source-transport':
-+                if args.input is None:
-+                    raise ValueError('--input exact private transport operation required')
-+                from deploy_test_private_source import prepare_transport
-+                print(json.dumps(prepare_transport(state, plan, args.root, bounded_read(args.input, 'private transport'))))
-+                return 0
-+            elif args.action == 'prepare-private-source':
-+                if args.input is None:
-+                    raise ValueError('--input exact private preparation operation required')
-+                from deploy_test_private_source import prepare_cycle
-+                prepare_cycle(state, plan, args.root, state_path, bounded_read(args.input, 'private preparation'))
-+            elif args.action in {"run", "resume"}:
-                 if args.action == "resume":
-                     if state["phase"] != "interrupted":
-                         raise ValueError("resume requires an interrupted cycle")
---- a/scripts/deploy_test_cloud.py
-+++ b/scripts/deploy_test_cloud.py
-@@ -133,6 +133,9 @@
-     details = {}
-     provenance = load_provenance(fleet / 'execution-provenance.json')
-     verify_source_transport(request, root, provenance)
-+    if 'private_source_binding' in request:
-+        from deploy_test_private_source import verify_fleet
-+        verify_fleet(request, root, fleet)
-     lifecycle = read(fleet / '_batch/lifecycle.json')
-     audit_rows = [line.split('=', 1) for line in
-                   (fleet / 'teardown-ownership/source-audit').read_text().splitlines()]
-@@ -406,6 +409,9 @@
-     for key in ('CLOUDBENCH_LOCAL_PATCH_SOURCE', 'CLOUDBENCH_LOCAL_PATCH_SHA256', 'CLOUDBENCH_LOCAL_PATCH_BASE_REF'):
-         env.pop(key, None)
-     env.update(source_transport_environment(binding))
-+    if 'private_source_binding' in request:
-+        from deploy_test_private_source import environment
-+        env.update(environment(request, root, directory))
-     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
-     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
-     catalog = root / 'agents/benchmarks/tasks.json'
-@@ -436,6 +442,8 @@
-         cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
-         reason = str(error)
-     result = {k: request[k] for k in ('token', 'source', 'gate')}
-+    if 'private_source_binding' in request:
-+        result['private_source_binding'] = request['private_source_binding']
-     result.update(preallocation_evidence=preallocation_evidence, source_transport=binding, cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
-                   cleanup_complete=cleaned, reused=False, native_exit=code, native_command=argv,
-                   evidence=details, reason=reason, fleet_directory=fleet,
---- a/scripts/deploy_test_native_cleanup.py
-+++ b/scripts/deploy_test_native_cleanup.py
-@@ -1421,6 +1421,9 @@
-     request = bounded_read(folder / 'request.json', 'successor request')
-     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
-          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
-+    if 'private_source_binding' in request:
-+        need(successor.get('private_source_binding') == request['private_source_binding'],
-+             'successor private source binding changed')
-     checks, skips = request['checks'], request['skips']
-     need(isinstance(checks, list) and checks and isinstance(skips, dict)
-          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
-@@ -1438,6 +1441,9 @@
-     result_path = folder / 'result.json'
-     need(successor.get('worker_result') == str(result_path), 'successor result locator')
-     result = bounded_read(result_path, 'successor native result')
-+    if 'private_source_binding' in request:
-+        need(result.get('private_source_binding') == request['private_source_binding'],
-+             'native private source binding changed')
-     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
-     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-          and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
-@@ -1625,7 +1631,11 @@
-     anchors = [e for e in entries if e['proof'].get('compatibility') in {r16.MODE, r19.MODE}]
-     need(anchors, 'current shared partition authority missing')
-     native_source_covered=False
--    if not clean and not _historical_only and candidate['validation_source']!=state['source']:
-+    if not clean and not _historical_only and 'private_source_binding' in state:
-+        from deploy_test_private_source import validate_binding
-+        validate_binding(state, entries, Path(candidate['owner']['worker_root']))
-+        native_source_covered=True
-+    if not clean and not _historical_only and not native_source_covered and candidate['validation_source']!=state['source']:
-         from cloudbench_maintenance import validate_current, anchor_for
-         maintenance_anchor,operation=anchor_for(entries)
-         try:
+diff --git a/scripts/tests/deploy-test-cycle.test.py b/scripts/tests/deploy-test-cycle.test.py
+index c0d9a1ff7..56d431589 100644
 --- a/scripts/tests/deploy-test-cycle.test.py
 +++ b/scripts/tests/deploy-test-cycle.test.py
-@@ -8796,4 +8796,263 @@
+@@ -8796,4 +8796,272 @@ class BoundNativeHubRetirement(unittest.TestCase):
                  self.m.retired_hub(self.owner_path,self.owner)
  
  
@@ -482,6 +495,7 @@
 +        self.protected = {'683e47df5094d8': 'vol_vwnym366kn7k8mmv',
 +                          '811d632f2650e8': 'vol_r1jde9donnx2mn9r'}
 +        self.manifest = dict(version=2, lease_protocol='cloudbench-source-lease-v1', creation_nonce='6'*32,
++            guest_env_sha256={'AGENTS_ENV_B64':'1'*64,'BACKEND_ENV_B64':'2'*64},
 +            app='navi-whisper-lux-bench', owner_token='a'*32,
 +            machine_id='abcd', instance_id='INSTANCE', machine_name='cloudbench-source-'+'a'*32,
 +            volume_id='vol_FIXTUREprivate', region='iad', image_digest='sha256:'+'b'*64,
@@ -505,7 +519,8 @@
 +            path = self.directory / (key+'.json'); c.write(path,value)
 +            self.artifacts[key] = dict(path=str(path),sha256=c.sha_file(path))
 +        c.write(Path(self.artifacts['request']['path']),
-+                {'protected_resources':self.protected,'build':self.artifacts['build']})
++                {'protected_resources':self.protected,'build':self.artifacts['build'],
++                 'guest_env_sha256':self.manifest['guest_env_sha256']})
 +        self.artifacts['request']['sha256']=c.sha_file(self.artifacts['request']['path'])
 +        import cloudbench_maintenance as maintenance
 +        build_mock=patch.object(maintenance,'image_build',return_value={'explicit':'image-build-test-double'})
@@ -655,9 +670,16 @@
 +        self.assertNotIn('result',retained)  # Unknown outcomes stay unfinished, never credited.
 +        self.assertEqual(self.state['failures'],c.read(cycle)['failures'])
 +
++    def test_parent_binds_native_successor_to_the_requested_guest_environment(self):
++        self.manifest['guest_env_sha256']['AGENTS_ENV_B64']='0'*64
++        path=Path(self.artifacts['manifest']['path']);c.write(path,self.manifest)
++        self.artifacts['manifest']['sha256']=c.sha_file(path)
++        with self.assertRaisesRegex(ValueError,'requested guest environment'):
++            self.validate()
++
 +    def test_protocol_downgrade_cannot_admit_a_new_source(self):
 +        self.manifest['version']=1
-+        del self.manifest['lease_protocol'];del self.manifest['creation_nonce']
++        del self.manifest['lease_protocol'];del self.manifest['creation_nonce'];del self.manifest['guest_env_sha256']
 +        path=Path(self.artifacts['manifest']['path']);c.write(path,self.manifest)
 +        self.artifacts['manifest']['sha256']=c.sha_file(path)
 +        with self.assertRaisesRegex(ValueError,'versioned source consumer protocol'):

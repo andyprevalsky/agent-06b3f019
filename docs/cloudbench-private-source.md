@@ -95,7 +95,12 @@ cleanup or financial credit.
 
 New native preparations publish **version two**, adding `lease_protocol` equal to
 `cloudbench-source-lease-v1` and the exact `creation_nonce` from the original
-creation journal. Legacy readers reject this schema. Current readers refuse a
+creation journal. It also requires `guest_env_sha256`, the two observed raw-base64
+environment digests sealed by preparation. Each primary and autoscaled worker
+receives the captured manifest through its trusted boot payload or wrapper and
+checks effective secret values against that contract before decoding files or
+starting a stack. A coherent rotation of an app blob and its companion digest
+therefore refuses this source rather than silently changing its environment. Legacy readers reject this schema. Current readers refuse a
 version-one downgrade of a native protocol-tagged source. Existing version-one
 sources retain their original behavior.
 

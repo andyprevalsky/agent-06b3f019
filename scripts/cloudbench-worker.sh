@@ -120,6 +120,7 @@ fi
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"
+cloudbench_verify_source_guest_env || exit 1
 [ -n "${AGENTS_ENV_B64:-}" ] || { log "FATAL: AGENTS_ENV_B64 is not set"; exit 1; }
 [ -n "${BACKEND_ENV_B64:-}" ] || { log "FATAL: BACKEND_ENV_B64 is not set"; exit 1; }
 umask 077

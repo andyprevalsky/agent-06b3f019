@@ -2,10 +2,11 @@
 """Create at most one independently owned, parked private source.
 
 Requires FLY_API_TOKEN and flyctl read access. Never stages app secrets, starts
-Machines, snapshots/stops donors, retries creates, or adopts discovered IDs.
+Machines, snapshots/stops donors, or retries creates. Inventory alone grants no
+ownership; GET-only reconciliation requires the original writeahead authority.
 Use the same --journal and arguments after interruption. A pending write without
-its durable ACK is ambiguous and requires provider reconciliation outside this
-CLI. `cleanup` removes only positively acknowledged parked resources, optionally
+its durable ACK is ambiguous and requires explicit GET-only reconciliation.
+`cleanup` removes only positively acknowledged/reconciled parked resources, optionally
 through --prepared-request/--prepared-result/--prepared-manifest verification;
 it never guesses an ID. Retain this journal as original create authority for the
 prepare-source helper. Capacity reads follow run-original600 capacity_snapshot:
@@ -19,6 +20,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from datetime import datetime
@@ -42,6 +44,14 @@ APP = 'navi-whisper-lux-bench'
 PROTECTED_MACHINES = {'683e47df5094d8', '811d632f2650e8', '832717a71940d8'}
 PROTECTED_VOLUMES = {'vol_vwnym366kn7k8mmv', 'vol_r1jde9donnx2mn9r'}
 MAX_BYTES = 64 * 1024 * 1024
+LEGACY_HEAD = 'd8f1bcd128c02bb938b64323991eabd70748e175'
+LEGACY_SOURCE_SHA = 'ac749cf4f4eaeb317fd5474fcc39d73171f69bd8953f3b69025a31502c3f3585'
+LEGACY_JOURNAL = HERE.parent / '.context/image-preparation-forensics/live/create-source-a'
+LEGACY_PINS = {
+    'intent.json': 'bc5b4956bc25e0d7be884132bfff147227f11062b34f0f6f9eaecb8ab76129aa',
+    'volume.pending.json': '5a4acaa77b9d81bd61ff3171134cc6a292f47985e876b77073dc9b74e3390cbd',
+    'volume.failed.json': 'edb33e389820f9023c6ea63d5999faea3415f59c2456ec11ec427ac05f3279b9',
+    'volume-1794264702770370112.capacity.json': 'b97bcff1c449d9ec8677938bd123ef7fbd81f7b561b0f5d7be2ef2e129f8358a'}
 
 
 class Refusal(ValueError):
@@ -61,7 +71,7 @@ def sha(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
-def read(path):
+def private_payload(path):
     STORAGE['plain'](path)
     before = path.lstat()
     def stable(info):
@@ -79,7 +89,11 @@ def read(path):
         os.close(fd)
     need(st.st_uid == os.geteuid() and not st.st_mode & 0o077 and st.st_nlink == 1,
          'private original receipt required')
-    return json.loads(raw, object_pairs_hook=STORAGE['unique_object'])
+    return raw
+
+
+def read(path):
+    return json.loads(private_payload(path), object_pairs_hook=STORAGE['unique_object'])
 
 
 def save(path, value):
@@ -110,25 +124,40 @@ class Native:
         self.auth = auth(os.environ.get('FLY_API_TOKEN', ''), time.monotonic() + 30)
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def request(self, method, url, body=None, absent=False, headers=None):
+    def request(self, method, url, body=None, absent=False, headers=None, capture=None):
         request = urllib.request.Request(url, method=method, data=None if body is None else canonical(body),
             headers={'Authorization': self.auth, 'Content-Type': 'application/json', 'Accept': 'application/json', **(headers or {})})
+        started = time.time()
+        phase, status = 'headers', None
         try:
             with DEADLINES['bounded'](20), self.opener.open(request, timeout=20) as response:
+                status = response.status
+                phase = 'body'
                 raw = response.read(MAX_BYTES + 1)
                 need(len(raw) <= MAX_BYTES, 'native response too large')
+                if capture is not None:
+                    capture(raw, status, started, time.time())
+                phase = 'decode'
                 return json.loads(raw, object_pairs_hook=STORAGE['unique_object']) if raw.strip() else {}
         except urllib.error.HTTPError as error:
             if absent and error.code == 404:
                 return None
             failure = Refusal('native HTTP request failed: status ' + str(error.code))
             failure.native_status = error.code
+            failure.diagnostic = dict(exception_class=type(error).__name__, response_phase=phase,
+                reason='native-http-error', started_epoch=started, failed_epoch=time.time(), elapsed_s=time.time()-started)
             raise failure from None
-        except (OSError, ValueError, DEADLINES['Deadline']):
-            raise Refusal('native response unavailable or malformed') from None
+        except (OSError, ValueError, DEADLINES['Deadline']) as error:
+            failure = Refusal('native response unavailable or malformed')
+            failure.native_status = status
+            failure.diagnostic = dict(exception_class=type(error).__name__, response_phase=phase,
+                reason='absolute-response-deadline' if isinstance(error, DEADLINES['Deadline']) else
+                       'socket-timeout' if isinstance(error, TimeoutError) else 'decode-or-transport-failure',
+                started_epoch=started, failed_epoch=time.time(), elapsed_s=time.time()-started)
+            raise failure from None
 
-    def api(self, method, path, body=None, app=APP, absent=False, headers=None):
-        return self.request(method, self.base + '/v1/apps/' + app + path, body, absent, headers)
+    def api(self, method, path, body=None, app=APP, absent=False, headers=None, capture=None):
+        return self.request(method, self.base + '/v1/apps/' + app + path, body, absent, headers, capture)
 
 
 def inventory(rows, label):
@@ -261,6 +290,21 @@ def binding(args, api):
         reservation_root=reservation_inventory()['root'])
 
 
+def verify_fork_snapshot_input(api, args, intent):
+    """A completed owned fork retains its pinned inputs across donor image updates.
+
+    The new Machine still uses the original immutable image/config request.
+    Only the donor's mutable image activation/version is outside this boundary;
+    snapshot, dependency attestation, mount, environment and storage inputs stay
+    exact. This check grants no mutation rights over the donor.
+    """
+    current = donor(api, args)
+    original = intent['donor']
+    fields = ('machine_id', 'volume_id', 'region', 'size_gb', 'env', 'snapshot', 'dependency_proof')
+    need(all(current.get(key) == original.get(key) for key in fields),
+         'original fork snapshot/dependency/environment input changed')
+
+
 def validate_intent(intent):
     need(isinstance(intent, dict) and intent.get('version') == 1, 'original intent version')
     b, source = intent['binding'], intent['donor']
@@ -293,14 +337,41 @@ def machine_config(intent, volume_id):
                   'cloudbench_source_create_nonce': intent['nonce'], 'cloudbench_source_create_intent': sha(intent)})
 
 
+def normalized_config(config, intent, volume_id):
+    """Only Fly's documented omitempty defaults and GET mount enrichments.
+
+    https://github.com/superfly/fly-go/blob/main/machine_types.go
+    Raw native configuration remains the receipt/preparer identity.
+    """
+    need(isinstance(config, dict), 'full native configuration required')
+    value = json.loads(json.dumps(config))
+    need('auto_destroy' not in value or value['auto_destroy'] is False, 'invalid auto_destroy default')
+    value.setdefault('auto_destroy', False)
+    value.setdefault('env', {})
+    need(isinstance(value['env'], dict) and all(isinstance(k, str) and isinstance(v, str)
+         for k, v in value['env'].items()), 'invalid environment default')
+    mounts = value.get('mounts')
+    need(isinstance(mounts, list) and len(mounts) == 1 and isinstance(mounts[0], dict), 'one exact mount required')
+    mount = mounts[0]
+    need({'volume', 'path'} <= mount.keys() <= {'volume', 'path', 'name', 'size_gb', 'encrypted'}
+         and mount['volume'] == volume_id and mount['path'] == '/data', 'native mount ownership changed')
+    enrichment = dict(name=intent['volume_request']['name'], size_gb=intent['donor']['size_gb'], encrypted=True)
+    need(all(type(mount[k]) is type(v) and mount[k] == v for k, v in enrichment.items() if k in mount),
+         'native mount metadata differs from owned Volume')
+    value['mounts'] = [{'volume': volume_id, 'path': '/data'}]
+    return value
+
+
 def verify_volume(api, intent, receipt, machine_id=None):
     vid = receipt.get('id')
     need(isinstance(vid, str) and re.fullmatch('vol_[A-Za-z0-9]+', vid) and vid not in PROTECTED_VOLUMES
          and vid != intent['donor']['volume_id'], 'invalid owned volume receipt')
     row = api.api('GET', '/volumes/' + vid)
     need(isinstance(row, dict) and row.get('id') == vid and row.get('name') == intent['volume_request']['name']
-         and row.get('region') == intent['donor']['region'] and row.get('size_gb') == intent['donor']['size_gb']
-         and row.get('state') == 'created' and row.get('attached_machine_id') == machine_id, 'owned volume changed or not ready')
+         and row.get('region') == intent['donor']['region'] and type(row.get('size_gb')) is int
+         and row.get('size_gb') == intent['donor']['size_gb']
+         and row.get('state') == 'created' and row.get('encrypted') is True
+         and row.get('attached_machine_id') == machine_id, 'owned volume changed or not ready')
     return row
 
 
@@ -318,7 +389,8 @@ def verify_machine(api, intent, machine, volume, successor=None):
     need(isinstance(row, dict) and row.get('id') == mid and row.get('name') == 'cloudbench-source-' + intent['binding']['owner_token']
          and row.get('instance_id') == (successor or machine).get('instance_id') and row.get('region') == intent['donor']['region']
          and row.get('state') in ({'stopped'} if successor else {'created', 'stopped'})
-         and row.get('config') == (successor['config'] if successor else machine_config(intent, volume['id']))
+         and canonical(normalized_config(row.get('config'), intent, volume['id']))
+             == canonical(normalized_config(successor['config'] if successor else machine_config(intent, volume['id']), intent, volume['id']))
          and row.get('image_ref', {}).get('digest') == (successor['config']['image'] if successor else intent['donor']['image']).rsplit('@', 1)[1],
          'owned Machine changed, active, or foreign')
     verify_volume(api, intent, volume, mid)
@@ -334,7 +406,8 @@ def validate_ack(intent, kind, request, ack):
          and ack['id'] not in {intent['donor']['machine_id'], intent['donor']['volume_id']}
          and row.get('name') == request['name'] and row.get('region') == request['region'], 'original create ACK changed')
     if kind == 'machine':
-        need(row.get('config') == request['config'] and row.get('instance_id') == ack.get('instance_id')
+        vid = request['config']['mounts'][0]['volume']
+        need(canonical(normalized_config(row.get('config'), intent, vid)) == canonical(request['config']) and row.get('instance_id') == ack.get('instance_id')
              and isinstance(row.get('instance_id'), str) and row['instance_id']
              and row.get('state') in {'created', 'stopped'}
              and row.get('image_ref', {}).get('digest') == intent['donor']['image'].rsplit('@', 1)[1],
@@ -344,9 +417,272 @@ def validate_ack(intent, kind, request, ack):
              'original volume ACK changed')
 
 
+def raw_sha(path):
+    return hashlib.sha256(private_payload(path)).hexdigest()
+
+
+def volume_authority_path(journal):
+    created, reconciled = journal / 'volume.created.json', journal / 'volume.reconciled.json'
+    need(not (created.exists() and reconciled.exists()), 'conflicting original/reconciled volume authority')
+    return reconciled if reconciled.exists() else created
+
+
+def machine_authority_path(journal):
+    created, reconciled = journal / 'machine.created.json', journal / 'machine.reconciled.json'
+    need(not (created.exists() and reconciled.exists()), 'conflicting original/reconciled Machine authority')
+    return reconciled if reconciled.exists() else created
+
+
+def pending_value(journal, kind, request, intent):
+    pending = read(journal / (kind + '.pending.json'))
+    expected = envelope(intent, {'request': request})
+    if 'precreate' in pending:
+        descriptor = pending['precreate']
+        need(set(descriptor) == {'name', 'sha256'} and re.fullmatch(kind + r'\.precreate-[0-9]+\.json', descriptor['name']),
+             'original precreate descriptor required')
+        path = journal / descriptor['name']
+        need(raw_sha(path) == descriptor['sha256'], 'original precreate inventory changed')
+        proof = record(journal, descriptor['name'], intent)
+        rows = inventory(proof['volumes' if kind == 'volume' else 'machines'], 'precreate ' + kind)
+        observed = proof['observed_epoch']
+        pending_mtime = (journal / (kind + '.pending.json')).stat().st_mtime
+        need(type(observed) in (int, float) and 0 < observed <= time.time() and math.isfinite(observed)
+             and pending_mtime - 60 <= observed <= pending_mtime + 1
+             and path.stat().st_mtime <= pending_mtime
+             and not any(row.get('name') == request['name'] for row in rows), 'original precreate collision absence required')
+        expected['precreate'] = descriptor
+    need(pending == expected, 'original pending request changed')
+    return pending
+
+
+def reconciliation_authority(journal, intent, request):
+    pending = pending_value(journal, 'volume', request, intent)
+    if 'precreate' in pending:
+        return dict(kind='sealed-precreate-inventory', precreate=pending['precreate'])
+    # The sole legacy exception pins the actual original operation, not a flag
+    # accepting an arbitrary caller's receipts or a discovered existing Volume.
+    need(journal == LEGACY_JOURNAL, 'no original invocation/precreate authority')
+    for name, digest in LEGACY_PINS.items():
+        need(raw_sha(journal / name) == digest, 'pinned legacy operation receipt changed')
+    operation_path = journal.parent / 'source-operation.json'
+    log_path = journal.parent / 'create-source-a.log'
+    need(raw_sha(operation_path) == '63d6a806b8cbc201c9d1fe5764d519fa99e2cd1ef3ad5b0432efb4e21d59dd10'
+         and hashlib.sha256(private_payload(log_path)).hexdigest() == '6d72c1788585e597c616c70c12a051075317bd54d5e8847a7028b2e33579b570',
+         'retained original invocation changed')
+    operation = read(operation_path)
+    need(operation['head'] == LEGACY_HEAD and operation['owner_token'] == intent['binding']['owner_token']
+         and all(operation[k] == intent['binding'][k] for k in ('donor_machine_id', 'donor_volume_id', 'snapshot_id')),
+         'original invocation identity differs')
+    original = subprocess.check_output(['git', '--no-replace-objects', '-C', str(HERE.parent), 'show',
+                                        LEGACY_HEAD + ':scripts/cloudbench-prepare-source-create.py'], timeout=20)
+    need(hashlib.sha256(original).hexdigest() == LEGACY_SOURCE_SHA, 'original creator source pin differs')
+    need((journal / 'volume.pending.json').stat().st_mtime_ns == 1794264708939776346
+         and (journal / 'volume.failed.json').stat().st_mtime_ns == 1794264728944081406,
+         'original invocation clock changed')
+    return dict(kind='pinned-original-legacy-invocation', source_head=LEGACY_HEAD, source_sha256=LEGACY_SOURCE_SHA,
+                operation_sha256=raw_sha(operation_path), precreate_inventory_gap=True)
+
+
+def verify_reconciled(journal, intent, request, receipt):
+    need(receipt.get('authority_kind') == 'reconciled-ambiguous-volume-create'
+         and receipt.get('snapshot_lineage_verified') is False
+         and receipt.get('snapshot_provenance') == 'original-writeahead-request'
+         and receipt.get('request_sha256') == sha(request)
+         and receipt.get('pending_sha256') == raw_sha(journal / 'volume.pending.json')
+         and receipt.get('failure_sha256') == raw_sha(journal / 'volume.failed.json')
+         and receipt.get('authority') == reconciliation_authority(journal, intent, request),
+         'reconciled original operation authority changed')
+    row = receipt['observed_volume']
+    need(receipt['id'] == row.get('id') and receipt['inventory_sha256'] == sha(receipt['inventory'])
+         and receipt['snapshot_sha256'] == sha(receipt['donor_snapshot']), 'reconciled native evidence changed')
+    verify_reconciliation_row(journal, intent, request, receipt['inventory'], row, receipt['donor_snapshot'])
+
+
+def verify_reconciliation_row(journal, intent, request, rows, row, snapshot):
+    failed = record(journal, 'volume.failed.json', intent)
+    need(failed.get('outcome') == 'ambiguous' and (failed.get('native_http_status') is None
+         or failed['native_http_status'] >= 500 or 200 <= failed['native_http_status'] < 300),
+         'native rejection is not ambiguous-create recovery authority')
+    rows = inventory(rows, 'reconciliation Volume')
+    matches = [v for v in rows if v.get('name') == request['name']]
+    need(len(matches) == 1 and isinstance(row, dict)
+         and all(matches[0].get(k) == row.get(k) for k in
+                 ('id', 'name', 'region', 'size_gb', 'encrypted', 'created_at', 'attached_machine_id', 'attached_alloc_id'))
+         and matches[0].get('state') in {'restoring', 'created'}, 'unique exact native Volume listing/detail required')
+    vid = row.get('id')
+    need(isinstance(vid, str) and re.fullmatch('vol_[A-Za-z0-9]+', vid)
+         and vid not in PROTECTED_VOLUMES and vid != intent['donor']['volume_id']
+         and row.get('name') == 'cbs_' + intent['binding']['owner_token'][:26]
+         and row.get('region') == request['region'] and row.get('size_gb') == request['size_gb']
+         and row.get('encrypted') is True
+         and row.get('attached_machine_id') is None and row.get('attached_alloc_id') is None
+         and row.get('state') in {'restoring', 'created'}, 'native Volume is foreign, attached, or invalid')
+    created = datetime.fromisoformat(row['created_at'].replace('Z', '+00:00')).timestamp()
+    diagnostic = failed.get('diagnostic') or {}
+    started = diagnostic.get('started_epoch', (journal / 'volume.pending.json').stat().st_mtime)
+    ended = diagnostic.get('failed_epoch', (journal / 'volume.failed.json').stat().st_mtime)
+    need(type(started) in (int, float) and type(ended) in (int, float)
+         # Kernel filesystem mtimes can lag wall-clock event stamps by a tick.
+         and (journal / 'volume.pending.json').stat().st_mtime - 1 <= started <= ended
+         <= (journal / 'volume.failed.json').stat().st_mtime + 1
+         and started <= created <= ended, 'native Volume outside original create attempt window')
+    need(snapshot == intent['donor']['snapshot'] and snapshot['id'] == request['snapshot_id']
+         and SNAPSHOT([snapshot], request['snapshot_id']) is not None, 'original donor snapshot proof differs')
+
+
+def reconcile_volume(api, journal, intent):
+    need(not any(journal.glob('machine.*.json')) and not (journal / 'cleanup.complete.json').exists()
+         and not any(journal.glob('*.delete*.json')) and not (journal / 'volume.created.json').exists(),
+         'reconciliation requires original ambiguous Volume only; no Machine attempt')
+    request = intent['volume_request']
+    authority = reconciliation_authority(journal, intent, request)
+    failed = record(journal, 'volume.failed.json', intent)
+    rows = inventory(api.api('GET', '/volumes'), 'reconciliation Volume')
+    matches = [row for row in rows if row.get('name') == request['name']]
+    need(len(matches) == 1, 'native Volume missing or duplicate')
+    row = api.api('GET', '/volumes/' + matches[0]['id'])
+    snapshots = api.api('GET', '/volumes/' + intent['donor']['volume_id'] + '/snapshots')
+    snapshot = SNAPSHOT(snapshots, request['snapshot_id'])
+    verify_reconciliation_row(journal, intent, request, rows, row, snapshot)
+    path = journal / 'volume.reconciled.json'
+    if path.exists():
+        receipt = record(journal, path.name, intent)
+        verify_reconciled(journal, intent, request, receipt)
+        need(receipt['id'] == row['id'], 'original reconciled Volume changed')
+        return receipt
+    receipt = envelope(intent, dict(authority_kind='reconciled-ambiguous-volume-create', authority=authority,
+        request_sha256=sha(request), pending_sha256=raw_sha(journal / 'volume.pending.json'),
+        failure_sha256=raw_sha(journal / 'volume.failed.json'), id=row['id'], instance_id=None,
+        observed_volume=row, inventory=rows, inventory_sha256=sha(rows), donor_snapshot=snapshot,
+        snapshot_lineage_verified=False, snapshot_provenance='original-writeahead-request',
+        snapshot_sha256=sha(snapshot), observed_epoch=time.time(), provider_writes=False))
+    save(path, receipt)
+    return receipt
+
+
+def machine_reconciliation_authority(journal, intent, request):
+    pending = pending_value(journal, 'machine', request, intent)
+    if 'precreate' in pending:
+        return dict(kind='sealed-precreate-inventory', precreate=pending['precreate'])
+    need(journal == LEGACY_JOURNAL, 'no original Machine invocation/precreate authority')
+    pins = dict(LEGACY_PINS, **{
+        'machine.pending.json': '4ae0658062114f6a6e2424ebd46acf4aaf0a96701f3981bcc8b13a7f9d281c14',
+        'machine-1794266845846846129.capacity.json': '967affe1904931758fd4cb2c6a633ed6df3d13fde63cc73d098f8e8a37835f8b',
+        'volume.reconciled.json': '52977998cb75c282b08f85df94ea105f23b2f2a1c2f1fc1995f4e558bf074300'})
+    need(all(raw_sha(journal / name) == digest for name, digest in pins.items()), 'original Machine journal changed')
+    invocation = journal.parent / 'create-invocation-3.json'
+    source = HERE.parent / '.context/creator-machine-reconcile/original-a60.py'
+    operation = journal.parent / 'source-operation.json'
+    need(raw_sha(invocation) == '660be19d5ec9539c9e1222dee65ce9b53d3fc03166e791ac8e2ed11b48e3eb25'
+         and raw_sha(source) == 'a60d29aaa17e6876a3a5c125a5eb9e5b38945fc8be1529e0d6106b9283146fb3'
+         and raw_sha(operation) == '63d6a806b8cbc201c9d1fe5764d519fa99e2cd1ef3ad5b0432efb4e21d59dd10'
+         and read(operation)['head'] == LEGACY_HEAD
+         and read(invocation)['creator_sha256'] == raw_sha(source)
+         and (journal / 'machine.pending.json').stat().st_mtime_ns == 1794266849060412838,
+         'retained original Machine source/invocation differs')
+    return dict(kind='pinned-original-legacy-machine-invocation', source_sha256=raw_sha(source),
+                invocation_sha256=raw_sha(invocation), operation_sha256=raw_sha(operation), precreate_inventory_gap=True)
+
+
+def machine_request(intent, volume_id):
+    return dict(name='cloudbench-source-' + intent['binding']['owner_token'], region=intent['donor']['region'],
+                config=machine_config(intent, volume_id), skip_launch=True)
+
+
+def machine_attempt_evidence(journal):
+    names = ['machine.pending.json', volume_authority_path(journal).name]
+    names += [name for name in ('machine.failed.json', 'machine.response.json', 'machine.response.raw.json')
+              if (journal / name).exists()]
+    return {name: raw_sha(journal / name) for name in names}
+
+
+def verify_machine_reconciliation(journal, intent, request, receipt):
+    need(receipt.get('authority_kind') == 'reconciled-ambiguous-machine-create'
+         and receipt.get('provider_writes') is False
+         and receipt.get('request_sha256') == sha(request)
+         and receipt.get('pending_sha256') == raw_sha(journal / 'machine.pending.json')
+         and receipt.get('volume_authority_sha256') == raw_sha(volume_authority_path(journal))
+         and receipt.get('attempt_evidence') == machine_attempt_evidence(journal)
+         and receipt.get('authority') == machine_reconciliation_authority(journal, intent, request),
+         'reconciled Machine authority changed')
+    rows, row, volume = receipt['inventory'], receipt['response'], receipt['observed_volume']
+    need(receipt['inventory_sha256'] == sha(rows) and receipt['response_sha256'] == sha(row)
+         and receipt['volume_sha256'] == sha(volume), 'reconciled Machine native evidence changed')
+    rows = inventory(rows, 'reconciliation Machine')
+    matches = [item for item in rows if item.get('name') == request['name']]
+    need(len(matches) == 1 and all(matches[0].get(k) == row.get(k) for k in
+         ('id', 'name', 'instance_id', 'region', 'config', 'state', 'image_ref', 'created_at')),
+         'unique exact native Machine listing/detail required')
+    validate_ack(intent, 'machine', request, receipt)
+    if (journal / 'machine.response.json').exists():
+        wire = record(journal, 'machine.response.json', intent)
+        raw = private_payload(journal / 'machine.response.raw.json')
+        need(wire.get('request_sha256') == sha(request) and type(wire.get('native_http_status')) is int
+             and 200 <= wire['native_http_status'] < 300
+             and wire.get('raw_sha256') == hashlib.sha256(raw).hexdigest(), 'original Machine wire response differs')
+        original = json.loads(raw, object_pairs_hook=STORAGE['unique_object'])
+        need(isinstance(original, dict), 'original native response malformed')
+        validate_ack(intent, 'machine', request, dict(id=original.get('id'), instance_id=original.get('instance_id'), response=original))
+        need(original['id'] == row['id'] and original['instance_id'] == row['instance_id'],
+             'known native Machine response differs from reconciliation')
+    vid = request['config']['mounts'][0]['volume']
+    need(volume.get('id') == vid and volume.get('name') == intent['volume_request']['name']
+         and volume.get('region') == intent['donor']['region'] and volume.get('state') == 'created'
+         and type(volume.get('size_gb')) is int and volume['size_gb'] == intent['donor']['size_gb']
+         and volume.get('encrypted') is True and volume.get('attached_machine_id') == row['id']
+         and row.get('state') == 'stopped'
+         and row.get('incomplete_config') is None, 'exact owned Volume attachment and stopped Machine required')
+    pending = journal / 'machine.pending.json'
+    ended = pending.stat().st_mtime + 20
+    failure = journal / 'machine.failed.json'
+    if failure.exists():
+        failed = record(journal, failure.name, intent)
+        status = failed.get('native_http_status')
+        need(failed.get('outcome') == 'ambiguous' and (status is None or type(status) is int
+             and (status >= 500 or 200 <= status < 300)), 'native Machine rejection cannot reconcile')
+        ended = (failed.get('diagnostic') or {}).get('failed_epoch', failure.stat().st_mtime)
+    created = datetime.fromisoformat(row['created_at'].replace('Z', '+00:00')).timestamp()
+    # Machine created_at has second precision; the request clock has fractions.
+    need(type(ended) in (int, float) and math.isfinite(ended)
+         and pending.stat().st_mtime - 1 <= created <= ended <= pending.stat().st_mtime + 21,
+         'native Machine outside original POST window')
+
+
+def reconcile_machine(api, journal, intent):
+    need(not (journal / 'machine.created.json').exists() and not (journal / 'result.json').exists()
+         and not any(journal.glob('*.delete*.json')) and not (journal / 'cleanup.complete.json').exists(),
+         'Machine reconciliation requires unfinished original create')
+    volume = create_once(None, journal, 'volume', intent['volume_request'], intent)
+    request = machine_request(intent, volume['id'])
+    authority = machine_reconciliation_authority(journal, intent, request)
+    rows = inventory(api.api('GET', '/machines'), 'reconciliation Machine')
+    matches = [row for row in rows if row.get('name') == request['name']]
+    need(len(matches) == 1, 'native Machine missing or duplicate')
+    row = api.api('GET', '/machines/' + matches[0]['id'])
+    current_volume = verify_volume(api, intent, volume, matches[0]['id'])
+    value = envelope(intent, dict(authority_kind='reconciled-ambiguous-machine-create', authority=authority,
+        request_sha256=sha(request), pending_sha256=raw_sha(journal / 'machine.pending.json'),
+        attempt_evidence=machine_attempt_evidence(journal),
+        volume_authority_sha256=raw_sha(volume_authority_path(journal)), id=row.get('id'), instance_id=row.get('instance_id'),
+        response=row, response_sha256=sha(row), inventory=rows, inventory_sha256=sha(rows),
+        observed_volume=current_volume, volume_sha256=sha(current_volume), provider_writes=False))
+    verify_machine_reconciliation(journal, intent, request, value)
+    path = journal / 'machine.reconciled.json'
+    if path.exists():
+        original = record(journal, path.name, intent)
+        verify_machine_reconciliation(journal, intent, request, original)
+        need(original['response'] == row and original['observed_volume'] == current_volume,
+             'reconciled Machine native observation changed')
+        return original
+    save(path, value)
+    return value
+
+
 def authority_digest(journal):
-    names = ['intent.json', 'volume.pending.json', 'volume.created.json',
-             'machine.pending.json', 'machine.created.json']
+    names = ['intent.json', 'volume.pending.json', volume_authority_path(journal).name,
+             'machine.pending.json', machine_authority_path(journal).name]
+    if (journal / 'machine.ready.json').exists():
+        names.append('machine.ready.json')
     return sha({name: sha(read(journal / name)) for name in names})
 
 
@@ -366,13 +702,20 @@ def verify_created_source(receipt_path):
     b = intent['binding']
     need(b['app'] == APP and re.fullmatch('[0-9a-f]{32}', b['owner_token'])
          and re.fullmatch('[0-9a-f]{32}', intent['nonce']), 'original creator identity')
-    volume = record(journal, 'volume.created.json', intent)
-    machine = record(journal, 'machine.created.json', intent)
+    volume = record(journal, volume_authority_path(journal).name, intent)
+    machine = record(journal, machine_authority_path(journal).name, intent)
     request = dict(name='cloudbench-source-' + b['owner_token'], region=intent['donor']['region'],
                    config=machine_config(intent, volume['id']), skip_launch=True)
     # ACK-present code paths perform no reads or writes through api.
     create_once(None, journal, 'volume', intent['volume_request'], intent)
     create_once(None, journal, 'machine', request, intent)
+    native = machine['response']
+    if (journal / 'machine.ready.json').exists():
+        ready = record(journal, 'machine.ready.json', intent)
+        need(ready.get('machine_authority_sha256') == raw_sha(machine_authority_path(journal))
+             and ready.get('request_sha256') == sha(request), 'ready native observation authority changed')
+        native = ready['response']
+        validate_ack(intent, 'machine', request, dict(id=machine['id'], instance_id=machine['instance_id'], response=native))
     for key in ('machine_id', 'volume_id', 'instance_id', 'machine_name', 'owner_token', 'snapshot_id',
                 'donor_machine_id', 'donor_volume_id', 'app'):
         expected = dict(machine_id=machine['id'], volume_id=volume['id'], instance_id=machine['instance_id'],
@@ -381,21 +724,48 @@ def verify_created_source(receipt_path):
         need(result.get(key) == expected[key], 'creator result identity changed')
     need(not any(journal.glob('*.delete*.json')) and not (journal / 'cleanup.complete.json').exists(),
          'source cleanup already began')
-    return dict(intent=intent, machine_request=request, machine=machine['response'], volume=volume['response'],
-                journal=str(journal), donor=intent['donor'])
+    need(result.get('config_sha256') == hashlib.sha256(json.dumps(native['config'],
+         sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+         and result.get('env_sha256') == hashlib.sha256(json.dumps(intent['donor']['env'],
+         sort_keys=True, separators=(',', ':')).encode()).hexdigest(), 'creator raw native config/environment seal changed')
+    return dict(intent=intent, machine_request=request, machine=native, volume=volume.get('observed_volume', volume.get('response')), volume_authority=volume.get('authority_kind', 'original-create-ack'),
+                machine_authority=machine.get('authority_kind', 'original-create-ack'), journal=str(journal), donor=intent['donor'])
 
 
 def create_once(api, journal, kind, request, intent):
     pending = journal / (kind + '.pending.json')
     ack = journal / (kind + '.created.json')
+    if kind == 'machine' and (journal / 'machine.reconciled.json').exists():
+        need(not ack.exists(), 'conflicting original/reconciled Machine authority')
+        value = record(journal, 'machine.reconciled.json', intent)
+        verify_machine_reconciliation(journal, intent, request, value)
+        return value
+    if kind == 'volume' and (journal / 'volume.reconciled.json').exists():
+        need(not ack.exists(), 'conflicting original/reconciled Volume authority')
+        value = record(journal, 'volume.reconciled.json', intent)
+        verify_reconciled(journal, intent, request, value)
+        return value
     if ack.exists():
         value = record(journal, ack.name, intent)
-        expected = envelope(intent, {'request': request})
-        need(read(pending) == expected and value.get('request_sha256') == sha(request), 'original writeahead changed')
+        pending_value(journal, kind, request, intent)
+        need(value.get('request_sha256') == sha(request), 'original writeahead changed')
         validate_ack(intent, kind, request, value)
+        if (journal / (kind + '.response.json')).exists():
+            wire = record(journal, kind + '.response.json', intent)
+            raw = private_payload(journal / (kind + '.response.raw.json'))
+            need(wire.get('request_sha256') == sha(request) and type(wire.get('native_http_status')) is int
+                 and 200 <= wire['native_http_status'] < 300
+                 and wire.get('raw_sha256') == hashlib.sha256(raw).hexdigest()
+                 and json.loads(raw, object_pairs_hook=STORAGE['unique_object']) == value['response'],
+                 'original raw native response changed')
         return value
     need(not pending.exists(), 'ambiguous create retained; never retry or adopt discovered resources')
-    save(pending, envelope(intent, {'request': request}))
+    pending_body = {'request': request}
+    if kind in ('volume', 'machine'):
+        precreate = sorted(journal.glob(kind + '.precreate-*.json'))
+        need(precreate and time.time() - read(precreate[-1])['observed_epoch'] <= 60, 'fresh sealed precreate inventory required')
+        pending_body['precreate'] = dict(name=precreate[-1].name, sha256=raw_sha(precreate[-1]))
+    save(pending, envelope(intent, pending_body))
     # Signals may interrupt the response/ACK window. The durable pending marker
     # intentionally bars replay even when a request never reached the provider.
     proofs = sorted(journal.glob(kind + '-*.capacity.json'))
@@ -403,13 +773,21 @@ def create_once(api, journal, kind, request, intent):
     proof = read(proofs[-1])
     need(time.time() - proof['ended_epoch'] <= 60
          and proof['observed_reservations'] == reservation_inventory(), 'capacity or normal reservations changed')
+    def capture(raw, status, started, finished):
+        target = journal / (kind + '.response.raw.json')
+        STORAGE['publish'](target, raw, immutable=True)
+        save(journal / (kind + '.response.json'), envelope(intent, dict(request_sha256=sha(request),
+            native_http_status=status, started_epoch=started, finished_epoch=finished,
+            raw_sha256=hashlib.sha256(raw).hexdigest())))
     try:
-        response = api.api('POST', '/volumes' if kind == 'volume' else '/machines', request)
+        response = api.api('POST', '/volumes' if kind == 'volume' else '/machines', request, capture=capture)
     except Refusal as error:
         status = getattr(error, 'native_status', None)
         save(journal / (kind + '.failed.json'), envelope(intent, dict(
             outcome='native-rejected' if isinstance(status, int) and 400 <= status < 500 else 'ambiguous',
-            native_http_status=status)))
+            native_http_status=status, diagnostic=getattr(error, 'diagnostic',
+                {'exception_class': type(error).__name__, 'response_phase': 'headers',
+                 'reason': 'native-http-rejection', 'failed_epoch': time.time()}))))
         raise
     need(isinstance(response, dict), 'ambiguous create response retained')
     identity = response.get('id')
@@ -419,9 +797,6 @@ def create_once(api, journal, kind, request, intent):
          and identity not in {intent['donor']['volume_id'], intent['donor']['machine_id']}
          and response.get('name') == request['name'] and response.get('region') == request['region'],
          'ambiguous or protected create response retained')
-    if kind == 'machine':
-        need(response.get('config') == request['config'] and isinstance(response.get('instance_id'), str)
-             and response['instance_id'], 'ambiguous Machine ACK retained')
     value = envelope(intent, {'id': identity, 'instance_id': response.get('instance_id'), 'request_sha256': sha(request), 'response': response})
     validate_ack(intent, kind, request, value)
     save(ack, value)
@@ -471,7 +846,7 @@ def retirement_successor(args, journal, intent):
     need(successor['owner_token'] == intent['binding']['owner_token'], 'prepared successor owner changed')
     prepared = read(args.prepared_result.absolute())
     after = helper['described'](prepared['after'])
-    original = machine_config(intent, successor['volume_id'])
+    original = json.loads(json.dumps(verify_created_source(authority)['machine']['config']))
     original['image'] = request['image_ref']
     need(after['id'] == successor['machine_id'] and after['config'] == original
          and after['state'] == 'stopped' and after['instance_id'] == successor['instance_id'],
@@ -517,8 +892,12 @@ def execute(args, api, journal):
     if (journal / 'cleanup.complete.json').exists():
         need(args.action == 'cleanup', 'source retired; original intent cannot allocate again')
         return read(journal / 'cleanup.complete.json')
-    volume_ack = journal / 'volume.created.json'
-    machine_ack = journal / 'machine.created.json'
+    volume_ack = volume_authority_path(journal)
+    machine_ack = machine_authority_path(journal)
+    if args.action == 'reconcile-volume':
+        return reconcile_volume(api, journal, intent)
+    if args.action == 'reconcile-machine':
+        return reconcile_machine(api, journal, intent)
     if args.action == 'cleanup':
         successor = retirement_successor(args, journal, intent)
         need(not (journal / 'machine.pending.json').exists() or machine_ack.exists(), 'ambiguous Machine create; volume retained')
@@ -570,28 +949,50 @@ def execute(args, api, journal):
         request = dict(name='cloudbench-source-' + args.owner_token, region=intent['donor']['region'],
                        config=machine_config(intent, volume['id']), skip_launch=True)
         machine = create_once(api, journal, 'machine', request, intent)
-        verify_machine(api, intent, machine, volume)
+        native = verify_machine(api, intent, machine, volume)
     else:
         need(not (journal / 'machine.pending.json').exists(), 'ambiguous Machine create retained')
         need(not (journal / 'volume.pending.json').exists() or volume_ack.exists(), 'ambiguous volume create retained')
-        need(donor(api, args) == intent['donor'], 'donor snapshot/config/environment changed from immutable intent')
+        if volume_ack.exists():
+            verify_fork_snapshot_input(api, args, intent)
+        else:
+            need(donor(api, args) == intent['donor'], 'donor snapshot/config/environment changed from immutable intent')
         if not volume_ack.exists():
             capacity(api, args, journal, 'volume-' + str(time.time_ns()))
-            need(not any(v.get('name') == intent['volume_request']['name'] for v in inventory(api.api('GET', '/volumes'), 'volume')),
+            rows = inventory(api.api('GET', '/volumes'), 'volume')
+            need(not any(v.get('name') == intent['volume_request']['name'] for v in rows),
                  'volume name exists without successful original create authority')
+            save(journal / ('volume.precreate-' + str(time.time_ns()) + '.json'),
+                 envelope(intent, dict(observed_epoch=time.time(), volumes=rows)))
         volume = create_once(api, journal, 'volume', intent['volume_request'], intent)
         verify_volume(api, intent, volume)
-        need(donor(api, args) == intent['donor'], 'donor snapshot/config/environment changed before Machine create')
+        verify_fork_snapshot_input(api, args, intent)
         capacity(api, args, journal, 'machine-' + str(time.time_ns()))
+        rows = inventory(api.api('GET', '/machines'), 'precreate Machine')
+        need(not any(row.get('name') == 'cloudbench-source-' + args.owner_token for row in rows),
+             'Machine name exists without successful original create authority')
+        save(journal / ('machine.precreate-' + str(time.time_ns()) + '.json'),
+             envelope(intent, dict(observed_epoch=time.time(), machines=rows)))
         request = dict(name='cloudbench-source-' + args.owner_token, region=intent['donor']['region'],
                        config=machine_config(intent, volume['id']), skip_launch=True)
         machine = create_once(api, journal, 'machine', request, intent)
-        verify_machine(api, intent, machine, volume)
+        native = verify_machine(api, intent, machine, volume)
+    ready_path = journal / 'machine.ready.json'
+    if ready_path.exists():
+        ready = record(journal, ready_path.name, intent)
+        need(ready.get('machine_authority_sha256') == raw_sha(machine_ack)
+             and ready.get('request_sha256') == sha(request)
+             and all(ready['response'].get(k) == native.get(k) for k in
+                     ('id', 'instance_id', 'config', 'name', 'region', 'image_ref')),
+             'sealed native ready config changed')
+    else:
+        save(ready_path, envelope(intent, dict(machine_authority_sha256=raw_sha(machine_authority_path(journal)),
+             request_sha256=sha(request), response=native)))
     return envelope(intent, dict(outcome='ready-for-prepare', app=APP, machine_id=machine['id'], volume_id=volume['id'],
         instance_id=machine['instance_id'], machine_name='cloudbench-source-' + args.owner_token,
         donor_machine_id=args.donor_machine_id, donor_volume_id=args.donor_volume_id,
         snapshot_id=args.snapshot_id, journal=str(journal), journal_sha256=authority_digest(journal),
-        config_sha256=hashlib.sha256(json.dumps(machine_config(intent, volume['id']), sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+        config_sha256=hashlib.sha256(json.dumps(native['config'], sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
         env_sha256=hashlib.sha256(json.dumps(intent['donor']['env'], sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
         guest_env_sha256={k: hashlib.sha256(v.encode()).hexdigest() for k, v in intent['donor']['env'].items()
                           if k in {'AGENTS_ENV_B64', 'BACKEND_ENV_B64'}}))
@@ -599,7 +1000,7 @@ def execute(args, api, journal):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['create', 'cleanup'])
+    parser.add_argument('action', choices=['create', 'cleanup', 'reconcile-volume', 'reconcile-machine'])
     parser.add_argument('--journal', type=Path, required=True)
     parser.add_argument('--owner-token', required=True)
     parser.add_argument('--donor-machine-id', required=True)
@@ -645,7 +1046,12 @@ def main():
                 save(journal / 'result.json', result)
             if args.output:
                 save(args.output.absolute(), result)
-            print(canonical(result).decode().strip())
+            public = result
+            if args.action == 'reconcile-machine':
+                # Full native inventories/config environments are private evidence.
+                public = {key: result[key] for key in ('authority_kind', 'id', 'instance_id', 'provider_writes')}
+                public.update(journal=str(journal), receipt_sha256=raw_sha(journal / 'machine.reconciled.json'))
+            print(canonical(public).decode().strip())
         finally:
             signal.alarm(0)
             os.close(fd)

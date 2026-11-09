@@ -111,6 +111,7 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+CLOUDBENCH_KERNEL_PROXY_CUSTODY="$(cloudbench_kernel_proxy_custody_policy)" || exit 1
 # Every guest refuses bench-app secrets lacking the committed guest namespace,
 # whichever launcher (or older checkout) staged them; a launcher may bind its own.
 CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"
@@ -5417,6 +5418,31 @@ verify_execution_provenance_contract() {
 }
 verify_execution_provenance_contract || exit 1
 
+# A fleet's captured manifest is independent of mutable app-level secrets.
+# Validate this controller handoff before either boot transport can start a guest.
+verify_private_source_environment_contract() {
+    python3 - "${CLOUDBENCH_SOURCE_MANIFEST_FILE:-}" "${CLOUDBENCH_SOURCE_MANIFEST_SHA256:-none}" \
+        "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" "${CLOUDBENCH_EXECUTION_PROVENANCE_FILE:-}" \
+        "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-source.py" <<'PYSOURCEENV'
+import hashlib, json, pathlib, runpy, sys
+path, expected, protocol, provenance, helper = sys.argv[1:]
+if provenance:
+    bound = json.loads(pathlib.Path(provenance).read_bytes())['config']['values'].get('base_source_manifest_sha256', 'none')
+    if bound != expected:
+        raise SystemExit('private source manifest differs from execution provenance')
+if not path:
+    if expected not in ('', 'none') or protocol not in ('', 'none'):
+        raise SystemExit('private source manifest handoff missing')
+    raise SystemExit(0)
+source = runpy.run_path(helper)
+raw = source['storage']['payload'](pathlib.Path(path))
+value = source['manifest'](raw)
+if hashlib.sha256(raw).hexdigest() != expected or protocol != value.get('lease_protocol', 'none'):
+    raise SystemExit('private source manifest handoff changed')
+PYSOURCEENV
+}
+verify_private_source_environment_contract || exit 1
+
 # ── Launch the driver: BOOT-LAUNCH (no ssh) or the legacy ssh path ──────────
 # BOOT-LAUNCH removes the per-box launch-ssh burst (start + ssh-ready + clear-stale
 # + stage + launch + confirm ≈ 7 ssh × N) that saturated Fly's Machines-API rate
@@ -5458,6 +5484,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
+        --env "CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
         --env CODEX_AUTH_PATH=
         --env CLOUDBENCH_CODEX_AUTH_HELPER=/cloudbench-codex-auth.py
         --env "CLOUDBENCH_CODEX_AUTH_SHA256=$CODEX_AUTH_SHA256"
@@ -5572,6 +5599,15 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
             --env CLOUDBENCH_EXECUTION_PROVENANCE_FILE=
             --env CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0
         )
+    fi
+    if [ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ]; then
+        _envargs+=(--env CLOUDBENCH_SOURCE_MANIFEST_FILE=/cloudbench-source-manifest.json
+            --env "CLOUDBENCH_SOURCE_MANIFEST_SHA256=$CLOUDBENCH_SOURCE_MANIFEST_SHA256"
+            --env "CLOUDBENCH_SOURCE_LEASE_PROTOCOL=${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}")
+        _boot_file_args+=(--file-local "/cloudbench-source-manifest.json=$CLOUDBENCH_SOURCE_MANIFEST_FILE")
+    else
+        _envargs+=(--env CLOUDBENCH_SOURCE_MANIFEST_FILE= --env CLOUDBENCH_SOURCE_MANIFEST_SHA256=
+            --env CLOUDBENCH_SOURCE_LEASE_PROTOCOL=)
     fi
     if [ -n "$LOCAL_PATCH_FILE" ]; then
         # flyctl embeds every --file-local payload base64-encoded inside the
@@ -5945,6 +5981,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo '}'
     echo "chmod +x /data/cloudbench-run.sh"
     echo "export REF=$(printf '%q' "$BENCH_REF")"
+    echo "export CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
     echo "export CLOUDBENCH_GITHUB_TOKEN_B64=$(printf '%q' "$CONTROLLER_GITHUB_TOKEN_B64")"
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
@@ -5957,6 +5994,9 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_BENCHMARK_TARGET_SCRIPT=/data/cloudbench-benchmark-target.py"
     echo "export CLOUDBENCH_CATALOG_SCRIPT=/data/cloudbench_catalog.py"
     echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+    echo "export CLOUDBENCH_SOURCE_MANIFEST_FILE=$(printf '%q' "$([ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ] && printf /data/cloudbench-source-manifest.json)")"
+    echo "export CLOUDBENCH_SOURCE_MANIFEST_SHA256=$(printf '%q' "$([ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ] && printf '%s' "$CLOUDBENCH_SOURCE_MANIFEST_SHA256")")"
+    echo "export CLOUDBENCH_SOURCE_LEASE_PROTOCOL=$(printf '%q' "$([ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ] && printf '%s' "$CLOUDBENCH_SOURCE_LEASE_PROTOCOL")")"
     echo "export CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT=/data/cloudbench-exact-session-cleanup.py"
     echo "export CLOUDBENCH_GUEST_RECOVERY_SCRIPT=/data/cloudbench-guest-recovery.py"
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
@@ -6062,8 +6102,13 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/process-identity.py /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/process-identity.py /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-source-manifest.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     provenance_stage_ok=1
+    if [ -n "${CLOUDBENCH_SOURCE_MANIFEST_FILE:-}" ]; then
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0444 \
+            "$CLOUDBENCH_SOURCE_MANIFEST_FILE" /data/cloudbench-source-manifest.json >"$stage_err" 2>&1 \
+            || provenance_stage_ok=0
+    fi
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
             "$CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT" /data/cloudbench-execution-provenance.py >"$stage_err" 2>&1 \

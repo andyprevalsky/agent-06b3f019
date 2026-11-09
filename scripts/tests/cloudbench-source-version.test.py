@@ -21,7 +21,7 @@ class SourceVersion(unittest.TestCase):
             volume_id='vol_owned', region='iad', image_digest='sha256:'+'b'*64, snapshot_id='vs_owned',
             node_fingerprint='c'*64, python_fingerprint='d'*64, verified_at=1794260000,
             shared_machine_id='683e47df5094d8', shared_volume_id='vol_vwnym366kn7k8mmv')
-        self.v2 = dict(self.v1, version=2, lease_protocol='cloudbench-source-lease-v1', creation_nonce='e'*32)
+        self.v2 = dict(self.v1, version=2, lease_protocol='cloudbench-source-lease-v1', creation_nonce='e'*32, guest_env_sha256={'AGENTS_ENV_B64':'1'*64,'BACKEND_ENV_B64':'2'*64})
         self.machine = dict(id=self.v1['machine_id'], instance_id='instance1', name=self.v1['machine_name'],
             state='stopped', region='iad', image_ref={'digest': self.v1['image_digest']},
             config={'image':'registry.fly.io/navi-whisper-lux-bench@'+self.v1['image_digest'],
@@ -56,7 +56,7 @@ class SourceVersion(unittest.TestCase):
         with self.assertRaises(ValueError): M['verify'](self.v2, self.inventory, parked_memory=2048)
 
     def test_unknown_partial_or_wrong_protocol_refuses(self):
-        for key, val in [('version',3),('version',True),('lease_protocol','unknown'),('creation_nonce','bad'),('extra','unknown')]:
+        for key, val in [('version',3),('version',True),('lease_protocol','unknown'),('creation_nonce','bad'),('guest_env_sha256',{}),('guest_env_sha256',{'AGENTS_ENV_B64':'1'*64,'BACKEND_ENV_B64':'bad'}),('extra','unknown')]:
             candidate = dict(self.v2);candidate[key]=val
             with self.assertRaises(ValueError):M['manifest'](json.dumps(candidate).encode())
         candidate = dict(self.v2);candidate.pop('creation_nonce')

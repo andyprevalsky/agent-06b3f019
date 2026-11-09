@@ -68,6 +68,32 @@ digest determines fleet pool isolation. The original pure verifier and byte-iden
 Golden reference: not applicable (ordinary native infrastructure code; any
 approval-gated adapter hunks require separate frozen review).
 
+## Native validation in progress
+
+The first native allocation on frozen d8f1bcd128c02bb938b64323991eabd70748e175
+retained an ambiguous volume-create outcome. Its original pending marker was
+written at 22:51:48.939776 UTC; the failure marker followed 20.004305 seconds
+later with no HTTP status. A read-only inventory found one exact reserved-name
+40-GiB volume, created at 22:51:50.024 UTC and still restoring, unattached.
+The client collapses transport, JSON and absolute-deadline failures at this
+boundary, so the precise transport cause remains unknown. No Machine create
+was attempted and the original failure is unchanged. This is not a PASS or
+allocation-free refusal. Supported exact-name reconciliation is being evaluated
+against the original writeahead; no second POST or inferred cleanup authority
+is allowed. Later-clone environment binding is also under final review.
+
+The bounded live source now has exact reconciled Volume and Machine authority,
+with both original POST acknowledgements honestly absent. The Machine is stopped
+on its own encrypted volume. Native validation exposed two further causal
+boundaries: a donor image activation after the owned snapshot fork incorrectly
+invalidated immutable fork inputs, and the provider omitted false/empty defaults
+and expanded mount metadata in its Machine response. Focused unchanged regressions
+failed before each repair and pass after narrow input-scope/normalization fixes.
+Snapshot, dependency, environment, mount and owned-volume tampering still refuse.
+Full raw native evidence stays private; public reconciliation output is bounded
+to identities and receipt hashes. Preparation and benchmark outcome proof remain
+pending; these allocation records grant no benchmark or historical task credit.
+
 ## Human feedback
 
 The user explicitly authorized this separate pre-parent-merge repair and full

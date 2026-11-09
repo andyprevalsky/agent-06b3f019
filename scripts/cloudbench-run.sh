@@ -894,6 +894,7 @@ step env_decode
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; finish 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"
+cloudbench_verify_source_guest_env || finish 1
 umask 077
 if [ -n "${AGENTS_ENV_B64:-}" ]; then
     echo "$AGENTS_ENV_B64" | base64 -d > "$REPO_DIR/agents/.env" || { log "FATAL: failed to decode AGENTS_ENV_B64"; finish 1; }
@@ -1328,6 +1329,30 @@ else
     )
 fi
 
+# Cloud guest Kernel proxy custody
+case "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" in
+    0|1) ;;
+    *) log "FATAL: invalid cloud guest Kernel proxy custody policy"; finish 1 ;;
+esac
+# Bind the checked-out guest path only for the controller-selected policy.
+if [ "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" = 1 ]; then
+    # A guest preload cannot authorize allocation through a production target.
+    # Keep task routing unchanged; unsupported targets remain blocked, not waived.
+    if [ "${BENCH_TARGET_MODE_FOR_STACK:-}" != local ]; then
+        log "FATAL: Kernel proxy custody requires a verified isolated guest target"
+        finish 1
+    fi
+if ! KERNEL_PROXY_NODE_OPTIONS="$(cloudbench_kernel_proxy_node_options "$REPO_DIR")"; then
+    log "FATAL: cloud guest Kernel proxy custody launch policy unavailable"
+    finish 1
+fi
+if ! gosu "$APP_USER" test -r "$REPO_DIR/back-end/scripts/blackbox-kernel-proxy-custody.cjs"; then
+    log "FATAL: cloud guest Kernel proxy custody preload is unreadable by stack user"
+    finish 1
+fi
+STACK_ENV+=("NODE_OPTIONS=$KERNEL_PROXY_NODE_OPTIONS")
+fi
+# End cloud guest Kernel proxy custody
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
 rm -f "$STACK_CLEANUP_STATUS_FILE"
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
@@ -1419,6 +1444,15 @@ if ! $STACK_READY; then
     log_stack_service_tails
     finish 1
 fi
+# Cloud guest Kernel proxy verification
+# Health alone is insufficient: confirm this backend actually loaded custody
+# before payment preparation or benchmark tasks can perform any live action.
+if [ "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" = 1 ] && ! gosu "$APP_USER" env "NODE_OPTIONS=$KERNEL_PROXY_NODE_OPTIONS" node \
+    "$REPO_DIR/back-end/scripts/verify-kernel-proxy-custody.cjs" "http://localhost:$BACKEND_PORT" --all-resources; then
+    log "FATAL: cloud guest backend did not prove Kernel proxy custody"
+    finish 1
+fi
+# End cloud guest Kernel proxy verification
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
 STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
 import json, sys

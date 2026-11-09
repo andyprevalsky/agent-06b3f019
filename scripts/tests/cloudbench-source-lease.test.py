@@ -40,7 +40,7 @@ class SourceLease(unittest.TestCase):
             instance_id=created['instance_id'], machine_name=created['machine_name'], volume_id=created['volume_id'],
             region='iad', image_digest='sha256:'+'e'*64, snapshot_id='vs_owned', node_fingerprint='a'*64,
             python_fingerprint='b'*64, verified_at=now, shared_machine_id=FIXTURE['DONOR'],
-            shared_volume_id=FIXTURE['VOL'], lease_protocol='cloudbench-source-lease-v1', creation_nonce=created['nonce'])
+            shared_volume_id=FIXTURE['VOL'], lease_protocol='cloudbench-source-lease-v1', creation_nonce=created['nonce'], guest_env_sha256={'AGENTS_ENV_B64':'1'*64,'BACKEND_ENV_B64':'2'*64})
         self.m = runpy.run_path(str(HELPER))
         input_path = self.root/'input.json'
         self.write(input_path, self.manifest)
@@ -386,7 +386,7 @@ class SourceLease(unittest.TestCase):
 
     def test_v1_manifest_and_protocol_tamper_refuse_before_claim(self):
         value = dict(self.manifest, version=1)
-        del value['lease_protocol']; del value['creation_nonce']
+        del value['lease_protocol']; del value['creation_nonce']; del value['guest_env_sha256']
         self.path.chmod(0o600); self.write(self.path, value)
         result = subprocess.run(self.command('hold'), env=self.b.env, capture_output=True, text=True, timeout=6)
         self.assertNotEqual(result.returncode, 0)

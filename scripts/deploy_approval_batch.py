@@ -14,6 +14,14 @@ flagged file, fails with ``re-request``: approval stays snapshot-scoped and the
 guards' semantics are unchanged (they still run, and the mandatory flag is
 passed only after ``check`` succeeds).
 
+``classify-code-only`` imports a completed independent managed review of false positives.
+It keeps the native guard findings and whole-file diff hashes, without recording
+approval or supplying an approval flag. Its authority is the exact assistant
+result re-fetched from boxes.dev on every check; local hashes are not authority.
+An independent completed owner result anchors the frozen batch, and the reviewer
+must be a different managed thread. Caller context is not authentication.
+Ordinary approvals also work off-box.
+
 Exit codes: 0 clear/covered, 1 re-request or rejected, 3 decision pending,
 2 usage/state error.
 """
@@ -24,7 +32,9 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -167,6 +177,96 @@ def merge_base(repo: Path, base_ref: str) -> str:
     return _git(repo, "merge-base", base_ref, "HEAD").strip()
 
 
+def platform_runtime() -> dict:
+    """Pin the official installation under the managed-account trust assumption.
+
+    Platform files outside the source workspace remain trusted. These hashes
+    bind that operational provenance; they are not cryptographic attestation.
+    """
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if os.environ.get("HOME") != str(home) or home.resolve() != home:
+        raise BatchError("managed authority requires the OS account's canonical HOME")
+    shim = Path("/opt/devbox-tools/bin/dvb-onbox")
+    daemon = home / ".devbox" / "daemon"
+    resolver = daemon / "resolve-daemon-node.sh"
+    wrapper = daemon / "bundle/wrappers/dvb-onbox.mjs"
+    config = daemon / "config.json"
+    def protected(path: Path, *, root: bool = False) -> None:
+        for target in (path, path.resolve(strict=True)):
+            for member in (target, *target.parents):
+                info = member.lstat()
+                if (info.st_uid not in ({0} if root else {0, os.getuid()})
+                        or not member.is_symlink() and info.st_mode & 0o022):
+                    raise BatchError("official managed runtime has unexpected ownership or writable paths")
+    protected(shim, root=True)
+    for path in (resolver, wrapper, config):
+        protected(path)
+    provider = json.loads(config.read_text()).get("computeProvider", "")
+    if provider == "e2b":
+        node = Path("/opt/devbox-runtime/node/current/bin/node")
+        protected(node, root=True)
+    elif provider == "":
+        node = daemon / "bundle/bin/node"
+        protected(node)
+    else:
+        raise BatchError("unsupported official managed runtime provider")
+    paths = [shim, resolver, node, Path("/usr/bin/bash"), Path("/usr/bin/env"),
+             *sorted(wrapper.parent.glob("*.mjs"))]
+    files = {}
+    for path in paths:
+        protected(path)
+        files[str(path)] = dict(resolved=str(path.resolve(strict=True)),
+                               sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    return dict(schema="boxes-official-runtime-v1", compute_provider=provider, files=files,
+                sha256=hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest())
+
+
+def managed_command(*args: str) -> dict:
+    """Use the installed CLI, not a caller-supplied PATH identity provider."""
+    environment = dict(os.environ)
+    if os.environ.get("DEPLOY_APPROVAL_BATCH_TEST_MODE") == "1":
+        binary = shutil.which("dvb-onbox")
+        runtime = {"test_fixture": True}
+    else:
+        binary = "/opt/devbox-tools/bin/dvb-onbox"
+        if any(os.environ.get(key) for key in ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH")):
+            raise BatchError("interpreter startup/loader injection refused for managed authority")
+        # Keep only native thread context and the existing HOME value. A list
+        # of forbidden shell/Node/loader startup variables is never complete.
+        context_keys = ("HOME", "BOXES_CLIENT_THREAD_ID", "BOXES_THREAD_STARTUP_ATTEMPT_ID",
+                        "BOXES_CLAUDE_STARTUP_ATTEMPT_ID", "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID",
+                        "BOXES_BACKEND_THREAD_ID", "BOXES_AGENT_BACKEND")
+        environment = {key: os.environ[key] for key in context_keys if key in os.environ}
+        environment["PATH"] = "/usr/bin:/bin"
+        if shutil.which("dvb-onbox") != binary:
+            raise BatchError("managed CLI PATH shadow refused")
+        runtime = platform_runtime()
+    if not binary:
+        raise BatchError("managed CLI unavailable")
+    try:
+        result = subprocess.run((binary, *args), env=environment, capture_output=True, text=True, timeout=30)
+        value = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        raise BatchError("managed authority unavailable") from error
+    if result.returncode or not isinstance(value, dict) or value.get("ok") is not True:
+        raise BatchError("managed authority request failed")
+    value["_runtime"] = runtime
+    return value
+
+
+def managed_thread() -> dict | None:
+    """Advisory context only; server-authored completed results prove authority."""
+    try:
+        value = managed_command("threads", "get-link", "--json")
+    except (BatchError, OSError, ValueError):
+        return None
+    if (not isinstance(value.get("publicId"), str)
+            or not re.fullmatch(r"thr_[0-9a-f]{32}", value.get("publicId", ""))
+            or not isinstance(value.get("requestId"), str) or not value["requestId"]):
+        return None
+    return dict(publicId=value["publicId"], requestId=value["requestId"], runtime=value["_runtime"])
+
+
 def freeze(repo: Path, state_path: Path, *, head: str, base_ref: str) -> dict:
     actual = _git(repo, "rev-parse", "HEAD").strip()
     if actual != head:
@@ -185,6 +285,7 @@ def freeze(repo: Path, state_path: Path, *, head: str, base_ref: str) -> dict:
         "guards": flagged,
         "files": digests(repo, base, files),
         "decision": None if files else "clear",
+        "owner": managed_thread(),
     }
     diff_path = state_path.with_suffix(".diff")
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,11 +322,122 @@ def decide(state_path: Path, *, decision: str, evidence: str) -> dict:
         raise BatchError("nothing in this batch needs a decision")
     if state.get("decision") not in (None,):
         raise BatchError(f"batch already decided: {state['decision']}; freeze a new batch to re-request")
+    if state.get("code_only"):
+        raise BatchError("batch already classified code-only; freeze a new batch to re-request")
     state["decision"] = decision
     state["decided_at"] = _now()
     state["evidence"] = evidence
     _write(state_path, state)
     return {"status": decision, "head": state["head"], "files": sorted(state["files"])}
+
+
+def validate_code_only(state: dict, report: dict) -> None:
+    if (not isinstance(report, dict)
+            or set(report) != {"schema", "snapshot", "merge_base", "files", "approval_scoped_hunks", "rationale", "freeze_owner", "batch"}
+            or report.get("schema") != "deploy-code-only-review-v1"
+            or report.get("snapshot") != state["head"]
+            or report.get("merge_base") != state["merge_base"]
+            or report.get("files") != state["files"]
+            or report.get("freeze_owner") != (state.get("owner") or {}).get("publicId")
+            or report.get("batch") != {key: value for key, value in state.items() if key != "code_only"}
+            or type(report.get("approval_scoped_hunks")) is not int
+            or report["approval_scoped_hunks"] != 0
+            or not isinstance(report.get("rationale"), dict)
+            or set(report["rationale"]) != set(state["files"])
+            or not all(isinstance(reason, str) and reason.strip() for reason in report["rationale"].values())):
+        raise BatchError("code-only evidence must classify every exact frozen diff with zero approval-scoped hunks")
+
+
+def batch_sha256(state: dict) -> str:
+    frozen = {key: value for key, value in state.items() if key != "code_only"}
+    return hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def completed_managed_result(thread_id: str, turn_id: str) -> dict:
+    """Resolve actual server authorship and read the complete assistant result."""
+    try:
+        metadata = managed_command("threads", "read", "--scope", "project", "--thread",
+                                   thread_id, "--turns", "1", "--json")
+        thread = metadata["thread"]
+        author = thread["publicId"]
+        if (not re.fullmatch(r"thr_[0-9a-f]{32}", author)
+                or not isinstance(thread["devboxId"], str) or not thread["devboxId"].strip()
+                or thread_id not in (thread["id"], author)):
+            raise BatchError("invalid managed result author identity")
+        completed = managed_command("threads", "result", thread["id"], "--turn", turn_id, "--json")
+        if metadata["_runtime"] != completed["_runtime"]:
+            raise BatchError("managed runtime changed while verifying review authority")
+        result = completed["data"]
+        if (result["status"] != "completed" or result["turnId"] != turn_id
+                or not isinstance(result["executionInstanceId"], str) or not result["executionInstanceId"].strip()
+                or result["executionInstanceId"] != thread["devboxId"]
+                or type(result["completedAt"]) is not int or result["completedAt"] <= 0
+                or not isinstance(result["output"]["text"], str)):
+            raise BatchError("invalid completed managed result")
+        return dict(publicId=author, turnId=turn_id, completedAt=result["completedAt"],
+                    text=result["output"]["text"], runtime=metadata["_runtime"], devboxId=thread["devboxId"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise BatchError("invalid managed result authority") from error
+
+
+def verify_review_authority(state: dict, review: dict) -> dict:
+    """Two actual server-authored results, never caller get-link assertions."""
+    try:
+        owner = completed_managed_result(review["owner_thread"], review["owner_turn"])
+        anchor = json.loads(owner["text"])
+        expected = dict(schema="deploy-freeze-anchor-v1", owner_public_id=owner["publicId"],
+                        head=state["head"], batch_sha256=batch_sha256(state))
+        if (anchor != expected or owner["publicId"] != state["owner"]["publicId"]
+                or owner["runtime"] != state["owner"].get("runtime")
+                or owner["completedAt"] < int(datetime.fromisoformat(state["frozen_at"].replace("Z", "+00:00")).timestamp() * 1000)):
+            raise BatchError("completed owner result does not anchor the exact frozen batch")
+        reviewer = completed_managed_result(review["thread"], review["turn"])
+        raw = review["evidence"]
+        if (reviewer["publicId"] == owner["publicId"] or reviewer["completedAt"] < owner["completedAt"]
+                or reviewer["runtime"] != owner["runtime"] or reviewer["text"] != raw
+                or hashlib.sha256(raw.encode()).hexdigest() != review["evidence_sha256"]):
+            raise BatchError("code-only authority does not match an independent completed review")
+        validate_code_only(state, json.loads(raw))
+        proof = {key: reviewer[key] for key in ("publicId", "turnId", "completedAt")}
+        proof["owner"] = {key: owner[key] for key in ("publicId", "turnId", "completedAt", "devboxId")}
+        proof["owner"]["text_sha256"] = hashlib.sha256(owner["text"].encode()).hexdigest()
+        return proof
+    except (KeyError, TypeError, ValueError) as error:
+        raise BatchError("invalid managed code-only review authority") from error
+
+
+def classify_code_only(repo: Path, state_path: Path, evidence: Path, review_thread: str, review_turn: str,
+                       owner_thread: str, owner_turn: str) -> dict:
+    state = _read(state_path)
+    if not state["files"] or state.get("decision") is not None or state.get("code_only"):
+        raise BatchError("code-only review requires a pending, unclassified batch")
+    owner = state.get("owner")
+    if (not isinstance(owner, dict) or not isinstance(owner.get("publicId"), str)
+            or not re.fullmatch(r"thr_[0-9a-f]{32}", owner.get("publicId", ""))
+            or not owner.get("requestId")):
+        raise BatchError("code-only classification requires a verified managed reviewer independent of the freeze owner; legacy batches need a fresh freeze")
+    if _git(repo, "rev-parse", "HEAD").strip() != state["head"]:
+        raise BatchError("code-only review must run at the frozen snapshot")
+    if digests(repo, state["merge_base"], sorted(state["files"])) != state["files"]:
+        raise BatchError("code-only review requires every frozen diff to remain unchanged")
+    code, payload = check(repo, state_path)
+    if code != EXIT_PENDING:
+        raise BatchError(f"batch cannot be classified: {payload['status']}")
+    try:
+        raw = evidence.read_text()
+        report = json.loads(raw)
+    except (OSError, ValueError) as error:
+        raise BatchError("unreadable code-only review evidence") from error
+    validate_code_only(state, report)
+    review = dict(thread=review_thread, turn=review_turn, reviewed_at=_now(), evidence=raw,
+                  evidence_sha256=hashlib.sha256(raw.encode()).hexdigest(),
+                  owner_thread=owner_thread, owner_turn=owner_turn)
+    reviewer = verify_review_authority(state, review)
+    review["reviewer"] = reviewer
+    state["code_only"] = review
+    _write(state_path, state)
+    return {"status": "code-only", "head": state["head"], "reviewer": reviewer["publicId"],
+            "files": sorted(state["files"])}
 
 
 def check(repo: Path, state_path: Path) -> tuple[int, dict]:
@@ -235,6 +447,10 @@ def check(repo: Path, state_path: Path) -> tuple[int, dict]:
     current = digests(repo, merge_base(repo, state["base_ref"]), files)
     frozen: dict[str, str] = state["files"]
     changed = sorted(path for path in files if frozen.get(path) != current[path])
+    if review := state.get("code_only"):
+        # Include formerly flagged files even if an edit removed their last hit.
+        reviewed = digests(repo, state["merge_base"], sorted(frozen))
+        changed = sorted(set(changed) | {path for path in frozen if reviewed[path] != frozen[path]})
     if changed:
         return EXIT_REREQUEST, {
             "status": "re-request",
@@ -242,6 +458,12 @@ def check(repo: Path, state_path: Path) -> tuple[int, dict]:
             "changed": changed,
             "frozen_head": state["head"],
         }
+    if review:
+        reviewer = verify_review_authority(state, review)
+        if state.get("decision") is not None or review.get("reviewer") != reviewer:
+            raise BatchError("invalid persisted code-only reviewer provenance")
+        return EXIT_OK, {"status": "code-only", "frozen_head": state["head"],
+                         "files": files, "guards_to_flag": [], "reviewer": review["reviewer"]["publicId"]}
     if not files:
         return EXIT_OK, {"status": "clear", "frozen_head": state["head"]}
     decision = state.get("decision")
@@ -269,6 +491,13 @@ def main(argv: list[str] | None = None) -> int:
     decision = commands.add_parser("decide")
     decision.add_argument("--decision", choices=sorted(DECISIONS), required=True)
     decision.add_argument("--evidence", required=True, help="who approved / reviewer verdict id")
+    classification = commands.add_parser("classify-code-only", help="independent managed review of exact false-positive diffs")
+    classification.add_argument("--evidence", type=Path, required=True,
+                                help="deploy-code-only-review-v1 JSON with exact frozen hashes and per-file rationale")
+    classification.add_argument("--review-thread", required=True, help="independent managed reviewer thread")
+    classification.add_argument("--review-turn", required=True, help="completed managed reviewer turn")
+    classification.add_argument("--owner-thread", required=True, help="server-authored freeze anchor thread")
+    classification.add_argument("--owner-turn", required=True, help="completed server freeze anchor turn")
     commands.add_parser("check")
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
@@ -278,6 +507,9 @@ def main(argv: list[str] | None = None) -> int:
             payload, code = freeze(repo, state_path, head=args.head, base_ref=args.base), EXIT_OK
         elif args.command == "decide":
             payload, code = decide(state_path, decision=args.decision, evidence=args.evidence), EXIT_OK
+        elif args.command == "classify-code-only":
+            payload, code = classify_code_only(repo, state_path, args.evidence, args.review_thread, args.review_turn,
+                                               args.owner_thread, args.owner_turn), EXIT_OK
         else:
             code, payload = check(repo, state_path)
     except (BatchError, subprocess.CalledProcessError) as error:

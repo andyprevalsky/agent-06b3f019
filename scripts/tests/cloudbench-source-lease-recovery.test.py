@@ -73,7 +73,7 @@ class SourceRecovery(unittest.TestCase):
     def test_legacy_v1_audit_does_not_invoke_new_source_recovery(self):
         f = self.fixture
         legacy = dict(f.manifest, version=1)
-        del legacy['lease_protocol']; del legacy['creation_nonce']
+        del legacy['lease_protocol']; del legacy['creation_nonce']; del legacy['guest_env_sha256']
         f.path.chmod(0o600); f.write(f.path, legacy)
         f.proof()
         source = FLEET.read_text()

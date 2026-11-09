@@ -98,6 +98,7 @@ _CONFIG_SCALAR_KEYS = {
     "seed_cache_identity",
     "volume_snapshot_id",
     "base_source_manifest_sha256",
+    "base_source_lease_protocol",
     "node_dependency_fingerprint",
     "python_dependency_fingerprint",
     "per_child_max_concurrency",

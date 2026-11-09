@@ -91,6 +91,7 @@ ENV_HELPER="$APP_DIR/scripts/lib/cloudbench-env.sh"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"
+cloudbench_verify_source_guest_env || exit 1
 umask 077
 if [ -n "${AGENTS_ENV_B64:-}" ]; then
     echo "$AGENTS_ENV_B64" | base64 -d > "$APP_DIR/agents/.env" || { log "FATAL: failed to decode AGENTS_ENV_B64"; exit 1; }

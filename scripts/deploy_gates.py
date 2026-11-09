@@ -233,6 +233,35 @@ def run_root(root: Path) -> Path:
     return Path(value).resolve() if value else (root / '.context/deploy-runs').resolve()
 
 
+def kernel_custody_environment(worker_root: Path) -> dict:
+    """Project an opted-in allocation guard into each worker's own checkout."""
+    policy = os.environ.get('CLOUDBENCH_KERNEL_PROXY_CUSTODY', '0')
+    try:
+        options = shlex.split(os.environ.get('NODE_OPTIONS', ''))
+    except ValueError as error:
+        raise Blocked('workers', 'invalid Node launch options for Kernel custody') from error
+    guard_name = 'blackbox-kernel-proxy-custody.cjs'
+    if policy not in ('0', '1'):
+        raise Blocked('workers', 'invalid Kernel allocation custody policy')
+    selected = policy == '1' or any(guard_name in option for option in options)
+    if not selected:
+        return {}
+    remapped = []
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in ('--require', '-r') and index + 1 < len(options) and guard_name in options[index + 1]:
+            index += 2
+            continue
+        if not (option.startswith(('--require=', '-r=')) and guard_name in option):
+            remapped.append(option)
+        index += 1
+    guard = worker_root / 'back-end/scripts' / guard_name
+    remapped.append('--require=' + str(guard))
+    return {'NODE_OPTIONS': ' '.join(json.dumps(option) for option in remapped),
+            'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '1'}
+
+
 def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
     missing = [key for key in SLOT_ENV if not values.get(key)]
     if missing:
@@ -240,6 +269,7 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
     if values.get('ROSE_DEPLOY_WORKTREE_PATH', str(path)) != str(path):
         raise Blocked('workers', f'{gate}: prepared env belongs to {values["ROSE_DEPLOY_WORKTREE_PATH"]}, not {path}')
     env = {key: values[key] for key in (*SLOT_ENV, *OPTIONAL_ENV) if values.get(key)}
+    env.update(kernel_custody_environment(path))
     env[RUN_ROOT_ENV] = str(run_root(root))
     # Gates inherit the coordinator's environment, so a test-suite gate clears an inherited park
     # directory explicitly (the ledger writers treat an empty value as unset).
@@ -259,6 +289,7 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
 def remote_slot(root: Path, gate: str) -> dict:
     """A github-actions slot: nothing is provisioned here; the VM checks out the frozen commit."""
     env = {'CONDUCTOR_WORKSPACE_NAME': f'deploy-{gate}', 'CONDUCTOR_PORT': REMOTE_PORT}
+    env.update(kernel_custody_environment(Path(GITHUB_WORKER_ROOT)))
     slot = {'id': f'{gate}-blacksmith', 'transport': GITHUB_TRANSPORT,
             'runner': BLACKSMITH_RUNNERS.get(gate, DEFAULT_BLACKSMITH_RUNNER),
             'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': gate_deadline(gate)}

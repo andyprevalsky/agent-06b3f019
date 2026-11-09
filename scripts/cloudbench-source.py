@@ -47,7 +47,7 @@ KEYS = {
     "shared_volume_id",
 }
 LEASE_PROTOCOL = "cloudbench-source-lease-v1"
-LEASE_KEYS = KEYS | {"lease_protocol", "creation_nonce"}
+LEASE_KEYS = KEYS | {"lease_protocol", "creation_nonce", "guest_env_sha256"}
 
 
 def manifest(data: bytes) -> dict:
@@ -60,6 +60,11 @@ def manifest(data: bytes) -> dict:
         require(isinstance(value["creation_nonce"], str)
                 and re.fullmatch(r"[0-9a-f]{32}", value["creation_nonce"]) is not None,
                 "source creation nonce")
+        contract = value["guest_env_sha256"]
+        require(isinstance(contract, dict)
+                and set(contract) == {"AGENTS_ENV_B64", "BACKEND_ENV_B64"}
+                and all(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+                        for digest in contract.values()), "source guest environment contract")
     require(value["app"] == "navi-whisper-lux-bench", "manifest app")
     patterns = {
         "owner_token": r"[0-9a-f]{32}",

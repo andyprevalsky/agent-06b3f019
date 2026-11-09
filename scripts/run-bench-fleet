@@ -17274,6 +17274,7 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "seed_cache_identity=$_SEED_GUEST_TOKEN"
     --config-value "volume_snapshot_id=$SNAP_ID"
     --config-value "base_source_manifest_sha256=${PRIVATE_SOURCE_SHA256:-none}"
+    --config-value "base_source_lease_protocol=${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}"
     --config-value "node_dependency_fingerprint=$CURRENT_NODE_FP"
     --config-value "python_dependency_fingerprint=$CURRENT_PY_FP"
     --config-value "per_child_max_concurrency=5"
@@ -18372,8 +18373,13 @@ PY
         echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
         echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+        echo "export CLOUDBENCH_EXECUTION_PROVENANCE_FILE=/data/cloudbench-execution-provenance.json"
+        echo "export CLOUDBENCH_SOURCE_MANIFEST_FILE=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf /data/cloudbench-source-manifest.json)")"
+        echo "export CLOUDBENCH_SOURCE_MANIFEST_SHA256=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf '%s' "$PRIVATE_SOURCE_SHA256")")"
+        echo "export CLOUDBENCH_SOURCE_LEASE_PROTOCOL=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf '%s' "$PRIVATE_SOURCE_LEASE_PROTOCOL")")"
         echo "export CLOUDBENCH_WORKER_EVIDENCE_HELPER=/data/cloudbench-worker-evidence.py"
         echo "export CLOUDBENCH_WORKER_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
+        echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
         [ "$borrowed_worker" = 0 ] || echo "export CLOUDBENCH_WORKER_EVIDENCE_SCOPE=run"
         echo "export CLOUDBENCH_WORKER_MACHINE_ID=$(printf '%q' "$wid")"
         echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
@@ -18519,6 +18525,10 @@ PY
                 }; } \
              && run_worker_stage_cmd "upload cloudbench-env.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-env.sh" /data/cloudbench-env.sh \
+             && { [ -z "$PRIVATE_SOURCE_FILE" ] || run_worker_stage_cmd "upload captured source manifest" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$PRIVATE_SOURCE_FILE" /data/cloudbench-source-manifest.json; } \
+             && run_worker_stage_cmd "upload execution provenance" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$EXECUTION_PROVENANCE_FILE" /data/cloudbench-execution-provenance.json \
              && run_worker_stage_cmd "upload worker environment" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
              && run_worker_stage_cmd "upload worker wrapper" \
@@ -19519,6 +19529,9 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \
     CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=1 \
     CLOUDBENCH_EXECUTION_PROVENANCE_FILE="$EXECUTION_PROVENANCE_FILE" \
+    CLOUDBENCH_SOURCE_MANIFEST_FILE="$PRIVATE_SOURCE_FILE" \
+    CLOUDBENCH_SOURCE_MANIFEST_SHA256="$PRIVATE_SOURCE_SHA256" \
+    CLOUDBENCH_SOURCE_LEASE_PROTOCOL="$PRIVATE_SOURCE_LEASE_PROTOCOL" \
     NO_OPEN=1 \
         run_fleet_child_supervised "$out/benchmark-child.finished" \
             bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
