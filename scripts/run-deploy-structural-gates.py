@@ -406,6 +406,13 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
     ),
     Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
+    Gate("cloudbench-prepare-source", ("python3", "scripts/tests/cloudbench-prepare-source.test.py")),
+    Gate("cloudbench-prepare-source-create", ("python3", "scripts/tests/cloudbench-prepare-source-create.test.py")),
+    Gate("cloudbench-source-version", ("python3", "scripts/tests/cloudbench-source-version.test.py")),
+    Gate("cloudbench-original-image-failure", ("python3", "scripts/tests/cloudbench-original-image-failure.test.py")),
+    Gate("cloudbench-source-lease", ("python3", "scripts/tests/cloudbench-source-lease.test.py")),
+    Gate("cloudbench-source-lease-fleet", ("python3", "scripts/tests/cloudbench-source-lease-fleet.test.py")),
+    Gate("cloudbench-source-lease-recovery", ("python3", "scripts/tests/cloudbench-source-lease-recovery.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),

@@ -419,6 +419,13 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Live Primary Return" python3 scripts/tests/cloudbench-live-primary-return.test.py
   run_suite "Cloud Benchmark Exact Shape Reuse" python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py
   run_suite "Cloud Benchmark Maintenance Env" python3 scripts/tests/cloudbench-maintenance-env.test.py
+  run_suite "Cloud Benchmark Source Preparation" python3 scripts/tests/cloudbench-prepare-source.test.py
+  run_suite "Cloud Benchmark Source Creation Admission" python3 scripts/tests/cloudbench-prepare-source-create.test.py
+  run_suite "Cloud Benchmark Source Version Contract" python3 scripts/tests/cloudbench-source-version.test.py
+  run_suite "Cloud Benchmark Original Image Failure" python3 scripts/tests/cloudbench-original-image-failure.test.py
+  run_suite "Cloud Benchmark Source Consumer Lease" python3 scripts/tests/cloudbench-source-lease.test.py
+  run_suite "Cloud Benchmark Fleet Source Lease" python3 scripts/tests/cloudbench-source-lease-fleet.test.py
+  run_suite "Cloud Benchmark Source Lease Recovery" python3 scripts/tests/cloudbench-source-lease-recovery.test.py
   run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
   run_suite "Fleet Infra Canary" bash scripts/tests/fleet-infra-canary.test.sh
   run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh

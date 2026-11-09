@@ -786,6 +786,10 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-source.py" \
+       "$ROOT_DIR/scripts/cloudbench-source-lease.py" \
+       "$ROOT_DIR/scripts/deploy_test_native_cleanup.py" \
+       "$ROOT_DIR/scripts/cloudbench-prepare-source-create.py" \
+       "$ROOT_DIR/scripts/cloudbench-disposable-controller.py" \
        "$ROOT_DIR/scripts/cloudbench-warm-pool.py" \
        "$ROOT_DIR/scripts/cloudbench-warm-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
@@ -857,6 +861,7 @@ MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readine
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
 WORKER_SNAPSHOT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-snapshot.py"
 SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source.py"
+SOURCE_LEASE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source-lease.py"
 WARM_SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-warm-source.py"
 AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
@@ -1218,6 +1223,10 @@ list_donor_snapshots() {
 # ── Capture an explicit immutable fleet source ─────────────────────────────
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
+PRIVATE_SOURCE_LEASE_PROTOCOL="none"
+PRIVATE_SOURCE_LEASE_PID=""
+PRIVATE_SOURCE_LEASE_READY=""
+PRIVATE_SOURCE_LEASE_RELEASE=""
 PRIVATE_SOURCE_ID=""
 PRIVATE_SOURCE_VOLUME_ID=""
 SHARED_WARM_ID=""
@@ -1230,6 +1239,7 @@ if [ -n "${CLOUDBENCH_SOURCE_MANIFEST:-}" ]; then
         PRIVATE_SOURCE_REGION PRIVATE_SOURCE_NODE_FP PRIVATE_SOURCE_PY_FP \
         SHARED_WARM_ID SHARED_WARM_VOLUME_ID PRIVATE_SOURCE_INSTANCE_ID < <(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE")
     [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
+    PRIVATE_SOURCE_LEASE_PROTOCOL="$(python3 "$SOURCE_HELPER" protocol "$PRIVATE_SOURCE_FILE")" || exit 1
     # Re-exec children consume the same captured bytes, never the caller's path.
     export CLOUDBENCH_SOURCE_MANIFEST="$PRIVATE_SOURCE_FILE"
 fi
@@ -1900,9 +1910,99 @@ source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
 export FLY_API_TOKEN
+private_source_holder_identity() {
+    python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/process-identity.py" "$PRIVATE_SOURCE_LEASE_PID"
+}
+
+private_source_lease_guard() {
+    [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ] || return 0
+    [ "$PRIVATE_SOURCE_LEASE_PROTOCOL" = cloudbench-source-lease-v1 ] || return 1
+    python3 "$SOURCE_LEASE_HELPER" check --ready "$PRIVATE_SOURCE_LEASE_READY" --manifest "$PRIVATE_SOURCE_FILE" \
+        --consumer-owner "$FLEET_OWNER_TOKEN" --run-id "$RUN_ID" \
+        --source-id "$PRIVATE_SOURCE_ID" --manifest-sha256 "$PRIVATE_SOURCE_SHA256" \
+        --parent-pid "$PRIVATE_SOURCE_LEASE_PARENT_PID"
+}
+
+start_private_source_lease() {
+    [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ] || return 0
+    PRIVATE_SOURCE_LEASE_PARENT_PID="$$"
+    PRIVATE_SOURCE_LEASE_READY="$FLEET_DIR/source-lease/ready.json"
+    PRIVATE_SOURCE_LEASE_RELEASE="$FLEET_DIR/source-lease/release.json"
+    python3 "$SOURCE_LEASE_HELPER" hold --manifest "$PRIVATE_SOURCE_FILE" \
+        --consumer-owner "$FLEET_OWNER_TOKEN" --run-id "$RUN_ID" --workspace "$ROOT_DIR" \
+        --journal "$FLEET_DIR/source-lease" --ready "$PRIVATE_SOURCE_LEASE_READY" \
+        --release-proof "$PRIVATE_SOURCE_LEASE_RELEASE" --parent-pid "$$" \
+        >"$FLEET_DIR/source-lease.log" 2>&1 &
+    PRIVATE_SOURCE_LEASE_PID=$!
+    PRIVATE_SOURCE_LEASE_BIRTH="$(private_source_holder_identity)" || return 1
+    local deadline=$((SECONDS + 60))
+    while [ ! -f "$PRIVATE_SOURCE_LEASE_READY" ]; do
+        if ! kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ private source lease was not admitted; no clone allocation authorized" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    export PRIVATE_SOURCE_LEASE_PROTOCOL PRIVATE_SOURCE_LEASE_READY PRIVATE_SOURCE_LEASE_PARENT_PID \
+        PRIVATE_SOURCE_ID PRIVATE_SOURCE_SHA256 PRIVATE_SOURCE_FILE SOURCE_LEASE_HELPER FLEET_OWNER_TOKEN RUN_ID
+    private_source_lease_guard
+}
+
+finish_private_source_lease() {
+    [ -n "${PRIVATE_SOURCE_LEASE_PID:-}" ] || return 0
+    local status=0 deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
+    if [ -z "${PRIVATE_SOURCE_LEASE_BIRTH:-}" ] || \
+        [ "$(private_source_holder_identity 2>/dev/null || true)" != "$PRIVATE_SOURCE_LEASE_BIRTH" ]; then
+        # A recycled PID or unreadable birth is never authority to signal or wait.
+        echo "❌ source holder identity unavailable; durable claim retained" >&2
+        return 1
+    fi
+    if [ -f "$FLEET_DIR/_batch/lifecycle.json" ] && [ -d "${FLEET_TEARDOWN_OWNERSHIP_DIR:-}" ]; then
+        python3 - "$PRIVATE_SOURCE_LEASE_RELEASE" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$FLEET_DIR/_batch/lifecycle.json" \
+            "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py" <<'PY_SOURCE_RELEASE' || status=1
+import json, runpy, sys
+from pathlib import Path
+path, audit, lifecycle, helper = sys.argv[1:]
+storage = runpy.run_path(helper)
+payload = (json.dumps({'audit_dir': audit, 'lifecycle': lifecycle}, sort_keys=True) + '\n').encode()
+storage['publish'](Path(path), payload, immutable=True)
+PY_SOURCE_RELEASE
+    else
+        status=1
+    fi
+    while kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ] && [ "$status" = 0 ]; do
+        # A completed child must be reaped even when kill -0 still sees a zombie.
+        case "$(ps -p "$PRIVATE_SOURCE_LEASE_PID" -o stat= 2>/dev/null)" in ''|Z*) break ;; esac
+        sleep 1
+    done
+    if kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null; then
+        case "$(ps -p "$PRIVATE_SOURCE_LEASE_PID" -o stat= 2>/dev/null)" in
+            ''|Z*) ;;
+            *)
+                status=1
+                # The normal close budget is spent. Reuse the existing exact-job,
+                # birth-fenced tree join with no additional TERM grace.
+                if ! cloudbench_terminate_tree_and_wait 0 "$PRIVATE_SOURCE_LEASE_PID"; then
+                    echo "❌ source lease holder did not join; durable claim retained" >&2
+                    return 1
+                fi ;;
+        esac
+    fi
+    wait "$PRIVATE_SOURCE_LEASE_PID" || status=1
+    PRIVATE_SOURCE_LEASE_PID=""
+    [ "$status" = 0 ] || echo "❌ source consumer closure unresolved; durable claim retained" >&2
+    return "$status"
+}
+
 private_source_allows_provider_call() {
     [ -n "${PRIVATE_SOURCE_ID:-}" ] || return 0
     local verb="${1:-} ${2:-}" arg
+    case "$verb" in
+        "machine clone"|"machines clone"|"machine run"|"machines run")
+            if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+                private_source_lease_guard || return 1
+            fi ;;
+    esac
     case "$verb" in
         "machine update"|"machines update"|"machine start"|"machines start"|"machine stop"|"machines stop"|"machine destroy"|"machines destroy"|"machine restart"|"machines restart"|"volumes destroy"|"volume destroy"|"volumes update"|"volume update"|"ssh console"|"ssh sftp")
             for arg in "$@"; do
@@ -6054,7 +6154,7 @@ fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume> [snap
     [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || return 0
     fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
     # Pass the exact source-owned mutation guards to bounded child shells.
-    export -f FLY private_source_allows_provider_call \
+    export -f FLY private_source_allows_provider_call private_source_lease_guard \
         archived_reuse_helper archived_reuse_sftp_get archived_reuse_transport_args \
         archived_reuse_fenced_effect cloudbench_mutation_admission cloudbench_mutation_launch_code
     export APP GIT_COMMON_DIR PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID SHARED_WARM_ID SHARED_WARM_VOLUME_ID \
@@ -12565,6 +12665,22 @@ recover_registry_primaries_to_pool() {  # exact recovery lock + canonical eviden
     done <<< "$proof_plan"
 }
 
+fleet_close_recovered_source_consumer() {  # <original owner>; canonical audit, never caller run paths
+    local owner="$1" audit="$FLEET_AUDIT_ROOT/$1" manifest digest protocol workspace
+    manifest="$audit/source-manifest.json"
+    digest="$(registry_meta_value "$audit/meta" source_manifest_sha256)"
+    if [ -z "$digest" ]; then
+        [ ! -e "$manifest" ] && [ ! -L "$manifest" ]
+        return $?
+    fi
+    protocol="$(python3 "$SOURCE_HELPER" protocol "$manifest" --sha256 "$digest")" || return 1
+    [ "$protocol" != none ] || return 0
+    [ "$protocol" = cloudbench-source-lease-v1 ] || return 1
+    workspace="$(registry_meta_value "$audit/meta" workspace_root)"
+    [ -n "$workspace" ] || return 1
+    python3 "$SOURCE_LEASE_HELPER" recover-close --workspace "$workspace" --consumer-owner "$owner"
+}
+
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
@@ -12585,6 +12701,7 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             && [ "$(registry_meta_value "$orphan_audit/meta" fleet_owner_token)" = "$token" ] \
             && [ "$(registry_meta_value "$orphan_audit/meta" status)" \
                 = "provider-teardown-verified" ]; then
+            fleet_close_recovered_source_consumer "$token" || return 1
             fleet_publish_recovered_terminal_projection "$orphan_audit"
             return $?
         fi
@@ -12795,6 +12912,7 @@ PY
     fi
     release_registry_recovery_lock "$registry"
     fleet_registry_remove_if_empty "$registry" || return 1
+    fleet_close_recovered_source_consumer "$token" || return 1
     fleet_publish_recovered_terminal_projection "$FLEET_AUDIT_ROOT/$token"
 }
 
@@ -12966,6 +13084,9 @@ fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...
 fleet_clone_volume_request() {  # <seconds> create|find <helper args...>; one JSON receipt on stdout
     local seconds="$1"
     shift
+    if [ "${1:-}" = create ] && [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
     python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-clone-volume.py" "$@" \
         --app "$APP" --timeout "$seconds"
@@ -14479,6 +14600,9 @@ finally:
 ' "$POOL_IDS_FILE" "$hints"
 }
 claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none free)
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     [ -f "$POOL_IDS_FILE" ] || return 0
     local id volume_id claim_path owner_status claim_host claim_pid claim_start claim_token cleanup_status
     local claim_digest desired_size="${1:-}" desired_memory="${2:-}" desired_cpus desired_kind
@@ -14805,10 +14929,24 @@ fi
 if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     recovery_status=0
     recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"
+    # A prior physical recovery may have retired the registry before closing
+    # its v2 source claim. The original native claim is the journal locator.
+    if [ ! -d "$recovery_registry" ] \
+        && [ -f "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/source-manifest.json" ]; then
+        recovered_source_protocol="$(python3 "$SOURCE_HELPER" protocol \
+            "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/source-manifest.json" \
+            --sha256 "$(registry_meta_value "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/meta" source_manifest_sha256)")" || exit 1
+        if [ "$recovered_source_protocol" = cloudbench-source-lease-v1 ]; then
+            recover_exact_stale_fleet_owner "$RECOVER_OWNER_TOKEN" || recovery_status=1
+            cloudbench_controller_lock_release "$LOCK_DIR"
+            exit "$recovery_status"
+        fi
+    fi
     private_recovery_digest="$(registry_meta_value "$recovery_registry/meta" source_manifest_sha256)"
     if [ -n "$private_recovery_digest" ] || [ -e "$recovery_registry/source-manifest.json" ] || [ -L "$recovery_registry/source-manifest.json" ]; then
         [ -n "$private_recovery_digest" ] || exit 1
         PRIVATE_SOURCE_FILE="$recovery_registry/source-manifest.json"
+        PRIVATE_SOURCE_LEASE_PROTOCOL="$(python3 "$SOURCE_HELPER" protocol "$PRIVATE_SOURCE_FILE")" || exit 1
         PRIVATE_SOURCE_SHA256="$private_recovery_digest"
         private_recovery_fields="$(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE" --sha256 "$private_recovery_digest")" || exit 1
         read -r PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID PRIVATE_SOURCE_SNAPSHOT \
@@ -15860,6 +15998,7 @@ PY
     if [ "$publication_failed" = "1" ]; then
         finalize_terminal_projection "$ec" || ec=1
     fi
+    finish_private_source_lease || ec=1
     # Teardown and final publication both need the snapshotted helpers.
     cleanup_owned_script_snapshot || ec=1
     exit "$ec"
@@ -16024,6 +16163,9 @@ echo "✅ Canonical seed dump present for guest pg${CLOUDBENCH_GUEST_PG_MAJOR}: 
 
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
 private_fleet_source_admission() {
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     # The existing publisher reads provider inventory once per poll. Clone
     # admission checks only the selected immutable base's fresh native record.
     [ "$(inventory_machine_field "$PRIVATE_SOURCE_ID" instance_id)" = "$PRIVATE_SOURCE_INSTANCE_ID" ] \
@@ -16075,6 +16217,9 @@ select_dependency_set_warm_source() {
 }
 select_dependency_set_warm_source || exit 1
 if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        start_private_source_lease || exit 1
+    fi
     validate_private_fleet_source || exit 1
     WARM_ID="$PRIVATE_SOURCE_ID"
     WARM_VOLUME_ID="$PRIVATE_SOURCE_VOLUME_ID"

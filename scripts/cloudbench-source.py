@@ -46,12 +46,20 @@ KEYS = {
     "shared_machine_id",
     "shared_volume_id",
 }
+LEASE_PROTOCOL = "cloudbench-source-lease-v1"
+LEASE_KEYS = KEYS | {"lease_protocol", "creation_nonce"}
 
 
 def manifest(data: bytes) -> dict:
     value = json.loads(data, object_pairs_hook=storage["unique_object"])
-    require(isinstance(value, dict) and set(value) == KEYS, "manifest fields")
-    require(type(value["version"]) is int and value["version"] == 1, "manifest version")
+    require(isinstance(value, dict), "manifest object")
+    require(type(value.get("version")) is int and value["version"] in (1, 2), "manifest version")
+    require(set(value) == (KEYS if value["version"] == 1 else LEASE_KEYS), "manifest fields")
+    if value["version"] == 2:
+        require(value["lease_protocol"] == LEASE_PROTOCOL, "source lease protocol")
+        require(isinstance(value["creation_nonce"], str)
+                and re.fullmatch(r"[0-9a-f]{32}", value["creation_nonce"]) is not None,
+                "source creation nonce")
     require(value["app"] == "navi-whisper-lux-bench", "manifest app")
     patterns = {
         "owner_token": r"[0-9a-f]{32}",
@@ -125,6 +133,15 @@ def verify(value: dict, inventory: dict, *, parked_memory: int) -> None:
     require(machine.get("state") == "stopped", "source must be stopped")
     require(machine.get("region") == value["region"], "machine region")
     config = machine.get("config") or {}
+    metadata = config.get("metadata") or {}
+    if value["version"] == 2:
+        require(metadata.get("cloudbench_source_protocol") == LEASE_PROTOCOL
+                and metadata.get("cloudbench_source_create_nonce") == value["creation_nonce"],
+                "native source lease protocol")
+        require(not any(key.startswith("cloudbench_source_retiring") for key in metadata),
+                "source retirement has begun")
+    else:
+        require("cloudbench_source_protocol" not in metadata, "source protocol downgrade")
     require(
         (config.get("metadata") or {}).get("cloudbench_source_owner")
         == value["owner_token"],
@@ -174,7 +191,7 @@ def verify(value: dict, inventory: dict, *, parked_memory: int) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["capture", "fields", "verify"])
+    parser.add_argument("mode", choices=["capture", "fields", "verify", "protocol"])
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--workspace", type=Path)
@@ -203,6 +220,8 @@ def main() -> int:
             storage["publish"](args.output, canonical(value), immutable=True)
             args.output.chmod(0o444)
             print(hashlib.sha256(canonical(value)).hexdigest())
+        elif args.mode == "protocol":
+            print(value.get("lease_protocol", "none"))
         elif args.mode == "fields":
             keys = (
                 "machine_id",
