@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { verifyInventoryOnly } from './browser-session-inventory-only.cases';
 
 import { randomUUID } from 'node:crypto';
 import { inspect } from 'node:util';
@@ -168,6 +169,15 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
   } as unknown as Browser;
 
   try {
+    await verifyInventoryOnly({
+      sessionId,
+      userId,
+      otherUserId,
+      passwordId: password.id,
+      passkeyId: passkey.id,
+      browser: fakeBrowser,
+      injectionCount: () => injectionEvents.length,
+    });
     const result = await prepareSessionCredentials(
       sessionId,
       userId,

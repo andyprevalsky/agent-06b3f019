@@ -54,6 +54,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 POOL = runpy.run_path(str(Path(__file__).with_name("cloudbench-warm-pool.py")))
 Fly, PoolError, resolve_token = POOL["Fly"], POOL["PoolError"], POOL["resolve_token"]
+# Fly caps one /wait at 60 s; the pool helper loops within that bound.
+wait_state = POOL["wait_state"]
 
 DEFAULT_APP = "navi-whisper-lux-bench"
 BASE_DONOR = "cloudbench-warm"
@@ -125,7 +127,8 @@ class Api(Fly):
                                     {"ttl": int(ttl), "description": "rose cloudbench warm-source claim"}, None)
         if status == 409:
             return None
-        need(status == 200 and isinstance(body, dict), f"lease acquire on {machine_id} -> HTTP {status}")
+        # Fly grants a lease with 201 Created; accept 200 too for older API responses.
+        need(status in (200, 201) and isinstance(body, dict), f"lease acquire on {machine_id} -> HTTP {status}")
         nonce = (body.get("data") or {}).get("nonce")
         need(isinstance(nonce, str) and nonce, "lease acquire returned no nonce")
         return nonce
@@ -350,9 +353,9 @@ def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, 
                                       "config": source_config(donor, set_id, volume["id"], time.time())})
         need(machine and machine.get("id"), "machine create returned no id")
         # Fleets and maintenance require a STOPPED source; a created-only Machine is not one.
-        api.wait(machine["id"], "started", 120)
+        wait_state(api, machine["id"], "started", 120)
         api.stop(machine["id"])
-        api.wait(machine["id"], "stopped", 120)
+        wait_state(api, machine["id"], "stopped", 120)
         log(f"✅ warm source {set_id}: {machine_name} ({machine['id']}) stopped on {volume['id']}")
         return set_id, machine_name, volume_name
     finally:

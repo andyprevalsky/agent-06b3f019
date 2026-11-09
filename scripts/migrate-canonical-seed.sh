@@ -63,10 +63,18 @@ seed_cache get "$OLD_TOKEN" "$WORK/old.dump"
 PORT="$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=postgres -p "127.0.0.1:${PORT}:5432" \
   "pgvector/pgvector:pg${PG_MAJOR}" >/dev/null
+ready=0
 for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -U postgres -q 2>/dev/null && break
+  if docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -q 2>/dev/null; then
+    ready=1
+    break
+  fi
   sleep 1
 done
+if [ "$ready" -ne 1 ]; then
+  echo "❌ PostgreSQL TCP readiness exhausted after 60 attempts; refusing migration/publication" >&2
+  exit 1
+fi
 
 psql_c() { PGPASSWORD=postgres psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PORT" -U postgres "$@"; }
 # Exact per-table row counts (pg_stat n_live_tup is only an estimate).

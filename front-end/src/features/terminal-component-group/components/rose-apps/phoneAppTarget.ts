@@ -4,7 +4,12 @@ import type { Message } from '../../hooks';
 import type { AgentBrowserTab } from './roseAppsState';
 import { phoneActivityKey } from '../browser-status-bar/phone/phoneOverlayState';
 import { phoneAttentionCandidate } from '../browser-status-bar/phone/phoneAttentionState';
-export function phoneAppTarget(agentId: string, messages: Message[], tabs: AgentBrowserTab[]) {
+export function phoneAppTarget(
+  agentId: string,
+  messages: Message[],
+  tabs: AgentBrowserTab[],
+  completed?: { taskId: string; requestId: string },
+) {
   const tasks = new Set<string>();
   const query = getQueryParams();
   if (
@@ -34,7 +39,10 @@ export function phoneAppTarget(agentId: string, messages: Message[], tabs: Agent
   }
   const candidates = [...tasks].filter(
     (taskId) =>
-      phoneActivityKey(messages, taskId) || phoneAttentionCandidate(taskId, agentId, messages),
+      phoneActivityKey(messages, taskId) ||
+      phoneAttentionCandidate(taskId, agentId, messages, completed?.requestId),
   );
+  if (candidates.length === 0 && !query.has('attention-request-id'))
+    return completed?.taskId ?? null;
   return candidates.length === 1 ? candidates[0] : null;
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { Harness } from './iphone-control.fixtures';
+import { syntheticConfiguration } from './iphone-control.synthetic-setup';
 
 function object(value: unknown): Record<string, unknown> {
   assert.ok(typeof value === 'object' && value !== null && !Array.isArray(value));
@@ -15,11 +16,26 @@ async function main() {
   let total = 0;
   const task = async () => {
     const f = await h.fixture();
-    await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' });
-    const context = await prisma.browserContext.create({
-      data: { userId: f.userId, contextId: randomUUID() },
+    const context = await prisma.browserContext.upsert({
+      where: { userId: f.userId },
+      create: { userId: f.userId, contextId: randomUUID() },
+      update: {},
     });
     contexts.push(context.id);
+    const setupBrowser = await prisma.browserSession.create({
+      data: { contextId: context.id, agentId: f.agentId, sessionId: randomUUID() },
+    });
+    await prisma.iPhoneLease.update({
+      where: { id: f.leaseId },
+      data: { browserTaskId: setupBrowser.id },
+    });
+    // Complete the separate synthetic bootup once, before target-task discovery.
+    // Request helpers must never heal phone, workflow, or generation changes.
+    await syntheticConfiguration(f.userId, f.leaseId);
+    const released = await h.request(f.userId, `/leases/${f.leaseId}/release`, {
+      method: 'POST',
+    });
+    assert.equal(released.status, 200);
     const browser = await prisma.browserSession.create({
       data: { contextId: context.id, agentId: f.agentId, sessionId: randomUUID() },
     });

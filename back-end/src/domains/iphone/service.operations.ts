@@ -1,3 +1,6 @@
+import { assessAuthLoss } from './service.authLoss';
+import type { ImessageAuthLossVerifier } from '../../providers/phoneAuthLoss';
+import { currentPortraitHint } from './repo.setupPortrait';
 import { runDevicePasscode } from './service.passcode';
 import { runMessage } from './service.message';
 import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
@@ -22,12 +25,14 @@ export const defaultPhoneClient: PhoneClientFactory = () => new PhoneHarnessClie
 
 export async function publicOperation(command: IPhoneOperation) {
   const encryptedPrivacy = await operationPrivacy(command.deviceId);
+  const portraitActionHint = await currentPortraitHint(command);
   return {
     id: command.requestKey,
     cursor: command.cursor,
     operation: command.operation,
     status: command.state,
     errorCode: command.errorCode,
+    ...(portraitActionHint ? { portraitActionHint } : {}),
     result:
       command.resultEncrypted === null
         ? null
@@ -54,13 +59,19 @@ function safeFailure(error: unknown, operation: string, started = false) {
   };
 }
 
-async function runClaim(claim: CommandClaim, input: PhoneCommand, client: PhoneHarnessClient) {
+async function runClaim(
+  claim: CommandClaim,
+  input: PhoneCommand,
+  client: PhoneHarnessClient,
+  authLossVerifier?: ImessageAuthLossVerifier
+) {
   let started = false;
   try {
     const session = await ensurePhoneSession(claim, client);
     if (!(await commands.beginExecution(claim))) return null;
     started = true;
     const result = await client.perform(session, input.operation, input.args);
+    await assessAuthLoss(claim, result, authLossVerifier);
     return await commands.finishCommand(claim, 'SUCCEEDED', result);
   } catch (error) {
     if (error instanceof PhoneConnectionPending && !started)
@@ -87,7 +98,8 @@ export async function performPhoneCommand(
   clientFactory: PhoneClientFactory = defaultPhoneClient,
   credentialVerifier?: CredentialVerifier,
   beforeSavedExecute?: () => Promise<void>,
-  messageVerifier?: MessageVerifier
+  messageVerifier?: MessageVerifier,
+  authLossVerifier?: ImessageAuthLossVerifier
 ) {
   if (
     ['credentials.fill_saved', 'credentials.fill_device_passcode'].includes(input.operation) &&
@@ -131,7 +143,7 @@ export async function performPhoneCommand(
           ? runDevicePasscode(claim, client, credentialVerifier, beforeSavedExecute)
           : input.operation === 'credentials.fill_saved'
             ? runSavedCredential(claim, client, credentialVerifier, beforeSavedExecute)
-            : runClaim(claim, input, client))) ??
+            : runClaim(claim, input, client, authLossVerifier))) ??
       (await commands.ownedCommand(userId, leaseId, input.operationId)) ??
       command;
   }

@@ -190,6 +190,18 @@ for (const mode of [
         };
         assert.deepEqual(result.data.operation?.result, expected);
         assert.deepEqual((await send()).data.operation?.result, expected);
+        if (mode === 'stale' || mode === 'start-race') {
+          assert.equal(
+            (
+              await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+                method: 'POST',
+                body: { ...body, setupRevision: body.setupRevision + 1 },
+              })
+            ).status,
+            409,
+            'Revoked credential rejection replay accepted changed input'
+          );
+        }
         assert.equal(JSON.stringify(result.data).includes(secret), false);
         assert.equal(
           (await send()).data.operation?.status,

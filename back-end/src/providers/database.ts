@@ -1,4 +1,5 @@
 import { type Prisma, PrismaClient } from '@prisma/client';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import dotenv from 'dotenv';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
@@ -35,6 +36,17 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient };
 // P1017 - Server has closed the connection (Supabase pooler idle timeout)
 // P2024 - Timed out fetching a new connection from the pool
 const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P1017', 'P2024']);
+
+// Non-idempotent writes must not replay after an ambiguous committed response.
+// Keep the same guarded/traced client and pool, with isolated async-call policy.
+const queryRetriesDisabled = new AsyncLocalStorage<boolean>();
+
+export function withoutQueryRetry<T>(operation: () => Promise<T>): Promise<T> {
+  return queryRetriesDisabled.run(true, async () => {
+    const result = await operation();
+    return result;
+  });
+}
 
 /** Transient connection/pool faults that a single query may safely retry. */
 function isRetryableQueryError(error: unknown): boolean {
@@ -334,7 +346,7 @@ export const prisma =
             }
           },
           {
-            maxRetries: 3,
+            maxRetries: queryRetriesDisabled.getStore() === true ? 1 : 3,
             initialBackoffMs: 100,
             isRetryable: isRetryableQueryError,
             component: `Prisma ${model ?? 'raw'}.${operation}`,

@@ -1,9 +1,13 @@
+import { validPortraitCommit } from './repo.setupPortrait';
 import { lockSetupCommit, setupCommitValid } from './repo.setupFence';
 import { writeSetupOutcome } from './repo.setupOutcome';
 import { setupState, type SetupInput } from '../../providers/phoneSetupState';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { SetupClaim } from './repo.setupCommand';
-import type { SetupVerificationResult } from '../../providers/phoneSetupVerifier';
+import type {
+  SetupVerificationResult,
+  SetupOutcomeResult,
+} from '../../providers/phoneSetupVerifier';
 import * as leases from './repo';
 
 export async function billSetup(
@@ -40,14 +44,19 @@ export async function billSetup(
 export async function finishSetup(
   claim: SetupClaim,
   input: SetupInput,
-  result: SetupVerificationResult | null,
+  result: SetupOutcomeResult | null,
   usageRecordId?: string
 ) {
   return leases.transaction(async (tx) => {
     const device = await lockSetupCommit(tx, claim);
     const command = await tx.iPhoneOperation.findUniqueOrThrow({ where: { id: claim.command.id } });
     const state = setupState(device.setupEncrypted);
-    const valid = await setupCommitValid(tx, device, claim, input, command, state);
+    let valid = await setupCommitValid(tx, device, claim, input, command, state);
+    if (result !== null && 'localPortrait' in result)
+      valid =
+        valid &&
+        result.status === result.localPortrait.status &&
+        (await validPortraitCommit(tx, claim, input, command, result.localPortrait));
     const now = await leases.databaseNow(tx);
     const succeeded = valid && (input.action !== 'verify' || result !== null);
     const errorCode = !valid
@@ -56,7 +65,7 @@ export async function finishSetup(
         ? 'phone_setup_verifier_unavailable'
         : null;
     const usage =
-      result !== null && usageRecordId !== undefined
+      result !== null && 'usage' in result && usageRecordId !== undefined
         ? {
             billedBy: 'backend',
             usageRecordId,

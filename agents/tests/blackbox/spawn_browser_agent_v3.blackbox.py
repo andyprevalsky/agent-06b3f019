@@ -26405,6 +26405,8 @@ async def _run_realm_transition_action_fixture(
     credential_action=None,
     credential_failure=False,
     credential_origin=None,
+    unexpected_worker_state=False,
+    reported_cookie_injection=False,
 ):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
@@ -26456,7 +26458,13 @@ async def _run_realm_transition_action_fixture(
     async def prepare(_config, **kwargs):
         realm = urlparse(kwargs["target_url"]).hostname
         events.append(("prepare", realm))
+        if kwargs.get("restore_browser_state", True):
+            events.append(("restore", realm))
         payload = {"auth_realm": realm, "auth_options": {"realm": realm}, "passwords": [], "passkeys": []}
+        if reported_cookie_injection:
+            payload["cookies_injected"] = True
+        if unexpected_worker_state:
+            payload["worker_apply"] = {"provider": "tilion", "cookies": [], "local_storage": []}
         if restoration_error or (preapproved_handoff and realm == "new.example"):
             payload["credential_preparation_error"] = "Browser state injection timed out after 18000ms"
         return payload
@@ -26543,6 +26551,10 @@ async def _run_realm_transition_action_fixture(
         patch(prefix + "build_realm_credential_state", hydrate),
         patch(prefix + "activity_drain_reason", AsyncMock(return_value=None)),
         patch(prefix + "prepare_browser_auth", prepare),
+        patch(
+            prefix + "apply_tilion_worker_state",
+            AsyncMock(side_effect=lambda *_args: events.append(("apply-worker-state", "new.example"))),
+        ),
         patch(prefix + "_call_browser_use_with_rotation", model_step),
         patch(
             prefix + "_wait_for_browser_user_control",
@@ -26780,8 +26792,8 @@ async def test_activity_cross_realm_action_redacts_reused_ref_values():
 
 
 @_in_browser_activity_context
-async def test_activity_redirected_goto_reloads_prepared_realm_once():
-    """Successful post-navigation restoration participates before the next model turn."""
+async def test_activity_redirected_goto_preserves_active_auth_transaction():
+    """Discover redirected credentials without replacing an already-started transaction."""
     import json
 
     for redirect, restoration_error in ((True, False), (False, False), (True, True)):
@@ -26791,11 +26803,11 @@ async def test_activity_redirected_goto_reloads_prepared_realm_once():
             restoration_error=restoration_error,
         )
         reloads = [event for event in events if event[0] == "reload"]
-        expected = 1 if redirect and not restoration_error else 0
-        assert len(reloads) == expected, "redirect restoration did not reload exactly once before the next model call"
-        if expected:
-            assert reloads[0][1] == "https://new.example/login"
-            assert events.index(("prepare", "new.example")) < events.index(reloads[0]) < events.index(("model", 2))
+        assert not reloads, "observed redirect restarted the active authentication transaction"
+        assert events.index(("prepare", "new.example")) < events.index(("model", 2))
+        assert (("restore", "new.example") in events) is (not redirect), (
+            "observed redirect must use inventory only; explicit navigation must still restore before navigation"
+        )
         tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
         context = json.loads(tools[0]["content"])["auth_context"]
         assert context["auth_realm"] == "new.example"
@@ -26803,6 +26815,40 @@ async def test_activity_redirected_goto_reloads_prepared_realm_once():
             assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
         if restoration_error:
             assert "18000ms" in context["credential_preparation_error"]
+
+
+@_in_browser_activity_context
+async def test_activity_observed_realm_preserves_state_and_private_inventory():
+    """A tool-observed realm change hydrates secrets without replacing live cookies."""
+    import json
+
+    contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture("evaluate")
+    assert ("prepare", "new.example") in events
+    assert ("restore", "new.example") not in events, "observation overwrote the active realm's browser state"
+    assert not any(event[0] == "reload" for event in events), "observation restarted the active page"
+    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+    context = json.loads(tools[0]["content"])["auth_context"]
+    assert context["auth_realm"] == "new.example" and context["inventory_status"] == "available"
+    assert prior not in str(contexts) and active not in str(contexts)
+
+
+@_in_browser_activity_context
+async def test_activity_inventory_rejects_unrequested_worker_state():
+    """An older or inconsistent server cannot turn an inventory read into a state write."""
+    import json
+
+    for reported_cookie_injection in (False, True):
+        contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
+            "evaluate", unexpected_worker_state=not reported_cookie_injection,
+            reported_cookie_injection=reported_cookie_injection,
+        )
+        assert not any(event[0] == "apply-worker-state" for event in events), (
+            "inventory-only preparation applied an unrequested browser-state payload"
+        )
+        tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+        context = json.loads(tools[0]["content"])["auth_context"]
+        assert context["inventory_status"] == "unknown"
+        assert "Inventory-only" in context["credential_preparation_error"]
 
 
 @_in_browser_activity_context
@@ -27381,6 +27427,7 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
             return None
 
     reload_dispatch = MagicMock(return_value=_NavigationEvent())
+    observed_urls = []
 
     class _InboxDomService(_FakeDomService):
         def __init__(self, *args, **kwargs):
@@ -27388,12 +27435,15 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
             self.session.event_bus = SimpleNamespace(dispatch=reload_dispatch)
 
         async def get_browser_state(self, include_screenshot=False):
+            observed_urls.append(inbox_url)
             return {"url": inbox_url, "screenshot": None}
 
         async def get_page_identity(self):
+            observed_urls.append(inbox_url)
             return {"url": inbox_url, "title": "Inbox"}
 
         async def get_current_url(self, *, fallback: str = ""):
+            observed_urls.append(inbox_url)
             return inbox_url
 
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
@@ -27453,9 +27503,15 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
     assert [call.kwargs["target_url"] for call in prepare_auth.await_args_list] == [inbox_url], (
         "the first google.com observation must prepare that realm through the transition"
     )
+    assert len(prepare_auth.await_args_list) == 1
+    assert prepare_auth.await_args.kwargs["restore_browser_state"] is False, (
+        "observed realm preparation must preserve the live authentication transaction"
+    )
+    assert llm_step.await_count == 1
+    assert observed_urls and set(observed_urls) == {inbox_url}, observed_urls
     navigations = [call.args[0].url for call in reload_dispatch.call_args_list]
-    assert navigations == ["https://mail.google.com/", inbox_url], (
-        f"start URL, then one reload so the prepared google.com cookies reach the page: {navigations}"
+    assert navigations == ["https://mail.google.com/"], (
+        f"only the requested start URL navigates; observed realm hydration preserves the inbox URL: {navigations}"
     )
 
 
@@ -38041,8 +38097,16 @@ async def run_all_tests():
         test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
     await r.record_async(
-        "activity_redirected_goto_reloads_prepared_realm_once",
-        test_activity_redirected_goto_reloads_prepared_realm_once,
+        "activity_redirected_goto_preserves_active_auth_transaction",
+        test_activity_redirected_goto_preserves_active_auth_transaction,
+    )
+    await r.record_async(
+        "activity_observed_realm_preserves_state_and_private_inventory",
+        test_activity_observed_realm_preserves_state_and_private_inventory,
+    )
+    await r.record_async(
+        "activity_inventory_rejects_unrequested_worker_state",
+        test_activity_inventory_rejects_unrequested_worker_state,
     )
     await r.record_async(
         "return_to_quarantined_realm_invalidates_other_auth_context",
@@ -38500,6 +38564,7 @@ async def run_all_tests():
     await r.record_async("phone_saved_credential_wire_and_unknown_receipt", test_phone_saved_credential_wire_and_unknown_receipt)
     await r.record_async("phone_device_passcode_wire_and_unknown_receipt", test_phone_device_passcode_wire_and_unknown_receipt)
     await r.record_async("phone_saved_credential_rejects_model_secret_routing_args", test_phone_saved_credential_rejects_model_secret_routing_args)
+    await r.record_async("phone_task_availability_is_authoritative", test_phone_task_availability_is_authoritative)
     await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
     await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
     await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
@@ -38528,8 +38593,8 @@ async def test_phone_durable_http_contract():
     view = {'lease': None, 'cursor': 0, 'lastOperation': None}
     def backend(request):
         calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
-        if request.url.path.endswith('/capability'):
-            return httpx.Response(200, json={'enabled': True})
+        if '/availability/' in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', 'enabled': True})
         if '/interactions/' in request.url.path:
             if request.method == 'POST':
                 view['lease'] = {'id': 'lease', 'status': 'ACTIVE'}
@@ -38582,8 +38647,8 @@ async def test_phone_reattach_reacquire_and_stale_cursor():
     lease = {'id': 'old', 'status': 'ACTIVE'}
     def backend(request):
         body = json.loads(request.content) if request.content else {}
-        if request.url.path.endswith('/capability'):
-            return httpx.Response(200, json={'enabled': True})
+        if '/availability/' in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', 'enabled': True})
         if '/interactions/' in request.url.path:
             if request.method == 'POST':
                 acquired.append(body['requestKey'])
@@ -38639,8 +38704,8 @@ async def test_phone_model_observation_and_account_isolation():
     last = {'id': 'persisted-op', 'status':'UNKNOWN','cursor':9,'operation':'input.text','result':None}
     def backend(request):
         enabled = request.headers['x-user-id'] == 'enabled'
-        if request.url.path.endswith('/capability'):
-            return httpx.Response(200,json={'enabled':enabled})
+        if '/availability/' in request.url.path:
+            return httpx.Response(200,json={'source': 'bootstrap', 'enabled':enabled})
         return httpx.Response(200,json={'lease':{'id':'owned','status':'ACTIVE'},'cursor':10,'lastOperation':{'id':'read','cursor':10,'status':'SUCCEEDED','operation':'screen.text'},'pendingOperation':last})
     def transport_client(*args, **kwargs):
         return real_client(transport=httpx.MockTransport(backend))
@@ -38677,7 +38742,7 @@ async def test_phone_revocation_and_safe_timeout():
     async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
         result=await execute_phone({'mode':'operation','operation':'input.tap'},config=config,user_id='u',agent_id='a',task_id='t',decision_id='call',snapshot={'enabled':True},client=client)
     assert not result['success']
-    assert paths == ['/api/iphone/capability']
+    assert paths == ['/api/iphone/availability/t']
     # Phone exception stays a tool outcome and cannot escape as a CDP timeout.
     from domains.spawn_browser_agent_v3.service_actions import execute_action
     with patch('domains.spawn_browser_agent_v3.phone.execute_phone', side_effect=asyncio.TimeoutError('CANARY-PASSWORD')):
@@ -38819,8 +38884,8 @@ async def test_native_phone_auth_http_identity_recovery():
 
     def backend(request):
         calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if request.method == "POST":
             if lost:
                 raise httpx.ReadError("CANARY-PRIVATE-TRANSPORT", request=request)
@@ -38888,8 +38953,8 @@ async def test_native_phone_auth_denials_and_safe_errors():
 
     def backend(request):
         calls.append((request.method, request.url.path))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if request.method == "POST":
             return httpx.Response(status, json={"error": "CANARY-PRIVATE-ERROR"})
         if "/interactions/" in request.url.path:
@@ -39086,8 +39151,8 @@ async def test_phone_setup_first_operation_and_seen_context():
     def backend(request):
         body = json.loads(request.content) if request.content else {}
         calls.append((request.method, request.url.path, body))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True, "setupState": "not_started"})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True, "setupState": "not_started"})
         if "/interactions/" in request.url.path:
             if request.method == "POST":
                 view.update(lease=lease, setup=setup)
@@ -39141,8 +39206,8 @@ async def test_phone_setup_actions_recovery_and_heartbeat():
     async def backend(request):
         body = json.loads(request.content) if request.content else {}
         calls.append((request.method, request.url.path, body))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if request.url.path.endswith("/heartbeat"):
             heartbeat.set()
             return httpx.Response(200, json={})
@@ -39208,8 +39273,8 @@ async def test_phone_setup_failclosed_and_safe_errors():
     status = 409
     def backend(request):
         calls.append((request.method, request.url.path))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         return httpx.Response(status, json={"error": "CANARY-PRIVATE-ERROR"})
     async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
         common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task", snapshot=snapshot, client=client, decision_id="decision")
@@ -39238,8 +39303,8 @@ async def test_phone_setup_pending_receipt_and_ready_private_ref():
     def backend(request):
         nonlocal key
         calls.append((request.method, request.url.path))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if request.url.path.endswith("/setup"):
             key = json.loads(request.content)["requestKey"]
             raise httpx.ReadTimeout("CANARY-PRIVATE-TIMEOUT", request=request)
@@ -39340,8 +39405,8 @@ async def test_phone_saved_credential_wire_and_unknown_receipt():
         nonlocal receipt
         body = json.loads(request.content) if request.content else {}
         calls.append((request.method, request.url.path, body))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if "/interactions/" in request.url.path:
             return httpx.Response(200, json={"lease": lease, "cursor": 99, "setup": {**setup, "revision": 99}})
         if request.url.path.endswith("/operations"):
@@ -39392,8 +39457,8 @@ async def test_phone_device_passcode_wire_and_unknown_receipt():
         nonlocal receipt
         body = json.loads(request.content) if request.content else {}
         calls.append((request.method, request.url.path, body))
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if "/interactions/" in request.url.path:
             return httpx.Response(200, json={"lease": lease, "cursor": 99, "setup": {**setup, "revision": 99}})
         if request.url.path.endswith("/operations"):
@@ -39434,8 +39499,8 @@ async def test_phone_saved_credential_rejects_model_secret_routing_args():
     from domains.spawn_browser_agent_v3.phone import execute_phone
     mutations = []
     def backend(request):
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if "/interactions/" in request.url.path:
             return httpx.Response(200, json={"lease": {"id": "lease", "status": "ACTIVE"}})
         mutations.append(request.url.path)
@@ -39464,8 +39529,8 @@ async def test_phone_setup_settings_targets_transport_recovery_and_billing():
     usage = {"billedBy": "backend", "usageRecordId": "backend-settings-usage", "model": "synthetic-verifier", "promptTokens": 20, "completionTokens": 4, "totalCostCents": 1}
     def backend(request):
         body = json.loads(request.content) if request.content else {}
-        if request.url.path.endswith("/capability"):
-            return httpx.Response(200, json={"enabled": True})
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={'source': 'bootstrap', "enabled": True})
         if request.url.path.endswith("/setup"):
             posts.append(body)
             key = body["requestKey"]
@@ -39563,3 +39628,46 @@ async def test_parked_proof_requires_capture_and_disconnect():
 async def test_phone_supervisor_preserves_unknown_and_cancellation():
     from phone_supervisor_fixture import check_phone_supervisor_boundary
     await check_phone_supervisor_boundary()
+
+
+async def test_phone_task_availability_is_authoritative():
+    teardown_mock()
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    for verdict in ({'enabled': True}, {'enabled': True, 'source': None},
+                    {'enabled': True, 'source': 'entitled'}, {'enabled': True, 'source': ['ready']},
+                    {'enabled': 1, 'source': 'ready'},
+                    {'enabled': False, 'source': 'ready'},
+                    {'enabled': True, 'source': 'ready'},
+                    {'enabled': True, 'source': 'bootstrap'},
+                    {'enabled': True, 'source': 'continuation'}):
+        calls = []
+        allowed = verdict.get('enabled') is True and verdict.get('source') in ('ready', 'bootstrap', 'continuation')
+        def backend(request):
+            calls.append((request.method, request.url.path))
+            if request.url.path == '/api/iphone/availability/task-owned':
+                return httpx.Response(200, json=verdict)
+            if request.url.path == '/api/iphone/capability':
+                return httpx.Response(200, json={'enabled': True, 'configured': True, 'setupState': 'ready'})
+            if request.url.path == '/api/iphone/interactions/task-owned':
+                return httpx.Response(200, json={'lease': None, 'cursor': 0})
+            raise AssertionError(request.url.path)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+            seen = await observe_phone(config, 'user', 'task-owned', client=client)
+            assert seen['enabled'] is allowed, (verdict, calls, seen)
+            assert calls[0] == ('GET', '/api/iphone/availability/task-owned'), calls
+            assert len(calls) == (2 if allowed else 1), calls
+            calls.clear()
+            if allowed:
+                verdict['enabled'] = False  # A decision snapshot does not survive revocation.
+            result = await execute_phone({'mode': 'status'}, config=config, user_id='user', agent_id='agent',
+                                         task_id='task-owned', decision_id='call', snapshot={'enabled': True}, client=client)
+            assert result['success'] is False
+            assert calls == [('GET', '/api/iphone/availability/task-owned')], calls
+    calls = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(503))) as client:
+        assert await observe_phone(config, 'user', '', client=client) == {'enabled': False}
+        assert calls == []
+        assert await observe_phone(config, 'user', 'task-owned', client=client) == {'enabled': False}
+        assert len(calls) == 1

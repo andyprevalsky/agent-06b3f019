@@ -27343,6 +27343,33 @@ async def run_all_tests():
         "phone_call_parked_on_hold_static_check",
         test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
     )
+    await r.record_async("failed_task_finally_preserves_published_error", test_failed_task_finally_preserves_published_error_in_terminal_report)
+    await r.record_async("interrupted_finalization_retains_one_error", test_interrupted_finalization_retains_one_error_occurrence)
+    # The explicit-only live-phone task's offline fixture/proof contracts recur
+    # with the existing benchmark suite; pytest owns parameter expansion.
+    from benchmarks import phone_live_auth_test
+    for name in sorted(dir(phone_live_auth_test)):
+        if name.startswith("test_"):
+            r.record("phone_live_auth_" + name[5:], _with_pytest_fixtures(getattr(phone_live_auth_test, name)))
+
+    from benchmarks import phone_boot_reset_test
+    for name in sorted(dir(phone_boot_reset_test)):
+        if name.startswith("test_"):
+            r.record("phone_boot_reset_" + name[5:], _with_pytest_fixtures(getattr(phone_boot_reset_test, name)))
+    from benchmarks import phone_daily_test
+    for name in sorted(dir(phone_daily_test)):
+        if name.startswith("test_"):
+            case = _with_pytest_fixtures(getattr(phone_daily_test, name))
+            if asyncio.iscoroutinefunction(case):
+                await r.record_async("phone_daily_" + name[5:], case)
+            else:
+                r.record("phone_daily_" + name[5:], case)
+
+    from benchmarks import phone_connectivity_test
+    for name in sorted(dir(phone_connectivity_test)):
+        if name.startswith("test_"):
+            r.record("phone_connectivity_" + name[5:], _with_pytest_fixtures(getattr(phone_connectivity_test, name)))
+
     from benchmarks import phone_callee_test, phone_hold_line_test
 
     for module, prefix in ((phone_hold_line_test, "phone_hold_line_"), (phone_callee_test, "phone_callee_")):
@@ -29075,3 +29102,83 @@ async def run_all_tests():
     )
 
     return r.all_passed
+
+
+async def test_failed_task_finally_preserves_published_error_in_terminal_report():
+    """Execute the report owner's actual finalizer prefix after a task raises."""
+    import ast
+    import inspect
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.phone_connectivity import PhoneCleanupBlocked
+
+    task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+    original = bench.TaskResult(name=task.name, passed=False, agent_id="synthetic-root",
+                               status="ERROR", benchmark_status="ERROR", progress_score=0,
+                               duration_seconds=1, cost_cents=0, message_count=0,
+                               failure_reason="original phone cleanup deadline exceeded")
+
+    async def executor(_base, _task, *, on_task_evaluated, **kwargs):
+        await on_task_evaluated(original)
+        raise PhoneCleanupBlocked("later task finally cleanup blocked")
+
+    namespace, cards = _live_report_producer_harness([task], executor, 1)
+    main = ast.parse(inspect.getsource(bench.main_async)).body[0]
+    owner = next(
+        node for node in main.body if isinstance(node, ast.Try)
+        and any(isinstance(child, ast.Name) and child.id == "_report_ticker_task"
+                for statement in node.finalbody for child in ast.walk(statement)))
+    prefix = []
+    for statement in owner.finalbody:
+        if isinstance(statement, ast.Assign) and any(isinstance(n, ast.Await) for n in ast.walk(statement)):
+            break
+        prefix.append(statement)
+    finish = ast.AsyncFunctionDef(name="_finish_report", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=prefix, decorator_list=[])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[finish], type_ignores=[])),
+                 "<report-finalizer>", "exec"), namespace)
+    ticker = asyncio.create_task(asyncio.Event().wait())
+    namespace["_report_ticker_task"] = ticker
+    try:
+        with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+            try:
+                await namespace["_run_reported_task"](task)
+            except PhoneCleanupBlocked:
+                pass
+            assert cards[-1]["results"]["failed"] == 1
+            await namespace["_finish_report"]()
+            assert cards[-1]["tasks"] == {"total": 1, "running": 0, "completed": 1, "queued": 0}, "published ERROR reverted to queued during finalization"
+            assert namespace["run"].task_results == [original], "original immutable attempt must be saved as ERROR"
+            assert original.benchmark_status == "ERROR" and not original.passed
+    finally:
+        ticker.cancel()
+        await asyncio.gather(ticker, return_exceptions=True)
+
+
+async def test_interrupted_finalization_retains_one_error_occurrence():
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+    evaluated = asyncio.Event()
+
+    async def executor(_base, _task, *, on_task_evaluated, **kwargs):
+        await on_task_evaluated(bench.TaskResult(
+            name=task.name, passed=True, agent_id="synthetic-interrupted-root", status="COMPLETED",
+            progress_score=1, duration_seconds=1, cost_cents=0, message_count=0))
+        evaluated.set()
+        await asyncio.Event().wait()
+
+    namespace, cards = _live_report_producer_harness([task], executor, 1)
+    with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+        coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+        await evaluated.wait()
+        coordinator.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator
+        namespace["_tick_report_once"]()
+    results = namespace["run"].task_results
+    assert len(results) == 1 and results[0].agent_id == "synthetic-interrupted-root"
+    assert not results[0].passed and results[0].benchmark_status == "ERROR"
+    assert "Interrupted during task finalization" in results[0].failure_reason
+    assert cards[-1]["tasks"]["completed"] == 1 and cards[-1]["results"]["failed"] == 1
