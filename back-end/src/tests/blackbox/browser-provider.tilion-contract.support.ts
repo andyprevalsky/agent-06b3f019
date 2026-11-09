@@ -24,7 +24,8 @@ type Fault =
   | 'bad-image'
   | 'corrupt-image'
   | 'disconnect'
-  | 'viewport';
+  | 'viewport'
+  | 'dns-dead-worker';
 
 async function replay(fault?: Fault): Promise<void> {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -46,6 +47,9 @@ async function replay(fault?: Fault): Promise<void> {
     goto: async (url: string) => {
       assert.equal(url, 'https://example.com');
       calls.push('navigate');
+      if (fault === 'dns-dead-worker' && !calls.includes('DELETE /v1/session/captured-session')) {
+        throw new Error('page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/');
+      }
       return { status: () => 200 };
     },
     title: async () => {
@@ -87,6 +91,7 @@ async function replay(fault?: Fault): Promise<void> {
   process.env.TILION_API_KEY = 'local-contract-only';
   chromium.connectOverCDP = async () => {
     calls.push('connect');
+    connected = true;
     return browser;
   };
   globalThis.fetch = async (input, init) => {
@@ -133,7 +138,9 @@ async function replay(fault?: Fault): Promise<void> {
   };
   try {
     await assertLiveTilionVendorContract();
-    assert.equal(deletes, 2, 'native success must prove repeated DELETE is idempotent');
+    const replaced = fault === 'dns-dead-worker' ? 1 : 0;
+    assert.equal(calls.filter((call) => call === 'POST /v1/session').length, 1 + replaced);
+    assert.equal(deletes, 2 + replaced, 'native success must prove repeated DELETE is idempotent');
     assert.equal(calls.filter((call) => call.endsWith('/screenshot')).length, 2);
     assert.equal(calls.at(-1), 'GET /v1/session/captured-session');
   } finally {
@@ -157,6 +164,11 @@ async function replay(fault?: Fault): Promise<void> {
 
 export async function assertTilionCapturedScreenshotContract(): Promise<void> {
   await replay();
+}
+
+/** A session whose worker cannot resolve DNS is released and the contract runs on a fresh one. */
+export async function assertTilionVendorContractReplacesDnsDeadSession(): Promise<void> {
+  await replay('dns-dead-worker');
 }
 
 export async function assertTilionScreenshotRejectsInvalidOwnership(): Promise<void> {
@@ -195,6 +207,10 @@ export const tilionContractCases: Array<[string, () => Promise<void>]> = [
   [
     'Tilion captured screenshot preserves attached CDP ownership',
     assertTilionCapturedScreenshotContract,
+  ],
+  [
+    'Tilion vendor contract replaces a session whose worker cannot resolve DNS',
+    assertTilionVendorContractReplacesDnsDeadSession,
   ],
   [
     'Tilion screenshot rejects invalid ownership and payloads',
