@@ -233,8 +233,8 @@ class PostCapUnreviewedTest(SyncRepoFixture):
         entry = self.record(later)
         self.assertEqual((entry["kind"], entry["disposition"], entry["inherited_from"]),
                          ("post-cap-unreviewed", "unreviewed", self.final))
-        self.assertIn("app.py", entry["changed_files"])
-        self.assertIn("tool.py", entry["changed_files"])
+        # main_only.py arrives reviewed on main; app.py (resolved) and tool.py are unreviewed.
+        self.assertEqual(entry["changed_files"], ["app.py", "docs/rca/INDEX.md", "tool.py"])
         self.assertIn("merged unreviewed", entry["report_row"])
         self.assertEqual(MODULE.require_mergeable(self.state_path, head=later)["head"], later)
         with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap reached"):

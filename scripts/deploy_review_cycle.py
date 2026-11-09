@@ -383,6 +383,10 @@ def post_cap_unreviewed(path: Path, *, head: str, base: str, repo: Path, reason:
     if not is_ancestor(repo, source, head):
         raise ReviewCycleError("recorded HEAD is not an ancestor of HEAD")
     base_sha = resolve(repo, base)
+    fork = git(repo, "merge-base", source, base_sha).strip()
+    main_side, branch_side = changed_files(repo, fork, base_sha), changed_files(repo, fork, source)
+    # Files only main changed arrive reviewed on main; files both sides changed may carry a conflict resolution.
+    unreviewed = sorted(changed_files(repo, source, head) - (main_side - branch_side))
     entry = {
         "number": len(entries) + 1,
         "kind": POST_CAP_KIND,
@@ -394,7 +398,7 @@ def post_cap_unreviewed(path: Path, *, head: str, base: str, repo: Path, reason:
         "base": base_sha,
         "reviewed_branch_diff_sha256": hashlib.sha256(branch_diff(repo, source, base_sha).encode()).hexdigest(),
         "branch_diff_sha256": hashlib.sha256(branch_diff(repo, head, base_sha).encode()).hexdigest(),
-        "changed_files": sorted(changed_files(repo, source, head)),
+        "changed_files": unreviewed,
         "reason": reason,
         "started_at": now(),
         "finished_at": now(),
