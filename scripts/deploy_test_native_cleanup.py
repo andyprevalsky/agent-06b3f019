@@ -21,6 +21,8 @@ MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
 # 98 MB on 2026-11-07, beyond the 64 MiB receipt cap, so its verified cleanup could never be bound
 # and every later smoke launch was refused. Run records get their own, still finite, cap.
 RUN_RECORD_MAX_BYTES = 512 * 1024 * 1024
+# A complete multi-participant proof has a separate finite I/O allowance.
+MAX_RAW_RUN_PROOF_BYTES = RUN_RECORD_MAX_BYTES
 
 
 def fleet_git_common(root):
@@ -935,7 +937,7 @@ def validate(receipt, owner, proof):
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
     run_artifacts = set()
-    raw_remaining = [MAX_RAW_FORENSIC_RUN_BYTES]
+    raw_remaining = [MAX_RAW_RUN_PROOF_BYTES]
     historical_sources = {}
     need(isinstance(bindings, dict), 'missing file bindings')
 
@@ -1271,7 +1273,7 @@ def validate(receipt, owner, proof):
             from deploy_test_run_artifact import read_run_artifact
             run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
                                     raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
-                                    raw_remaining=raw_remaining)
+                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES)
             used.add(str(run_path))
             run_artifacts.add(str(run_path))
         else:

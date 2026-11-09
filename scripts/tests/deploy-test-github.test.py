@@ -1112,5 +1112,93 @@ class GateSetupReleaseTools(unittest.TestCase):
             self.assertIn("flyctl: installing the dependency disk's last good copy", second.stderr)
             self.assertTrue((tmp / 'home/.fly/bin/flyctl').exists())
 
+
+class GitHubTerminalCleanup(unittest.TestCase):
+    """Cleanup reconciliation retains observation loss, even after remote worker PASS."""
+    def setUp(self):
+        import deploy_test_cycle as cycle
+        import deploy_test_github_cleanup as cleanup
+        import hashlib, zipfile
+        self.c, self.m = cycle, cleanup
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        self.token = 'same-original-token'
+        self.tag = gh.tag_name(RUNNER, 'semantic-stack', self.token)
+        self.owner = {'transport':'github-actions','run_id':7,'url':'https://github.com/Rose-Ai-Labs/rose/actions/runs/7'}
+        self.request = {'token':self.token,'source':self.source,'gate':'semantic-stack','worker_root':gh.REMOTE_ROOT,'checks':['semantic-stack'],'skips':{}}
+        self.adapter = {**self.request,'cases':{'semantic-stack':'UNVERIFIED'},'complete':False,'cleanup_complete':False,'cleanup_owner':self.owner,
+                        'remote':{'run_id':7,'run_attempt':'1','event_sha':self.source['head'],'tag':self.tag}}
+        self.receipt = {**self.request,'cases':{'semantic-stack':'UNVERIFIED'},'complete':False,'worker_result':str(self.folder/'result.json'),
+                        'log':str(self.folder/'output.log'),'cleanup_owner':{'worker_cleanup_owner':self.owner,'request_token':self.token},'timed_out':True}
+        self.process = {'supervisor_pid':41,'child_pid':42,'native_exit':1,'quiescent':True,'orphaned_children':False,'remaining':[],'error':None,'reaped':[{'pid':42,'status':256}],'term_sent':[42],'timed_out':True}
+        for n, doc in [('request.json',self.request),('result.json',self.adapter),('receipt.json',self.receipt),('output.log.process.json',self.process)]:
+            (self.folder/n).write_text(json.dumps(doc))
+        self.artifact = self.folder/'artifact.zip'
+        native = {**self.request,'complete':True,'cases':{'semantic-stack':'PASS'},'cleanup_complete':True}
+        with zipfile.ZipFile(self.artifact,'w') as z:
+            for n, doc in [('request.json',self.request),('result.json',native),('timing.json',{'worker_finished_at':100,'worker_exit':0})]: z.writestr(n,json.dumps(doc))
+        digest=cycle.sha_file(self.artifact)
+        self.seen={'run':{'id':7,'run_attempt':1,'status':'completed','conclusion':'success','head_sha':self.source['head'],'head_branch':self.tag,'path':'.github/workflows/deploy-gates.yml','event':'push','repository':{'id':10},'head_repository':{'id':10}},
+                   'jobs':{'total_count':1,'jobs':[{'id':8,'run_id':7,'run_attempt':1,'status':'completed','completed_at':'2026-11-09T00:00:00Z','labels':[RUNNER]}]},
+                   'artifacts':{'artifacts':[{'id':9,'name':gh.ARTIFACT,'expired':False,'digest':'sha256:'+digest,'workflow_run':{'id':7,'repository_id':10,'head_repository_id':10,'head_branch':self.tag,'head_sha':self.source['head']}}]}}
+        self.proof={'kind':cleanup.KIND,'token':self.token,'receipt_sha256':cycle.sha_file(self.folder/'receipt.json'),
+                    'original_files':{n:cycle.sha_file(self.folder/n) for n in cleanup.FILES},'artifact':str(self.artifact),
+                    'remote':{'repository':'Rose-Ai-Labs/rose','run_id':7,'run_attempt':1,'job_ids':[8],'artifact_id':9,'artifact_sha256':digest}}
+        self.state={'attempts':[{'results':[self.receipt]}],'failures':[{'id':'failure','gate':'semantic-stack','native_result':'UNVERIFIED','complete':False}],
+                    'phase':'triage','pending':['failure'],'repair_gates':[]}
+        self.mock=self.enterContext(patch.object(cleanup,'observe',side_effect=lambda rid:copy.deepcopy(self.seen)))
+        self.original={p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()}
+    def test_exact_terminal_owner_allows_normal_reexecute_without_credit(self):
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),[])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.c.reexecute(self.state,'failure')
+        self.assertEqual(self.state['failures'][0]['native_result'],'UNVERIFIED')
+        self.assertEqual({p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()},self.original)
+    def test_local_wait_identity_negatives(self):
+        original=copy.deepcopy(self.process)
+        malformed=[{'reaped':[{'pid':99,'status':0}]},
+                   {'reaped':[{'pid':42,'status':256},{'pid':42,'status':256}]},
+                   {'reaped':[{'pid':42,'status':0}]},
+                   {'reaped':[{'pid':42,'status':127}]},
+                   {'reaped':[{'pid':42,'status':65535}]},
+                   {'reaped':[{'pid':41,'status':0},{'pid':42,'status':256}]},
+                   {'child_pid':True},{'supervisor_pid':True},{'native_exit':True},
+                   {'child_pid':41},{'native_exit':-999},{'native_exit':256}]
+        for change in malformed:
+            with self.subTest(change=change):
+                row={**original,**change}
+                (self.folder/'output.log.process.json').write_text(json.dumps(row))
+                self.proof['original_files']['output.log.process.json']=self.c.sha_file(self.folder/'output.log.process.json')
+                with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        row={**original,'native_exit':-15,'reaped':[{'pid':42,'status':15},{'pid':43,'status':9}]}
+        (self.folder/'output.log.process.json').write_text(json.dumps(row))
+        self.proof['original_files']['output.log.process.json']=self.c.sha_file(self.folder/'output.log.process.json')
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_wrong_run_attempt_head_tag_live_jobs_and_digest_refuse(self):
+        for group,key,value in [('run','id',True),('run','run_attempt',2),('run','head_sha','c'*40),('run','head_branch','wrong'),('run','status','in_progress')]:
+            with self.subTest(key=key):
+                original=self.seen[group][key];self.seen[group][key]=value
+                with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+                self.seen[group][key]=original
+        self.seen['jobs']['jobs'][0]['status']='in_progress'
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        self.seen['jobs']['jobs'][0]['status']='completed';self.seen['artifacts']['artifacts'][0]['digest']='sha256:wrong'
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+    def test_original_mutation_and_new_owner_refuse(self):
+        (self.folder/'result.json').write_text('{}')
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        (self.folder/'result.json').write_bytes(self.original['result.json'])
+        newer=copy.deepcopy(self.receipt);newer['token']='new-owner';self.state['attempts'].append({'results':[newer]})
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+    def test_revalidation_and_remote_drift_refuse(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.seen['run']['run_attempt']=2
+        with self.assertRaises(ValueError):self.c.retained_owners(self.state,['semantic-stack'])
+
 if __name__ == '__main__':
     unittest.main()

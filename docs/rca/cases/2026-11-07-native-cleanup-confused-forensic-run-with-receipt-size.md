@@ -104,3 +104,30 @@ unchanged. The file-reading allowance is unrelated to a spending budget.
 Separate control receipts from intact forensic payloads. Bound both explicitly,
 verify all original bytes, and preserve historical failure projections even when
 later evidence permits a new launch.
+
+## November 9 recurrence: proof aggregate versus per-run admission
+
+PR1896 retained all thirteen original parent runs and its linked canary. Their
+verified original run files total 212,366,375 bytes. Each fits the existing
+128 MiB per-run forensic bound, but the shared 128 MiB proof counter rejects
+the complete cohort before native custody validation. Omitting participants or
+rewriting logs would conceal required evidence.
+
+The correction gives native cleanup a separate finite 512 MiB proof-wide raw
+I/O allowance. The per-run 128 MiB cap, ordinary 64 MiB materialization/scalar
+bounds, 64 KiB streaming, complete JSON/hash/descriptor verification and every
+variant/source-pin/custody predicate remain unchanged. Standalone readers still
+default to the original aggregate allowance. This is not a task, timeout,
+coverage or concurrency change.
+
+The same registered real two-by-65-MiB log-array test fails on the original
+aggregate guard and passes after separation; individual scalars remain 1 MiB.
+Aggregate exhaustion, per-run exhaustion, malformed/trailing input, hash drift,
+standalone defaults and scalar bounds remain negative controls. Independent
+review cleared exact diff 074e6eda07b8450a111915275d1ef2c17ec58c0d3bfcc69395493c221406b5ee.
+Evidence is retained privately under .context/deploy-pr1896-continuation/smoke-rca/aggregate-candidate.
+
+A pure replay validated all fourteen participants with credit_granted=false,
+cleanup_complete=false and obligations_preserved=true. It neither reconciled
+the live cycle nor cleared financial, browser, guest/runtime, provider or Hub
+custody. Required frozen-source gates and production acceptance remain pending.

@@ -6286,14 +6286,72 @@ class Cycle(unittest.TestCase):
         total = sum(p.stat().st_size for p in records)
         self.assertEqual(15, len(records))
         before = copy.deepcopy(state)
-        with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total - 1), \
+        with patch.object(native, 'MAX_RAW_RUN_PROOF_BYTES', total - 1), \
                 self.assertRaisesRegex(ValueError, 'aggregate raw admission bound exceeded'):
             c.reconcile(state, occurrence['id'], proof)
         self.assertEqual(before, state)
-        with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total), \
+        with patch.object(native, 'MAX_RAW_RUN_PROOF_BYTES', total), \
                 patch.object(artifact, 'read_run_artifact', side_effect=AssertionError('loaded ordinary run')):
             c.reconcile(state, occurrence['id'], proof)
         self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+
+    def test_isolated_proof_separates_per_run_and_aggregate_bytes(self):
+        import deploy_test_native_cleanup as native
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        records = sorted(Path(p) for p in proof['files'] if p.endswith('/_batch/run.json'))
+        for path in records[:2]:
+            with path.open('wb') as stream:
+                stream.write(b'{"tasks":[{"logs":[')
+                for index in range(65):
+                    if index: stream.write(b',')
+                    stream.write(b'"' + b'x' * (1024 * 1024) + b'"')
+                stream.write(b']}]}')
+            proof['files'][str(path)] = c.sha_file(path)
+        total = sum(p.stat().st_size for p in records)
+        self.assertGreater(total, 128 * 1024 * 1024)
+        self.assertTrue(all(p.stat().st_size < 128 * 1024 * 1024 for p in records))
+        before = copy.deepcopy(state)
+        c.reconcile(state, failure['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['failures'], state['failures'])
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved']); self.assertTrue(entry['retained_services'])
+
+    def test_isolated_proof_byte_and_tail_refusals_remain_atomic(self):
+        import deploy_test_native_cleanup as native
+        original_state, failure, paths, original_proof, gate, packet = self.isolated_campaign_state()
+        original_bytes = {Path(p): Path(p).read_bytes() for p in original_proof['files'] if p.endswith('/_batch/run.json')}
+        for mutation in ('aggregate', 'individual', 'syntax', 'trailing', 'hash'):
+            with self.subTest(mutation=mutation):
+                state, proof = copy.deepcopy(original_state), copy.deepcopy(original_proof)
+                for p, raw in original_bytes.items(): p.write_bytes(raw)
+                records = sorted(Path(p) for p in proof['files'] if p.endswith('/_batch/run.json'))
+                path = records[0]
+                payload = json.dumps({'tasks': [{'logs': 'x' * (5000 if mutation == 'individual' else 3500)}]}).encode()
+                if mutation == 'syntax': payload += b'!'
+                if mutation == 'trailing': payload += b'{}'
+                path.write_bytes(payload)
+                if mutation != 'hash': proof['files'][str(path)] = c.sha_file(path)
+                total = sum(p.stat().st_size for p in records)
+                cap = total - 1 if mutation == 'aggregate' else 65536
+                before = copy.deepcopy(state)
+                with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', 4096), patch.object(native, 'MAX_RAW_RUN_PROOF_BYTES', cap, create=True), self.assertRaises(ValueError):
+                    c.reconcile(state, failure['id'], proof)
+                self.assertEqual(before, state)
+
+    def test_run_reader_default_aggregate_and_scalar_bounds_unchanged(self):
+        import deploy_test_run_artifact as artifact
+        path = self.root / 'reader-bounds.json'
+        path.write_text('{"tasks":[]}')
+        with self.assertRaisesRegex(ValueError, 'aggregate raw admission bound exceeded'):
+            artifact.read_run_artifact(path, c.sha_file(path), 1024, raw_limit=64, raw_remaining=[65])
+        self.assertEqual({'tasks': []}, artifact.read_run_artifact(path, c.sha_file(path), 1024,
+            raw_limit=64, raw_remaining=[65], raw_aggregate_limit=65))
+        path.write_text(json.dumps({'tasks': [{'logs': 'x' * 2000}]}))
+        with self.assertRaisesRegex(ValueError, 'scalar byte bound exceeded'):
+            artifact.read_run_artifact(path, c.sha_file(path), 1024, raw_limit=4096,
+                raw_remaining=[4096], raw_aggregate_limit=4096)
 
     def test_campaign_missing_cleanup_and_mutations_refuse_atomically(self):
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
