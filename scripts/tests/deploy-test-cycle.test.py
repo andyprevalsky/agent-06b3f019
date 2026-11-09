@@ -5756,7 +5756,16 @@ class LocalCleanup(unittest.TestCase):
         self.post55_proxy_mock=self.enterContext(patch.object(auditor,'_proxy',return_value=self.post55_proxy))
         self.post55_process_mock=self.enterContext(patch.object(auditor,'_processes',return_value=([],[])))
         self.post55_listener_mock=self.enterContext(patch.object(auditor,'_listeners',return_value=[{'port':21535,'inode':'99','uid':0}]))
-        self.enterContext(patch.object(post,'source_bytes',side_effect=lambda root,head,name:(ROOT/name).read_bytes()))
+        # Pair this synthetic source identity with its own immutable fixture bytes.
+        # Do not require a historical branch object in a fresh/shallow checkout.
+        producer_blobs = {name: (ROOT / name).read_bytes() for name in post.PINS}
+        producer_pins = {name: hashlib.sha256(raw).hexdigest()
+                         for name, raw in producer_blobs.items()}
+        self.enterContext(patch.object(post, 'PINS', producer_pins))
+        def fixture_source_bytes(root, head, name):
+            self.assertEqual((root, head), (self.worker, self.source['head']))
+            return producer_blobs[name]
+        self.enterContext(patch.object(post, 'source_bytes', side_effect=fixture_source_bytes))
         row=auditor.observe(self.post55_spec);self.post55_audit_path=self.root/'physical-audit.json';c.write(self.post55_audit_path,row)
         self.proof.update(audit={'path':str(self.post55_audit_path),'sha256':c.sha_file(self.post55_audit_path)},confirmed_at=time.time())
         self.post55_write_controls()
@@ -6658,7 +6667,10 @@ class InterruptedLocalRecovery(unittest.TestCase):
                     self.assertRaisesRegex(ValueError,r'worker root process \d+ is unverifiable'):
                 self.reconcile()
             self.assertEqual(before,self.state)
-            self.reconcile()
+            # An earlier fixture's patch.stopall() can retire the module-wide
+            # process scope; own this positive control at its actual import seam.
+            with patch.object(deploy_test_process, 'process_entries', own_process_entries):
+                self.reconcile()
         self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
 
     def test_original_exclusions_stay_skip_without_test_or_cleanup_credit(self):
@@ -8714,6 +8726,73 @@ class Round49RetirementCertificates(unittest.TestCase):
             self.r.terminal(process)
         self.assertEqual(process['reaped'][0], {'pid': 900002, 'status': 256})
 
+
+
+    def test_committed_retirement_survives_current_selection_refresh(self):
+        self.issue()
+        certificate = copy.deepcopy(self.state['historical_launch_retirements'])
+        current = copy.deepcopy(self.gate); current['selection_evidence'] = ['new current source selection']
+        self.state['plan'] = copy.deepcopy(self.state['plan'])
+        self.state['plan']['gates'] = [current if g['name'] == current['name'] else g for g in self.state['plan']['gates']]
+        self.assertTrue(c.settled_round49_missing_request(self.state, self.directory, current, Path(self.proof['old_request'])))
+        self.assertEqual(certificate, self.state['historical_launch_retirements'])
+
+    def test_committed_retirement_survives_added_current_backend_inventory_without_credit(self):
+        self.issue()
+        current = copy.deepcopy(self.gate)
+        current['checks'].append('new-main-domain')
+        current['worker_recipe']['cases']['new-main-domain'] = {'command': ['new-domain-command']}
+        current['selection_evidence'] = ['refreshed backend inventory']
+        self.state['plan'] = copy.deepcopy(self.state['plan'])
+        self.state['plan']['gates'] = [current if g['name'] == current['name'] else g for g in self.state['plan']['gates']]
+        before = copy.deepcopy(self.state)
+        self.assertTrue(c.settled_round49_missing_request(self.state, self.directory, current, Path(self.proof['old_request'])))
+        self.assertEqual(before, self.state)
+        self.assertFalse(c.reusable_full_pass(self.state, current))
+        with self.assertRaisesRegex(ValueError, 'same logical root and exact footprint'):
+            self.issue()
+
+    def test_changed_current_contract_without_certificate_cannot_issue_or_recognize(self):
+        current = copy.deepcopy(self.gate); current['selection_evidence'] = ['new selection']
+        self.state['plan'] = copy.deepcopy(self.state['plan'])
+        self.state['plan']['gates'] = [current if g['name'] == current['name'] else g for g in self.state['plan']['gates']]
+        self.assertFalse(self.r.recognized(self.state, self.directory, current, Path(self.proof['old_request'])))
+        with self.assertRaisesRegex(ValueError, 'same logical root and exact footprint'):
+            self.issue()
+        self.assertNotIn('historical_launch_retirements', self.state)
+
+    def test_refreshed_retirement_still_refuses_foreign_root_admission_and_bad_native_proof(self):
+        self.issue()
+        current = copy.deepcopy(self.gate); current['selection_evidence'] = ['new selection']
+        for field, value in [('worker_root', str(self.repo / 'new-root')), ('cwd', '/foreign'),
+                             ('worker_transport', 'foreign-transport'), ('result_transport', 'foreign-transport')]:
+            changed = {**current, field: value}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.r.recognized(self.state, self.directory, changed, Path(self.proof['old_request']))
+        certificate = self.state['historical_launch_retirements'][self.proof['old_request']]
+        original = copy.deepcopy(certificate)
+        for field, value in [('kind', 'wrong'), ('issued_at', True), ('credit_granted', 0)]:
+            certificate[field] = value
+            with self.subTest(certificate=field), self.assertRaises(ValueError):
+                self.r.recognized(self.state, self.directory, current, Path(self.proof['old_request']))
+            certificate.clear(); certificate.update(copy.deepcopy(original))
+        self.object_overrides[(self.later['head'], 'scripts/deploy_test_worker.py')] = b'changed source'
+        with self.assertRaises(ValueError):
+            self.r.recognized(self.state, self.directory, current, Path(self.proof['old_request']))
+
+    def test_refreshed_all_six_retirements_leave_new_backend_cleanup_debt_blocking(self):
+        for proof in self.proofs.values(): self.issue(proof)
+        self.active_root = Path(self.gate['worker_root'])
+        current = copy.deepcopy(self.gate); current['checks'].append('new-domain')
+        current['worker_recipe']['cases']['new-domain'] = {'command': ['new-domain']}
+        self.assertTrue(self.r.recognized(self.state, self.directory, current, Path(self.proof['old_request'])))
+        folder = self.directory / 'attempts/55/triage' / self.gate['name']; folder.mkdir(parents=True)
+        result = {'token': 'newer-55', 'gate': self.gate['name'], 'source': self.later, 'cleanup_complete': False}
+        self.put(folder / 'result.json', result)
+        self.state['attempts'].append({'results': [{**result, 'complete': False, 'worker_result': str(folder / 'result.json')}]})
+        with self.assertRaisesRegex(ValueError, 'cleanup state unknown'):
+            c.retained_owners(self.state, [self.gate['name']])
+        self.assertEqual(len(self.state['historical_launch_retirements']), 6)
 
 
 class ExplicitAgentCardOverride(unittest.TestCase):

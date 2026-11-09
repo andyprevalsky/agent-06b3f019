@@ -319,5 +319,13 @@ def recognized(state, directory, gate, request):
     need(isinstance(cert, dict) and cert.get('kind') == KIND and cert.get('credit_granted') is False
          and isinstance(cert.get('proof'), dict) and cert['proof'].get('old_request') == str(request)
          and cert['proof'].get('gate') == gate['name'], 'malformed present certificate')
-    validate(state, directory, cert['proof'], gate, cert)
+    # A committed certificate retires this old request, not today's native catalog.
+    # Issuance/reconcile still validates the current gate's exact original footprint.
+    directory = Path(directory).resolve(strict=True)
+    _, proposal, _ = historical(directory, state, directory.parents[1])
+    original_gate, = [g for g in proposal['after_state']['plan']['gates'] if g['name'] == gate['name']]
+    need(all(gate.get(k) == original_gate.get(k) for k in
+             ('worker_root', 'cwd', 'worker_transport', 'result_transport')),
+         'retired request root/admission binding changed')
+    validate(state, directory, cert['proof'], original_gate, cert)
     return True
