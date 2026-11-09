@@ -44,10 +44,13 @@ class Task:
     watch_rules: tuple[str, ...] = ()
     rubric: tuple[dict[str, str], ...] = ()
     notes: str = ""
+    prompt_suffix: Optional[str] = None
 
     @property
     def full_prompt(self) -> str:
-        return self.prompt.rstrip() + PROMPT_SUFFIX
+        """The prompt plus the no-push suffix; a skill test may set its own (\"\" for none)."""
+        suffix = PROMPT_SUFFIX if self.prompt_suffix is None else self.prompt_suffix
+        return self.prompt.rstrip() + suffix
 
 
 @dataclass(frozen=True)
@@ -122,6 +125,7 @@ def _task(raw: dict[str, Any], defaults: dict[str, Any]) -> Task:
         watch_rules=_tuple(merged.get("watch_rules"), "watch_rules", task_id),
         rubric=rubric,
         notes=str(merged.get("notes") or ""),
+        prompt_suffix=None if merged.get("prompt_suffix") is None else str(merged["prompt_suffix"]),
     )
 
 

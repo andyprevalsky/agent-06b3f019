@@ -1,0 +1,285 @@
+{
+  "provenance": {
+    "source": "agentcard-proof-1 campaign (launch.sh: scripts/run-bench <4 payment tasks> --runs 1 --concurrency 4 --retry-infra 0), 2026-11-06 04:17Z-04:55Z, this box; result 3 passed, r001-j0004 exit=1",
+    "recorded": "Campaign banner, ▶/✅/❌ job lines, liveness lines and the final summary.json: verbatim from cli.log and campaigns/agentcard-proof-1/summary.json; per-job log heads from r001-j000N.log. Paths rewritten; job pids are the dummy controller's children.",
+    "synthesized": "The running-state summary.json (final summary with terminal fields cleared); the launcher's run time is compressed to ~3 minutes."
+  },
+  "vars": {
+    "CAMPAIGN_ID": "campaign-20261109-0920-agentcard",
+    "SUMMARY": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/summary.json",
+    "RUN_ID": "{CAMPAIGN_ID}"
+  },
+  "controller": {
+    "token": "8c2b9e4f1a3d5c7b9e0f1a2b3c4d5e6f",
+    "app": "navi-whisper-lux-bench",
+    "run_id": "campaign-20261109-0920-agentcard",
+    "argv0": "run-bench-campaign.py",
+    "start": "rule",
+    "children": 4,
+    "exit_after_seconds": 900,
+    "max_lifetime_seconds": 3000,
+    "on_exit_files": {
+      "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/summary.json": {
+        "campaign_id": "{CAMPAIGN_ID}",
+        "started_at": "2026-11-06T04:17:58.982544+00:00",
+        "finished_at": "2026-11-06T04:55:25.638716+00:00",
+        "status": "failed",
+        "runs": 1,
+        "concurrency": 4,
+        "task_count": 4,
+        "total_jobs": 4,
+        "peak_concurrency": 4,
+        "jobs": [
+          {
+            "index": 1,
+            "job_id": "r001-j0001",
+            "task": "agent-payment-test-shop",
+            "run": 1,
+            "status": "passed",
+            "controller_exit_code": 0,
+            "started_at": "2026-11-06T04:18:16.827905+00:00",
+            "finished_at": "2026-11-06T04:43:59.007361+00:00",
+            "wall_clock_seconds": 1542.179,
+            "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-1.lock",
+            "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0001.log",
+            "attempt": 1,
+            "attempts": [],
+            "controller_pid": "{CHILD_PID_1}",
+            "task_status": "PASSED",
+            "infra_failure": false,
+            "terminal_task": true
+          },
+          {
+            "index": 2,
+            "job_id": "r001-j0002",
+            "task": "agent-payment-setup-resume",
+            "run": 1,
+            "status": "passed",
+            "controller_exit_code": 0,
+            "started_at": "2026-11-06T04:18:16.828354+00:00",
+            "finished_at": "2026-11-06T04:45:41.415945+00:00",
+            "wall_clock_seconds": 1644.588,
+            "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-2.lock",
+            "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0002.log",
+            "attempt": 1,
+            "attempts": [],
+            "controller_pid": "{CHILD_PID_2}",
+            "task_status": "PASSED",
+            "infra_failure": false,
+            "terminal_task": true
+          },
+          {
+            "index": 3,
+            "job_id": "r001-j0003",
+            "task": "agent-payment-idempotent-abandonment",
+            "run": 1,
+            "status": "passed",
+            "controller_exit_code": 0,
+            "started_at": "2026-11-06T04:18:16.828816+00:00",
+            "finished_at": "2026-11-06T04:50:37.403270+00:00",
+            "wall_clock_seconds": 1940.574,
+            "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-3.lock",
+            "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0003.log",
+            "attempt": 1,
+            "attempts": [],
+            "controller_pid": "{CHILD_PID_3}",
+            "task_status": "PASSED",
+            "infra_failure": false,
+            "terminal_task": true
+          },
+          {
+            "index": 4,
+            "job_id": "r001-j0004",
+            "task": "agent-payment-abandonment",
+            "run": 1,
+            "status": "failed",
+            "controller_exit_code": 1,
+            "started_at": "2026-11-06T04:18:16.829242+00:00",
+            "finished_at": "2026-11-06T04:55:05.179554+00:00",
+            "wall_clock_seconds": 2208.35,
+            "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-4.lock",
+            "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0004.log",
+            "attempt": 1,
+            "attempts": [],
+            "controller_pid": "{CHILD_PID_4}",
+            "task_status": "SKIPPED",
+            "infra_failure": false,
+            "terminal_task": true
+          }
+        ],
+        "retry_infra": 0,
+        "e2e_started_at_epoch": 1793938678.9753594,
+        "e2e_timeout_seconds": null,
+        "e2e_timeout_exceeded": false,
+        "shared_inventory": {
+          "directory": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/shared-inventory",
+          "publisher_pid": 1414243
+        },
+        "wall_clock_seconds": 2246.618,
+        "e2e_wall_clock_seconds": 2246.663
+      }
+    },
+    "on_term_files": {}
+  },
+  "rules": [
+    {
+      "id": "launch",
+      "match": "agent-payment-test-shop.*(-k|--runs)[ =]?1\\b|(-k|--runs)[ =]?1\\b.*agent-payment-test-shop",
+      "start_controller": true,
+      "responses": [
+        {
+          "stdout": "🎯 resolved 4 benchmark task(s): agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment\n{REPORT_FORMAT}\n🧪 benchmark campaign: tasks=4 runs=1 jobs=4 concurrency=4\n   summary: /var/tmp/rose-agentcard-cloud/.context/agentcard-proof/campaigns/agentcard-proof-1/summary.json\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n   monitor: python3 -m json.tool {SUMMARY}\n   follow each job log's exact printed fleet-monitor command; the campaign directory is not a fleet-monitor handle.\n   controller status/exit is separate from monitor.task_outcomes; retain genuine task FAIL.\n    scripts/run-bench scorecard /var/tmp/rose-agentcard-cloud/.context/agentcard-proof/campaigns/agentcard-proof-1 --html /var/tmp/rose-agentcard-cloud/.context/agentcard-proof/campaigns/agentcard-proof-1/scorecard.html\n    dvb-onbox visuals publish --file /var/tmp/rose-agentcard-cloud/.context/agentcard-proof/campaigns/agentcard-proof-1/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 10 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard /var/tmp/rose-agentcard-cloud/.context/agentcard-proof/campaigns/agentcard-proof-1 --text\n⏳ campaign liveness active=4 pending=0 r001-j0001:pid={CHILD_PID_1}:bytes=0 r001-j0002:pid={CHILD_PID_2}:bytes=0 r001-j0003:pid={CHILD_PID_3}:bytes=0 r001-j0004:pid={CHILD_PID_4}:bytes=0\n⏳ campaign liveness active=4 pending=0 r001-j0001:pid={CHILD_PID_1}:bytes=15840 r001-j0002:pid={CHILD_PID_2}:bytes=15923 r001-j0003:pid={CHILD_PID_3}:bytes=15853 r001-j0004:pid={CHILD_PID_4}:bytes=15842\n⏳ campaign liveness active=4 pending=0 r001-j0001:pid={CHILD_PID_1}:bytes=15840 r001-j0002:pid={CHILD_PID_2}:bytes=16624 r001-j0003:pid={CHILD_PID_3}:bytes=16554 r001-j0004:pid={CHILD_PID_4}:bytes=15842\n",
+          "files": {
+            "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0001.log": "🎯 resolved 1 benchmark task(s): agent-payment-test-shop\n{REPORT_FORMAT}\n📦 local commit d7a514e4692df52fbbf8df793cba6c082bcfe11a is not on origin; guest will fetch 40d5e1262f92c861a19b7c10c17e990800d96fed and receive the complete workspace delta as a patch\n🖥️  local benchmark diagnostics: http://localhost:16784/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261109-092001-777001\n    owner: {CONTROLLER_TOKEN}; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092001-777001 --html {REPO}/.context/fleet/runs/20261109-092001-777001/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261109-092001-777001/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 10 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092001-777001 --text\n✅ central hub registration verified: run=20261106-041817-1416112\n📤 uploaded run bundle to hub: 20261106-041817-1416112-m399d3779fc6d\n📊 Mac app Benchmark Hub: run=20261106-041817-1416112-m399d3779fc6d\n",
+            "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0002.log": "🎯 resolved 1 benchmark task(s): agent-payment-setup-resume\n{REPORT_FORMAT}\n📦 local commit d7a514e4692df52fbbf8df793cba6c082bcfe11a is not on origin; guest will fetch 40d5e1262f92c861a19b7c10c17e990800d96fed and receive the complete workspace delta as a patch\n🖥️  local benchmark diagnostics: http://localhost:16784/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261109-092002-777002\n    owner: {CONTROLLER_TOKEN}; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092002-777002 --html {REPO}/.context/fleet/runs/20261109-092002-777002/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261109-092002-777002/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 10 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092002-777002 --text\n✅ central hub registration verified: run=20261106-041817-1416112\n📤 uploaded run bundle to hub: 20261106-041817-1416112-m399d3779fc6d\n📊 Mac app Benchmark Hub: run=20261106-041817-1416112-m399d3779fc6d\n",
+            "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0003.log": "🎯 resolved 1 benchmark task(s): agent-payment-idempotent-abandonment\n{REPORT_FORMAT}\n📦 local commit d7a514e4692df52fbbf8df793cba6c082bcfe11a is not on origin; guest will fetch 40d5e1262f92c861a19b7c10c17e990800d96fed and receive the complete workspace delta as a patch\n🖥️  local benchmark diagnostics: http://localhost:16784/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261109-092003-777003\n    owner: {CONTROLLER_TOKEN}; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092003-777003 --html {REPO}/.context/fleet/runs/20261109-092003-777003/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261109-092003-777003/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 10 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092003-777003 --text\n✅ central hub registration verified: run=20261106-041817-1416112\n📤 uploaded run bundle to hub: 20261106-041817-1416112-m399d3779fc6d\n📊 Mac app Benchmark Hub: run=20261106-041817-1416112-m399d3779fc6d\n",
+            "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0004.log": "🎯 resolved 1 benchmark task(s): agent-payment-abandonment\n{REPORT_FORMAT}\n📦 local commit d7a514e4692df52fbbf8df793cba6c082bcfe11a is not on origin; guest will fetch 40d5e1262f92c861a19b7c10c17e990800d96fed and receive the complete workspace delta as a patch\n🖥️  local benchmark diagnostics: http://localhost:16784/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261109-092004-777004\n    owner: {CONTROLLER_TOKEN}; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092004-777004 --html {REPO}/.context/fleet/runs/20261109-092004-777004/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261109-092004-777004/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 10 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261109-092004-777004 --text\n✅ central hub registration verified: run=20261106-041817-1416112\n📤 uploaded run bundle to hub: 20261106-041817-1416112-m399d3779fc6d\n📊 Mac app Benchmark Hub: run=20261106-041817-1416112-m399d3779fc6d\n",
+            "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/summary.json": {
+              "campaign_id": "{CAMPAIGN_ID}",
+              "started_at": "2026-11-06T04:17:58.982544+00:00",
+              "finished_at": null,
+              "status": "running",
+              "runs": 1,
+              "concurrency": 4,
+              "task_count": 4,
+              "total_jobs": 4,
+              "peak_concurrency": 4,
+              "jobs": [
+                {
+                  "index": 1,
+                  "job_id": "r001-j0001",
+                  "task": "agent-payment-test-shop",
+                  "run": 1,
+                  "status": "running",
+                  "controller_exit_code": null,
+                  "started_at": "2026-11-06T04:18:16.827905+00:00",
+                  "finished_at": null,
+                  "wall_clock_seconds": null,
+                  "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-1.lock",
+                  "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0001.log",
+                  "attempt": 1,
+                  "attempts": [],
+                  "controller_pid": "{CHILD_PID_1}",
+                  "task_status": null,
+                  "infra_failure": false,
+                  "terminal_task": false
+                },
+                {
+                  "index": 2,
+                  "job_id": "r001-j0002",
+                  "task": "agent-payment-setup-resume",
+                  "run": 1,
+                  "status": "running",
+                  "controller_exit_code": null,
+                  "started_at": "2026-11-06T04:18:16.828354+00:00",
+                  "finished_at": null,
+                  "wall_clock_seconds": null,
+                  "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-2.lock",
+                  "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0002.log",
+                  "attempt": 1,
+                  "attempts": [],
+                  "controller_pid": "{CHILD_PID_2}",
+                  "task_status": null,
+                  "infra_failure": false,
+                  "terminal_task": false
+                },
+                {
+                  "index": 3,
+                  "job_id": "r001-j0003",
+                  "task": "agent-payment-idempotent-abandonment",
+                  "run": 1,
+                  "status": "running",
+                  "controller_exit_code": null,
+                  "started_at": "2026-11-06T04:18:16.828816+00:00",
+                  "finished_at": null,
+                  "wall_clock_seconds": null,
+                  "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-3.lock",
+                  "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0003.log",
+                  "attempt": 1,
+                  "attempts": [],
+                  "controller_pid": "{CHILD_PID_3}",
+                  "task_status": null,
+                  "infra_failure": false,
+                  "terminal_task": false
+                },
+                {
+                  "index": 4,
+                  "job_id": "r001-j0004",
+                  "task": "agent-payment-abandonment",
+                  "run": 1,
+                  "status": "running",
+                  "controller_exit_code": null,
+                  "started_at": "2026-11-06T04:18:16.829242+00:00",
+                  "finished_at": null,
+                  "wall_clock_seconds": null,
+                  "controller_lock": "cloudbench-controller-campaign-c80f0f17df1d-4.lock",
+                  "log": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/r001-j0004.log",
+                  "attempt": 1,
+                  "attempts": [],
+                  "controller_pid": "{CHILD_PID_4}",
+                  "task_status": null,
+                  "infra_failure": false,
+                  "terminal_task": false
+                }
+              ],
+              "retry_infra": 0,
+              "e2e_started_at_epoch": 1793938678.9753594,
+              "e2e_timeout_seconds": null,
+              "e2e_timeout_exceeded": false,
+              "shared_inventory": {
+                "directory": "{REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/shared-inventory",
+                "publisher_pid": 1414243
+              },
+              "wall_clock_seconds": 2246.618,
+              "e2e_wall_clock_seconds": 2246.663
+            }
+          },
+          "sleep_seconds": 150,
+          "stdout_after": "⏳ campaign liveness active=1 pending=0 r001-j0004:pid={CHILD_PID_4}:bytes=23675\n⏳ campaign liveness active=1 pending=0 r001-j0004:pid={CHILD_PID_4}:bytes=23746\n✅ r001-j0001 task=agent-payment-test-shop exit=0 wall=1542.179s\n✅ r001-j0002 task=agent-payment-setup-resume exit=0 wall=1644.588s\n✅ r001-j0003 task=agent-payment-idempotent-abandonment exit=0 wall=1940.574s\n❌ r001-j0004 task=agent-payment-abandonment exit=1 wall=2208.35s\n❌ campaign failed wall=2246.618s summary={REPO}/.context/fleet/campaigns/{CAMPAIGN_ID}/summary.json\n",
+          "controller": "exit",
+          "exit_code": 1
+        }
+      ]
+    },
+    {
+      "id": "fleet-monitor",
+      "match": "^monitor\\s",
+      "responses": [
+        {
+          "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261109-092001-777001\", \"occupancy\": {\"preflight\": 0, \"startup\": 0, \"ready\": 0, \"running\": 0, \"evaluation/evidence\": 0, \"teardown\": 0, \"finished\": 1, \"rejected\": 0}, \"task_outcomes\": {\"passed\": 1}, \"task_controller_warnings\": [], \"card_age_s\": 4.0, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": true, \"cleanup_status\": \"verified\", \"observation_warning\": null, \"next_action\": \"inspect_terminal_and_owned_resources\"}\n"
+        }
+      ]
+    },
+    {
+      "id": "scorecard-html",
+      "match": "^scorecard\\s+(?P<CARD_RUN>\\S+)\\s+.*--html\\s+(?P<HTML>\\S+)",
+      "responses": [
+        {
+          "stdout": "{\"html\": \"{HTML}\", \"valid\": true, \"problems\": [], \"publish\": \"dvb-onbox visuals publish --file {HTML} --title \\\"{RUN_ID} scorecard\\\"\"}\n",
+          "files": {
+            "{HTML}": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"generator\" content=\"cloudbench-scorecard v8\"><title>{RUN_ID} scorecard</title><style>\n:root{color-scheme:light dark;--fg:light-dark(#1f2328,#e6edf3);--muted:light-dark(#59636e,#9198a1);\n--line:light-dark(#d1d9e0,#3d444d);--tile:light-dark(#f6f8fa,#151b23);--ok:light-dark(#1a7f37,#3fb950);\n--bad:light-dark(#cf222e,#ff7b72);--run:light-dark(#0969da,#58a6ff);--warn:light-dark(#9a6700,#d29922);\n--na:light-dark(#6e7781,#8b949e);--agent:light-dark(#bc4c00,#f0883e);--harness:light-dark(#8250df,#bc8cff);\nfont:14px/1.45 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;color:var(--fg)}\n:root[data-theme=light]{color-scheme:light}:root[data-theme=dark]{color-scheme:dark}\nbody{margin:0;padding:12px;background:transparent}main{max-width:760px;margin:0 auto}\nsection{margin:0 0 14px}h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--run);margin:0 0 6px;font-weight:650}\n.ok{color:var(--ok)}.bad{color:var(--bad)}.run{color:var(--run)}.warn{color:var(--warn)}.na{color:var(--na)}\n.agent{color:var(--agent)}.harness{color:var(--harness)}.muted{color:var(--muted)}\n.title{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;font-size:19px;font-weight:700}\n.badge{font-size:13px;font-weight:700;padding:1px 8px;border:1px solid currentColor;border-radius:999px}\n.sub{color:var(--muted);font-size:13px;overflow-wrap:anywhere}.sub b{color:var(--fg)}\n.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}\n.tile{background:var(--tile);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-width:0}\n.tile .k{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}\n.tile .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.2}\n.tile .s{font-size:12px;color:var(--muted);overflow-wrap:anywhere}\n.bar{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--line)}\n.bar.mini{height:8px;border-radius:4px;flex:1 1 120px;max-width:220px}\n.seg{display:block;height:100%}.seg.ok{background:var(--ok)}.seg.bad{background:var(--bad)}.seg.warn{background:var(--warn)}\n.seg.na{background:var(--na)}.seg.agent{background:var(--agent)}.seg.harness{background:var(--harness)}.seg.run{background:var(--run)}\n.legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums}\n.legend span{white-space:nowrap}.note{font-size:12px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}\n.causes{display:grid;grid-template-columns:auto minmax(40px,90px) minmax(0,1fr);gap:3px 8px;align-items:center;font-size:13px}\n.causes .n{font-weight:700;text-align:right;font-variant-numeric:tabular-nums}.causes .t,.clip{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n.causes .meter{height:6px;border-radius:3px;background:var(--line);overflow:hidden}.causes .meter i{display:block;height:100%}\ndl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;margin:0;font-size:13px}dt{color:var(--muted)}\ndd{margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}\nul{list-style:none;margin:0;padding:0;font-size:13px}li{margin:2px 0;overflow-wrap:anywhere}\n.hist{border-top:1px solid var(--line);padding:6px 0;font-size:13px}.hist:first-of-type{border-top:0}\n.hist .l1{display:flex;flex-wrap:wrap;gap:2px 10px;font-weight:650}.hist .l2,.hist .l3{color:var(--muted);overflow-wrap:anywhere}\n.hist .l3{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}\n.agents{display:grid;grid-template-columns:1fr auto auto auto;gap:2px 10px;font-size:13px;font-variant-numeric:tabular-nums}\n.agents .h{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}.agents .life{text-align:right}\n.agents .why{grid-column:1/-1;color:var(--bad);font-size:12px;padding-left:18px}\n@media (max-width:420px){.causes{grid-template-columns:auto 36px minmax(0,1fr)}.tile .v{font-size:20px}}\nfooter{border-top:1px solid var(--line);padding-top:8px;font-weight:650}\n.gen{font-size:11px;color:var(--muted);font-weight:400;margin-top:4px}\n</style></head><body><main><section data-section=\"header\"><div class=\"title\"><span>🧪 Experiment # UNRECORDED</span><span class=\"badge ok\">✅ COMPLETE</span></div><div class=\"sub\"><b>{RUN_ID}</b> · 1 scheduled · cloud · src d7a514e46 · tasks 40d5e1262</div><div class=\"sub\">Triggered Nov 5, 8:18:18 PM PST</div><div class=\"sub\"><span class=\"warn\">experiments/day UNRECORDED (no ledger launch)</span></div><div class=\"sub\">Since last benchmark ended: <b>2d20h</b> ago · {RUN_ID} ended Nov 5, 8:43:43 PM PST</div></section><section data-section=\"kpis\"><div class=\"kpis\"><div class=\"tile\"><div class=\"k\">QUEUED</div><div class=\"v run\">0</div><div class=\"s\">logical tasks</div></div><div class=\"tile\"><div class=\"k\">IN_PROGRESS</div><div class=\"v run\">0</div><div class=\"s\">logical tasks</div></div><div class=\"tile\"><div class=\"k\">COMPLETED</div><div class=\"v run\">1</div><div class=\"s\">of 1 scheduled</div></div></div></section><section data-section=\"outcomes\"><h2>Outcomes</h2><div class=\"bar\" role=\"img\" aria-label=\"outcomes: PASS 1 of 1\"><i class=\"seg ok\" style=\"width:100.000%\"></i></div><div class=\"legend\"><span class=\"ok\">■ PASS 1 · 100.0%</span><span class=\"ok\">■ HARNESS FAILURE 0</span><span class=\"ok\">■ INFRA FAILURE 0 · 0.0%</span></div><div class=\"note\">Stop at 1/1 unique infra-failed jobs (5% of scheduled); now 0. Source: report-card.json.</div></section><section data-section=\"causes\"><h2>Failure causes</h2><div class=\"note\">No failed or unclassified jobs.</div></section><section data-section=\"timing\"><h2>Timing · Cost</h2><dl><dt>Triggered</dt><dd>Nov 5, 8:18:18 PM PST</dd><dt>Elapsed</dt><dd>25m25s</dd><dt>Execution window</dt><dd>exec window 2h00m</dd><dt>Ended</dt><dd>Nov 5, 8:43:43 PM PST</dd><dt>Wall / job</dt><dd>p50 25m25s · max 25m25s · 1/1 jobs</dd><dt>Execution</dt><dd>p50 2m25s · p95 2m25s · 1/1 tasks</dd><dt>💲 Cost</dt><dd>$0.01 agent LLM metered · 1/1 runs · <span class=\"warn\">infra / wmh_grounding UNMETERED</span></dd><dt>Cache</dt><dd>agent demo-cache hit avg 85% · 1/1 runs</dd><dt>LLM latency</dt><dd><span class=\"warn\">UNMEASURED</span></dd></dl></section><section data-section=\"lifecycle\"><h2>Lifecycle</h2><ul><li class=\"ok\">✅ Owned resources released <span class=\"muted\">· lifecycle.json verified</span></li><li class=\"ok\">✅ Final Hub publication</li><li class=\"ok\">✅ Controller exited <span class=\"muted\">· exit 0</span></li></ul></section><section data-section=\"history\"><h2>LAST 3 EXPERIMENTS</h2><div class=\"hist\"><div class=\"l1\"><span>#?</span><span class=\"ok\">✅ COMPLETE</span><span>{RUN_ID}</span><span class=\"muted\">25m25s</span></div><div class=\"l2\">Nov 5, 8:18:18 PM PST → 8:43:43 PM PST · Q 0 · IP 0 · C 1/1 · 💲 $0.01 metered</div><div class=\"l3\"><div class=\"bar mini\" role=\"img\" aria-label=\"#? outcomes: PASS 1 of 1\"><i class=\"seg ok\" style=\"width:100.000%\"></i></div><span>PASS 1/1 (100.0%) · HARNESS 0 · INFRA 0/1</span></div></div></section><section data-section=\"agents\"><h2>ACTIVE SUB-AGENTS / PARENT</h2><div class=\"note\">No active agents</div></section><section data-section=\"issues\"><h2>ISSUES / NEXT ACTION</h2><ul><li class=\"ok\">✅ No open issues recorded.</li></ul></section><footer data-section=\"footer\"><span class=\"ok\">✅ COMPLETE</span> · results final, resources released<div class=\"gen\">Rendered by scripts/run-bench scorecard (v8) at Nov 8, 5:15:20 PM PST from recorded artifacts.</div></footer></main><script type=\"application/json\" id=\"scorecard-data\">{\"agents\": [], \"agents_blocking\": false, \"experiment\": {\"cache\": {\"avg\": 0.849, \"n\": 1, \"of\": 1}, \"cost\": {\"metered_usd\": 0.01, \"n\": 1, \"of\": 1, \"unmetered\": [\"infra\", \"wmh_grounding\"]}, \"end_evidence\": \"provider-teardown-verified.epoch\", \"ended_at\": 1793940223.0, \"exec\": {\"n\": 1, \"of\": 1, \"p50\": 144.6, \"p95\": 144.6}, \"harness_classified\": true, \"id\": \"{RUN_ID}\", \"infra_attempts\": 0, \"infra_breached\": false, \"infra_jobs\": 0, \"infra_threshold\": 1, \"infra_unreconciled\": false, \"issues\": [], \"kind\": \"fleet\", \"label\": \"{RUN_ID}\", \"lifecycle\": [{\"detail\": \"lifecycle.json verified\", \"issue\": true, \"label\": \"Owned resources released\", \"state\": \"ok\"}, {\"detail\": \"\", \"issue\": true, \"label\": \"Final Hub publication\", \"state\": \"ok\"}, {\"detail\": \"exit 0\", \"issue\": true, \"label\": \"Controller exited\", \"state\": \"ok\"}], \"lifecycle_verified\": {\"of\": 1, \"yes\": 0}, \"notes\": [], \"outcomes\": {\"AGENT FAIL\": 0, \"CANCELLED\": 0, \"HARNESS\": 0, \"INFRA\": 0, \"PASS\": 1, \"SKIPPED\": 0, \"UNKNOWN\": 0}, \"progress\": {\"completed\": 1, \"in_progress\": 0, \"queued\": 0, \"unobserved\": 0}, \"reasons\": [], \"reasons_more\": 0, \"released\": {\"of\": 1, \"yes\": 1}, \"released_at\": null, \"rows_source\": \"report-card.json\", \"run_dir\": \"/var/tmp/rose-agentcard-cloud/.context/agentcard-proof/runs/{RUN_ID}\", \"runs\": null, \"scheduled_total\": 1, \"scored\": 1, \"source_ref\": \"d7a514e469\", \"state\": \"COMPLETE\", \"state_reason\": \"\", \"surface\": \"cloud\", \"task_ref\": \"40d5e1262f92c861a19b7c10c17e990800d96fed\", \"tasks\": null, \"terminal_attempts\": 1, \"triggered_at\": 1793938698.0, \"wall\": {\"max\": 1525.0, \"n\": 1, \"of\": 1, \"p50\": 1525.0}, \"window_s\": 7200.0}, \"format\": \"v8\", \"generated_at\": 1794186920.140419, \"goal\": null, \"history\": [{\"cancelled_before_release\": null, \"cost\": {\"metered_usd\": 0.01, \"n\": 1, \"of\": 1, \"unmetered\": [\"infra\", \"wmh_grounding\"]}, \"end_evidence\": \"provider-teardown-verified.epoch\", \"ended_at\": 1793940223.0, \"harness_classified\": true, \"id\": \"{RUN_ID}\", \"infra_attempts\": 0, \"infra_jobs\": 0, \"infra_unreconciled\": false, \"label\": \"{RUN_ID}\", \"never_started\": null, \"number\": null, \"outcomes\": {\"AGENT FAIL\": 0, \"CANCELLED\": 0, \"HARNESS\": 0, \"INFRA\": 0, \"PASS\": 1, \"SKIPPED\": 0, \"UNKNOWN\": 0}, \"progress\": {\"completed\": 1, \"in_progress\": 0, \"queued\": 0, \"unobserved\": 0}, \"released\": {\"of\": 1, \"yes\": 1}, \"rows_source\": \"report-card.json\", \"scheduled_total\": 1, \"scored\": 1, \"state\": \"COMPLETE\", \"state_reason\": \"\", \"terminal_attempts\": 1, \"triggered_at\": 1793938698.0}], \"in_ledger\": false, \"issues\": [], \"number\": null, \"rate\": null, \"since\": {\"age\": 246697.14041900635, \"at\": 1793940223.0, \"label\": \"{RUN_ID}\", \"state\": \"ENDED\"}}</script></body></html>\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "scorecard-text",
+      "match": "^scorecard\\s+\\S+.*--text",
+      "responses": [
+        {
+          "stdout": "🧪 EXPERIMENT #UNRECORDED · 🔴 FAILED\n{RUN_ID} · 4 scheduled · cloud · src d7a514e46\nTriggered Nov 5, 8:18:18 PM PST\nexperiments/day UNRECORDED (no ledger launch)\nSince last benchmark ended: 2d20h ({RUN_ID})\nQUEUED 0 · IN_PROGRESS 0 · COMPLETED 4/4\nPASS 3 · HARNESS FAILURE 0 · INFRA FAILURE 0\nPass rate 100.0% (3/3 scored) · SKIPPED 1\nInfra attempts 0/4\nStop at 1/4 unique infra-failed jobs (5%)\nCost $0.01 metered (1/1) · infra/wmh_grounding UNMETERED\nCache agent demo-cache avg 85% (1/1) · LLM latency UNMEASURED\nLifecycle\n  ✅ Owned resources released · lifecycle.json verified\n  ✅ Final Hub publication\n  ✅ Controller exited · exit 0\nLAST 3 EXPERIMENTS\n  #? 🔴 FAILED {RUN_ID} · Nov 5, 8:18:18 PM PST → 8:43:43 PM PST · PASS 1/1 · INFRA 0/1\nACTIVE SUB-AGENTS / PARENT\n  No active agents\nISSUES / NEXT ACTION\n  • No open issues recorded.\n🔴 FAILED\n"
+        }
+      ]
+    },
+    {
+      "id": "scorecard-validate",
+      "match": "^scorecard\\s+--validate",
+      "responses": [
+        {
+          "stdout": "{\"valid\": true, \"problems\": []}\n"
+        }
+      ]
+    }
+  ],
+  "scenario": "bench-02-campaign"
+}

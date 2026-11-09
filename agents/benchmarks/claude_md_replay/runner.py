@@ -108,6 +108,21 @@ async def credentials(mode: str, *, env_file: Optional[Path], lease_backend: str
         await parity.release_lease(lease)
 
 
+USER_SKILL_PREFIX = "boxes-"
+
+
+def install_user_skills(config_dir: Path, skills_from: Path) -> list[str]:
+    """Copy the platform's boxes-* user skills (only those: no global CLAUDE.md or memory) into the run's config."""
+    target = config_dir / "skills"
+    target.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for skill in sorted(skills_from.iterdir()):
+        if skill.is_dir() and skill.name.startswith(USER_SKILL_PREFIX) and (skill / "SKILL.md").is_file():
+            shutil.copytree(skill, target / skill.name, symlinks=True, dirs_exist_ok=True)
+            copied.append(skill.name)
+    return copied
+
+
 def init_event(transcript: str) -> dict[str, Any]:
     for event in parity._json_lines(transcript):
         if event.get("type") == "system" and event.get("subtype") == "init":
@@ -125,10 +140,12 @@ async def run_claude(
     timeout: int,
     cli_bin: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    user_skills_from: Optional[Path] = None,
 ) -> dict[str, Any]:
     resolved = cli_bin or shutil.which("claude", path=source_env.get("PATH")) or "claude"
     command = claude_argv(resolved, model, effort, paths.repo, prompt, max_budget_usd)
     env = replay_env(paths, source_env)
+    skills = install_user_skills(Path(env["CLAUDE_CONFIG_DIR"]), user_skills_from) if user_skills_from else []
     started = time.monotonic()
     exit_code, transcript = await asyncio.to_thread(
         parity._run_cli, command.argv, cwd=paths.repo, stdin=command.stdin, timeout=timeout, env=env
@@ -147,6 +164,7 @@ async def run_claude(
         "timed_out": exit_code == -9,
         "summary": summary,
         "init": init_event(transcript),
+        "user_skills": skills,
         "infra": parity.infra_failure(summary, exit_code)
         or (None if "result" in summary else f"CLI exited {exit_code} without a result event: {transcript.strip()[-300:]}"),
     }

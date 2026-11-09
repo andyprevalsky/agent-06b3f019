@@ -41,6 +41,7 @@ class RunOptions:
     keep_clone: bool = False
     grade: bool = True
     skill_overlay_from: Optional[Path] = None
+    user_skills_from: Optional[Path] = None
 
 
 def now() -> str:
@@ -149,6 +150,7 @@ async def execute(task: Task, paths: RunPaths, opts: RunOptions, *, source_env: 
             timeout=int(opts.timeout or task.timeout_seconds),
             cli_bin=opts.cli_bin,
             max_budget_usd=opts.max_budget_usd,
+            user_skills_from=opts.user_skills_from,
         )
         honeypot.phase = "post"
         start_tree = result["prepare"]["fixture_tree"]

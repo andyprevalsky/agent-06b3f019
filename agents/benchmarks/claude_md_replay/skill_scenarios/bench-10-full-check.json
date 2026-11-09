@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "source": "boxes.dev thread ph740ay1wnfqvp0r56kanj5jxx8h28x3 (--ai-- descend polar k3 · RCA I1 sharded 2h window, devbox 0d70611e): 'scripts/run-bench <20 polar-bu> -k 3 --concurrency 60 --timeout 7200 --check'",
+    "recorded": "The refusal lines are scripts/run-bench's sharded-route strings ('HEAD … is not pushed to origin', 'tracked changes refused').",
+    "synthesized": "The full-selection banner (128 tasks x 2 = 256 copies routed to the sharded operator)."
+  },
+  "rules": [
+    {
+      "id": "full-check",
+      "match": "^full\\b.*--check",
+      "responses": [
+        {
+          "stdout": "🎯 full: 128 ready cloud task(s) whose last 3 runs passed, -k 2 → 256 simultaneous copies (> 32): routing to the sharded controller operator\n🔎 --check: local checks plus read-only provider preflight\n",
+          "stderr": "❌ HEAD {HEAD} is not pushed to origin; push it first (guests fetch only pushed commits)\n",
+          "exit_code": 2
+        }
+      ]
+    },
+    {
+      "id": "full-launch",
+      "match": "^full\\b",
+      "responses": [
+        {
+          "stdout": "🎯 full: 128 ready cloud task(s) whose last 3 runs passed, -k 2 → 256 simultaneous copies (> 32): routing to the sharded controller operator\n",
+          "stderr": "❌ HEAD {HEAD} is not pushed to origin; push it first (guests fetch only pushed commits)\n",
+          "exit_code": 2
+        }
+      ]
+    }
+  ],
+  "vars": {
+    "HEAD": "5a9b91f0e4d6a7accff187c77b8a5bb282c326d5"
+  },
+  "scenario": "bench-10-full-check"
+}
