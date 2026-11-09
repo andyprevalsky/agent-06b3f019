@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1857-rca784d/20261108T222036Z-config.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "bf54fcb355d4f49f9f5969b268f42e4133b4877f6e24ffba124bcb9f62019fe5",
+  "gzip_sha256": "79ec648c38dae888928285751989758e87d3ff0b1702fb03b22e0a3dfb4adf9a",
+  "stored_bytes": 19918,
+  "frames": 1,
+  "files": 9,
+  "original_bytes": 38790,
+  "manifest_sha256": "ad170e31516d46cac2f3442bb34a124af4187c0a91f085f2915d80d34c30cdc2",
+  "full_readback_verified": true
+}

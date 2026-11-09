@@ -1,0 +1,28 @@
+{
+ "failures": [
+  {
+   "id": "0a112489f4d74566b6371360e043515a",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "11ab61c131e0e35fe17e11e70e89ddaa52cfdc14",
+    "digest": "b76e0f4bb53e90ab89b3276f0d77be9a1932a364b598f358b9962c95ca1b4e3d"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "deploy-test-github test_capacity_counts_only_gates_this_host_runs selects cloud smoke in a fixture repo without an origin; this branch's unpushed-HEAD refusal (9b9a4771b0) made the dry run exit 2",
+   "evidence": "structural progress row suite=deploy-test-github FAIL (0 != 2); fix b698aa8dde stubs the fixture HEAD as pushed, passes 5x; the refusal itself stays covered in deploy-gates.test.py"
+  }
+ ]
+}

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { FilePointer } from '../../providers/storage';
+import { codeCliSettingsSchema } from '../../providers/codeCliSettings';
 
 export const createSessionSchema = z.object({
   agent_id: z.string().uuid(),
@@ -19,6 +20,10 @@ export const createSessionSchema = z.object({
   // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
   target: z.enum(['cloud', 'local']).optional(),
   device_id: z.string().uuid().optional(),
+  // The spawn's task_name; the agents list shows it as the code agent's title.
+  task_name: z.string().min(1).max(200).nullable().optional(),
+  // A resuming turn's model / effort / speed: the first resumed turn runs on them.
+  cli_settings: codeCliSettingsSchema.optional(),
 });
 
 export const closeSessionSchema = z.object({
@@ -43,6 +48,10 @@ export interface CreateSessionParams {
   fresh_conversation?: boolean;
   lease_owner?: string;
   base_branch?: string;
+  /** The spawn's task_name (the code agent's title in the agents list). */
+  task_name?: string | null;
+  /** A resuming turn's model / effort / speed for the first resumed turn. */
+  cli_settings?: z.infer<typeof codeCliSettingsSchema>;
 }
 
 export interface CloseSessionParams {

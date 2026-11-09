@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1857-rca784d/20261108T233031Z-terminal-controls.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "efa301221e8cdeab8066e64a7ac934d28d06dea0f2a32cce4ccca191f956e1ec",
+  "gzip_sha256": "d448df48829304e212f995ac43142cd497f1515066a43bb69be3e0f7bac8664f",
+  "stored_bytes": 1127538,
+  "frames": 1,
+  "files": 9,
+  "original_bytes": 13203692,
+  "manifest_sha256": "1eba527535679c8416cb1778d1441cb9bbf3e804ba1cfcaf55239c6e93058c34",
+  "full_readback_verified": true
+}

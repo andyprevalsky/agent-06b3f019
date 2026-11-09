@@ -3384,6 +3384,33 @@ async def test_cc_execute_tool_happy_path_yields_finished():
     assert finished.data["usage"]["service"][0]["cost_cents"] == 0.05
 
 
+async def test_cc_execute_tool_notes_the_code_provider_on_the_spawn_record():
+    """The handler keeps the CLI on the spawn's background record (wait_for 'code:<provider>').
+
+    It notes the selected provider, then the provider the activity actually ran (a
+    usage-limit switch inside the activity wins), always under the spawn's tool_call_id.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    handle = _FakeActivityHandle(
+        result={"success": True, "message": "ok", "output_files": [], "code_provider": "codex"}
+    )
+    instance = _FakeCCWorkflowInstance()
+    noted = []
+    instance._note_background_code_provider = lambda task_id, provider: noted.append((task_id, provider))
+    restore = _patch_cc_workflow(_FakeCCWorkflow(handle))
+    try:
+        await _collect_cc_events(
+            SpawnClaudeCodeAgentManager().execute_tool(instance, {"goal": "fix it", "attachments": None}, "tc-cc")
+        )
+    finally:
+        restore()
+
+    assert len(noted) == 2, noted
+    assert {task_id for task_id, _ in noted} == {"tc-cc"}
+    assert noted[-1] == ("tc-cc", "codex")
+
+
 async def test_cc_execute_tool_records_forced_provider_without_serializing_credential():
     """Forced Claude is recorded while OAuth material stays out of workflow history."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
@@ -4143,6 +4170,7 @@ async def _run_all_tests():
     await r.record_async("spawn_activity_error_reraises", test_spawn_activity_error_reraises_after_cleanup)
     # SpawnClaudeCodeAgentManager.execute_tool
     await r.record_async("cc_exec_happy", test_cc_execute_tool_happy_path_yields_finished)
+    await r.record_async("cc_exec_notes_code_provider", test_cc_execute_tool_notes_the_code_provider_on_the_spawn_record)
     await r.record_async(
         "cc_exec_forced_claude_no_serialized_credential",
         test_cc_execute_tool_records_forced_provider_without_serializing_credential,
@@ -5881,16 +5909,29 @@ async def test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume()
     for tool_call, expected in (
         ({"goal": "g", "_fresh_conversation": True}, {"fresh_conversation": True}),
         ({"goal": "g"}, None),
+        # The spawn's task_name rides in the same request dict (the code agent's list title).
+        ({"goal": "g", "task_name": "fix_parser"}, {"task_name": "fix_parser"}),
+        (
+            {"goal": "g", "task_name": "fix_parser", "_fresh_conversation": True},
+            {"fresh_conversation": True, "task_name": "fix_parser"},
+        ),
     ):
         fake = _SequencedCCWorkflow(_CC_COMPLETED)
         restore = _patch_cc_workflow(fake)
         try:
-            await _collect_cc_events(
+            events = await _collect_cc_events(
                 SpawnClaudeCodeAgentManager().execute_tool(_HandoffCCWorkflowInstance(), tool_call, "tc-fresh")
             )
         finally:
             restore()
         assert fake.started[0][16] == expected, fake.started[0][16]
+        # metadata.code_agent.title names the code agent (its view header when opened from a URL).
+        titles = {
+            (getattr(event, "metadata", None) or {}).get("code_agent", {}).get("title")
+            for event in events
+            if (getattr(event, "metadata", None) or {}).get("code_agent")
+        }
+        assert titles == {tool_call.get("task_name")}, titles
 
     _setup()
     await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1", fresh_conversation=True)
@@ -5903,6 +5944,13 @@ async def test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume()
     await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1")
     body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
     assert "fresh_conversation" not in body, body
+    assert "task_name" not in body, body
+
+    clear_captures()
+    _setup()
+    await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1", task_name="fix_parser")
+    body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
+    assert body["task_name"] == "fix_parser", body
 
 async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
     """A drained activity restarts against the same sandbox, not a new session."""

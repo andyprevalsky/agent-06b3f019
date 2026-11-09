@@ -71,9 +71,9 @@ for (const count of [10_000, 50_000, 100_000]) {
       await expect(oldest).toBeInViewport();
       const group = page.getByTestId('trajectory-work-group').first();
       await group.getByRole('button', { name: /Worked/ }).click();
-      await expect(group.getByTestId('trajectory-history-entry')).toHaveCount(20);
-      await group.getByRole('button', { name: 'Next activities' }).click();
-      await expect(group.getByTestId('trajectory-history-entry')).toHaveCount(18);
+      // 50 a page: the whole 38-activity history fits on one page, with no pager.
+      await expect(group.getByTestId('trajectory-history-entry')).toHaveCount(38);
+      await expect(group.getByRole('button', { name: 'Next activities' })).toHaveCount(0);
       await page.screenshot({
         path: info.outputPath('oldest-private.png'),
         animations: 'disabled',

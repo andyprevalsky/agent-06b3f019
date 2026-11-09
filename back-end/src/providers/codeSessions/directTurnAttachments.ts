@@ -1,11 +1,20 @@
-import { downloadFromStorage } from '../../providers/storage';
-import type { CodeTurnAttachment } from '../../providers/codeSessionTurns';
+import { downloadFromStorage } from '../storage';
+import type { CodeTurnAttachment } from '../codeSessionTurns';
 
 export interface DirectAttachment {
   original_filename: string;
   mime_type: string;
   storage_path?: string;
   size_bytes: number;
+}
+
+/** The caller's own storage object: under `<userId>/`, no `.` / `..` segments. */
+export function isOwnedAttachmentPath(path: string | undefined, userId: string): path is string {
+  return (
+    path !== undefined &&
+    path.startsWith(`${userId}/`) &&
+    !path.split('/').some((part) => part === '..' || part === '.')
+  );
 }
 
 /** Owner check precedes every service-key read; verify declared and actual size. */
@@ -17,13 +26,7 @@ export async function prepareDirectTurnAttachments(
   let totalBytes = 0;
   for (const attachment of pointers ?? []) {
     const path = attachment.storage_path;
-    if (
-      path === undefined ||
-      !path.startsWith(`${userId}/`) ||
-      path.split('/').some((part) => part === '..' || part === '.')
-    ) {
-      throw new Error('INVALID_ATTACHMENT');
-    }
+    if (!isOwnedAttachmentPath(path, userId)) throw new Error('INVALID_ATTACHMENT');
     if (attachment.size_bytes > 20 * 1024 * 1024) throw new Error('ATTACHMENTS_TOO_LARGE');
     const content = await downloadFromStorage(path);
     totalBytes += content.length;

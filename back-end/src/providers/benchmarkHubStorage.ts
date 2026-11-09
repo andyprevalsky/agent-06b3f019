@@ -41,7 +41,12 @@ const committedPairs = new WeakMap<
 const backfillStamps = new WeakMap<Map<string, string | null>, string>();
 const remoteCache = new Map<string, { raw: string; etag: string }>();
 let parsedCatalog: { etag: string | null; value: OverlayCatalog } | undefined;
-const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+// Concurrent coverage shards share one checkout but not one database, so the
+// Postgres index lock cannot serialize their local index writes. Each shard's
+// launcher points BENCHMARK_HUB_LOCAL_DIR at its own directory.
+const LOCAL_HUB_ROOT =
+  process.env.BENCHMARK_HUB_LOCAL_DIR ||
+  path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
 const isolatedRunId =
   process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
 if (

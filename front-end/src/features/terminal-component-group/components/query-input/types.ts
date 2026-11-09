@@ -7,6 +7,7 @@
 import type React from 'react';
 
 import type { MessageTarget } from '@/lib/api';
+import type { SpeedLevel } from '@/lib/agentSpeed';
 import type { AgentDetail, FilePointer, Model } from '../../hooks';
 
 /** Single in-flight attachment. Lifecycle: pending -> uploading -> done | error. */
@@ -85,7 +86,12 @@ export interface QueryInputProps {
    * The speed toggle's state when the caller owns it (the code-agent view: its
    * session's speed). Without onFastModeChange the toggle only shows the state.
    */
-  speedControl?: { fastMode: boolean; onFastModeChange?: (enabled: boolean) => void };
+  speedControl?: SpeedControl;
+  /**
+   * Rose Desktop direct channel: status at the box's top-right corner (the
+   * code-agent view's container dot + devbox usage); the text keeps clear of it.
+   */
+  cornerStatus?: React.ReactNode;
   /** Rose Desktop nub content for a direct channel (the code-agent view's working settings). */
   nub?: React.ReactNode;
 }
@@ -103,3 +109,16 @@ export const DEFAULT_DRIP_STYLES: DripStyles = {
   borderColorScalar: 0,
   borderRgb: 'rgba(255, 255, 255, 0.5)',
 };
+
+/** Speed toggle wiring (InputContainer's SpeedToggle). */
+export interface SpeedControl {
+  fastMode: boolean;
+  onFastModeChange?: (enabled: boolean) => void;
+  /**
+   * The exact level the caller runs at (the code-agent view: its session's
+   * standard / fast / ultrafast), shown instead of the account's fast-vs-ultra
+   * preference; with it, clicks go to onLevelChange (absent → read-only).
+   */
+  level?: SpeedLevel;
+  onLevelChange?: (level: SpeedLevel) => void;
+}

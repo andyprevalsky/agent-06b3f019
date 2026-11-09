@@ -1,0 +1,14 @@
+[
+  {
+    "path": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+    "sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4"
+  },
+  {
+    "path": "docs/handoffs/pr-1634-closeout/recover_closeout.py",
+    "sha256": "0c469e18e5b391bedc53669781e2633145d564156476955097be51ec554afe32"
+  },
+  {
+    "path": "docs/handoffs/pr-1831-closeout/restore_private_archive.py",
+    "sha256": "77ea66dc18b8022ba129b643f3a77085326281c06e4491c675dcbfe242f51dfe"
+  }
+]
