@@ -40,6 +40,7 @@ import {
   items,
   otherA,
   RUN,
+  storedBytes,
   userA,
   type BlackboxTest,
 } from './agent-tools.support';
@@ -272,8 +273,85 @@ async function frameHeightWhen(page: Page, want: (height: number) => boolean, la
   throw new Error(`${label}: frame height ${height}px`);
 }
 
+/**
+ * An SVG display is only ever an image. Chromium loads the SVG's stored bytes
+ * (served as image/svg+xml, as storage does) through <img>, exactly like the FE,
+ * and the SVG's <script> and onload try to hit a loopback beacon: nothing may
+ * arrive. Opening the same bytes as a document (the positive control) does run
+ * them, which is why signed SVG URLs force a download.
+ */
+async function svgBeaconHits(
+  storagePath: string
+): Promise<{ image: string[]; document: string[] }> {
+  const hits: string[] = [];
+  let svg = Buffer.alloc(0);
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    if (path.startsWith('/beacon')) {
+      hits.push(req.url ?? '');
+      res.writeHead(204).end();
+    } else if (path === '/chart.svg') {
+      res.writeHead(200, { 'content-type': 'image/svg+xml' }).end(svg);
+    } else {
+      res
+        .writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        .end('<!doctype html><img id="i" src="/chart.svg" alt="chart">');
+    }
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const stored = storedBytes(storagePath);
+  assert(stored, 'svg render check needs the local display store');
+  svg = Buffer.from(stored.toString('utf8').replaceAll('BEACON_ORIGIN', origin));
+  const browser = await cli.launchBrowser({ noWebgpu: true });
+  try {
+    const page = await (await browser.newContext()).newPage();
+    await page.goto(`${origin}/host`);
+    await page.waitForFunction(() => {
+      const img = document.getElementById('i') as HTMLImageElement | null;
+      return img !== null && img.complete && img.naturalWidth > 0;
+    });
+    await page.waitForTimeout(1500);
+    const image = [...hits];
+    await page.goto(`${origin}/chart.svg`);
+    await page.waitForTimeout(1500);
+    return { image, document: hits.slice(image.length) };
+  } finally {
+    await browser.close();
+    server.close();
+  }
+}
+
 export function displayRenderCases(): BlackboxTest[] {
   return [
+    {
+      name: 'render: a displayed SVG never runs its script or onload as an <img> (a document would)',
+      fn: async () => {
+        const svg = Buffer.from(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" ` +
+            `onload="fetch('BEACON_ORIGIN/beacon?onload')">` +
+            `<script>fetch('BEACON_ORIGIN/beacon?script')</script>` +
+            `<rect width="40" height="20" fill="red"/><desc>${RUN}</desc></svg>`
+        );
+        const res = await display(
+          otherA,
+          { items: [b64(svg, 'chart.svg')] },
+          { apiKeyUser: userA }
+        );
+        assert(res.status === 201 || res.status === 200, `display svg ${res.status}`);
+        const item = items(res)[0];
+        assert(
+          item.mime_type === 'image/svg+xml' && item.kind === 'image',
+          `${item.kind} ${item.mime_type}`
+        );
+        const { image, document } = await svgBeaconHits(item.file_pointer.storage_path);
+        assert(image.length === 0, `svg script ran inside <img>: ${JSON.stringify(image)}`);
+        assert(
+          document.length > 0,
+          'positive control: the same svg opened as a document must run (else the probe proves nothing)'
+        );
+      },
+    },
     {
       name: 'render: failed pixel evidence preserves the measured PNG and leaves the verdict unchanged',
       fn: async () => {

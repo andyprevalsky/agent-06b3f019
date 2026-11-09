@@ -15,7 +15,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { supabase } from '@/lib/supabase';
 import { getAttachmentUrl, type FilePointer } from '../../hooks';
-import { SIGNED_URL_TTL_SECONDS } from '../documentPreview.load';
+import { SIGNED_URL_TTL_SECONDS, signedUrlOptions } from '../documentPreview.load';
 
 export type InlineMediaUrlState = Record<string, string | null>;
 
@@ -27,7 +27,11 @@ async function signMediaUrl(
   if (agentId) return getAttachmentUrl(agentId, file.id, file.storage_path, { signal });
   const { data, error } = await supabase.storage
     .from('attachments')
-    .createSignedUrl(file.storage_path, SIGNED_URL_TTL_SECONDS);
+    .createSignedUrl(
+      file.storage_path,
+      SIGNED_URL_TTL_SECONDS,
+      signedUrlOptions(file.storage_path),
+    );
   if (error || !data?.signedUrl) throw new Error(error?.message || 'Could not sign media URL');
   return data.signedUrl;
 }
