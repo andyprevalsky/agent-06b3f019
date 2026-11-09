@@ -7,6 +7,8 @@ export const ALLOWED_VERIFIED_PHONES: readonly string[] = [
 ];
 export const QUEUE_TIMEOUT_MS = 300_000;
 export const LEASE_TIMEOUT_MS = 120_000;
+/** User control and pending phone auth outlive agent heartbeats only for this bounded grace. */
+export const USER_CONTROL_TIMEOUT_MS = 15 * 60_000;
 export const TERMINAL_AGENT_STATUSES = [
   'COMPLETED',
   'FAILED',

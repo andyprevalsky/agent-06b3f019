@@ -89,7 +89,7 @@ export async function admit(tx: Transaction, deviceId: string): Promise<void> {
   const [next] = await tx.$queryRaw<{ id: string; queueDeadlineAt: Date }[]>`
     SELECT l.id, l."queueDeadlineAt" FROM "IPhoneLease" l JOIN "Agent" a ON a.id = l."agentId"
     WHERE l."deviceId" = ${deviceId} AND l.status = 'WAITING' AND a."deletedAt" IS NULL
-      AND a.status::text NOT IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
+      AND a.status::text NOT IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED', 'PAUSED')
     ORDER BY l.ticket LIMIT 1 FOR SHARE OF a`;
   if (next === undefined) return;
   const now = await databaseNow(tx);
@@ -262,7 +262,14 @@ export async function view(tx: Transaction, id: string) {
         ? 0
         : null;
   const setup = await ensureSetup(tx, lease.deviceId, lease);
-  return { lease, queuePosition, setup: setup.dto };
+  const holder =
+    lease.status === 'WAITING'
+      ? await tx.iPhoneLease.findFirst({
+          where: { deviceId: lease.deviceId, status: 'ACTIVE' },
+          select: { id: true, agentId: true, controlOwner: true },
+        })
+      : null;
+  return { lease, queuePosition, setup: setup.dto, holder };
 }
 
 export async function lockedDevice(tx: Transaction, userId: string) {

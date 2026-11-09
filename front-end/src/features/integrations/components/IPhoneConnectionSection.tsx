@@ -1,5 +1,36 @@
+/**
+ * STATE MACHINE: IPhoneConnectionSection (one integration row, same look as DesktopIntegrationRow)
+ *
+ *   section header "IPHONE" · row: app-icon tile · "iPhone" · right-side status + action
+ *
+ *   [LOADING]        "Checking…" (Connect waits for the first read)
+ *   [DISABLED]       account not enabled/configured → mailto copy under the row, no action
+ *   [NOT_CONNECTED]  "Connect" ──click──> POST /iphone/connect (one request key)
+ *                      ok → [SETTING_UP] + opens the Phone app in DEVICE VIEW (watch boot-up)
+ *                      error → inline error, stays [NOT_CONNECTED]
+ *   [SETTING_UP]     "Setting up…" + "View"; setup progress bar under the row fills by
+ *                    completed steps (useIPhoneConnection polls every 2.5 s)
+ *                      ──server ready──> [READY]
+ *   [READY]          tile glows rose · "Connected" + "View"
+ *   [NEEDS_REAUTH]   tile glows amber · "Needs reauth" + "Reconnect" (same connect flow)
+ *
+ * "View" opens the Phone app's device view when the Phone app exists (Rose Desktop);
+ * otherwise it links to the setup agent. Flag on and off render this same row.
+ */
 import { Loader2 } from 'lucide-react';
+
+import { IPhoneSetupProgress } from '@/components/iphone/IPhoneSetupProgress';
+import { usePhoneLauncher } from '@/hooks/phoneLauncherContext';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
+
 import { useIPhoneConnection } from '../hooks/useIPhoneConnection';
+import {
+  ACTION_CLASSES,
+  DESKTOP_ROW_CLASSES,
+  DESKTOP_ROW_NAME_CLASSES,
+  DesktopSectionHeader,
+} from './DesktopIntegrationRow';
+import DropdownIconFrame, { warningGlowGradient } from './DropdownIconFrame';
 
 function AppleIcon() {
   return (
@@ -7,84 +38,119 @@ function AppleIcon() {
       data-testid="iphone-apple-icon"
       aria-hidden="true"
       viewBox="0 0 24 24"
-      className="h-6 w-6 fill-current"
+      className="fill-current"
     >
       <path d="M16.2 3.2c.7-.9 1.1-2 1-3.2-1 .1-2.3.7-3 1.6-.7.8-1.2 2-1 3.1 1.1.1 2.3-.6 3-1.5Zm3.6 9.5c0-2.4 2-3.6 2.1-3.7-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-2-1-3.3-.9-1.7 0-3.2 1-4.1 2.4-1.8 3-.5 7.6 1.2 10 .8 1.2 1.8 2.5 3.1 2.5 1.3-.1 1.7-.8 3.3-.8 1.5 0 1.9.8 3.3.8 1.4 0 2.2-1.2 3-2.4 1-1.4 1.4-2.7 1.4-2.8-.1 0-2.8-1.1-2.8-4.1Z" />
     </svg>
   );
 }
 
+const STATUS_CLASSES = 'shrink-0 text-[12px] text-muted-foreground';
+
 export default function IPhoneConnectionSection() {
   const { status, busy, error, connect } = useIPhoneConnection();
+  const launcher = usePhoneLauncher();
+  const roseDesktop = useRoseDesktop();
+  const phoneApp = roseDesktop && launcher !== null ? launcher : null;
   const unavailable = status !== null && (!status.enabled || !status.configured);
   const ready = status?.status === 'ready';
   const settingUp = status?.status === 'setting_up';
   const reauth = status?.status === 'needs_reauth';
   const label =
     status === null
-      ? 'Checking iPhone connection…'
-      : ready
-        ? 'Connected'
-        : settingUp
-          ? 'Setting up'
-          : reauth
-            ? 'Needs reauth'
-            : 'Connect your iPhone to Rose';
+      ? error === null
+        ? 'Checking…'
+        : null
+      : unavailable
+        ? null
+        : ready
+          ? 'Connected'
+          : settingUp
+            ? 'Setting up…'
+            : reauth
+              ? 'Needs reauth'
+              : null;
+  const canConnect = !ready && !settingUp && !unavailable;
+  const onConnect = async () => {
+    const started = await connect();
+    if (started !== null && started.status === 'setting_up') phoneApp?.openPhoneDevice();
+  };
+  const viewAgentHref = status?.setupAgentId
+    ? `/?agent-id=${encodeURIComponent(status.setupAgentId)}`
+    : null;
   return (
-    <section
-      aria-label="iPhone connection"
-      className="rounded-lg border border-border bg-card/60 p-4"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-            <AppleIcon />
-          </div>
-          <div className="min-w-0">
-            <h3 className="font-medium">iPhone</h3>
-            <p className="text-xs text-muted-foreground" role="status">
-              {label}
-            </p>
-            {unavailable && (
-              <p className="text-xs text-muted-foreground">
-                To enable iPhone access, email{' '}
-                <a className="underline" href="mailto:andy@roselabs.ai">
-                  andy@roselabs.ai
-                </a>
-                .
-              </p>
-            )}
-            {status?.setupAgentId && (
-              <a
-                className="text-xs underline"
-                href={`/?agent-id=${encodeURIComponent(status.setupAgentId)}`}
-              >
-                Open iPhone setup
-              </a>
-            )}
-            {error && (
-              <p role="alert" className="text-xs text-destructive">
-                {error}
-              </p>
-            )}
-          </div>
-        </div>
-        {!ready && !settingUp && (
-          <button
-            type="button"
-            onClick={() => void connect()}
-            disabled={busy || (status === null && error === null)}
-            aria-label={reauth ? 'Reconnect iPhone' : 'Connect iPhone'}
-            className="shrink-0 rounded-lg bg-foreground px-3 py-2 text-xs text-background disabled:opacity-60"
+    <section aria-label="iPhone connection">
+      <DesktopSectionHeader>iPhone</DesktopSectionHeader>
+      <div className={DESKTOP_ROW_CLASSES} data-testid="integration-row-iphone">
+        <div className="flex items-center gap-3">
+          <DropdownIconFrame
+            iconScale={62}
+            iconFit="contain"
+            className="text-[#1d1d1f]"
+            isSynced={ready || reauth}
+            glowGradient={reauth ? warningGlowGradient : undefined}
           >
-            {busy ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : reauth ? (
-              'Reconnect'
+            <AppleIcon />
+          </DropdownIconFrame>
+          <span className={DESKTOP_ROW_NAME_CLASSES}>iPhone</span>
+          {label !== null && (
+            <span role="status" className={STATUS_CLASSES}>
+              {label}
+            </span>
+          )}
+          {(ready || settingUp) &&
+            (phoneApp !== null ? (
+              <button
+                type="button"
+                className={ACTION_CLASSES}
+                onClick={phoneApp.openPhoneDevice}
+                aria-label="View iPhone"
+              >
+                View
+              </button>
             ) : (
-              'Connect iPhone'
-            )}
-          </button>
+              viewAgentHref !== null && (
+                <a className={ACTION_CLASSES} href={viewAgentHref} aria-label="Open iPhone setup">
+                  View
+                </a>
+              )
+            ))}
+          {canConnect && (
+            <button
+              type="button"
+              onClick={() => void onConnect()}
+              disabled={busy || (status === null && error === null)}
+              aria-label={reauth ? 'Reconnect iPhone' : 'Connect iPhone'}
+              className={ACTION_CLASSES}
+            >
+              {busy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : reauth ? (
+                'Reconnect'
+              ) : (
+                'Connect'
+              )}
+            </button>
+          )}
+        </div>
+        {settingUp && status !== null && (
+          <div className="ml-[46px] mt-2">
+            <IPhoneSetupProgress connection={status} variant="inline" />
+          </div>
+        )}
+        {unavailable && (
+          <p className="ml-[46px] mt-1 text-xs text-muted-foreground">
+            To enable iPhone access, email{' '}
+            <a className="underline" href="mailto:andy@roselabs.ai">
+              andy@roselabs.ai
+            </a>
+            .
+          </p>
+        )}
+        {error && (
+          <p role="alert" className="ml-[46px] mt-1 text-xs text-destructive dark:text-red-300">
+            {error}
+          </p>
         )}
       </div>
     </section>

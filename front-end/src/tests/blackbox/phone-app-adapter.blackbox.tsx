@@ -100,18 +100,22 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-it('does not request a phone from Home or stale selected-agent state', () => {
+/** Device view reads are account-level and lease-free; anything else is task-scoped. */
+const taskScoped = () =>
+  requests.filter((url) => !/\/iphone\/(device|device\/frame|connection)$/.test(url));
+it('Home shows the read-only device view; stale selected-agent state requests nothing', async () => {
   const v = render(view(null));
-  expect(screen.getByText('Select an agent to view its phone.')).toBeVisible();
+  expect(screen.getByTestId('phone-device-view')).toBeVisible();
+  await waitFor(() => expect(requests.some((url) => url.endsWith('/iphone/device'))).toBe(true));
   v.rerender(view('agent-b', 'agent-a'));
   expect(screen.getByText('Loading this agent’s phone…')).toBeVisible();
-  expect(requests).toEqual([]);
+  expect(taskScoped()).toEqual([]);
 });
 it('never creates a session for a tab without phone activity or an ambiguous interaction', () => {
   const v = render(view('agent-a', 'agent-a', []));
-  expect(screen.getByText('No active phone interaction for this agent.')).toBeVisible();
+  expect(screen.getByTestId('phone-device-view')).toBeVisible();
   v.rerender(view('agent-a', 'agent-a', [event(), { ...event('task-b'), message_id: 'second' }]));
-  expect(requests).toEqual([]);
+  expect(taskScoped()).toEqual([]);
 });
 it('shows only its owned private frame, never auto-takes control; unmount revokes it', async () => {
   const v = render(view());
