@@ -134,7 +134,7 @@ require_section_text "$RCA_PER_FAILURE" 'Every RCA names a concrete defect at a 
 FIXES="$(section_text '## Fixes' '## Final change review')"
 require_section_text "$FIXES" 'At 90 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 100 minutes take what it handed back.' \
   "/descend must warn RCA owners at 90 minutes and collect at 100"
-require_section_text "$FIXES" 'the RCA asks the parent for a check slot; the parent grants it only when the task' \
+require_section_text "$FIXES" 'the RCA asks the parent for a check slot (diagnosis uses the batch'"'"'s existing evidence, never a new run); the parent grants it only when the task' \
   "an RCA's end-to-end check must be admitted by the parent"
 require_section_text "$FIXES" 'the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait` in the background, never `--local`, with `CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES` set to' \
   "an RCA's end-to-end check must be one cloud run counted against the batch's provider budget"
