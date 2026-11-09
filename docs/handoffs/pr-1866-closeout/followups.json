@@ -20,11 +20,12 @@
     },
     {
       "item": "Devbox deletion readiness",
-      "state": "NOT_READY: only the boxes.dev Codex harness (app-server 247680 and its code-mode host 486991, serving this devbox's idle Codex helper threads) remains live",
+      "state": "NOT_READY: only the boxes.dev daemon's shared Codex app-server (247680) and its code-mode host (486991) remain; no workspace state",
       "reasons": [
         "Archived to R2 devbox-closeout-private/pr1866-7577a657/ (core + 3 deploy-cloud batches, 7.2 GB, read-back verified): .context (24 GB), logs, 72 unpushed branches and the stash (git bundle)",
         "13 leftover PR #1697 agent_link_server hubs stopped by exact PID; flyctl agent stopped",
-        "Not stopped: the platform Codex app-server and code-mode host, owned by boxes.dev for other threads"
+        "Not stopped: the platform Codex app-server and code-mode host, owned by boxes.dev for other threads",
+        "All 4 box-created Codex helper threads (ph74gd5h, ph73qw1t, ph78a0bs, ph77071p) archived after their work finished; the daemon-owned app-server was not killed (deploy rule: never kill processes this deploy did not start) and clears when the daemon recycles it"
       ]
     }
   ]
