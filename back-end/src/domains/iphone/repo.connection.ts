@@ -14,7 +14,9 @@ import { setupProgress } from '../../providers/phoneSetupVerification';
 import * as leases from './repo';
 import { IPhoneError, type IPhoneDevice, type Transaction } from './types';
 
-const terminal = ['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED'];
+// A paused setup agent is not driving setup (and no longer holds the phone), so it must not
+// pin the connection at setting_up: Connect starts a fresh setup agent instead.
+const inactive = ['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED', 'PAUSED'];
 async function activeSetup(tx: Transaction, userId: string, id: string | undefined) {
   if (id === undefined || id === '') return false;
   const agent = await tx.agent.findUnique({
@@ -24,7 +26,7 @@ async function activeSetup(tx: Transaction, userId: string, id: string | undefin
   if (agent && (agent.userId !== userId || agent.deletedAt !== null))
     throw new IPhoneError(409, 'iPhone setup agent is unavailable');
   // The encrypted reservation is committed before normal creation starts.
-  return agent === null || !terminal.includes(agent.status);
+  return agent === null || !inactive.includes(agent.status);
 }
 /** Connection screen projection: stored checks as ordered steps plus the setup browser task. */
 async function withProgress(
