@@ -502,6 +502,13 @@ require_text "$POOL_DRIVER" 'initialize-managed-worker-queue.ts' "fresh queues r
 require_text "$POOL_DRIVER" '"--verify-retired"' "recycled banks require their exact queue retirement certificate"
 require_text "$POOL_DRIVER" '"RETIRED" if managed else "RETAINED_LEGACY"' "legacy retention must not pretend retirement"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' "shared control plane must use the production DB"
+# Cutover coalescing and the rollback guard need ancestry proofs: bounded history
+# (never the ~2.6 GB full benchmark history) plus the opted-in GitHub compare.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'fetch-depth: 64' "deploy checkout must carry bounded history for ancestry proofs"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'WORKER_DEPLOYMENT_ANCESTRY_GITHUB: "1"' "deploy cutover must opt into GitHub ancestry proofs"
+if grep -Eq 'fetch-depth: 0' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "deploy-agents checkout must never fetch the full history"
+fi
 if grep -qE 'force-clear-generation-queue.ts|migrate-open-agent-workflows.ts' "$POOL_DRIVER" "$COOP"; then
   fail "routine pool cutover must not terminate unfinished work"
 fi

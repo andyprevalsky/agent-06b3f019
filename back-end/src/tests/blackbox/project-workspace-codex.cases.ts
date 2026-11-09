@@ -348,6 +348,48 @@ process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');
     );
   });
 
+  // code-agent-rose-repo (2026-11-08): a cold dependency install held the agent
+  // for 469 s. Past the grace window the agent starts, told where the report
+  // appears; a previous boot's report is removed so it cannot pass for this one.
+  test('codex: a slow startup does not hold the agent past the grace window; a stale report is removed', async () => {
+    installFakeCodex();
+    const home = mkdtempSync(join(ctx.fixture, 'codex-home-runner-slow-'));
+    const workdir = join(home, 'workspace');
+    const projectDir = join(home, '.rose', 'project');
+    mkdirSync(workdir, { recursive: true });
+    mkdirSync(projectDir, { recursive: true });
+    const reportPath = join(projectDir, 'startup-report.json');
+    writeFileSync(reportPath, '{"status":"ok"}');
+    writeFileSync(
+      join(projectDir, 'startup.json'),
+      JSON.stringify({ timeoutS: 480, reportPath, logPath: join(projectDir, 'startup.log') })
+    );
+    const runner = join(home, 'scripted-startup-runner.cjs');
+    writeFileSync(runner, 'setTimeout(() => {}, 8000);\n');
+    const { capture } = await runWsServer({
+      home,
+      label: 'runner-slow',
+      env: {
+        ROSE_PROJECT_WORKDIR: workdir,
+        ROSE_PROJECT_STARTUP: runner,
+        ROSE_PROJECT_STARTUP_CONFIG: join(projectDir, 'startup.json'),
+        ROSE_PROJECT_NAME: 'PJ-Codex-Runner-slow',
+        CODE_SESSION_PROJECT_STARTUP_GRACE_MS: '500',
+      },
+    });
+    assert(
+      capture.prompt.includes(
+        'Project startup for project PJ-Codex-Runner-slow is still running in the background'
+      ),
+      `the agent is told startup is still running: ${capture.prompt.slice(0, 300)}`
+    );
+    assert(
+      capture.prompt.includes(`wait until ${reportPath} exists`),
+      capture.prompt.slice(0, 300)
+    );
+    assert(!existsSync(reportPath), 'the previous boot report was removed before startup');
+  });
+
   test('codex: a missing or unreadable startup report is reported as such and never stalls the session', async () => {
     const crash = await runWithScriptedStartupRunner('crash', scriptedStartupRunners.crash(7));
     assert(

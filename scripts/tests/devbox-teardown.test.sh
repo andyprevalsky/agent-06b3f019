@@ -38,7 +38,15 @@ export FAKE_LOG="$WORK/log"
 # The database selection below depends on ROSE_USE_SYSTEM_PG; a runner or devbox that exports it must not
 # decide the default and Docker cases. The forced-system case sets it explicitly.
 unset ROSE_USE_SYSTEM_PG
-run() { : >"$FAKE_LOG"; PATH="$WORK/bin:$PATH" bash "$ROOT/scripts/devbox-teardown.sh" "$@"; }
+# The teardown also sources <root>/.cloud-env, which exists only on boxes.dev devboxes and exports
+# ROSE_USE_SYSTEM_PG=true and the cloud workspace name. Run the unchanged script from a root without one
+# (the files it reads, copied byte for byte) so the host's cloud identity cannot decide these cases either.
+FIXTURE_ROOT="$WORK/root"
+mkdir -p "$FIXTURE_ROOT/scripts/lib" "$FIXTURE_ROOT/back-end/scripts"
+cp "$ROOT/scripts/devbox-teardown.sh" "$FIXTURE_ROOT/scripts/"
+cp "$ROOT/scripts/lib/workspace-env.sh" "$FIXTURE_ROOT/scripts/lib/"
+cp "$ROOT/back-end/scripts/local-db-container.sh" "$FIXTURE_ROOT/back-end/scripts/"
+run() { : >"$FAKE_LOG"; PATH="$WORK/bin:$PATH" bash "$FIXTURE_ROOT/scripts/devbox-teardown.sh" "$@"; }
 
 # 1. the explicit stack id computed by the backend function reaches the killer
 out="$(run)"; rc=$?
@@ -58,7 +66,7 @@ FAKE_SLEEP=30 TEARDOWN_BUDGET_SECONDS=2 run >/dev/null || fail "hung killer must
 [ $((SECONDS - start)) -lt 10 ] || fail "budget not respected ($((SECONDS - start))s)"
 # 6. the database url the stack id and the kill use follows run.sh's selection:
 #    system Postgres by default, the workspace's Docker container when it runs
-ws="$(basename "$ROOT")"
+ws="$(basename "$FIXTURE_ROOT")"
 run >/dev/null
 grep -q "DB_URL_FOR_STACK=postgresql://postgres:postgres@localhost:5432/victoria" "$FAKE_LOG" || fail "default is system Postgres: $(grep DB_URL_FOR_STACK "$FAKE_LOG")"
 grep -q "DB_URL_FOR_KILL=postgresql://postgres:postgres@localhost:5432/victoria" "$FAKE_LOG" || fail "kill must use the same database"

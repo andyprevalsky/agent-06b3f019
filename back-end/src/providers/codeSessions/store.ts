@@ -110,6 +110,7 @@ async function tryLease(id: string, leaseOwner: string, now: Date): Promise<bool
     where: {
       id,
       state: { not: CODE_SESSION_STATES.RETIRED },
+      closingTaskId: null,
       OR: [{ leaseOwner: null }, { leaseOwner }, { leaseExpiresAt: { lt: now } }],
     },
     data: {
@@ -302,6 +303,21 @@ export async function markPaused(codeSessionId: string): Promise<void> {
       leaseExpiresAt: null,
       lastActiveAt: new Date(),
     },
+  });
+}
+
+/**
+ * Drop one spawn's lease without touching the session's state: a spawn refused
+ * because the user holds the live CLI in direct chat must leave that session
+ * ACTIVE (it is live) and let its own retry, or another spawn, lease it again.
+ */
+export async function releaseLease(
+  codeSessionId: string,
+  leaseOwner: string | null
+): Promise<void> {
+  await prisma.codeSession.updateMany({
+    where: { id: codeSessionId, leaseOwner },
+    data: { leaseOwner: null, leaseExpiresAt: null },
   });
 }
 

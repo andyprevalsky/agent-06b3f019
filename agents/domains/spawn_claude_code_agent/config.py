@@ -116,6 +116,14 @@ CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
 # gets the same task back (backend createWithCodeSession).
 CODE_SESSION_CREATE_TIMEOUT_S: Final[float] = 30 * 60.0
 CODE_SESSION_CREATE_HEARTBEAT_S: Final[float] = 30.0
+# A resumed spawn whose live CLI the user holds in direct chat, behind a
+# ws-server too old to hold an attaching spawn: the backend answers 409
+# CODE_SESSION_HELD and never stops that CLI. The spawn waits (heartbeating,
+# capped backoff) for the hand back; the ws-server releases an idle hold after
+# 10 minutes, so this covers it with a margin before failing truthfully.
+CODE_SESSION_HELD_CODE: Final[str] = "CODE_SESSION_HELD"
+CODE_SESSION_HELD_WAIT_S: Final[float] = 12 * 60.0
+CODE_SESSION_HELD_BACKOFF_S: Final[tuple[float, float]] = (5.0, 30.0)
 # A reattaching attempt closes the previous sandbox and starts over only after
 # this many failed handshakes, so one network blip does not discard a live run.
 REATTACH_PROBE_ATTEMPTS: Final[int] = 3

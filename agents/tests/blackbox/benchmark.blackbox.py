@@ -3640,6 +3640,141 @@ async def test_agentcard_setup_retries_transient_upstream_failure():
         assert calls == [409]
 
 
+async def test_agentcard_setup_retries_only_the_structured_org_rate_limit():
+    """2026-11-08 deploy smoke: prepare-residual returned the org-wide MCP throttle.
+
+    The backend answers a throttled AgentCard Organization MCP call with a 429
+    whose structured code is ``agentcard_org_mcp_rate_limited``; the upstream
+    refused the call, and every setup action converges on retry. Wait out that
+    window instead of failing the task 9 seconds in. Any other 4xx stays terminal.
+    """
+    import json as _json
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    throttled = _json.dumps(
+        {
+            "error": "AgentCard Organization MCP rate limit exceeded",
+            "code": "agentcard_org_mcp_rate_limited",
+            "retryAfterSeconds": None,
+        }
+    )
+    throttled_with_hint = throttled.replace('"retryAfterSeconds": null', '"retryAfterSeconds": 7')
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self.text = body
+
+        def json(self):
+            return _json.loads(self.text)
+
+    def fake_client(responses):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                status, body = responses[min(len(calls), len(responses) - 1)]
+                calls.append((status, json["action"]))
+                return FakeResponse(status, body)
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    ready = (200, '{"status":"residual_ready"}')
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client([(429, throttled), (429, throttled_with_hint), ready])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual") == {
+                "status": "residual_ready"
+            }
+        assert calls == [(429, "prepare-residual")] * 2 + [(200, "prepare-residual")]
+        # A null hint waits a bounded share of the org window; an explicit hint is honored.
+        assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3, 7.0]
+
+        sleeps.clear()
+        client, calls = fake_client([(429, throttled)])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except RuntimeError as error:
+                assert "agentcard_org_mcp_rate_limited" in str(error)
+            else:
+                raise AssertionError("a persistent org throttle must raise after its bounded attempts")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        # PR #1813 smoke, 2026-11-08: recover_funds got the provider's intermittent 401 on a healthy
+        # secret. The typed code is the same transient org state; every setup action converges.
+        unauthorized = _json.dumps(
+            {
+                "error": "AgentCard Organization MCP recover_funds failed: Invalid or expired organization token",
+                "code": "agentcard_org_mcp_unauthorized",
+            }
+        )
+        sleeps.clear()
+        client, calls = fake_client([(401, unauthorized), ready])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual") == {
+                "status": "residual_ready"
+            }
+        assert calls == [(401, "prepare-residual"), (200, "prepare-residual")]
+        assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3]
+
+        sleeps.clear()
+        client, calls = fake_client([(401, unauthorized)])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except RuntimeError as error:
+                assert "agentcard_org_mcp_unauthorized" in str(error)
+            else:
+                raise AssertionError("a sustained org auth rejection must raise after its bounded attempts")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        # Any other 401, including one without the typed provider code, stays terminal.
+        for untyped in ('{"error":"Unauthorized"}', '{"code":"api_key_invalid"}', "Invalid API key"):
+            sleeps.clear()
+            client, calls = fake_client([(401, untyped), ready])
+            with patch.object(bench.httpx, "AsyncClient", client):
+                try:
+                    await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"an untyped 401 must stay terminal: {untyped}")
+            assert calls == [(401, "prepare-residual")] and sleeps == []
+
+        # A 429 without the structured transient code is not proof the call never ran.
+        for unstructured in ('{"error":"Too many requests"}', "rate limit exceeded", '{"code":"other_limit"}'):
+            sleeps.clear()
+            client, calls = fake_client([(429, unstructured), ready])
+            with patch.object(bench.httpx, "AsyncClient", client):
+                try:
+                    await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"unstructured 429 must stay terminal: {unstructured}")
+            assert calls == [(429, "prepare-residual")] and sleeps == []
+
+
 def test_agentcard_setup_attention_failure_fails_the_task_with_its_cause():
     """The poll loop must surface a failed setup fixture instead of swallowing it as a warning."""
     import inspect
@@ -6295,6 +6430,51 @@ async def test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_o
             assert isinstance(caught.value, bench.AgentCardReleaseStall) == (flag == "1")
             assert "last observed" in str(caught.value)
     assert calls == {"reads": 0, "recoveries": 0}
+
+
+async def test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error():
+    """PR #1781 deploy smoke (2026-11-08 05:17Z): one lifecycle read got AgentCard's transient 401,
+    the next read observed the exact release stall, and the idempotent abandon re-POST was still
+    in flight at the reconciliation deadline. The superseded read error must not veto the waiver
+    for the fresh exact-stall observation (it saved ERROR while cleanup printed the SKIP)."""
+    import pytest
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+
+    task = get_task_by_name("agent-payment-abandonment")
+    reads = {"count": 0}
+
+    async def read(_base, _aid):
+        reads["count"] += 1
+        if reads["count"] == 1:
+            raise RuntimeError(
+                'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP '
+                'list_transfers failed: Invalid or expired organization token"}'
+            )
+        return _agentcard_release_stall_lifecycle()
+
+    async def slow_recover(_base, _aid):
+        await asyncio.sleep(5)
+        raise AssertionError("the deadline must cancel the in-flight recovery")
+
+    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
+        with pytest.raises(RuntimeError) as caught:
+            await asyncio.wait_for(
+                bench._wait_for_expected_payment_lifecycle(
+                    "http://benchmark.invalid",
+                    "exact-owned-agent",
+                    task,
+                    _agentcard_release_stall_lifecycle(),
+                    timeout_seconds=0.3,
+                    poll_interval_seconds=0.01,
+                    fetch_lifecycle=read,
+                    recover_lifecycle=slow_recover,
+                    resume_pending_after_seconds=0.001,
+                ),
+                timeout=2,
+            )
+    assert reads["count"] == 2
+    assert isinstance(caught.value, bench.AgentCardReleaseStall), caught.value
 
 
 async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation():
@@ -24583,17 +24763,19 @@ def test_history_ledger_task_names_still_exist_in_catalog():
     import json as _json
     from pathlib import Path
 
+    from benchmarks import history_ledger
     from benchmarks.benchmark_tasks import all_tasks
 
     ledger = Path(__file__).resolve().parents[2] / "benchmarks" / "history" / "task_durations.jsonl"
-    if not ledger.exists() or ledger.stat().st_size == 0:
+    # The ledger is its base file plus per-writer shards (history_ledger.py).
+    lines = history_ledger.read_lines(ledger)
+    if not lines:
         return  # fresh checkout — nothing recorded yet
     recorded = set()
-    with ledger.open() as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                recorded.add(_json.loads(line)["task"])
+    for line in lines:
+        line = line.strip()
+        if line:
+            recorded.add(_json.loads(line)["task"])
     catalog_names = {t.name for t in all_tasks()}
     orphaned = sorted(recorded - catalog_names)
     assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"
@@ -25557,6 +25739,52 @@ def test_multi_task_run_record_survives_a_long_task_name_list():
             ):
                 paths.append(run.save(directory=directory))
         assert paths[0] != paths[1], "distinct suites collapsed onto one run-record filename"
+
+
+async def test_abandon_retries_typed_org_auth_rejection_after_reconciling():
+    """A provider 401 on the idempotent abandon POST is the same org state as its throttle.
+
+    PR #1813 smoke, 2026-11-08: a healthy secret was rejected as "Invalid or expired
+    organization token". Reconcile through the read endpoint first, then wait the org window.
+    An untyped 401 proves nothing about the provider and stays terminal.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    typed = (
+        'Failed to abandon test payment: 401 {"error":"AgentCard Organization MCP close_card failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+    posts = []
+
+    async def abandon(_base_url, _agent_id):
+        posts.append(_agent_id)
+        if len(posts) == 1:
+            raise Exception(typed)
+        return {"purchase": {"status": "VOIDED"}}
+
+    reads = []
+
+    async def lifecycle(_base_url, agent_id):
+        reads.append(agent_id)
+        return {"purchase": {"status": "HELD"}}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench.asyncio, "sleep", fake_sleep):
+        result = await bench._start_payment_abandonment_with_recovery(
+            "http://backend", "agent-1", abandon_payment=abandon, fetch_lifecycle=lifecycle
+        )
+    assert result == {"purchase": {"status": "VOIDED"}}
+    assert posts == ["agent-1", "agent-1"] and reads == ["agent-1"]
+    assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3]
+
+    assert bench._rate_limit_retry_delay('Failed to abandon test payment: 401 {"error":"Unauthorized"}') is None
+    assert bench._rate_limit_retry_delay('Failed to abandon test payment: 401 {"code":"api_key_invalid"}') is None
 
 
 def test_abandon_retry_waits_out_upstream_rate_limit_window():
@@ -26935,6 +27163,10 @@ async def run_all_tests():
         "agentcard_release_policy_fetch_cancel_strict",
         test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
     )
+    await r.record_async(
+        "agentcard_release_policy_fresh_stall_after_recovered_read_error",
+        test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error,
+    )
 
     await r.record_async(
         "benchmark_native_checks_overlap_judges_without_losing_ownership",
@@ -27124,6 +27356,33 @@ async def run_all_tests():
         "phone_call_parked_on_hold_static_check",
         test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
     )
+    await r.record_async("failed_task_finally_preserves_published_error", test_failed_task_finally_preserves_published_error_in_terminal_report)
+    await r.record_async("interrupted_finalization_retains_one_error", test_interrupted_finalization_retains_one_error_occurrence)
+    # The explicit-only live-phone task's offline fixture/proof contracts recur
+    # with the existing benchmark suite; pytest owns parameter expansion.
+    from benchmarks import phone_live_auth_test
+    for name in sorted(dir(phone_live_auth_test)):
+        if name.startswith("test_"):
+            r.record("phone_live_auth_" + name[5:], _with_pytest_fixtures(getattr(phone_live_auth_test, name)))
+
+    from benchmarks import phone_boot_reset_test
+    for name in sorted(dir(phone_boot_reset_test)):
+        if name.startswith("test_"):
+            r.record("phone_boot_reset_" + name[5:], _with_pytest_fixtures(getattr(phone_boot_reset_test, name)))
+    from benchmarks import phone_daily_test
+    for name in sorted(dir(phone_daily_test)):
+        if name.startswith("test_"):
+            case = _with_pytest_fixtures(getattr(phone_daily_test, name))
+            if asyncio.iscoroutinefunction(case):
+                await r.record_async("phone_daily_" + name[5:], case)
+            else:
+                r.record("phone_daily_" + name[5:], case)
+
+    from benchmarks import phone_connectivity_test
+    for name in sorted(dir(phone_connectivity_test)):
+        if name.startswith("test_"):
+            r.record("phone_connectivity_" + name[5:], _with_pytest_fixtures(getattr(phone_connectivity_test, name)))
+
     from benchmarks import phone_callee_test, phone_hold_line_test
 
     for module, prefix in ((phone_hold_line_test, "phone_hold_line_"), (phone_callee_test, "phone_callee_")):
@@ -27871,6 +28130,14 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_setup_retries_transient_upstream_failure",
         test_agentcard_setup_retries_transient_upstream_failure,
+    )
+    await r.record_async(
+        "agentcard_setup_retries_only_the_structured_org_rate_limit",
+        test_agentcard_setup_retries_only_the_structured_org_rate_limit,
+    )
+    await r.record_async(
+        "abandon_retries_typed_org_auth_rejection",
+        test_abandon_retries_typed_org_auth_rejection_after_reconciling,
     )
     r.record(
         "agentcard_setup_attention_failure_fails_task",
@@ -28848,3 +29115,83 @@ async def run_all_tests():
     )
 
     return r.all_passed
+
+
+async def test_failed_task_finally_preserves_published_error_in_terminal_report():
+    """Execute the report owner's actual finalizer prefix after a task raises."""
+    import ast
+    import inspect
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.phone_connectivity import PhoneCleanupBlocked
+
+    task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+    original = bench.TaskResult(name=task.name, passed=False, agent_id="synthetic-root",
+                               status="ERROR", benchmark_status="ERROR", progress_score=0,
+                               duration_seconds=1, cost_cents=0, message_count=0,
+                               failure_reason="original phone cleanup deadline exceeded")
+
+    async def executor(_base, _task, *, on_task_evaluated, **kwargs):
+        await on_task_evaluated(original)
+        raise PhoneCleanupBlocked("later task finally cleanup blocked")
+
+    namespace, cards = _live_report_producer_harness([task], executor, 1)
+    main = ast.parse(inspect.getsource(bench.main_async)).body[0]
+    owner = next(
+        node for node in main.body if isinstance(node, ast.Try)
+        and any(isinstance(child, ast.Name) and child.id == "_report_ticker_task"
+                for statement in node.finalbody for child in ast.walk(statement)))
+    prefix = []
+    for statement in owner.finalbody:
+        if isinstance(statement, ast.Assign) and any(isinstance(n, ast.Await) for n in ast.walk(statement)):
+            break
+        prefix.append(statement)
+    finish = ast.AsyncFunctionDef(name="_finish_report", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=prefix, decorator_list=[])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[finish], type_ignores=[])),
+                 "<report-finalizer>", "exec"), namespace)
+    ticker = asyncio.create_task(asyncio.Event().wait())
+    namespace["_report_ticker_task"] = ticker
+    try:
+        with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+            try:
+                await namespace["_run_reported_task"](task)
+            except PhoneCleanupBlocked:
+                pass
+            assert cards[-1]["results"]["failed"] == 1
+            await namespace["_finish_report"]()
+            assert cards[-1]["tasks"] == {"total": 1, "running": 0, "completed": 1, "queued": 0}, "published ERROR reverted to queued during finalization"
+            assert namespace["run"].task_results == [original], "original immutable attempt must be saved as ERROR"
+            assert original.benchmark_status == "ERROR" and not original.passed
+    finally:
+        ticker.cancel()
+        await asyncio.gather(ticker, return_exceptions=True)
+
+
+async def test_interrupted_finalization_retains_one_error_occurrence():
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+    evaluated = asyncio.Event()
+
+    async def executor(_base, _task, *, on_task_evaluated, **kwargs):
+        await on_task_evaluated(bench.TaskResult(
+            name=task.name, passed=True, agent_id="synthetic-interrupted-root", status="COMPLETED",
+            progress_score=1, duration_seconds=1, cost_cents=0, message_count=0))
+        evaluated.set()
+        await asyncio.Event().wait()
+
+    namespace, cards = _live_report_producer_harness([task], executor, 1)
+    with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+        coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+        await evaluated.wait()
+        coordinator.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator
+        namespace["_tick_report_once"]()
+    results = namespace["run"].task_results
+    assert len(results) == 1 and results[0].agent_id == "synthetic-interrupted-root"
+    assert not results[0].passed and results[0].benchmark_status == "ERROR"
+    assert "Interrupted during task finalization" in results[0].failure_reason
+    assert cards[-1]["tasks"]["completed"] == 1 and cards[-1]["results"]["failed"] == 1

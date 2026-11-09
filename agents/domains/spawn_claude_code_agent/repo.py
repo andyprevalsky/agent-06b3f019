@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 import uuid as uuid_module
 from typing import Any, Optional
 
@@ -14,6 +16,9 @@ from config import load_config
 from domains.spawn_claude_code_agent.config import (
     CODE_SESSION_CREATE_HEARTBEAT_S,
     CODE_SESSION_CREATE_TIMEOUT_S,
+    CODE_SESSION_HELD_BACKOFF_S,
+    CODE_SESSION_HELD_CODE,
+    CODE_SESSION_HELD_WAIT_S,
     CODE_SESSION_RESIZE_ATTEMPTS,
     CODE_SESSION_RESIZE_RETRY_BACKOFF_S,
     CODE_SESSION_RESIZE_TIMEOUT_S,
@@ -269,6 +274,50 @@ async def _post_with_heartbeats(request: Any, message: str) -> httpx.Response:
             pending.cancel()
 
 
+def _is_held_response(response: httpx.Response) -> bool:
+    return response.status_code == 409 and _json_or_empty(response).get("code") == CODE_SESSION_HELD_CODE
+
+
+async def _create_waiting_out_direct_hold(post: Any, agent_id: str) -> httpx.Response:
+    """POST the create; while the backend answers CODE_SESSION_HELD, wait for the hand back and repost.
+
+    The live CLI's user is chatting with it directly and its ws-server cannot hold an attaching spawn, so
+    the backend refuses without touching that CLI. No task row or session is created (the backend releases
+    the lease), so a repost is the same create and the tool call's lease keeps it one spawn; each attempt
+    only re-stages the sandbox's files idempotently. The wait heartbeats and backs off (capped, with
+    +/-20% jitter so spawns held at the same moment don't repost in lockstep) for up to
+    CODE_SESSION_HELD_WAIT_S, which covers the ws-server's 10-minute idle release; past it the spawn fails
+    non-retryably with the true reason.
+    """
+    started = time.monotonic()
+    delay, max_delay = CODE_SESSION_HELD_BACKOFF_S
+    response = await post()
+    while _is_held_response(response):
+        waited = time.monotonic() - started
+        if waited >= CODE_SESSION_HELD_WAIT_S:
+            raise ApplicationError(
+                "The code agent's session is still held: the user is still chatting with it directly; "
+                "spawn it again after they hand it back.",
+                type=CODE_SESSION_HELD_CODE,
+                non_retryable=True,
+            )
+        logger.info(
+            "[ClaudeCode] Code session held by the user's direct chat; waiting for the hand back",
+            agent_id=agent_id,
+            waited_s=round(waited, 1),
+            retry_in_s=delay,
+        )
+        remaining = delay * random.uniform(0.8, 1.2)
+        while remaining > 0:
+            safe_heartbeat("Waiting for the user to hand the code agent back")
+            step = min(remaining, 5.0)
+            await asyncio.sleep(step)
+            remaining -= step
+        delay = min(delay * 2, max_delay)
+        response = await post()
+    return response
+
+
 async def create_e2b_session(
     agent_id: str,
     goal: str,
@@ -282,6 +331,8 @@ async def create_e2b_session(
     target: str = "cloud",
     local_device_id: Optional[str] = None,
     fresh_conversation: bool = False,
+    task_name: Optional[str] = None,
+    cli_settings: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
@@ -307,6 +358,12 @@ async def create_e2b_session(
     }
     if attachments:
         create_payload["attachments"] = attachments
+    if task_name:
+        # The agents list shows the spawn's task_name as the code agent's title.
+        create_payload["task_name"] = task_name[:200]
+    if cli_settings:
+        # A resuming turn's model / effort / speed (backend cliSettingsEnvOverrides).
+        create_payload["cli_settings"] = cli_settings
     if github_repo_url and target != "local":
         create_payload["github_repo_url"] = github_repo_url
     if target == "local":
@@ -323,17 +380,21 @@ async def create_e2b_session(
             create_payload["fresh_conversation"] = True
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(CODE_SESSION_CREATE_TIMEOUT_S, connect=10.0)) as client:
-        response = await _post_with_heartbeats(
-            client.post(
-                f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
-                headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                },
-                json=create_payload,
-            ),
-            "Starting the code-agent sandbox",
-        )
+
+        async def post_create() -> httpx.Response:
+            return await _post_with_heartbeats(
+                client.post(
+                    f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
+                    headers={
+                        "x-api-key": config.backend.api_key or "",
+                        "Content-Type": "application/json",
+                    },
+                    json=create_payload,
+                ),
+                "Starting the code-agent sandbox",
+            )
+
+        response = await _create_waiting_out_direct_hold(post_create, agent_id)
 
         if response.status_code == 409 and target == "local":
             body = _json_or_empty(response)
@@ -367,10 +428,7 @@ async def create_e2b_session(
                 response_text=response_text,
             )
             detail = f": {response_text}" if response_text else ""
-            message = (
-                f"Failed to create code session (provider={code_provider}): "
-                f"HTTP {response.status_code}{detail}"
-            )
+            message = f"Failed to create code session (provider={code_provider}): HTTP {response.status_code}{detail}"
             upper = f"{message} {response_text}".upper()
             billing_markers = (
                 "MISSING PAYMENT METHOD",
@@ -396,6 +454,39 @@ async def create_e2b_session(
             raise Exception(message)
 
         return response.json()
+
+
+async def report_undelivered_code_turns(agent_id: str, task_id: str, turn_ids: list[str], reason: str) -> None:
+    """Tell the senders of agent turns this code session accepted but lost (``user_turn_undelivered``).
+
+    The backend notifies each sending Rose agent once per turn (idempotent on the original message key),
+    so a retry or a replayed event is safe. Best effort: a failure is logged, never raised into the monitor.
+    """
+    if not turn_ids:
+        return
+    config = load_config()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/code-turns-undelivered",
+                headers={"x-api-key": config.backend.api_key or ""},
+                json={"session_id": task_id, "turn_ids": turn_ids[:50], "reason": (reason or "rejected")[:100]},
+            )
+            response.raise_for_status()
+        logger.info(
+            "[ClaudeCode] Reported undelivered agent turns",
+            agent_id=agent_id,
+            task_id=task_id,
+            turns=len(turn_ids),
+            notified=_json_or_empty(response).get("notified"),
+        )
+    except Exception as e:
+        logger.warning(
+            "[ClaudeCode] Could not report undelivered agent turns",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=extract_error_message(e),
+        )
 
 
 async def persist_terminal_output(
@@ -448,7 +539,8 @@ async def close_e2b_session(
     A persistent code session is checkpointed and paused (never killed);
     ``reason`` (close | failure | cancel | idle | drain) is recorded on the
     checkpoint. Returns dict with output_files, usage and ``code_session``
-    facts (branch, merge facts, checkpoint), or empty dict on failure.
+    facts (branch, merge facts, checkpoint). A lost response retries this same
+    task's idempotent close; it never restarts the code agent.
     """
     config = load_config()
     payload: dict[str, Any] = {"task_id": task_id}
@@ -461,31 +553,47 @@ async def close_e2b_session(
     if additional_paths:
         payload["additional_paths"] = additional_paths
 
-    try:
-        # Checkpoint upload + pause + GitHub merge facts: a control-plane bound.
+    async def reconcile_close() -> dict[str, Any]:
+        last_error = "close was not confirmed"
+        # Each request retains the existing transport bound. The backend may
+        # still be closing after a lost response; its task receipt makes the
+        # next request join that operation or replay its completed result.
         async with httpx.AsyncClient(timeout=180.0) as client:
-            close_response = await client.post(
-                f"{config.backend.api_url}{_session_base_path(code_provider)}/close",
-                headers={"x-api-key": config.backend.api_key or ""},
-                json=payload,
-            )
-            if close_response.status_code == 200:
-                return close_response.json()
-            logger.warning(
-                "[ClaudeCode] Close session returned non-200",
-                task_id=task_id,
-                status_code=close_response.status_code,
-            )
-            return {}
-    except WorkflowGenerationSealed:
-        raise  # a replaced generation must stop, never be swallowed
-    except Exception as e:
-        logger.warning(
-            "[ClaudeCode] Failed to close session",
-            task_id=task_id,
-            error=extract_error_message(e),
+            for attempt in range(3):
+                try:
+                    response = await client.post(
+                        f"{config.backend.api_url}{_session_base_path(code_provider)}/close",
+                        headers={"x-api-key": config.backend.api_key or ""},
+                        json=payload,
+                    )
+                    raise_if_generation_sealed(response.status_code, "spawn_claude_code_agent")
+                    if response.status_code == 200:
+                        result = response.json()
+                        if not isinstance(result, dict) or not isinstance(result.get("output_files"), list):
+                            raise ValueError("close response has no output_files result")
+                        return result
+                    last_error = f"HTTP {response.status_code}"
+                    if response.status_code not in (408, 429, 500, 502, 503, 504):
+                        break
+                except (httpx.TransportError, ValueError) as error:
+                    last_error = extract_error_message(error) or type(error).__name__
+                logger.warning(
+                    "[ClaudeCode] Close unconfirmed; reconciling the same task",
+                    task_id=task_id,
+                    attempt=attempt + 1,
+                    error=last_error,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(0.25 * (attempt + 1))
+        # Generic activity retry reattaches to the CLI. This failure belongs
+        # only to close, so it must not trigger that path or report empty output.
+        raise ApplicationError(
+            f"Code session close remains unconfirmed for task {task_id}: {last_error}",
+            type="CodeSessionCloseUnconfirmed",
+            non_retryable=True,
         )
-        return {}
+
+    return await _post_with_heartbeats(reconcile_close(), "Closing the code-agent session")
 
 
 async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> Optional[dict[str, Any]]:

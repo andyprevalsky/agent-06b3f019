@@ -205,13 +205,11 @@ for (const provider of ['claude', 'codex'] as const) {
     await expect(history).toHaveCount(0);
     await expect(page.getByTestId('query-input-layer').locator('textarea')).toBeVisible();
     await header.click();
-    // 30 deduped steps, 20 a page (the trajectory work groups' pager); opening a
-    // running row lands on its latest page.
-    await expect(pageOf('2 / 2')).toBeVisible();
-    await expect(entries).toHaveCount(10);
-    await history.getByRole('button', { name: 'Previous activities' }).click();
-    await expect(pageOf('1 / 2')).toBeVisible();
-    await expect(entries).toHaveCount(20);
+    // 30 deduped steps fit one page (50 a page, the trajectory work groups' pager,
+    // anchored at the newest): every step shows and no pager renders.
+    await expect(entries).toHaveCount(30);
+    await expect(history.getByRole('button', { name: 'Previous activities' })).toHaveCount(0);
+    await expect(pageOf('1 / 1')).toHaveCount(0);
     completed = true;
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(slot).toHaveCount(1);
@@ -223,11 +221,8 @@ for (const provider of ['claude', 'codex'] as const) {
     await expect(view.getByText(FINAL, { exact: true })).toBeVisible();
     await expect(slot.getByText(FINAL, { exact: true })).toHaveCount(0);
     await header.click();
-    await expect(pageOf('1 / 2')).toBeVisible();
-    await expect(entries).toHaveCount(20);
-    await history.getByRole('button', { name: 'Next activities' }).click();
-    await expect(pageOf('2 / 2')).toBeVisible();
-    await expect(entries).toHaveCount(10);
+    await expect(entries).toHaveCount(30);
+    await expect(history.getByRole('button', { name: 'Next activities' })).toHaveCount(0);
     await header.click();
     await expect(history).toHaveCount(0);
     expect(hasUncaughtErrors(rec)).toEqual([]);

@@ -18,6 +18,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -363,7 +364,9 @@ class Executor(unittest.TestCase):
                     semantic_worker_processes=g.SEMANTIC_WORKER_PROCESSES, sample_memory=None,
                     abort_below_mb=None, executor='blacksmith')
         from types import SimpleNamespace
+        # Cloud smoke is selected, so gates refuse an unpushed HEAD; this fixture's HEAD is treated as pushed.
         with patch.object(g, 'list_selected', return_value=selection), \
+                patch.object(g, 'unpushed_smoke_refusal', return_value=None), \
                 patch.object(g, 'standard_template', standard), \
                 patch.object(g, 'check_capacity', lambda root, workers, proc=None: seen.append(
                     [w['gate'] for w in workers]) or {'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0,
@@ -476,6 +479,27 @@ class Launcher(unittest.TestCase):
             self.assertEqual(result['evidence']['c']['log'], str(local))
             self.assertEqual(result['evidence']['c']['remote_log'], gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log')
             self.assertEqual(result['evidence']['d']['log'], '/etc/passwd')
+
+    def test_capped_bundle_keeps_server_logs_before_bulk_coverage_json(self):
+        # The PR #1762 shard-2 artifact dropped its 10 MB server log: 3,000 raw V8
+        # and replay-cache JSON files, each smaller, had filled the 400 MB budget first.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            coverage = root / 'back-end/coverage'
+            coverage.mkdir(parents=True)
+            (coverage / 'server-shard2.log').write_bytes(b'l' * 1000)
+            raw = root / '.context/test-runs/backend-coverage-failed-x/raw-v8'
+            raw.mkdir(parents=True)
+            for index in range(10):
+                (raw / f'coverage-{index}.json').write_bytes(b'j' * 300)
+            out.mkdir()
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'BUNDLE_TOTAL_BYTES', 2000), \
+                    patch.object(gh, 'publish_done'):
+                gh.remote_bundle(type('Args', (), {'out': out})())
+            self.assertTrue((out / 'artifact/files/back-end/coverage/server-shard2.log').is_file())
+            skipped = {row['path'] for row in json.loads((out / 'artifact/bundle.json').read_text())['skipped']}
+            self.assertNotIn('back-end/coverage/server-shard2.log', skipped)
+            self.assertEqual(len(skipped), 7)  # 1000 B of log, then three 300 B JSON files fit
 
     def test_run_lookup_matches_the_tag_and_reports_a_rejected_workflow(self):
         head, name = 'd' * 40, 'deploy-gates/4vcpu/g-1'
@@ -649,6 +673,84 @@ class ResultChannel(unittest.TestCase):
             self.assertEqual(1, json.loads((out / 'timing.json').read_text())['worker_exit'])
 
 
+class RestQuota(unittest.TestCase):
+    """A shared-token rate limit waits for the reset GitHub reports, never a fixed 300 s, and never past the deadline."""
+
+    def limited(self, headers: dict, body: bytes = b'{"message": "API rate limit exceeded for user"}'):
+        from email.message import Message
+        message = Message()
+        for key, value in headers.items():
+            message[key] = value
+        return gh.urllib.error.HTTPError('https://api.github.com/x', 403, 'Forbidden', message, io.BytesIO(body))
+
+    def run_request(self, client, outcomes, now=1_000_000.0):
+        class Response:
+            status, headers = 200, {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        class Opener:
+            def open(self, req, timeout):
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return Response()
+
+        pauses = []
+        with patch.object(gh.urllib.request, 'build_opener', return_value=Opener()), \
+             patch.object(gh.time, 'time', return_value=now), patch.object(gh.STOP, 'wait', side_effect=pauses.append), \
+             redirect_stdout(io.StringIO()) as out:
+            result = client.request('GET', '/actions/runs/1')
+        return result, pauses, out.getvalue()
+
+    def test_waits_until_the_reported_primary_reset_not_a_fixed_300_seconds(self):
+        client = gh.GitHub('t', 'acme/rose')
+        (status, _, _), pauses, out = self.run_request(
+            client, [self.limited({'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1001234'}), None])
+        self.assertEqual(status, 200)
+        self.assertEqual(pauses, [1235.0])
+        self.assertEqual(client.rate_limited_seconds, 1235.0)
+        self.assertIn('DEPLOY_GATE_RATE_LIMITED waiting 1235s (until 1970-01-12T14:07:15Z)', out)
+
+    def test_a_secondary_limit_waits_for_its_retry_after(self):
+        client = gh.GitHub('t', 'acme/rose')
+        secondary = self.limited({'Retry-After': '7'}, b'{"message": "You have exceeded a secondary rate limit"}')
+        _, pauses, _ = self.run_request(client, [secondary, None])
+        self.assertEqual(pauses, [7.0])
+        _, pauses, _ = self.run_request(client, [self.limited({}), None])
+        self.assertEqual(pauses, [60.0], 'a limit naming no reset waits the documented minute')
+
+    def test_the_wait_is_capped_by_the_callers_deadline_and_then_raises(self):
+        client = gh.GitHub('t', 'acme/rose', deadline=1_000_100.0)
+        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1003600'}
+        _, pauses, _ = self.run_request(client, [self.limited(reset), None])
+        self.assertEqual(pauses, [100.0])
+        with self.assertRaises(gh.urllib.error.HTTPError):
+            self.run_request(client, [self.limited(reset)], now=1_000_100.0)
+
+    def test_the_cancel_poll_is_conditional(self):
+        polled = []
+
+        class Fake:
+            def request(self, method, path, **kwargs):
+                return 202, {}, b''
+
+            def json(self, path, conditional=False):
+                polled.append(conditional)
+                return {'status': 'completed' if len(polled) > 2 else 'in_progress'}
+
+        with patch.object(gh.time, 'sleep'):
+            self.assertEqual(gh.cancel_run(Fake(), 1)['status'], 'completed')
+        self.assertEqual(polled, [True, True, True])
+
+
 class TagPush(unittest.TestCase):
     def test_a_transient_remote_rejection_is_retried_with_the_same_tag_object(self):
         calls = []
@@ -673,6 +775,342 @@ class TagPush(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gh.push_tag(ROOT, 't', 'o/r', 'x', b'tag')
 
+
+# A real launcher process (scripts/deploy_test_github.py main) whose network edges are fakes: GitHub REST
+# calls and R2 channel reads are answered in-process and appended to FAKE_LOG. No live API is reached.
+LAUNCHER_FAKE = r"""
+import io, hashlib, json, os, sys, zipfile
+from pathlib import Path
+sys.path.insert(0, os.environ['FAKE_ROOT'] + '/scripts')
+import deploy_test_github as gh
+LOG, RUN, FOREIGN = Path(os.environ['FAKE_LOG']), 42452647149, 42452640000
+STATE = {'cancelled': False, 'name': None}
+REQUEST = json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text())
+
+def note(**row):
+    with LOG.open('a') as stream:
+        stream.write(json.dumps(row) + '\n')
+
+def artifact():
+    result = {k: REQUEST[k] for k in ('token', 'source', 'gate')}
+    result.update(cases={c: 'PASS' for c in REQUEST['checks']}, complete=True, reused=False,
+                  cleanup_complete=True, evidence={}, worker_root=REQUEST['worker_root'])
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        archive.writestr('result.json', json.dumps(result))
+    return buffer.getvalue()
+
+class Channel:
+    def __init__(self, env, client=None):
+        pass
+    def get(self, name, leaf):
+        mode = os.environ['FAKE_MODE']
+        if leaf == 'started.json' and mode != 'silent':
+            return json.dumps({'transport': gh.TRANSPORT, 'run_id': RUN, 'url': 'u', 'tag': name}).encode()
+        if mode == 'done' and leaf == 'artifact.zip':
+            return artifact()
+        if mode == 'done' and leaf == 'done.json':
+            return json.dumps({'objects': {'artifact.zip': hashlib.sha256(artifact()).hexdigest()}, 'at': 1,
+                               'run_id': RUN, 'conclusion': 'success', 'status': 'completed'}).encode()
+        return None
+    def delete(self, name):
+        note(op='channel-delete')
+
+def request(self, method, path, **kwargs):
+    note(op=method, path=path)
+    if method == 'POST':
+        STATE['cancelled'] = path == f'/actions/runs/{RUN}/cancel' or STATE['cancelled']
+    return 202, {}, b''
+
+def read(self, path, conditional=False):
+    note(op='GET', path=path)
+    if path.startswith('/actions/runs?'):  # this tag's run beside another owner's run on the same commit
+        runs = [{'id': FOREIGN, 'path': gh.WORKFLOW_PATH, 'head_branch': 'deploy-gates/8vcpu/other-0000000000000000'},
+                {'id': RUN, 'path': gh.WORKFLOW_PATH, 'head_branch': STATE['name'], 'html_url': 'u'}]
+        return {'workflow_runs': runs}
+    done = STATE['cancelled'] and path == f'/actions/runs/{RUN}'
+    return {'id': RUN, 'status': 'completed' if done else 'in_progress', 'conclusion': 'cancelled' if done else None}
+
+def push(root, token, repo, name, raw):
+    STATE['name'] = name
+    note(op='push', tag=name)
+    return 'sha'
+
+gh.Channel, gh.GitHub.request, gh.GitHub.json, gh.push_tag = Channel, request, read, push
+gh.git = lambda *args, **kwargs: ''
+gh.load_token, gh.repository = (lambda root: 'x'), (lambda root: 'o/r')
+gh.delete_tag = lambda *args: note(op='tag-delete')
+gh.env_file_values = lambda root: {}
+gh.CHANNEL_POLL_SECONDS = gh.START_POLL_SECONDS = 0.1
+gh.PARENT_POLL_SECONDS = 0.1
+note(op='ready', pid=os.getpid())
+raise SystemExit(gh.main(['--runner', 'blacksmith-8vcpu-ubuntu-2404', '--worker-script', 'deploy_test_worker.py',
+                          '--worker-root', gh.REMOTE_ROOT, '--deadline-seconds', '900']))
+"""
+
+# The cycle's own path: cancellation_handlers + run_command(owned_lifecycle) under deploy_test_supervisor.
+CYCLE_DRIVER = r"""
+import os, sys
+sys.path.insert(0, os.environ['FAKE_ROOT'] + '/scripts')
+from deploy_test_process import cancellation_handlers, run_command
+with cancellation_handlers(), open(os.environ['FAKE_OUTPUT'], 'wb') as output:
+    print(run_command([sys.executable, sys.argv[1]], cwd=os.environ['FAKE_ROOT'], env=dict(os.environ),
+                      output=output, timeout=None, owned_lifecycle=True), flush=True)
+"""
+
+# A parent that is SIGKILLed while its launcher child watches the run.
+DYING_PARENT = r"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, sys.argv[1]])
+time.sleep(600)
+"""
+
+
+class LauncherStopTest(unittest.TestCase):
+    """A stopped launcher cancels exactly the run its tag push started, inside the supervisor's TERM grace."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='gh-launcher-stop-', dir='/var/tmp'))
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
+        for name, text in (('launcher.py', LAUNCHER_FAKE), ('cycle.py', CYCLE_DRIVER), ('parent.py', DYING_PARENT)):
+            (self.tmp / name).write_text(text)
+        request = {'token': 't' * 16, 'source': {'head': 'h' * 40}, 'gate': 'new-test-stability',
+                   'checks': ['new-test-stability'], 'worker_root': gh.REMOTE_ROOT}
+        (self.tmp / 'request.json').write_text(json.dumps(request))
+        self.log, self.result = self.tmp / 'log.jsonl', self.tmp / 'result.json'
+        self.addCleanup(self.reap_launchers)
+
+    def reap_launchers(self):
+        """A regressed launcher outlives its killed parent: stop exactly this test's fake launchers."""
+        for row in self.rows():
+            if row['op'] == 'ready':
+                try:
+                    if str(self.tmp / 'launcher.py').encode() in Path(f"/proc/{row['pid']}/cmdline").read_bytes():
+                        os.kill(row['pid'], 9)
+                except (OSError, ProcessLookupError):
+                    pass
+
+    def env(self, mode):
+        return {**os.environ, 'FAKE_ROOT': str(ROOT), 'FAKE_LOG': str(self.log), 'FAKE_MODE': mode,
+                'FAKE_OUTPUT': str(self.tmp / 'output.log'), 'DEPLOY_GATE_REQUEST': str(self.tmp / 'request.json'),
+                'DEPLOY_GATE_RESULT': str(self.result)}
+
+    def rows(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def launched(self, proc):
+        """Wait until the fake tag push happened (the remote run now exists), never on a fixed sleep."""
+        end = time.monotonic() + 30
+        while not any(r['op'] == 'push' for r in self.rows()):
+            self.assertIsNone(proc.poll(), 'launcher exited before launching')
+            self.assertLess(time.monotonic(), end, 'launcher never pushed its tag')
+            time.sleep(0.05)
+        time.sleep(0.3)  # a few channel polls: the launcher is now watching
+
+    def wait_result(self, seconds=20):
+        end = time.monotonic() + seconds
+        while not self.result.exists():
+            self.assertLess(time.monotonic(), end, 'launcher wrote no receipt')
+            time.sleep(0.05)
+        return json.loads(self.result.read_text())
+
+    def assert_cancelled_once(self, result, cause):
+        posts = [r['path'] for r in self.rows() if r['op'] == 'POST']
+        self.assertEqual(posts, ['/actions/runs/42452647149/cancel'])  # exactly its own run, never the foreign one
+        self.assertEqual(result['reason'], 'remote run cancelled')
+        self.assertNotIn('cleanup_owner', result)
+        remote = result['remote']
+        self.assertEqual((remote['run_id'], remote['status'], remote['conclusion']),
+                         (42452647149, 'completed', 'cancelled'))
+        self.assertEqual(remote['stop_cause'], cause)
+        self.assertIn('cancel_requested_at', remote)
+        self.assertLess(remote['launcher_finished_at'] - remote['cancel_requested_at'], gh.STOP_CANCEL_SECONDS)
+        request = json.loads((self.tmp / 'request.json').read_text())
+        self.assertEqual(validate_result(result, request, 1), ({'new-test-stability': 'UNVERIFIED'}, False))
+
+    def launcher(self, mode):
+        proc = subprocess.Popen([sys.executable, str(self.tmp / 'launcher.py')], env=self.env(mode),
+                                stdout=subprocess.DEVNULL)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        return proc
+
+    def test_term_after_the_run_reported_itself_cancels_exactly_that_run(self):
+        proc = self.launcher('started')
+        self.launched(proc)
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=gh.STOP_CANCEL_SECONDS + 3), 1)
+        self.assert_cancelled_once(self.wait_result(), 'SIGTERM')
+
+    def test_term_before_the_run_reported_itself_still_names_and_cancels_it(self):
+        # The 2026-11-08 leak: a silent channel plus STOP made the run lookup return at once, so the
+        # launched run was reported never-started and only its tag was deleted.
+        proc = self.launcher('silent')
+        self.launched(proc)
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=gh.STOP_CANCEL_SECONDS + 3), 1)
+        self.assert_cancelled_once(self.wait_result(), 'SIGTERM')
+
+    @unittest.skipUnless(sys.platform == 'linux', 'owned worker lifecycle requires Linux')
+    def test_term_to_the_cycle_cancels_through_its_owned_supervisor(self):
+        for mode in ('silent', 'started'):
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                self.result.unlink(missing_ok=True)
+                cycle = subprocess.Popen([sys.executable, str(self.tmp / 'cycle.py'), str(self.tmp / 'launcher.py')],
+                                         env=self.env(mode), stdout=subprocess.PIPE, text=True)
+                self.addCleanup(lambda: cycle.poll() is None and cycle.kill())
+                self.launched(cycle)
+                cycle.terminate()
+                out, _ = cycle.communicate(timeout=30)
+                code, _, cancelled, lingering = eval(out.strip().splitlines()[-1])
+                self.assertEqual((code, cancelled, lingering), (1, True, False))  # exited inside the TERM grace
+                self.assert_cancelled_once(self.wait_result(1), 'SIGTERM')
+
+    def test_parent_death_cancels_the_launched_run(self):
+        parent = subprocess.Popen([sys.executable, str(self.tmp / 'parent.py'), str(self.tmp / 'launcher.py')],
+                                  env=self.env('started'), stdout=subprocess.DEVNULL)
+        self.addCleanup(lambda: parent.poll() is None and parent.kill())
+        self.launched(parent)
+        parent.kill()
+        parent.wait()
+        self.assert_cancelled_once(self.wait_result(), 'parent exited')
+
+    def test_normal_completion_never_cancels(self):
+        proc = self.launcher('done')
+        self.assertEqual(proc.wait(timeout=30), 0)
+        result = self.wait_result(1)
+        self.assertEqual(result['cases'], {'new-test-stability': 'PASS'})
+        self.assertNotIn('stop_cause', result['remote'])
+        self.assertEqual([r for r in self.rows() if r['op'] == 'POST'], [])
+class WorkflowMirrorCheckout(unittest.TestCase):
+    """deploy-gates.yml "Check out the frozen commit", executed from the workflow text itself.
+
+    PR #1787 run 42440778292: the restored sticky-disk mirror kept a commit-graph chain naming a
+    deleted graph file, so every git command in the job's --shared clone printed "warning: unable to
+    find all commit-graph files" and original600's exact-stderr check failed. The step must rebuild
+    such a chain before cloning, and run any gc in the foreground.
+    """
+    STEP = '      - name: Check out the frozen commit\n'
+
+    def step_script(self, mirror_root, url):
+        text = (ROOT / '.github/workflows/deploy-gates.yml').read_text()
+        body = text[text.index(self.STEP):]
+        body = body[:body.index('\n      - name:', 1)]
+        lines = body.split('        run: |\n', 1)[1].splitlines()
+        script = '\n'.join(line[10:] for line in lines) + '\n'
+        for old, new in (('sudo chown "$(id -u):$(id -g)" /home/runner/rose-git-mirror', ':'),
+                         ('/home/runner/rose-git-mirror', mirror_root),
+                         ('url="https://github.com/${GITHUB_REPOSITORY}.git"', 'url=' + url)):
+            self.assertIn(old, script, 'workflow checkout step drifted from this fixture')
+            script = script.replace(old, new)
+        return script
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+    def test_restored_broken_commit_graph_chain_is_rebuilt_before_the_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            origin, ws = tmp / 'origin', tmp / 'ws'
+            ws.mkdir()
+            self.git('init', '-q', '--initial-branch=main', str(origin))
+            for i in range(3):
+                (origin / 'f').write_text(str(i))
+                self.git('add', 'f', cwd=origin)
+                self.git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', str(i), cwd=origin)
+            self.git('tag', 'deploy-gates/8vcpu/x', cwd=origin)
+            env = {**os.environ, 'FETCH_TOKEN': 't', 'GITHUB_REF': 'refs/tags/deploy-gates/8vcpu/x',
+                   'GITHUB_WORKSPACE': str(ws), 'GIT_CONFIG_NOSYSTEM': '1', 'HOME': str(tmp)}
+            script = self.step_script(str(tmp / 'disk'), origin.as_uri())
+
+            def run():
+                return subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True, timeout=120)
+            first = run()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            mirror = tmp / 'disk/rose.git'
+            # The saved snapshot: a split chain whose base graph file is gone.
+            for i in range(3, 5):
+                (origin / 'f').write_text(str(i))
+                self.git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qam', str(i), cwd=origin)
+                self.git('-C', str(mirror), 'fetch', '-q', origin.as_uri(), '+refs/heads/main:refs/heads/main')
+                self.git('-C', str(mirror), 'commit-graph', 'write', '--reachable', '--split')
+            graphs = mirror / 'objects/info/commit-graphs'
+            base = (graphs / 'commit-graph-chain').read_text().split()[0]
+            (graphs / f'graph-{base}.graph').unlink()
+            broken = subprocess.run(['git', '-C', str(mirror), 'log', '-1'], capture_output=True, text=True)
+            self.assertIn('unable to find all commit-graph files', broken.stderr, 'fixture did not break the chain')
+            second = run()
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertNotIn('commit-graph', second.stderr)
+            self.assertIn('mirror commit-graph rebuilt', second.stdout)
+            log = subprocess.run(['git', '-C', str(ws), 'log', '-1', '--format=%H'], capture_output=True, text=True)
+            self.assertEqual(log.stderr, '')
+            self.assertEqual(log.stdout.strip(), self.git('rev-parse', 'deploy-gates/8vcpu/x^{commit}', cwd=origin).stdout.strip())
+            self.assertIn('-c gc.autoDetach=false', script, 'mirror gc must not outlive the step')
+
+
+
+class GateSetupReleaseTools(unittest.TestCase):
+    """scripts/ci/deploy-gate-setup.sh flyctl + tunnel tools, executed with stand-in curl/sudo/tar.
+
+    PR #1826 (2026-11-08): GitHub's unauthenticated release downloads answered 504 for 15+ minutes
+    and the unauthenticated `--retry 3` installs failed every Blacksmith gate in "Prepare runner"
+    before a single test ran. Release binaries are fetched through the GitHub API with the job token,
+    retrying any error for minutes, and scripts/ci/release-tool.sh installs the dependency disk's
+    last good copy when the fetch still fails.
+    """
+
+    def run_block(self, tmp, calls, curl_fails=False):
+        text = (ROOT / 'scripts/ci/deploy-gate-setup.sh').read_text()
+        block = text[text.index('# Release binaries (flyctl'):text.index('step "dependency disk"')]
+        bin_dir = tmp / 'bin'
+        bin_dir.mkdir(exist_ok=True)
+        (tmp / 'deps').mkdir(exist_ok=True)  # the mounted dependency disk
+        api = json.dumps({'assets': [
+            {'name': 'flyctl_0.5.5_Linux_x86_64.tar.gz', 'url': 'https://api.github.com/assets/1'},
+            {'name': 'cloudflared-linux-amd64', 'url': 'https://api.github.com/assets/2'},
+        ]})
+        (tmp / 'api.json').write_text(api)
+        (bin_dir / 'curl').write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\x1f" "$@" >> ' + str(calls) + '\nprintf "\\n" >> ' + str(calls) + '\n'
+            + ('exit 22\n' if curl_fails else '')
+            + 'out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done\n'
+            'if [ -n "$out" ]; then printf "#!/bin/sh\\n" > "$out"; else cat ' + str(tmp / 'api.json') + '; fi\n')
+        (bin_dir / 'tar').write_text('#!/usr/bin/env bash\nprintf "#!/bin/sh\\n" > "$4/$5"\n')
+        (bin_dir / 'sudo').write_text('#!/usr/bin/env bash\n[ "$1" = bash ] && exit 0\n'
+                                      'case "$*" in *" /usr/local/bin/"*) exit 0;; esac\nexec "$@"\n')
+        for name in ('curl', 'tar', 'sudo'):
+            (bin_dir / name).chmod(0o755)
+        env = {'PATH': f'{bin_dir}:/usr/bin:/bin', 'HOME': str(tmp / 'home'), 'DEPS': str(tmp / 'deps'),
+               'GITHUB_PATH': str(tmp / 'ghpath'), 'FETCH_TOKEN': 'tok-123', 'RELEASE_TOOL_RETRY_SECONDS': '0'}
+        script = 'set -euo pipefail\nstep() { :; }\n' + block
+        return subprocess.run(['bash', '-c', script], cwd=ROOT, env=env, capture_output=True, text=True,
+                              timeout=60)
+
+    def test_release_tools_use_the_token_retry_for_minutes_and_fall_back_to_the_disk_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            calls = tmp / 'curl-calls'
+            first = self.run_block(tmp, calls)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            invocations = [line.split('\x1f')[:-1] for line in calls.read_text().splitlines()]
+            self.assertGreaterEqual(len(invocations), 4, invocations)  # API + asset, for flyctl and cloudflared
+            for args in invocations:
+                self.assertIn('Authorization: Bearer tok-123', args)
+                self.assertIn('--retry-all-errors', args)
+                self.assertGreaterEqual(int(args[args.index('--retry-max-time') + 1]), 120, args)
+                self.assertTrue(any(a.startswith('https://api.github.com/') for a in args), args)
+            self.assertTrue(any('https://api.github.com/repos/cloudflare/cloudflared/releases/latest' in args
+                                for args in invocations), invocations)
+            self.assertTrue((tmp / 'home/.fly/bin/flyctl').exists())
+            self.assertTrue((tmp / 'deps/release-tools/flyctl').exists())
+            # A later runner on the same dependency disk during an outage installs the last good copy.
+            calls.unlink()
+            (tmp / 'home/.fly/bin/flyctl').unlink()
+            second = self.run_block(tmp, calls, curl_fails=True)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("flyctl: installing the dependency disk's last good copy", second.stderr)
+            self.assertTrue((tmp / 'home/.fly/bin/flyctl').exists())
 
 if __name__ == '__main__':
     unittest.main()

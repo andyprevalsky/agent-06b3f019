@@ -326,6 +326,7 @@ GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
+    Gate("deploy-test-semantic", ("python3", "scripts/tests/deploy-test-semantic.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
     Gate("deploy-cli", ("python3", "scripts/tests/deploy-cli.test.py")),
     Gate("deploy-gates", ("python3", "scripts/tests/deploy-gates.test.py")),
@@ -333,6 +334,7 @@ GATES = (
     Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
     Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
     Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
+    Gate("mac-app-release-drift", ("bash", "scripts/tests/mac-app-release-drift.test.sh")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",
@@ -347,7 +349,9 @@ GATES = (
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
+    Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    Gate("canonical-seed-migration-readiness", ("python3", "scripts/tests/migrate-canonical-seed.test.py")),
     Gate(
         "canonical-seed-whatsapp-content",
         ("bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"),
@@ -368,6 +372,10 @@ GATES = (
     Gate(
         "benchmark-history-backfill",
         ("python3", "scripts/tests/benchmark-history-backfill.test.py"),
+    ),
+    Gate(
+        "concurrent-pr-shared-paths",
+        ("python3", "scripts/tests/concurrent-pr-shared-paths.test.py"),
     ),
     Gate(
         "cloudbench-full-selection",
@@ -394,6 +402,11 @@ GATES = (
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
+    Gate(
+        "cloudbench-cross-devbox-admission",
+        ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
+    ),
+    Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -469,6 +482,7 @@ GATES = (
         "cloudbench-explicit-idle-admission",
         ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
     ),
+    Gate("cloudbench-cohort-reconcile", ("python3", "scripts/tests/cloudbench-cohort-reconcile.test.py")),
     Gate(
         "cloudbench-fixed-native-worker",
         ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
@@ -509,6 +523,10 @@ GATES = (
     Gate(
         "cloudbench-controller-gate-flyctl-bounds",
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
+    ),
+    Gate(
+        "cloudbench-shared-transport-integration",
+        ("python3", "scripts/tests/cloudbench-shared-transport-integration.test.py"),
     ),
     Gate(
         "cloudbench-bootstrap-recovery",

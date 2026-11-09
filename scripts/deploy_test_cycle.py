@@ -145,7 +145,7 @@ def runtime_config_sha256(path: Path) -> str:
     return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
 
 
-def input_fingerprints(plan: dict, root: Path) -> dict:
+def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None) -> dict:
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
     links = index_gitlinks(root)
@@ -176,7 +176,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
                             "runtime_config": runtime_config,
                             "command": g["command"], "env": g.get("env", {}),
                             "worker": g.get("worker"), "checks": g["checks"],
-                            "environment": environment_digest()}) for g in plan["gates"]}
+                            "environment": environment_digest() if environment is None else environment}) for g in plan["gates"]}
 
 
 def command(value: object) -> list[str]:
@@ -255,7 +255,7 @@ def initialize(plan: dict, root: Path) -> dict:
             "input_fingerprints": input_fingerprints(plan, root)}
 
 
-def reuse_qualifications(state: dict, gate: dict) -> dict:
+def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=ROOT, custody_refresh=False) -> dict:
     """Replay existing dispositions; projected source fields never replace native proof."""
     from deploy_failure_report import decision
     revalidate_standing_skips(state)
@@ -281,19 +281,34 @@ def reuse_qualifications(state: dict, gate: dict) -> dict:
                 or warning['receipt_sha256'] != evidence['sha256']
                 or sha_file(evidence['path']) != evidence['sha256'] or case in expected):
             raise ValueError('reuse resource qualification changed')
+        if 'renewal' in warning:
+            from deploy_test_agentcard_renewal import validate_active
+            validate_active(state, warning)
         expected[case] = {'disposition': RESOURCE_SKIP, **warning}
+    if include_custody:
+        from deploy_test_historical_custody import guard, identical_inputs_binding
+        current = (identical_inputs_binding(state, root)
+                   if custody_refresh and state.get('historical_no_retry_custody') else None)
+        expected.update(guard(state, gate, root, expected, current=current))
     if not set(expected) <= set(gate['checks']):
         raise ValueError('reuse qualification outside full inventory')
     return expected
 
 
 def qualification_identity(skips: dict) -> dict:
-    # refresh changes ONLY these outer projection fields; nested native/RCA bytes stay bound.
-    return {key: {k: v for k, v in value.items() if k not in {'source', 'original_source'}}
-            for key, value in skips.items()}
+    # Only projection source/plan may change during an identical-input refresh.
+    # Native source, task, financial facts, environment and fingerprints remain bound.
+    result = copy.deepcopy(skips)
+    for value in result.values():
+        for field in ('source', 'original_source'):
+            value.pop(field, None)
+        if value.get('disposition') == 'NO_RETRY_CUSTODY':
+            for field in ('source', 'plan_digest'):
+                value['current_binding'].pop(field, None)
+    return result
 
 
-def full_pass_binding(state: dict, gate: dict) -> dict | None:
+def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> dict | None:
     """Latest FULL execution: native PASS subset plus exact existing qualified exclusions."""
     latest = latest_receipts(state).get(gate['name'])
     if not latest or gate.get('quick'):
@@ -303,7 +318,7 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     if receipt.get('kind') == 'recovered-native-execution-v1':
         return None
     try:
-        skips = reuse_qualifications(state, gate)
+        skips = reuse_qualifications(state, gate, root=root, custody_refresh=custody_refresh)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         return None
     active = [case for case in gate['checks'] if case not in skips]
@@ -332,6 +347,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
                 or request.get('checks') != active
                 or qualification_identity(request.get('skips', {})) != qualification_identity(skips)
                 or any(v.get('source') != receipt['source'] for v in request.get('skips', {}).values())
+                or any(receipt.get('case_complete', {}).get(k) is not False
+                       or receipt.get('current_execution', {}).get(k) != 'UNVERIFIED'
+                       for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY')
                 or request.get('worker_recipe') != gate.get('worker_recipe')):
             return None
         worker = receipt.get('worker_result')
@@ -350,14 +368,14 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
         return None
 
 
-def carried_pass(state: dict, gate: dict) -> bool:
+def carried_pass(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> bool:
     entry = state.get('carried_passes', {}).get(gate['name'])
     if not entry:
         return False
     return (entry.get('validated_source') == state['source']
             and entry.get('input_fingerprint') == state['input_fingerprints'].get(gate['name'])
             and entry.get('contract_digest') == digest(gate)
-            and full_pass_binding(state, gate) == entry.get('native_binding'))
+            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh) == entry.get('native_binding'))
 
 
 def reusable_full_pass(state: dict, gate: dict) -> bool:
@@ -472,9 +490,18 @@ def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, roo
 
 
 def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+    """Admit one source-bound gate, run it, and retain its native cleanup receipt."""
     from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
+    if any(w.get('gate') == name and 'renewal' in w for w in state.get('resource_warnings', [])):
+        reuse_qualifications(state, gate)
+    from deploy_test_historical_custody import guard, state_identity, known
+    custody = {}
+    if ('historical_custody_import' in state or known(state, root)
+            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
+        legacy = reuse_qualifications(state, gate, include_custody=False, root=root)
+        custody = guard(state, gate, root, legacy)
     token = uuid.uuid4().hex
     case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
                   if key.startswith(name + "/") and value["source"] == state["source"]}
@@ -484,19 +511,26 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                  for w in state.get("resource_warnings", [])
                  if w["gate"] == name and w["source"] == state["source"]
                  and w.get("input_fingerprint") == state["input_fingerprints"].get(name)}
-    active = [c for c in gate["checks"] if c not in case_skips and c not in qualified]
+    active = [c for c in gate["checks"] if c not in case_skips and c not in qualified and c not in custody]
     if not active:
+        if any(v.get('disposition') == 'user / overridden' for v in case_skips.values()) and (
+                not host_admission or host_admission.get('started') is not True):
+            raise ValueError('explicit all-skip gate requires successful native root admission')
         return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
-                "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified}
+                "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified,
+                "custody_skips": custody, "case_complete": {c: False for c in custody},
+                "current_execution": {c: "UNVERIFIED" for c in custody}}
     # A worker must explicitly consume the case inventory, including exclusions.
     # Without a case-aware worker mixed skip/run would either rerun skipped tests
     # or silently omit checks, so reject it before launch.
-    if (case_skips or qualified) and not gate.get("case_protocol"):
+    if (case_skips or qualified or custody) and not gate.get("case_protocol"):
         raise ValueError(f"{name}: mixed skips require the worker's case protocol")
     folder = directory / "attempts" / str(state["round"]) / phase / name
     folder.mkdir(parents=True, exist_ok=False)
     request = {"token": token, "source": state["source"], "gate": name,
-               "checks": active, "skips": {**case_skips, **qualified}, "phase": phase}
+               "checks": active, "skips": {**case_skips, **qualified, **custody}, "phase": phase}
+    if custody or (directory / 'cycle.json').exists():
+        request.update(custody_state=str((directory / 'cycle.json').resolve()), custody_state_sha256=state_identity(state))
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
         request['worker_root'] = gate.get('worker_root', str((root / gate.get('cwd', '.')).resolve()))
@@ -509,6 +543,11 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
            "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1",
            # Teardown ownership of every process the gate starts (benchmark_teardown).
            LANE_TOKEN_ENV: token}
+    if 'custody_state' in request:
+        from deploy_test_historical_custody import environment_identity, runtime_identity
+        request['custody_runtime'] = runtime_identity(root)
+        request['custody_child_environment'] = environment_identity(env)
+        write(folder / 'request.json', request)
     admission = isolated_request(state, gate, request, root, env)
     if admission:
         request['isolated_validation'] = admission
@@ -519,11 +558,12 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     native_producer = gate.get("native_cloud") is True
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
+    preallocation_refused = False
     worker_cleanup_owner = None
     host_admission = {} if host_admission is None else host_admission
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
         try:
-            if host_admission.get('deadline_monotonic') is not None:
+            if host_admission.get('started') is not False and host_admission.get('deadline_monotonic') is not None:
                 host_timeout = host_admission['deadline_monotonic'] - time.monotonic()
                 if host_timeout <= 0:
                     host_admission.update(started=False, timed_out=True,
@@ -540,7 +580,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         except OSError as error:
             output.write(str(error).encode())
             code = 127
-    cases = {c: "SKIP" for c in [*case_skips, *qualified]}
+    cases = {c: "SKIP" for c in [*case_skips, *qualified, *custody]}
     valid = False
     complete = False
     reason = None
@@ -570,8 +610,14 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                 }
             if isinstance(result.get('evidence'), dict):
                 worker_evidence = result['evidence']
-            raw_cases, complete = validate_result(result, request, code,
-                invalid_process=timed_out or cancelled or lingering)
+            from deploy_test_cloud_refusal import refused_before_admission
+            preallocation_refused = refused_before_admission(
+                result, request, gate, root, code, invalid_process=timed_out or cancelled or lingering)
+            if preallocation_refused:
+                raw_cases, complete = result['cases'], False
+            else:
+                raw_cases, complete = validate_result(result, request, code,
+                    invalid_process=timed_out or cancelled or lingering)
             cases.update(raw_cases)
             valid = True
         except (KeyError, TypeError, ValueError) as error:
@@ -600,7 +646,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         valid = False
         complete = False
         reason = reason or 'worker reported a retained remote cleanup owner'
-    if native_producer and host_admission.get('started') is not False and (not valid or not complete):
+    if native_producer and host_admission.get('started') is not False and not preallocation_refused and (not valid or not complete):
         # Native producers can intentionally retain recovery resources. Unknown
         # native cleanup must be reconciled before another attempt can resume.
         lingering = True
@@ -612,7 +658,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
               "executed": host_admission.get('started', True), "complete": valid and complete,
               "reason": host_admission.get('reason', reason), "timed_out": timed_out,
-              "case_complete": {c: valid and v != 'UNVERIFIED' for c, v in cases.items()},
+              "case_complete": {c: valid and v != 'UNVERIFIED' and c not in custody for c, v in cases.items()},
+              "current_execution": {c: "UNVERIFIED" for c in custody}, "custody_skips": custody,
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
@@ -715,16 +762,33 @@ AGENTCARD_RELEASE_STALL_REASON = ("AgentCard never released the closed card's or
                                   "releasedCents=0); skipped under the standing user-approved warning policy")
 
 
+@contextmanager
+def source_module(path: Path):
+    """Fresh source with an owned module identity, without process-global argv changes."""
+    import importlib.util
+    module_name = '_deploy_source_' + uuid.uuid4().hex
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        # Bypass timestamp/size based .pyc reuse, including same-size source edits.
+        exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
+        yield module
+    finally:
+        if sys.modules.get(module_name) is module:
+            del sys.modules[module_name]
+
+
 def agentcard_release_stall_task(name: object, root: Path = ROOT, production: bool = False) -> bool:
     """The same literal catalog predicate the selector prints for this standing warning. Staged smoke qualifies
     sandbox rows only (the default: production tasks never run there); scripts/deploy_prod.py's production
     lane asks for the production task with production=True."""
-    import runpy
-    selector = runpy.run_path(str(root / 'agents/benchmarks/select_predeploy_benches.py'))
-    tasks = [task for task in selector['load_tasks'](root / 'agents/benchmarks/tasks.json')
-             if task.name == name and bool(task.production_only) is production]
-    rules = selector['standing_skip_eligibility'](tasks, [name]).get(name, []) if tasks else []
-    return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+    with source_module(root / 'agents/benchmarks/select_predeploy_benches.py') as selector:
+        tasks = [task for task in selector.load_tasks(root / 'agents/benchmarks/tasks.json')
+                 if task.name == name and bool(task.production_only) is production]
+        rules = selector.standing_skip_eligibility(tasks, [name]).get(name, []) if tasks else []
+        return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+
 
 
 def unreleased_amount_text(transfer: object) -> str:
@@ -850,8 +914,22 @@ def standing_skip(state: dict, proof: dict, root: Path) -> None:
                 'evidence':str(Path(proof['run_dir']) / 'run.json'), 'policy_source':result['warnings'][0]['policy_source']}}
 
 
+def validate_user_override(entry, state, check):
+    from deploy_failure_report import USER_OVERRIDE, decision
+    approval = entry.get('user_override', {})
+    gate = check.split('/', 1)[0]
+    if (decision(entry) != USER_OVERRIDE or entry.get('check') != check
+            or approval.get('source') != state['source']
+            or approval.get('input_fingerprint') != state['input_fingerprints'].get(gate)):
+        raise ValueError('explicit user override current source/input/check binding changed')
+
+
 def revalidate_standing_skips(state: dict) -> None:
     for key, entry in state.get('skips', {}).items():
+        if entry.get('disposition') == 'user / overridden':
+            validate_user_override(entry['rca'], state, key)
+            if entry['source'] != state['source'] or entry.get('input_fingerprint') != state['input_fingerprints'].get(key.split('/', 1)[0]):
+                raise ValueError('explicit user override projection changed')
         if 'standing_skip' in entry:
             if (entry['source'] != state['source'] or entry.get('input_fingerprint')
                     != state['input_fingerprints'].get(key.split('/',1)[0])):
@@ -906,14 +984,26 @@ def validate_resource_skip(entry: dict, failure: dict) -> None:
 
 
 def adjudicate(state: dict, report: dict) -> None:
+    """Adjudicate all pending RCA by default, or an explicit independent subset.
+
+    Partial reports retain every unhandled occurrence and keep readiness blocked;
+    they permit normal independent FULL execution of diagnosed repairs only.
+    """
     from deploy_failure_report import decision
     if state["phase"] != "triage":
         raise ValueError("no failures awaiting RCA")
     entries = report.get("failures", [])
     by_id = {entry["id"]: entry for entry in entries}
-    if len(by_id) != len(entries) or set(by_id) != set(state["pending"]):
+    partial = report.get('partial', False)
+    if type(partial) is not bool:
+        raise ValueError('partial RCA mode must be an explicit boolean')
+    selected = set(by_id)
+    pending_ids = set(state['pending'])
+    covered = bool(selected) and selected < pending_ids if partial else selected == pending_ids
+    if len(by_id) != len(entries) or not covered:
         raise ValueError("RCA dispositions must cover every pending occurrence exactly once")
-    pending = [f for f in state["failures"] if f["id"] in state["pending"]]
+    pending = [f for f in state["failures"] if f["id"] in selected]
+    unhandled = [identifier for identifier in state['pending'] if identifier not in selected]
     decisions = []
     for failure in pending:
         entry = by_id[failure["id"]]
@@ -922,6 +1012,10 @@ def adjudicate(state: dict, report: dict) -> None:
                 or entry.get("native_result") != failure["native_result"]):
             raise ValueError("RCA receipt has the wrong source or check")
         disposition = decision(entry)
+        if disposition == 'user / overridden':
+            validate_user_override(entry, state, failure['check'])
+            if entry.get('prior_waiver') != failure.get('prior_waiver'):
+                raise ValueError('explicit user override renewal changed')
         if 'standing_policy' in entry:
             # A refresh renewal retains the original native failure, never fabricates a new FAIL.
             prior = failure.get('prior_waiver')
@@ -939,7 +1033,7 @@ def adjudicate(state: dict, report: dict) -> None:
         if disposition == "execution required":
             if failure["complete"]:
                 raise ValueError("execution recovery requires an incomplete occurrence")
-        elif disposition != "blocking" and not failure["complete"]:
+        elif disposition not in {"blocking", "user / overridden"} and not failure["complete"]:
             raise ValueError("unverified/incomplete execution cannot be waived as a completed case")
         decisions.append((failure, entry, disposition))
     # Atomic transition: UNKNOWN leaves every occurrence open, never drops peers.
@@ -950,7 +1044,7 @@ def adjudicate(state: dict, report: dict) -> None:
     for failure, entry, disposition in decisions:
         failure["rca"] = entry
         failure["disposition"] = disposition
-        if failure['source'] != state['source'] and disposition not in {'blocking', 'execution required'}:
+        if failure['source'] != state['source'] and disposition not in {'blocking', 'execution required', 'user / overridden'}:
             # Same renewal semantics as refresh: old native facts never become a new-source exclusion.
             prior = {'source': failure['source'], 'rca': entry, 'disposition': disposition}
             state.setdefault('superseded_skips', []).append(prior)
@@ -986,10 +1080,12 @@ def adjudicate(state: dict, report: dict) -> None:
     # Gates routed by `reexecute` during THIS triage are repair work for the same round; the
     # accumulated repair_gates ledger carries stale credit from earlier rounds and is not the signal.
     repair |= set(state.pop("triage_repair_gates", []))
-    if renewals:
+    if unhandled or renewals:
         state['failures'].extend(renewals)
-        state['pending'] = [f['id'] for f in renewals]
-        state.update(phase='triage', ready=False, failure_phase='refresh')
+        state['pending'] = unhandled + [f['id'] for f in renewals]
+        state.update(phase='triage', ready=False)
+        if renewals:
+            state['failure_phase'] = 'refresh'
         if repair:
             state['repair_gates'] = sorted(set(state['repair_gates']) | repair)
             state['triage_repair_gates'] = sorted(repair)
@@ -1078,6 +1174,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
+            from deploy_test_cloud_refusal import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
             from deploy_test_interrupted_cleanup import still_bound
             return still_bound(state, receipt, entry)
@@ -1120,7 +1219,7 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
     for entry in entries:
         old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')
         need(entry['validation_source'] == request['source'] and request['token'] != entry['token']
-             and set(old['checks']) | set(old.get('skips', {})) == set(gate['checks']), 'next source/inventory binding')
+             and (set(old['checks']) | set(old.get('skips', {}))) <= set(gate['checks']), 'next source/inventory binding')
         bindings.append({'original_receipt_sha256': entry['proof']['receipt_sha256'],
                          'original_request_token': entry['token'], 'new_request_token': request['token'],
                          'source': request['source'], 'new_native_root': str(new_root),
@@ -1152,11 +1251,19 @@ def retained_owners(state: dict, gates) -> list[str]:
     return sorted(owned)
 
 
-def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
+def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> None:
     """Typed, receipt-backed cleanup reconciliation for a boxes-thread owner: clears the owner for launch
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'round49-launch-debt-retirement-v1':
+        from deploy_test_round49_retirement import reconcile as retire_round49
+        retire_round49(state, occurrence_id, proof, persist=persist)
+        return
+    if proof.get('kind') == 'cloud-source-refusal-cleanup-v1':
+        from deploy_test_cloud_refusal import reconcile as reconcile_refusal
+        reconcile_refusal(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
         from deploy_test_interrupted_cleanup import renew_policy_witness
         renew_policy_witness(state, occurrence_id, proof)
@@ -1279,12 +1386,13 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
 
 
 def interrupted_receipt(state: dict, request_token: str) -> dict:
-    """Identify a terminal interrupted operation, without inventing an RCA occurrence."""
-    if (state.get('phase') != 'interrupted' or not state.get('attempts')
-            or state['attempts'][-1].get('interrupted') is not True
+    """Identify a terminal interrupted/stale operation without inventing an RCA occurrence."""
+    phase = state.get('phase')
+    if (phase not in {'interrupted', 'stale'} or not state.get('attempts')
+            or state['attempts'][-1].get(phase) is not True
             or state.get('running') or 'live_failures' in state
             or not isinstance(request_token, str) or not request_token):
-        raise ValueError('a quiescent interrupted operation token is required')
+        raise ValueError('a quiescent interrupted or stale operation token is required')
     rows = [r for r in state['attempts'][-1]['results'] if r.get('token') == request_token]
     if (len(rows) != 1 or latest_receipts(state).get(rows[0]['gate']) != rows[0]
             or rows[0].get('source') != state['source'] or rows[0].get('complete') is not False
@@ -1512,6 +1620,135 @@ def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
             "prerequisite": held["prerequisite"], "reason": held["reason"]}
 
 
+def settled_round49_missing_request(state, directory, gate, request_path):
+    from deploy_test_round49_retirement import recognized
+    if recognized(state, directory, gate, request_path):
+        return True
+    import hashlib
+    import json
+    import os
+    import stat
+    from pathlib import Path
+    import deploy_test_local_cleanup as cleanup_module
+    import deploy_test_process as process_module
+    import deploy_test_result as result_module
+    import deploy_test_cycle as cycle_module
+    quiet = cleanup_module.quiet
+    MAX_RECEIPT_BYTES = result_module.MAX_RECEIPT_BYTES
+
+    def need(value, reason):
+        if not value:
+            raise ValueError('round49 launch proof: ' + reason)
+
+    def encode(value):
+        return (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + '\n').encode()
+
+    def sha(path):
+        path = Path(path)
+        need(path.is_absolute() and not path.is_symlink() and path.resolve(strict=True) == path
+             and path.is_file() and path.stat().st_uid == os.getuid()
+             and not path.stat().st_mode & 0o022, 'noncanonical artifact')
+        with path.open('rb') as stream:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+    def doc(path, limit=MAX_RECEIPT_BYTES):
+        path = Path(path)
+        before = sha(path)
+        need(path.stat().st_size <= limit, 'typed artifact size')
+        obj = json.loads(path.read_bytes())
+        need(isinstance(obj, dict) and sha(path) == before, 'artifact changed/object required')
+        return obj
+
+    directory = Path(directory).resolve(strict=True)
+    request_path = Path(request_path)
+    journal_path = directory / 'settlement-round49-journal.json'
+    if not journal_path.exists() and not journal_path.is_symlink():
+        return False
+    journal = doc(journal_path)
+    marker = doc(directory / 'settlement-round49-committed.json')
+    need(marker == {'journal_sha256':sha(journal_path)}
+         and journal.get('kind') == 'native-settlement-journal-v1'
+         and type(journal.get('round')) is int and journal['round'] == 49
+         and journal.get('positive_credit') is False, 'committed typed negative settlement required')
+    proposal_path, authorization_path = map(Path, (journal['proposal_path'], journal['authorization_path']))
+    need(sha(proposal_path) == journal['proposal_sha256']
+         and sha(authorization_path) == journal['authorization_sha256'], 'sealed proposal/authorization changed')
+    # These are state+source manifests, not ordinary small control receipts.
+    proposal = doc(proposal_path, 32 * 1024 * 1024)
+    authorization = doc(authorization_path, 32 * 1024 * 1024)
+    need(proposal.get('round') == 49 and proposal.get('positive_credit') is False
+         and proposal['source'] == journal['native_source'] == authorization['native_source']
+         and authorization['operator_source'] == journal['operator_source']
+         and authorization['proposal_sha256'] == journal['proposal_sha256']
+         and authorization['after_state_sha256'] == journal['after_state_sha256']
+         == hashlib.sha256(encode(proposal['after_state'])).hexdigest(), 'native/operator/after-state binding')
+    controller = Path(__file__).absolute()
+    controller_stat = controller.stat()
+    expected_controller = authorization['operator_files']['scripts/deploy_test_cycle.py']
+    need(stat.S_ISREG(controller_stat.st_mode)
+         and sha(controller) == expected_controller['sha256']
+         and stat.S_IFMT(controller_stat.st_mode) | (controller_stat.st_mode & stat.S_IXUSR)
+         == expected_controller['mode'], 'reviewed admission controller bytes/mode changed')
+    for relative, module in [('scripts/deploy_test_cycle.py', cycle_module),
+                             ('scripts/deploy_test_local_cleanup.py', cleanup_module),
+                             ('scripts/deploy_test_process.py', process_module),
+                             ('scripts/deploy_test_result.py', result_module)]:
+        actual_path = Path(module.__file__).absolute()
+        actual_mode = actual_path.stat().st_mode
+        expected = authorization['operator_files'][relative]
+        need(stat.S_ISREG(actual_mode) and sha(actual_path) == expected['sha256']
+             and stat.S_IFMT(actual_mode) | (actual_mode & stat.S_IXUSR) == expected['mode'],
+             'reviewed admission dependency bytes/mode changed: ' + relative)
+    for function, module in [(quiet, cleanup_module),
+                             (process_module.scan_same_user_processes, process_module),
+                             (cycle_module.bounded_read, cycle_module)]:
+        need(getattr(function, '__module__', None) == module.__name__
+             and getattr(function, '__globals__', None) is vars(module)
+             and Path(function.__code__.co_filename).absolute() == Path(module.__file__).absolute(),
+             'admission callable is not owned by pinned module')
+    # run_phase already verifies actual current source/environment/input fingerprints.
+    # Historical native cleanup never grants current-source PASS adoption.
+    expected_path = directory / 'attempts/49/triage' / gate['name'] / 'request.json'
+    need(request_path == expected_path and str(request_path.parent / 'receipt.json')
+         in proposal['original_missing_outer_paths']
+         and not (request_path.parent / 'receipt.json').exists()
+         and not (request_path.parent / 'receipt.json').is_symlink(), 'exact original missing request path')
+    request = doc(request_path)
+    after = proposal['after_state']
+    original_gate, = [g for g in after['plan']['gates'] if g['name'] == gate['name']]
+    need(encode(original_gate) == encode(gate), 'current gate contract/recipe/inventory changed')
+    need(request['source'] == journal['native_source'] and request['gate'] == gate['name']
+         and request['worker_root'] == gate['worker_root']
+         and encode(request['worker_recipe']) == encode(gate['worker_recipe']), 'original request binding')
+    expected = [r for a in after['attempts'] for r in a.get('results', [])
+                if r.get('gate') == gate['name'] and r.get('token') == request['token']]
+    current = [r for a in state['attempts'] for r in a.get('results', [])
+               if r.get('gate') == gate['name'] and r.get('token') == request['token']]
+    need(len(expected) == len(current) == 1 and encode(current[0]) == encode(expected[0]), 'retained recovered row changed')
+    row = expected[0]
+    need(row.get('kind') == 'recovered-native-execution-v1' and row.get('status') == 'FAIL'
+         and row.get('complete') is False and row.get('source') == journal['native_source']
+         and row.get('cancelled') == row.get('timed_out') == 'UNKNOWN'
+         and set(row['cases']) == set(gate['checks'])
+         and all(v in ('UNVERIFIED', 'SKIP') for v in row['cases'].values())
+         and 'UNVERIFIED' in row['cases'].values(), 'negative-only recovered admission')
+    for path, expected_sha in proposal['input_artifacts'].items():
+        if Path(path) != directory / 'cycle.json':
+            need(sha(path) == expected_sha, 'original sealed input changed')
+    need(str(request_path) in proposal['input_artifacts'], 'request not sealed')
+    process_path = request_path.parent / 'output.log.process.json'
+    need(str(process_path) in proposal['input_artifacts'], 'native closure not sealed')
+    process = doc(process_path)
+    need(process.get('quiescent') is True and process.get('remaining') == []
+         and process.get('orphaned_children') is False and process.get('error') is None
+         and process.get('cancelled') is False and process.get('timed_out') is False
+         and process.get('term_sent') == process.get('kill_sent') == []
+         and not Path('/proc', str(process['supervisor_pid'])).exists()
+         and not Path('/proc', str(process['child_pid'])).exists(), 'native closure no longer quiet')
+    quiet(Path(gate['worker_root']))  # Rechecked each launch, never signals anything.
+    return True  # Launch eligibility ONLY. No receipt/result/state mutation or PASS credit.
+
+
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
               excluded_roots=()) -> None:
@@ -1531,7 +1768,8 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                     and (g.get('worker_transport') != 'local-isolated'
                          or local_admission_root(g, root) not in excluded)]
         for gate in selected:
-            if any(not (p.parent / 'receipt.json').is_file() for p in
+            if any(not (p.parent / 'receipt.json').is_file()
+                   and not settled_round49_missing_request(state, directory, gate, p) for p in
                    (directory / 'attempts').glob('*/' + '*/' + gate['name'] + '/request.json')):
                 raise ValueError('prior independent worker request has no terminal receipt')
     else:
@@ -1854,7 +2092,43 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
-def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None) -> None:
+def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None,
+            historical_no_retry_proof: dict | None = None) -> None:
+    from deploy_test_historical_custody import known, prepare, apply, verify
+    if historical_no_retry_proof is not None and election_proof is not None:
+        raise ValueError('historical custody cannot mix election flags')
+    if historical_no_retry_proof is not None:
+        if digest(historical_no_retry_proof) in state.get('historical_custody_refreshes', []):
+            from deploy_test_historical_custody import binding, verify
+            if (state['plan'] != new or historical_no_retry_proof['current_binding'] != binding(new, root)):
+                raise ValueError('historical custody replay differs from current binding')
+            verify(state, root)
+            return
+        rows = prepare(state, old, new, historical_no_retry_proof, root)
+        candidate = copy.deepcopy(state)
+        pending = copy.deepcopy(state.get('pending_post_merge', []))
+        _refresh(candidate, old, new, root)
+        protected = {r['original_failure']['id'] for r in rows}
+        candidate['pending_post_merge'] = [p for p in candidate.get('pending_post_merge', []) if p['id'] not in protected] + [p for p in pending if p['id'] in protected]
+        candidate['superseded_pending_post_merge'] = [p for p in candidate.get('superseded_pending_post_merge', [])
+                                                       if p['id'] not in protected]
+        for r in rows:
+            candidate['skips'].pop(r['original_failure']['check'], None)
+        candidate['resource_warnings'] = [w for w in candidate.get('resource_warnings', []) if w['id'] not in protected]
+        apply(candidate, rows, root)
+        candidate.setdefault('historical_custody_refreshes', []).append(digest(historical_no_retry_proof))
+        verify(candidate, root)  # Re-read native/current bindings before the one atomic publication.
+        state.clear(); state.update(candidate)
+        return
+    if known(state, root):
+        # Preserve ordinary same-input carry; changed inputs require explicit custody.
+        same = input_fingerprints(new, root) == state['input_fingerprints']
+        if not same or state.get('historical_no_retry_custody'):
+            raise ValueError('historical custody proof required before source refresh')
+    _refresh(state, old, new, root, election_proof=election_proof)
+
+
+def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=None) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -1870,7 +2144,12 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
     unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
-    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not interrupted_refresh:
+    unstarted_final = (state['phase'] == 'final' and not state.get('pending')
+                       and 'live_failures' not in state and not state.get('resume_phase')
+                       and not state.get('running')
+                       and not any(a.get('phase') == 'final' and a.get('source') == state['source']
+                                   and not a.get('stale') for a in state.get('attempts', [])))
+    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not unstarted_final and not interrupted_refresh:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")
@@ -1900,8 +2179,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
         for name, gate in old_gates.items():
             if name in removed:
                 continue
-            binding = full_pass_binding(state, gate)
-            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
+            binding = full_pass_binding(state, gate, root=root, custody_refresh=True)
+            if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate, root=root, custody_refresh=True))
                     and digest(gate) == digest(new_gates[name])):
                 # Retire historical repair routing using the OLD validated FULL
                 # receipt. This grants no new-source credit: changed inputs
@@ -1922,7 +2201,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
         gate = key.split("/", 1)[0]
         if gate in removed:
             continue  # Original qualification remains in superseded_skips below.
-        if skip.get("input_fingerprint") == fingerprints.get(gate):
+        if skip.get('disposition') != 'user / overridden' and skip.get("input_fingerprint") == fingerprints.get(gate):
             carry[key] = {**skip, "source": new["source"], "original_source": skip["source"]}
         elif skip.get("disposition") == "pending post-merge":
             # A pending qualification is not an executed handoff: with changed inputs the case simply
@@ -1934,7 +2213,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
             revisit.append({"id": uuid.uuid4().hex, "check": key, "gate": gate,
                             "source": new["source"], "native_result": "prior waived failure; changed inputs",
                             "command": new_gates[gate]["command"],
-                            "complete": True, "phase": "refresh", "prior_waiver": skip})
+                            "complete": skip.get("disposition") != "user / overridden", "phase": "refresh", "prior_waiver": skip})
     state["superseded_skips"] = [*state.get("superseded_skips", []), *state["skips"].values()]
     state["skips"] = carry
     kept_warnings, stale_warnings = [], []
@@ -2036,6 +2315,8 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
         revalidate_standing_skips(state)
+        from deploy_test_historical_custody import verify as verify_custody
+        verify_custody(state, root)
         from deploy_test_election import verify as verify_elections
         verify_elections(state)
         for gate in plan['gates']:
@@ -2050,10 +2331,17 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry"])
+    parser.add_argument('--donor-state', type=Path,
+                        help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
+    parser.add_argument('--donor-index', type=Path)
+    parser.add_argument('--donor-sha256')
+    parser.add_argument('--donor-index-sha256')
+    parser.add_argument("--historical-no-retry-proof", type=Path)
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -2066,13 +2354,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
+        if args.historical_no_retry_proof is not None and args.action not in {'refresh', 'import-historical-no-retry'}:
+            raise ValueError('--historical-no-retry-proof applies only to refresh or import-historical-no-retry')
+        if args.donor_sha256 is not None and args.action not in {'prepare-historical-import', 'admit-historical-import', 'import-historical-custody'}:
+            raise ValueError('--donor-sha256 applies only to historical import')
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
-            journal = directory / 'settlement-journal.json'
-            if journal.exists():
-                committed = directory / 'settlement-committed.json'
-                if not committed.is_file() or read(committed) != {'journal_sha256': sha_file(journal)}:
+            journals = [directory / 'settlement-journal.json',
+                        *sorted(directory.glob('settlement-round*-journal.json'))]
+            for journal in journals:
+                if journal.is_symlink():
+                    raise ValueError('settlement journal must be an owned regular file')
+                if not journal.exists():
+                    continue
+                if journal.name == 'settlement-journal.json':
+                    committed = directory / 'settlement-committed.json'
+                else:
+                    match = re.fullmatch(r'settlement-round([1-9][0-9]*)-journal\.json', journal.name)
+                    if match is None or not journal.is_file():
+                        raise ValueError('invalid round-bound settlement journal')
+                    metadata = bounded_read(journal, 'settlement journal')
+                    if type(metadata.get('round')) is not int or metadata['round'] != int(match[1]):
+                        raise ValueError('invalid round-bound settlement journal')
+                    committed = directory / ('settlement-round' + match[1] + '-committed.json')
+                if (committed.is_symlink() or not committed.is_file()
+                        or read(committed) != {'journal_sha256': sha_file(journal)}):
                     raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
@@ -2102,11 +2409,73 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "triage-quick":
                 with cancellation_handlers():
                     triage_quick(plan, state, directory, args.root)
+            elif args.action == 'prepare-agentcard-renewal':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import binding
+                if not args.occurrence:
+                    raise ValueError('--occurrence original warning id required')
+                print(json.dumps({**binding(state, args.occurrence, args.root), 'prepared_at': time.time()}))
+                return 0
+            elif args.action == 'renew-agentcard-warning':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import renew
+                if args.proof is None:
+                    raise ValueError('--proof read-only provider confirmation required')
+                renew(state, bounded_read(args.proof, 'AgentCard renewal'), args.root)
+            elif args.action in {'prepare-historical-import', 'admit-historical-import', 'import-historical-custody'}:
+                if plan != state['plan']:
+                    raise ValueError('historical import plan differs from fresh selection')
+                indexed = (args.action == 'import-historical-custody' or args.donor_state is not None
+                           or args.donor_index is not None or args.donor_index_sha256 is not None)
+                if indexed:
+                    from deploy_test_historical_custody import import_proof, import_history
+                    if (args.action == 'admit-historical-import' or args.input is not None
+                            or args.donor_state is None or args.donor_index is None
+                            or not args.donor_sha256 or not args.donor_index_sha256
+                            or args.historical_no_retry_proof is not None):
+                        raise ValueError('custody import requires explicit pinned donor, index and exact current plan')
+                    donor_args = (args.donor_state.absolute(), args.donor_index.absolute(),
+                                  args.donor_sha256, args.donor_index_sha256)
+                    if args.action == 'prepare-historical-import':
+                        print(json.dumps(import_proof(state, *donor_args, args.root)))
+                        return 0
+                    if args.proof is None:
+                        raise ValueError('custody import requires exact prepared --proof')
+                    import_history(state, *donor_args, read(args.proof), args.root)
+                else:
+                    from deploy_test_historical_custody import prepare_import, admit_import
+                    if args.input is None:
+                        raise ValueError('--input immutable historical donor cycle required')
+                    if args.donor_sha256 is None:
+                        raise ValueError('--donor-sha256 approved immutable donor-index hash required')
+                    if args.action == 'prepare-historical-import':
+                        print(json.dumps(prepare_import(state, args.input, directory, args.root, donor_sha256=args.donor_sha256)))
+                        return 0
+                    if args.proof is None:
+                        raise ValueError('--proof typed historical import preparation required')
+                    admit_import(state, bounded_read(args.proof, 'historical import proof'), args.input, directory, args.root,
+                                 donor_sha256=args.donor_sha256)
+            elif args.action == 'prepare-historical-no-retry':
+                if args.input is None:
+                    raise ValueError('--input previous plan required')
+                from deploy_test_historical_custody import build
+                print(json.dumps(build(state, read(args.input), plan, args.root)))
+                return 0
+            elif args.action == 'import-historical-no-retry':
+                if args.input is None or args.donor_state is None or args.historical_no_retry_proof is None:
+                    raise ValueError('--input donor plan, --donor-state and --historical-no-retry-proof required')
+                if plan != state['plan']:
+                    raise ValueError('custody transfer plan differs from fresh selection')
+                from deploy_test_historical_custody import adopt
+                adopt(state, read(args.donor_state), read(args.input), read(args.historical_no_retry_proof), args.root)
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
                 refresh(state, read(args.input), plan, args.root,
-                        election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None)
+                        election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None,
+                        historical_no_retry_proof=read(args.historical_no_retry_proof) if args.historical_no_retry_proof else None)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
@@ -2135,7 +2504,8 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "reconcile":
                 if args.proof is None:
                     raise ValueError("--proof cleanup proof required")
-                reconcile(state, args.occurrence, bounded_read(args.proof, "cleanup proof"))
+                reconcile(state, args.occurrence, bounded_read(args.proof, "cleanup proof"),
+                          persist=lambda: write(state_path, state))
             elif args.action == "complete":
                 # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
                 blocked = pending_completion_block(state)
@@ -2143,6 +2513,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"DEPLOY_CYCLE INCOMPLETE: {blocked}", file=sys.stderr)
                     return 1
             elif args.action == "verify":
+                from deploy_test_historical_custody import verify as verify_custody
+                verify_custody(state, args.root)
                 from deploy_test_election import verify as verify_elections
                 verify_elections(state)
                 if args.require_resolved and pending_completion_block(state):
@@ -2153,6 +2525,8 @@ def main(argv: list[str] | None = None) -> int:
                         or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
                     raise ValueError("cycle not complete on exact current source and plan")
             elif args.action == "report":
+                from deploy_test_historical_custody import verify as verify_custody
+                verify_custody(state, args.root)
                 from deploy_failure_report import render
                 failures = [{**f["rca"], "disposition": f["disposition"]}
                             for f in state["failures"] if "rca" in f]
@@ -2166,6 +2540,11 @@ def main(argv: list[str] | None = None) -> int:
                     text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
                              + election['reason'] + '\nNative: ' + election['native_result']
                              + '\nOriginal financial/custody obligations remain recorded.\n')
+                for row in state.get('historical_no_retry_custody', []):
+                    f = row['original_failure']
+                    text += (f"\n{f['check']}: SKIPPED — historical no-retry custody; current-source behavior "
+                             f"and financial state UNVERIFIED. Original native {f['worker_evidence']['native_task']['benchmark_status']}; "
+                             f"historical unreleased {row['original_amount_cents']} cents. No execution or financial credit.\n")
                 warnings = state.get("resource_warnings", [])
                 if warnings:
                     text += "\nRESOURCE WARNINGS (third-party resource skipped with warning; no pass credit)\n"
@@ -2176,6 +2555,10 @@ def main(argv: list[str] | None = None) -> int:
                                  f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}")
                         if proof['reason_code'] == AGENTCARD_RELEASE_STALL_CODE:
                             text += f" · {agentcard_unreleased_text(state, w)} (followup: unreleased funds stay open)"
+                        if 'renewal' in w:
+                            renewal = w['renewal']
+                            text += (f" · Current-input exclusion renewed at: {renewal['finished_at']}"
+                                     f" · No new execution or financial cleanup credit")
                         text += "\n"
                 (directory / "report.md").write_text(text)
                 print(text, end="")

@@ -112,6 +112,11 @@ async def _queue_imessage_real(
     if result.get("success") is not True or not isinstance(queue_id, str) or not queue_id:
         return {"success": False, "error": "Backend did not return an iMessage queue receipt"}
 
+    if result.get("provider") == "phone_harness":
+        return {"success": True, "queue_id": queue_id, "provider": "phone_harness",
+                "status": result.get("status"), "browser_task_id": result.get("browser_task_id"),
+                "sent_at": result.get("sent_at")}
+
     relay_connected = result.get("relay_connected") is True
     relay_last_seen_at = result.get("relay_last_seen_at")
     if not relay_connected:
@@ -615,3 +620,22 @@ async def generate_message_activity(
         message_body = lines[1].strip() if len(lines) > 1 else ""
 
     return {"message": message_body, "subject": subject, "usage": usage}
+
+
+@activity.defn
+async def read_phone_message_activity(user_id: str, agent_id: str, queue_id: str) -> dict[str, Any]:
+    from urllib.parse import quote
+
+    from config import load_config
+    config = load_config()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/imessage/queue/{quote(queue_id, safe='')}/status",
+            headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
+        )
+    if response.status_code != 200:
+        return {"success": False, "error": "Cloud message receipt unavailable"}
+    value = response.json()
+    return {"success": value.get("success") is True, "queue_id": queue_id,
+            "provider": value.get("provider"), "status": value.get("status"),
+            "sent_at": value.get("sent_at"), "browser_task_id": value.get("browser_task_id")}

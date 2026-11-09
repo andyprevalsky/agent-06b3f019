@@ -15,7 +15,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -46,7 +46,7 @@ function sha(path: string): string {
 }
 
 /** A pushed clone with tracked data of `bigBytes`, then local edits on top. */
-function seedRepo(
+export function seedRepo(
   fixtureDir: string,
   home: string,
   bigBytes: number
@@ -167,6 +167,184 @@ export function registerCheckpointSizeCases(ctx: CheckpointSizeContext): void {
       assert.deepEqual(porcelain(restored), before, 'git sees the same working tree after restore');
     });
   });
+
+  for (const legacy of [false, true]) {
+    test(`managed reference sources (${legacy ? 'legacy metadata repair' : 'fresh clone'}) checkpoint below the cap and restore the exact pin and edits`, async () => {
+      await withSession(async (session) => {
+        const home = join(ctx.fixtureDir, `home-reference-${randomUUID()}`);
+        const { workspace } = seedRepo(ctx.fixtureDir, home, 0);
+        const sourceHome = join(ctx.fixtureDir, `source-reference-${randomUUID()}`);
+        const { workspace: source, bigSha } = seedRepo(ctx.fixtureDir, sourceHome, 3 * MIB);
+        const origin = git(source, 'remote', 'get-url', 'origin');
+        const pinned = git(source, 'rev-parse', 'HEAD');
+        const names = ['openclaw', 'hermes-agent', 'codex', 'prime-agent', 'kimi-code'];
+        const urls = [
+          'openclaw/openclaw',
+          'nousresearch/hermes-agent',
+          'openai/codex',
+          'PrimeIntellect-ai/prime-agent',
+          'MoonshotAI/kimi-code',
+        ];
+        const config = join(ctx.fixtureDir, `reference-git-${randomUUID()}.config`);
+        writeFileSync(
+          config,
+          `[url "file://${origin}"]\n${urls.map((url) => `  insteadOf = https://github.com/${url}.git\n`).join('')}`
+        );
+        mkdirSync(join(workspace, 'scripts'));
+        mkdirSync(join(workspace, 'prompt-review'));
+        copyFileSync(
+          new URL('../../../../scripts/sync-reference-repos.sh', import.meta.url),
+          join(workspace, 'scripts/sync-reference-repos.sh')
+        );
+        writeFileSync(join(workspace, '.gitignore'), `local.env\n${names.join('/\n')}/\n`);
+        git(workspace, 'add', '-A');
+        git(workspace, 'commit', '-q', '-m', 'reference setup');
+        git(workspace, 'push', '-q', 'origin', 'main');
+        // Model an interrupted mv across the temporary/workspace filesystem boundary.
+        // Linux uses real tmpfs; other hosts simulate that boundary at the same path.
+        const tempBase = existsSync('/dev/shm') ? '/dev/shm' : ctx.fixtureDir;
+        const moveBin = join(ctx.fixtureDir, `reference-mv-${randomUUID()}`);
+        mkdirSync(moveBin);
+        const realMv = execFileSync('bash', ['-c', 'command -v mv'], {
+          encoding: 'utf8',
+        }).trim();
+        writeFileSync(
+          join(moveBin, 'mv'),
+          [
+            '#!/usr/bin/env node',
+            "const fs = require('node:fs');",
+            "const { dirname } = require('node:path');",
+            "const { spawnSync } = require('node:child_process');",
+            'const [source, destination] = process.argv.slice(2);',
+            `const externalTemp = ${JSON.stringify(tempBase + '/rose-reference.')};`,
+            'if (source.startsWith(externalTemp) || fs.statSync(source).dev !== fs.statSync(dirname(destination)).dev) {',
+            '  fs.mkdirSync(destination, { recursive: true });',
+            "  fs.writeFileSync(destination + '/HEAD', 'partial metadata copy\\n');",
+            "  process.stderr.write('simulated interrupted cross-filesystem metadata move\\n');",
+            '  process.exit(1);',
+            '}',
+            `process.exit(spawnSync(${JSON.stringify(realMv)}, process.argv.slice(2), { stdio: 'inherit' }).status ?? 1);`,
+          ].join('\n') + '\n',
+          { mode: 0o755 }
+        );
+        const sync = (...args: string[]): void => {
+          execFileSync('bash', ['scripts/sync-reference-repos.sh', ...args], {
+            cwd: workspace,
+            env: {
+              ...process.env,
+              GIT_CONFIG_GLOBAL: config,
+              GIT_CONFIG_NOSYSTEM: '1',
+              ...(legacy
+                ? {
+                    TMPDIR: tempBase,
+                    PATH: `${moveBin}:${process.env.PATH ?? ''}`,
+                  }
+                : {}),
+            },
+            stdio: 'pipe',
+          });
+        };
+        sync();
+        const reference = join(workspace, 'openclaw');
+        writeFileSync(join(reference, 'keep.txt'), 'local reference edit\n');
+        rmSync(join(reference, 'delete-me.txt'));
+        writeFileSync(join(reference, 'scratch.txt'), 'untracked reference\n');
+        writeFileSync(join(reference, 'local.env'), 'IGNORED=reference\n');
+        if (legacy) {
+          for (const name of names)
+            rmSync(join(workspace, name, '.git'), { recursive: true, force: true });
+          // Older directories can recover their missing pin from the saved tip record.
+          rmSync(join(workspace, 'hermes-agent', '.ref-sha'));
+          // The recorded pin must win over a subsequently advanced remote tip.
+          writeFileSync(join(source, 'new-tip.txt'), 'new upstream version\n');
+          git(source, 'add', '-A');
+          git(source, 'commit', '-q', '-m', 'advance upstream');
+          git(source, 'push', '-q', 'origin', 'main');
+        }
+        const before = porcelain(workspace);
+        sync();
+        assert.deepEqual(
+          porcelain(workspace),
+          before,
+          'nested repo metadata must not change parent status'
+        );
+        assert.equal(sha(join(reference, 'data.bin')), bigSha, 'sync preserves reference contents');
+        assert.equal(readFileSync(join(reference, '.ref-sha'), 'utf8').trim(), pinned);
+        // Keep checkpoint IO entirely local after proving the real setup script.
+        for (const name of names) {
+          if (existsSync(join(workspace, name, '.git')))
+            git(join(workspace, name), 'remote', 'set-url', 'origin', origin);
+        }
+        const stored = await withCap(1 * MIB, () =>
+          checkpointCodeSession({
+            session,
+            fs: localSandboxFs(home),
+            reason: 'close',
+            agentId: session.rootAgentId,
+          })
+        );
+        assert.ok(
+          stored,
+          'managed reference data must be reproducible rather than exceed the checkpoint cap'
+        );
+        const { manifest } = await loadVerifiedCheckpoint(session.userId, session.id, stored.seq);
+        assert.ok(manifest.artifacts['worktree.tar.gz'].size < 256 * 1024);
+        for (const name of names) {
+          const repo = manifest.repos.find((candidate) => candidate.path === `workspace/${name}`);
+          assert.equal(repo?.head, pinned);
+          assert.equal(repo?.worktreeFromGit, true);
+          assert.equal(
+            repo?.bundle,
+            null,
+            'a shallow pinned remote needs no full repository bundle'
+          );
+        }
+        const restoredHome = join(ctx.fixtureDir, `home-reference-restored-${randomUUID()}`);
+        mkdirSync(restoredHome);
+        const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
+        assert.ok(await restoreLatestCheckpoint(row, localSandboxFs(restoredHome)));
+        const restored = join(restoredHome, 'workspace', 'openclaw');
+        assert.equal(git(restored, 'rev-parse', 'HEAD'), pinned);
+        assert.equal(sha(join(restored, 'data.bin')), bigSha);
+        assert.equal(readFileSync(join(restored, 'keep.txt'), 'utf8'), 'local reference edit\n');
+        assert.equal(existsSync(join(restored, 'delete-me.txt')), false);
+        assert.equal(readFileSync(join(restored, 'scratch.txt'), 'utf8'), 'untracked reference\n');
+        assert.equal(readFileSync(join(restored, 'local.env'), 'utf8'), 'IGNORED=reference\n');
+        assert.equal(
+          existsSync(join(restored, 'new-tip.txt')),
+          false,
+          'restore stays on the old pin'
+        );
+        assert.deepEqual(porcelain(join(restoredHome, 'workspace')), before);
+
+        if (legacy) {
+          const record = readFileSync(join(workspace, 'prompt-review/REF_SHAS.txt'), 'utf8');
+          rmSync(join(reference, '.git'), { recursive: true });
+          writeFileSync(join(reference, '.ref-sha'), 'invalid-revision\n');
+          assert.throws(() => sync(), /invalid saved revision/, 'an unknown pin fails closed');
+          assert.equal(existsSync(join(reference, '.git')), false);
+          assert.equal(readFileSync(join(reference, 'keep.txt'), 'utf8'), 'local reference edit\n');
+          assert.equal(readFileSync(join(workspace, 'prompt-review/REF_SHAS.txt'), 'utf8'), record);
+          writeFileSync(join(reference, '.ref-sha'), `${pinned}\n`);
+        }
+        sync('--force');
+        const latest = git(source, 'rev-parse', 'HEAD');
+        const record = readFileSync(join(workspace, 'prompt-review/REF_SHAS.txt'), 'utf8');
+        for (const name of names) {
+          assert.equal(git(join(workspace, name), 'rev-parse', 'HEAD'), latest);
+          assert.equal(readFileSync(join(workspace, name, '.ref-sha'), 'utf8').trim(), latest);
+          assert.ok(record.includes(`${name} ${latest}\n`));
+        }
+        assert.equal(
+          readFileSync(join(reference, 'keep.txt'), 'utf8'),
+          'tracked, will be edited\n'
+        );
+        assert.equal(existsSync(join(reference, 'delete-me.txt')), true);
+        assert.equal(existsSync(join(reference, 'scratch.txt')), false);
+        assert.deepEqual(porcelain(workspace), before, 'force refresh also keeps parent status');
+      });
+    });
+  }
 
   test('a skip-worktree (sparse) file is never resurrected by restore', async () => {
     await withSession(async (session) => {

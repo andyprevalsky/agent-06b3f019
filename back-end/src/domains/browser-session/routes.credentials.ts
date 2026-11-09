@@ -30,8 +30,11 @@ export function registerBrowserCredentialRoutes(router: Router): void {
           res.status(401).json({ error: 'Unauthorized' });
           return;
         }
-        const { target_url: targetUrl } = prepareSessionCredentialsSchema.parse(req.body);
-        const result = await prepareSessionCredentials(req.params.sessionId, userId, targetUrl);
+        const { target_url: targetUrl, restore_browser_state: restoreBrowserState } =
+          prepareSessionCredentialsSchema.parse(req.body);
+        const result = await prepareSessionCredentials(req.params.sessionId, userId, targetUrl, {
+          restoreBrowserState,
+        });
         res.json({ success: true, ...result });
       } catch (error) {
         if (error instanceof ZodError) {

@@ -30,6 +30,8 @@ export interface SetupProof {
   profileRevision: number;
   workflowId: string;
   providerEpoch: number;
+  /** Original native observation epoch when a confirmed stop carries the device settings. */
+  observedProviderEpoch?: number;
   expectedPhone: string | null;
   runtime?: SetupRuntime;
 }
@@ -73,13 +75,20 @@ export function proofCurrent(
 }
 export function verificationDto(
   value: SetupChecks | undefined,
-  context: Parameters<typeof proofCurrent>[1]
+  context: Parameters<typeof proofCurrent>[1],
+  runtimeObservation?: {
+    value: SetupChecks | undefined;
+    context: Parameters<typeof proofCurrent>[1];
+  }
 ) {
   const checks = Object.fromEntries(
     SETUP_TARGETS.map((target) => {
-      const proof = value?.checks[target];
+      const source = target === 'runtime' && runtimeObservation ? runtimeObservation.value : value;
+      const proof = source?.checks[target];
+      const binding =
+        target === 'runtime' && runtimeObservation ? runtimeObservation.context : context;
       const current =
-        value?.requirementsVersion === SETUP_REQUIREMENTS_VERSION && proofCurrent(proof, context);
+        source?.requirementsVersion === SETUP_REQUIREMENTS_VERSION && proofCurrent(proof, binding);
       return [
         target,
         {
@@ -106,13 +115,17 @@ export function verificationDto(
     context.expectedPhone !== null &&
     context.expectedGoogleIdentity !== undefined &&
     context.expectedGoogleIdentity !== '';
+  const runtimeValue = runtimeObservation ? runtimeObservation.value : value;
+  const runtimeContext = runtimeObservation?.context ?? context;
   const runtime =
-    value?.requirementsVersion === SETUP_REQUIREMENTS_VERSION ? value.checks.runtime : undefined;
+    runtimeValue?.requirementsVersion === SETUP_REQUIREMENTS_VERSION
+      ? runtimeValue.checks.runtime
+      : undefined;
   const currentRuntime =
-    proofCurrent(runtime, context) &&
+    proofCurrent(runtime, runtimeContext) &&
     runtime !== undefined &&
     runtime.status === 'confirmed' &&
-    (context.now?.getTime() ?? Date.now()) - Date.parse(runtime.observedAt) <= 120_000
+    (runtimeContext.now?.getTime() ?? Date.now()) - Date.parse(runtime.observedAt) <= 120_000
       ? runtime.runtime
       : undefined;
   const operationalStatus =
@@ -156,6 +169,10 @@ export function validSetupChecks(value: unknown): value is SetupChecks {
       typeof p.workflowId === 'string' &&
       Number.isSafeInteger(p.profileRevision) &&
       Number.isSafeInteger(p.providerEpoch) &&
+      (p.observedProviderEpoch === undefined ||
+        (Number.isSafeInteger(p.observedProviderEpoch) &&
+          p.observedProviderEpoch >= 0 &&
+          p.observedProviderEpoch <= p.providerEpoch)) &&
       typeof p.evidenceDigest === 'string' &&
       (p.expectedPhone === null || typeof p.expectedPhone === 'string')
   );

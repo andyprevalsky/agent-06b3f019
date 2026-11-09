@@ -16,7 +16,7 @@ a fix the human already rejected.
 ```
 docs/rca/
   README.md            this contract
-  INDEX.md             generated, greppable — one entry per case
+  INDEX.md             local only (git-ignored): `rca_archive.py reindex` output
   cases/*.md           one file per root-caused incident
   process-feedback.md  durable human rules about HOW to do RCA here
 ```
@@ -104,8 +104,10 @@ Five required sections:
    evidence and source to the existing case rather than forking it — recurrence
    count is the signal that a fix did not hold.
 
-`back-end/src/tests/structural/rca-archive.test.ts` enforces the schema, section
-completeness, and `INDEX.md` freshness on every deploy.
+`back-end/src/tests/structural/rca-archive.test.ts` enforces the schema and section
+completeness on every deploy, and refuses a committed `INDEX.md`: the index is
+derived from `cases/`, and committing it made every pair of case-adding PRs
+conflict on GitHub (forcing a main sync and a full gate rerun).
 
 ## Historical backfill provenance
 

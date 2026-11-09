@@ -62,7 +62,6 @@ from helpers.wait_wake import (
     wake_source_path,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
-from utils.wait_phrase import wait_target
 from utils.oai_demo import is_oai_demo_mass_agent_task
 from utils.simulated_clock import (
     advance_simulated_clock,
@@ -71,6 +70,7 @@ from utils.simulated_clock import (
     simulated_time_skip_enabled,
 )
 from utils.wait_for_bounds import resolve_wait_for_agents_timeout
+from utils.wait_phrase import wait_target
 
 # Agents-mode wait: most addresses resolved / reported per call.
 MAX_WAIT_AGENTS = 20
@@ -829,11 +829,13 @@ class WaitForManager(ToolManager):
             targets.append(target)
         # Name the waited-on agents by their task names ("Waiting for chase_balances"),
         # the same names the agents panel shows; the model's description is the fallback.
+        # targetTypes (same order) picks each target's icon on the work row.
         names = [_wait_target_name(target) for target in targets]
         if not any_agent and names and all(names):
             label = ", ".join(str(name) for name in names)
             base_meta["description"] = label
             base_meta["targetNames"] = names
+            base_meta["targetTypes"] = [_wait_target_type(target) for target in targets]
 
         now = _utc_now()
         resume = take_tool_resume(workflow_instance, tool_call_id)
@@ -949,7 +951,8 @@ async def _read_tree_node(workflow_instance: Any, node: str) -> Optional[dict[st
 
 
 async def _resolve_wait_target(workflow_instance: Any, address: str) -> tuple[dict[str, Any], Optional[str]]:
-    """Address → {address, agent_ids, background_task_id, path, own, status} (or an error)."""
+    """Address → {address, agent_ids, background_task_id, path, agent_type, code_provider, own, status}
+    (or an error)."""
     finder = getattr(workflow_instance, "_background_task_for_address", None)
     own = finder(address) if callable(finder) else None
     if own is not None:
@@ -960,6 +963,8 @@ async def _resolve_wait_target(workflow_instance: Any, address: str) -> tuple[di
             "background_task_id": own.get("background_task_id"),
             "path": own.get("path"),
             "task_name": own.get("task_name"),
+            "agent_type": own.get("agent_type"),
+            "code_provider": own.get("code_provider"),
             "own": True,
             "status": own.get("status"),
         }, None
@@ -982,7 +987,34 @@ async def _resolve_wait_target(workflow_instance: Any, address: str) -> tuple[di
         "own": False,
         "status": node.get("status"),
         "node": target_id or address,
+        "agent_type": node.get("type"),
+        "code_provider": node.get("code_provider") or node.get("provider"),
     }, None
+
+
+_GENERAL_PURPOSE_TYPES = {"agent", "general_purpose", "for_each"}
+# The kinds the FE maps to an icon as-is (waitAgentKinds.ts agentKind; 'code' alone lets
+# the transcript pick the CLI).
+_PLAIN_TARGET_TYPES = {"code", "browser", "explore"}
+
+
+def _wait_target_type(target: dict[str, Any]) -> Optional[str]:
+    """A waited-on agent's kind for its icon: code[:claude|:codex] | browser | explore | general_purpose.
+
+    None when the type is unknown (a failed tree read, a path-only fallback, a type outside
+    that set): the FE then derives the icon from its transcript instead of showing a wrong one.
+    """
+    kind = target.get("agent_type")
+    if not isinstance(kind, str):
+        return None
+    if kind in _GENERAL_PURPOSE_TYPES:
+        return "general_purpose"
+    if kind not in _PLAIN_TARGET_TYPES:
+        return None
+    provider = target.get("code_provider")
+    if kind == "code" and provider in ("claude", "codex"):
+        return f"code:{provider}"
+    return kind
 
 
 def _wait_target_name(target: dict[str, Any]) -> Optional[str]:

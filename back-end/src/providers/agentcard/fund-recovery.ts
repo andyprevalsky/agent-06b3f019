@@ -336,3 +336,42 @@ export async function recoverAllCardholderResiduals(
     ...(oldestPendingAgeMs === undefined ? {} : { oldestPendingAgeMs }),
   };
 }
+
+/** What one settle-wait poll did for THIS cardholder's residual (an accelerator, never success). */
+export type CardholderRecoveryNudge =
+  | { kind: 'coalesced'; inFlightCents: number }
+  | { kind: 'requested'; recovery: FundRecoveryResult }
+  | { kind: 'nothing_to_recover' };
+
+/**
+ * Nudge ONE cardholder's residual back to the pool, coalescing on a recovery already in flight.
+ *
+ * The sandbox org is shared by every deploy and dev box. A settle wait that swept EVERY
+ * cardholder (`recoverAllCardholderResiduals`: list_cardholders + list_recoveries + one
+ * recover_funds per cardholder + list_recoveries) every 8 s cost 3 + N org calls per poll per
+ * deploy, and pulled other runs' cardholders' residual out from under them. Only the residual of
+ * the card's own cardholder can release its mint, so this reads the org's open recoveries first
+ * (one call) and, when one already holds this cardholder's claim — requested by this run, another
+ * deploy or production — polls on it instead of asking again (AgentCard: "an open recovery holds
+ * its claim so the same residual can't be pulled twice, so don't retry — poll instead"). The
+ * provider recovers the full residual when no amount is given, so a retried poll can never pull
+ * money twice. A real provider failure still throws AgentCardRecoveryError.
+ */
+export async function nudgeCardholderRecovery(
+  cardholderId: string,
+  callOrgTool: AgentCardOrgToolCaller = callOrgToolProvider
+): Promise<CardholderRecoveryNudge> {
+  const open = (await pendingRecoveries(callOrgTool)).filter(
+    (entry) => entry.cardholderId === cardholderId
+  );
+  if (open.length > 0) {
+    return {
+      kind: 'coalesced',
+      inFlightCents: open.reduce((sum, entry) => sum + entry.amountCents, 0),
+    };
+  }
+  const recovery = await recoverCardholderFunds(cardholderId, callOrgTool);
+  return recovery.status === 'nothing_to_recover'
+    ? { kind: 'nothing_to_recover' }
+    : { kind: 'requested', recovery };
+}

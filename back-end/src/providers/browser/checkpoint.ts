@@ -164,7 +164,7 @@ export async function checkpointLogicalBrowser(
           const frames = new Map<string, FrameStorage>();
           const origin = new URL(page.url()).origin;
           for (const frame of page.frames()) {
-            const captured = await readFrameStorage(frame, origin);
+            const captured = await readFrameStorage(frame, origin, knownOrigins);
             if (captured && captured.origin !== origin) frames.set(captured.origin, captured);
           }
           const missing = [...knownOrigins].filter(
@@ -513,15 +513,44 @@ async function detachedTabStorage(page: Page, origins: string[]) {
 }
 
 /** Read through the initialized frame, not its still-empty CDP URL projection. */
-async function readFrameStorage(frame: Frame, topOrigin: string): Promise<FrameStorage | null> {
-  const state = await frame.evaluate<FrameStorage | null>(`(() => {
+async function readFrameStorage(
+  frame: Frame,
+  topOrigin: string,
+  observedOrigins?: Set<string>
+): Promise<FrameStorage | null> {
+  let originConfirmed = false;
+  try {
+    // Confirm the initialized security origin before a storage getter can
+    // lose the frame. URL alone is unsafe for sandboxed/opaque documents.
+    const origin = await frame.evaluate<string | null>(`(() => {
+      if (globalThis.origin === 'null' || !/^https?:$/.test(location.protocol)
+          || location.origin === ${JSON.stringify(topOrigin)}) return null;
+      return location.origin;
+    })()`);
+    if (!origin) return null;
+    observedOrigins?.add(origin);
+    originConfirmed = true;
+    const state = await frame.evaluate<FrameStorage | null>(`(() => {
     if (globalThis.origin === 'null') return null;
     if (!/^https?:$/.test(location.protocol) || location.origin === ${JSON.stringify(topOrigin)}) return null;
     const entries = storage => Object.entries(storage).map(([name,value]) => ({name,value}));
     return { origin: location.origin, sessionStorage: entries(sessionStorage), localStorage: entries(localStorage) };
   })()`);
-  if (state) state.indexedDB = await captureFrameIndexedDB(frame);
-  return state;
+    if (state) {
+      // Retain successful origin discovery before the next await: if this
+      // frame leaves during IndexedDB capture, the existing popup fallback
+      // must still recover its complete namespace, including sessionStorage.
+      observedOrigins?.add(state.origin);
+      state.indexedDB = await captureFrameIndexedDB(frame);
+    }
+    return state;
+  } catch (error) {
+    // A detached document's session namespace can outlive its frame. Only
+    // omit this read after its initialized origin reached the popup fallback.
+    // Unknown origins must retain the source and the previous checkpoint.
+    if (frame.isDetached() && originConfirmed) return null;
+    throw error;
+  }
 }
 
 /** Local route fulfillment on the caller-owned page keeps the top-level storage partition. */

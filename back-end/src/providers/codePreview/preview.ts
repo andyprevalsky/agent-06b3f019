@@ -129,8 +129,12 @@ export function codePreviewAutostartCommand(home: string, sinceLaunchMs: number)
   const cli = `${home}/${CODE_PREVIEW_CLI_PATH}`;
   const log = `${home}/.rose/preview/autostart.log`;
   const elapsed = Math.max(0, Math.floor(sinceLaunchMs));
+  // Only the nohup'd preview goes to the background, with every stdio stream
+  // redirected: backgrounding the whole `mkdir && nohup` list kept a subshell
+  // on the caller's output pipe for the preview's life, so every E2B autostart
+  // waited out its 10 s command timeout (code-agent-rose-repo, 2026-11-08).
   return (
-    `mkdir -p ${home}/.rose/preview && nohup ${cli} start --dir ${ROSE_FRONT_END_DIR} ` +
-    `--wait-startup --since "$(( $(date +%s%3N) - ${elapsed} ))" > ${log} 2>&1 &`
+    `mkdir -p ${home}/.rose/preview && { nohup ${cli} start --dir ${ROSE_FRONT_END_DIR} ` +
+    `--wait-startup --since "$(( $(date +%s%3N) - ${elapsed} ))" > ${log} 2>&1 < /dev/null & }`
   );
 }

@@ -22,8 +22,8 @@
  * Without IntersectionObserver the first page counts as on screen.
  */
 
-import { useQueries, useQueryClient, type Query } from '@tanstack/react-query';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { QueryClientContext, useQueries, useQueryClient, type Query } from '@tanstack/react-query';
+import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import {
   CODE_AGENT_LIST_MAX_ROOTS,
@@ -200,4 +200,102 @@ export function useRoseCodeAgents(agents: Agent[], selectedAgentId: string | nul
         ? new Set(agents.slice(0, CODE_AGENT_LIST_MAX_ROOTS).map((a) => a.agent_id))
         : onScreen,
   };
+}
+
+/**
+ * One code agent's newest row from the left bar's already-read pages (no
+ * request of its own), and when that page was read: the code-agent view reads
+ * its container state here. Null until a page listing it has been read.
+ */
+export function useCachedCodeAgent(
+  codeAgentId: string,
+): { item: CodeAgentListItem; readAt: number } | null {
+  const queryCache = useQueryClient().getQueryCache();
+  const read = useCallback(() => {
+    let best: { item: CodeAgentListItem; readAt: number } | null = null;
+    for (const query of queryCache.findAll({ queryKey: [QUERY_KEY] })) {
+      if (!Array.isArray(query.state.data)) continue;
+      const item = (query.state.data as CodeAgentListItem[]).find(
+        (row) => row.code_agent_id === codeAgentId,
+      );
+      if (item && (!best || query.state.dataUpdatedAt > best.readAt))
+        best = { item, readAt: query.state.dataUpdatedAt };
+    }
+    return best;
+  }, [queryCache, codeAgentId]);
+  const snapshot = useRef<{ item: CodeAgentListItem; readAt: number } | null>(null);
+  const getSnapshot = useCallback(() => {
+    const next = read();
+    const prev = snapshot.current;
+    if (prev?.item === next?.item && prev?.readAt === next?.readAt) return prev;
+    snapshot.current = next;
+    return next;
+  }, [read]);
+  return useSyncExternalStore(
+    useCallback((onChange) => queryCache.subscribe(onChange), [queryCache]),
+    getSnapshot,
+  );
+}
+
+/** Rows of `ownerAgentId` titled `taskName`: a running one first, then the newest. */
+export function pickCodeAgent(
+  rows: readonly CodeAgentListItem[],
+  ownerAgentId: string,
+  taskName: string,
+): CodeAgentListItem | null {
+  let best: CodeAgentListItem | null = null;
+  const rank = (row: CodeAgentListItem) => [
+    Number(row.status === 'ACTIVE'),
+    new Date(row.created_at).getTime(),
+  ];
+  for (const row of rows) {
+    if (row.owner_agent_id !== ownerAgentId || row.title.trim() !== taskName) continue;
+    if (!best) best = row;
+    else {
+      const [running, at] = rank(row);
+      const [bestRunning, bestAt] = rank(best);
+      if (running > bestRunning || (running === bestRunning && at > bestAt)) best = row;
+    }
+  }
+  return best;
+}
+
+/**
+ * Click-time lookup of the code agent `ownerAgentId` spawned as `taskName` (the
+ * code-agents row title is the spawn's task_name): the left bar's already-read
+ * pages first; on a miss (spawned since that read, root off screen) ONE fetch of
+ * `rootAgentId`'s list into the same cache, then the join again. No polling.
+ * Null without a match, a QueryClient or a task name.
+ */
+export function useFindCodeAgent(): (
+  ownerAgentId: string,
+  taskName: string | null,
+  rootAgentId: string | null,
+) => Promise<CodeAgentListItem | null> {
+  const queryClient = useContext(QueryClientContext);
+  return useCallback(
+    async (ownerAgentId, taskName, rootAgentId) => {
+      if (!queryClient || !taskName) return null;
+      const cachedRows = () =>
+        queryClient
+          .getQueryCache()
+          .findAll({ queryKey: [QUERY_KEY] })
+          .flatMap((query) =>
+            Array.isArray(query.state.data) ? (query.state.data as CodeAgentListItem[]) : [],
+          );
+      const cached = pickCodeAgent(cachedRows(), ownerAgentId, taskName);
+      if (cached || !rootAgentId) return cached;
+      try {
+        await queryClient.fetchQuery({
+          queryKey: [QUERY_KEY, rootAgentId],
+          queryFn: () => fetchCodeAgentsForRoots([rootAgentId]),
+          staleTime: 0,
+        });
+      } catch {
+        return null;
+      }
+      return pickCodeAgent(cachedRows(), ownerAgentId, taskName);
+    },
+    [queryClient],
+  );
 }

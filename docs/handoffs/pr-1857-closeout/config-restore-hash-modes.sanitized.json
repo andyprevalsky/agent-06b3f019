@@ -1,0 +1,172 @@
+{
+  "format": "PR1857-CONFIG-RESTORE-HASH-MODES-V1",
+  "verified_at": "2026-11-08T22:21:16.240952+00:00",
+  "files": 9,
+  "all_originals_unchanged": true,
+  "all_hashes_sizes_and_modes_match": true,
+  "checks": [
+    {
+      "member": "rose/agents/.env",
+      "expected_sha256": "012eb85d483cb5ac6c81806764c875946a46dde49f318737590a57bc4a02a27a",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/back-end/.env",
+      "expected_sha256": "9944b6d5422409e536816556d7df026a3cc932c26d8bddee74d476ce23d29150",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/front-end/.env",
+      "expected_sha256": "ce29f1c578f830db12439cec7eff6f0c7866b6d456eaeb0478782edf3a0fdd69",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/research/.env",
+      "expected_sha256": "21a533c2b2122e79030104d4020f50cecff3b66996bc5da9a8d0d9a590ba7665",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/mac-app/.env",
+      "expected_sha256": "2a333316d5cb8c4b795a0602c91905f5d82d0141e4756486cb0251697b3df4dc",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/.env.npm",
+      "expected_sha256": "1aa05f7ec1774a78ad7577792eb9b5c40b52db6678fa2de4fab4f00d2fb5ee5a",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/agents/.env.benchmark-temporal",
+      "expected_sha256": "4ef303990843e9a0ba7f33b011e530415bc31ad6bf0eea63804542aad5ae74f2",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/.context/pr1634-archive-recovery.env",
+      "expected_sha256": "375ad55c6bdb46d7cc849fe32e4368dd223cd47f593acbe32c8ad68a7d392f12",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    },
+    {
+      "member": "rose/.devbox/staged-external/external_config/5-ngrok-agent-config/ngrok.yml",
+      "expected_sha256": "609381349679e8e8e7dba3658a1703bde56c9b4868894a100635e71b27dcae89",
+      "expected_mode": "0o600",
+      "original_unchanged": true,
+      "local_config_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      },
+      "independent_render_restore": {
+        "bytes_match": true,
+        "hash_match": true,
+        "mode_match": true,
+        "mode": "0o600"
+      }
+    }
+  ],
+  "independent_key_and_r2_source": "existing Render service environment; see config-render-restore-proof.sanitized.json"
+}

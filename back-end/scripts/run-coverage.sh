@@ -196,6 +196,9 @@ fi
 # Hermetic per-shard local stores (set after SHARD_SUFFIX is known).
 export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage$SHARD_SUFFIX}"
 export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage$SHARD_SUFFIX}"
+# Benchmark Hub's index lock is a per-database advisory lock; concurrent shards
+# with separate databases must not share one local index.json.
+export BENCHMARK_HUB_LOCAL_DIR="${BENCHMARK_HUB_LOCAL_DIR:-$ROOT_DIR/.context/benchmark-hub$SHARD_SUFFIX}"
 
 # All coverage runs in one worktree share coverage/tmp, coverage/blackbox-run,
 # coverage/server.log, and the workspace database. Hold OS advisory locks in a
@@ -472,6 +475,9 @@ if [[ -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
   export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
 fi
 # The instrumented backend starts independently of run-blackbox-tests.sh.
+# Full-suite phone fixtures explicitly opt in; never a product default or shared env write.
+# Preserve an explicit caller0 for rollout-denial coverage.
+export CLOUD_IPHONE_ENABLED="${CLOUD_IPHONE_ENABLED-1}"
 # OAuth URL cases need the same synthetic local client, never the production one.
 export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"

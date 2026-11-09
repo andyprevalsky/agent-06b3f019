@@ -53,6 +53,7 @@ async function runAll(): Promise<void> {
   await import('./agents-cutover-replace-not-failed.cases');
   await import('./agents-agent-messages.cases');
   await import('./agents-agent-messages-code.cases');
+  await import('./agents-code-turns-undelivered.cases');
   await import('./agents-agent-message-guard.cases');
   await import('./agents-agent-tree.cases');
   await import('./agents-agent-address.cases');

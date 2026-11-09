@@ -12,6 +12,12 @@
  * Rose Desktop accounts get no top-right nav links at all (UI ledger #14, #66:
  * no Research, Careers or Download — the app icons sit there instead); the
  * signed-out stock website keeps Research, Careers and Download.
+ *
+ * LEFT OFFSET (md+): Rose Desktop with a left bar (sidebarWidthCollapsed > 0)
+ * pads every view by --rose-bar-offset — the bar's width while it is pinned or
+ * dragged open (the chat is pushed, not covered), else 64px. Layouts without a
+ * bar (SharedBenchmarkLayout passes 0) get no offset. The stock sidebar keeps
+ * --browse-sidebar-offset on full-width views only.
  */
 
 import { isStandaloneApp } from '@/lib/isStandaloneApp';
@@ -54,19 +60,25 @@ interface MainContentProps {
 }
 
 export function MainContent(props: MainContentProps) {
+  // The shared benchmark layout renders no bar (sidebarWidthCollapsed 0): nothing to clear.
+  const roseBar = useRoseDesktop() && props.sidebarWidthCollapsed > 0;
   // Full-width views (browse, benchmarks) must clear the fixed sidebar rail —
   // centered views never reach under it, but max-w-none content does.
   const fullWidthView = props.currentView === 'browse' || props.currentView === 'benchmarks';
-  const browseOffsetStyle = fullWidthView
-    ? ({
-        '--browse-sidebar-offset': `${props.sidebarWidthCollapsed}px`,
-      } as React.CSSProperties)
-    : undefined;
+  const browseOffsetStyle =
+    fullWidthView && !roseBar
+      ? ({
+          '--browse-sidebar-offset': `${props.sidebarWidthCollapsed}px`,
+        } as React.CSSProperties)
+      : undefined;
   return (
     <main
+      data-testid="terminal-main-content"
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
-        fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
+        roseBar
+          ? 'md:pl-[var(--rose-bar-offset,64px)]'
+          : fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
       )}
       style={{
         height: 'var(--app-height, 100dvh)',

@@ -1,0 +1,52 @@
+{
+ "pr": 1796,
+ "merged_sha": "dd330764a676ae56a6a798a75e8f9d69c6146720",
+ "final_head": "d010787688930ae5e4a1add7a0b99318a347f891",
+ "archives": {
+  "core": "devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm",
+  "cloud": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm",
+  "refs (reused)": "devbox-closeout-private/pr1760-cdb8ce58/20261108-refs.tar.gz.aesgcm",
+  "stash (reused)": "devbox-closeout-private/pr1760-cdb8ce58/20261108-stash.tar.gz.aesgcm",
+  "extra": "devbox-closeout-private/pr1796-dd330764/extra.tar.gz.aesgcm",
+  "extra2": "devbox-closeout-private/pr1796-dd330764/extra2.tar.gz.aesgcm"
+ },
+ "assignment": {
+  "test": "smoke/agent-payment-abandonment",
+  "original_failure": "Failed to abandon test payment: 401 agentcard_org_mcp_unauthorized (PR #1777 campaign 3cd670edb6dc, Hub run 20261108-041743-3156927-m547c38d72f0c)",
+  "adopted": "PR #1781 packet: superseded lifecycle-read 401 vetoed the release-stall SKIP (run 20261108-045825-2709472)",
+  "outcome": "fixed source smoke x3 (bf0e288cf, cfb2bd34c, d01078768 / Hub run 20261108-080709-1961857): zero org-MCP 401s, no INFRA STOP, native SKIPPED on the standing AgentCard sandbox release stall (agentcard_release_stall); not a PASS",
+  "rca_case": "docs/rca/cases/2026-11-08-agentcard-org-read-auth-retry-shorter-than-provider-401-flap.md",
+  "solo_outcome_run": "scripts/run-bench agent-payment-abandonment on main e8e974958 (fleet run 20261108-091559-2958796, agent 732898a0-f6cc-4be1-9e3a-e25dfa0a0c66): native SKIPPED on the same release stall, zero org-MCP 401s; read-only list_transfers shows our recover_funds residual (rcv_d2c20fdb3e4bb460945f83ab, 3721) credited to concurrent transfers owt_622531dd32f119b33753b55e/owt_685d3758f404813836e1e03e on the shared sandbox cardholder (recorded in the 2026-10-02 stall case)",
+  "gated_outcome_runs": "bf26a925f: solo 20261108-095414-3397378 and gated 20261108-102251-3748298 (sole mint on the shared cardholder in its window) both native SKIPPED on the release stall with zero org 401s; concurrency ruled out; attempt 20261108-104322-3997016 operator-cancelled before allocation (Hub INFRA_ERROR is a cancellation, excluded from the ledger)",
+  "correction": "the earlier 'credited to concurrent transfers' reading was wrong: 3721 = 4396-675 test-shop residuals on their own transfers (corrected in the 2026-10-02 case)"
+ },
+ "production": {
+  "render": "PASS",
+  "backend-probes": "PASS",
+  "semantic": "PASS (chat-lifecycle-ratchet run 42464214602)",
+  "agentcard": "FAIL external/waived: stripeHold.livemode (test-mode Stripe payer fixture; live KYC cardholder is user-only); $1.00 unreleased on owt_1ae363fb4d0b8a9d5b6d5911"
+ },
+ "review": "cycle 1 CodeRabbit findings (2) fixed; later heads usage-capped (skip --reason usage-cap); adversarial substitute review CLEAN; merged unreviewed by CodeRabbit",
+ "followups": [
+  "agent-payment-abandonment native PASS is blocked by AgentCard: the sandbox does not release closed-card transfers even with no concurrent mints (gated run 20261108-102251-3748298); provider-side fix needed",
+  "AgentCard production lane needs a KYC-passed live cardholder and live Stripe payer fixture (user-only); $1.00 unreleased on owt_1ae363fb4d0b8a9d5b6d5911",
+  "Unreleased sandbox mints: owt_303be99fbdefc1558f7bef85, owt_720b0c809c695510fb8437ab, owt_3e8d584c8bc9cb9aca26d2f8 and the attempt-3 transfer (4396 each, test mode)",
+  "Fleet canary member browser-auth-saved-password-retry INFRA_ERROR (run 20261108-091646-2967956): cloudbench-disposable-volume.py FileExistsError on .git/cloudbench-fleet-audits/<id>/volume-backups",
+  "Quick-gate budget: backend-structural takes ~94 s solo on local-Postgres hosts (prisma-local-push live checks) vs the 120 s quick default beside tsc/eslint",
+  "agent-payment-idempotent-abandonment: root stayed ACTIVE until the 900 s timeout after the second browser's request_payment_card failed (PR #1770 packet); agent behavior gap",
+  "Unreleased sandbox mints from outcome runs: owt_ffd0262284bbf27cedb63123, owt_a160ef981048ea3ddf9fe6d1 (4396 each, test mode)"
+ ],
+ "retained": {
+  "path": "/var/tmp/agc401/benchwt/.context/fleet/runs/*/teardown-ownership",
+  "owner": "this deploy (solo outcome run)",
+  "reason": "sealed root-owned Machine/volume ownership records; never unseal or delete",
+  "retirement": "after Fly confirms vol_40o77e6wl5wlnwk4 and vol_vdeppdq722l8oo34 destroyed (pending_destroy at closeout); Machines 8024d9b629e738, 83d1372c051478, 8111694c249618 destroyed"
+ },
+ "adopted_pr1770": {
+  "packet_sha256": "623486781d9654225d9bea7500d69a1184c32930cbed8a03618018e2acbfff5c",
+  "task": "agent-payment-idempotent-abandonment",
+  "first_unrecovered_step": "get_card_details org 401 in the same-cart reuse liveness check (covered by #1796 read flap window)",
+  "outcome": "PASS natively on 3 fixed-source deploy smoke runs; original native FAIL and the 900s root-ACTIVE consequence preserved, not PASS",
+  "obligation": "owt_c98bfc7c1354547acb761593 (4396, sandbox) preserved, no remint"
+ }
+}

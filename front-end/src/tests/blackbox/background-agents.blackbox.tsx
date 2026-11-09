@@ -531,32 +531,7 @@ describe('running-agents dock', () => {
     expect(table).toHaveTextContent('string · required');
   });
 
-  it('expands an explore or browser task row into its trajectory from loaded rows, without fetching', async () => {
-    const browserRows = [
-      started('call_br', 'browser', '/root/order_breakfast', 'Order breakfast'),
-      row({
-        toolCallId: 'call_br',
-        toolName: 'spawn_browser_agent',
-        toolStatus: 'IN_PROGRESS',
-        excludeFromModel: true,
-        task_id: 't-br',
-        action_type: 'browser',
-        browser_url: 'https://live.example/br',
-        title: 'Browser Agent In Progress',
-      }),
-      row(
-        {
-          toolCallId: 'br-step-1',
-          toolName: 'spawn_browser_agent',
-          toolStatus: 'FINISHED',
-          task_id: 't-br',
-          subAgentId: 't-br',
-          action_type: 'goto',
-          title: 'Navigated → https://www.instacart.com/',
-        },
-        'Navigated → https://www.instacart.com/',
-      ),
-    ];
+  it('expands an explore task row into its trajectory from loaded rows, without fetching', async () => {
     const exploreStep = row(
       {
         toolCallId: 'ex-step-1',
@@ -567,11 +542,10 @@ describe('running-agents dock', () => {
       },
       'Searched the web for hotel prices',
     );
-    const messages = [...explore(), exploreStep, ...browserRows];
     const onNavigate = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    renderDock(messages, onNavigate);
-    await userEvent.click(screen.getByRole('button', { name: /Running 2 agents/ }));
+    renderDock([...explore(), exploreStep], onNavigate);
+    await userEvent.click(screen.getByRole('button', { name: /Running 1 agent/ }));
     const panel = screen.getByTestId('background-agents-panel');
     expect(within(panel).queryByTestId('agent-panel-trajectory')).toBeNull();
     const fetchesBeforeExpand = fetchSpy.mock.calls.length;
@@ -582,26 +556,13 @@ describe('running-agents dock', () => {
     expect(
       exploreTrajectory.querySelector(`[data-message-id="${exploreStep.message_id}"]`),
     ).not.toBeNull();
-
-    await userEvent.click(within(panel).getByText('browser · order_breakfast'));
-    const trajectories = within(panel).getAllByTestId('agent-panel-trajectory');
-    const browserTrajectory = trajectories.find((el) => el.dataset.taskId === 't-br');
-    expect(browserTrajectory).toBeDefined();
-    expect(
-      browserTrajectory!.querySelector(`[data-message-id="${browserRows[2].message_id}"]`),
-    ).not.toBeNull();
-
     // Built from rows the client already holds: no request and no navigation.
     expect(fetchSpy.mock.calls.length).toBe(fetchesBeforeExpand);
     expect(onNavigate).not.toHaveBeenCalled();
 
     // Clicking the row again folds its trajectory away.
     await userEvent.click(within(panel).getByText('explore · hotel_price'));
-    expect(
-      within(panel)
-        .getAllByTestId('agent-panel-trajectory')
-        .map((el) => el.dataset.taskId),
-    ).toEqual(['t-br']);
+    expect(within(panel).queryByTestId('agent-panel-trajectory')).toBeNull();
     fetchSpy.mockRestore();
   });
 

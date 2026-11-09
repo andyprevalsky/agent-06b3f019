@@ -604,6 +604,164 @@ def startup_campaign(root, runs, campaign, request, receipt, adapter, confirmed,
     return identities
 
 
+PREFLIGHT_REFUSAL = 'FATAL: requested benchmark commit {} is not fetchable from origin and local patch shipping is disabled'
+PREFLIGHT_PRODUCER = ('echo "FATAL: requested benchmark commit $resolved is not fetchable from origin '
+                      'and local patch shipping is disabled" >&2')
+PREFLIGHT_DISPATCH = ('if ! BENCH_REF="$(cloudbench_fetchable_ref "$ROOT_DIR" "$BENCH_REF" \\\n'
+                      '        "$([ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ] && printf 0 || printf 1)")"; then\n'
+                      '        exit 1\n')
+
+
+def preflight_refusal_campaign(root, runs, campaign, request, receipt, adapter, confirmed, document, bound, proof):
+    """Every dispatched job refused at run-bench preflight before any fleet existed (PR #1767).
+
+    Positive evidence only: each job's bound log ends in the exact producer refusal for the bound
+    source, with no monitor handle; no fleet participant exists; relay, publisher and supervisor
+    closure are replayed exactly as for a preallocation campaign. Launch eligibility only."""
+    from datetime import datetime
+    head = receipt['source']['head']
+    summary = document(campaign / 'summary.json')
+    checks, jobs = request['checks'], summary['jobs']
+    need(checks and len(set(checks)) == len(checks) and not request.get('skips')
+         and summary['campaign_id'] == campaign.name and summary['runs'] == 1
+         and summary['retry_infra'] == 0 and summary['status'] == 'failed'
+         and summary['task_count'] == summary['total_jobs'] == len(jobs) == len(checks)
+         and {j['task'] for j in jobs} == set(checks) and len({j['job_id'] for j in jobs}) == len(jobs),
+         'preflight inventory')
+    need(not any(summary.get(k) for k in ('cleanup_ticket_failure', 'shared_inventory_failed',
+                                          'shared_transport_cleanup_pending', 'workspace_binding'))
+         and not any(c.get('cleanup_budget_retirement_pending') for c in summary.get('startup_cohorts', [])),
+         'preflight additional ownership')
+    unverified = dict.fromkeys(checks, 'UNVERIFIED')
+    need(receipt.get('cases') == adapter.get('cases') == unverified and adapter.get('complete') is False
+         and adapter.get('cleanup_complete') is False and adapter.get('reason') is None
+         and adapter.get('fleet_directory') == str(campaign) and type(adapter.get('native_exit')) is int
+         and 1 <= adapter['native_exit'] <= 255
+         and adapter.get('evidence') == {n: {'unverified': 'campaign job has no native fleet handle'} for n in checks},
+         'preflight adapter outcome')
+    start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
+    need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
+         <= receipt['finished_at'] <= confirmed, 'preflight clocks')
+    need(runs.is_dir() and not runs.is_symlink() and runs.resolve() == runs and not any(runs.iterdir()),
+         'preflight fleet participant present')
+    # The bound source's own producer emits this exact refusal and exits before lock or Machine.
+    library = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                       head + ':scripts/lib/cloudbench-env.sh']).decode()
+    fleet = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                     head + ':scripts/run-bench-fleet']).decode()
+    need(library.count(PREFLIGHT_PRODUCER) == 1 and fleet.count(PREFLIGHT_DISPATCH) == 1,
+         'unsupported preflight producer')
+    refusal = PREFLIGHT_REFUSAL.format(head)
+    refused = {}
+    for job in jobs:
+        need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']) and job['run'] == 1 and job['attempt'] == 1
+             and job['attempts'] == [] and job['status'] == 'failed'
+             and type(job.get('controller_exit_code')) is int and 1 <= job['controller_exit_code'] <= 255
+             and type(job.get('controller_pid')) is int and job['controller_pid'] > 1
+             and job.get('controller_command') == ['bash', str(root / 'scripts/run-bench'), job['task'],
+                                                   '--ref', head, '--foreground'], 'preflight job')
+        need(job['job_id'] not in refused and job['task'] in checks, 'preflight job identity')
+        log = campaign / (job['job_id'] + '.log')
+        need(job['log'] == str(log), 'preflight job log binding')
+        lines = [line.strip() for line in bound(log).decode(errors='replace').splitlines() if line.strip()]
+        need(lines and lines[-1] == refusal and sum(line.startswith('FATAL:') for line in lines) == 1,
+             'preflight refusal for the bound source')
+        # The exact fleet handle/banner shapes campaign-v1 parses; prose such as "printed monitor" is not one.
+        handle = str(root / 'scripts/run-bench') + ' monitor '
+        need(not any(handle in line or re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line) for line in lines),
+             'preflight dispatched a fleet')
+        # A live or reused controller PID is refused, never signalled.
+        need(not Path('/proc', str(job['controller_pid'])).exists(), 'preflight controller PID present')
+        refused[job['job_id']] = {'task': job['task'], 'controller_exit_code': job['controller_exit_code']}
+    supervision = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
+    need(supervision['term_sent'] == supervision['kill_sent'] == [] and supervision['orphaned_children'] is False,
+         'preflight unexpected supervised termination')
+    from deploy_test_cloud import campaign_published
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    for path in (campaign / 'hub-group.json', campaign / 'hub-group-publication-ack.private.json'):
+        document(path)
+    try:
+        published = campaign_published(summary, campaign, adapter['started_at'], native)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as error:
+        raise ValueError('native cleanup: preflight publication unavailable') from error
+    need(published, 'preflight publication closure')
+    return refused
+
+
+def dispatch_refusal(root, runs, campaign, request, receipt, adapter, confirmed, document, bound):
+    """Retire only the audited source-refusal path before any fleet admission.
+
+    This grants launch eligibility, never task or financial cleanup credit.
+    Unknown historical producers still require their own custody proof.
+    """
+    policies = {
+        'scripts/run-bench': 'd6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e',
+        'scripts/run-bench-fleet': '7552a933e8510bfb3b2b03787cd102d7f144cb25039ea4a9e883d29a48c57451',
+        'scripts/lib/cloudbench-env.sh': '166f249b055d9b5ebf6d28cb54c7f522e4ad0ab5652cfe670ecc58388a947e2d',
+        'scripts/run-bench-campaign.py': '57196da49e7dd07eb696e85ee8b6394d61237ad339579093d12c5645f298691f',
+    }
+    for name, expected in policies.items():
+        original = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                            receipt['source']['head'] + ':' + name])
+        need(hashlib.sha256(original).hexdigest() == expected, 'unaudited dispatch refusal producer: ' + name)
+    checks = request['checks']
+    skips = request.get('skips', {})
+    from deploy_test_historical_custody import KIND as CUSTODY_KIND
+    need(checks and len(set(checks)) == len(checks) and not set(checks).intersection(skips)
+         and all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
+                 and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
+                 and v.get('current_binding', {}).get('source') == receipt['source']
+                 and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
+                 and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
+                 for v in skips.values()), 'dispatch refusal exclusion inventory')
+    expected = {**dict.fromkeys(checks, 'UNVERIFIED'), **dict.fromkeys(skips, 'SKIP')}
+    need(receipt['cases'] == expected and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
+         and adapter.get('complete') is False and adapter.get('cleanup_complete') is False
+         and adapter.get('reused') is False and adapter.get('native_exit') == 1,
+         'dispatch refusal original outcomes')
+    need(runs.is_dir() and not runs.is_symlink() and not any(runs.iterdir()), 'dispatch refusal has native participants')
+    summary = document(campaign / 'summary.json')
+    jobs = summary['jobs']
+    need(summary['campaign_id'] == campaign.name and summary['runs'] == 1 and summary['retry_infra'] == 0
+         and summary['status'] == 'failed' and summary['task_count'] == summary['total_jobs'] == len(jobs) == len(checks)
+         and len({j['job_id'] for j in jobs}) == len(jobs) and {j['task'] for j in jobs} == set(checks)
+         and not any(summary.get(k) for k in ('startup_cohorts', 'cleanup_ticket_failure',
+                                             'shared_inventory_failed', 'shared_transport_cleanup_pending')),
+         'dispatch refusal campaign inventory')
+    from datetime import datetime
+    start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
+    need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
+         <= receipt['finished_at'] <= confirmed, 'dispatch refusal clocks')
+    message = ('FATAL: requested benchmark commit ' + receipt['source']['head']
+               + ' is not fetchable from origin and local patch shipping is disabled')
+    pids = []
+    for job in jobs:
+        need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']) and job['run'] == job['attempt'] == 1
+             and job['attempts'] == [] and job['status'] == 'failed' and type(job['controller_exit_code']) is int
+             and job['controller_exit_code'] == 1 and type(job['controller_pid']) is int
+             and job['controller_pid'] > 1 and start <= datetime.fromisoformat(job['started_at']).timestamp()
+             <= datetime.fromisoformat(job['finished_at']).timestamp() <= finish
+             and job['controller_command'] == ['bash', str(root / 'scripts/run-bench'), job['task'],
+                                               '--ref', receipt['source']['head'], '--foreground'],
+             'dispatch refusal child identity')
+        log = campaign / (job['job_id'] + '.log')
+        need(job['log'] == str(log), 'dispatch refusal log binding')
+        lines = bound(log).decode().splitlines()
+        need(lines and lines[-1] == message and lines.count(message) == 1
+             and not any(str(root / 'scripts/run-bench') + ' monitor ' in line for line in lines),
+             'dispatch refusal exact boundary')
+        need(not Path('/proc', str(job['controller_pid'])).exists(), 'dispatch refusal child remains')
+        pids.append(job['controller_pid'])
+    need(len(set(pids)) == len(pids), 'dispatch refusal aliased children')
+    supervisor = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
+    need(supervisor['orphaned_children'] is False and supervisor['term_sent'] == [], 'dispatch refusal supervision')
+    from deploy_test_cloud import campaign_published
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):
+        document(campaign / name)
+    need(campaign_published(summary, campaign, adapter['started_at'], native), 'dispatch refusal publication closure')
+
+
 def validate(receipt, owner, proof):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -628,15 +786,28 @@ def validate(receipt, owner, proof):
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
+    historical_sources = {}
     need(isinstance(bindings, dict), 'missing file bindings')
 
-    def bound(path, limit=MAX_RECEIPT_BYTES):
+    def bound(path, limit=MAX_RECEIPT_BYTES, *, historical_head=None):
         path = Path(path)
-        need(path.is_absolute() and path.resolve() == path and path.is_file() and not path.is_symlink(), 'noncanonical proof file')
-        need(path.stat().st_size <= limit, 'proof file too large')
-        raw = path.read_bytes()
+        historical_head = historical_head or historical_sources.get(str(path))
+        need(path.is_absolute() and path.resolve() == path and not path.is_symlink(), 'noncanonical proof file')
+        if historical_head is not None:
+            need(isinstance(historical_head, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', historical_head),
+                 'historical producer head')
+            relative = path.relative_to(root)
+            need(relative.parts[0] == 'scripts', 'historical producer scope')
+            raw = subprocess.check_output(['git', '-C', str(root), 'show', historical_head + ':' + relative.as_posix()])
+            need(len(raw) <= min(limit, MAX_RECEIPT_BYTES), 'proof file too large')
+        else:
+            need(path.is_file(), 'noncanonical proof file')
+            need(path.stat().st_size <= limit, 'proof file too large')
+            raw = path.read_bytes()
         need(bindings.get(str(path)) == hashlib.sha256(raw).hexdigest(), 'file hash mismatch: ' + str(path))
         used.add(str(path))
+        if historical_head is not None:
+            historical_sources[str(path)] = historical_head
         return raw
 
     def document(path, limit=MAX_RECEIPT_BYTES):
@@ -663,6 +834,33 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-ref-preflight-v1':
+        from deploy_test_native_ref_preflight import validate_ref_preflight
+        result = validate_ref_preflight(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'proof file closure')
+        return result
+    if layout == 'campaign-prelaunch-v1':
+        from deploy_test_native_prelaunch import validate_prelaunch
+        result = validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'proof file closure')
+        return result
+    if layout == 'campaign-cleanup-prepare-v1':
+        from deploy_test_native_prepare import validate_prepare
+        result = validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'prepare proof file closure')
+        return result
+    if layout == 'campaign-dispatch-refusal-v1':
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
+             and proof.get('purpose') is None and not proof.get('recovered_runtime')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text, 'dispatch refusal root binding')
+        dispatch_refusal(root, runs, campaign, request, receipt, adapter, confirmed, document, bound)
+        need(used == set(bindings), 'dispatch refusal proof file closure')
+        return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+                'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
+                'participants': [], 'native_audit_seals': {}, 'retained_services': [],
+                'credit_granted': False, 'financial_cleanup_credit': False}
     if layout == 'campaign-startup-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
@@ -675,9 +873,25 @@ def validate(receipt, owner, proof):
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [],
                 'startup_processes': identities, 'credit_granted': False}
+    if layout == 'campaign-preflight-refusal-v1':
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
+             and proof.get('purpose') is None and not proof.get('recovered_runtime')
+             and not proof.get('current_hub_retirement')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text, 'preflight root binding')
+        refused = preflight_refusal_campaign(root, runs, campaign, request, receipt, adapter, confirmed,
+                                             document, bound, proof)
+        need(used == set(bindings), 'preflight proof file closure')
+        return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+                'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
+                'participants': [], 'native_audit_seals': {}, 'retained_services': [],
+                'preflight_refusals': refused, 'credit_granted': False}
     preallocation = layout == 'campaign-preallocation-v1'
+    mixed = layout == 'campaign-mixed-preallocation-v1'
+    staged_preallocation = preallocation or mixed
     supervision = None
-    if layout in {'campaign-v1','campaign-preallocation-v1'}:
+    if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and (reference.get('native_directory') == str(campaign) or preallocation
@@ -703,7 +917,7 @@ def validate(receipt, owner, proof):
              <= receipt['finished_at'] <= confirmed, 'campaign terminal clocks')
         pending_hubs = summary.get('shared_transport_cleanup_pending')
         need(not any(summary.get(key) for key in ('cleanup_ticket_failure', 'shared_inventory_failed'))
-             and (not pending_hubs or preallocation and pending_hubs is True
+             and (not pending_hubs or staged_preallocation and pending_hubs is True
                   and isinstance(proof.get('current_hub_retirement'),dict)),
              'campaign shared cleanup pending')
         cohorts = summary.get('startup_cohorts', [])
@@ -721,10 +935,27 @@ def validate(receipt, owner, proof):
         need(published, 'campaign publication or publisher cleanup')
         for path in publication:
             bound(path)
-        if preallocation:
+        if staged_preallocation:
+            expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
+            if mixed:
+                from deploy_test_historical_custody import KIND as CUSTODY_KIND
+                skips = request.get('skips', {})
+                need(isinstance(skips, dict) and not set(skips).intersection(checks)
+                     and all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
+                             and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
+                             and v.get('current_binding', {}).get('source') == receipt['source']
+                             and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
+                             and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
+                             for v in skips.values()),
+                     'mixed original exclusion inventory')
+            else:
+                skips = request.get('skips')
+                need(isinstance(skips, dict) and not set(checks).intersection(skips),
+                     'preallocation active/skip inventory')
+            expected_cases.update(dict.fromkeys(skips, 'SKIP'))
             need(summary['status'] in {'failed','cancelled'} and not proof.get('purpose')
-                 and not proof.get('recovered_runtime') and not summary.get('workspace_binding')
-                 and receipt['cases']==dict.fromkeys(checks,'UNVERIFIED'),
+                 and not proof.get('recovered_runtime') and (mixed or not summary.get('workspace_binding'))
+                 and receipt['cases'] == expected_cases,
                  'preallocation outcomes')
             supervision=preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound)
             if pending_hubs:
@@ -756,7 +987,7 @@ def validate(receipt, owner, proof):
             for index, line in enumerate(lines):
                 match = re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line.strip())
                 if match:
-                    if preallocation:
+                    if staged_preallocation:
                         need(match[1] == receipt['source']['head'], 'preallocation foreign log ref')
                     ref = match[1]
                 if line.strip() == 'mode: --infra-probe (strict barrier, no LLM / run_benchmark)':
@@ -770,7 +1001,7 @@ def validate(receipt, owner, proof):
                     match = re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.', owner_line)
                     canary_links[Path(args[2])] = {'parent': one[0], 'ref': ref, 'owner': match[1] if match else None}
                     infra = False
-                if preallocation:
+                if preallocation or mixed and not one:
                     match=re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory[.]',
                                        lines[index+1].strip() if index+1<len(lines) else '')
                     need(match is not None, 'preallocation controller owner')
@@ -809,15 +1040,35 @@ def validate(receipt, owner, proof):
     isolated = proof.get('purpose') == 'isolated-validation'
     need(proof.get('purpose') in {None, 'isolated-validation'} and (not isolated or layout == 'campaign-v1'), 'proof purpose')
     retained, audit_seals, recovered, excluded = {}, {}, {}, {}
+    zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    admission_parents = frozenset()
+    if layout == 'campaign-admission-rejected-v1':
+        from deploy_test_native_admission import validate_campaign
+        admission_parents = validate_campaign(receipt, proof, root, runs, parents, participants, bound, document)
+    cancelled_parent_zero = frozenset()
+    if 'cancelled_parent_admission' in proof:
+        from deploy_test_native_cancelled_parent import cancelled_parent_admission
+        cancelled_parent_zero = cancelled_parent_admission(receipt, proof, adapter, root, parents, participants, bound, document, tree)
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
     for fleet in sorted(participants):
         benches = json.loads(bound(fleet / '_batch/benches.json'))
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
-        run = document(fleet / '_batch/run.json', RUN_RECORD_MAX_BYTES)  # Bind original outcomes without regrading them.
+        run_path = fleet / '_batch/run.json'
+        if isolated or preallocation or mixed or fleet in admission_parents:
+            run = document(run_path, RUN_RECORD_MAX_BYTES)
+        else:
+            # Native task logs can exceed the small control-receipt cap. Preserve
+            # the full hash and JSON-object contract without loading those logs.
+            from native_json_evidence import verify_native_object
+            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
+            verify_native_object(run_path, bindings.get(str(run_path)))
+            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
+            used.add(str(run_path))
+            run = None
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
@@ -831,6 +1082,25 @@ def validate(receipt, owner, proof):
              and life['status'] in {'verified', 'failed'}, 'native terminal lifecycle')
         zero_allocation = False
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
+        if mixed and fleet in parents:
+            absent = [not p.exists() and not p.is_symlink() for p in (provenance_path, matrix_path)]
+            if all(absent):
+                need(life['status'] == 'failed' and isolated_canary_release(
+                    fleet, life, benches, run, root, receipt, proof, preallocation_links.get(fleet), bound, tree),
+                    'mixed preallocation zero resources')
+                need(not Path('/proc', fleet.name.rsplit('-', 1)[-1]).exists(), 'mixed preallocation controller PID present')
+                for bench in benches:
+                    for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'):
+                        artifact = fleet / bench['name'] / name
+                        need(not artifact.exists() and not artifact.is_symlink(), 'mixed preallocation task artifact present')
+                need(document(fleet / '_batch/disposable-cleanup.json').get('successful_runtime_inferred') is False,
+                     'mixed preallocation runtime inference is not evidence')
+                zero_parents.add(fleet)
+                zero_allocation = True
+            else:
+                need(all(p.is_file() and not p.is_symlink() for p in (provenance_path, matrix_path)),
+                     'mixed execution evidence incomplete')
+                graded_parents.add(fleet)
         if preallocation:
             need(fleet in parents and life['status']=='failed'
                  and isolated_canary_release(fleet,life,benches,run,root,receipt,proof,
@@ -841,9 +1111,13 @@ def validate(receipt, owner, proof):
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+        admission_parent = fleet in admission_parents
+        if admission_parent:
+            from deploy_test_native_admission import validate_parent
+            validate_parent(fleet, life, benches, run, root, bound, document, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if preallocation or failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
-            pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
+        if (preallocation or (mixed and fleet in zero_parents) or (failed_canary and zero_allocation) or admission_parent or fleet in cancelled_parent_zero) and not provenance_path.exists() and not matrix_path.exists():
+            pass  # Positive native admission boundary and sealed ownership; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
             need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)
@@ -907,7 +1181,10 @@ def validate(receipt, owner, proof):
         retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': hub_owner,
                              'disposition': meta['hub_disposition']}
         audit_seals[str(audit)] = seal
-    if preallocation:
+    if mixed:
+        need(zero_parents and graded_parents and zero_parents | graded_parents == set(parents),
+             'mixed cleanup requires both zero-allocation and graded parents')
+    if staged_preallocation:
         need(set(supervision['term_sent']) <= {int(r['owner']['pid'])for r in retained.values()}
              and all(any(v==dict(pid=pid,status=15)for v in supervision['reaped'])for pid in supervision['term_sent']),
              'preallocation unexpected supervised termination')
@@ -933,9 +1210,10 @@ def validate(receipt, owner, proof):
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
             'participants': sorted(map(str, participants)), 'native_audit_seals': audit_seals,
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
-    if preallocation:
-        result['preallocation_source_authorities']={str(k):v['source_authority']for k,v in preallocation_links.items()}
-    if preallocation and proof.get('current_hub_retirement'):
+    if staged_preallocation:
+        result['preallocation_source_authorities']={str(k):v['source_authority'] for k,v in preallocation_links.items()
+                                                     if preallocation or k in zero_parents}
+    if staged_preallocation and proof.get('current_hub_retirement'):
         result['current_hub_retirement']=copy.deepcopy(proof['current_hub_retirement'])
     if isolated:
         need(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')
@@ -1050,7 +1328,7 @@ def reconcile(state, occurrence_id, proof):
             # promoted to triage. Its retained owner still requires exact proof.
             need(not state.get('running') and 'live_failures' not in state and not CANCEL.is_set()
                  and state.get('attempts') and state['attempts'][-1].get('stale') is True
-                 and proof.get('layout') == 'campaign-startup-v1', 'quiescent stale startup required')
+                 and proof.get('layout') in {'campaign-startup-v1', 'campaign-prelaunch-v1'}, 'quiescent stale startup required')
             candidates = [r for r in latest_receipts(state).values()
                           if r.get('token') == occurrence_id]
             need(len(candidates) == 1, 'stale operation identity')

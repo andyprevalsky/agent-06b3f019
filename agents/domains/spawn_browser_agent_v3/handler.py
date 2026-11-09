@@ -87,6 +87,7 @@ from providers.rose.speed import bind_agent_speed
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
+from utils.browser_identity import logical_browser_task_id as _logical_browser_task_id
 from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
@@ -143,6 +144,7 @@ from .config import (
 )
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
+from .phone import bind_approved_message
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
@@ -263,11 +265,6 @@ logger = structlog.get_logger()
 # Resume marker for a sign-in-help request the user declined.
 AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
-
-
-def _logical_browser_task_id(agent_id: str) -> str:
-    """One browser identity per GP; activity/tool IDs remain separate."""
-    return str(uuid_module.uuid5(uuid_module.NAMESPACE_URL, f"rose-browser-owner:{agent_id}"))
 
 
 def _browser_task_terminal_metadata(
@@ -6174,6 +6171,7 @@ async def spawn_browser_agent_activity_v3(
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
     browser_pool = browser_pool_for_agent_model(agent_model)
@@ -6238,6 +6236,7 @@ async def spawn_browser_agent_activity_v3(
         browser_pool=browser_pool,
         inbox_address=inbox_address,
         await_owner_cleanup=await_owner_cleanup,
+        approved_message_intent=approved_message_intent,
     )
 
 
@@ -7870,6 +7869,7 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_pool: str = BROWSER_USE_PRICING_POOL,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -8014,7 +8014,12 @@ async def _spawn_browser_agent_activity_v3_real(
                 ),
             )
 
-    from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
+    from browser_tools.dom_service import (
+        ActionHistory,
+        DOMService,
+        browser_downloads_path_for_provider,
+        keep_receipt_image_urls,
+    )
     from browser_tools.humanizer import BrowserHumanizer
     from helpers.llm import check_progress
 
@@ -8220,18 +8225,7 @@ async def _spawn_browser_agent_activity_v3_real(
         # Receipt image URLs are typed text, not raster attachments. Preserve
         # only their HTTP(S) strings through the same secret-value redactor;
         # arbitrary nested media and data-image payloads remain suppressed.
-        visible_payment = result.get("payment_request")
-        if isinstance(payment_response, dict) and isinstance(visible_payment, dict):
-            items_key = "line_items" if "line_items" in payment_response else "lineItems"
-            original_items = payment_response.get(items_key)
-            visible_items = visible_payment.get(items_key)
-            if isinstance(original_items, list) and isinstance(visible_items, list):
-                for original_item, visible_item in zip(original_items, visible_items):
-                    if not isinstance(original_item, dict) or not isinstance(visible_item, dict):
-                        continue
-                    image_url = original_item.get("image_url")
-                    if isinstance(image_url, str) and image_url.startswith(("https://", "http://")):
-                        visible_item["image_url"] = _redact_activity_value(image_url)
+        keep_receipt_image_urls(payment_response, result.get("payment_request"), _redact_activity_value)
         if "browser_output_schema" in result:
             result["browser_output_schema"] = _model_visible_browser_output_schema(
                 result["browser_output_schema"], _redact_activity_value
@@ -8937,6 +8931,8 @@ async def _spawn_browser_agent_activity_v3_real(
             # is on, not the start URL's; the first step's realm transition
             # prepares the start URL's realm.
             user_profile, auth_realm = _resume_context_from_session_info(session_data, auth_realm)
+        if approved_message_intent:
+            await bind_approved_message(config, user_id, task_id, approved_message_intent)
         _record_timing("session_init", t_session)
         # Durable Tilion downloads from before a write-lock/payment/auth pause,
         # keyed by the session this activity actually runs on.
@@ -9822,7 +9818,6 @@ async def _spawn_browser_agent_activity_v3_real(
                 raise RuntimeError("Approved payment card has no pending browser tool result to complete")
         failed_credential_prep_realms: Dict[str, str] = {}
         credential_preparation_error: Optional[str] = None
-        pending_credential_reload_realm: Optional[str] = None
         action_redaction_refs: Optional[List[Dict[str, str]]] = None
 
         def _credential_binding() -> tuple:
@@ -9902,6 +9897,8 @@ async def _spawn_browser_agent_activity_v3_real(
 
         async def _prepare_credentials_for_url_unquarantined(
             target_url: str,
+            *,
+            restore_browser_state: bool = True,
         ) -> Optional[Dict[str, Any]]:
             """Atomically activate every saved credential type for a new realm."""
             target_realm = auth_realm_from_url(target_url)
@@ -9917,6 +9914,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     user_id=user_id,
                     session_id=session_id,
                     target_url=target_url,
+                    **({"restore_browser_state": False} if not restore_browser_state else {}),
                 )
             except Exception as prep_error:
                 failed_credential_prep_realms[target_realm] = (
@@ -9924,6 +9922,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 raise
             realm_worker_apply = tilion_worker_apply_payload(payload)
+            if not restore_browser_state and (realm_worker_apply or payload.get("cookies_injected")):
+                raise RuntimeError("Inventory-only credential preparation returned browser-state mutation")
             if realm_worker_apply:
                 await apply_tilion_worker_state(playwright_browser, realm_worker_apply)
             realm_state = await build_realm_credential_state(
@@ -9980,7 +9980,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
             return summary
 
-        async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+        async def _prepare_credentials_for_url(
+            target_url: str, *, restore_browser_state: bool = True
+        ) -> Optional[Dict[str, Any]]:
             previous_auth_realm = auth_realm
             if _credential_binding() != active_credential_binding:
                 # A replaced browser or selected credential invalidates both
@@ -9992,21 +9994,22 @@ async def _spawn_browser_agent_activity_v3_real(
                 # Invalidate unrelated context before discovery, including a
                 # return to a quarantined realm. Missing inventory is unknown.
                 _activate_realm_credentials(unknown_realm_credential_state(target_realm), {})
+            async def prepare_target(url: str) -> Optional[Dict[str, Any]]:
+                return await _prepare_credentials_for_url_unquarantined(
+                    url, restore_browser_state=restore_browser_state
+                )
+
             return await prepare_optional_realm_credentials(
                 target_url=target_url,
                 current_auth_realm=previous_auth_realm,
                 failed_realms=failed_credential_prep_realms,
-                prepare_credentials=_prepare_credentials_for_url_unquarantined,
+                prepare_credentials=prepare_target,
             )
 
         async def _auth_context_for_url(observed_url: str) -> Dict[str, Any]:
             """Publish only safe inventory for an actual browser tool observation."""
-            nonlocal pending_credential_reload_realm
             realm = auth_realm_from_url(observed_url)
-            realm_changed = bool(realm and not auth_realm_matches_url(auth_realm, observed_url))
-            prepared = await _prepare_credentials_for_url(observed_url)
-            if realm_changed and prepared is not None and not prepared.get("credential_preparation_error"):
-                pending_credential_reload_realm = auth_realm
+            await _prepare_credentials_for_url(observed_url, restore_browser_state=False)
             if not realm:
                 # Non-web pages have no authentication inventory. In particular,
                 # about:blank must not inherit another tab's realm.
@@ -10338,41 +10341,21 @@ async def _spawn_browser_agent_activity_v3_real(
             step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
 
-            # Clicks, form submissions, and server redirects can cross an auth
-            # realm without a goto tool call. Prepare that realm before the
-            # model observes or interacts with it, then reload once so newly
-            # injected cookies and origin state participate in the first page
-            # request the agent acts on.
+            # A redirect or popup has already started its authentication
+            # transaction. Refresh its credential inventory without replacing
+            # live cookies or navigating its transaction URL again.
             observed_auth_realm = auth_realm_from_url(current_url)
             observed_realm_changed = observed_auth_realm != auth_realm and not auth_realm_matches_url(
                 auth_realm, current_url
             )
-            reload_prepared_realm = bool(
-                pending_credential_reload_realm and auth_realm_matches_url(pending_credential_reload_realm, current_url)
-            )
-            pending_credential_reload_realm = None
             if _credential_binding() != active_credential_binding or observed_realm_changed:
-                prepared_realm = await _prepare_credentials_for_url(current_url)
-                reload_prepared_realm = bool(
-                    observed_realm_changed
-                    and prepared_realm is not None
-                    and not prepared_realm.get("credential_preparation_error")
+                prepared_realm = await _prepare_credentials_for_url(
+                    current_url, restore_browser_state=False
                 )
-            if reload_prepared_realm:
-                from browser_use.browser.events import NavigateToUrlEvent
-
-                reload_event = dom_service.session.event_bus.dispatch(
-                    NavigateToUrlEvent(url=current_url, wait_until="commit")
-                )
-                await reload_event
-                await reload_event.event_result(raise_if_any=True, raise_if_none=False)
-                await wait_for_navigation_ready(dom_service, url=current_url)
-                logger.info(
-                    "Reloaded page after redirected realm credential preparation",
-                    auth_realm=auth_realm,
-                    current_url=current_url,
-                )
-                continue
+                if prepared_realm is not None and not prepared_realm.get("credential_preparation_error"):
+                    # Reobserve under the newly hydrated secret-redaction
+                    # scope; the page itself remains untouched.
+                    continue
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
@@ -13743,6 +13726,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     activity_args.append(getattr(workflow_instance, "model", None))
                     activity_args.append(inbox_address)
                     activity_args.append(True)
+                    approved_message_intent = tool_call.get("approvedMessageIntent")
+                    if isinstance(approved_message_intent, str) and approved_message_intent:
+                        activity_args.append(approved_message_intent)
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,

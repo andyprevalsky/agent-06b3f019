@@ -25,6 +25,19 @@ export type {
   PhoneHarnessSession,
 } from './phoneHarnessTypes';
 
+/** Internal callers may shorten transport deadlines; no caller can extend native defaults. */
+function boundedTimeout(normal: number, maximum?: number): number {
+  if (maximum === undefined) return normal;
+  if (!Number.isSafeInteger(maximum) || maximum <= 0 || maximum > 60000)
+    throw new PhoneHarnessError(
+      'Invalid internal phone timeout',
+      null,
+      'invalid_argument',
+      'rejected'
+    );
+  return Math.min(normal, maximum);
+}
+
 export class PhoneHarnessClient {
   readonly #apiKey: string;
   readonly #apiUrl: string;
@@ -78,6 +91,15 @@ export class PhoneHarnessClient {
         const entry = record(value);
         return { id: string(entry.id), label: string(entry.label), state: string(entry.state) };
       });
+  }
+  /** Destructive owner action. Caller must prove idle custody and never replay an unknown POST. */
+  async resetDevice(deviceId: string): Promise<{ accepted: true }> {
+    await exchange(this.#fetch, `${this.#apiUrl}/me/devices/${segment(deviceId)}/reset`, {
+      method: 'POST',
+      token: this.#apiKey,
+      allowEmptySuccess: true,
+    });
+    return { accepted: true };
   }
   async create(
     deviceId: string,
@@ -170,7 +192,8 @@ export class PhoneHarnessClient {
   async perform(
     value: PhoneHarnessSession,
     operation: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    maxTimeoutMs?: number
   ): Promise<unknown> {
     const grant = this.control(value);
     if (
@@ -189,9 +212,12 @@ export class PhoneHarnessClient {
     if (typeof args !== 'object' || args === null || Array.isArray(args))
       invalid('invalid_argument');
     const textLength = operation === 'input.text' && typeof args.s === 'string' ? args.s.length : 0;
-    const timeoutMs = operation.startsWith('apps.')
-      ? 90_000
-      : Math.min(240_000, Math.max(60_000, textLength * 200 + 30_000));
+    const timeoutMs = boundedTimeout(
+      operation.startsWith('apps.')
+        ? 90_000
+        : Math.min(240_000, Math.max(60_000, textLength * 200 + 30_000)),
+      maxTimeoutMs
+    );
     const raw = await exchange(this.#fetch, `${grant.url}/op`, {
       method: 'POST',
       token: grant.token,
@@ -232,11 +258,12 @@ export class PhoneHarnessClient {
     }
     return data.result;
   }
-  async frame(value: PhoneHarnessSession): Promise<Uint8Array> {
+  async frame(value: PhoneHarnessSession, maxTimeoutMs?: number): Promise<Uint8Array> {
     const grant = this.control(value);
     return (await exchange(this.#fetch, `${grant.url}/frame.png`, {
       token: grant.token,
       png: true,
+      timeoutMs: boundedTimeout(60000, maxTimeoutMs),
     })) as Uint8Array;
   }
   private account(

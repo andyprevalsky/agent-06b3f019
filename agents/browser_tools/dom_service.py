@@ -586,6 +586,28 @@ def offcenter_click_point(center_x: float, center_y: float, width: float, height
     )
 
 
+def keep_receipt_image_urls(receipt: Any, visible: Any, project: Any) -> None:
+    """Restore a payment receipt's typed HTTP(S) image URLs onto its projection.
+
+    Receipt image URLs are text the agent copied from the page, not raster
+    attachments; the private-entry media policy must not erase them from the
+    request it already made. Each URL still passes through ``project``.
+    """
+    if not isinstance(receipt, dict) or not isinstance(visible, dict):
+        return
+    items_key = "line_items" if "line_items" in receipt else "lineItems"
+    original_items = receipt.get(items_key)
+    visible_items = visible.get(items_key)
+    if not isinstance(original_items, list) or not isinstance(visible_items, list):
+        return
+    for original, visible_item in zip(original_items, visible_items):
+        if not isinstance(original, dict) or not isinstance(visible_item, dict):
+            continue
+        url = original.get("image_url")
+        if isinstance(url, str) and url.startswith(("https://", "http://")):
+            visible_item["image_url"] = project(url)
+
+
 @dataclass
 class ActionHistoryEntry:
     """A single action in the history with both index and coordinate representations.
@@ -658,6 +680,14 @@ class ActionHistory:
                     safe_entry[key]["formatted_state"] = self._dom_service.model_visible_value(value["formatted_state"])
                 else:
                     safe_entry[key] = self._dom_service.model_visible_value(value)
+        if entry.get("action") == "request_payment_card":
+            # Every history read re-projects; a later private entry must not
+            # rewrite the card request this step already made (agent ce9d2ae6).
+            project = self._dom_service.model_visible_value
+            keep_receipt_image_urls(entry.get("params"), safe_entry.get("params"), project)
+            result = entry.get("result")
+            if isinstance(result, dict) and isinstance(safe_entry.get("result"), dict):
+                keep_receipt_image_urls(result.get("payment_request"), safe_entry["result"].get("payment_request"), project)
         if not self._dom_service.secret_values_used and entry.get("screenshot"):
             safe_entry["screenshot"] = entry["screenshot"]
         # These are harness-owned mechanics, rather than page echoes. A CVV
@@ -1021,19 +1051,7 @@ class DOMService:
         if action_name == "request_payment_card":
             # Typed operational receipt text must survive every action projection,
             # before the activity's final return. Raster/media policy stays generic.
-            payment = result.get("payment_request")
-            visible_payment = safe.get("payment_request")
-            if isinstance(payment, dict) and isinstance(visible_payment, dict):
-                items_key = "line_items" if "line_items" in payment else "lineItems"
-                original_items = payment.get(items_key)
-                visible_items = visible_payment.get(items_key)
-                if isinstance(original_items, list) and isinstance(visible_items, list):
-                    for original, visible in zip(original_items, visible_items):
-                        if not isinstance(original, dict) or not isinstance(visible, dict):
-                            continue
-                        url = original.get("image_url")
-                        if isinstance(url, str) and url.startswith(("https://", "http://")):
-                            visible["image_url"] = self.model_visible_value(url)
+            keep_receipt_image_urls(result.get("payment_request"), safe.get("payment_request"), self.model_visible_value)
         if action_name in {"screenshot", "read_browser_state"} and not self.secret_values_used:
             # Only these action outputs contain trusted raster transport.
             # A coincidental CVV in PNG base64 is not a page-text readback.
@@ -1326,6 +1344,20 @@ class DOMService:
                 except (asyncio.CancelledError, Exception):
                     pass
             try:
+                # Stop this session's periodic storage writer before the final
+                # SaveStorageStateEvent. Python 3.11 wait_for can consume a
+                # cancellation when a CDP reply wins the race, leaving the
+                # native watchdog's one-shot cancel waiting on its next poll.
+                watchdog = getattr(session, "_storage_state_watchdog", None)
+                monitor = getattr(watchdog, "_monitoring_task", None)
+                if isinstance(monitor, asyncio.Task) and monitor is not asyncio.current_task():
+                    while not monitor.done():
+                        monitor.cancel()
+                        await asyncio.wait({monitor}, timeout=0.05)
+                    if not monitor.cancelled():
+                        error = monitor.exception()
+                        if error is not None:
+                            logger.warning(f"Storage monitor stopped with error: {error}")
                 # keep_alive prevents BrowserStopEvent from stopping a remote
                 # provider, including sessions discovered from their CDP URL.
                 await session.stop()

@@ -214,7 +214,7 @@ function parseEachSourceFilters(
   };
 }
 
-export function validateGrepInput(rawParams: GrepParams): ValidatedGrepInput {
+export async function validateGrepInput(rawParams: GrepParams): Promise<ValidatedGrepInput> {
   const params = dropNullParams(rawParams);
   for (const key of Object.keys(params)) {
     if (!ALLOWED_GREP_KEYS.has(key)) {
@@ -245,7 +245,7 @@ export function validateGrepInput(rawParams: GrepParams): ValidatedGrepInput {
     );
   }
   // Fix 2: reject ReDoS-catastrophic patterns before they reach Postgres `~`.
-  const safety = checkPatternSafety(normalizedPattern, flags);
+  const safety = await checkPatternSafety(normalizedPattern, flags);
   if (!safety.ok) {
     throw new InvalidPatternError(safety.reason);
   }

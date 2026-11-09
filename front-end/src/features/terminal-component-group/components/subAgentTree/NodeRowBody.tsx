@@ -14,7 +14,8 @@ interface NodeRowBodyProps {
   goalMaxChars?: number;
   /** If true, allows goal to flex and truncate with ellipsis (used for full tree rows). */
   goalFlex?: boolean;
-  onClick: () => void;
+  /** Unset: nothing to open (no pointer, no hover, no chevron). */
+  onClick?: () => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }
@@ -47,13 +48,15 @@ export function NodeRowBody({
   return (
     <div
       className={cn(
-        'flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-[#2f2f2c] rounded',
+        'flex items-center gap-1 py-0.5 rounded',
+        onClick && 'cursor-pointer hover:bg-gray-100 dark:hover:bg-[#2f2f2c]',
         node.status === 'COMPLETED' && 'text-gray-500',
         node.status === 'FAILED' && 'text-red-500',
         node.status === 'COST_LIMIT_REACHED' && 'text-amber-500',
         node.status === 'OUT_OF_CREDITS' && 'text-red-500',
       )}
       onClick={onClick}
+      data-navigable={onClick ? 'true' : 'false'}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
     >
@@ -79,7 +82,9 @@ export function NodeRowBody({
         <FailureChip failureContext={node.failureContext} />
       )}
       <GoalText node={node} goalMaxChars={goalMaxChars} goalFlex={goalFlex} />
-      <ChevronRight className="h-4 w-4 flex-shrink-0 text-gray-400 dark:text-gray-500" />
+      {onClick && (
+        <ChevronRight className="h-4 w-4 flex-shrink-0 text-gray-400 dark:text-gray-500" />
+      )}
     </div>
   );
 }

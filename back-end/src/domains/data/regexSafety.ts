@@ -4,10 +4,17 @@
  * User/model-supplied regex flows into Postgres `~`, whose backtracking engine
  * will not honor statement_timeout mid-match — so a catastrophic pattern is a
  * DoS. And JS `RegExp` (used for validation) accepts constructs Postgres ARE
- * does not. These pure helpers gate and normalize the pattern before it runs.
+ * does not. These helpers gate and normalize the pattern before it runs.
+ *
+ * The analyzer runs off the event loop: recheck's `check` uses its native agent
+ * subprocess (or a worker thread), while `checkSync` parks the main thread on
+ * Atomics.wait for up to the whole deadline. One shared backend serves every
+ * agent's grep, so a synchronous 1 s analysis froze all requests; concurrent
+ * greps stacked those freezes into a 6.7 s outage that dropped keep-alive
+ * sockets (docs/rca/cases/2026-11-08-grep-regex-safety-blocked-event-loop.md).
  */
 
-import { checkSync } from 'recheck';
+import { check } from 'recheck';
 
 import { isClearlyAtMostQuadraticPattern } from './regexSafetyProof';
 
@@ -58,45 +65,111 @@ function isClearlyLinearPattern(source: string): boolean {
   return true;
 }
 
-type PatternAnalyzer = typeof checkSync;
+/** A finite union of nonempty fixed literal strings has no repetition frontier. */
+function isFiniteLiteralAlternation(source: string, flags: string): boolean {
+  if (!/^[ims]*$/.test(flags)) return false;
+  let branchLength = 0;
+  let hasAlternation = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '\\') {
+      index += 1;
+      if (index === source.length || !'\\^$.*+?()[]{}|'.includes(source[index])) return false;
+      branchLength += 1;
+    } else if (char === '|') {
+      if (branchLength === 0) return false;
+      hasAlternation = true;
+      branchLength = 0;
+    } else {
+      if ('^$.*+?()[]{}'.includes(char)) return false;
+      branchLength += 1;
+    }
+  }
+  return hasAlternation && branchLength > 0;
+}
+
+type PatternAnalyzer = (
+  source: string,
+  flags: string,
+  params: { timeout: number; signal: AbortSignal }
+) => ReturnType<typeof check>;
 type PatternSafetyControl = number | PatternAnalyzer;
+
+// recheck starts its native agent on first use without memoizing the spawn, so
+// concurrent first calls each start an agent and all but one leak. One shared
+// warm-up call owns that spawn; it counts against the caller's deadline.
+let analyzerWarmup: Promise<unknown> | undefined;
+function warmAnalyzer(): Promise<unknown> {
+  analyzerWarmup ??= check('a', '', {
+    timeout: RECHECK_TIMEOUT_MS,
+    signal: AbortSignal.timeout(RECHECK_TIMEOUT_MS),
+  }).catch(() => undefined);
+  return analyzerWarmup;
+}
+
+/**
+ * Settle with `work`, or with null at the deadline. recheck does not settle a
+ * call whose agent process died, so its own timeout and abort are not enough.
+ */
+async function beforeDeadline<T>(work: Promise<T>, deadlineAt: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Classify a regex with `recheck` and reject genuinely dangerous shapes
  * (exponential, or polynomial degree > 2). Quadratic patterns like
  * `meeting.*tomorrow` stay allowed so we don't nerf realistic queries.
  */
-export function checkPatternSafety(
+export async function checkPatternSafety(
   source: string,
   flags: string,
   control: PatternSafetyControl = RECHECK_TIMEOUT_MS
-): PatternSafety {
+): Promise<PatternSafety> {
   if (source.length > MAX_PATTERN_LENGTH) {
     return {
       ok: false,
       reason: `Pattern too long (${source.length} chars, max ${MAX_PATTERN_LENGTH}).`,
     };
   }
-  const analyze = typeof control === 'function' ? control : checkSync;
+  const analyze: PatternAnalyzer = typeof control === 'function' ? control : check;
   const timeoutMs = typeof control === 'number' ? control : RECHECK_TIMEOUT_MS;
   // An explicitly supplied analyzer is a test seam for fail-closed behavior,
   // so it must run even when the pattern is in the locally proven subset.
   if (
     typeof control !== 'function' &&
     typeof flags === 'string' &&
-    (isClearlyLinearPattern(source) || isClearlyAtMostQuadraticPattern(source, flags))
+    (isClearlyLinearPattern(source) ||
+      isFiniteLiteralAlternation(source, flags) ||
+      isClearlyAtMostQuadraticPattern(source, flags))
   ) {
     return { ok: true };
   }
-  // Retries share one wall-clock deadline. Each checkSync invocation otherwise
+  // Retries share one wall-clock deadline. Each analyzer invocation otherwise
   // starts a fresh timeout, which would multiply request-path latency by the
-  // retry count under load.
+  // retry count under load. recheck's own timeout starts only once its agent
+  // runs the analysis, so concurrent requests queued behind busy cores (or an
+  // agent that died) would wait without bound; the deadline is enforced in
+  // wall-clock time and the pattern fails closed.
   const deadlineAt = Date.now() + timeoutMs;
-  const runAnalyzer = () => {
+  if (typeof control !== 'function') {
+    await beforeDeadline(warmAnalyzer(), deadlineAt);
+  }
+  const runAnalyzer = async () => {
     const remainingMs = deadlineAt - Date.now();
     if (remainingMs <= 0) return null;
     try {
-      return analyze(source, flags, { timeout: remainingMs });
+      return await beforeDeadline(
+        analyze(source, flags, { timeout: remainingMs, signal: AbortSignal.timeout(remainingMs) }),
+        deadlineAt
+      );
     } catch {
       return null;
     }
@@ -105,12 +178,12 @@ export function checkPatternSafety(
   // shared deadline or accepting an unclassified pattern. A third unknown
   // still fail-closes — the guard exists to keep catastrophic regex out of
   // Postgres.
-  let diagnostics = runAnalyzer();
+  let diagnostics = await runAnalyzer();
   if (diagnostics === null || diagnostics.status === 'unknown') {
-    diagnostics = runAnalyzer();
+    diagnostics = await runAnalyzer();
   }
   if (diagnostics === null || diagnostics.status === 'unknown') {
-    diagnostics = runAnalyzer();
+    diagnostics = await runAnalyzer();
   }
   if (diagnostics === null || diagnostics.status === 'unknown') {
     return unclassifiedPatternRejection();

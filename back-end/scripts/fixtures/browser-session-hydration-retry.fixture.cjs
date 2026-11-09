@@ -531,7 +531,7 @@ async function run() {
   // Live hydration has no completion acknowledgement; a second caller must not adopt.
   const active = await fixture();
   failGoto = false;
-  let release, entered;
+  let release;
   pendingGoto = new Promise((r) => (release = r));
   const enteredPromise = new Promise((r) => (entered = r));
   onGotoBlocked = entered;
@@ -545,6 +545,7 @@ async function run() {
     });
     assert.equal(held.response, null);
     assert.equal(held.request.phase, 'hydrating');
+    assert(held.request.hydrationTargets?.length > 0, 'Held goto must have durable provenance');
     const before = creates; // The active owner retains its original immutable request.
     await prisma.toolSideEffect.update({
       where: { id: held.id },

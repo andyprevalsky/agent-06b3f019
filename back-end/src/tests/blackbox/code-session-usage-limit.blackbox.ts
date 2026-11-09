@@ -67,6 +67,7 @@ import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCreden
 import { claudeTaskIntegrationId } from '../../providers/claudeCodeSandboxAuth';
 import { localDeviceSandboxId } from '../../providers/localDevices/hub';
 import { buildLocalSessionEnvs } from '../../providers/localDevices/session';
+import { isolateFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 config();
 
@@ -94,6 +95,7 @@ const original = {
   connect: Sandbox.connect,
 };
 const createdIntegrations: string[] = [];
+let restoreCooldowns: (() => Promise<void>) | undefined;
 
 async function poolToken(name: 'claude_code' | 'gpt_code'): Promise<string> {
   const row = await prisma.integration.create({
@@ -138,6 +140,9 @@ async function otherLeasable(name: string): Promise<number> {
 }
 
 before(async () => {
+  // Funded-key cases run in-process with fake keys; HTTP cases use real,
+  // fixture-owned subscription rows, which this isolation leaves untouched.
+  restoreCooldowns = await isolateFundedKeyCooldowns();
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = join(fixtureDir, 'storage');
   // Shared funded keys (and the gateways a Claude Code sandbox would use)
@@ -156,30 +161,36 @@ before(async () => {
 });
 
 after(async () => {
-  for (const [key, value] of [
-    ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
-    ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
-    ['ANTHROPIC_API_KEY', saved.anthropic],
-    ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeKey],
-    ['OPENROUTER_API_KEY', saved.openrouter],
-    ['GPT_API_KEY', saved.gpt],
-    ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
-    ['AZURE_FOUNDRY_ENDPOINT', saved.foundryEndpoint],
-    ['AZURE_FOUNDRY_API_KEY', saved.foundryKey],
-    ['CODEX_AZURE_FOUNDRY_HOST', saved.codexAzureHost],
-  ] as const) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  try {
+    for (const [key, value] of [
+      ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
+      ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
+      ['ANTHROPIC_API_KEY', saved.anthropic],
+      ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeKey],
+      ['OPENROUTER_API_KEY', saved.openrouter],
+      ['GPT_API_KEY', saved.gpt],
+      ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
+      ['AZURE_FOUNDRY_ENDPOINT', saved.foundryEndpoint],
+      ['AZURE_FOUNDRY_API_KEY', saved.foundryKey],
+      ['CODEX_AZURE_FOUNDRY_HOST', saved.codexAzureHost],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    Object.assign(Sandbox, original);
+    await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
+    await prisma.codeSession.deleteMany({ where: { userId } });
+    await prisma.integration.deleteMany({ where: { id: { in: createdIntegrations } } });
+    await prisma.agent.deleteMany({ where: { userId } });
+    await prisma.user.deleteMany({ where: { userId } });
+    rmSync(fixtureDir, { recursive: true, force: true });
+  } finally {
+    try {
+      await restoreCooldowns?.();
+    } finally {
+      await prisma.$disconnect();
+    }
   }
-  Object.assign(Sandbox, original);
-  await __resetCodexFundedCooldown();
-  await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
-  await prisma.codeSession.deleteMany({ where: { userId } });
-  await prisma.integration.deleteMany({ where: { id: { in: createdIntegrations } } });
-  await prisma.agent.deleteMany({ where: { userId } });
-  await prisma.user.deleteMany({ where: { userId } });
-  rmSync(fixtureDir, { recursive: true, force: true });
-  await prisma.$disconnect();
 });
 
 // First, before the cases below leave pooled subscriptions of their own behind.

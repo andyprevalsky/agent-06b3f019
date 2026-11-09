@@ -13,6 +13,7 @@ import signal
 import threading
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,10 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+# The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
+# outer deploy worker (the local executor runs this suite inside a gate) would
+# make admission() demand that outer cycle's custody locator in-process.
+os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as cycle
 import deploy_test_worker as worker
@@ -461,6 +466,10 @@ class Cloud(unittest.TestCase):
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
+        # Offline: these fixtures never read the shared Tilion account (see CloudSharedProviderHeadroom).
+        offline=patch.object(cloud.provider_headroom,'live_probes',return_value={});offline.start();self.addCleanup(offline.stop)
+        # Offline: the frozen ref counts as pushed; deploy-cloud-smoke-speed covers the unpushed refusal.
+        pushed=patch.object(cloud,'origin_fetchable',return_value=True);pushed.start();self.addCleanup(pushed.stop)
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.runs=self.root/'runs';self.fleet=self.runs/'native-run'
         self.request={'token':'token','source':{'head':'a'*40,'digest':'frozen'},
@@ -700,6 +709,79 @@ class CloudCampaign(unittest.TestCase):
         self.seal_campaign(self.campaign)
         cases,_,cleaned,_=self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
         self.assertEqual('FAIL',cases['task-16']);self.assertEqual('PASS',cases['task-0']);self.assertTrue(cleaned)
+
+    def seal_native_lifecycle(self, fleet, *, teardown='0', benches='task-5', autoscaler='1'):
+        """Run the fleet's actual lifecycle writer for a controller that exited 1."""
+        text=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=text.index("<<'PY'\n",text.index('# Seal the lifecycle after provider audit'))
+        body=text[text.index('\n',start)+1:text.index('\nPY\n',start)]
+        owner=cycle.read(fleet/'_batch/lifecycle.json')['fleet_owner_token']
+        (fleet/'_batch/lifecycle.json').unlink()
+        subprocess.run([sys.executable,'-c',body,str(fleet),owner,fleet.name,str(self.root),'1',teardown,'0','1',
+                        autoscaler,str(self.root/'registry'),'0','1'],check=True,timeout=30,
+                       env={**os.environ,'CLOUDBENCH_AUTOSCALER_FAILED_BENCHES':benches})
+
+    def mass_agent_autoscaler_capacity_failure(self, **lifecycle):
+        """PR #1760 smoke: the task passed, its worker clone was capacity-denied, teardown was verified."""
+        fleet=self.runs/'fleet-5'
+        (fleet/'task-5/autoscaler.failed').write_text('Machine-count capacity unavailable for worker clone\n')
+        self.seal_native_lifecycle(fleet,**lifecycle)
+        self.summary['status']='failed';self.summary['jobs'][5].update(status='failed',controller_exit_code=1)
+        self.seal_campaign(self.campaign)
+        return self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
+
+    def test_autoscaler_capacity_failure_is_one_verified_failure_not_an_unverified_gate(self):
+        from deploy_test_result import validate
+        cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure()
+        self.assertEqual('FAIL',cases['task-5'])
+        self.assertEqual({name:'PASS' for name in self.request['checks'] if name!='task-5'},
+                         {k:v for k,v in cases.items() if k!='task-5'})
+        self.assertTrue(cleaned)
+        self.assertEqual('Machine-count capacity unavailable for worker clone',
+                         details['task-5']['mandatory_autoscaler_failure'])
+        result={**{k:self.request[k] for k in ('token','source','gate')},'cases':cases,'complete':True,
+                'cleanup_complete':cleaned,'reused':False}
+        self.assertEqual((cases,True),validate(result,self.request,1))
+        lifecycle=cycle.read(self.runs/'fleet-5/_batch/lifecycle.json')
+        self.assertEqual('failed',lifecycle['status'])  # existing consumers keep the run-level verdict
+        self.assertEqual((True,['task-5']),(lifecycle['cleanup_verified'],lifecycle['autoscaler_failed_benches']))
+
+    def test_autoscaler_failure_with_unverified_teardown_still_blocks_cleanup(self):
+        cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure(teardown='1')
+        self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+        self.assertIn('native cleanup was not verified',details['task-5']['unverified'])
+
+    def test_unattributed_failed_lifecycle_still_blocks_cleanup(self):
+        for benches in ('', 'task-5 not-requested'):
+            with self.subTest(benches=benches):
+                cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure(benches=benches)
+                self.assertEqual('failed',cycle.read(self.runs/'fleet-5/_batch/lifecycle.json')['status'])
+                self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+                self.assertIn('native cleanup was not verified',details['task-5']['unverified'])
+
+    def test_unreadable_autoscaler_reason_keeps_the_verified_failure(self):
+        (self.runs/'fleet-5/task-5/autoscaler.failed').write_text('x\n')
+        with patch.object(Path,'open',side_effect=PermissionError('denied')):
+            reason=self.cloud.autoscaler_reason(self.runs/'fleet-5/task-5')
+        self.assertEqual('mandatory autoscaler failed; autoscaler.failed unreadable',reason)
+
+    def test_unreadable_native_record_is_unverified_not_pass(self):
+        real=Path.read_bytes
+        def read_bytes(path):
+            if path.name=='cloudbench-run.json' and path.parent.name=='task-3':
+                raise PermissionError('denied')
+            return real(path)
+        with patch.object(Path,'read_bytes',read_bytes):
+            cases,details,_,_=self.campaign_collect()
+        self.assertEqual('UNVERIFIED',cases['task-3']);self.assertIn('unverified',details['task-3'])
+
+    def test_fleet_attributes_every_autoscaler_failure_branch_to_its_bench(self):
+        text=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=text.index('AUTOSCALER_FAILED_BENCHES=()\n')
+        loop=text[start:text.index('\ndone\n',start)]
+        self.assertNotIn('AUTOSCALER_FAILURE=1\n        ',loop.split('if [ "$autoscaler_bench_failed" = 1 ]')[0])
+        self.assertGreaterEqual(loop.count('autoscaler_bench_failed=1'),7)
+        self.assertIn('AUTOSCALER_FAILED_BENCHES+=("${CHILD_BENCH[$j]}")',loop)
 
     def test_execute_seventeen_tasks_crosses_real_capacity_and_receipt_boundary(self):
         import shutil
@@ -1555,6 +1637,155 @@ class Boxes(unittest.TestCase):
         self.assertIn('request control-project-threads', result['transport_receipt']['cli_error']['text'])
         self.assertIn('request control-project-threads', Path(result['transport_receipt']['cli_log']).read_text())
         self.assertEqual(1, len(self.calls_of('send')))  # no retry loop
+
+    @contextlib.contextmanager
+    def scripted_transport(self, cancel_after=None):
+        # Orchestration-only seam: preserve real envelopes, logs, absolute deadlines,
+        # and collector/parser behavior without paying OS startup for each fake CLI.
+        # Real run_cli deadline, signal and reap tests below remain subprocess-backed.
+        clock = [time.time()]
+        started = clock[0]
+        elapsed = [0.0]
+        events = []
+
+        def sleep(seconds):
+            elapsed[0] += seconds
+            clock[0] = started + elapsed[0]
+            if cancel_after is not None and elapsed[0] >= cancel_after:
+                events[-1]["cancel_elapsed"] = elapsed[0]
+                self.boxes.CANCEL.set()
+
+        def invoke(argv, *, timeout, completion_deadline=None):
+            config = cycle.read(self.config)
+            key = argv[1]
+            with self.calls.open('a') as stream:
+                stream.write(json.dumps(argv) + '\n')
+            if key == 'list' and '--all' not in argv:
+                key = 'list_page1'
+            reply = config.get(key, {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+            if isinstance(reply, list):
+                count = len(self.calls_of(key))
+                reply = reply[min(count - 1, len(reply) - 1)]
+            budget = min(timeout, max(0, completion_deadline - clock[0])) if completion_deadline is not None else timeout
+            events.append({'op': key, 'at': clock[0], 'budget': budget, 'deadline': completion_deadline})
+            duration = reply.get('sleep', 0)
+            if duration >= budget:
+                sleep(budget)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            sleep(duration)
+            return reply.get('rc', 0), json.dumps(reply.get('stdout', {})).encode(), reply.get('stderr', '').encode()
+
+        with patch.object(self.boxes, 'run_cli', side_effect=invoke), patch.object(self.boxes, 'time') as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.monotonic.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = sleep
+            yield events
+
+
+    def test_crash_between_send_and_persist_adopts_the_existing_turn_strict_scripted(self):
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        prompt = self.boxes.build_prompt(self.request, self.binding)
+        cycle.write(directory / 'state.json', {'token': 'tok-1', 'idempotency_key': 'tok-1', 'thread': 'ph-worker',
+            'host': self.host, 'worker_root': str(self.root.resolve()), 'deadline_at': time.time() + 30,
+            'prompt_sha256': __import__('hashlib').sha256(prompt.encode()).hexdigest(), 'sent_attempted_at': time.time(),
+            'turn_id': None, 'message_id': None, 'cli_log': str(directory / 'cli.log'), 'stderr_log': str(directory / 'stderr.log')})
+        self.configure(reply=self.reply(), read={'rc': 0, 'stdout': self.wrap({}, status='ready', messages=[
+            {'role': 'user', 'state': 'ready', 'text': 'unrelated', 'turnId': 'turn-0'},
+            {'role': 'user', 'state': 'ready', 'text': prompt, 'turnId': 'turn-7'}])})
+        result = self.run_adapter()
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
+        # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
+        self.configure(reply=self.reply()); self.calls.unlink()
+        with self.scripted_transport() as events:
+            result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
+        self.assertEqual('list', events[0]['op'])
+        self.assertTrue(all(event['op'] == 'read' for event in events[1:]))
+        self.assertEqual('send_indeterminate_unadopted', result['reason']); self.assertEqual([], self.calls_of('send'))
+        self.assertGreater(len(self.calls_of('read')), 1); self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        # a changed prompt under the same token is never resent
+        state = cycle.read(directory / 'state.json'); state['prompt_sha256'] = 'f' * 64; state['turn_id'] = None
+        cycle.write(directory / 'state.json', state); self.calls.unlink()
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual([], self.calls_of('send'))
+
+
+    def test_initial_send_slice_timeout_adopts_nested_read_without_second_send_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': .6}, read=[
+            {'sleep': .6}, {'rc': 0, 'stdout': self.nested_assignment()}])
+        started = time.time()
+        with self.scripted_transport() as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('native-evidence-unavailable',result['reason'])
+        self.assertEqual('turn-1',result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual(2, len(self.calls_of('read')))
+        send = self.calls_of('send')[0]
+        self.assertEqual('tok-1', send[send.index('--idempotency-key') + 1])
+        self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        state = cycle.read(directory / 'state.json')
+        self.assertGreaterEqual(state['deadline_at'], started + 5)
+        self.assertLess(state['deadline_at'], started + 5.2)
+        self.assertEqual('turn-1', state['turn_id'])
+
+        self.assertEqual(['list', 'send', 'read', 'read', 'wait', 'result'], [event['op'] for event in events])
+        self.assertTrue(all(event['at'] + event['budget'] <= event['deadline'] for event in events))
+
+
+    def test_initial_send_adoption_cancel_retains_owner_without_resending_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': 3})
+        started = time.monotonic()
+        with self.scripted_transport(cancel_after=.35) as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+            result = self.run_adapter(deadline=5)
+        self.assertLess(time.monotonic() - started, .8)
+        self.assertEqual('send_indeterminate_unadopted', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual([], self.calls_of('wait')); self.assertEqual([], self.calls_of('result'))
+
+        self.assertEqual(['list', 'send'], [event['op'] for event in events[:2]])
+        self.assertTrue(all(event['op'] == 'read' for event in events[2:]))
+        self.assertTrue(self.boxes.CANCEL.is_set())
+        elapsed = next(event["cancel_elapsed"] for event in events if "cancel_elapsed" in event)
+        self.assertGreaterEqual(elapsed, .35)
+        self.assertLess(elapsed, .8)
+
+
+    def test_cancel_before_send_never_invokes_the_cli_strict_scripted(self):
+        drive = self.boxes._drive
+        def cancel_before_first_call(*args, **kwargs):
+            self.boxes.CANCEL.set()  # after cancellation handlers initialize, before any CLI
+            return drive(*args, **kwargs)
+        with patch.object(self.boxes, '_drive', side_effect=cancel_before_first_call), \
+             patch.object(self.boxes, 'run_cli') as invoke:
+            result = self.run_adapter()
+        invoke.assert_not_called()
+        self.assertEqual([], self.calls_of('send'))
+        self.assertEqual('cancelled during native CLI call', result['reason'])
+        self.assertTrue(all(value == 'UNVERIFIED' for value in result['cases'].values()))
+
+
+    def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified_strict_scripted(self):
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+        __import__('shutil').rmtree(self.coordinator / '.context')
+        truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
+        self.configure(reply=truncated)
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+
+        self.assertEqual(['list', 'send', 'wait', 'result'], [event['op'] for event in events])
+
+
 
 
 def load(name, relative):
@@ -2881,6 +3112,211 @@ class WorkerBenchmarkControllerKill(unittest.TestCase):
         self.assertFalse(self.alive(self.pid))
         self.assertFalse(self.marker.exists())
         self.assertEqual('UNVERIFIED', row['status']); self.assertTrue(row['lingering_group'])
+
+
+class FakeTilionListing:
+    """Offline stand-in for Tilion GET /v1/sessions at the urllib boundary (no provider call)."""
+    def __init__(self, *live_counts, status=200, body=None):
+        self.live_counts=list(live_counts);self.status=status;self.body=body;self.requests=[]
+
+    def open(self, _director, request, data=None, timeout=None):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),timeout))
+        count=self.live_counts.pop(0) if len(self.live_counts)>1 else self.live_counts[0]
+        body=self.body if self.body is not None else json.dumps(
+            [{'session_id':f'sess-{i}','state':'running','created_at':1} for i in range(count)]).encode()
+        status=self.status
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return body
+        response=Response();response.status=status
+        return response
+
+
+class CloudSharedProviderHeadroom(unittest.TestCase):
+    """Two deploys and production share ONE 20-browser Tilion account: size smoke from its live usage."""
+    KEY='fixture-tilion-key-not-real'
+
+    def setUp(self):
+        import deploy_test_cloud as cloud
+        self.cloud=cloud;self.now=[1_000.0];self.sleeps=[]
+        env={'CLOUDBENCH_BROWSER_PROVIDER':'tilion','TILION_API_KEY':self.KEY,
+             'TILION_BASE_URL':'https://tilion.fixture.invalid',
+             'CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}
+        for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
+                        patch('time.sleep',side_effect=self.sleep)):
+            patcher.start();self.addCleanup(patcher.stop)
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def width(self, listing, count=17):
+        stderr=io.StringIO()
+        with patch('urllib.request.OpenerDirector.open',new=lambda director,request,data=None,timeout=None:
+                   listing.open(director,request,data,timeout)), contextlib.redirect_stderr(stderr):
+            try:
+                return self.cloud.campaign_width([f'task-{i}' for i in range(count)]),stderr.getvalue()
+            finally:
+                self.assertNotIn(self.KEY,stderr.getvalue())
+
+    def test_live_account_sessions_narrow_the_smoke_width(self):
+        listing=FakeTilionListing(5)  # production + another deploy hold five browsers right now
+        width,output=self.width(listing)
+        self.assertEqual(11,width)  # floor(20 * 0.8 - 5), not the solo registry cap 16
+        url,method,headers,timeout=listing.requests[0]
+        self.assertEqual(('https://tilion.fixture.invalid/v1/sessions','GET'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertLessEqual(timeout,15)
+        self.assertIn('5 live account-wide of 20 (20% reserved for production)',output)
+        self.assertEqual([],self.sleeps)
+
+    def test_idle_account_still_honours_the_registry_cap_and_request(self):
+        self.assertEqual(16,self.width(FakeTilionListing(0))[0])
+        self.assertEqual(3,self.width(FakeTilionListing(0),count=3)[0])
+
+    def test_second_deploy_waits_while_the_first_holds_the_pool_then_starts(self):
+        # Deploy A's 16 smoke browsers are live; production keeps its four-browser reserve.
+        listing=FakeTilionListing(16,17,9)
+        width,output=self.width(listing)
+        self.assertEqual(7,width)
+        self.assertEqual(3,len(listing.requests))
+        self.assertEqual([30.0,30.0],self.sleeps)
+        self.assertEqual(2,output.count('⏳ waiting for shared provider headroom'))
+        self.assertIn('16 live of 20, 20% reserved for production',output)
+
+    def test_full_account_until_the_deadline_refuses_before_any_launch(self):
+        launched=[]
+        with patch.object(self.cloud,'run_command',side_effect=lambda *a,**k:launched.append(a)):
+            with self.assertRaises(ValueError) as refused:
+                self.width(FakeTilionListing(16))
+        self.assertIn('cannot admit one smoke task by the deadline',str(refused.exception))
+        self.assertEqual([],launched)
+        self.assertAlmostEqual(900.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=30 for pause in self.sleeps))
+
+    def test_unreadable_listing_never_admits_and_refuses_at_the_deadline(self):
+        for listing in (FakeTilionListing(0,status=500),FakeTilionListing(0,body=b'<html>'),
+                        FakeTilionListing(0,body=b'{"sessions":[]}')):
+            with self.subTest(status=listing.status,body=listing.body):
+                self.now[0]=1_000.0;self.sleeps.clear()
+                with self.assertRaises(ValueError) as refused:
+                    self.width(listing)
+                self.assertIn('live usage unreadable',str(refused.exception))
+
+    def test_devbox_without_tilion_credential_is_unmeasured_not_silent(self):
+        import cloudbench_provider_headroom as headroom
+        probes=headroom.live_probes(environ={},env_file=Path(tempfile.mkdtemp(prefix='no-env-'))/'.env')
+        self.assertIsNone(probes['tilion-browser-sessions']())
+        capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
+        registry=capacity['for_browser_provider'](capacity['load_registry'](),'tilion')
+        stderr=io.StringIO()
+        width=headroom.admitted_width(17,registry,probes=probes,deadline=0,stream=stderr)
+        self.assertEqual(16,width)
+        self.assertIn('live account usage UNMEASURED',stderr.getvalue())
+
+    def test_plain_http_base_url_never_receives_the_key(self):
+        import cloudbench_provider_headroom as headroom
+        with self.assertRaises(headroom.HeadroomUnavailable):
+            headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
+                                          opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FakeCerebrasProbe:
+    """Offline stand-in for one 1-token Cerebras completion at the opener boundary."""
+    def __init__(self, *answers):
+        self.answers=list(answers);self.requests=[]
+
+    def __call__(self, request, timeout):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),json.loads(request.data)))
+        status,headers=self.answers.pop(0) if len(self.answers)>1 else self.answers[0]
+        if status!=200:
+            import urllib.error
+            raise urllib.error.HTTPError(request.full_url,status,'limited',headers,io.BytesIO(b'{}'))
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return b'{}'
+        response=Response();response.status=status;response.headers=headers
+        return response
+
+
+class CerebrasRatchetHeadroom(unittest.TestCase):
+    """The latency ratchet waits on the Cerebras org quota that every deploy and production spend."""
+    KEY='fixture-cerebras-key-not-real'
+
+    def setUp(self):
+        import cloudbench_provider_headroom as headroom
+        from fractions import Fraction
+        self.headroom=headroom;self.reserve=Fraction(1,5);self.now=[0.0];self.sleeps=[]
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def wait(self, probe, deadline=600):
+        out,err=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ready=self.headroom.wait_for_cerebras(self.KEY,reserve=self.reserve,deadline=deadline,opener=probe,
+                                                  clock=lambda:self.now[0],sleep=self.sleep,stream=out)
+        self.assertNotIn(self.KEY,out.getvalue()+err.getvalue())
+        return ready,out.getvalue(),err.getvalue()
+
+    @staticmethod
+    def window(remaining, limit=300, reset=17):
+        return {'x-ratelimit-limit-requests-minute':str(limit),'x-ratelimit-remaining-requests-minute':str(remaining),
+                'x-ratelimit-reset-requests-minute':str(reset),'x-ratelimit-remaining-requests-day':'0'}
+
+    def test_ample_shared_quota_starts_immediately_with_one_tiny_probe(self):
+        probe=FakeCerebrasProbe((200,self.window(240)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([],self.sleeps)
+        url,method,headers,body=probe.requests[0]
+        self.assertEqual(('https://api.cerebras.ai/v1/chat/completions','POST'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertEqual(1,body['max_completion_tokens']);self.assertEqual('qwen-3.8-27b',body['model'])
+        self.assertIn('requests-minute 240/300',out)  # a daily window never holds a per-minute ratchet
+
+    def test_other_deploys_draining_the_minute_window_hold_the_ratchet_until_reset(self):
+        probe=FakeCerebrasProbe((200,self.window(12,reset=23)),(429,{'retry-after':'9'}),(200,self.window(290)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([23.0,9.0],self.sleeps)
+        self.assertIn('requests-minute 12 of 300 remaining',out);self.assertIn('probe answered 429',out)
+
+    def test_quota_still_short_at_the_deadline_fails_closed(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((429,{})),deadline=150)
+        self.assertFalse(ready);self.assertAlmostEqual(150.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=60 for pause in self.sleeps))
+        self.assertIn('FAIL: Cerebras shared quota still short at the deadline',err)
+
+    def test_unexpected_probe_status_is_not_headroom(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((401,{})),deadline=40)
+        self.assertFalse(ready);self.assertIn('answered HTTP 401',err)
+
+    def test_a_rejected_credential_stops_at_once_but_a_provider_error_is_retried(self):
+        # 2026-11-08: the probe answered 403 for an hour while the semantic gate waited on it.
+        ready,_,err=self.wait(FakeCerebrasProbe((403,{})),deadline=3600)
+        self.assertFalse(ready);self.assertEqual([],self.sleeps)
+        self.assertIn('cannot measure the shared Cerebras quota',err)
+        ready,_,err=self.wait(FakeCerebrasProbe((503,{})),deadline=90)
+        self.assertFalse(ready);self.assertTrue(self.sleeps)
+
+    def test_cli_without_any_cerebras_key_reports_unmeasured(self):
+        env={k:v for k,v in os.environ.items() if not k.startswith('CEREBRAS')}
+        out=io.StringIO()
+        with patch.dict(os.environ,env,clear=True), \
+             patch.object(self.headroom,'BACKEND_ENV_FILE',Path(tempfile.gettempdir())/'missing-provider-headroom.env'), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=AssertionError('probed without a key')), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(0,self.headroom.main(['cerebras-wait','--timeout-seconds','0']))
+        self.assertIn('UNMEASURED',out.getvalue())
+
+    def test_cli_prefers_a_dedicated_ratchet_key_and_fails_closed_on_timeout(self):
+        seen=[]
+        with patch.dict(os.environ,{'CEREBRAS_RATCHET_API_KEY':'dedicated','CEREBRAS_API_KEY':'shared'}), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=lambda key,**kw:seen.append((key,kw['reserve'])) or False):
+            self.assertEqual(1,self.headroom.main(['cerebras-wait','--timeout-seconds','5']))
+        self.assertEqual([('dedicated',self.reserve)],seen)  # registry production_reserve_fraction 0.2
 
 
 if __name__=='__main__': unittest.main()

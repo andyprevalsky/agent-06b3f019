@@ -44,7 +44,10 @@ Every selected nonquick gate needs a worker binding:
     "transport": "local-isolated",
     "cwd": "/prepared-workers/backend",
     "worker_root": "/prepared-workers/backend",
-    "env": {"CONDUCTOR_WORKSPACE_NAME": "deploy-backend", "CONDUCTOR_PORT": "12000"},
+    "env": {
+      "CONDUCTOR_WORKSPACE_NAME": "deploy-backend",
+      "CONDUCTOR_PORT": "12000"
+    },
     "timeout_seconds": 3600
   }
 }
@@ -156,9 +159,15 @@ can set `command` to an SSH argv ending in `python3 scripts/deploy_test_worker.p
 ```json
 {
   "cases": {
-    "coordinator": {"command": ["python3", "scripts/tests/deploy-test-cycle.test.py"]},
-    "selection": {"command": ["python3", "scripts/tests/deploy-test-plan.test.py"]},
-    "worker": {"command": ["python3", "scripts/tests/deploy-test-worker.test.py"]}
+    "coordinator": {
+      "command": ["python3", "scripts/tests/deploy-test-cycle.test.py"]
+    },
+    "selection": {
+      "command": ["python3", "scripts/tests/deploy-test-plan.test.py"]
+    },
+    "worker": {
+      "command": ["python3", "scripts/tests/deploy-test-worker.test.py"]
+    }
   }
 }
 ```
@@ -206,11 +215,14 @@ The coordinator supplies `DEPLOY_GATE_REQUEST` (JSON file) and
 ```json
 {
   "token": "copy the unique request token",
-  "source": {"head": "exact requested head", "digest": "exact requested digest"},
+  "source": {
+    "head": "exact requested head",
+    "digest": "exact requested digest"
+  },
   "gate": "backend-coverage-blackbox",
   "complete": true,
   "cleanup_complete": true,
-  "cases": {"selected-case-id": "PASS", "another-case-id": "FAIL"}
+  "cases": { "selected-case-id": "PASS", "another-case-id": "FAIL" }
 }
 ```
 
@@ -344,3 +356,240 @@ older legacy receipt says PASS. Exit5 means source/configuration changed;
 exit1 means not ready, and exit2 means missing or malformed evidence. The staged
 runner requests `/RCA` immediately for every failure, rather than waiting for
 the legacy pipeline's repeated-round cap.
+
+## Changed-source AgentCard warning renewal
+
+`refresh` still revokes resource warnings whose inputs changed. For an already
+confirmed **sandbox AgentCard release stall**, the two typed actions below can
+qualify only that original case for exclusion from the new full sweep. They do
+not create a native result, financial cleanup credit, refund, or passing test.
+The original complete FAIL/native SKIPPED row, snapshot, confirmation and warning
+history remain intact. Compute quota and other exceptions cannot use this path.
+
+After the source is frozen, retain the previous plan, generate the new plan with
+`deploy_test_plan.py` and the same worker bindings, and use the ordinary refresh:
+
+```bash
+python3 scripts/deploy_test_cycle.py refresh --input .context/deploy-pipeline/previous-plan.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py prepare-agentcard-renewal --occurrence ORIGINAL_WARNING_ID --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline > .context/deploy-pipeline/agentcard-renewal-binding.json
+./node_modules/.bin/tsx back-end/scripts/agentcard-confirm-stall.ts .context/deploy-pipeline/agentcard-renewal-binding.json .context/deploy-pipeline/agentcard-renewal-proof.json
+python3 scripts/deploy_test_cycle.py renew-agentcard-warning --proof .context/deploy-pipeline/agentcard-renewal-proof.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py run --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+```
+
+Run the producer with the existing managed organization authentication; it does
+not load or edit env files. Keep both JSON files private. The proof output must
+not already exist. No provider calls occur in the Python actions. The producer
+uses only `get_card(card_id)` and `list_transfers(status=consumed, limit=100)`,
+sharing one organization retry deadline. It retains only allowlisted metadata.
+Missing, ambiguous, live, changed, or no-longer-stalled resources fail closed.
+Never request card details or retry minting/reclaiming to obtain a proof.
+
+The proof schema is `{binding, started_at, finished_at, observations}`. Binding
+contains `kind: agentcard-release-stall-renewal-v1`, occurrence, original warning
+and native-file SHA256, original/current source, plan/input/environment digests,
+unchanged task/payment/assertion contract digest, producer SHA256, original
+resource IDs, amount and `prepared_at`. Observation contains only card
+`id/status/balanceCents` (plus `livemode: false` only when the vendor supplies
+that field) and transfer
+`id/cardId/status/amountCents/transferredCents/releasedCents/livemode`. It must
+show the original CLOSED zero-balance card and its exact linked consumed transfer
+with `livemode: false`, the original transferred amount and zero released. An
+absent card mode stays absent; an explicit live or malformed card mode is
+rejected. Sandbox mode must always be proved by the linked transfer. Preparation precedes both
+fresh read timestamps; admission requires a read started within five minutes.
+An exact accepted proof is idempotent. All remaining current-source checks run
+under the existing full-plan, source, cleanup and deadline rules.
+
+The provider's transfer listing is a bounded newest-first window. If exactly
+100 distinct, dated rows are all newer than the original native failure's
+completion and omit its transfer, the producer can instead record
+`observations.transfer_page` with count, oldest timestamp and a redacted row
+hash. The original exact card must still be CLOSED with zero balance. This
+preserves the historical no-retry obligation, not a current transfer-state
+claim: the financial state stays UNVERIFIED and the original obligation stays
+open. Original-native, unchanged-contract, producer, current-input and freshness
+guards remain mandatory; every peer executes. Partial, old, duplicate, malformed
+or mixed pages fail closed. No refund, release or PASS is inferred from absence.
+
+## Historical AgentCard no-retry custody
+
+When payment implementation changes invalidate warning renewal, a confirmed
+historical sandbox stall still must not be reissued. This is a separate typed
+`NO_RETRY_CUSTODY` omission, not a renewed provider warning. It preserves the
+original native FAIL/SKIPPED, source, financial snapshot and pending auth repair
+packet. Current execution and financial state remain **UNVERIFIED**; omitted
+cases have `case_complete=false` and receive no execution or financial credit.
+Every other selected current-source check runs normally.
+
+After the parent freezes the new source and writes the ordinary new plan, run:
+
+```sh
+python3 scripts/deploy_test_cycle.py prepare-historical-no-retry --input .context/deploy-pipeline/previous-plan.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline > .context/deploy-pipeline/historical-no-retry.json
+python3 scripts/deploy_test_cycle.py refresh --input .context/deploy-pipeline/previous-plan.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline --historical-no-retry-proof .context/deploy-pipeline/historical-no-retry.json
+python3 scripts/deploy_test_cycle.py run --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+```
+
+Preparation reads existing evidence only: exact native bytes, task catalog,
+sealed fleet audits and absent owner registries. It does not read the provider,
+retimestamp old observations, assert unchanged payment code, or resolve a repair.
+A changed task, corrupt evidence, live/unknown owner, missing projection or mixed
+waiver refuses refresh/admission/verification. Repeated source changes require
+another exact binding. Pending post-merge debt survives until the existing
+`resolve` action records the actual repair link. Legacy warning renewal and
+compute-quota revocation keep their existing requirements.
+
+### Import custody into an independent repair cycle
+
+The refresh commands above operate on one existing cycle. An independent repair
+uses the ordinary current full plan and normal `init`, then the separate typed
+import below. The donor cycle is an immutable evidence index, never the current
+state. No donor attempt, PASS, READY, environment, fingerprint or legacy skip is
+imported. Original failures, native statuses, authority, pending auth repair or
+its actual repair link stay intact. Both current execution and financial state
+remain UNVERIFIED, with no credit; every peer still executes.
+
+First review and admit the exact immutable native/adapter files and complete
+fleet lifecycle/local/canonical audit trees required by `known()` and
+`historical()`. Include discovery dependencies even when they are not protected
+cases. Admission must check approved manifests, canonical paths and hashes,
+refuse symlinks/differing overlaps and create files without overwriting. This
+metadata API copies no files and cannot bypass missing closure, active owners,
+broken ownership symlinks, live PIDs, changed catalogs or native financial joins.
+Never overlay source, managed configuration, requests, live claims or a donor
+`cycle.json`. Obtain the approved donor-index hash from the verified preservation
+manifest; do not compute a replacement hash to authorize changed donor bytes.
+
+Keep the current cycle separate from historical `attempts/<round>` paths.
+Use the existing `DEPLOY_TEST_CYCLE_STATE_DIR` (or `gates --state-dir`) route;
+`DEPLOY_RUN_ROOT` selects timing receipts. There is no `ROSE_DEPLOY_RUN_ROOT`
+setting. Set these before plan generation/init and retain them throughout.
+Existing request-owned/canonical custody locator checks are unchanged. A custom
+cycle requires the default `.context/deploy-pipeline/cycle.json` to be absent.
+
+With the parent-frozen source and the normal template and provisioned inventory,
+the parent generates the full plan through `deploy_test_plan.py --inventory`
+and initializes it before any gate execution. `scripts/deploy gates --dry-run`
+shows the normal selection/worker commands; it is not a prepare-only execution
+mode. The following commands consume those already prepared paths:
+
+```sh
+python3 scripts/deploy_test_plan.py --inventory "$INVENTORY" --template "$TEMPLATE" --base origin/main --output "$PLAN"
+python3 scripts/deploy_test_cycle.py init --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+python3 scripts/deploy_test_cycle.py prepare-historical-import --input "$DONOR" --donor-sha256 "$DONOR_SHA256" --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR" > "$IMPORT_PROOF"
+python3 scripts/deploy_test_cycle.py admit-historical-import --input "$DONOR" --donor-sha256 "$DONOR_SHA256" --proof "$IMPORT_PROOF" --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+`DONOR` is the absolute canonical path to the preserved donor `cycle.json`.
+`IMPORT_PROOF` is a new private output file. Preparation leaves the current
+cycle unchanged. Admission re-reads donor/native evidence and binds the exact
+target cycle path plus fresh current source/full-plan/environment/input hashes.
+It requires pristine initialized state and no existing attempt namespace. All
+validation precedes the cycle writer's atomic publication. Immediate exact
+replay is idempotent; drift or non-fresh current state refuses admission without
+changing it. This hash-pinned interface delegates admission to the same
+authoritative `adopt()` protocol as `import-historical-no-retry`, using the
+preserved donor's embedded plan. It records `historical_custody_transfers` with
+persistent protected failure identities in addition to import provenance;
+removing custody/history rows cannot erase those obligations. Existing legacy
+import metadata is not replayable over a cycle that already has attempts;
+preserve that cycle and route any metadata migration through its owner rather
+than resetting or importing it again.
+The shared `build()`/`adopt()` contract came from main commit
+`8e3fca1b12cdaab9636b2eae4e23e225d1261fc4`, integrated in PR #1830. The
+approved-SHA interface is a compatibility envelope around that contract,
+not a second transfer validator.
+`--historical-no-retry-proof` is accepted by same-cycle `refresh` and the
+donor-plan `import-historical-no-retry` flow below; supplying it to `init` fails
+instead of silently losing custody.
+
+After reviewing the admitted state, the parent runs the existing Python CLI
+entrypoint in the same pinned environment used for manual init/import:
+
+```sh
+python3 scripts/deploy_cli.py gates --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+Keep the same plan inputs, worker bindings and timing root. The `scripts/deploy`
+shell wrapper prepends dependency directories to `PATH`; invoking it after a
+manual Python init changes the bound environment and correctly refuses execution.
+The Python CLI entrypoint preserves that caller environment and uses the ordinary
+gate coordinator. No import command starts workers, contacts a
+provider, renews a provider warning, retries a payment, or clears repair debt.
+Production live-mode duties remain with their separate owner and are not
+eligible for this sandbox protocol.
+
+The shared prepare action selects the SHA/adopt compatibility envelope with
+`--input`, or the contents-index envelope with `--donor-state`/`--donor-index`.
+Mixed forms are refused. Both require the named plan to equal the current plan.
+Both reuse the same donor inventory/native guards; their versioned retained
+provenance remains verified during normal admission, including legacy cycles.
+
+### Fresh-devbox history-only custody admission
+
+A foreign cycle is evidence, never a fresh cycle or READY result. On a fresh
+repair devbox, first restore/hash-verify the explicit archive and admit its native,
+adapter and audit files to their exact canonical paths without overwrites or live
+owner registries. Full donor `known()` discovery and every indexed `historical()`
+closure must pass; missing unrelated sandbox discovery evidence also blocks.
+The donor cycle must be quiescent, and its history/active indexes must agree.
+
+Freeze the current source, produce the ordinary full current plan, and `init`
+its fresh state directory normally. Before executing any gates, prepare and
+review the explicit history-only transfer (replace the digest placeholders with
+independently verified receipt/contents values):
+
+```sh
+python3 scripts/deploy_test_cycle.py prepare-historical-import --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline --donor-state .context/pr1770-custody-native-evidence/rose/.context/deploy-pipeline/cycle.json --donor-index .context/pr1770-historical-custody-contents.json --donor-sha256 <verified-donor-sha256> --donor-index-sha256 <verified-contents-sha256> > .context/deploy-pipeline/custody-import-proof.json
+python3 scripts/deploy_test_cycle.py import-historical-custody --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline --donor-state .context/pr1770-custody-native-evidence/rose/.context/deploy-pipeline/cycle.json --donor-index .context/pr1770-historical-custody-contents.json --donor-sha256 <verified-donor-sha256> --donor-index-sha256 <verified-contents-sha256> --proof .context/deploy-pipeline/custody-import-proof.json
+```
+
+The supported contents format is
+`PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1`; it must pin the original
+canonical cycle path to the supplied raw donor SHA256. Preparation leaves cycle
+bytes untouched. Admission atomically adds only exact indexed original/resolved
+failures, immutable custody history, their pending repair packets and explicit
+donor provenance to the pristine current state. It reuses normal `apply`,
+verification and child admission, with current bindings and UNVERIFIED/no-credit
+semantics. Donor attempts, PASS, ordinary skips, environment, fingerprints,
+source, operational waivers and READY are never imported. Original donor bytes
+remain separately unchanged. Every ordinary selected current check runs.
+
+An exact import replay is idempotent only while the imported state remains
+otherwise pristine; nonempty, mixed, pending, changed-source or changed-proof
+states refuse. Native/index/authority/catalog/audit/owner drift refuses both
+import and later verification/admission. After execution begins, use normal
+current-cycle history refresh for source changes, never reset or reimport.
+This sandbox protocol grants no production lifecycle retry or financial action;
+separate live-mode financial duties remain separate.
+
+### Independent-deploy custody transfer
+
+A donor deploy's full ledger is not the new repair's execution ledger. Its
+selection may include checks that the independent repair's current planner
+does not select. Same-deploy `refresh` still refuses to remove originally
+selected checks; do not edit that guard or overlay a donor READY cycle.
+
+After restoring and hash-validating the immutable donor evidence/audits, retain
+its cycle and plan separately. Prepare against the new frozen full plan using
+the donor state directory, then initialize the new cycle normally and import
+only its verified no-retry facts:
+
+```sh
+python3 scripts/deploy_test_cycle.py prepare-historical-no-retry --input <donor-plan.json> --plan .context/deploy-pipeline/plan.json --state-dir <donor-state-directory> > .context/deploy-pipeline/historical-no-retry.json
+python3 scripts/deploy_test_cycle.py init --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py import-historical-no-retry --input <donor-plan.json> --donor-state <donor-state-directory>/cycle.json --historical-no-retry-proof .context/deploy-pipeline/historical-no-retry.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py run --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+```
+
+Import requires an exact fresh current-source ledger and revalidates the donor
+plan/state, native bytes, catalog contracts, sealed audits and absent owners.
+It transfers the immutable failure history and canonical pending/resolved
+repair debt, with a donor digest and current binding. No donor PASS, READY,
+attempt, provider waiver or execution qualification is imported. Every selected
+current peer executes; protected cases remain `NO_RETRY_CUSTODY`, without
+execution or financial credit. Exact replay is idempotent and revalidates the
+current binding and complete transferred obligations. Removing any protected
+failure/history/projection fails closed during ordinary guard/admission/verify
+as well as replay. Duplicate identities and changed debt wrappers are rejected
+before atomic publication. No provider timestamps are refreshed.

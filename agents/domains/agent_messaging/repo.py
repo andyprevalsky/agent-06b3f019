@@ -130,6 +130,8 @@ def _delivery(body: Dict[str, Any]) -> Dict[str, Any]:
     }
     if body.get("queued") is True:
         result["queued"] = True
+        if body.get("queued_reason") == "direct_hold":
+            result["queued_reason"] = "direct_hold"
     if isinstance(body.get("woke"), bool):
         result["woke"] = body["woke"]
     if isinstance(body.get("wake_error"), str):

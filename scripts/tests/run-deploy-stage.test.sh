@@ -742,7 +742,7 @@ PARK_FIXTURE="$TEST_ROOT/park-root"
 mkdir -p "$PARK_FIXTURE/scripts" "$PARK_FIXTURE/agents/benchmarks/history" "$PARK_FIXTURE/.context"
 cp "$ROOT_DIR/scripts/run-predeploy-local" "$PARK_FIXTURE/scripts/run-predeploy-local"
 cp "$ROOT_DIR/scripts/run_logged_command.py" "$PARK_FIXTURE/scripts/run_logged_command.py"
-for module in __init__ select_predeploy_benches predeploy_metrics timeout_history span_history; do
+for module in __init__ select_predeploy_benches predeploy_metrics timeout_history history_ledger span_history; do
     cp "$ROOT_DIR/agents/benchmarks/$module.py" "$PARK_FIXTURE/agents/benchmarks/$module.py"
 done
 cat >"$PARK_FIXTURE/agents/benchmarks/tasks.json" <<'JSON'
@@ -831,14 +831,20 @@ grep -qF -- "python3 scripts/benchmark-history-latest-only.py --base origin/main
     || fail "the printed publish command must name the configured park directory: $(grep -F 'publish them with' "$TEST_ROOT/park-custom.out")"
 grep -qF -- "--apply-parked \"$PARK_DIR\" --write" "$TEST_ROOT/park-flag.out" \
     || fail "the printed publish command must name the default park directory: $(grep -F 'publish them with' "$TEST_ROOT/park-flag.out")"
-# Outside a deploy the rows still reach the tracked ledgers directly.
+# Outside a deploy the rows still reach the tracked ledgers directly: attempts and
+# durations land in this branch's own shard (agents/benchmarks/history_ledger.py),
+# never in the shared base file that concurrent PRs would both edit.
 park_smoke PREDEPLOY_RUN_ID=unparked >"$TEST_ROOT/park-plain.out" 2>&1 \
     || fail "plain smoke failed: $(cat "$TEST_ROOT/park-plain.out")"
 [ "$(cat "$PARK_FIXTURE/.context/run-bench-park-env")" = "<unset>" ] || fail "a plain smoke run must not park its rows"
-[ "$(wc -l <"$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl")" -eq 2 ] \
-    || fail "a plain smoke run must append its attempt row to the tracked ledger"
-[ "$(wc -l <"$PARK_FIXTURE/agents/benchmarks/history/task_durations.jsonl")" -eq 2 ] \
-    || fail "a plain smoke run must append its duration row to the tracked ledger"
+cmp -s "$PARK_FIXTURE/agents/benchmarks/history/task_attempts.jsonl" "$TEST_ROOT/park-attempts.before" \
+    || fail "a plain smoke run must not edit the shared base attempts ledger"
+cmp -s "$PARK_FIXTURE/agents/benchmarks/history/task_durations.jsonl" "$TEST_ROOT/park-durations.before" \
+    || fail "a plain smoke run must not edit the shared base durations ledger"
+[ "$(cat "$PARK_FIXTURE"/agents/benchmarks/history/task_attempts.*.jsonl | wc -l)" -eq 1 ] \
+    || fail "a plain smoke run must append its attempt row to this branch's ledger shard"
+[ "$(cat "$PARK_FIXTURE"/agents/benchmarks/history/task_durations.*.jsonl | wc -l)" -eq 1 ] \
+    || fail "a plain smoke run must append its duration row to this branch's ledger shard"
 [ "$(wc -l <"$PARK_FIXTURE/agents/benchmarks/history/span_durations.jsonl")" -eq 2 ] \
     || fail "a plain smoke run must append its span row to the tracked ledger"
 [ "$(wc -l <"$PARK_DIR/task_attempts.jsonl")" -eq 1 ] || fail "a plain smoke run must leave the park untouched"

@@ -59,6 +59,21 @@ async def _fill_checkout_field(page, selectors: tuple[str, ...], value: str, lab
                        f"selector_diagnostics={json.dumps(observations, separators=(',', ':'))}")
 
 
+async def _select_billing_country(page, country: str) -> None:
+    """Pin the billing country that the US test card and ZIP belong to.
+
+    Hosted Checkout preselects the country from Stripe's visitor IP geolocation.
+    A fleet guest geolocated to the eurozone gets a country whose form has no
+    postal-code input, so the ZIP field never renders.
+    """
+    for frame in page.frames:
+        select = frame.locator('select[name="billingCountry"]').first
+        if await select.count():
+            if await select.input_value() != country:
+                await select.select_option(country, timeout=5000)
+            return
+
+
 async def _stripe_session(session_id: str, stripe_key: str) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
@@ -117,6 +132,7 @@ async def complete_test_subscription_checkout(
                                        "123", "CVC")
             await _fill_checkout_field(page, ('input[name="billingName"]', 'input[autocomplete="cc-name"]'),
                                        "Benchmark User", "billing name")
+            await _select_billing_country(page, "US")
             await _fill_checkout_field(page, ('input[name="billingPostalCode"]', 'input[autocomplete="postal-code"]'),
                                        "94105", "ZIP")
             submit = page.locator('button[type="submit"]').last

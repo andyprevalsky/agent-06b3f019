@@ -38,6 +38,30 @@ export function spawnLifecycleWorker(
   child.stderr?.on('data', (b) => {
     output += b;
   });
+  let started = false;
+  let startup: NodeJS.Timeout;
+  // Resolves once the worker has loaded its import graph and connected, so a
+  // caller's fixed window measures the lifecycle, not process startup under
+  // host load. Startup keeps its own bound so a hung worker still fails.
+  const ready = new Promise<void>((resolve, reject) => {
+    startup = setTimeout(
+      () => reject(new Error(`lifecycle worker not ready within 120s: ${output}`)),
+      120_000
+    );
+    child.on('message', (message: { type?: string; error?: string }) => {
+      // A pre-ready failure reports its cause only on the result message.
+      if (message.type === 'result' && !started)
+        reject(new Error(`worker failed before ready: ${message.error}`));
+      if (message.type !== 'ready') return;
+      started = true;
+      resolve();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (!started) reject(new Error(`worker exit ${code} before ready: ${output}`));
+    });
+  }).finally(() => clearTimeout(startup!));
+  void ready.catch(() => {});
   const result = new Promise<string>((resolve, reject) => {
     let done = false;
     child.on(
@@ -58,7 +82,7 @@ export function spawnLifecycleWorker(
   });
   void result.catch(() => {});
   const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
-  return { result, closed, child };
+  return { ready, result, closed, child };
 }
 export async function registerLifecycleServiceWorker(page: Page): Promise<void> {
   await page.evaluate(async () => {

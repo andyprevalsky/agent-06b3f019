@@ -1,3 +1,4 @@
+import { toDate } from '../localDateTime';
 import type { FilePointer } from '../api';
 import type { RealtimeBroadcastWrapper } from './wrapper';
 import type {
@@ -28,6 +29,34 @@ import {
   validateToolStreamPayload,
   validateUpdateAgentPayload,
 } from './validators';
+
+/** Native Postgres broadcasts use UTC timestamp-without-zone columns; API frames use ISO. */
+function normalizeDatabaseBroadcast(
+  wrapper: unknown,
+  table: 'Agent' | 'Message',
+  timeField: 'updatedAt' | 'timestamp',
+): unknown {
+  if (typeof wrapper !== 'object' || wrapper === null) return wrapper;
+  const payload = (wrapper as Record<string, unknown>).payload;
+  if (typeof payload !== 'object' || payload === null) return wrapper;
+  const envelope = payload as Record<string, unknown>;
+  if (envelope.schema !== 'public' || envelope.table !== table) return wrapper;
+  const raw = envelope.record;
+  if (typeof raw !== 'object' || raw === null) return wrapper;
+  const record = raw as Record<string, unknown>;
+  const value = record[timeField];
+  const date = typeof value === 'string' ? toDate(value) : null;
+  // Route malformed native rows through the existing extraction error path.
+  const normalized =
+    date && (table !== 'Agent' || typeof record.id === 'string')
+      ? {
+          ...record,
+          [timeField]: date.toISOString(),
+          ...(table === 'Agent' ? { agentId: record.id } : {}),
+        }
+      : null;
+  return { ...wrapper, payload: { ...envelope, record: normalized } };
+}
 
 // =============================================================================
 // Strict Extraction Functions (with validation + error logging)
@@ -74,7 +103,7 @@ function extractAndValidate<T>(
  */
 export function extractInsertPayload(wrapper: unknown): InsertMessagePayload | null {
   const record = extractAndValidate<InsertMessagePayload>(
-    wrapper,
+    normalizeDatabaseBroadcast(wrapper, 'Message', 'timestamp'),
     'INSERT',
     validateInsertMessagePayload,
   );
@@ -93,7 +122,11 @@ export function extractInsertPayload(wrapper: unknown): InsertMessagePayload | n
  * Extract and validate UPDATE agent payload.
  */
 export function extractUpdatePayload(wrapper: unknown): UpdateAgentPayload | null {
-  return extractAndValidate<UpdateAgentPayload>(wrapper, 'UPDATE', validateUpdateAgentPayload);
+  return extractAndValidate<UpdateAgentPayload>(
+    normalizeDatabaseBroadcast(wrapper, 'Agent', 'updatedAt'),
+    'UPDATE',
+    validateUpdateAgentPayload,
+  );
 }
 
 /**

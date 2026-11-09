@@ -239,10 +239,15 @@ fail() {
     # terminal markers live in the per-bench run dir and explain intermittent
     # finalization failures. Dump the three newest so they outlive TMP_ROOT.
     local autoscaler_logs
+    local -a task_bench_logs=()
     # -r: with no autoscaler log, a bare `ls -t` would list (and dump) the cwd.
     autoscaler_logs="$(find "$TMP_ROOT" -name autoscaler.log -type f -print 2>/dev/null |
         xargs -r ls -t 2>/dev/null | head -3)"
-    for log in "$TMP_ROOT"/controller-*.log $autoscaler_logs; do
+    while IFS= read -r log; do
+        task_bench_logs+=("$log")
+    done < <(find "$TMP_ROOT" -name bench.log -type f -print0 2>/dev/null |
+        xargs -0 -r ls -t -- 2>/dev/null | head -3)
+    for log in "$TMP_ROOT"/controller-*.log $autoscaler_logs "${task_bench_logs[@]}"; do
         [ -f "$log" ] || continue
         if [ "$(basename "$log")" = "autoscaler.log" ]; then
             echo "── $(dirname "$log") autoscaler markers: $(cd "$(dirname "$log")" &&
@@ -1338,6 +1343,7 @@ def run_fake_driver(mdir):
         # retry. No transient failure marker or fixture deadline is the fault.
         deadline = time.time() + 30
         failed_worker = None
+        ready = []
         while time.time() < deadline:
             output = current_task_output()
             if output:
@@ -1373,7 +1379,13 @@ def run_fake_driver(mdir):
                     break
                 time.sleep(0.1)
         if not Path(MARKERS, "worker-readiness-retry-proven").is_file():
-            log("FATAL: readiness failure never crossed captured cleanup and healthy retry")
+            observed = time.time()
+            log("FATAL: readiness failure never crossed captured cleanup and healthy retry " + json.dumps({
+                "phase": "healthy-retry" if failed_worker else "captured-retirement",
+                "failed_worker": failed_worker, "ready_workers": ready,
+                "elapsed_seconds": observed - (deadline - 30),
+                "deadline_remaining_seconds": deadline - observed,
+            }, sort_keys=True))
             exit_code = 1
     # Keep the lower-target regression alive after the in-flight worker reaches
     # its own terminal cleanup boundary. Staging remains committed while it is
@@ -5809,12 +5821,30 @@ print(" ".join(sorted(m["name"] for m in machines)))
 done
 echo "PASS: scenario 2g — lower demand retains missing evidence and drains captured staging"
 
+# The sealed lifecycle keeps the run verdict (status) separate from proven cleanup and
+# names the failed autoscaler's bench, so a deploy can keep its peers' verdicts.
+assert_autoscaler_lifecycle() {  # <since-marker> <bench|-> <cleanup_verified: True|False>
+    local lifecycle
+    lifecycle="$(find "$WS_A/.context/fleet/runs" -path '*/_batch/lifecycle.json' -newer "$1" -print 2>/dev/null)"
+    [ "$(printf '%s\n' "$lifecycle" | grep -c .)" = 1 ] ||
+        fail "expected exactly one new fleet lifecycle, got: $lifecycle"
+    python3 - "$lifecycle" "$2" "$3" <<'PY' || fail "autoscaler failure lifecycle evidence is wrong"
+import json, sys
+payload = json.loads(open(sys.argv[1]).read())
+assert payload["status"] == "failed" and payload["controller_exit_code"] == 1, payload
+# Retained resources keep the lifecycle unverified whether or not aggregation named the bench.
+assert sys.argv[2] == "-" or payload["autoscaler_failed_benches"] == [sys.argv[2]], payload
+assert payload["cleanup_verified"] is (sys.argv[3] == "True"), payload
+PY
+}
+
 # A provider destroy failure after cancellation cannot leave a tracked worker
 # permanently canceled if demand rebounds. The autoscaler must fail closed and
 # retain durable ownership for controller cleanup, which is allowed to retry.
 reset_fake_state
 : > "$FAKE_DIR/journal.log"
 : > "$FAKE_DIR/fail-worker-destroy-once"
+: > "$TMP_ROOT/destroy-failure.since"
 destroy_failure_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-destroy-failure.log" \
@@ -5833,6 +5863,7 @@ print(" ".join(sorted(m["name"] for m in machines)))
 ' "$FAKE_DIR/state.json")"
 [ "$remaining" = "cloudbench-warm" ] ||
     fail "destroy-failure cleanup leaked machines: $remaining"
+assert_autoscaler_lifecycle "$TMP_ROOT/destroy-failure.since" autoscaler-worker-destroy-failure True
 rm -f "$FAKE_DIR/fail-worker-destroy-once"
 echo "PASS: scenario 2h — scale-down destroy failure fails closed and remains recoverable"
 
@@ -5844,6 +5875,7 @@ reset_fake_state
 # refusal takes precedence over its single transient budget.
 : > "$FAKE_DIR/fail-worker-destroy-once"
 : > "$FAKE_DIR/fail-worker-destroy-always"
+: > "$TMP_ROOT/destroy-persistent.since"
 persistent_destroy_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-destroy-persistent.log" \
@@ -5859,6 +5891,7 @@ persistent_worker="$(sed -n 1p "$FAKE_DIR/markers/worker-clone-id" 2>/dev/null)"
 persistent_registry="$(grep -rlx "id=$persistent_worker" "$SANDBOX/.git/cloudbench-fleet-ownership"/*/clones 2>/dev/null | head -1)"
 [ -n "$persistent_registry" ] ||
     fail "a persistently refused worker destroy released its exact durable ownership"
+assert_autoscaler_lifecycle "$TMP_ROOT/destroy-persistent.since" - False
 # Remove only this asserted, test-owned retained fixture before later cases.
 persistent_token="$(basename "$(dirname "$(dirname "$persistent_registry")")")"
 rm -f "$TMP_ROOT/capacity-reservations/reservations/$persistent_token"-*
