@@ -255,6 +255,28 @@ export const connectionCases: Case[] = [
         'not_connected',
         'a paused setup agent must not pin setting_up'
       );
+      const privacyOf = async () =>
+        openPhoneValue<{ active: boolean; values: string[] }>(
+          (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } }))
+            .privateInputEncrypted as string
+        );
+      // An unresolved private input still holds device custody: Connect relaunches setup but
+      // must not lift the private phase over it.
+      const unknownInput = await prisma.iPhoneOperation.create({
+        data: {
+          deviceId: f.deviceId,
+          leaseId: f.leaseId,
+          requestKey: randomUUID(),
+          operation: 'input.text',
+          actor: 'agent',
+          inputHash: 'synthetic',
+          requestEncrypted: sealPhoneValue({}),
+          state: 'UNKNOWN',
+          activeDeviceId: f.deviceId,
+          providerEpoch: 0,
+          deadlineAt: new Date(),
+        },
+      });
       const second = await connect();
       assert.equal(second.status, 200);
       assert.notEqual(
@@ -263,10 +285,20 @@ export const connectionCases: Case[] = [
         'Connect must start a fresh setup agent'
       );
       assert.deepEqual(launched, [firstAgent, second.data.setupAgentId]);
-      const resumed = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
-      const privacy = openPhoneValue<{ active: boolean; values: string[] }>(
-        resumed.privateInputEncrypted as string
+      assert.equal(
+        (await privacyOf()).active,
+        true,
+        'Connect lifted privacy over an unresolved private input'
       );
+      await prisma.iPhoneOperation.delete({ where: { id: unknownInput.id } });
+      await prisma.agent.update({
+        where: { id: second.data.setupAgentId as string },
+        data: { status: 'PAUSED' },
+      });
+      const third = await connect();
+      assert.equal(third.status, 200);
+      assert.deepEqual(launched, [firstAgent, second.data.setupAgentId, third.data.setupAgentId]);
+      const privacy = await privacyOf();
       assert.equal(privacy.active, false, 'Connect left the phone in a private phase');
       assert.deepEqual(privacy.values, ['typed'], 'Connect must keep known secrets for redaction');
       assert.equal(

@@ -116,10 +116,15 @@ export async function reserve(userId: string, expectedRevision: number, requestK
     );
     if (!result.reused) {
       // Connect is the owner's explicit hand-off of the phone to setup, so it resumes a private
-      // phase left by an ended user-control session (known values stay for redaction). A phase
-      // the user still controls is left alone.
-      const userControl = await tx.iPhoneLease.findFirst({
-        where: { deviceId: device.id, status: 'ACTIVE', controlOwner: 'user' },
+      // phase left by an ended session (known values stay for redaction). While any lease still
+      // holds the phone or an operation (including an UNKNOWN private input) keeps device
+      // custody, the phase is left alone.
+      const holder = await tx.iPhoneLease.findFirst({
+        where: { deviceId: device.id, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      const custody = await tx.iPhoneOperation.findUnique({
+        where: { activeDeviceId: device.id },
         select: { id: true },
       });
       await tx.iPhoneDevice.update({
@@ -127,7 +132,7 @@ export async function reserve(userId: string, expectedRevision: number, requestK
         data: {
           setupEncrypted: sealSetup(state),
           setupState: 'not_started',
-          ...(userControl === null
+          ...(holder === null && custody === null
             ? { privateInputEncrypted: resumedPrivacy(device.privateInputEncrypted) }
             : {}),
         },
