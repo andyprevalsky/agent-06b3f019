@@ -860,6 +860,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # own spawn goal is not the catalog prefix.
         self.root_goal: Optional[str] = None
         self._browser_activity_cleanup_unknown: bool = False
+        self._browser_activity_cleanup_receipt: Optional[Dict[str, Any]] = None
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
         # User-authored tools pinned once per run (domains/user_tools); carried
@@ -1249,6 +1250,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._last_credit_check = int(runtime.get("last_credit_check", 0))
         self.write_lock_enabled = runtime.get("write_lock_enabled", True) is True
         self._browser_activity_cleanup_unknown = runtime.get("browser_activity_cleanup_unknown") is True
+        receipt = runtime.get("browser_activity_cleanup_receipt")
+        self._browser_activity_cleanup_receipt = dict(receipt) if isinstance(receipt, dict) else None
         self._signup_completed = runtime.get("signup_completed") is True
         self._signup_dismissed = runtime.get("signup_dismissed") is True
         if isinstance(runtime.get("context"), list):
@@ -1515,6 +1518,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "write_lock_enabled": self.write_lock_enabled,
                 **({"browser_activity_cleanup_unknown": True}
                    if self._browser_activity_cleanup_unknown else {}),
+                **({"browser_activity_cleanup_receipt": dict(self._browser_activity_cleanup_receipt)}
+                   if self._browser_activity_cleanup_receipt is not None else {}),
                 "signup_completed": self._signup_completed,
                 "signup_dismissed": self._signup_dismissed,
                 "cloud_agent_lifecycle_tool_call_id": self._cloud_agent_lifecycle_tool_call_id,
@@ -1611,6 +1616,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
     # =========================================================================
     # SIGNALS
     # =========================================================================
+
+    @workflow.signal
+    def browser_activity_cleanup_complete(self, receipt: Any) -> None:
+        """Release only the attempt whose worker has joined its browser teardown."""
+        expected = self._browser_activity_cleanup_receipt
+        if not isinstance(expected, dict) or not isinstance(receipt, dict):
+            return
+        if not all(
+            isinstance(receipt.get(key), str) and receipt[key] == expected.get(key)
+            for key in ("run_id", "activity_id")
+        ):
+            return
+        self._browser_activity_cleanup_receipt = {**expected, "completed": True}
+        self._browser_activity_cleanup_unknown = False
 
     @workflow.signal(name=GENERATION_HANDOFF_SIGNAL)
     def generation_handoff_available(self, task_queue: str) -> None:

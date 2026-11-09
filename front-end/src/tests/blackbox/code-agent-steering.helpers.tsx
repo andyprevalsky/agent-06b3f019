@@ -48,10 +48,10 @@ export function expandWork(scope: HTMLElement): HTMLElement[] {
   return within(scope).queryAllByTestId('trajectory-history-entry');
 }
 
-/** The view's USER rows (the person's turns), in order. */
+/** The view's USER rows (the person's turns, without their sent-time line), in order. */
 export function userRows(scope: HTMLElement): string[] {
   return Array.from(scope.querySelectorAll('[data-message-role="USER"]')).map(
-    (row) => row.textContent ?? '',
+    (row) => row.querySelector('[data-testid="user-message-text"]')?.textContent ?? '',
   );
 }
 

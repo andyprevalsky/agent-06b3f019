@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import runpy
@@ -11,6 +12,11 @@ import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
+ISOLATED_RENEWAL_PHASES = frozenset({'triage', 'needs-focused-plan', 'failed-gates'})
+
+# Bound raw run evidence per proof; ordinary receipts retain their existing limit.
+MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
+
 # A fleet's own _batch/run.json carries every message and log of its run: a mass-agent record was
 # 98 MB on 2026-11-07, beyond the 64 MiB receipt cap, so its verified cleanup could never be bound
 # and every later smoke launch was refused. Run records get their own, still finite, cap.
@@ -302,6 +308,68 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
                  and not t.get('owned_roots') and t.get('lifecycle_stage') == 'released'
                  and t.get('failure_reason') == 'no current run artifact produced' for t in tasks), 'canary pre-task projection')
     return not rows  # Missing provenance is supported only before ANY native guest allocation.
+
+
+def unlaunched_relay_retired(campaign, bound, document):
+    """Observe startup-only local custody after every exact producer has joined."""
+    location = document(campaign / 'shared-relay-location.json')
+    directory = Path(location['directory'])
+    need(directory.is_absolute() and directory.resolve() == directory
+         and directory.parent == Path('/tmp') and directory.name.startswith('cb-relay-')
+         and directory.is_dir() and not directory.is_symlink(), 'relay startup directory')
+    archive = campaign / 'shared-relay'
+    for name in ('authority.private.json', 'startup-cleanup.json', 'bootstrap.private.log', 'broker.private.log'):
+        need(bound(directory / name) == bound(archive / name), 'relay startup archive differs')
+    authority = document(directory / 'authority.private.json')
+    cleanup = document(directory / 'startup-cleanup.json')
+    socket = directory / 'fly-agent.sock'
+    need(authority.get('agent_socket') == str(socket)
+         and authority.get('inventory_directory') == str(campaign / 'shared-inventory')
+         and cleanup.get('bootstrap_joined') is True
+         and cleanup.get('agent_shutdown_verified') is False
+         and cleanup.get('agent_retirement_pending') is True,
+         'original startup custody')
+    native = runpy.run_path(str(Path(__file__).with_name('cloudbench-shared-relay.py')))
+    native['physical'](directory, True)
+    prefix = 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':'
+    def local_birth(value):
+        """Require the producer's native identity on this exact machine boot."""
+        return (isinstance(value, str) and value.startswith(prefix)
+                and value[len(prefix):].isdigit() and int(value[len(prefix):]) > 0)
+    need(type(authority.get('parent_pid')) is int and authority['parent_pid'] > 1
+         and local_birth(authority.get('parent_start'))
+         and native['birth'](authority['parent_pid']) != authority['parent_start'],
+         'startup parent identity not retired on this host')
+    for role in ('bootstrap', 'broker'):
+        path = directory / (role + '-owner.json')
+        if not path.exists():
+            need(role == 'broker' and cleanup.get('broker_joined') is False
+                 and not path.is_symlink() and not (archive / path.name).exists(), 'startup producer evidence absent')
+            continue
+        need(bound(path) == bound(archive / path.name), 'startup producer archive differs')
+        owner = document(path)
+        need(owner.get('parent_pid') == authority['parent_pid']
+             and owner.get('parent_start') == authority['parent_start']
+             and type(owner.get('pid')) is int and owner['pid'] > 1
+             and local_birth(owner.get('birth'))
+             and cleanup.get(role + '_joined') is True
+             and native['birth'](owner['pid']) != owner['birth'], 'startup producer still live')
+    need(not socket.exists() and not socket.is_symlink()
+         and not (directory / 'ready.json').exists() and not (directory / 'ready.json').is_symlink(),
+         'startup agent socket or admitted broker remains')
+    # Before PING/version validation there is no sealed agent PID. Observe the
+    # official executable's unique inherited socket scope, never signal by name.
+    expected = ('FLY_AGENT_SOCKET_PATH=' + str(socket)).encode()
+    for process in Path('/proc').glob('[0-9]*'):
+        try:
+            if process.stat().st_uid != os.getuid() or not (process / 'comm').read_text().strip().startswith('flyctl'):
+                continue
+            need(expected not in (process / 'environ').read_bytes().split(b'\0'), 'unsealed startup agent remains')
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    logs = [directory / name for name in ('bootstrap.private.log', 'broker.private.log')]
+    holders = subprocess.run(['lsof', '-t', '--', *map(str, logs)], capture_output=True, timeout=10)
+    need(holders.returncode == 1 and not holders.stdout and not holders.stderr, 'startup log holder remains')
 
 
 
@@ -762,6 +830,86 @@ def dispatch_refusal(root, runs, campaign, request, receipt, adapter, confirmed,
     need(campaign_published(summary, campaign, adapter['started_at'], native), 'dispatch refusal publication closure')
 
 
+def inventory_init_failure(root, runs, campaign, request, receipt, adapter, bound, document):
+    """A sealed, read-only publisher timeout before any fleet or relay admission."""
+    checks = request['checks']
+    need(receipt.get('cases') == adapter.get('cases') == dict.fromkeys(checks, 'UNVERIFIED')
+         and receipt.get('case_complete') == dict.fromkeys(checks, False)
+         and adapter.get('complete') is False and adapter.get('cleanup_complete') is False
+         and type(adapter.get('native_exit')) is int and adapter['native_exit'] == 1,
+         'inventory init changed outcome')
+    command = adapter.get('native_command', [])
+    need(len(command) == len(checks) + 10 and command[:2] == ['bash', 'scripts/run-bench']
+         and command[2:2+len(checks)] == checks and command[-8:-5] == ['--runs', '1', '--concurrency']
+         and command[-5].isdigit() and 1 <= int(command[-5]) <= len(checks)
+         and command[-4:] == ['--retry-infra', '0', '--ref', receipt['source']['head']],
+         'inventory init native command')
+    # These original native producers initialize the API-only feed before relay
+    # or task dispatch; later source changes must establish their own boundary.
+    supported = {
+        'scripts/cloudbench-campaign-inventory.sh': 'e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d',
+        'scripts/lib/cloudbench-inventory.sh': '01dc00ebba29ea4307f78774c3d8d73fd214c64f06fda1d00fc86df24c08b8e2',
+        'scripts/run-bench-campaign.py': '57196da49e7dd07eb696e85ee8b6394d61237ad339579093d12c5645f298691f',
+        'scripts/lib/cloudbench-env.sh': '166f249b055d9b5ebf6d28cb54c7f522e4ad0ab5652cfe670ecc58388a947e2d',
+        'scripts/cloudbench-campaign-machines.py': 'e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b',
+        'scripts/cloudbench-machine-readiness.py': '5843e509a64380711147b140c346e81622a2f904b300d3af5a247415f5488797',
+        'scripts/run-bench': 'd6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e',
+        'scripts/cloudbench_catalog.py': 'fd6adad0f3961a77f5cbb8b82abd648e910614cd0017c21f116f413be6e7702e',
+        'scripts/cloudbench-timeout-policy.py': '1a5b0453284a8c0af9bc4fd2d5e9bd38fd50b275fee373f677af7d8816f6d5f5',
+        'scripts/cloudbench-shard-coordinator.py': '1af282bba9119573f489f671790bdad3cbe758e664ac406c92c9fedd503831c5',
+        'agents/benchmarks/benchmark_tasks.py': 'be31c1eb4b0be2fc6fd75f9fa0d17617757348206df3649d6707a9a122356a61',
+        'agents/benchmarks/fixtures.py': 'f91cf759cab84c6f35b3d5f69d9b672f7ae5f90d65dad4442808d4228a91b95e',
+        'agents/benchmarks/live_fixtures.py': 'd6262bda88a214a79f340275f08fd7327bf8f933bd401822e142941001447efd',
+        'agents/benchmarks/polar_catalog.py': '23809eb3426240e01271dff3b562388ca42974cff5a6466413ac7c949a7de319',
+        'agents/benchmarks/timeout_history.py': '4f63f44e8d59b5e77fcc317ba376b7289306772eb6c029b42f4b3ae28854c148',
+        'agents/benchmarks/history_ledger.py': '8a7f727b0c1988f4ae78381d10328680a03f607c59806b3cb795bf76d1ae3f72',
+        'scripts/cloudbench-provider-capacity.py': 'b8ffc0fa2a39b6b390d45ef839030bd4a33585cd1716a724fbd2538b8bd15eea',
+        'scripts/cloudbench-production-only-tasks.py': '1913e6273aa278a2ee7bf4685c35c92a102dc8f254ae571a35acd040333e0887',
+        'scripts/cloudbench-campaign-seed.py': '4435e9c3bfbca5fea28b196f9d2c9a653d708b4bf6c43b7d2df2df6a8a087316',
+        'agents/benchmarks/hub_upload.py': '9717841cd456c9a0e48d5807746a142f63f01a4984e0dbaf5b61ab667fc005e5',
+        'scripts/cloudbench-scorecard.py': '2084612fbc0468f5ddffad7e86794660cb219ffea1d9a534697623859935524f',
+        'scripts/cloudbench_experiments.py': '3ae289a75fd1a1188c49d28636dc9b30927ba5a74a8e5c9bc6e384a672c6c797',
+        'scripts/cloudbench-port-lease.py': '183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1',
+    }
+    for relative, expected in supported.items():
+        original = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                            receipt['source']['head'] + ':' + relative])
+        need(hashlib.sha256(original).hexdigest() == expected, 'inventory init unsupported producer')
+        if relative in {'scripts/cloudbench-campaign-inventory.sh', 'scripts/lib/cloudbench-inventory.sh',
+                        'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench-campaign-machines.py',
+                        'scripts/cloudbench-machine-readiness.py'}:
+            need(bound(campaign / 'shared-inventory/scripts' / Path(relative).name) == original,
+                 'inventory init source changed')
+    inventory = campaign / 'shared-inventory'
+    text = bound(inventory / 'publisher.private.log').decode()
+    match = re.fullmatch(r'\[warn\] FLY_COMPLETION_TIMEOUT shell_pid=([0-9]+) shell_start_ticks=([0-9]+) '
+                         r'fly_return_status=unknown fifo_read_status=142\n'
+                         r'❌ shared inventory snapshot did not initialize\n', text)
+    need(match is not None and int(match[1]) > 1, 'inventory init timeout boundary')
+    diagnostic = inventory / 'inventory-refresh-diagnostics'
+    latest = fields(bound(diagnostic / 'latest'))
+    need(latest.get('phase') == 'volumes-list' and latest.get('status') == '142'
+         and latest.get('elapsed_seconds', '').isdigit()
+         and latest.get('epoch', '').isdigit() and latest.get('pid', '').isdigit()
+         and int(latest['pid']) > 1, 'inventory init diagnostic')
+    need(bound(diagnostic / 'history').decode().splitlines() == [
+        '\t'.join((latest['epoch'], 'volumes-list', '142', latest['elapsed_seconds']))]
+         and bound(diagnostic / 'failure.raw.private') == b'', 'inventory init diagnostic history')
+    supervisor = document(runs.parent / 'cli.log.process.json')
+    child, owner = supervisor.get('child_pid'), supervisor.get('supervisor_pid')
+    need(type(child) is int and child > 1 and type(owner) is int and owner > 1 and child != owner
+         and type(supervisor.get('native_exit')) is int
+         and supervisor.get('native_exit') == adapter['native_exit']
+         and supervisor.get('quiescent') is True and supervisor.get('orphaned_children') is False
+         and supervisor.get('remaining') == supervisor.get('term_sent') == supervisor.get('kill_sent') == []
+         and supervisor.get('timed_out') is False and supervisor.get('cancelled') is False
+         and supervisor.get('error') is None
+         and supervisor.get('reaped') == [dict(pid=child, status=adapter['native_exit'] * 256)],
+         'inventory init supervisor closure')
+    for pid in {child, owner, int(match[1]), int(latest['pid'])}:
+        need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
+
+
 def validate(receipt, owner, proof):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -786,6 +934,8 @@ def validate(receipt, owner, proof):
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
+    run_artifacts = set()
+    raw_remaining = [MAX_RAW_FORENSIC_RUN_BYTES]
     historical_sources = {}
     need(isinstance(bindings, dict), 'missing file bindings')
 
@@ -834,6 +984,63 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
+    if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1', 'campaign-inventory-init-failure-v1'}:
+        # Missing host tooling can stop inventory before any controller exists.
+        # Reconcile only that zero-admission boundary, retaining every native
+        # UNVERIFIED outcome. A launched campaign still needs the fleet audit.
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('purpose')
+             and not proof.get('controller_log') and not proof.get('recovered_runtime')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text,
+             'unlaunched startup failure binding')
+        if layout == 'campaign-unlaunched-v1':
+            need("No such file or directory: 'flyctl'" in cli_text, 'missing executable boundary')
+        elif layout == 'campaign-unlaunched-relay-v1':
+            unlaunched_relay_retired(campaign, bound, document)
+        else:
+            inventory_init_failure(root, runs, campaign, request, receipt, adapter, bound, document)
+        summary = document(campaign / 'summary.json')
+        checks, jobs = request['checks'], summary['jobs']
+        need(checks and len(set(checks)) == len(checks)
+             and summary.get('campaign_id') == campaign.name and summary.get('runs') == 1
+             and summary.get('retry_infra') == 0 and summary.get('status') == 'failed'
+             and type(summary.get('peak_concurrency')) is int and summary['peak_concurrency'] == 0
+             and summary.get('shared_inventory_failed') is True and not summary.get('startup_cohorts')
+             and summary.get('task_count') == summary.get('total_jobs') == len(checks) == len(jobs),
+             'unlaunched campaign inventory')
+        need({job.get('task') for job in jobs} == set(checks)
+             and all(job.get('job_id') == f'r001-j{index:04d}' and job.get('run') == 1
+                     and job.get('attempt') == 1 and job.get('attempts') == []
+                     and job.get('status') == 'cancelled'
+                     and all(job.get(key) is None for key in
+                             ('controller_pid', 'controller_exit_code', 'started_at', 'finished_at', 'wall_clock_seconds'))
+                     and job.get('log') == str(campaign / (job['job_id'] + '.log'))
+                     and not Path(job['log']).exists() and not Path(job['log']).is_symlink()
+                     for index, job in enumerate(jobs, 1)), 'a campaign controller was admitted')
+        need(runs.is_dir() and not runs.is_symlink() and not any(runs.iterdir()), 'native fleet resources exist')
+        from datetime import datetime
+        start, finish = (datetime.fromisoformat(summary[key]).timestamp() for key in ('started_at', 'finished_at'))
+        need(adapter['started_at'] <= start <= finish <= receipt['finished_at'] <= confirmed,
+             'unlaunched terminal clocks')
+        inventory = campaign / 'shared-inventory'
+        need(bound(inventory / 'stop') == b'' and not (inventory / 'owner').exists()
+             and not (inventory / 'owner').is_symlink(), 'inventory publisher still owns startup')
+        logs = [cli, inventory / 'publisher.private.log', campaign / 'hub-group-publication.private.log']
+        for path in logs[1:]:
+            bound(path)
+        holders = subprocess.run(['lsof', '-t', '--', *map(str, logs)], capture_output=True, timeout=10)
+        need(holders.returncode == 1 and not holders.stdout and not holders.stderr,
+             'startup log writer or unknown process observation')
+        for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):
+            document(campaign / name)
+        from deploy_test_cloud import campaign_published
+        native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+        need(campaign_published(summary, campaign, adapter['started_at'], native), 'startup publication or publisher cleanup')
+        need(used == set(bindings), 'unlaunched proof file closure')
+        return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+                'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
+                'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
     if layout == 'campaign-ref-preflight-v1':
         from deploy_test_native_ref_preflight import validate_ref_preflight
         result = validate_ref_preflight(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
@@ -1059,14 +1266,26 @@ def validate(receipt, owner, proof):
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
         run_path = fleet / '_batch/run.json'
         if isolated or preallocation or mixed or fleet in admission_parents:
-            run = document(run_path, RUN_RECORD_MAX_BYTES)
+            # These layouts consume the original projection. Bind its control
+            # metadata through the bounded forensic reader; logs stay opaque.
+            from deploy_test_run_artifact import read_run_artifact
+            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
+            run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
+                                    raw_limit=MAX_RAW_FORENSIC_RUN_BYTES,
+                                    raw_remaining=raw_remaining)
+            used.add(str(run_path))
+            run_artifacts.add(str(run_path))
         else:
             # Native task logs can exceed the small control-receipt cap. Preserve
             # the full hash and JSON-object contract without loading those logs.
             from native_json_evidence import verify_native_object
             need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
             verify_native_object(run_path, bindings.get(str(run_path)))
-            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
+            verified_size = run_path.stat().st_size
+            need(run_path.is_file() and verified_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
+            # Every participant run record shares the proof's aggregate raw-run allowance.
+            need(verified_size <= raw_remaining[0], 'native artifact: aggregate raw admission bound exceeded')
+            raw_remaining[0] -= verified_size
             used.add(str(run_path))
             run = None
         life = document(fleet / '_batch/lifecycle.json')
@@ -1077,7 +1296,12 @@ def validate(receipt, owner, proof):
         # provider release below; unlinked or foreign failures refuse.
         failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
         if failed_canary and run is None:
-            run = document(run_path, RUN_RECORD_MAX_BYTES)
+            # The ordinary branch already charged this run to raw_remaining above.
+            # Load only bounded control metadata; keep forensic task logs opaque.
+            from deploy_test_run_artifact import read_run_artifact
+            run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
+                                    raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES))
+            run_artifacts.add(str(run_path))
         need(type(life.get('version')) is int and life['version'] == 1 and life['run_id'] == fleet.name
              and life['workspace_root'] == str(root) and life['hub_publication_failed'] is False
              and type(life['controller_exit_code']) is int
@@ -1209,9 +1433,12 @@ def validate(receipt, owner, proof):
                                       'disposition': 'retained-exact-owner-transfer-required'}
         need(retained, 'retained service evidence missing')
         for path in bindings:
-            # Retain and re-hash ALL original debt evidence, including retained Hub owners. Fleet run
-            # records keep the larger cap they were first bound with above.
-            bound(path, RUN_RECORD_MAX_BYTES if path.endswith('/_batch/run.json') else MAX_RECEIPT_BYTES)
+            if path in run_artifacts:
+                from deploy_test_run_artifact import read_run_artifact
+                read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES,
+                                  raw_limit=MAX_RAW_FORENSIC_RUN_BYTES)
+            else:
+                bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
     need(used == set(bindings), 'proof file closure')
     result = {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
@@ -1291,24 +1518,118 @@ def clean_isolated_successor(state, prior, original, successor):
          and original['finished_at'] <= successor['started_at'] <= successor['finished_at'], 'successor clocks')
 
 
+def reconciliation_occurrence(state, entry, receipt):
+    """Keep token-based interruption and failure-based reconciliation identities distinct."""
+    if entry.get('occurrence') == receipt['token']:
+        return
+    rows = [f for f in state.get('failures', []) if f.get('id') == entry.get('occurrence')]
+    need(len(rows) == 1, 'reconciliation occurrence identity')
+    failure = rows[0]
+    case = failure.get('check', '').partition('/')[2]
+    need(failure.get('gate') == receipt['gate'] and failure.get('source') == receipt['source']
+         and failure.get('evidence') == receipt['log'] and failure.get('command') == receipt['command']
+         and failure.get('worker_result') == receipt['worker_result']
+         and failure.get('native_result') == 'UNVERIFIED' and failure.get('complete') is False
+         and receipt['cases'].get(case) == 'UNVERIFIED', 'reconciliation occurrence binding')
+
+
+def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
+    """Launch-only authority from an immutable full failed cohort's strict normal reconciliation."""
+    from deploy_test_cycle import bounded_read, receipt_owner, sha_file
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    need(successor is not None and successor.get('token') != original['token']
+         and successor.get('executed') is True and successor.get('complete') is False
+         and successor.get('status') == 'FAIL' and type(successor.get('native_exit')) is int
+         and successor['native_exit'] in (0, 1) and successor.get('timed_out') is False
+         and successor.get('cancelled') is False and successor.get('command') == gate['command'],
+         'failed successor execution')
+    rows = [(a, r) for a in state['attempts'] for r in a.get('results', []) if r is successor]
+    need(len(rows) == 1 and rows[0][0].get('phase') in {'initial', 'focused', 'failed-gates', 'final', 'triage'}
+         and not rows[0][0].get('interrupted') and not rows[0][0].get('stale')
+         and rows[0][0].get('source') == successor['source']
+         and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True),
+         'failed successor full attempt')
+    binding = successor.get('execution_binding', {})
+    # This receipt's hash-bound execution inputs are historical. Current target inputs
+    # can legitimately differ and must earn fresh full-gate credit after renewal.
+    need(isinstance(binding, dict) and set(binding) == {'contract_digest', 'environment', 'input_fingerprint'}
+         and all(isinstance(v, str) and re.fullmatch('[0-9a-f]{64}', v) for v in binding.values()),
+         'failed successor historical execution binding')
+    folder = Path(successor['log']).parent
+    need(bounded_read(folder / 'receipt.json', 'failed successor receipt') == successor,
+         'failed successor receipt changed')
+    need(successor.get('worker_result') == str(folder / 'result.json'), 'failed successor result locator')
+    request = bounded_read(folder / 'request.json', 'failed successor request')
+    need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
+         and request.get('phase') == rows[0][0]['phase']
+         and request.get('worker_recipe') == gate.get('worker_recipe'), 'failed successor request identity')
+    checks, skips = request['checks'], request['skips']
+    need(isinstance(checks, list) and checks and isinstance(skips, dict)
+         and len(set(checks)) == len(checks) and not set(checks) & set(skips)
+         and set(checks) | set(skips) == set(gate['checks'])
+         and all(isinstance(v, dict) and v.get('source') == successor['source'] for v in skips.values())
+         and set(successor.get('cases', {})) == set(gate['checks'])
+         and set(successor.get('case_complete', {})) == set(gate['checks'])
+         and all(successor['cases'].get(k) == 'SKIP' for k in skips)
+         and all(successor['cases'].get(k) in {'PASS', 'FAIL', 'UNVERIFIED'} for k in checks)
+         and all(type(v) is bool for v in successor['case_complete'].values())
+         and any(successor['cases'][k] == 'UNVERIFIED' and successor['case_complete'][k] is False for k in checks),
+         'failed successor full inventory')
+    owner = receipt_owner(prior['gate'], successor)
+    need(isinstance(owner, dict) and owner.get('worker_root') == prior['owner']['worker_root'],
+         'failed successor owner')
+    native_root = Path(owner['worker_root']) / '.context/deploy-cloud' / hashlib.sha256(successor['token'].encode()).hexdigest()
+    expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'], original_request_token=prior['token'],
+        new_request_token=successor['token'], source=successor['source'], new_native_root=str(native_root),
+        excluded_resources=prior['excluded_resources'], credit_granted=False)
+    admissions = request.get('isolated_validation')
+    need(isinstance(admissions, list) and all(isinstance(v, dict) for v in admissions)
+         and admissions == successor.get('isolated_validation')
+         and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
+         'failed successor original isolation binding')
+    entries = [(k, e) for k, e in state.get('reconciled_owners', {}).items()
+               if e.get('token') == successor['token']]
+    need(len(entries) == 1, 'one strict normal successor reconciliation required')
+    key, entry = entries[0]
+    normal = entry.get('proof', {})
+    need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
+         and entry.get('purpose') is None and normal.get('purpose') is None
+         and normal.get('layout') == 'campaign-v1' and key == normal.get('receipt_sha256')
+         and key == sha_file(folder / 'receipt.json') and entry.get('credit_granted') is False,
+         'strict normal successor reconciliation required')
+    reconciliation_occurrence(state, entry, successor)
+    # Re-run the unchanged normal validator: all native file hashes, audits, retained Hub custody,
+    # provider release and publication closure are required even when this result is incomplete.
+    need(still_bound(entry, successor, owner), 'strict normal successor proof changed')
+    need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
+         and finite(successor.get('finished_at'))
+         and original['finished_at'] <= successor['started_at'] <= successor['finished_at'],
+         'failed successor clocks')
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
-    need(state.get('phase') == 'triage' and not state.get('running')
-         and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent triage required')
+    need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
+         and not state.get('running')
+         and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
     previous = [(key, entry) for key, entry in state.get('reconciled_owners', {}).items()
                 if entry.get('token') == request_token]
     need(len(previous) == 1, 'one prior reconciliation required')
     key, prior = previous[0]
     need(prior.get('kind') == KIND and prior.get('purpose') == 'isolated-validation'
-         and prior.get('occurrence') == request_token and key == proof.get('receipt_sha256'), 'original reconciliation identity')
+         and key == proof.get('receipt_sha256'), 'original reconciliation identity')
     receipts = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
                 if row.get('gate') == prior['gate'] and row.get('token') == request_token]
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
+    reconciliation_occurrence(state, prior, receipt)
     latest = latest_receipts(state).get(prior['gate'])
     if latest != receipt:
-        clean_isolated_successor(state, prior, receipt, latest)
+        if latest is not None and latest.get('complete') is False:
+            reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
+        else:
+            clean_isolated_successor(state, prior, receipt, latest)
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
     need(still_bound(prior, receipt, owner), 'prior native proof changed')
@@ -1328,7 +1649,8 @@ def reconcile(state, occurrence_id, proof):
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
-        if failure is None and state.get('phase') == 'triage' and proof.get('purpose') == 'isolated-validation':
+        if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
+                and proof.get('purpose') == 'isolated-validation'):
             return renew_isolated_validation(state, occurrence_id, proof)
         if failure is None and state.get('phase') == 'stale':
             # A source refresh can finish a full attempt before its failures are

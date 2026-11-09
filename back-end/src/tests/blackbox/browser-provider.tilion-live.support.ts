@@ -304,6 +304,11 @@ export async function assertLiveTilionVendorContract(): Promise<void> {
 
 /** Backend-route parity on a Tilion-pinned run, mirroring the Kernel live parity. */
 export async function runLiveTilionProviderParity(): Promise<void> {
+  const { withBrowserProviderServer } = await import('./browser-provider.fixture-server.support');
+  await withBrowserProviderServer('tilion', runConfiguredTilionProviderParity);
+}
+
+async function runConfiguredTilionProviderParity(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
   if (!baseUrl) return;
   const apiKey = process.env.BACKEND_API_KEY?.trim();
@@ -335,8 +340,7 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     });
 
   await prisma.user.create({ data: { userId, name: 'Tilion Provider Blackbox' } });
-  // Pin Tilion through the persisted preference so this parity holds whatever
-  // the backend's deployment default is; the default never overrides it.
+  // The owned route server selects Tilion explicitly; its preference supplies proxy options.
   await prisma.browserContext.create({
     data: {
       userId,

@@ -3,12 +3,19 @@ import { useCallback } from 'react';
 import type { Message } from '@/lib/api';
 
 import { postAgentMessage } from '../api';
+import type { StagedUserMessage } from '../types';
 import type { AgentProviderState } from './useAgentProviderState';
+import {
+  buildLocalUserMessage,
+  confirmLocalUserMessage,
+  dropLocalUserMessage,
+} from './optimisticUserMessages';
 
 export function useAgentMessaging({
   messageHandlersRef,
   selectedAgentIdRef,
-}: Pick<AgentProviderState, 'messageHandlersRef' | 'selectedAgentIdRef'>) {
+  setMessages,
+}: Pick<AgentProviderState, 'messageHandlersRef' | 'selectedAgentIdRef' | 'setMessages'>) {
   const registerMessageHandler = useCallback(
     (subAgentId: string | null, handler: (message: Message) => void): (() => void) => {
       messageHandlersRef.current.set(subAgentId, handler);
@@ -41,5 +48,24 @@ export function useAgentMessaging({
     [selectedAgentIdRef],
   );
 
-  return { registerMessageHandler, dispatchMessage, sendMessage };
+  const stageUserMessage = useCallback(
+    (agentId: string, text: string): StagedUserMessage => {
+      const local = buildLocalUserMessage(text);
+      const isCurrent = () => selectedAgentIdRef.current === agentId;
+      if (isCurrent()) setMessages((previous) => [...previous, local]);
+      return {
+        confirm: (server) => {
+          if (!isCurrent()) return;
+          setMessages((previous) => confirmLocalUserMessage(previous, local, server));
+        },
+        drop: () => {
+          if (isCurrent())
+            setMessages((previous) => dropLocalUserMessage(previous, local.message_id));
+        },
+      };
+    },
+    [selectedAgentIdRef, setMessages],
+  );
+
+  return { registerMessageHandler, dispatchMessage, sendMessage, stageUserMessage };
 }

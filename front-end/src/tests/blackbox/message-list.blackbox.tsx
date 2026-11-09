@@ -60,7 +60,6 @@ function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
 }
 
 function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextValue {
-  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
   return {
     agent: null,
     applyAgentDetail: () => true,
@@ -68,6 +67,7 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     stagePendingAgentCreation: () => {},
     reconcilePendingAgentCreation: async () => {},
     rollbackPendingAgentCreation: () => false,
+    stageUserMessage: () => ({ confirm: () => {}, drop: () => {} }),
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
@@ -75,7 +75,7 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     streamingPlan: null,
     streamingAttention: null,
     streamingTools: new Map(),
-    streamedTextsRef,
+    streamedTextsRef: { current: new Set<string>() },
     registerMessageHandler: () => () => {},
     sendMessage: async () => {},
     isLoadingAgent: false,

@@ -709,29 +709,32 @@ class ActionHistory:
             dom_service.restore_secret_redaction_state(self._dom_service.secret_redaction_state())
         self._dom_service = dom_service
 
-    def _model_visible_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
-        if self._dom_service is None:
+    @staticmethod
+    def project_entry(entry: Dict[str, Any], dom_service: Optional["DOMService"]) -> Dict[str, Any]:
+        if dom_service is None:
             return entry
-        safe_entry = self._dom_service.model_visible_value(entry)
+        safe_entry = dom_service.model_visible_value(entry)
         for key in ("params", "result"):
             if key in entry:
                 # Their outer keys are tool protocol. Nested evaluate result
                 # keys still belong to the page and remain subject to masking.
                 value = entry[key]
                 if key == "result" and entry.get("action") == "read_browser_state" and isinstance(value, dict) and isinstance(value.get("formatted_state"), str):
-                    safe_entry[key] = self._dom_service.model_visible_value({k: v for k, v in value.items() if k != "formatted_state"})
-                    safe_entry[key]["formatted_state"] = self._dom_service.model_visible_value(value["formatted_state"])
+                    safe_entry[key] = dom_service.model_visible_value({k: v for k, v in value.items() if k != "formatted_state"})
+                    safe_entry[key]["formatted_state"] = dom_service.model_visible_value(value["formatted_state"])
+                elif key == "result" and entry.get("action") == "request_payment_card" and callable(getattr(dom_service, "model_visible_action_result", None)):
+                    safe_entry[key] = dom_service.model_visible_action_result(entry.get("action", ""), value)
                 else:
-                    safe_entry[key] = self._dom_service.model_visible_value(value)
+                    safe_entry[key] = dom_service.model_visible_value(value)
         if entry.get("action") == "request_payment_card":
             # Every history read re-projects; a later private entry must not
             # rewrite the card request this step already made (agent ce9d2ae6).
-            project = self._dom_service.model_visible_value
+            project = dom_service.model_visible_value
             keep_receipt_image_urls(entry.get("params"), safe_entry.get("params"), project)
             result = entry.get("result")
             if isinstance(result, dict) and isinstance(safe_entry.get("result"), dict):
                 keep_receipt_image_urls(result.get("payment_request"), safe_entry["result"].get("payment_request"), project)
-        if not self._dom_service.secret_values_used and entry.get("screenshot"):
+        if not dom_service.secret_values_used and entry.get("screenshot"):
             safe_entry["screenshot"] = entry["screenshot"]
         # These are harness-owned mechanics, rather than page echoes. A CVV
         # equal to a step/index must not change the chosen target or make a
@@ -740,6 +743,10 @@ class ActionHistory:
             if key in entry:
                 safe_entry[key] = entry[key]
         return safe_entry
+
+
+    def _model_visible_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        return self.project_entry(entry, self._dom_service)
 
     def secret_redaction_state(self) -> Dict[str, Any]:
         return self._dom_service.secret_redaction_state() if self._dom_service is not None else {}
@@ -953,6 +960,11 @@ class DOMService:
         """
         self.cdp_url = cdp_url
         self.cdp_multiplexer = cdp_multiplexer
+        self.disconnect_confirmed = cdp_multiplexer is None
+        self._session_disconnect_confirmed = True
+        self._disconnecting_sessions: list[Any] = []
+        self._session_custodies: dict[int, Any] = {}
+        self._session_admission_closed = False
         self._released_cdp_bytes = 0
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
@@ -1128,9 +1140,13 @@ class DOMService:
 
         This must be called before any other methods.
         """
+        if self._session_admission_closed:
+            raise RuntimeError("Browser session acquisition is closed")
         try:
             from browser_use.browser.profile import BrowserProfile
             from browser_use.browser.session import BrowserSession
+
+            from browser_tools.browser_session_owner import create_owned_browser_session
 
             disable_browser_use_pending_request_probe()
             drop_browser_use_serial_dom_probes()
@@ -1153,7 +1169,11 @@ class DOMService:
             )
 
             # Must pass cdp_url directly to prevent BrowserSession from overriding is_local=True
-            self._session = BrowserSession(browser_profile=profile, cdp_url=self.cdp_url)
+            if self._session is not None:
+                self._disconnecting_sessions.append(self._session)
+            self._session = create_owned_browser_session(BrowserSession, browser_profile=profile, cdp_url=self.cdp_url)
+            self.disconnect_confirmed = False
+            self._session_disconnect_confirmed = False
             await self._session.start()
             logger.info(
                 f"🌐 Connected to browser via CDP: {self.cdp_url[:50]}... "
@@ -1354,15 +1374,39 @@ class DOMService:
         try:
             await self._disconnect_session()
         finally:
-            multiplexer, self.cdp_multiplexer = self.cdp_multiplexer, None
+            multiplexer = self.cdp_multiplexer
             if multiplexer is not None:
-                self._released_cdp_bytes += int(getattr(multiplexer, "upstream_bytes_received", 0) or 0)
-                with contextlib.suppress(Exception):
-                    await multiplexer.close()
+                self.disconnect_confirmed = False
+                released_bytes = int(getattr(multiplexer, "upstream_bytes_received", 0) or 0)
+                await multiplexer.close()
+                self.cdp_multiplexer = None
+                self._released_cdp_bytes += released_bytes
+            self.disconnect_confirmed = getattr(self, "_session_disconnect_confirmed", self.disconnect_confirmed)
 
     async def _disconnect_session(self) -> None:
-        if self._session:
-            session = self._session
+        from browser_tools.browser_session_owner import BrowserSessionCustody
+
+        self._session_admission_closed = True
+        sessions = getattr(self, "_disconnecting_sessions", [])
+        self._disconnecting_sessions = sessions
+        custodies = getattr(self, "_session_custodies", {})
+        self._session_custodies = custodies
+        if self._session is not None:
+            if not any(session is self._session for session in sessions):
+                sessions.append(self._session)
+            self._session = None
+        if sessions:
+            self.disconnect_confirmed = False
+            self._session_disconnect_confirmed = False
+        # Seal every session before the first await, including displaced ones.
+        for session in sessions:
+            custody = custodies.setdefault(id(session), getattr(session, "_native_custody", None) or BrowserSessionCustody())
+            custody.sealed = True
+            custody.remember(getattr(session, "_cdp_client_root", None))
+            session._intentional_stop = True
+        for session in tuple(sessions):
+            custody = custodies[id(session)]
+            await custody.quiesce(session)
             task = self._captcha_indicator_task
             self._captcha_indicator_task = None
             if task is not None and not task.done():
@@ -1388,9 +1432,14 @@ class DOMService:
                             logger.warning(f"Storage monitor stopped with error: {error}")
                 # keep_alive prevents BrowserStopEvent from stopping a remote
                 # provider, including sessions discovered from their CDP URL.
-                await session.stop()
+                await custody.stop_session(session)
+                await custody.close_clients()
             except Exception as e:
-                logger.warning(f"Error during disconnect: {e}")
+                logger.warning(f"Error during disconnect: {e}", exc_info=True)
+            else:
+                if custody.closed:
+                    sessions[:] = [owner for owner in sessions if owner is not session]
+                    custodies.pop(id(session), None)
             finally:
                 self._session = None
                 self._selector_map = {}
@@ -1405,7 +1454,12 @@ class DOMService:
                 self._passkey_auth_reload_at_by_target.clear()
                 self._passkey_auth_reload_url_by_target.clear()
                 self._passkey_pending_auth_reload_targets.clear()
-                logger.info("🔌 Disconnected from browser")
+                if custody.closed:
+                    logger.info("🔌 Disconnected from browser")
+                else:
+                    logger.warning("Browser session cleanup unconfirmed; retaining native custody")
+        if not sessions and hasattr(self, "_session_disconnect_confirmed"):
+            self._session_disconnect_confirmed = True
 
     async def _send_cdp_command(
         self,

@@ -1,0 +1,17 @@
+{
+  "format": "PR1859-DEPLOY-QUALIFICATION-V1",
+  "status": "COMPLETE_WITH_DELEGATED_FAILURES",
+  "merged_sha": "4e28dab648a66e70f513979cb11b59e614866424",
+  "Fly": "PASS",
+  "production_semantic": "PASS",
+  "workflow_migration": "Delegated/waived; nativeFAIL42PASS3FAILof45, fixturecleanupPASS",
+  "premerge_selected_gates": "14PASS1FAIL, existingTilionrepairgoalhandoffaccepted; nativeFAILretained",
+  "smoke": "13PASS nativecompleteandcleanuptrue",
+  "CodeRabbit": "SKIPPED confirmedspendingcap; mergedunreviewedbyprovider",
+  "pending_handoffs": 0,
+  "repair_agents": [
+    "https://boxes.dev/thread/thr_a22cd6bd7dd145e489a128a9a0d88e4e",
+    "https://boxes.dev/thread/thr_6b90d980e2ef4d78b2b744d5fcb1b357"
+  ],
+  "publication_condition": "Final archive recovery is verified and nativeREADY receipt is committed. RecordsPR merge/link and finalscorecard complete publication; original native receipts remain immutable."
+}

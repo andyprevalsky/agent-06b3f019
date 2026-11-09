@@ -258,7 +258,7 @@ test('deadline-equal/late heartbeat expires holder and promotes oldest waiter', 
   await expectStatus(view(f.userId, active.id), 'EXPIRED');
   await expectStatus(view(f.userId, waiting.id), 'ACTIVE');
 });
-test('pending auth retains paused lease across expiration; resolved auth provides bounded grace', async () => {
+test('pending auth retains lease across heartbeat expiry within the user-control grace; resolved auth provides bounded grace', async () => {
   const f = await fixture();
   const a = await agent(f.userId);
   const b = await agent(f.userId);
@@ -269,8 +269,11 @@ test('pending auth retains paused lease across expiration; resolved auth provide
     action(f.userId, active.id, 'awaiting-auth', { attentionRequestId: auth.id }),
     200
   );
-  await prisma.agent.update({ where: { id: a.id }, data: { status: 'PAUSED' } });
-  await expire(active.id);
+  // Heartbeat expired, still inside USER_CONTROL_TIMEOUT_MS: the pending auth keeps the phone.
+  await prisma.iPhoneLease.update({
+    where: { id: active.id },
+    data: { leaseExpiresAt: new Date(Date.now() - 60_000) },
+  });
   const retained = await view(f.userId, active.id);
   assert(
     retained.status === 'ACTIVE' && retained.attentionRequestId === auth.id,

@@ -168,8 +168,10 @@ class SingleCdpConnectionMultiplexer:
         self._server: Any = None
         self._local_url = ""
         self._upstream: Any = None
+        self._dialing_upstream: Any = None
         self._reader: Optional[asyncio.Task] = None
         self._upstream_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
         self._ids = itertools.count(1)
         self._clients: Set[_Client] = set()
         self._client_numbers = itertools.count(1)
@@ -282,20 +284,38 @@ class SingleCdpConnectionMultiplexer:
 
     async def close(self) -> None:
         self._closed = True
-        if self._watchdog is not None:
-            self._watchdog.cancel()
-            self._watchdog = None
-        for task in list(self._background):
-            task.cancel()
-        for client in list(self._clients):
-            with contextlib.suppress(Exception):
-                await client.websocket.close(code=1001, reason="multiplexer closed")
-        if self._server is not None:
-            self._server.close()
-            with contextlib.suppress(Exception):
+        async with self._close_lock:
+            if self._watchdog is not None:
+                self._watchdog.cancel()
+                await asyncio.gather(self._watchdog, return_exceptions=True)
+                self._watchdog = None
+            for task in list(self._background):
+                task.cancel()
+            for client in list(self._clients):
+                await self._close_client(client, code=1001, reason="multiplexer closed")
+            if self._server is not None:
+                self._server.close()
                 await self._server.wait_closed()
-            self._server = None
-        await self._close_upstream()
+                self._server = None
+            await self._close_upstream()
+            # The reader can admit work while sockets are closing. Drain only
+            # after it stops, retaining descendants registered while unwinding.
+            while self._background:
+                tasks = list(self._background)
+                for task in tasks:
+                    if not task.cancelling():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self._background.difference_update(tasks)
+
+    async def _close_client(self, client: _Client, *, code: int, reason: str) -> None:
+        await client.websocket.close(code=code, reason=reason)
+        await client.websocket.wait_closed()
+        if client.sender is not None:
+            client.sender.cancel()
+            await asyncio.gather(client.sender, return_exceptions=True)
+            client.sender = None
+        self._clients.discard(client)
 
     async def disconnect_confirmed(self, disconnect: Callable[[], Awaitable[None]]) -> None:
         """Fence new dials and confirm the transport actually closed by owner detach."""
@@ -338,6 +358,9 @@ class SingleCdpConnectionMultiplexer:
         delays = list(self._slot_retry_delays)
         while True:
             upstream = await self._dial_upstream()
+            # Keep native custody through confirmation without exposing a
+            # socket that has no reader to commands or departing clients.
+            self._dialing_upstream = upstream
             if self._slot_confirm_seconds <= 0:
                 return upstream
             try:
@@ -349,6 +372,8 @@ class SingleCdpConnectionMultiplexer:
             except websockets.ConnectionClosed:
                 code = getattr(upstream, "close_code", None)
                 reason = getattr(upstream, "close_reason", "") or ""
+                await upstream.wait_closed()
+                self._dialing_upstream = None
                 if code != _SLOT_BUSY_CLOSE_CODE or not delays:
                     raise CdpMultiplexerUpstreamClosed(code, reason or "provider closed the CDP socket") from None
                 delay = delays.pop(0)
@@ -367,14 +392,27 @@ class SingleCdpConnectionMultiplexer:
                 raise CdpMultiplexerUpstreamClosed(1001, "multiplexer closed")
             if self._upstream is not None:
                 return
-            self._upstream = await self._dial_confirmed_upstream()
+            # A previous confirmation may have failed/cancelled. It cannot be
+            # reused, and another dial cannot bypass its retained native owner.
+            await self._close_dialing_upstream()
+            upstream = await self._dial_confirmed_upstream()
+            self._reader = asyncio.create_task(self._read_upstream(upstream))
+            self._upstream = upstream
+            self._dialing_upstream = None
             self.upstream_connections_opened += 1
-            self._reader = asyncio.create_task(self._read_upstream(self._upstream))
             logger.info(
                 "[CdpMux] Upstream CDP socket attached (label=%s, opened=%d)",
                 self._label,
                 self.upstream_connections_opened,
             )
+
+    async def _close_dialing_upstream(self) -> None:
+        """Called under _upstream_lock; failed closure retains native custody."""
+        upstream = self._dialing_upstream
+        if upstream is not None:
+            await upstream.close()
+            await upstream.wait_closed()
+            self._dialing_upstream = None
 
     async def _close_upstream(self) -> None:
         async with self._upstream_lock:
@@ -387,7 +425,6 @@ class SingleCdpConnectionMultiplexer:
                     self._label,
                     _close_details(upstream),
                 )
-            self._upstream, self._reader = None, None
             self._fail_internal(CdpMultiplexerUpstreamClosed(1000, "released"))
             self._pending.clear()
             self._pending_since.clear()
@@ -404,26 +441,24 @@ class SingleCdpConnectionMultiplexer:
             self._override_refused.clear()
             self._wants_debugger_wait.clear()
             self._browser_user_agent = None
-            if upstream is not None:
-                if self._checkpoint_close is not None:
-                    self._checkpoint_close_task = asyncio.current_task()
-                    try:
-                        await upstream.close()
-                        await upstream.wait_closed()
-                    except BaseException as error:
-                        self._upstream, self._reader = upstream, reader
-                        if not self._checkpoint_close.done():
-                            self._checkpoint_close.set_exception(error)
-                        raise
-                    finally:
-                        self._checkpoint_close_task = None
-                else:
-                    with contextlib.suppress(Exception):
-                        await upstream.close()
-            if reader is not None and reader is not asyncio.current_task():
-                reader.cancel()
-                with contextlib.suppress(BaseException):
-                    await reader
+            self._checkpoint_close_task = asyncio.current_task()
+            try:
+                await self._close_dialing_upstream()
+                if upstream is not None:
+                    # The owner must remain reachable during both awaits. A
+                    # close request (or cancellation) is not a native receipt.
+                    await upstream.close()
+                    await upstream.wait_closed()
+                if reader is not None and reader is not asyncio.current_task():
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
+                self._upstream, self._reader = None, None
+            except BaseException as error:
+                if self._checkpoint_close is not None and not self._checkpoint_close.done():
+                    self._checkpoint_close.set_exception(error)
+                raise
+            finally:
+                self._checkpoint_close_task = None
             if upstream is not None:
                 logger.info("[CdpMux] Upstream CDP socket released (label=%s)", self._label)
             if self._checkpoint_close is not None and not self._checkpoint_close.done():
@@ -472,7 +507,14 @@ class SingleCdpConnectionMultiplexer:
             code,
             reason[:120],
         )
-        self._upstream, self._reader = None, None
+        # A reader error can occur while the socket is still live. Confirm its
+        # closure before relinquishing the native handle or notifying clients.
+        async with self._upstream_lock:
+            if self._upstream is not upstream:
+                return
+            await upstream.close()
+            await upstream.wait_closed()
+            self._upstream = None
         self._fail_internal(CdpMultiplexerUpstreamClosed(code, reason))
         self._pending.clear()
         self._pending_since.clear()
@@ -487,8 +529,9 @@ class SingleCdpConnectionMultiplexer:
         self._override_claim.clear()
         self._override_refused.clear()
         for client in list(self._clients):
-            with contextlib.suppress(Exception):
-                await client.websocket.close(code=_downstream_close_code(code), reason=reason[:120])
+            await self._close_client(client, code=_downstream_close_code(code), reason=reason[:120])
+        if self._reader is asyncio.current_task():
+            self._reader = None
 
     async def _route_upstream(self, raw: Any) -> None:
         message = json.loads(raw)
@@ -984,6 +1027,7 @@ class SingleCdpConnectionMultiplexer:
     async def _serve_client(self, websocket: Any) -> None:
         if self._closed:
             await websocket.close(code=1001, reason="multiplexer closed")
+            await websocket.wait_closed()
             return
         client = _Client(websocket=websocket, number=next(self._client_numbers))
         ended: Optional[BaseException] = None
@@ -1005,9 +1049,7 @@ class SingleCdpConnectionMultiplexer:
             # client's own socket is still open; the exit log below names which.
             ended = error
         finally:
-            self._clients.discard(client)
-            if client.sender is not None:
-                client.sender.cancel()
+            await self._close_client(client, code=1000, reason="client disconnected")
             logger.info(
                 "[CdpMux] Local CDP client %d left (label=%s, %s, ended_by=%s, clients_left=%d)",
                 client.number,

@@ -1,0 +1,20 @@
+{
+  "format": "PR1859-REVIEW-EXCEPTION-V1",
+  "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+  "status": "SKIPPED",
+  "reason": "usage-cap",
+  "substantive_CodeRabbit_review_delivered": false,
+  "merged_unreviewed_by_CodeRabbit": true,
+  "evidence": {
+    "source": "gh:Rose-Ai-Labs/rose",
+    "captured_at": "2026-11-08T23:40:38.119689+00:00",
+    "issue_comment_id": 6728165875,
+    "issue_comment_updated_at": "2026-11-08T23:40:19Z",
+    "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+    "check_run_id": 128901192825,
+    "check_conclusion": "neutral",
+    "check_title": "Review rate limited",
+    "non_substantive_review_ids": []
+  },
+  "independent_scoped_reviews": "Runtime V2 GROUNDED and ordinary-code legacy recovery v4 PASS are separate; no general provider review is claimed."
+}

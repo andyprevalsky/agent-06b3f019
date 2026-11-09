@@ -39,6 +39,7 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 # ownership and release with the minimum real allocation; the focused reserve
 # tests cover sizing and low-space behavior separately.
 export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
+python3 "$ROOT_DIR/scripts/tests/cloudbench-worker-readiness-publication.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-port-allocation.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-process-cleanup.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-catalog.test.py" || exit 1

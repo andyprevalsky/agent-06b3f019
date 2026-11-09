@@ -61,3 +61,42 @@ claiming offline results as normal production Google acceptance.
 ## Reusable lesson
 
 Advance an immutable baseline only after proving both the old rows and the complete reviewed upstream snapshot are preserved.
+
+
+## 2026-11-09 recurrence: approved browser catalog edits
+
+The PR #1865 final agents coverage run (GitHub Actions 42690638070) failed
+`phone_daily_existing_catalog_rows_unchanged` at the exact prefix assertion on
+source `52b7cc41f091286ce1c5d21d87aa7523f65b6814`. The benchmark domain failed;
+130 other agent domains passed. The aggregate remains UNVERIFIED until its
+normal complete rerun, never a waiver or a claimed passing gate.
+
+Gate: INTRODUCED by this deploy's intentional catalog edits. The archived
+`06416c4f9f50ecec4f5d2678620e20dc3c0fd3d0` prefix has 208 rows. All names and
+relative positions remain; 198 rows are byte-equivalent as canonical JSON.
+Exactly nine rows contain the user-approved signed-in metadata and one
+(`browser-auth-assistance-declined`) contains the already-approved evaluator
+change. The seven appended phone rows are identical to current main. Reverting
+those ten changes would discard authorized deliverables. Main retains the old
+pin and the old ten rows, so syncing main alone cannot resolve this failure.
+
+Refresh only the immutable fixture pin to the already-approved integration
+catalog at `52b7cc41f091286ce1c5d21d87aa7523f65b6814`. The catalog, task
+definitions, timeout values and all 30 Python assert nodes are unchanged. This
+now freezes all 215 reviewed rows, including the seven phone rows. It is not a
+comparison of current data to itself: the expected value comes from an
+immutable Git blob. Separate phone discovery, group, status, evaluator and
+scoped-evidence checks remain independent.
+
+Causal proof used the identical owning pytest invocation against a private
+copy: old pin RED (0.09s), refreshed pin GREEN (0.07s), unauthorized old-row
+mutation RED (0.08s), unauthorized phone-row mutation RED (0.08s), restored
+catalog GREEN (0.06s). All 35 owning phone-daily pytest cases then passed
+in 1.64s with the unchanged native pyproject configuration. The existing
+benchmark blackbox dynamically registers every phone-daily test, including
+this exact prefix assertion; the reported native gate confirms that wiring.
+This is an offline blackbox assertion failure, not a
+failed live phone benchmark; no device operation or benchmark prompt was run
+or altered to obtain this proof. Native proof, exact commands and negative
+controls are retained in the PR #1865 closeout evidence. The full normal
+agents coverage gate on the final integrated source remains required.

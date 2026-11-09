@@ -14,6 +14,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+# Source of the original round-37 inventory-init failure whose exact producer bytes the native validator pins.
+INVENTORY_INIT_PRODUCER_SOURCE = 'ce016428eeb484b19b503a6f65884eb92f1e3fde'
 # The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
 # outer deploy worker (the local executor runs this suite inside a gate) would
 # make admission() demand that outer cycle's custody locator in-process.
@@ -68,9 +70,58 @@ def own_process_entries():
 
 
 def setUpModule():
+    # Disposable fixtures own their custody; an enclosing deploy request belongs
+    # to the runner. Tests for request ownership install their own explicit path.
+    environment = patch.dict(os.environ)
+    environment.start()
+    unittest.addModuleCleanup(environment.stop)
+    os.environ.pop('DEPLOY_GATE_REQUEST', None)
     hermetic = patch.object(deploy_test_process, 'process_entries', own_process_entries)
     hermetic.start()
     unittest.addModuleCleanup(hermetic.stop)
+
+
+class FixtureEnvironment(unittest.TestCase):
+    def test_outer_request_does_not_rebind_disposable_fixture_custody(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            request.parent.mkdir(parents=True)
+            request.write_text('{}')
+            env = dict(os.environ, DEPLOY_GATE_REQUEST=str(request))
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
+                'Cycle.test_historical_custody_rejects_tampering_and_missing_admission_proof',
+                'Cycle.test_historical_import_cli_and_admission_keep_current_inventory',
+                'RelayStartupEvidence.test_native_adapter_requests_owned_supervision'],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Ran 3 tests', result.stdout)
+
+    def test_explicit_request_owner_still_requires_matching_custody(self):
+        import deploy_test_historical_custody as h
+        before = dict(os.environ)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(request)}):
+                for candidate in ({}, {'custody_state': str(root / '.context/foreign/cycle.json')}):
+                    with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                        h.admission(candidate, root)
+        self.assertEqual(dict(os.environ), before)
+
+
+    def test_module_cleanup_restores_enclosing_environment(self):
+        program = (
+            "import os,runpy,unittest; "
+            "module=runpy.run_path(__import__('sys').argv[1]); "
+            "before=dict(os.environ); module['setUpModule'](); "
+            "assert 'DEPLOY_GATE_REQUEST' not in os.environ; "
+            "assert dict(os.environ)=={k:v for k,v in before.items() if k!='DEPLOY_GATE_REQUEST'}; "
+            "unittest.doModuleCleanups(); assert dict(os.environ)==before"
+        )
+        env = dict(os.environ, DEPLOY_GATE_REQUEST='/enclosing/request.json')
+        result = subprocess.run([sys.executable, '-B', '-c', program, str(Path(__file__).resolve())],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 class EnvironmentIdentity(unittest.TestCase):
@@ -2100,6 +2151,127 @@ class Cycle(unittest.TestCase):
         self.assertEqual(('triage', False), (after['phase'], after['ready']))
         self.assertEqual(1, c.verify_saved(self.directory, self.root))
 
+    def repair_independent_fixture(self, failing=False):
+        import contextlib, io
+        state, plan, path, plan_path, _ = self.independent_triage_fixture(failing=failing)
+        state.update(phase='needs-focused-plan', repair_gates=['api'])
+        state.pop('pending')
+        c.write(path, state)
+        lease = Path(self.workers.name) / 'leased'
+        def call(*extra):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    return c.main(['repair-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                                   '--root', str(self.root), '--exclude-root', str(lease), *extra])
+                except SystemExit as error:
+                    return error.code
+        return state, plan, path, plan_path, call
+
+    def test_repair_independent_observes_full_siblings_without_disposing_of_repairs(self):
+        before, plan, path, _, call = self.repair_independent_fixture()
+        self.assertEqual(0, call())
+        after = c.read(path)
+        for key in ('failures', 'reconciled_owners', 'source', 'plan_digest', 'repair_gates'):
+            self.assertEqual(before[key], after[key])
+        self.assertEqual(('needs-focused-plan', False), (after['phase'], after['ready']))
+        self.assertNotIn('pending', after)
+        self.assertEqual(before['attempts'], after['attempts'][:-1])
+        self.assertEqual(['missing'], [r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('needs-focused-plan', after['attempts'][-1]['origin_phase'])
+        self.assertTrue(after['attempts'][-1]['independent_full'])
+        self.assertTrue(c.reusable_full_pass(after, next(g for g in plan['gates'] if g['name'] == 'missing')))
+        self.assertEqual(0, call())
+        self.assertEqual(after['attempts'], c.read(path)['attempts'])
+
+    def test_repair_independent_failure_enters_real_triage_and_keeps_original_debt(self):
+        before, _, path, _, call = self.repair_independent_fixture(failing=True)
+        self.assertEqual(0, call())
+        after = c.read(path)
+        self.assertEqual(('triage', False), (after['phase'], after['ready']))
+        self.assertEqual('needs-focused-plan', after['failure_phase'])
+        self.assertEqual(before['failures'], after['failures'][:len(before['failures'])])
+        self.assertEqual(1, len(after['pending']))
+        self.assertEqual('missing/missing', after['failures'][-1]['check'])
+        self.assertEqual(before['repair_gates'], after['repair_gates'])
+        self.assertEqual(before['reconciled_owners'], after['reconciled_owners'])
+
+    def test_explicit_local_repair_observation_keeps_full_contract_and_required_repair_set(self):
+        before, plan, path, _, call = self.repair_independent_fixture()
+        self.assertEqual(0, call('--include-repair-local')); after = c.read(path)
+        self.assertEqual({'api', 'missing'}, {row['gate'] for row in after['attempts'][-1]['results']})
+        self.assertEqual(before['plan'], after['plan'])
+        self.assertEqual(before['repair_gates'], after['repair_gates'])
+        self.assertEqual(before['failures'], after['failures'])
+        self.assertEqual(before['reconciled_owners'], after['reconciled_owners'])
+        self.assertEqual(('needs-focused-plan', False), (after['phase'], after['ready']))
+        self.assertTrue(after['attempts'][-1]['include_repair_local'])
+        api = next(g for g in plan['gates'] if g['name'] == 'api')
+        self.assertTrue(c.reusable_full_pass(after, api))
+        self.assertEqual(set(api['checks']), set(next(row for row in after['attempts'][-1]['results']
+                                                    if row['gate'] == 'api')['cases']))
+
+    def test_repair_independent_never_dispatches_an_unrepaired_cloud_gate(self):
+        before, plan, path, plan_path, call = self.repair_independent_fixture()
+        cloud = dict(name='cloud', category='smoke', worker='native-cloud-worker',
+                     native_cloud=True, case_protocol=True, worker_transport='benchmark-cloud-cli',
+                     cwd=str(self.root), command=[sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')],
+                     checks=['still-required-cloud-check'], timeout_seconds=2)
+        plan['gates'].append(cloud)
+        before.update(plan=plan, plan_digest=c.digest(plan), input_fingerprints=c.input_fingerprints(plan, self.root))
+        c.write(plan_path, plan); c.write(path, before)
+        self.assertEqual(0, call('--include-repair-local')); after = c.read(path)
+        self.assertEqual({'api', 'missing'}, {row['gate'] for row in after['attempts'][-1]['results']})
+        self.assertIn(cloud, after['plan']['gates'])
+        self.assertFalse(after['ready'])
+        self.assertFalse(after['attempts'][-1]['cloud_execution_allowed'])
+        self.assertFalse(any(self.directory.glob('attempts/*/*/cloud/request.json')))
+
+    def test_repair_independent_refuses_legacy_cloud_transport_after_normal_repair_transition(self):
+        _, plan, path, plan_path, call = self.repair_independent_fixture()
+        launcher = Path(self.workers.name) / 'run-predeploy-cloud'
+        marker = Path(self.workers.name) / 'legacy-cloud-launched'
+        launcher.write_text('touch "' + str(marker) + '"\n')
+        plan['gates'].append(dict(name='legacy-cloud', category='smoke', worker='legacy-cloud',
+                                 worker_transport='benchmark-cloud-cli', command=['bash', str(launcher)],
+                                 checks=['would-allocate-cloud'], timeout_seconds=2))
+        plan['gates'][1]['command'] = [sys.executable, '-c', 'raise SystemExit(1)']
+        state = c.initialize(plan, self.root)
+        c.run_phase(plan, state, self.directory, self.root)
+        c.run_phase(plan, state, self.directory, self.root)
+        c.adjudicate(state, {'failures': [self.report(f)['failures'][0] for f in state['failures']]})
+        old = copy.deepcopy(plan); (self.root / 'code').write_text('actual local source repair')
+        plan = copy.deepcopy(plan); plan['source'] = c.source(self.root)
+        c.refresh(state, old, plan, self.root)
+        c.run_phase(plan, state, self.directory, self.root)
+        self.assertEqual('needs-focused-plan', state['phase']); marker.unlink()
+        c.write(plan_path, plan); c.write(path, state)
+        self.assertEqual(0, call('--include-repair-local'))
+        after = c.read(path)
+        self.assertFalse(marker.exists())
+        self.assertNotIn('legacy-cloud', [row['gate'] for row in after['attempts'][-1]['results']])
+        self.assertIn('legacy-cloud', [gate['name'] for gate in after['plan']['gates']])
+        self.assertFalse(after['attempts'][-1]['cloud_execution_allowed'])
+        self.assertFalse(after['ready'])
+
+    def test_repair_independent_refuses_unresolved_running_or_stale_boundaries_atomically(self):
+        before, _, path, _, call = self.repair_independent_fixture()
+        for changes in ({'pending': ['unresolved']}, {'running': True}, {'live_failures': []},
+                        {'resume_phase': 'focused'}, {'phase': 'focused'}, {'phase': 'ready'}, {'ready': True}):
+            with self.subTest(changes=changes):
+                c.write(path, {**before, **changes}); saved = path.read_bytes()
+                self.assertEqual(2, call()); self.assertEqual(saved, path.read_bytes())
+        c.write(path, before); saved = path.read_bytes()
+        (self.root / 'code').write_text('changed source')
+        self.assertEqual(2, call()); self.assertEqual(saved, path.read_bytes())
+
+    def test_waived_independent_observation_returns_to_required_focused_repairs(self):
+        failure = self.failure()
+        self.state.update(failure_phase='needs-focused-plan', repair_gates=['ui'])
+        c.adjudicate(self.state, self.report(failure, 'NOT_INTRODUCED',
+                                           external_provider={'name': 'fixture provider', 'reason': 'outage'}))
+        self.assertEqual(('needs-focused-plan', False), (self.state['phase'], self.state['ready']))
+        self.assertEqual(['ui'], self.state['repair_gates'])
+
     def test_old_source_disposition_requires_current_renewal_without_exempting_new_inputs(self):
         failure = self.failure()
         old_native = copy.deepcopy(failure)
@@ -3992,7 +4164,7 @@ class Cycle(unittest.TestCase):
         transport_receipt + cleanup_owner, same-turn platform result, native audit, process sidecar, audit
         record) with fake identities; every hash and marker is computed from the bytes written here."""
         import hashlib
-        gate_name, token = 'cloudbench-controller', 'f' * 32
+        gate_name, token = 'cloudbench-controller', getattr(self, '_renewal_fixture_token', 'f' * 32)
         source = {'head': 'a' * 40, 'digest': 'b' * 64}
         owner = {'worker_thread': 'ph-fake-worker', 'worker_host': 'fake-devbox-uuid', 'worker_root': '/fake/worker/root',
                  'request_token': token, 'message_id': 'fake-message-id', 'turn_id': 'fake-turn-id',
@@ -4226,7 +4398,7 @@ class Cycle(unittest.TestCase):
         for ordinal, role in enumerate(('parent', 'canary')):
             fleet = runs / role; fleets.append(fleet)
             names = [gate['name']] if role == 'parent' else ['infra-probe']
-            owner = str(ordinal + 1) * 32
+            owner = str(ordinal + getattr(self, '_renewal_owner_offset', 1)) * 32
             audit = fleet / 'teardown-ownership'; audit.mkdir(parents=True)
             meta = dict(version='1', fleet_owner_token=owner, run_id=role, app='fixture',
                 workspace_root=str(self.root), status='provider-teardown-verified',
@@ -4679,7 +4851,8 @@ class Cycle(unittest.TestCase):
                   + [paths['receipt'].stat().st_size, paths['adapter'].stat().st_size])
         for record in records:
             value = json.loads(record.read_text())
-            value['padding'] = 'x' * (cap + 1)
+            # Native run size comes from per-task log arrays, not retained metadata.
+            value['tasks'] = [dict(logs={'worker_logs': ['x' * 512] * (cap // 512 + 1)})]
             record.write_text(json.dumps(value))
             proof['files'][str(record)] = hashlib.sha256(record.read_bytes()).hexdigest()
         with patch.object(c, 'MAX_RECEIPT_BYTES', cap):
@@ -4707,11 +4880,11 @@ class Cycle(unittest.TestCase):
         for index, name in enumerate(names, 1):
             fleet = runs / ('20261103-080440-' + str(310000 + index))
             shutil.copytree(template, fleet)
-            token = f'{index + 10:032x}'
+            token = f'{index + getattr(self, "_renewal_campaign_offset", 10):032x}'
             audit = fleet / 'teardown-ownership'
             (audit / 'source-audit').unlink()
             meta = (audit / 'meta').read_text().replace('run_id=parent', 'run_id=' + fleet.name)
-            meta = meta.replace('fleet_owner_token=' + '1' * 32, 'fleet_owner_token=' + token)
+            meta = meta.replace('fleet_owner_token=' + str(getattr(self, '_renewal_owner_offset', 1)) * 32, 'fleet_owner_token=' + token)
             (audit / 'meta').write_text(meta)
             h = hashlib.sha256()
             for file in sorted(audit.rglob('*'), key=lambda q: str(q.relative_to(audit))):
@@ -4775,6 +4948,277 @@ class Cycle(unittest.TestCase):
             files.extend(p for p in (self.root / '.git/cloudbench-fleet-audits' / token).rglob('*') if p.is_file())
         proof['files'] = {str(p): c.sha_file(p) for p in files}
         return state, occurrence, paths, proof, parents
+
+    def unlaunched_campaign_state(self):
+        import shutil
+        import runpy
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        campaign = Path(proof['campaign'])
+        runs = parents[0].parent
+        for child in runs.iterdir():
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
+        summary = c.read(campaign / 'summary.json')
+        summary.update(peak_concurrency=0, shared_inventory_failed=True)
+        for job in summary['jobs']:
+            Path(job['log']).unlink()
+            job.update(status='cancelled', controller_exit_code=None, started_at=None,
+                       finished_at=None, wall_clock_seconds=None)
+            job.pop('controller_pid', None)
+        c.write(campaign / 'summary.json', summary)
+        native = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        group = native['campaign_group_record'](summary)
+        c.write(campaign / 'hub-group.json', group)
+        import hashlib
+        c.write(campaign / 'hub-group-publication-ack.private.json', dict(pid=2147483000,
+            token='d' * 32, record_sha256=hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()))
+        inventory = campaign / 'shared-inventory'
+        inventory.mkdir()
+        (inventory / 'stop').touch()
+        (inventory / 'publisher.private.log').write_text('read-only inventory startup failed\n')
+        (campaign / 'hub-group-publication.private.log').write_text('published\n')
+        cli = runs.parent / 'cli.log'
+        cli.write_text(f"Native campaign {campaign}\nFileNotFoundError: [Errno 2] No such file or directory: 'flyctl'\n")
+        proof['layout'] = 'campaign-unlaunched-v1'
+        files = [paths['receipt'].parent / 'request.json', cli, *campaign.glob('*.json'),
+                 inventory / 'stop', inventory / 'publisher.private.log',
+                 campaign / 'hub-group-publication.private.log']
+        proof['files'] = {str(p): c.sha_file(p) for p in files}
+        return state, occurrence, paths, proof, campaign
+
+    def inventory_init_failure_state(self):
+        import hashlib
+        # The validator supports only the exact producer that hit the original failure; read those
+        # bytes from that source commit, not from the current tree (later syncs change producers).
+        def original(relative):
+            return subprocess.check_output(['git', '-C', str(ROOT), 'show',
+                                            INVENTORY_INIT_PRODUCER_SOURCE + ':' + relative])
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        inventory = campaign / 'shared-inventory'
+        for relative in ('scripts/cloudbench-campaign-inventory.sh', 'scripts/lib/cloudbench-inventory.sh',
+                         'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench-campaign-machines.py',
+                         'scripts/cloudbench-machine-readiness.py', 'scripts/run-bench-campaign.py',
+                         'scripts/run-bench',
+                         'scripts/cloudbench_catalog.py',
+                         'scripts/cloudbench-timeout-policy.py',
+                         'scripts/cloudbench-shard-coordinator.py',
+                         'agents/benchmarks/benchmark_tasks.py',
+                         'agents/benchmarks/fixtures.py',
+                         'agents/benchmarks/live_fixtures.py',
+                         'agents/benchmarks/polar_catalog.py',
+                         'agents/benchmarks/timeout_history.py',
+                         'agents/benchmarks/history_ledger.py',
+                         'scripts/cloudbench-provider-capacity.py',
+                         'scripts/cloudbench-production-only-tasks.py',
+                         'scripts/cloudbench-campaign-seed.py',
+                         'agents/benchmarks/hub_upload.py',
+                         'scripts/cloudbench-scorecard.py',
+                         'scripts/cloudbench_experiments.py',
+                         'scripts/cloudbench-port-lease.py'):
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_bytes(original(relative))
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts', 'agents'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'native publisher source'], check=True)
+        head = c.source(self.root)['head']
+        # The native source reader binds a real fixture commit; no git reader is mocked.
+        source = dict(head=head, digest=c.source(self.root)['digest'])
+        publisher = inventory / 'scripts'; publisher.mkdir()
+        for relative in ('scripts/cloudbench-campaign-inventory.sh', 'scripts/lib/cloudbench-inventory.sh',
+                         'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench-campaign-machines.py',
+                         'scripts/cloudbench-machine-readiness.py'):
+            (publisher / Path(relative).name).write_bytes(original(relative))
+        log = inventory / 'publisher.private.log'
+        log.write_text('[warn] FLY_COMPLETION_TIMEOUT shell_pid=2147483002 shell_start_ticks=18368956 fly_return_status=unknown fifo_read_status=142\n❌ shared inventory snapshot did not initialize\n')
+        diagnostic = inventory / 'inventory-refresh-diagnostics'; diagnostic.mkdir()
+        (diagnostic / 'latest').write_text('phase=volumes-list\nstatus=142\nepoch=1793664473\nelapsed_seconds=32\npid=2147483003\npublisher_token=fixture\n')
+        (diagnostic / 'history').write_text('1793664473\tvolumes-list\t142\t32\n')
+        (diagnostic / 'failure.raw.private').write_bytes(b'')
+        cli = Path(paths['adapter']).parent  # the existing fixture owns all paths
+        request = c.read(paths['receipt'].parent / 'request.json')
+        receipt = c.read(paths['receipt']); adapter = c.read(paths['adapter'])
+        request['source'] = source; receipt['source'] = source; adapter['source'] = source; proof['source'] = source
+        c.write(paths['receipt'].parent / 'request.json', request)
+        runs = Path(adapter['runner_log']).parent / 'runs'
+        command = ['bash', 'scripts/run-bench', *request['checks'], '--runs', '1', '--concurrency', '4', '--retry-infra', '0', '--ref', request['source']['head']]
+        adapter.update(native_exit=1, complete=False, cleanup_complete=False, native_command=command)
+        c.write(paths['adapter'], adapter)
+        receipt['native_cleanup_reference']['result_sha256'] = c.sha_file(paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+        c.write(paths['receipt'], receipt)
+        Path(adapter['runner_log']).write_text(f'Campaign inventory did not initialize; see private publisher log\n{campaign}\n')
+        c.write(runs.parent / 'cli.log.process.json', dict(supervisor_pid=2147483000, child_pid=2147483001,
+            native_exit=1, cancelled=False, timed_out=False, quiescent=True, orphaned_children=False,
+            reaped=[dict(pid=2147483001, status=256)], term_sent=[], kill_sent=[], remaining=[], error=None))
+        proof.update(layout='campaign-inventory-init-failure-v1', owner=receipt['cleanup_owner'],
+                     receipt_sha256=c.sha_file(paths['receipt']), worker_result_sha256=c.sha_file(paths['adapter']))
+        proof['files'] = {str(path): c.sha_file(path) for path in
+            [paths['receipt'].parent / 'request.json', Path(adapter['runner_log']), runs.parent / 'cli.log.process.json',
+             *campaign.glob('*.json'), campaign / 'hub-group-publication.private.log',
+             inventory / 'stop', log, *publisher.iterdir(), *diagnostic.iterdir()]}
+        state['attempts'][-1]['results'][0] = receipt
+        return state, occurrence, paths, proof, campaign
+
+    def test_inventory_init_failure_retirement_keeps_every_outcome_unverified(self):
+        import deploy_test_native_cleanup as native
+        state, occurrence, paths, proof, campaign = self.inventory_init_failure_state()
+        receipt = c.read(paths['receipt'])
+        before = copy.deepcopy(receipt)
+        original_attempts = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        result = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['attempts'], original_attempts)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['participants'], [])
+        self.assertEqual(receipt, before)
+        self.assertEqual(set(receipt['cases'].values()), {'UNVERIFIED'})
+
+    def test_inventory_init_failure_rejects_changed_precampaign_entrypoints(self):
+        import deploy_test_native_cleanup as native
+        # The changed wrapper is committed as source evidence and never executed.
+        target = self.root / 'scripts/run-bench'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('# Untrusted pre-campaign operation; never executed by this test.\n')
+        state, occurrence, paths, proof, campaign = self.inventory_init_failure_state()
+        receipt = c.read(paths['receipt'])
+        committed = subprocess.check_output(['git', '-C', str(self.root), 'show',
+                                             receipt['source']['head'] + ':scripts/run-bench'])
+        self.assertEqual(committed, target.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'inventory init unsupported producer'):
+            native.validate(receipt, receipt['cleanup_owner'], proof)
+
+    def test_inventory_init_failure_refuses_admission_unknown_owner_and_changed_source(self):
+        import deploy_test_native_cleanup as native
+        state, occurrence, paths, proof, campaign = self.inventory_init_failure_state()
+        adapter = c.read(paths['adapter']); runs = Path(adapter['runner_log']).parent / 'runs'
+        original = {Path(path): Path(path).read_bytes() for path in proof['files']}
+        original[paths['receipt']] = paths['receipt'].read_bytes()
+        original[paths['adapter']] = paths['adapter'].read_bytes()
+        supervisor = runs.parent / 'cli.log.process.json'
+        def edit(path, **values):
+            doc = c.read(path); doc.update(values); c.write(path, doc)
+        changes = [
+            ('participant', lambda: (runs / 'unexpected').mkdir()),
+            ('owner', lambda: (campaign / 'shared-inventory/owner').write_text('live')),
+            ('unknown-supervisor', lambda: edit(supervisor, quiescent=False)),
+            ('orphan', lambda: edit(supervisor, orphaned_children=True)),
+            ('live-process', lambda: edit(supervisor, supervisor_pid=os.getpid())),
+            ('source-bytes', lambda: (campaign / 'shared-inventory/scripts/cloudbench-inventory.sh').write_text('changed')),
+            ('source-identity', lambda: edit(paths['receipt'], source={'head': 'b' * 40})),
+            ('native-outcome', lambda: edit(paths['adapter'], cases={'fixture': 'PASS'})),
+        ]
+        for name, change in changes:
+            for path, data in original.items(): path.write_bytes(data)
+            for added in (runs / 'unexpected', campaign / 'shared-inventory/owner'):
+                if added.is_dir(): added.rmdir()
+                elif added.exists(): added.unlink()
+            change()
+            current = copy.deepcopy(proof)
+            if name == 'native-outcome':
+                receipt = c.read(paths['receipt'])
+                receipt['cases'] = c.read(paths['adapter'])['cases']
+                receipt['native_cleanup_reference']['result_sha256'] = c.sha_file(paths['adapter'])
+                receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+                c.write(paths['receipt'], receipt)
+                current['owner'] = receipt['cleanup_owner']
+                current['worker_result_sha256'] = c.sha_file(paths['adapter'])
+            current['files'] = {str(path): c.sha_file(path) for path in original if str(path) in proof['files']}
+            current['receipt_sha256'] = c.sha_file(paths['receipt'])
+            with self.subTest(case=name), self.assertRaises(ValueError):
+                native.validate(c.read(paths['receipt']), c.read(paths['receipt'])['cleanup_owner'], current)
+        for path, data in original.items(): path.write_bytes(data)
+        log = campaign / 'shared-inventory/publisher.private.log'
+        with log.open('ab'), self.assertRaisesRegex(ValueError, 'startup log writer'):
+            native.validate(c.read(paths['receipt']), c.read(paths['receipt'])['cleanup_owner'], proof)
+
+    def test_unlaunched_campaign_reconciles_without_test_credit(self):
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        original = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+        self.assertEqual(original, state['attempts'])
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([], entry['participants'])
+
+    def test_unlaunched_campaign_rejects_admission_or_active_writer(self):
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        summary = campaign / 'summary.json'
+        original = c.read(summary)
+        for field, value in [('peak_concurrency', 1), ('startup_cohorts', [{'prepared': True}])]:
+            changed = {**original, field: value}
+            c.write(summary, changed); proof['files'][str(summary)] = c.sha_file(summary)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], proof)
+        c.write(summary, original); proof['files'][str(summary)] = c.sha_file(summary)
+        with (campaign / 'shared-inventory/publisher.private.log').open('a'):
+            with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+        job = campaign / 'r001-j0001.log'
+        job.write_text('controller was admitted\n')
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+
+    def unlaunched_relay_state(self):
+        import shutil
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        temporary = tempfile.TemporaryDirectory(prefix='cb-relay-')
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        prefix = 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':'
+        authority = dict(parent_pid=2147483000, parent_start=prefix + '1',
+            agent_socket=str(directory / 'fly-agent.sock'), inventory_directory=str(campaign / 'shared-inventory'))
+        c.write(directory / 'authority.private.json', authority)
+        c.write(directory / 'startup-cleanup.json', dict(bootstrap_joined=True, broker_joined=True,
+            agent_shutdown_verified=False, agent_retirement_pending=True))
+        for role in ('bootstrap', 'broker'):
+            c.write(directory / (role + '-owner.json'), dict(pid=2147483001, birth=prefix + '2',
+                parent_pid=authority['parent_pid'], parent_start=authority['parent_start']))
+            (directory / (role + '.private.log')).write_text('unsupported Fly agent version\n')
+        archive = campaign / 'shared-relay'
+        shutil.copytree(directory, archive)
+        c.write(campaign / 'shared-relay-location.json', dict(directory=str(directory)))
+        cli = Path(c.read(paths['adapter'])['runner_log'])
+        cli.write_text(f'Native campaign {campaign}\nValueError: shared transport broker did not initialize\n')
+        proof.update(layout='campaign-unlaunched-relay-v1')
+        proof['files'].update({str(p): c.sha_file(p) for p in [campaign / 'shared-relay-location.json',
+            *directory.iterdir(), *archive.iterdir(), cli]})
+        return state, occurrence, proof, directory
+
+    def test_unlaunched_relay_reconciles_retired_startup_without_test_credit(self):
+        state, occurrence, proof, directory = self.unlaunched_relay_state()
+        original = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+        self.assertEqual(original, state['attempts'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+
+    def test_unlaunched_relay_refuses_an_unsealed_live_agent(self):
+        state, occurrence, proof, directory = self.unlaunched_relay_state()
+        child = subprocess.Popen([sys.executable, '-c',
+            "import ctypes,sys;ctypes.CDLL(None).prctl(15,b'flyctl',0,0,0);print('ready',flush=True);sys.stdin.read()"],
+            env={**os.environ, 'FLY_AGENT_SOCKET_PATH': str(directory / 'fly-agent.sock')},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual('ready', child.stdout.readline().strip())
+            with self.assertRaisesRegex(ValueError, 'unsealed startup agent remains'):
+                c.reconcile(state, occurrence['id'], proof)
+        finally:
+            child.stdin.close();child.wait(timeout=10);child.stdout.close()
+        c.reconcile(state, occurrence['id'], proof)
+
+    def test_unlaunched_relay_refuses_wrong_host_or_live_parent(self):
+        import runpy
+        state, occurrence, proof, directory = self.unlaunched_relay_state()
+        source = directory / 'authority.private.json'
+        archive = Path(proof['campaign']) / 'shared-relay' / source.name
+        original = c.read(source)
+        native = runpy.run_path(str(ROOT / 'scripts/cloudbench-shared-relay.py'))
+        for fields in [dict(parent_start='proc-start:foreign-host:1'),
+                       dict(parent_pid=os.getpid(), parent_start=native['birth'](os.getpid()))]:
+            for path in (source, archive):
+                c.write(path, {**original, **fields});proof['files'][str(path)] = c.sha_file(path)
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'parent identity not retired'):
+                c.reconcile(state, occurrence['id'], proof)
 
     def admission_campaign_state(self):
         import hashlib, shutil, time, runpy
@@ -5219,7 +5663,8 @@ class Cycle(unittest.TestCase):
         cap = max([Path(p).stat().st_size for p in proof['files'] if not p.endswith('/_batch/run.json')]
                   + [paths['receipt'].stat().st_size, paths['adapter'].stat().st_size])
         value = json.loads(record.read_text())
-        value['padding'] = 'x' * (cap + 1)
+        # Run bytes beyond the receipt cap are native forensic log arrays, not metadata.
+        value['tasks'] = [dict(logs={'worker_logs': ['x' * 512] * (cap // 512 + 1)})]
         record.write_text(json.dumps(value))
         proof['files'][str(record)] = c.sha_file(record)
         import deploy_test_native_cleanup as n
@@ -5432,6 +5877,165 @@ class Cycle(unittest.TestCase):
         before = copy.deepcopy(state); packet.write_text(packet.read_text()+' ')
         with self.assertRaises(ValueError): c.reconcile(state, receipt['token'], renewed)
         self.assertEqual(before, state)
+
+    def reconciled_failed_successor_renewal_state(self):
+        from datetime import datetime, timezone
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        original = state['attempts'][-1]['results'][0]
+        c.reconcile(state, failure['id'], proof)
+        self._renewal_fixture_token, self._renewal_owner_offset = 'e' * 32, 3
+        self._renewal_campaign_offset = 100
+        old_directory = self.directory
+        self.directory = old_directory / 'successor'
+        try:
+            normal, occurrence, native_paths, native_proof, parents = self.campaign_recon_state()
+        finally:
+            self.directory = old_directory
+            del self._renewal_fixture_token, self._renewal_owner_offset, self._renewal_campaign_offset
+        successor = normal['attempts'][-1]['results'][0]
+        successor.update(command=gate['command'], started_at=original['started_at'] + 1000,
+            finished_at=original['finished_at'] + 1001,
+            execution_binding=dict(contract_digest=c.digest(gate), environment=state['environment'],
+                                   input_fingerprint=c.digest('historical-source-input')))
+        native_root = Path(native_proof['campaign']).parent.parent
+        admission = dict(original_receipt_sha256=proof['receipt_sha256'],
+            original_request_token=original['token'], new_request_token=successor['token'],
+            source=successor['source'], new_native_root=str(native_root),
+            excluded_resources=copy.deepcopy(state['reconciled_owners'][proof['receipt_sha256']]['excluded_resources']),
+            credit_granted=False)
+        successor['isolated_validation'] = [admission]
+        request_path = native_paths['receipt'].parent / 'request.json'
+        request = c.read(request_path); request.update(phase='focused', skips={}, isolated_validation=[admission])
+        c.write(request_path, request)
+        adapter = c.read(native_paths['adapter']); adapter['started_at'] += 1000
+        c.write(native_paths['adapter'], adapter)
+        successor['native_cleanup_reference']['result_sha256'] = c.sha_file(native_paths['adapter'])
+        c.write(native_paths['receipt'], successor)
+        summary_path = Path(native_proof['campaign']) / 'summary.json'
+        summary = c.read(summary_path)
+        for key in ('started_at', 'finished_at'):
+            summary[key] = datetime.fromtimestamp(datetime.fromisoformat(summary[key]).timestamp()+1000, timezone.utc).isoformat()
+        c.write(summary_path, summary)
+        import runpy, hashlib
+        native = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        group = native['campaign_group_record'](summary)
+        c.write(summary_path.parent / 'hub-group.json', group)
+        ack_path = summary_path.parent / 'hub-group-publication-ack.private.json'
+        ack = c.read(ack_path); ack['record_sha256'] = hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()
+        c.write(ack_path, ack)
+        native_proof.update(owner=copy.deepcopy(successor['cleanup_owner']),
+            receipt_sha256=c.sha_file(native_paths['receipt']), worker_result_sha256=c.sha_file(native_paths['adapter']))
+        native_proof['files'] = {p:c.sha_file(p) for p in native_proof['files']}
+        c.reconcile(normal, occurrence['id'], native_proof)
+        entry = normal['reconciled_owners'][native_proof['receipt_sha256']]
+        state['reconciled_owners'][native_proof['receipt_sha256']] = entry
+        # Preserve the normal native failure occurrence as well as the original isolated failure.
+        occurrence.update(command=successor['command'], finished_at=successor['finished_at'])
+        state['failures'].append(occurrence)
+        state['attempts'].append(dict(phase='focused', source=successor['source'], results=[successor]))
+        (self.root / 'renewal-source').write_text('next repair')
+        state.update(source=c.source(self.root), phase='needs-focused-plan', ready=False)
+        state['plan']['source'] = state['source']
+        state['plan_digest'] = c.digest(state['plan'])
+        return state, original, proof, successor, native_proof
+
+    def test_reconciled_failed_successor_renews_at_repair_boundary_without_credit(self):
+        state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
+        before = copy.deepcopy(state)
+        incoming = dict(proof, validation_source=state['source'])
+        c.reconcile(state, original['token'], incoming)
+        key = proof['receipt_sha256']
+        self.assertEqual(state['source'], state['reconciled_owners'][key]['validation_source'])
+        self.assertEqual(before['reconciled_owners'][key]['occurrence'], state['reconciled_owners'][key]['occurrence'])
+        for field in before:
+            if field not in ('reconciled_owners', 'reconciled_owner_history'):
+                self.assertEqual(before[field], state[field], field)
+        self.assertEqual(before['reconciled_owners'][native_proof['receipt_sha256']],
+                         state['reconciled_owners'][native_proof['receipt_sha256']])
+        self.assertFalse(state['reconciled_owners'][key]['credit_granted'])
+        self.assertFalse(state['reconciled_owners'][key]['cleanup_complete'])
+        self.assertFalse(successor['complete'])
+        self.assertIsNone(c.full_pass_binding(state, state['plan']['gates'][-1]))
+        same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
+        self.assertEqual(same, state)
+
+    def test_failed_successor_renewal_uses_sealed_historical_environment_without_carryover(self):
+        state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
+        historical = copy.deepcopy(successor['execution_binding'])
+        state['environment'] = c.digest('new target environment with explicit operator limits')
+        gate = next(g for g in state['plan']['gates'] if g['name'] == successor['gate'])
+        gate['env'] = {'RENEWAL_TARGET_EPOCH': 'new'}
+        state['plan_digest'] = c.digest(state['plan'])
+        state['input_fingerprints'][gate['name']] = c.digest('new target full input')
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], dict(proof, validation_source=state['source']))
+        self.assertEqual(historical, successor['execution_binding'])
+        self.assertNotEqual(state['environment'], historical['environment'])
+        self.assertNotEqual(c.digest(gate), historical['contract_digest'])
+        for field in before:
+            if field not in ('reconciled_owners', 'reconciled_owner_history'):
+                self.assertEqual(before[field], state[field], field)
+        self.assertIsNone(c.full_pass_binding(state, gate))
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+
+    def test_reconciled_failed_successor_rejects_untrusted_authority_atomically(self):
+        state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
+        incoming = dict(proof, validation_source=state['source'])
+        normal_key = native_proof['receipt_sha256']
+        mutations = [
+            ('missing-normal', lambda s: s['reconciled_owners'].pop(normal_key)),
+            ('isolated-only', lambda s: s['reconciled_owners'][normal_key].update(purpose='isolated-validation')),
+            ('wrong-owner', lambda s: s['reconciled_owners'][normal_key]['owner'].update(request_token='foreign')),
+            ('wrong-occurrence', lambda s: s['reconciled_owners'][normal_key].update(occurrence='foreign')),
+            ('wrong-original-occurrence', lambda s: s['reconciled_owners'][proof['receipt_sha256']].update(occurrence='foreign')),
+            ('wrong-contract', lambda s: s['plan']['gates'][-1].update(command=['false'])),
+            ('wrong-environment', lambda s: s['attempts'][-1]['results'][0]['execution_binding'].update(environment='0'*64)),
+            ('missing-environment', lambda s: s['attempts'][-1]['results'][0]['execution_binding'].pop('environment')),
+            ('not-executed', lambda s: s['attempts'][-1]['results'][0].update(executed=False)),
+            ('cancelled', lambda s: s['attempts'][-1]['results'][0].update(cancelled=True)),
+            ('timed-out', lambda s: s['attempts'][-1]['results'][0].update(timed_out=True)),
+            ('unknown-exit', lambda s: s['attempts'][-1]['results'][0].update(native_exit=None)),
+            ('wrong-token', lambda s: s['attempts'][-1]['results'][0].update(token='foreign')),
+            ('interrupted-attempt', lambda s: s['attempts'][-1].update(interrupted=True)),
+            ('partial-attempt', lambda s: s['attempts'][-1].update(phase='quick')),
+            ('missing-case', lambda s: s['attempts'][-1]['results'][0]['cases'].pop(next(iter(successor['cases'])))),
+            ('foreign-isolation', lambda s: s['attempts'][-1]['results'][0]['isolated_validation'][0].update(original_request_token='foreign')),
+            ('changed-exclusions', lambda s: s['attempts'][-1]['results'][0]['isolated_validation'][0].update(excluded_resources={})),
+            ('unknown-latest', lambda s: s['attempts'].append(dict(phase='focused', results=[dict(successor, token='new-unknown')]))),
+            ('running', lambda s: s.update(running={'gate':successor['gate']})),
+            ('live-failures', lambda s: s.update(live_failures=[])),
+            *[(phase, lambda s, phase=phase: s.update(phase=phase))
+              for phase in ('interrupted', 'ready', 'quick', 'focused', 'initial', 'final', 'stale', 'unknown')]]
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
+                with self.assertRaises(ValueError): c.reconcile(candidate, original['token'], incoming)
+                self.assertEqual(before, candidate)
+        files = [Path(successor['log']).parent/'receipt.json',
+                 Path(successor['log']).parent/'request.json', Path(successor['worker_result'])]
+        for paths, suffix in [(native_proof['files'], '/summary.json'),
+                              (native_proof['files'], '/lifecycle.json'),
+                              (native_proof['files'], '/meta'),
+                              (native_proof['files'], '.owner'), (proof['files'], '/meta')]:
+            files.append(next(Path(p) for p in paths if p.endswith(suffix)))
+        for file in files:
+            with self.subTest(file=file):
+                raw = file.read_bytes(); file.write_bytes(raw+b' ')
+                before = copy.deepcopy(state)
+                try:
+                    with self.assertRaises(ValueError): c.reconcile(state, original['token'], incoming)
+                    self.assertEqual(before, state)
+                finally: file.write_bytes(raw)
+
+    def test_isolated_renewal_accepts_only_quiescent_repair_phases(self):
+        state, paths, proof, gate, packet, original = self.renewal_state()
+        incoming = dict(proof, validation_source=state['source'])
+        for phase in ('triage', 'needs-focused-plan', 'failed-gates'):
+            with self.subTest(phase=phase):
+                candidate = copy.deepcopy(state); candidate['phase'] = phase
+                c.reconcile(candidate, original['token'], incoming)
+                self.assertEqual(phase, candidate['phase'])
 
     def test_isolated_native_validation_requires_current_os_payload_authority(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
@@ -5775,6 +6379,25 @@ class Cycle(unittest.TestCase):
             path.write_bytes(raw); life_path.write_bytes(life_raw)
             if path == meta: reseal(fleet, life_path)
             bind()
+
+    def test_campaign_unloaded_run_records_share_aggregate_raw_allowance(self):
+        # Ordinary participants verify run.json without loading it, yet still charge
+        # the proof's one aggregate raw-run allowance shared with the bounded reader.
+        import deploy_test_native_cleanup as native
+        import deploy_test_run_artifact as artifact
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        records = [Path(p) for p in proof['files'] if p.endswith('/_batch/run.json')]
+        total = sum(p.stat().st_size for p in records)
+        self.assertEqual(15, len(records))
+        before = copy.deepcopy(state)
+        with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total - 1), \
+                self.assertRaisesRegex(ValueError, 'aggregate raw admission bound exceeded'):
+            c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
+        with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total), \
+                patch.object(artifact, 'read_run_artifact', side_effect=AssertionError('loaded ordinary run')):
+            c.reconcile(state, occurrence['id'], proof)
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
 
     def test_campaign_missing_cleanup_and_mutations_refuse_atomically(self):
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
@@ -6290,6 +6913,39 @@ assert len(list(p.iterdir()))==2
         self.assertTrue(result['cancelled'])
         self.assertNotEqual(0,result['native_exit'])
 
+
+    def test_focused_phase_launches_workers_only_after_its_quick_checks(self):
+        # A focused repair of a quick check keeps that check's short budget on an idle host:
+        # a worker it shares the phase with starts only after every quick check has returned.
+        state=copy.deepcopy(self.state)
+        state.update(phase='focused',repair_gates=['backend-structural','api'],
+                     focused={'backend-structural':{'command':['true'],'checks':['backend-structural']},
+                              'api':{'command':['true'],'checks':['a','b']}})
+        import time
+        events,lock=[],threading.Lock()
+        def fake(gate,state,*_args,**_kwargs):
+            with lock:events.append(('start',gate['name']))
+            time.sleep(.2 if gate.get('quick') else 0)
+            with lock:events.append(('end',gate['name']))
+            return {**self.result(gate['name'],**{k:'PASS' for k in gate['checks']}),'gate':gate['name']}
+        with patch.object(c,'execute',side_effect=fake):
+            c.run_phase(self.plan,state,self.directory,self.root)
+        self.assertLess(events.index(('end','backend-structural')),events.index(('start','api')))
+        self.assertEqual({'backend-structural','api'},{r['gate'] for r in state['attempts'][-1]['results']})
+
+    def test_cancel_during_quick_checks_never_launches_deferred_workers(self):
+        state=copy.deepcopy(self.state)
+        state.update(phase='focused',repair_gates=['backend-structural','api'],
+                     focused={'backend-structural':{'command':['true'],'checks':['backend-structural']},
+                              'api':{'command':['true'],'checks':['a','b']}})
+        launched=[]
+        def fake(gate,state,*_args,**_kwargs):
+            launched.append(gate['name']);c.CANCEL.set()
+            return {**self.result(gate['name'],**{k:'UNVERIFIED' for k in gate['checks']}),'gate':gate['name'],'cancelled':True}
+        with patch.object(c,'execute',side_effect=fake):
+            c.run_phase(self.plan,state,self.directory,self.root)
+        self.assertEqual(['backend-structural'],launched)
+        self.assertEqual('interrupted',state['phase'])
 
     def test_ambiguous_rca_submit_is_not_automatically_repeated(self):
         f=self.failure();paths=c.rca_requests(self.state,self.directory)
@@ -7386,6 +8042,62 @@ class InterruptedLocalRecovery(unittest.TestCase):
         saved=c.read(directory/'cycle.json')
         self.assertEqual(original,saved['attempts']);self.assertFalse(saved['ready']);self.assertNotIn('resume_phase',saved)
         self.assertEqual(raw,{n:p.read_bytes() for n,p in self.paths.items()})
+
+    def term_cancelled(self):
+        """The coordinator's TERM cancellation (-15): no KILL escalation, every TERM target reaped."""
+        self.receipt.update(native_exit=-15)
+        self.process.update(native_exit=-15,orphaned_children=True,kill_sent=[],term_sent=[124,125],
+                            reaped=[{'pid':124,'status':15},{'pid':125,'status':15}])
+        self.seal()
+
+    def test_term_cancelled_worker_reconciles_from_supervisor_wait_records(self):
+        self.term_cancelled();original=copy.deepcopy(self.state['attempts'])
+        self.assertEqual([self.gate['name']],c.retained_owners(self.state,[self.gate['name']]))
+        self.reconcile()
+        c.interrupted_boundary(self.state)
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_term_cancelled_worker_refuses_unreaped_target_or_kill_escalation(self):
+        for change in [dict(reaped=[{'pid':124,'status':15}]),dict(remaining=[125]),dict(quiescent=False),
+                       dict(reaped=[{'pid':124,'status':9},{'pid':125,'status':15}]),dict(kill_sent=[124])]:
+            self.term_cancelled();self.process.update(change);self.seal()
+            with self.subTest(change=change),self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+
+    def missing_supervisor_receipt(self,**teardown):
+        """A TERM'd supervisor that exited before writing its wait records leaves only the coordinator teardown."""
+        self.receipt.update(native_exit=-15);(self.folder/'output.log.process.json').unlink(missing_ok=True)
+        name=f"teardown/attempt-{self.folder.parent.parent.name}-{self.gate['name']}.json"
+        record=dict(attempt=int(self.folder.parent.parent.name),lane=self.gate['name'],token=self.receipt['token'],
+                    outcome='clean',survivors=[],lingering=[],owned=[],foreign=[])
+        record.update(teardown)
+        (self.folder/'teardown').mkdir(exist_ok=True);c.write(self.folder/name,record)
+        self.paths={n:self.folder/n for n in ['request.json','receipt.json']}
+        for n,v in [('request.json',self.request),('receipt.json',self.receipt)]:c.write(self.paths[n],v)
+        files={n:c.sha_file(p) for n,p in self.paths.items()};files[name]=c.sha_file(self.folder/name)
+        self.proof=dict(kind=KIND,files=files,confirmed_at=201,observed_by='native-interrupted-review')
+
+    def test_term_cancelled_worker_without_supervisor_receipt_needs_clean_teardown_and_quiet_root(self):
+        self.missing_supervisor_receipt();original=copy.deepcopy(self.state['attempts'])
+        proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError):self.reconcile()
+        finally:
+            proc.terminate();proc.wait(timeout=2)
+        self.reconcile()
+        c.interrupted_boundary(self.state)
+        self.assertEqual(original,self.state['attempts'])
+
+    def test_term_cancelled_worker_without_supervisor_receipt_refuses_unclean_or_foreign_teardown(self):
+        for change in [dict(outcome='killed'),dict(survivors=[{'pid':126}]),dict(token='other'),dict(lingering=[126])]:
+            self.state.pop('reconciled_owners',None)
+            self.missing_supervisor_receipt(**change)
+            with self.subTest(change=change),self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+        self.receipt.update(native_exit=-9);c.write(self.paths['receipt.json'],self.receipt)
+        self.proof['files']['receipt.json']=c.sha_file(self.paths['receipt.json'])
+        with self.assertRaisesRegex(ValueError,'KILLed supervisor must leave its wait records'):self.reconcile()
 
     def test_refresh_requires_all_closure_and_preserves_original_source_and_clock(self):
         (self.coordinator/'code').write_text('new');new={**self.plan,'source':c.source(self.coordinator)}

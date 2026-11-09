@@ -2,8 +2,9 @@
  * SubmitOrStopButton — the query box's send / stop LiquidWhiteButton.
  *
  * STATE MACHINE (SUBMIT BUTTON):
- *   [SEND]    <-- canSubmit === true (spinner while attachments upload)
- *   [STOP]    <-- canSubmit === false (renders pause/stop button)
+ *   [SEND]    <-- canSubmit === true (spinner while attachments upload); QueryInput
+ *                 passes true for a running agent once the box has a draft
+ *   [STOP]    <-- canSubmit === false (running agent, empty box: pause/stop button)
  *   [PAUSING] <-- isPausing === true (spinner, disabled)
  *
  * darkGlass (Rose Desktop flag): adds the `rose-dark-glass` class and the SVG
