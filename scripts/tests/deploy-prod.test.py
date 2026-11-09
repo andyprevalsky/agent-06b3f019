@@ -56,8 +56,13 @@ class Fake:
     """Injected IO: records every command, gh call, HTTP request and output line."""
 
     def __init__(self, root: Path, changed: list[str], *, handler=None, http=None, gh=None, gh_exists=True,
-                 descendants=(), unknown=(), fetch_learns=False):
+                 descendants=(), unknown=(), fetch_learns=False, gh_env=None, pool=None):
         self.root, self.changed, self.handler, self.http, self.gh = root, changed, handler, http, gh
+        # gh_env(args, env) sees the call's GH_TOKEN; pool(argv) answers `github_token_pool.py pick`
+        # (default: no member, so reads keep GH_TOKEN).
+        self.gh_env, self.pool = gh_env, pool
+        self.pool_calls: list[list[str]] = []
+        self.gh_tokens: list[tuple[str, str | None]] = []
         self.gh_exists = gh_exists
         # `git merge-base --is-ancestor SHA <x>`: 0 for x in descendants, 128 for x in unknown (until a fetch of
         # origin main learns it when fetch_learns), else 1.
@@ -108,7 +113,15 @@ class Fake:
             with self.lock:
                 self.factory.append((argv[3], argv[4]))
             return 0, 'FACTORY_EVENT {}', ''
+        if len(argv) > 1 and argv[1].endswith('github_token_pool.py'):
+            with self.lock:
+                self.pool_calls.append(list(argv))
+            return self.pool(argv) if self.pool else (1, '', 'github_token_pool: no member configured')
         if argv[0].endswith('gh'):
+            with self.lock:
+                self.gh_tokens.append((' '.join(argv[1:3]), env.get('GH_TOKEN')))
+            if self.gh_env:
+                return self.gh_env(argv[1:], env)
             if self.gh:
                 return self.gh(argv[1:])
             if argv[1:3] == ['pr', 'view']:
@@ -1324,6 +1337,55 @@ class OtherLanesTest(Base):
         self.assertEqual(plain.decisions, ['false'])
         self.assertRegex('\n'.join(plain.lines), r'mac-release\s+SKIPPED-not-applicable\s+mac-app-release-decision '
                                                   r'ship=false reason=no-shipped-change')
+
+    RATE_LIMITED = 'HTTP 403: API rate limit exceeded for user ID 25310436.'
+    POOL_TOKEN = 'ghs_SEKRIT_pool_app_0005'
+
+    def test_label_read_uses_token_pool_when_gh_token_is_rate_limited(self) -> None:
+        # 2026-11-09: GITHUB_TOKEN's core quota hit 0 mid-deploy; every read-only gh call with it failed
+        # (403) while the GitHub App member had full quota. Reads take the pool's pick; the result is unchanged.
+        def gh(args, env):
+            if env.get('GH_TOKEN') == SECRETS['GITHUB_TOKEN']:
+                return 1, '', self.RATE_LIMITED
+            return 0, json.dumps({'labels': []}), ''
+        fake = Fake(self.root, ['docs/a.mdx'], gh_env=gh, pool=lambda argv: (0, self.POOL_TOKEN + '\n', ''))
+        self.assertEqual(self.main(fake, '--dry-run'), 0)
+        self.assertEqual(fake.decisions, ['false'])
+        lines = '\n'.join(fake.lines)
+        self.assertRegex(lines, r'mac-release\s+SKIPPED-not-applicable\s+mac-app-release-decision ship=false')
+        self.assertNotIn('rate limit', lines)
+        self.assertEqual(fake.gh_tokens, [('pr view', self.POOL_TOKEN)])
+        self.assertEqual([argv[1:] for argv in fake.pool_calls],
+                         [[str(ROOT / 'scripts' / 'github_token_pool.py'), 'pick', '--resource', 'core',
+                           '--repo-root', str(self.root)]])
+
+    def test_pool_member_failure_retries_once_with_gh_token(self) -> None:
+        def gh(args, env):
+            if env.get('GH_TOKEN') == self.POOL_TOKEN:
+                return 1, '', 'HTTP 404: Not Found'
+            return 0, '[]', ''
+        fake = Fake(self.root, [], gh_env=gh, pool=lambda argv: (0, self.POOL_TOKEN, ''))
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(ctx.gh_json(['api', 'repos/{owner}/{repo}/deployments']), [])
+        self.assertEqual([token for _call, token in fake.gh_tokens], [self.POOL_TOKEN, SECRETS['GITHUB_TOKEN']])
+        both = Fake(self.root, [], gh_env=lambda args, env: (1, '', f'HTTP 404: Not Found {env.get("GH_TOKEN")}'),
+                    pool=lambda argv: (0, self.POOL_TOKEN, ''))
+        ctx = self.ctx(both, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        ctx.add_secrets({'GITHUB_TOKEN': SECRETS['GITHUB_TOKEN']})
+        with self.assertRaises(dp.LaneError) as caught:
+            ctx.gh_json(['api', 'repos/{owner}/{repo}/deployments'])
+        self.assertEqual(str(caught.exception), "gh api repos/{owner}/{repo}/deployments failed with the token pool's "
+                                                "member (HTTP 404: Not Found ***) and with GH_TOKEN: HTTP 404: Not Found ***")
+
+    def test_no_pool_member_reads_with_gh_token(self) -> None:
+        fake = Fake(self.root, [], gh_env=lambda args, env: (0, '[]', ''))
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(ctx.gh_json(['api', 'x']), [])
+        self.assertEqual(ctx.gh_json(['api', 'y']), [])
+        self.assertEqual([token for _call, token in fake.gh_tokens], [SECRETS['GITHUB_TOKEN']] * 2)
+        self.assertEqual([line for line in fake.lines if 'token pool' in line],
+                         ['[gh] token pool picked no member (github_token_pool: no member configured); '
+                          'reading with GH_TOKEN'])
 
     def test_gh_setup(self) -> None:
         gh, env, values = dp.gh_setup(self.root, {}, lambda path: path == dp.DEVBOX_GH)

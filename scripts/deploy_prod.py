@@ -37,6 +37,7 @@ import urllib.request
 import uuid
 
 from run_deploy_pipeline import _dotenv_values  # scripts/ is sys.path[0]: one env-file parser
+from run_deploy_pipeline import gh_token_pool_argv  # one GitHub token pool pick for read-only gh calls
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable or 'python3'
@@ -246,6 +247,7 @@ class Ctx:
     secrets: list[str] = field(default_factory=list)
     records: dict = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    pool_warned: bool = False
 
     def dotenv(self, package: str) -> dict[str, str]:
         values = _dotenv_values(self.root / package / '.env')
@@ -307,9 +309,26 @@ class Ctx:
         self.emit(lane, f'$ {display}')
 
     def gh_json(self, args: list[str]) -> object:
-        code, out, err = self.io.capture([self.gh, *args], self.root, self.child_env())
+        """A read-only gh call: the token pool's best member first (GH_TOKEN's REST quota can run out
+        mid-deploy), then once more with GH_TOKEN when that member fails (its 404 is not authoritative)."""
+        env = self.child_env()
+        code, out, err = self.io.capture(gh_token_pool_argv(self.root, env), self.root, env)
+        token = out.strip() if code == 0 else ''
+        if token and token != env.get('GH_TOKEN'):
+            self.add_secrets({'GITHUB_POOL_TOKEN': token})
+            code, out, err = self.io.capture([self.gh, *args], self.root, {**env, 'GH_TOKEN': token})
+            pooled = None if code == 0 else self.redact((err or out).strip())[:300]
+        else:
+            if not token and not self.pool_warned:
+                self.pool_warned = True
+                self.emit('gh', f'token pool picked no member ({self.redact((err or out).strip())[:200] or "empty"}); '
+                                'reading with GH_TOKEN')
+            code, pooled = 1, ''
         if code != 0:
-            raise LaneError(f'gh {" ".join(args[:2])} failed: {self.redact((err or out).strip())[:300]}')
+            code, out, err = self.io.capture([self.gh, *args], self.root, env)
+        if code != 0:
+            first = f" with the token pool's member ({pooled}) and with GH_TOKEN" if pooled else ''
+            raise LaneError(f'gh {" ".join(args[:2])} failed{first}: {self.redact((err or out).strip())[:300]}')
         try:
             return json.loads(out or 'null')
         except json.JSONDecodeError as error:
