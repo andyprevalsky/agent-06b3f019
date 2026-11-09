@@ -20,7 +20,7 @@ sources:
   - PR #1859
   - commit 4e28dab648a66e70f513979cb11b59e614866424
   - commit 8be5624557a91278114ee7e523c2381e4aad61b5
-  - run ebd845cc-1a9e-4d9f-aa73-c5fd14870e03
+  - task production-workflow-migration run ebd845cc-1a9e-4d9f-aa73-c5fd14870e03
 repro: back-end/src/tests/blackbox/agents-liveness-reconcile.cases.ts
 status: open
 ---
@@ -35,7 +35,7 @@ Path: durable replacement claim and snapshot → quiet candidate discovery → T
 
 Gate: NOT_INTRODUCED relative to PR1859 and baseline above, based on retained source-object equality and real-function replay on both revisions. This repair remains assigned. Searches for the raw stale-acceptance error and prepared replacement/liveness/STARTING_UP/NOT_FOUND found related liveness and chain-ownership cases, without this precise prepared-intent boundary. This is a relative, not an established recurrence.
 
-A real isolated Postgres/backend owning-suite run (`ROSE_USE_SYSTEM_PG=true bash back-end/scripts/run-blackbox-tests.sh agents`) failed before the production edit: 328 passed, 2 failed, 330 total. Both new failures were the expected prepared NOT_FOUND preservation and concurrent exact start acceptance assertions. The same three focused cases passed after the draft fix; full suite and original production acceptance remain pending. The focused driver imports these exact checked-in cases and real production functions, using local DB and simulated Temporal descriptions. This causal proof does not substitute for production acceptance.
+A real isolated Postgres/backend owning-suite run (`ROSE_USE_SYSTEM_PG=true bash back-end/scripts/run-blackbox-tests.sh agents`) failed before the production edit: 328 passed, 2 failed, 330 total. Both new failures were the expected prepared NOT_FOUND preservation and concurrent exact start acceptance assertions. The same three focused cases passed after the draft fix; full owning suite passed 330/330; original production acceptance remains pending. The focused driver imports these exact checked-in cases and real production functions, using local DB and simulated Temporal descriptions. This causal proof does not substitute for production acceptance.
 
 Problem class: durable intent and execution were conflated by an observer that did not participate in custody. Deeper boundary: persisted identity/acceptance distinguishes those phases already; no new lifecycle or timer is needed. No LLM call is implicated. The validator is synthetic and has no root-agent bug report.
 
