@@ -16,7 +16,7 @@ export class PhoneConnectionPending extends Error {
   }
 }
 
-function isFresh(session: PhoneHarnessSession): boolean {
+export function isFresh(session: PhoneHarnessSession): boolean {
   return (
     session.state === 'ready' &&
     !session.closeRequested &&

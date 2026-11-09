@@ -70,6 +70,7 @@ function agentContext(messages: Message[], agentId: string): AgentContextValue {
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => false),
+    stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
   };
 }
 
@@ -214,7 +215,7 @@ describe('top-right app icons', () => {
     expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'closed');
   });
 
-  it('Phone shows only the floating Coming soon device, 24px off the right edge', async () => {
+  it('Phone shows only the floating device (device view), 24px off the right edge', async () => {
     const user = userEvent.setup();
     renderWithProviders(<RoseAppIcons />);
     expect(screen.queryByTestId('rose-phone')).toBeNull();
@@ -231,7 +232,11 @@ describe('top-right app icons', () => {
     const device = within(phone).getByTestId('rose-phone-device');
     expect([...phone.children]).toEqual([device]);
     expect(device.style.boxShadow).toContain('rgba(0,0,0,.35)');
-    expect(device).toHaveTextContent('Select an agent to view its phone.');
+    // No agent selected: the read-only device view (default: no enabled phone).
+    expect(within(device).getByTestId('phone-device-view')).toBeInTheDocument();
+    expect(
+      await within(device).findByText('Phone access requires the connected phone service.'),
+    ).toBeInTheDocument();
     expect(within(phone).queryAllByRole('button')).toHaveLength(0);
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
     // One app at a time: opening Integrations hides the phone.

@@ -159,7 +159,7 @@ describe('a message to a stopped code agent resumes it', () => {
   it('shows the container coming back beside the time: resuming → starting → delivered', () => {
     const resuming = renderPerson([...firstRun, resumeTurn]);
     expect(resuming.status).toHaveAttribute('data-resume-status', 'resuming');
-    expect(resuming.status).toHaveTextContent(/^\d{1,2}:\d{2}.* · Resuming…$/);
+    expect(resuming.status).toHaveTextContent(/^(?:.+, )?\d{1,2}:\d{2}.* · Resuming…$/);
     expect(resuming.status.querySelector('time')).toHaveAttribute('dateTime', at(20));
     resuming.view.unmount();
 

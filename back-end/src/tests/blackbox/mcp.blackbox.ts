@@ -17,6 +17,12 @@
  *   - multipart "Both" (audio + transcription field) → 201, audio archived best-effort
  *   - app test event (test=true) or no transcript → 200 spawned:false, no agent
  *
+ * Index 01 setup guide (POST /api/index01/credentials):
+ *   - unauthenticated → 401
+ *   - returns webhook URL + Authorization header for the caller's own dedicated
+ *     "Index 01" key (no subscription needed), idempotent across calls, and the
+ *     returned key authenticates the webhook
+ *
  * Usage: npx tsx src/tests/blackbox/mcp.blackbox.ts
  */
 
@@ -34,6 +40,7 @@ const INTERNAL_KEY = process.env.BACKEND_API_KEY || '';
 const RUN = `${Date.now()}-${randomUUID().slice(0, 8)}`;
 const userId = `mcp-bb-${RUN}`;
 const apiKey = randomUUID().replace(/-/g, '');
+const credsUserId = `mcp-bb-creds-${RUN}`;
 const gatedUserId = `mcp-bb-gated-${RUN}`;
 const gatedKey = randomUUID().replace(/-/g, '');
 const createdAgentIds: string[] = [];
@@ -278,6 +285,43 @@ tests.push(
   ]
 );
 
+async function credentials(
+  headers: Record<string, string>
+): Promise<{ status: number; body: Record<string, string> }> {
+  const res = await fetch(`${BASE_URL}/api/index01/credentials`, { method: 'POST', headers });
+  return { status: res.status, body: (await res.json()) as Record<string, string> };
+}
+
+tests.push(
+  [
+    'credentials: unauthenticated → 401',
+    async () => {
+      const r = await credentials({});
+      assert(r.status === 401, `expected 401, got ${r.status}`);
+    },
+  ],
+  [
+    'credentials: dedicated key, idempotent, authenticates the webhook',
+    async () => {
+      const headers = { 'X-API-Key': INTERNAL_KEY, 'X-User-Id': credsUserId };
+      const first = await credentials(headers);
+      assert(first.status === 200, `expected 200, got ${first.status} ${JSON.stringify(first)}`);
+      assert(first.body.webhook_url.endsWith('/api/index01/webhook'), first.body.webhook_url);
+      assert(first.body.header_name === 'Authorization', first.body.header_name);
+      assert(/^Bearer [0-9a-f]{32}$/.test(first.body.header_value), 'bad header value');
+      const second = await credentials(headers);
+      assert(second.body.header_value === first.body.header_value, 'key rotated on reopen');
+      const keys = await prisma.roseApiKey.findMany({ where: { userId: credsUserId } });
+      assert(keys.length === 1 && keys[0].name === 'Index 01', JSON.stringify(keys));
+      const hook = await webhook(JSON.stringify({ event: 'test' }), {
+        'Content-Type': 'application/json',
+        Authorization: first.body.header_value,
+      });
+      assert(hook.status === 200 && hook.body.spawned === false, JSON.stringify(hook));
+    },
+  ]
+);
+
 async function cleanup(): Promise<void> {
   for (const id of createdAgentIds) {
     await fetch(`${BASE_URL}/api/agents/${id}`, {
@@ -285,8 +329,10 @@ async function cleanup(): Promise<void> {
       headers: { 'X-API-Key': INTERNAL_KEY },
     }).catch(() => undefined);
   }
-  await prisma.roseApiKey.deleteMany({ where: { userId: { in: [userId, gatedUserId] } } });
-  await prisma.user.deleteMany({ where: { userId: { in: [userId, gatedUserId] } } });
+  await prisma.roseApiKey.deleteMany({
+    where: { userId: { in: [userId, gatedUserId, credsUserId] } },
+  });
+  await prisma.user.deleteMany({ where: { userId: { in: [userId, gatedUserId, credsUserId] } } });
 }
 
 async function main(): Promise<void> {
@@ -299,6 +345,11 @@ async function main(): Promise<void> {
     where: { userId: gatedUserId },
     update: {},
     create: { userId: gatedUserId, isAnonymous: true },
+  });
+  await prisma.user.upsert({
+    where: { userId: credsUserId },
+    update: {},
+    create: { userId: credsUserId, isAnonymous: false, usedInviteCode: 1 },
   });
   await prisma.roseApiKey.create({ data: { userId, apiKey, name: 'mcp blackbox' } });
   await prisma.roseApiKey.create({ data: { userId: gatedUserId, apiKey: gatedKey } });

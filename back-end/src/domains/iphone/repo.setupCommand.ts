@@ -1,3 +1,4 @@
+import { availabilityInTransaction } from './repo.availability';
 import { requiresGoogleIdentity } from '../../providers/phoneSetupVerification';
 /** Logical setup journal claims share the physical slot, without performing phone IO. */
 import {
@@ -16,6 +17,8 @@ import { IPhoneError } from './types';
 export async function claimSetup(userId: string, taskId: string, input: SetupInput) {
   return leases.transaction(async (tx) => {
     const { task, device, holder, current } = await setupHolder(tx, userId, taskId);
+    if (!(await availabilityInTransaction(tx, userId, taskId)).enabled)
+      throw new IPhoneError(409, 'iPhone setup is not authorized for this task');
     const inputHash = phoneCommandHash(`setup.${input.action}`, input, 'agent');
     const existing = await tx.iPhoneOperation.findUnique({
       where: { leaseId_requestKey: { leaseId: holder.id, requestKey: input.requestKey } },

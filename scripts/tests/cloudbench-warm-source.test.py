@@ -102,7 +102,8 @@ class FakeFly:
                         return 409, {"error": "lease currently held"}
                     lease = {"nonce": uuid.uuid4().hex, "expires": time.time() + body["ttl"]}
                     self.leases[mid] = lease
-                    return 200, {"status": "success", "data": {"nonce": lease["nonce"]}}
+                    # Real Fly answers a granted lease with 201 Created (observed 2026-11-09).
+                    return 201, {"status": "success", "data": {"nonce": lease["nonce"]}}
                 if rest == ["lease"] and method == "DELETE":
                     if self.leases.get(mid, {}).get("nonce") == nonce:
                         self.leases.pop(mid)
@@ -119,7 +120,11 @@ class FakeFly:
                     machine["state"] = "stopped"
                     return 200, {}
                 if rest == ["wait"]:
-                    wanted = dict(item.split("=") for item in query.split("&"))["state"]
+                    params = dict(item.split("=") for item in query.split("&"))
+                    # Real Fly rejects a wait timeout outside [1s, 1m0s] (observed 2026-11-09).
+                    if not 1 <= int(params.get("timeout", "60")) <= 60:
+                        return 400, {"error": "invalid_argument: invalid WaitMachineRequest.Timeout"}
+                    wanted = params["state"]
                     return (200, {"ok": True}) if machine["state"] == wanted else (408, {"error": "timeout"})
             if parts == ["volumes"]:
                 if method == "GET":

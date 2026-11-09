@@ -41,14 +41,14 @@ export function credentialPublicKeyPem(): string {
 /**
  * Which remote-browser provider the compute-grants domain uses.
  *
- * Kernel is the default; Steel, Browser Use and Tilion remain selectable via
+ * Tilion is the fresh-session default; other providers remain selectable via
  * COMPUTE_GRANT_BROWSER_PROVIDER so a provider outage cannot block account
  * connect or grant recovery -- the two paths whose failure silently pushes every
  * request onto paid models.
  */
 export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use' | 'tilion' {
   const configured = process.env.COMPUTE_GRANT_BROWSER_PROVIDER?.trim();
-  const selected = configured === undefined || configured === '' ? 'kernel' : configured;
+  const selected = configured === undefined || configured === '' ? 'tilion' : configured;
   // Domain config cannot import the browser provider layer. Match its rollout
   // flag parser so disabling Browser Use also returns compute grants to Kernel.
   const flag = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;

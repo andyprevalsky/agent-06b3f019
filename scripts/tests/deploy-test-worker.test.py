@@ -22,6 +22,10 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+# The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
+# outer deploy worker (the local executor runs this suite inside a gate) would
+# make admission() demand that outer cycle's custody locator in-process.
+os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as cycle
 import deploy_test_worker as worker
@@ -459,6 +463,16 @@ class Worker(unittest.TestCase):
 
 class Cloud(unittest.TestCase):
     def setUp(self):
+        # These native receipt fixtures own their adapter inputs, not the deploy's fanout.
+        environment = patch.dict(os.environ, {
+            'CLOUDBENCH_BROWSER_PROVIDER': 'tilion',
+            'CLOUDBENCH_PROVIDER_LIMITS_FILE': str(ROOT / 'scripts/cloudbench-provider-limits.json'),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
+        # This standalone fixture owns its request, not the invoking gate's custody.
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
@@ -577,6 +591,37 @@ class Cloud(unittest.TestCase):
         self.assertNotIn('failing',argv)
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
+
+    def test_cloud_admission_limit_preserves_every_selected_case(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1'}), \
+             patch.object(self.cloud, 'source', return_value=self.request['source']), \
+             patch.object(self.cloud, 'run_command', return_value=(0,False,False,False)) as launch, \
+             patch.object(self.cloud, 'collect_campaign', return_value=({'passing':'PASS','failing':'PASS'},{},True,'native-run')):
+            result=self.cloud.execute(self.request,self.root)
+        argv=launch.call_args.args[0]
+        self.assertEqual(['passing','failing'],argv[2:4])
+        self.assertEqual('1',argv[argv.index('--concurrency')+1])
+        self.assertEqual('1',argv[argv.index('--runs')+1])
+        self.assertEqual('0',argv[argv.index('--retry-infra')+1])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+
+    def test_cloud_admission_limit_cannot_raise_provider_capacity(self):
+        checks=[str(i) for i in range(100)]
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1000'}):
+            limited=self.cloud.campaign_width(checks)
+        with patch.dict(os.environ, {}, clear=True):
+            provider_width=self.cloud.campaign_width(checks)
+        self.assertEqual(provider_width,limited)
+
+    def test_invalid_cloud_admission_limit_fails_before_launch(self):
+        for value in ('', '0', '-1', '1.5', ' 2', 'two'):
+            with self.subTest(value=value), patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY':value}), \
+                 patch.object(self.cloud, 'source', return_value=self.request['source']), \
+                 patch.object(self.cloud, 'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'DEPLOY_CLOUD_CONCURRENCY'):
+                    self.cloud.execute(self.request,self.root)
+                launch.assert_not_called()
 
     def test_cloud_launch_records_selected_standing_skip_eligibility_before_dispatch(self):
         names=['browser-auth-guest-purchase','claude-only','ordinary']
@@ -1634,6 +1679,155 @@ class Boxes(unittest.TestCase):
         self.assertIn('request control-project-threads', Path(result['transport_receipt']['cli_log']).read_text())
         self.assertEqual(1, len(self.calls_of('send')))  # no retry loop
 
+    @contextlib.contextmanager
+    def scripted_transport(self, cancel_after=None):
+        # Orchestration-only seam: preserve real envelopes, logs, absolute deadlines,
+        # and collector/parser behavior without paying OS startup for each fake CLI.
+        # Real run_cli deadline, signal and reap tests below remain subprocess-backed.
+        clock = [time.time()]
+        started = clock[0]
+        elapsed = [0.0]
+        events = []
+
+        def sleep(seconds):
+            elapsed[0] += seconds
+            clock[0] = started + elapsed[0]
+            if cancel_after is not None and elapsed[0] >= cancel_after:
+                events[-1]["cancel_elapsed"] = elapsed[0]
+                self.boxes.CANCEL.set()
+
+        def invoke(argv, *, timeout, completion_deadline=None):
+            config = cycle.read(self.config)
+            key = argv[1]
+            with self.calls.open('a') as stream:
+                stream.write(json.dumps(argv) + '\n')
+            if key == 'list' and '--all' not in argv:
+                key = 'list_page1'
+            reply = config.get(key, {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+            if isinstance(reply, list):
+                count = len(self.calls_of(key))
+                reply = reply[min(count - 1, len(reply) - 1)]
+            budget = min(timeout, max(0, completion_deadline - clock[0])) if completion_deadline is not None else timeout
+            events.append({'op': key, 'at': clock[0], 'budget': budget, 'deadline': completion_deadline})
+            duration = reply.get('sleep', 0)
+            if duration >= budget:
+                sleep(budget)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            sleep(duration)
+            return reply.get('rc', 0), json.dumps(reply.get('stdout', {})).encode(), reply.get('stderr', '').encode()
+
+        with patch.object(self.boxes, 'run_cli', side_effect=invoke), patch.object(self.boxes, 'time') as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.monotonic.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = sleep
+            yield events
+
+
+    def test_crash_between_send_and_persist_adopts_the_existing_turn_strict_scripted(self):
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        prompt = self.boxes.build_prompt(self.request, self.binding)
+        cycle.write(directory / 'state.json', {'token': 'tok-1', 'idempotency_key': 'tok-1', 'thread': 'ph-worker',
+            'host': self.host, 'worker_root': str(self.root.resolve()), 'deadline_at': time.time() + 30,
+            'prompt_sha256': __import__('hashlib').sha256(prompt.encode()).hexdigest(), 'sent_attempted_at': time.time(),
+            'turn_id': None, 'message_id': None, 'cli_log': str(directory / 'cli.log'), 'stderr_log': str(directory / 'stderr.log')})
+        self.configure(reply=self.reply(), read={'rc': 0, 'stdout': self.wrap({}, status='ready', messages=[
+            {'role': 'user', 'state': 'ready', 'text': 'unrelated', 'turnId': 'turn-0'},
+            {'role': 'user', 'state': 'ready', 'text': prompt, 'turnId': 'turn-7'}])})
+        result = self.run_adapter()
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
+        # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
+        self.configure(reply=self.reply()); self.calls.unlink()
+        with self.scripted_transport() as events:
+            result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
+        self.assertEqual('list', events[0]['op'])
+        self.assertTrue(all(event['op'] == 'read' for event in events[1:]))
+        self.assertEqual('send_indeterminate_unadopted', result['reason']); self.assertEqual([], self.calls_of('send'))
+        self.assertGreater(len(self.calls_of('read')), 1); self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        # a changed prompt under the same token is never resent
+        state = cycle.read(directory / 'state.json'); state['prompt_sha256'] = 'f' * 64; state['turn_id'] = None
+        cycle.write(directory / 'state.json', state); self.calls.unlink()
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual([], self.calls_of('send'))
+
+
+    def test_initial_send_slice_timeout_adopts_nested_read_without_second_send_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': .6}, read=[
+            {'sleep': .6}, {'rc': 0, 'stdout': self.nested_assignment()}])
+        started = time.time()
+        with self.scripted_transport() as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('native-evidence-unavailable',result['reason'])
+        self.assertEqual('turn-1',result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual(2, len(self.calls_of('read')))
+        send = self.calls_of('send')[0]
+        self.assertEqual('tok-1', send[send.index('--idempotency-key') + 1])
+        self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        state = cycle.read(directory / 'state.json')
+        self.assertGreaterEqual(state['deadline_at'], started + 5)
+        self.assertLess(state['deadline_at'], started + 5.2)
+        self.assertEqual('turn-1', state['turn_id'])
+
+        self.assertEqual(['list', 'send', 'read', 'read', 'wait', 'result'], [event['op'] for event in events])
+        self.assertTrue(all(event['at'] + event['budget'] <= event['deadline'] for event in events))
+
+
+    def test_initial_send_adoption_cancel_retains_owner_without_resending_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': 3})
+        started = time.monotonic()
+        with self.scripted_transport(cancel_after=.35) as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+            result = self.run_adapter(deadline=5)
+        self.assertLess(time.monotonic() - started, .8)
+        self.assertEqual('send_indeterminate_unadopted', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual([], self.calls_of('wait')); self.assertEqual([], self.calls_of('result'))
+
+        self.assertEqual(['list', 'send'], [event['op'] for event in events[:2]])
+        self.assertTrue(all(event['op'] == 'read' for event in events[2:]))
+        self.assertTrue(self.boxes.CANCEL.is_set())
+        elapsed = next(event["cancel_elapsed"] for event in events if "cancel_elapsed" in event)
+        self.assertGreaterEqual(elapsed, .35)
+        self.assertLess(elapsed, .8)
+
+
+    def test_cancel_before_send_never_invokes_the_cli_strict_scripted(self):
+        drive = self.boxes._drive
+        def cancel_before_first_call(*args, **kwargs):
+            self.boxes.CANCEL.set()  # after cancellation handlers initialize, before any CLI
+            return drive(*args, **kwargs)
+        with patch.object(self.boxes, '_drive', side_effect=cancel_before_first_call), \
+             patch.object(self.boxes, 'run_cli') as invoke:
+            result = self.run_adapter()
+        invoke.assert_not_called()
+        self.assertEqual([], self.calls_of('send'))
+        self.assertEqual('cancelled during native CLI call', result['reason'])
+        self.assertTrue(all(value == 'UNVERIFIED' for value in result['cases'].values()))
+
+
+    def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified_strict_scripted(self):
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+        __import__('shutil').rmtree(self.coordinator / '.context')
+        truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
+        self.configure(reply=truncated)
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+
+        self.assertEqual(['list', 'send', 'wait', 'result'], [event['op'] for event in events])
+
+
+
 
 def load(name, relative):
     spec = importlib.util.spec_from_file_location(name, ROOT / relative)
@@ -2180,7 +2374,7 @@ class Backend(unittest.TestCase):
         docker.chmod(0o700)
         env = {'CONDUCTOR_WORKSPACE_NAME': 'fixture', 'CONDUCTOR_PORT': '20000',
                'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'FAKE_POSTGRES': str(state),
-               'FAKE_DOCKER_CALLS': str(calls)}
+               'FAKE_DOCKER_CALLS': str(calls), 'BACKEND_COVERAGE_DATABASE_URL': ''}
         # A stopped fixture genuinely prevents the original setup; no fabricated result.
         setup = [sys.executable, '-c', "import json,os; from pathlib import Path; "
                  "assert json.loads(Path(os.environ['FAKE_POSTGRES']).read_text())['row']['running']; "
@@ -2994,6 +3188,8 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
                         patch('time.sleep',side_effect=self.sleep)):
             patcher.start();self.addCleanup(patcher.stop)
+        # Test the account ceiling independently of the invoking deploy's width.
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
 
     def sleep(self, seconds):
         self.sleeps.append(seconds);self.now[0]+=seconds
@@ -3067,6 +3263,32 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         with self.assertRaises(headroom.HeadroomUnavailable):
             headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
                                           opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FixtureEnvironmentIsolation(unittest.TestCase):
+    def test_cloud_request_custody_is_local_and_parent_environment_is_restored(self):
+        parent = '/tmp/fixture-parent/attempts/34/phase/gate/request.json'
+        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': parent, 'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            Cloud('test_cloud_cli_gets_only_active_cases_and_frozen_ref').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual(parent, os.environ['DEPLOY_GATE_REQUEST'])
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+
+    def test_headroom_fixture_preserves_parent_width_and_explicit_limits(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            CloudSharedProviderHeadroom('test_live_account_sessions_narrow_the_smoke_width').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+            fixture = CloudSharedProviderHeadroom()
+            fixture.setUp()
+            try:
+                with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+                    self.assertEqual(4, fixture.width(FakeTilionListing(5))[0])
+            finally:
+                fixture.doCleanups()
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
 
 
 class FakeCerebrasProbe:

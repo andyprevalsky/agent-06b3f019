@@ -325,7 +325,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
   const repo = join(home, 'workspace');
   assert(prompt.cwd === repo, `CLI runs in the restored repo, got ${prompt.cwd}`);
   assert(
-    prompt.stdin.startsWith('Project startup for project PJ-Restore finished OK'),
+    prompt.stdin.startsWith('/goal Project startup for project PJ-Restore finished OK'),
     `startup outcome reaches the CLI: ${prompt.stdin.slice(0, 200)}`
   );
   assert(
@@ -452,7 +452,7 @@ test('startup failure and timeout are reported, and the timeout is enforced', as
   const fail = await startSession(s.userId, failing.id, 'fail');
   const failPrompt = JSON.parse(await waitForFile(fail.capture, 60_000)) as { stdin: string };
   assert(
-    failPrompt.stdin.startsWith('Project startup for project PJ-Fail FAILED (exit 3)'),
+    failPrompt.stdin.startsWith('/goal Project startup for project PJ-Fail FAILED (exit 3)'),
     `failure reaches the CLI: ${failPrompt.stdin.slice(0, 200)}`
   );
   assert(failPrompt.stdin.includes('failing now'), 'failure output tail included');
@@ -468,7 +468,7 @@ test('startup failure and timeout are reported, and the timeout is enforced', as
   };
   const elapsed = Date.now() - slowSession.started;
   assert(
-    slowPrompt.stdin.startsWith('Project startup for project PJ-Timeout TIMED OUT after 2s'),
+    slowPrompt.stdin.startsWith('/goal Project startup for project PJ-Timeout TIMED OUT after 2s'),
     `timeout reaches the CLI: ${slowPrompt.stdin.slice(0, 200)}`
   );
   assert(elapsed < 20_000, `the session did not wait for the 30s script (${elapsed}ms)`);

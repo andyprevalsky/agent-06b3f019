@@ -11,9 +11,9 @@ import {
 import path from "node:path";
 import vm from "node:vm";
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import test from "node:test";
+import test, { after } from "node:test";
 import type * as TypeScript from "../../back-end/node_modules/typescript";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -47,6 +47,24 @@ const workRoot =
   process.env.ROSE_GROUPING_CONTROL_ROOT ??
   path.join(project, ".context", `campaign-grouping-control-${process.pid}`);
 mkdirSync(workRoot, { recursive: true, mode: 0o700 });
+const cleanupRoots: string[] = [];
+after(() => {
+  for (const root of cleanupRoots) {
+    const retired = spawnSync(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        path.join(
+          sourceRoot,
+          "scripts/tests/fixtures/campaign_cleanup_fixture.py",
+        ),
+        "retire",
+        root,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(retired.status, 0, retired.stdout + retired.stderr);
+  }
+});
 
 function owningBoundary() {
   const objects = new Map<string, string>();
@@ -415,7 +433,23 @@ function fixtureRoot(name: string) {
     `#!/usr/bin/env bash\nexec '${project}/agents/venv/bin/python' '${child}' '${root}/agents/benchmarks/hub_upload.py'\n`,
   );
   chmodSync(fleet, 0o700);
-  return { root, fleet };
+  const prepared = spawnSync(
+    path.join(project, "agents/venv/bin/python"),
+    [
+      path.join(
+        sourceRoot,
+        "scripts/tests/fixtures/campaign_cleanup_fixture.py",
+      ),
+      "prepare",
+      root,
+      sourceRoot,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
+  const cleanupEnv = JSON.parse(prepared.stdout) as Record<string, string>;
+  cleanupRoots.push(root);
+  return { root, fleet, cleanupEnv };
 }
 
 async function waitFor(check: () => boolean, child: ReturnType<typeof spawn>) {
@@ -498,11 +532,15 @@ test(
           BENCHMARK_HUB_UPLOAD_URL: api.base,
           RUN_BENCH_CAMPAIGN_ID: "group-first",
           RUN_BENCH_CAMPAIGN_ROOT: path.join(fixture.root, "campaigns"),
+          ...fixture.cleanupEnv,
           RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
           CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
           GROUP_CONTROL_WORK: receipts,
           GROUP_PROJECT_ROOT: project,
-          PYTHONPATH: path.join(project, "agents"),
+          PYTHONPATH: [
+            fixture.cleanupEnv.PYTHONPATH,
+            path.join(project, "agents"),
+          ].join(path.delimiter),
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -722,11 +760,15 @@ test(
             // The last shard misstates the group size; the Hub must refuse it.
             RUN_BENCH_CAMPAIGN_GROUP_TOTAL: index === 2 ? "8" : "6",
             RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT: String(startedAt),
+            ...fixture.cleanupEnv,
             RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
             CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
             GROUP_CONTROL_WORK: receipts,
             GROUP_PROJECT_ROOT: project,
-            PYTHONPATH: path.join(project, "agents"),
+            PYTHONPATH: [
+              fixture.cleanupEnv.PYTHONPATH,
+              path.join(project, "agents"),
+            ].join(path.delimiter),
           },
           stdio: ["ignore", "pipe", "pipe"],
         },
@@ -1874,10 +1916,19 @@ test("a released runner ERROR attempt is the infrastructure attempt its campaign
   let mirrored = "";
   mirror.stdout.on("data", (chunk) => (mirrored += chunk));
   await once(mirror, "close");
-  assert.equal(mirrored.trim(), "True", "hub_upload final_record_matches disagrees with taskSummary");
+  assert.equal(
+    mirrored.trim(),
+    "True",
+    "hub_upload final_record_matches disagrees with taskSummary",
+  );
   // The retry's starting registration (live) must be admitted, not 409'd.
   const retry: any = infraAttempt("runner-error-group", "m1", 2);
-  retry.tasks[0] = { name: "repeat-task", status: "starting", passed: null, lifecycle_stage: "starting" };
+  retry.tasks[0] = {
+    name: "repeat-task",
+    status: "starting",
+    passed: null,
+    lifecycle_stage: "starting",
+  };
   await owner.putRun(retry, { live: true });
   const detail = await owner.getRunDetail("runner-error-group");
   assert.equal(detail.tasks[0].child_run_id, retry.run_id);
@@ -1952,6 +2003,7 @@ test(
           BENCHMARK_HUB_PARENT_RUN_ID: "infra-stop-parent",
           RUN_BENCH_CAMPAIGN_ID: "infra-stop",
           RUN_BENCH_CAMPAIGN_ROOT: campaigns,
+          ...fixture.cleanupEnv,
           RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
           CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
           CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "",
@@ -1972,7 +2024,10 @@ test(
       readFileSync(path.join(campaigns, "infra-stop/summary.json"), "utf8"),
     );
     assert.notEqual(run.exitCode, 0, stdout + stderr);
-    assert.ok(elapsed < 40, `campaign kept running ${elapsed}s after the breach`);
+    assert.ok(
+      elapsed < 40,
+      `campaign kept running ${elapsed}s after the breach`,
+    );
     const receipt = summary.infra_stop;
     assert.ok(receipt, "summary.json must carry the infra stop breach receipt");
     assert.equal(receipt.job_id, "r004-j0007");

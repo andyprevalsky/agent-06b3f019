@@ -18,6 +18,7 @@ import type {
 } from '../types';
 import type { AgentProviderState } from './useAgentProviderState';
 import { agentSelectionControls, type AgentSelectionControls } from './agentSelectionControls';
+import { carryClientUserMessages } from './optimisticUserMessages';
 
 interface SelectionOptions {
   canLoadAgent: boolean;
@@ -299,7 +300,7 @@ function mergeCanonicalMessages(
     if (message.message_id !== projection?.messageId) return true;
     return !canonicalUserTexts.has(message.text);
   });
-  return [...canonical, ...realtimeOnly];
+  return carryClientUserMessages(previous, [...canonical, ...realtimeOnly]);
 }
 
 function prepareSelection(state: AgentSelectionControls, id: string | null) {

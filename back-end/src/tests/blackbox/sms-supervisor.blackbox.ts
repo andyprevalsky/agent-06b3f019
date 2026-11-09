@@ -626,6 +626,7 @@ async function runAll() {
       fn: () => testNaturalApproval_ambiguousApprovalAsksClarification(prisma),
     },
     bareRejectionBlackboxCase(prisma),
+    ...smsPhoneAttentionBehaviorCases(prisma),
     ...smsPausedReplyBehaviorCases(prisma),
     ...smsStartPhaseBehaviorCases(prisma),
     ...smsQueuedAgentBehaviorCases(prisma),

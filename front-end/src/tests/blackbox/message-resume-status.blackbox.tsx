@@ -63,7 +63,7 @@ describe('resume state beside a resuming message', () => {
 
     const resuming = status(browserTurn, [before, browserTurn]);
     expect(resuming.line).toHaveAttribute('data-resume-status', 'resuming');
-    expect(resuming.line).toHaveTextContent(/^\d{1,2}:\d{2}.* · Resuming…$/);
+    expect(resuming.line).toHaveTextContent(/^(?:.+, )?\d{1,2}:\d{2}.* · Resuming…$/);
     expect(resuming.line?.querySelector('time')).toHaveAttribute('dateTime', at(10));
     resuming.view.unmount();
 

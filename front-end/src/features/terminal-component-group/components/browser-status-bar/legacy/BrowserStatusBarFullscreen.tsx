@@ -53,7 +53,7 @@ import type {
   StepProgress,
 } from '../types';
 
-interface FullscreenProps {
+export interface FullscreenProps {
   readOnly?: boolean;
   agentId?: string | null;
   taskId: string;

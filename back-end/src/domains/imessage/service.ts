@@ -1,3 +1,4 @@
+export { CloudMessageBindingConflictError } from './types';
 import { createHash } from 'node:crypto';
 import { createLogger } from '../../providers/logger';
 import {
@@ -9,7 +10,14 @@ import {
   recordQueueDeliveryResult,
   markImessageBridgeSeen,
 } from './repo';
-import type { MessageChannel, RecentInboundMessage } from './types';
+import {
+  CloudMessageEligibilityError,
+  type MessageChannel,
+  type RecentInboundMessage,
+} from './types';
+import { cloudMessageEligible } from './repo.cloud';
+import { cloudMessageStatus } from './cloudMessage';
+export { bindCloudMessage } from './repo.cloud';
 
 const log = createLogger('iMessage');
 const BRIDGE_FRESHNESS_MS = 45_000;
@@ -71,7 +79,22 @@ export async function queueMessage(
       : `imq_${createHash('sha256')
           .update(`${userId}\0${agentId}\0${idempotencyKey}`)
           .digest('hex')}`;
-  const entry = await createQueueEntry(userId, agentId, phoneNumber, message, id);
+  let transport = 'mac';
+  try {
+    if (await cloudMessageEligible(userId, agentId)) transport = 'phone_harness';
+  } catch (error) {
+    if (!(error instanceof CloudMessageEligibilityError)) throw error;
+    throw new ValidationError(error.message);
+  }
+  const entry = await createQueueEntry(
+    userId,
+    agentId,
+    phoneNumber,
+    message,
+    id,
+    undefined,
+    transport
+  );
 
   if (
     entry.userId !== userId ||
@@ -89,7 +112,10 @@ export async function queueMessage(
     phone: phoneNumber.substring(0, 4) + '****',
   });
 
-  const bridge = await getImessageBridgeStatus(userId);
+  const bridge =
+    entry.transport === 'phone_harness'
+      ? { connected: false, lastSeenAt: null }
+      : await getImessageBridgeStatus(userId);
   return { entry, bridge };
 }
 
@@ -147,18 +173,24 @@ export async function recordDeliveryResult(
 export async function getDeliveryStatus(userId: string, queueId: string) {
   const row = await findQueueEntryForUser(userId, queueId);
   if (row === null) throw new QueueEntryNotFoundError();
-  const status = row.sentAt
-    ? 'sent'
-    : row.failedAt
-      ? 'failed'
-      : row.dispatchedAt
-        ? 'legacy_dispatched'
-        : row.claimedAt
-          ? 'sending'
-          : row.expiresAt !== null && row.expiresAt.getTime() <= Date.now()
-            ? 'expired'
-            : 'queued';
+  const status =
+    row.transport === 'phone_harness'
+      ? cloudMessageStatus(row)
+      : row.sentAt
+        ? 'sent'
+        : row.failedAt
+          ? 'failed'
+          : row.dispatchedAt
+            ? 'legacy_dispatched'
+            : row.claimedAt
+              ? 'sending'
+              : row.expiresAt !== null && row.expiresAt.getTime() <= Date.now()
+                ? 'expired'
+                : 'queued';
   return {
+    ...(row.transport === 'phone_harness'
+      ? { provider: 'phone_harness', browserTaskId: row.phoneBrowserTaskId }
+      : {}),
     status,
     sentAt: row.sentAt,
     failedAt: row.failedAt,

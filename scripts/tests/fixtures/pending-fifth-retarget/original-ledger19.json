@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "40a97e181dfca68a916efbe88d2f63ac758d1dc9",
+      "status": "completed",
+      "started_at": "2026-11-06T03:05:17.760712+00:00",
+      "result": "findings",
+      "finished_at": "2026-11-06T03:08:18.613145+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "e5b592d5513ae7d6223a2267faac839bfc4f7c03",
+      "status": "completed",
+      "started_at": "2026-11-06T03:10:25.195767+00:00",
+      "result": "unavailable",
+      "finished_at": "2026-11-06T03:17:13.804825+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "7c43796a1ce4aef27c783566f180080063fe85f4",
+      "status": "completed",
+      "started_at": "2026-11-06T03:17:13.886619+00:00",
+      "replaces": "e5b592d5513ae7d6223a2267faac839bfc4f7c03",
+      "result": "clean",
+      "finished_at": "2026-11-06T03:26:44.068928+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 This review is too large to run within your organization's remaining usage spending cap. Raise or remove your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-', issue comment 6675633481 updated 2026-11-06T03:18:35Z naming commit 7c43796a1; check run 127689363548 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-06T03:26:44.067830+00:00",
+        "issue_comment_id": 6675633481,
+        "issue_comment_updated_at": "2026-11-06T03:18:35Z",
+        "quote": "Review limit reached \u2014 This review is too large to run within your organization's remaining usage spending cap. Raise or remove your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-",
+        "check_run_id": 127689363548,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "c22e3dbff",
+      "status": "completed",
+      "started_at": "2026-11-06T03:35:40.833488+00:00",
+      "result": "unavailable",
+      "finished_at": "2026-11-06T03:36:04.836990+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "c22e3dbff544cbc5aa100ea308c1ad756adf2419",
+      "status": "completed",
+      "started_at": "2026-11-06T03:36:04.953941+00:00",
+      "replaces": "c22e3dbff",
+      "result": "findings",
+      "finished_at": "2026-11-06T03:44:04Z",
+      "late_delivery": {
+        "original_result": "unavailable",
+        "original_finished_at": "2026-11-06T03:40:54.682323+00:00",
+        "review_id": 5795469123,
+        "submitted_at": "2026-11-06T03:44:04Z",
+        "reconciled_at": "2026-11-06T03:48:08.637591+00:00",
+        "reason": "substantive review arrived after source supersession; count it against the review budget and own its valid finding"
+      }
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "b70e81ed80359748aafb743d8e9d072cf40559e5",
+      "status": "completed",
+      "started_at": "2026-11-06T04:32:26.839729+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-06T04:34:50.266845+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6675633481 updated 2026-11-06T04:33:24Z naming commit b70e81ed8; check run 127713501089 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": ".context/rca-browser-4f77/final-review-evidence.json",
+        "captured_at": "1793939677.02104",
+        "issue_comment_id": 6675633481,
+        "issue_comment_updated_at": "2026-11-06T04:33:24Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 127713501089,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "062824642b47563cece1c6150d83e7e485a5ef74",
+      "status": "completed",
+      "started_at": "2026-11-06T04:44:39.447662+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-06T04:46:58.213396+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6675633481 updated 2026-11-06T04:44:50Z naming commit 062824642; check run 127717080521 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": ".context/rca-browser-4f77/reviews/062824642b47563cece1c6150d83e7e485a5ef74/final-review-evidence.json",
+        "captured_at": "1793940312.0976927",
+        "issue_comment_id": 6675633481,
+        "issue_comment_updated_at": "2026-11-06T04:44:50Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 127717080521,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "67ec2f704",
+      "status": "completed",
+      "started_at": "2026-11-06T05:18:32.040355+00:00",
+      "result": "unavailable",
+      "finished_at": "2026-11-06T05:18:57.499441+00:00"
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "67ec2f704174da94d673fb13ace561da6934ccdd",
+      "status": "completed",
+      "started_at": "2026-11-06T05:18:59.541550+00:00",
+      "replaces": "67ec2f704",
+      "result": "clean",
+      "finished_at": "2026-11-06T05:30:30.286199+00:00"
+    },
+    {
+      "number": 10,
+      "kind": "sync-inherited",
+      "head": "beb5ee66dfb2844d5dfaea6ec13a2f7cd56c7a14",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "67ec2f704174da94d673fb13ace561da6934ccdd",
+      "base": "21dc96cd23c74ff21a685af547d6ba27ac5f6794",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-06T06:15:47.251053+00:00",
+      "finished_at": "2026-11-06T06:15:47.251082+00:00"
+    },
+    {
+      "number": 11,
+      "kind": "sync-inherited",
+      "head": "6b46e852618de64d07d3fe1226f41c62f46041e0",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "beb5ee66dfb2844d5dfaea6ec13a2f7cd56c7a14",
+      "base": "429d9ac6f9520597ba4145df096e7c37fae1d879",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-06T06:44:21.421848+00:00",
+      "finished_at": "2026-11-06T06:44:21.421876+00:00"
+    },
+    {
+      "number": 12,
+      "kind": "sync-inherited",
+      "head": "f271a2eba6c4f01fb442a3c6ddd7d1d781d03a36",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "6b46e852618de64d07d3fe1226f41c62f46041e0",
+      "base": "fe1c74a90d5baf68a4530ce8c292fada385bf781",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-06T09:01:19.366887+00:00",
+      "finished_at": "2026-11-06T09:01:19.366909+00:00"
+    },
+    {
+      "number": 13,
+      "kind": "sync-inherited",
+      "head": "75092ec8f1a45d226ea036a362c4ac0e8eda16af",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "f271a2eba6c4f01fb442a3c6ddd7d1d781d03a36",
+      "base": "4513252f401c16a3ff177309ebc9257491cd45cf",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-06T23:28:26.242971+00:00",
+      "finished_at": "2026-11-06T23:28:26.243000+00:00"
+    },
+    {
+      "number": 14,
+      "kind": "sync-inherited",
+      "head": "08518097eb90a042395f7772ae9cfcd10c2f6d16",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "75092ec8f1a45d226ea036a362c4ac0e8eda16af",
+      "base": "50a582a14dd2dcec7d63e8b46c6fbbf7c0ace275",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [],
+      "started_at": "2026-11-07T02:06:03.752920+00:00",
+      "finished_at": "2026-11-07T02:06:03.752944+00:00"
+    },
+    {
+      "number": 15,
+      "kind": "sync-inherited",
+      "head": "b704f7f3f444783af658dff0484ca65a1ba9fa9f",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "08518097eb90a042395f7772ae9cfcd10c2f6d16",
+      "base": "1a65f46018b13f2ef7e0a0f027f2c290af4d0d03",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-07T03:13:15.050096+00:00",
+      "finished_at": "2026-11-07T03:13:15.050120+00:00"
+    },
+    {
+      "number": 16,
+      "kind": "sync-inherited",
+      "head": "b02ee99ce2ae236c7a985eb72c2419be84b0141d",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "b704f7f3f444783af658dff0484ca65a1ba9fa9f",
+      "base": "e7c42f1a3aa3393f503096b43e2a4c565fbdc96d",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [],
+      "started_at": "2026-11-07T04:29:18.983861+00:00",
+      "finished_at": "2026-11-07T04:29:18.983886+00:00"
+    },
+    {
+      "number": 17,
+      "kind": "sync-inherited",
+      "head": "0d3a03ae0da476027bfceaf35724c75744062119",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "b02ee99ce2ae236c7a985eb72c2419be84b0141d",
+      "base": "2c56c26556c7bfb4ebc5ec0070a1a2cefb5f59f3",
+      "branch_diff_sha256": "cdf64c04c79845e349309b9652ff4859279e3420ef2b2369c5d7f49dd3819b99",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-07T05:31:57.135515+00:00",
+      "finished_at": "2026-11-07T05:31:57.135537+00:00"
+    },
+    {
+      "number": 4,
+      "kind": "verification",
+      "head": "77744c54e7da30fd57c8b1c3295b9f9c70249fd5",
+      "status": "completed",
+      "started_at": "2026-11-07T20:33:26.228088+00:00",
+      "one_final_review_approval": {
+        "approval_id": "user-20261107T181201-figure-it-out",
+        "approved_head": "77744c54e7da30fd57c8b1c3295b9f9c70249fd5",
+        "prior_ledger_sha256": "e4a8f82b6c90b68e858094453d1610e4e4967a5e4b9b176a27f98df1e79653d7",
+        "prior_entries": 17,
+        "review_position": 4
+      },
+      "result": "findings",
+      "finished_at": "2026-11-07T21:01:33.548033+00:00"
+    },
+    {
+      "number": 5,
+      "kind": "verification",
+      "head": "74311e0479c97a8ba770646fa83bf84ba5893081",
+      "status": "open",
+      "started_at": "2026-11-08T21:40:46.375583+00:00",
+      "post_findings_review_approval": {
+        "approval_id": "pr1708-extra-review-88942d6",
+        "approved_head": "74311e0479c97a8ba770646fa83bf84ba5893081",
+        "prior_ledger_sha256": "a270605346f6cc34bd349e97fbc0c94e714dba631749cca0c72f4feff7e6cfb8",
+        "prior_entries": 18,
+        "review_position": 5,
+        "fourth_review_head": "77744c54e7da30fd57c8b1c3295b9f9c70249fd5"
+      }
+    }
+  ]
+}

@@ -1,6 +1,9 @@
 /** Durable admission: device FOR UPDATE -> reconcile -> mutate -> FIFO admit.
  * Every process uses this lock order. Transactions perform database I/O only. */
+import { accountPermitted } from './repo.account';
+export { accountPermitted } from './repo.account';
 import { ensureSetup } from './repo.setup';
+import { availabilityInTransaction } from './repo.availability';
 import { nativeControlError } from './repo.attention';
 import { resumePrivacy } from './repo.privacy';
 import { databaseNow } from './repo.clock';
@@ -55,9 +58,6 @@ export async function bind(userId: string, providerDeviceId: string) {
   }
 }
 export const transaction = runTransactionWithRetry;
-export async function accountPermitted(tx: Transaction, userId: string) {
-  return permitted(await tx.user.findUnique({ where: { userId } }));
-}
 export async function readLease(tx: Transaction, id: string, userId?: string) {
   return tx.iPhoneLease.findFirst({ where: { id, userId } });
 }
@@ -89,7 +89,7 @@ export async function admit(tx: Transaction, deviceId: string): Promise<void> {
   const [next] = await tx.$queryRaw<{ id: string; queueDeadlineAt: Date }[]>`
     SELECT l.id, l."queueDeadlineAt" FROM "IPhoneLease" l JOIN "Agent" a ON a.id = l."agentId"
     WHERE l."deviceId" = ${deviceId} AND l.status = 'WAITING' AND a."deletedAt" IS NULL
-      AND a.status::text NOT IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
+      AND a.status::text NOT IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED', 'PAUSED')
     ORDER BY l.ticket LIMIT 1 FOR SHARE OF a`;
   if (next === undefined) return;
   const now = await databaseNow(tx);
@@ -144,6 +144,11 @@ export async function enqueue(tx: Transaction, device: IPhoneDevice, input: Acqu
     if (existing.browserTaskId !== (input.browserTaskId ?? null))
       return new IPhoneError(409, 'Request key belongs to another browser task');
     return existing.id;
+  }
+  if (input.browserTaskId !== undefined) {
+    const allowed = await availabilityInTransaction(tx, device.userId, input.browserTaskId);
+    if (!allowed.enabled || allowed.source === 'continuation')
+      return new IPhoneError(409, 'iPhone setup is required');
   }
   const now = await databaseNow(tx);
   const lease = await tx.iPhoneLease.create({
@@ -257,7 +262,14 @@ export async function view(tx: Transaction, id: string) {
         ? 0
         : null;
   const setup = await ensureSetup(tx, lease.deviceId, lease);
-  return { lease, queuePosition, setup: setup.dto };
+  const holder =
+    lease.status === 'WAITING'
+      ? await tx.iPhoneLease.findFirst({
+          where: { deviceId: lease.deviceId, status: 'ACTIVE' },
+          select: { id: true, agentId: true, controlOwner: true },
+        })
+      : null;
+  return { lease, queuePosition, setup: setup.dto, holder };
 }
 
 export async function lockedDevice(tx: Transaction, userId: string) {
