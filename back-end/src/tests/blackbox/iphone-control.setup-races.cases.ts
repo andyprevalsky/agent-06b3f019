@@ -50,6 +50,16 @@ export const setupRaceCases: Case[] = [
       assert.equal(result.data.operation?.status, 'FAILED');
       assert.equal(result.data.operation?.errorCode, 'phone_setup_stale');
       assert.equal((await send()).data.operation?.status, 'FAILED');
+      assert.equal(
+        (
+          await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
+            method: 'POST',
+            body: { ...body, args: { x: 11, y: 20 } },
+          })
+        ).status,
+        409,
+        'Revocation replay admitted changed input'
+      );
       assert.equal(h.physicalOperations.filter((op) => op.op === 'input.tap').length, 0);
       assert.equal(
         (
@@ -132,7 +142,7 @@ export const setupRaceCases: Case[] = [
     },
   ]),
   [
-    'unconfirmed setup verdict stays blocked and verified readiness survives session cleanup',
+    'unconfirmed setup blocks and completed configuration remains ready across normal session cleanup',
     async (h) => {
       const f = await freshSetup(h);
       h.setupVerifier = async () => ({ identityConfirmed: false, usage: verifierUsage });
@@ -173,10 +183,14 @@ export const setupRaceCases: Case[] = [
         throw new Error('Observing successor must not silently invoke verifier');
       };
       const next = (await h.request(f.userId, `/interactions/${task.id}`)).data.setup as SetupDto;
-      assert.equal(next.required, true);
-      assert.notEqual(next.state, 'ready');
+      assert.equal(next.required, false);
+      assert.equal(next.state, 'ready');
       assert.equal((next as SetupDto & { identityVerified: boolean }).identityVerified, true);
-      assert.equal(next.expectedAccountIdentifier, f.identity);
+      assert.equal(
+        next.expectedAccountIdentifier,
+        undefined,
+        'Ready consumers do not need the private setup identifier'
+      );
     },
   ],
 ];

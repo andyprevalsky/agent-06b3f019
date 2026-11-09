@@ -23,6 +23,39 @@ EXTERNAL_REASONS = {"outage", "credits exhausted", "credential or billing change
 TREASURY_POLICY = 'treasury-failures-skip-and-warn-2026-10-29'
 
 
+USER_OVERRIDE = 'user / overridden'
+USER_OVERRIDE_CHECKS = frozenset({
+    'agentcard-lifecycle/agentcard-lifecycle',
+    *('smoke/' + case for case in ('agent-payment-test-shop', 'agent-payment-setup-resume',
+      'agent-payment-idempotent-abandonment', 'agent-payment-abandonment', 'agent-payment-new-user-journey')),
+})
+USER_OVERRIDE_REFERENCE = {'thread_id': 'ph7bsx6sqkqz9eap7w95xcs9t98gdv97',
+                           'turn_id': 'turn:01a1bcfc-c96e-73c0-b344-d80486cd674c',
+                           'reply': 'SKIP agentcard bs'}
+FINANCIAL_WARNING = 'Last captured $43.96; current settlement UNKNOWN; original financial obligations remain.'
+
+
+def explicit_user_override(entry):
+    approval = entry.get('user_override')
+    if (not isinstance(approval, dict) or set(approval) != {'message', 'question_checks', 'source', 'input_fingerprint'}
+            or approval['message'] != USER_OVERRIDE_REFERENCE
+            or not isinstance(approval['question_checks'], list)
+            or len(approval['question_checks']) != 6 or set(approval['question_checks']) != USER_OVERRIDE_CHECKS
+            or entry.get('check') not in USER_OVERRIDE_CHECKS
+            or entry['native_result'] not in {'FAIL', 'UNVERIFIED', 'prior waived failure; changed inputs'}
+            or any(k in entry for k in ('standing_policy', 'resource_skip', 'external_provider', 'repair_agent',
+                   'post_merge', 'execute_unverified', 'assigned_repair'))):
+        raise ValueError('explicit user override requires exact six-check approval and no other exception')
+    source = approval['source']
+    if (not isinstance(source, dict) or set(source) != {'head', 'digest'}
+            or not isinstance(source['head'], str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', source['head'])
+            or not isinstance(source['digest'], str) or not re.fullmatch(r'[0-9a-f]{64}', source['digest'])
+            or not isinstance(approval['input_fingerprint'], str)
+            or not re.fullmatch(r'[0-9a-f]{64}', approval['input_fingerprint'])):
+        raise ValueError('explicit user override source/input binding required')
+    return USER_OVERRIDE
+
+
 def decision(entry: dict) -> str:
     attribution = entry.get("attribution")
     # Read retained reports without rewriting their original attribution/evidence.
@@ -33,6 +66,8 @@ def decision(entry: dict) -> str:
     if not all(isinstance(entry.get(k), str) and entry[k].strip()
                for k in ["id", "description", "evidence", "native_result"]):
         raise ValueError("Failure identity, description, evidence and original native result are required")
+    if 'user_override' in entry:
+        return explicit_user_override(entry)
     if 'standing_policy' in entry:
         policy = entry['standing_policy']
         if (not isinstance(policy, dict) or set(policy) != {'name', 'reason', 'affected_records', 'evidence_at'}
@@ -193,6 +228,10 @@ def render(report: dict, scorecard: str = "") -> str:
                           f"Reason: {p['reason']} · Evidence time: {p['evidence_at']}",
                           f"Affected records: {', '.join(p['affected_records']) or 'not available'}",
                           f"Evidence: {e['evidence']} · Standing user instruction: October 29, 2026"])
+    for e in report['failures']:
+        if e['disposition'] == USER_OVERRIDE:
+            lines.extend(['', f"⚠️ Overridden — {e['check']} · original {e['native_result']} retained; no execution or cleanup credit",
+                          FINANCIAL_WARNING, f"Approval: {USER_OVERRIDE_REFERENCE['reply']} · {USER_OVERRIDE_REFERENCE['turn_id']}"])
     # Always appended after every other section, preserving failed native results.
     for e in report["failures"]:
         if e["disposition"] == "external / waived":

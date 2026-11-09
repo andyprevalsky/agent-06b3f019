@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
 
-import { SMS_TEMPLATES } from '../../providers/smsTemplates';
+import { getAgentUrl, SMS_TEMPLATES } from '../../providers/smsTemplates';
 import { formatPaymentApprovalBody } from '../../providers/smsSupervisor/writeLockBody';
 
 const agentUrl = 'https://roselabs.ai/?agent-id=coffee-123';
+
+const phoneAttentionUrl = new URL(getAgentUrl('phone-agent', 'phone-task', 'phone-request'));
+assert.equal(phoneAttentionUrl.origin, 'https://roselabs.ai');
+assert.equal(phoneAttentionUrl.searchParams.get('agent-id'), 'phone-agent');
+assert.equal(phoneAttentionUrl.searchParams.get('browser-id'), 'phone-task');
+assert.equal(phoneAttentionUrl.searchParams.get('attention-request-id'), 'phone-request');
+assert.equal(
+  new URL(getAgentUrl('browser-agent', 'browser-task')).searchParams.has('attention-request-id'),
+  false
+);
 
 assert.equal(
   SMS_TEMPLATES.agentStarted('coffee', 'Order my usual Blue Bottle coffee for pickup', agentUrl),

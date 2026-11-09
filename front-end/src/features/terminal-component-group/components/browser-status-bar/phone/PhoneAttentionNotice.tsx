@@ -9,7 +9,8 @@ export function PhoneAttentionNotice({
   attention?: PhoneAttentionModel;
   lease?: PhoneLease | null;
 }) {
-  if (!attention || (!attention.id && !attention.error)) return null;
+  if (!attention || (!attention.id && !attention.error && !attention.request?.completedAt))
+    return null;
   const message =
     attention.error ||
     attention.notice ||

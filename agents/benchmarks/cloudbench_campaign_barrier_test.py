@@ -111,7 +111,10 @@ def run_campaign(
     ]
     if strict:
         command.append("--forward-arg=--strict-barrier")
-        # Strict cohorts run the parent N2 preflight with cleanup tickets bound to committed source.
+    cleanup_ticketed = strict or runs <= concurrency
+    if cleanup_ticketed:
+        # Full-width ordinary and strict campaigns bind real cleanup tickets to
+        # committed fixture source; only strict mode adds a start rendezvous.
         for name in ("cloudbench-cleanup-tickets.py", "cloudbench-infra-canary-preflight.py"):
             (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
         (scripts / "run-fleet-infra-canary").write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -158,7 +161,7 @@ def run_campaign(
     try:
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     finally:
-        if strict:
+        if cleanup_ticketed:
             shutil.rmtree(admission, ignore_errors=True)
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
     assert events.exists(), (result.returncode, result.stdout, result.stderr, summary)
