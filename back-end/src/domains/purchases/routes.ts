@@ -148,13 +148,19 @@ router.post(
   '/:cardId/close',
   asyncHandler(hybridAuth),
   asyncHandler<HybridAuthRequest>(async (req: HybridAuthRequest, res: Response) => {
-    if (getAuthenticatedUserId(req) === undefined) {
+    const userId = getAuthenticatedUserId(req);
+    if (userId === undefined) {
       res.status(401).json({ error: 'Authenticated user required' });
       return;
     }
 
     try {
-      const result = await service.closePurchaseCard(req.params.cardId);
+      const result = await service.closePurchaseCard(
+        req.params.cardId,
+        undefined,
+        undefined,
+        userId
+      );
       res.json(result);
     } catch (error) {
       if (error instanceof service.PurchaseError) {

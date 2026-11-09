@@ -2,11 +2,6 @@ import { IntegrationStatus, IntegrationType, PurchaseSpendStatus } from '@prisma
 import { prisma } from '../../providers/database';
 
 export async function resetBenchmarkAgentCardSetup(userId: string): Promise<void> {
-  const config = {
-    orgManaged: true,
-    onboardingSessionId: `benchmark-agentcard-onboarding-${userId}`,
-    onboardingSetupUrl: 'https://example.invalid/agentcard/benchmark-onboarding',
-  };
   await prisma.integration.upsert({
     where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     create: {
@@ -15,37 +10,13 @@ export async function resetBenchmarkAgentCardSetup(userId: string): Promise<void
       type: IntegrationType.TOOL_SETUP,
       status: IntegrationStatus.NOT_CONNECTED,
       isActive: true,
-      config,
+      config: {},
     },
     update: {
       type: IntegrationType.TOOL_SETUP,
       status: IntegrationStatus.NOT_CONNECTED,
       isActive: true,
-      config,
-      lastUsedAt: new Date(),
-    },
-  });
-}
-
-export async function completeBenchmarkAgentCardSetup(
-  userId: string,
-  cardholderId: string
-): Promise<void> {
-  await prisma.integration.upsert({
-    where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
-    create: {
-      userId,
-      name: 'agentcard',
-      type: IntegrationType.TOOL_SETUP,
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      config: { orgManaged: true, cardholderId },
-    },
-    update: {
-      type: IntegrationType.TOOL_SETUP,
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      config: { orgManaged: true, cardholderId },
+      // Preserve v2 ownership and legacy credentials for cleanup; only readiness changes.
       lastUsedAt: new Date(),
     },
   });

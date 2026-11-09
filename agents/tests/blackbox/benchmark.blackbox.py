@@ -3481,6 +3481,100 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         )
 
 
+def test_local_main_seeds_only_the_selected_child_payment_fixture():
+    """Native child main must not bind a sibling's payment identity into this world."""
+    from types import SimpleNamespace
+    from benchmarks import local
+
+    cohort = ["agent-payment-new-user-journey", "agent-payment-test-shop", "chat-mode"]
+
+    class RunnerBoundaryReached(Exception):
+        pass
+
+    for selected, child_world, expected_seeds in [
+        (cohort[0], True, 0),
+        (cohort[1], True, 1),
+        (cohort[2], True, 0),
+        (cohort[0], False, 0),
+        (cohort[1], False, 1),
+    ]:
+        inherited_tasks = cohort if child_world else [selected]
+        stack = local.ServiceStack(
+            run_id="native-mixed-seed-test",
+            context_dir=local.REPO_ROOT / ".context" / "native-mixed-seed-test",
+            manifest_path=local.REPO_ROOT / ".context" / "native-mixed-seed-test" / "services.json",
+            service_log=local.REPO_ROOT / ".context" / "native-mixed-seed-test" / "services.log",
+            isolated=True,
+        )
+        manifest = {
+            "ports": {"backend": 3001, "frontend": 3002, "local_db": 5432},
+            "urls": {"public": "https://fixture.example.invalid"},
+            "database": {"name": "victoria_native_fixture"},
+        }
+        owner = SimpleNamespace(
+            starting=False, process=None, started=False, verified=True,
+            signum=None, record=lambda *_args: None,
+        )
+        def fixture_subprocess(command, **kwargs):
+            assert command[:3] == ["npx", "tsx", "scripts/setup-benchmark-payment.ts"]
+            assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+            assert kwargs["env"]["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"
+            assert kwargs["env"]["DIRECT_URL"] == kwargs["env"]["DATABASE_URL"]
+            return SimpleNamespace(returncode=0)
+
+        argv = [selected, "--no-dashboard"]
+        if child_world:
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, b"1")
+            os.close(write_fd)
+            argv.extend(["--world-ready-fd", str(read_fd)])
+            for sibling in cohort:
+                argv.extend(["--cohort-task", sibling])
+        # Parse real argv, consume the real coordinator pipe, configure the real
+        # cohort environment, and reach main's actual fixture dispatch. Only the
+        # external service/fixture/runner boundaries are replaced; no stack,
+        # database, agent or provider call is allowed to start.
+        with (
+            patch.dict(os.environ, {"TRACE_ARCHIVE_ENABLED": "1", local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV: local.AGENT_PAYMENT_BENCHMARK_USER_ID}),
+            patch.object(local, "enforce_provider_capacity"),
+            patch.object(local, "validate_agentcard_org_credentials"),
+            patch.object(local, "build_service_stack", return_value=stack),
+            patch.object(local, "configure_task_environment", wraps=local.configure_task_environment) as configure,
+            patch.object(local, "LocalBenchmarkOwner", return_value=owner),
+            patch.object(local, "start_services", return_value=(None, manifest)) as services,
+            patch.object(local, "apply_manifest_environment"),
+            patch.object(local, "diagnostic_log_env", return_value={}),
+            patch.object(local, "dashboard_enabled", return_value=False),
+            patch.object(local, "print_scorecard_instruction"),
+            patch.object(local, "seed_payment_fixture", wraps=local.seed_payment_fixture) as seed,
+            patch.object(local, "run_benchmark_invocation", side_effect=RunnerBoundaryReached) as runner,
+            patch.object(local, "stop_services") as stop,
+            patch.object(local, "start_frontend_tunnel", side_effect=AssertionError("real tunnel started")),
+            patch.object(local.subprocess, "run", side_effect=fixture_subprocess) as fixture_process,
+        ):
+            try:
+                local.main(argv)
+            except RunnerBoundaryReached:
+                pass
+            else:
+                raise AssertionError("native main never reached the benchmark runner boundary")
+            assert seed.call_count == expected_seeds, (
+                f"selected {selected} child_world={child_world} seeded regular payment fixture "
+                f"{seed.call_count} time(s), expected {expected_seeds}; sibling cohort must not own this binding; "
+                f"attempted CLI users={[call.args[0][-1] for call in fixture_process.call_args_list]}"
+            )
+            assert fixture_process.call_count == expected_seeds
+            if expected_seeds:
+                seed.assert_called_once_with(manifest)
+            configure.assert_called_once_with(inherited_tasks, isolated=True)
+            assert services.call_args.kwargs["tasks"] == inherited_tasks
+            assert runner.call_args.args[0].tasks == [selected]
+            assert os.environ["BENCHMARK_ISOLATED_RUN"] == "true"
+            if selected in cohort[:2]:
+                assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
+            stop.assert_called_once_with(None, stack=stack)
+
+
 def test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path():
     """Sandbox lifecycle benches run as the admin account and force the charged mint path."""
     import os
@@ -3835,6 +3929,20 @@ def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
         env={},
         env_path=env_path,
     )
+
+
+def test_payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing(tmp_path):
+    """A legacy MCP token cannot authenticate the v2 card and wallet requests."""
+    import pytest
+
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text('AGENTCARD_ORG_MCP_ACCESS_TOKEN="fake_legacy_org_token"\n')
+    with pytest.raises(RuntimeError, match="REST v2 requires organization client credentials"):
+        local.validate_agentcard_org_credentials(
+            ["agent-payment-test-shop"], env={}, env_path=env_path
+        )
 
 
 def test_isolated_benchmark_services_allow_slow_first_sync():
@@ -7155,6 +7263,46 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
         assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
 
 
+async def test_production_payment_admission_requires_scoped_live_v2_readiness():
+    """Live billing plus a legacy connection must not admit a paid v2 probe."""
+    import httpx
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_client = httpx.AsyncClient
+    ready = {"connected": True, "apiVersion": 2, "status": "approved",
+             "livemode": True, "fundsSource": "company_flow"}
+    for status in (
+        {"connected": True, "status": "approved"},
+        {**ready, "connected": False},
+        {**ready, "livemode": False},
+        {**ready, "status": "pending"},
+        {**ready, "fundsSource": "onramp"},
+        ready,
+    ):
+        seen = []
+
+        def fixture(request):
+            seen.append(request)
+            assert request.method == "GET", "admission must never move money"
+            if request.url.path == "/api/credits/usage":
+                return httpx.Response(200, json={"tier": "pro", "remaining": 1000, "stripeLivemode": True})
+            assert request.url.path == "/api/agentcard/status"
+            assert request.headers["x-user-id"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+            return httpx.Response(200, json=status)
+
+        with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
+             patch.object(bench.httpx, "AsyncClient",
+                          side_effect=lambda **kw: original_client(transport=httpx.MockTransport(fixture), **kw)):
+            if status == ready:
+                await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+            else:
+                with pytest.raises(RuntimeError, match="live v2"):
+                    await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+        assert [r.url.path for r in seen] == ["/api/credits/usage", "/api/agentcard/status"]
+
+
 async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
     """.claude/commands/DEPRECATED_deploy.md Step 13c (orig L3407-3434): when the non-admin
     production identity is missing, `agent-payment-production-abandonment` stops before any live
@@ -7188,17 +7336,17 @@ async def test_production_payment_identity_gap_fails_closed_with_its_own_provisi
     message = str(raised.value)
     command = (
         "  cd back-end && set -a && . ./.env && set +a && \\\n"
-        '    DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
+        '    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
         "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \\\n"
-        '    --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"\n'
+        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107\n"
     )
     assert command in message
     for rule in (
         "is not provisioned: it has no Subscription row",
         "Every credential it needs is already in back-end/.env; do not ask the user",
         "the 6543 pooler fails",
-        "EXISTING dedicated benchmark cardholder only",
+        "dedicated benchmark user's normal signed live v2 connection, consent and approved KYC first",
+        "A legacy cardholder is not a v2 connected user",
         "never create an identity automatically or bypass pending KYC",
         "never enter a card number",
         "one-time hosted Stripe Checkout link: a human saves the live card there once",
@@ -28083,6 +28231,10 @@ async def run_all_tests():
         "payment_benchmark_admin_run_user_forced_customer_path",
         test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path,
     )
+    r.record(
+        "local_main_selected_child_payment_fixture",
+        test_local_main_seeds_only_the_selected_child_payment_fixture,
+    )
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
         test_agentcard_setup_targets_effective_benchmark_user,
@@ -28290,6 +28442,10 @@ async def run_all_tests():
     await r.record_async(
         "production_payment_identity_gap_prints_its_provisioning_rules",
         test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules,
+    )
+    await r.record_async(
+        "production_payment_admission_requires_scoped_live_v2_readiness",
+        test_production_payment_admission_requires_scoped_live_v2_readiness,
     )
     r.record(
         "production_frontend_ignores_stale_local_manifest",
@@ -29012,6 +29168,10 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_accepts_org_client_credentials_from_dotenv",
         _with_tmp_path(test_payment_benchmark_accepts_org_client_credentials_from_dotenv),
+    )
+    r.record(
+        "payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing",
+        _with_tmp_path(test_payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing),
     )
     r.record(
         "agent_latency_time_containment_scales",

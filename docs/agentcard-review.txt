@@ -1,0 +1,97 @@
+AgentCard integration review — 2026-11-08
+
+Current server integration
+New company-funded purchase intents use AgentCard's v2 REST Issuing API:
+platform client-credentials token, connected user.id, company wallet funding,
+explicit single_use cards, Idempotency-Key, structured credential reads, and
+exact transfer reconciliation. MCP is retained for optional user tools, legacy
+card cleanup and legacy treasury maintenance, rather than new purchase issuance.
+The existing AGENTCARD_MINT_ENABLED rollout cutoff remains in force.
+
+Authoritative references reread
+https://docs.agentcard.com/api-reference/overview
+https://docs.agentcard.com/api-reference/access-tokens/create
+https://docs.agentcard.com/api-reference/connections/start
+https://docs.agentcard.com/api-reference/connections/verify
+https://docs.agentcard.com/api-reference/cards/overview
+https://docs.agentcard.com/api-reference/cards/create
+https://docs.agentcard.com/api-reference/cards/credentials
+https://docs.agentcard.com/api-reference/company-wallet/get-transfer
+https://docs.agentcard.com/api-reference/company-wallet/create-recovery
+https://docs.agentcard.com/webhooks/overview
+
+The original completed integration plan documents retired v1/static-key details
+and is historical, not the current provider contract. Updated back-end/README.md
+and back-end/.env.example describe the new supported server path and prerequisites.
+
+Product and financial requirements checked
+- Purchase approval, itemized receipt, rejection, secret-ref injection and held
+  purchase reuse remain on the existing workflow/UI paths.
+- Cards are minted for the approved total, with the provider's 100-cent minimum;
+  the request carries the immutable purchase Stripe billing mode and issuance
+  refuses a mismatched live/sandbox wallet before creating a card.
+- Company funding is checked as an organization setting. Unsupported per-card
+  funds_source is not sent. Onramp sandbox creation is excluded because that
+  provider path explicitly ignores card idempotency keys.
+- Stable purchase/card keys survive pending funding, transport uncertainty and
+  retries. Retry-After/retry_after_seconds are minimum waits; the existing
+  bounded attempt stops instead of retrying earlier than a long hint.
+- A connected provider user is not a legacy cardholder ID. New connections use
+  OTP and consent, signed per-user sessions, exclusive credential-scoped bindings
+  and hosted KYC; old identities remain available for legacy reconciliation.
+- Purchase close requests filter ownership in the database before selecting a
+  record, including shared static-card IDs. Another user cannot close/refund it.
+- Future minted credential archives allowlist receipt fields. PAN/CVV return to
+  the trusted checkout worker but are not persisted by the payment archive writer.
+- Financial webhooks require signing configuration; missing configuration fails
+  closed. A closed card alone does not substitute for company-funding settlement.
+- Exact transfer reads replace newest-100 visibility assumptions on the REST rail.
+  Unknown, pending and partial releases are not relabeled as full refunds.
+
+Reproduced reliability/safety defects
+The old runtime replayed unkeyed recovery mutations three times after timeouts
+and ambiguous unavailable/throttle results. New tests fail on that behavior and
+pass with effect-aware retries. Opaque HTTP 429/5xx and Retry-After headers now
+use transport status rather than requiring matching prose. Idempotent keyed card
+creation retains its safe replay. Runtime timing tests use virtual clocks, removing
+real backoff waits and a host-load-sensitive elapsed-time assertion (about 31s to
+under 1s for the existing file).
+Additional fail/pass regressions cover cross-user close, credential archiving,
+missing webhook configuration, billing-mode mismatch, wrong-OTP token refresh,
+and provider delay truncation. Binding-race and mode-transition regressions are
+also owned by the existing AgentCard store/onboarding suites.
+
+Real provider observations
+Read-only platform-token/company-wallet verification passed using sandbox
+credentials. An opt-in provider test completed sandbox connection and consent,
+100-cent company-funded issuance, same-key same-card replay, simulated clearing,
+and automatic card closure. No real purchase or charge occurred.
+The real /connect/start response uses id, as its OpenAPI schema specifies; one
+narrative guide incorrectly shows connect_id. The implementation follows id and
+passes it back as connect_id during verification.
+The sandbox labels the charged closed card's closed_reason as canceled rather
+than the documented used. This discrepancy remains visible in the test receipt;
+financial verification uses the cleared transaction, exact card and amount, and
+zero remaining balance, not the closure label.
+
+Limits
+Production issuance/settlement and production webhook configuration were not
+verified by these sandbox checks. Historical credential archives were not altered.
+This review and the local tests do not constitute a production deployment or a
+claim that every past benchmark failure is fixed. Final test results are recorded
+in the task's verification receipts under .context/agentcard-review/.
+
+Final verification receipts (same workspace, final combined implementation)
+41 backend AgentCard/purchase/fixture unit files: passed.
+Existing payment-card agent blackbox: passed (including credential archive redaction).
+Payment approval/confirmation frontend checks: 43 passed.
+New v2 and legacy-runtime regressions: five consecutive runs passed.
+Provider-delay regression: five consecutive runs passed, including oversized hints.
+Changed TypeScript: typecheck, formatting and lint passed (one pre-existing
+script-ignore warning; no lint errors). RCA registry validation: 1,606 cases valid.
+The signed v2 setup, legacy-writer race, credential-scope roundtrip and disconnected
+cleanup regressions also passed five runs in their owning workers' suites.
+The real sandbox lifecycle was rerun after the billing-mode guard and passed.
+Sandbox CLI fixture validation/seeding passed with an explicitly connected v2 user.
+Existing users need a one-time v2 connection; legacy card cleanup stays available.
+No production deployment was performed by this task.

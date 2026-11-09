@@ -1413,13 +1413,11 @@ def validate_agentcard_org_credentials(
     configured.update(os.environ if env is None else env)
     client_id = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_ID", "").strip()
     client_secret = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_SECRET", "").strip()
-    direct = configured.get("AGENTCARD_ORG_MCP_ACCESS_TOKEN", "").strip()
-    if direct.startswith("sk_"):
-        direct = ""
-    if direct or (client_id and client_secret):
+    if client_id and client_secret:
         return
     raise RuntimeError(
-        "AgentCard Organization MCP credentials are missing. API keys (sk_*) are retired; "
+        "AgentCard REST v2 requires organization client credentials. An MCP access token "
+        "cannot authenticate the Issuing API. API keys (sk_*) are retired; "
         "run `agentcard companies credentials create`, then set "
         "AGENTCARD_ORG_OAUTH_CLIENT_ID and AGENTCARD_ORG_OAUTH_CLIENT_SECRET."
     )
@@ -3277,7 +3275,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if dashboard_enabled(ci=args.no_dashboard):
             dashboard = maybe_launch_dashboard(_dashboard_context_dir(stack), enabled=True)
         print_scorecard_instruction(_dashboard_context_dir(stack))
-        if needs_payment_fixture(cohort_tasks):
+        # Service/worker policy is shared by the cohort, but identity-binding
+        # fixtures belong only to the tasks selected in this child world.
+        if needs_payment_fixture(selected_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
             # Prefer the stable public URL run.sh assigned at startup (reserved ngrok domain →

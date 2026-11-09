@@ -8,6 +8,7 @@ import { orgPollWaitsMs } from './agentcard/org-poll-schedule';
 import { recoverCardholderFunds } from './agentcard/fund-recovery';
 import { getOrgManagedCardholderId } from './agentcard/store';
 import { createLogger } from './logger';
+import { AgentCardWalletFundingRouter } from './agentcard/wallet-v2';
 
 const log = createLogger('WalletFunding');
 const RELEASE_LOOKUP_ATTEMPTS = 20;
@@ -171,6 +172,17 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     ) => Promise<string | undefined> = getOrgManagedCardholderId
   ) {}
 
+  /** Override only the read boundary when an exact REST transfer lookup is available. */
+  protected async readTransfer(
+    transferId: string,
+    retryDeadlineAtMs: number
+  ): Promise<Record<string, unknown> | undefined> {
+    const result = await this.toolCaller('list_transfers', { limit: 100 }, retryDeadlineAtMs);
+    const record = assertToolSuccess('list_transfers', result);
+    const transfers = Array.isArray(record.transfers) ? record.transfers : [];
+    return transfers.map(asRecord).find((value) => value.id === transferId);
+  }
+
   async fundUserWallet(request: WalletFundingRequest): Promise<WalletFundingResult> {
     log.info('Company-flow card creation will trigger AgentCard wallet funding', {
       user_id: maskId(request.userId),
@@ -252,9 +264,9 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     let cardholderId: string | undefined;
     let cardholderResolved = false;
     for (let attempt = 1; attempt <= observations; attempt += 1) {
-      let result: unknown;
+      let transfer: Record<string, unknown> | undefined;
       try {
-        result = await this.toolCaller('list_transfers', { limit: 100 }, retryDeadlineAtMs);
+        transfer = await this.readTransfer(request.providerTransferId, retryDeadlineAtMs);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/too many requests|rate.?limit|\b429\b/i.test(message)) throw error;
@@ -264,11 +276,6 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
         }
         break;
       }
-      const record = assertToolSuccess('list_transfers', result);
-      const transfers = Array.isArray(record.transfers) ? record.transfers : [];
-      const transfer = transfers
-        .map((value) => asRecord(value))
-        .find((value) => value.id === request.providerTransferId);
       const releasedCents = transfer?.released_cents;
       const status = transfer?.status;
       log.info('Observed AgentCard company-wallet funding release state', {
@@ -339,5 +346,5 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
 }
 
 export function createWalletFundingProvider(): WalletFundingProvider {
-  return new AgentCardCompanyWalletFundingProvider();
+  return new AgentCardWalletFundingRouter();
 }

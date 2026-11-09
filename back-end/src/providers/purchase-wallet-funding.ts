@@ -318,7 +318,7 @@ async function performPurchaseWalletFundingReclaim(
       reason,
     });
     const reclaimed = await repo.markWalletFundingReclaimed(funding.id, reclaimLeaseToken, result);
-    if (reclaimed.count === 1) {
+    if (reclaimed.count === 1 && result.metadata?.api_version !== 'v2') {
       // The card is closed and AgentCard has released the hold — but that release lands in the
       // CARDHOLDER's float, not the org pool, where no other user can draw on it. Pull it back
       // now rather than waiting for the next top-up cycle to sweep it.

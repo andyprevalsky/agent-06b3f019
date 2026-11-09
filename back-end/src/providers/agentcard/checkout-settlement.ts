@@ -25,6 +25,7 @@ import { PurchaseSpendStatus } from '@prisma/client';
 import { isAdminUser } from '../../utils/adminAccess';
 import { createCardProviderForAgent } from '../card-provider';
 import { prisma } from '../database';
+import { agentCardV2Request } from './api-v2';
 import {
   AgentCardSandboxSettlementError,
   claimHeldPurchaseForCharge,
@@ -97,15 +98,24 @@ async function findPurchaseForCheckout(purchaseId: string): Promise<CheckoutHeld
 }
 
 /**
- * Read the minted card's last4 through the AGENT-scoped factory. Production keeps
- * `AGENTCARD_MINT_ENABLED` off, so only the durable `Agent.isBenchmark` bit can resolve a real
- * AgentCard here; the env-only factory would hand back the static Brex provider and reject the id.
+ * v2 retains card identity after closure but revokes credentials. Legacy cards
+ * keep the agent-scoped factory, including the production benchmark mint gate.
+ * This read proves identity only; the caller must already have verified capture.
  */
 async function getCardLast4(
   userId: string,
   agentId: string | null,
   cardId: string
 ): Promise<string> {
+  if (cardId.startsWith('card_')) {
+    // A captured single-use card may already be closed, with credentials revoked.
+    // Read only its stable identity; closure itself is never evidence of capture.
+    const card = await agentCardV2Request('GET', `/api/v2/cards/${encodeURIComponent(cardId)}`);
+    if (card.id !== cardId || typeof card.last4 !== 'string' || !/^\d{4}$/.test(card.last4)) {
+      throw new Error('AgentCard returned an invalid card identity');
+    }
+    return card.last4;
+  }
   const provider = await createCardProviderForAgent(userId, agentId);
   const details = await provider.getDetails(cardId);
   return details.pan.replace(/\s+/g, '').slice(-4);

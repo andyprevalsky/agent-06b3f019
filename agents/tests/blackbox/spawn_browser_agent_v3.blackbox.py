@@ -31890,7 +31890,20 @@ def test_manager_payment_gate_normalizes_company_funding_retry_delay():
         assert _normalize_funding_retry_seconds(invalid) == 5.0
     assert _normalize_funding_retry_seconds(0.001) == 1.0
     assert _normalize_funding_retry_seconds(5) == 5.0
-    assert _normalize_funding_retry_seconds(600) == 60.0
+    assert _normalize_funding_retry_seconds(120) == 120.0
+    assert _normalize_funding_retry_seconds(600) == 600.0
+
+
+async def test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline():
+    for retry_seconds in (600, 1e308):
+        events, activity_calls, _, _ = await _drive_payment_card_gate(
+            mint_results=[{
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": retry_seconds,
+            }]
+        )
+        assert activity_calls.count("mint_purchase_card_activity") == 1
+        assert any(getattr(event, "title", "") == "Payment funding is delayed" for event in events)
 
 
 async def test_manager_payment_gate_reports_company_funding_deadline():
@@ -38390,6 +38403,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_company_funding_deadline",
         test_manager_payment_gate_reports_company_funding_deadline,
+    )
+    await r.record_async(
+        "manager_payment_gate_honors_long_provider_delay",
+        test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline,
     )
     r.record(
         "transient_session_init_failure_classification",

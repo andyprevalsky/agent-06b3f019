@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { assertV2WalletContract } from '../blackbox/agentcard-wallet-v2.cases';
 import { AgentCardOrgRuntime, orgRetryDeadlineAtMs } from '../../providers/agentcard/org-runtime';
 import { AgentCardCompanyWalletFundingProvider } from '../../providers/wallet-funding';
 
@@ -116,6 +117,45 @@ async function assertReleaseObserverSharesOneRetryBudget(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  await assertV2WalletContract();
+  // A known transfer can fall behind 100 newer rows. An exact reader must be honored
+  // without changing the legacy constructor or replaying any funding mutation.
+  let exactReads = 0;
+  class ExactTransferProvider extends AgentCardCompanyWalletFundingProvider {
+    protected async readTransfer(transferId: string): Promise<Record<string, unknown>> {
+      exactReads += 1;
+      assert.equal(transferId, 'owt-old');
+      return { id: transferId, status: 'reclaimed', released_cents: 100 };
+    }
+  }
+  const oldTransferProvider = new ExactTransferProvider(
+    async () => ({
+      structuredContent: {
+        transfers: Array.from({ length: 100 }, (_, i) => ({
+          id: `owt-new-${i}`,
+          status: 'consumed',
+          released_cents: 0,
+        })),
+      },
+    }),
+    { attempts: 1, delayMs: 0 }
+  );
+  assert.equal(
+    (
+      await oldTransferProvider.reclaimUserWalletFunding({
+        userId: 'user-old',
+        purchaseId: 'purchase-old',
+        amountCents: 100,
+        currency: 'usd',
+        providerTransferId: 'owt-old',
+        idempotencyKey: 'purchase-wallet-reclaim:purchase-old',
+        reason: 'agent_cleanup_unspent_card',
+      })
+    ).metadata?.status,
+    'release_confirmed'
+  );
+  assert.equal(exactReads, 1);
+
   // A closed unspent card can leave its own fully funded company transfer consumed until
   // recover_funds pulls the cardholder's released residual. The observer must accelerate that
   // transition, while still requiring THIS transfer's terminal state before reporting success.

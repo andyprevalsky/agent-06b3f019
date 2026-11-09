@@ -2,6 +2,8 @@ export interface CardProviderMintRequest {
   amountCents: number;
   idempotencyKey?: string;
   fundsSource?: 'onramp_flow' | 'company_flow';
+  /** Immutable purchase billing mode. Required by the server-side v2 issuer. */
+  expectedLivemode?: boolean;
 }
 
 export interface CardProviderMintResult {

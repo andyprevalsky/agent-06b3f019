@@ -5,6 +5,37 @@ import Stripe from 'stripe';
 // so sandbox provisioning could overwrite the live Stripe customer + cardholder.
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
 import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
+import { getV2ConnectedUserId } from '../src/providers/agentcard/store';
+import { agentCardV2Request } from '../src/providers/agentcard/api-v2';
+
+/** Read-only admission before any live fixture/Stripe write. Never connects or advances KYC. */
+export async function requireLiveV2FixtureReady(
+  userId: string,
+  dependencies: Partial<{
+    getConnectedUserId: typeof getV2ConnectedUserId;
+    request: typeof agentCardV2Request;
+  }> = {}
+): Promise<void> {
+  const v2UserId = await (dependencies.getConnectedUserId ?? getV2ConnectedUserId)(userId);
+  if (v2UserId === undefined || v2UserId.trim() === '') {
+    throw new Error(
+      '--live requires the normal signed live AgentCard connection and consent for this Rose user under the current organization client; a legacy cardholderId cannot establish v2 readiness. Complete connection first, then re-run.'
+    );
+  }
+  const request = dependencies.request ?? agentCardV2Request;
+  const wallet = await request('GET', '/api/v2/company_wallet');
+  if (wallet.livemode !== true || wallet.default_funds_source !== 'company_flow') {
+    throw new Error(
+      '--live requires provider-verified live credentials and company_flow funding; no fixture changes were made'
+    );
+  }
+  const kyc = await request('GET', `/api/v2/kyc?user_id=${encodeURIComponent(v2UserId)}`);
+  if (kyc.status !== 'approved') {
+    throw new Error(
+      '--live requires approved KYC for the connected v2 user; finish the normal signed live connection/KYC flow before provisioning'
+    );
+  }
+}
 
 /** Sandbox and live fixtures must never share their Stripe, user, or AgentCard identities. */
 export type FixtureMode = 'sandbox' | 'live';

@@ -2637,12 +2637,12 @@ PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
     "back-end/.env; do not ask the user for any of them. Run (DIRECT_URL: the 6543 pooler fails "
     "with \"Can't reach database server\"):\n"
     "  cd back-end && set -a && . ./.env && set +a && \\\n"
-    "    DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
+    "    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
     "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} \\\n"
-    "    --agentcard-cardholder-id \"$DEDICATED_AGENTCARD_CARDHOLDER_ID\"\n"
-    "Guardrails: bind an EXISTING dedicated benchmark cardholder only (never Andy's or another "
-    "actor's); never create an identity automatically or bypass pending KYC; never enter a card "
+    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}\n"
+    "Guardrails: require the dedicated benchmark user's normal signed live v2 connection, consent "
+    "and approved KYC first (never Andy's or another actor's identity). A legacy cardholder is not "
+    "a v2 connected user; never create an identity automatically or bypass pending KYC; never enter a card "
     "number. When the live customer has no saved card the script prints a one-time hosted Stripe "
     "Checkout link: a human saves the live card there once, then re-run the command."
 )
@@ -2683,6 +2683,27 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
         )
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
+        async with httpx.AsyncClient(timeout=15) as client:
+            status = await client.get(
+                f"{base_url}/api/agentcard/status",
+                headers={**headers, "x-user-id": user_id},
+            )
+        if status.status_code != 200:
+            raise RuntimeError(f"Could not verify live v2 AgentCard readiness ({status.status_code})")
+        readiness = status.json()
+        if not (
+            readiness.get("apiVersion") == 2
+            and readiness.get("connected") is True
+            and readiness.get("status") == "approved"
+            and readiness.get("livemode") is True
+            and readiness.get("fundsSource") == "company_flow"
+        ):
+            raise RuntimeError(
+                "Production payment identity needs a scoped live v2 AgentCard connection, "
+                "approved KYC and a live company-funded wallet before running paid probes. "
+                "Complete the normal signed live connection for the dedicated benchmark user; "
+                "a legacy cardholder or sandbox fixture cannot satisfy this requirement."
+            )
         return
     message = (
         f"Production payment identity {user_id} is not provisioned: {gap}.\n"
