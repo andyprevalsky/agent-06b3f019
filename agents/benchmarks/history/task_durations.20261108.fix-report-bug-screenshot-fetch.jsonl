@@ -1,3 +1,0 @@
-{"task": "spawn-sub-agents", "duration_seconds": 155.4, "cost_cents": 1.0, "timestamp": "2026-11-08T17:10:42.247307+00:00", "agent_id": "3602acc8-dcfd-4c82-8e65-566c8e1e1ee5"}
-{"task": "background-agent-message-smoke", "duration_seconds": 77.4, "cost_cents": 2.0, "timestamp": "2026-11-08T17:10:48.203077+00:00", "agent_id": "89fba203-dfa9-4264-90b8-4eaeace48826"}
-{"task": "agent-payment-new-user-journey", "duration_seconds": 139.6, "cost_cents": 2.0, "timestamp": "2026-11-08T17:10:42.461939+00:00", "agent_id": "42d21556-4926-4066-8af5-483e9604d4a7"}
