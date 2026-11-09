@@ -143,7 +143,8 @@ def test_prepare_builds_a_leak_free_repo_with_the_arm_instructions(source, tmp_p
     assert "agents/benchmarks/history" not in "".join(prepared["instruction_files"])
     assert not (repo / "agents" / "benchmarks" / "history").exists()
     assert prepared["leak_check"] == {"ok": True, "remotes": [], "commits": 1, "forbidden_present": [], "shallow": False}
-    assert _git(repo, "log", "-1", "--format=%s").strip() == "base: the starting point"
+    # The snapshot's only commit carries a neutral subject, never the source's (which can name the fix).
+    assert _git(repo, "log", "-1", "--format=%s").strip() == "Snapshot"
     assert _git(repo, "status", "--porcelain").strip() == ""
     assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", source["merge"]], capture_output=True).returncode != 0
     assert _git(repo, "config", "core.hooksPath").strip() == ".git/replay-hooks"
@@ -201,7 +202,10 @@ def test_shims_and_pre_push_hook_record_and_refuse(source, tmp_path):
     driver.prepare(_task(source), paths, _opts(source, tmp_path))
     env = {**os.environ, "PATH": f"{paths.bin}:{os.environ['PATH']}"}
     gh = subprocess.run(["gh", "pr", "create", "--fill"], env=env, capture_output=True, text=True)
-    assert gh.returncode == 1 and "refused" in gh.stderr
+    # Answers like an installed but unauthenticated gh, and records the call for the observer.
+    assert gh.returncode == 4 and "gh auth login" in gh.stderr
+    logged = [json.loads(line) for line in (paths.mocks / "cli-shims.jsonl").read_text().splitlines()]
+    assert [(row["tool"], row["argv"], row["refused"]) for row in logged] == [("gh", ["pr", "create", "--fill"], True)]
     bare = tmp_path / "bare.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
     _git(paths.repo, "remote", "add", "sneaky", str(bare))
@@ -224,7 +228,10 @@ def test_dummy_envs_point_databases_at_the_honeypot(source, tmp_path):
     assert agents["LOCAL_DB"] == "postgresql://localhost:5432/x"
     assert agents["BACKEND_API_URL"].startswith("http://127.0.0.1:9/")
     assert backend["OPENAI_API_KEY"].startswith("rcanaryABC")
-    assert prepared["dummy_envs"]["back-end"] == ["ANTHROPIC_API_KEY", "DATABASE_URL", "DIRECT_URL", "OPENAI_API_KEY", "PORT"]
+    assert prepared["dummy_envs"]["back-end"] == [
+        "ANTHROPIC_API_KEY", "DATABASE_URL", "DIRECT_URL", "OPENAI_API_KEY", "PORT", "TEMPORAL_TASK_QUEUE"]
+    # A replayed stack never consumes a shared Temporal queue.
+    assert backend["TEMPORAL_TASK_QUEUE"] == agents["TEMPORAL_TASK_QUEUE"] == "navi-agent-tasks-local"
     assert _git(paths.repo, "status", "--porcelain").strip() == ""
 
 
