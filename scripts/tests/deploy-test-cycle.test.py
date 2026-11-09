@@ -70,6 +70,13 @@ def setUpModule():
 
 
 class Cycle(unittest.TestCase):
+    def own_custody_request_context(self):
+        # Direct custody calls belong to this temporary cycle, not the outer gate.
+        request = self.directory / 'attempts/0/initial/api/request.json'
+        context = patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(request),
+                                         'DEPLOY_GATE_RESULT': str(request.with_name('result.json'))})
+        context.start(); self.addCleanup(context.stop)
+
     def custody_fixture(self, top_level=None):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
@@ -230,6 +237,7 @@ class Cycle(unittest.TestCase):
         self.assertEqual(2, len(fresh['failures']))
 
     def test_historical_import_cli_and_admission_keep_current_inventory(self):
+        self.own_custody_request_context()
         import contextlib, io
         import deploy_test_historical_custody as h
         fresh, donor, index = self.transfer_fixture()
@@ -257,6 +265,10 @@ class Cycle(unittest.TestCase):
             custody_state_sha256=h.state_identity(state), custody_child_environment=h.environment_identity(os.environ),
             custody_runtime=h.runtime_identity(self.root))
         h.admission(request, self.root)
+        foreign = self.root / '.context/foreign/attempts/0/initial/api/request.json'
+        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(foreign)}):
+            with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                h.admission(request, self.root)
         request['checks'] = gate['checks']
         with self.assertRaises(ValueError): h.admission(request, self.root)
         changed = copy.deepcopy(state); changed['historical_custody_import']['donor']['state_digest'] = 'wrong'
@@ -706,6 +718,7 @@ class Cycle(unittest.TestCase):
             (self.root / 'code').write_text(code)
 
     def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
+        self.own_custody_request_context()
         import deploy_test_historical_custody as h
         new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)
         before = copy.deepcopy(self.state)
@@ -7340,6 +7353,10 @@ class RelayStartupEvidence(unittest.TestCase):
                     with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
 
     def test_native_adapter_requests_owned_supervision(self):
+        # This extracted adapter has a standalone source fixture and no cycle.
+        context = patch.dict(os.environ, {key: value for key, value in os.environ.items()
+                             if key not in ('DEPLOY_GATE_REQUEST', 'DEPLOY_GATE_RESULT')}, clear=True)
+        context.start(); self.addCleanup(context.stop)
         import ast,contextlib,hashlib,time,shutil
         import deploy_test_cloud as cloud
         code=(self.target/'deploy_test_cloud.py').read_text()

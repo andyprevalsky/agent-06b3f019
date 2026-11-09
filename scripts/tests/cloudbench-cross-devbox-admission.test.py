@@ -13,9 +13,7 @@ stubbed; no flyctl, network or credentials.
 """
 from __future__ import annotations
 
-import ast
-import contextlib
-import hashlib
+import shutil
 import os
 import re
 import subprocess
@@ -23,6 +21,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -158,24 +157,40 @@ class AdapterPassesGateDeadline(unittest.TestCase):
             {"CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH": "1000100"})
 
     def test_execute_hands_the_deadline_to_the_native_cli(self):
-        code = ADAPTER.read_text()
-        function = next(n for n in ast.parse(code).body if isinstance(n, ast.FunctionDef) and n.name == "execute")
         calls = []
-        requested = {"checks": ["browser-smoke"], "skips": {}, "token": "owned",
-                     "source": {"head": "a" * 40}, "gate": "smoke"}
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as base:
-            namespace = dict(
-                NAME=re.compile(r"^[A-Za-z0-9_.-]+$"), source=lambda _r: requested["source"],
-                campaign_width=lambda _c: 1, hashlib=hashlib, os=os, time=time, sys=sys,
-                cancellation_handlers=contextlib.nullcontext, write=lambda *_a: None,
-                shared_canary_env=lambda _r: {}, capacity_admission_env=self.adapter.capacity_admission_env,
-                # The adapter refuses an unpushed source first (9b9a4771b0); this fixture's head is pushed.
-                origin_fetchable=lambda *_a: True,
-                run_command=lambda *a, **k: (calls.append((a, k)) or (1, False, False, False)),
-                collect_campaign=lambda *_a: ({"browser-smoke": "UNVERIFIED"}, {}, False, "fixture"))
-            exec(compile(ast.Module(body=[function], type_ignores=[]), str(ADAPTER), "exec"), namespace)
-            before = time.time()
-            namespace["execute"](requested, Path(base))
+            root = Path(base)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / '.git/info/exclude').write_text('.context/\n')
+            for relative in ('scripts/lib/cloudbench-env.sh', 'scripts/create-worktree-patch.sh'):
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / relative, target)
+            subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+            subprocess.run(['git', '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
+                            'commit', '-qm', 'fixture'], cwd=root, check=True)
+            subprocess.run(['git', 'update-ref', 'refs/remotes/origin/main', 'HEAD'], cwd=root, check=True)
+            requested = dict(checks=['browser-smoke'], skips={}, token='owned',
+                             source=self.adapter.source(root), gate='smoke')
+            # Use the real adapter and source seal, but no enclosing gate request or provider.
+            standalone = {key: value for key, value in os.environ.items()
+                          if key not in ('DEPLOY_GATE_REQUEST', 'DEPLOY_GATE_RESULT')}
+            with patch.dict(os.environ, standalone, clear=True), \
+                    patch.object(self.adapter, 'origin_fetchable', return_value=True), \
+                    patch.object(self.adapter, 'campaign_width', return_value=1), \
+                    patch.object(self.adapter, 'shared_canary_env', return_value={}), \
+                    patch.object(self.adapter, 'run_command', side_effect=lambda *a, **k:
+                                 (calls.append((a, k)) or (1, False, False, False))), \
+                    patch.object(self.adapter, 'collect_campaign',
+                                 return_value=({'browser-smoke': 'UNVERIFIED'}, {}, False, 'fixture')):
+                foreign = root / 'foreign/attempts/0/initial/smoke/request.json'
+                with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(foreign)):
+                    with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                        self.adapter.execute(requested, root)
+                self.assertEqual(calls, [])
+                before = time.time()
+                result = self.adapter.execute(requested, root)
+                self.assertEqual(result['source_transport']['source'], requested['source'])
         self.assertEqual(len(calls), 1)
         deadline = int(calls[0][1]["env"]["CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH"])
         from deploy_gates import GATE_DEADLINE_SECONDS

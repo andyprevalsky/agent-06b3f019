@@ -460,6 +460,11 @@ class Worker(unittest.TestCase):
 
 class Cloud(unittest.TestCase):
     def setUp(self):
+        # These direct adapter calls own standalone disposable requests, not
+        # the enclosing structural worker's request/result namespace.
+        request_env = patch.dict(os.environ, {key: value for key, value in os.environ.items()
+                                 if key not in ('DEPLOY_GATE_REQUEST', 'DEPLOY_GATE_RESULT')}, clear=True)
+        request_env.start(); self.addCleanup(request_env.stop)
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
@@ -507,6 +512,17 @@ class Cloud(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
 
     def collect(self):return self.cloud.collect(self.request,self.root,self.runs,1,1)
+
+    def test_standalone_fixture_preserves_real_enclosing_custody_refusal(self):
+        from deploy_test_historical_custody import admission
+        self.assertNotIn('DEPLOY_GATE_REQUEST', os.environ)
+        self.assertNotIn('DEPLOY_GATE_RESULT', os.environ)
+        admission(self.request, self.root)
+        enclosing = self.root / '.context/cycle/attempts/0/initial/smoke/request.json'
+        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(enclosing)}):
+            with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                admission(self.request, self.root)
+
 
     def test_native_skip_is_failure_until_rca_and_passing_peer_survives(self):
         cases,evidence,cleaned,_=self.collect()
