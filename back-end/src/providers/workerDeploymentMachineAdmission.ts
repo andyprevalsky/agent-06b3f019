@@ -27,14 +27,14 @@ async function requireController(
     where: {
       operationType: 'WORKER_DEPLOYMENT_JOB',
       externalId: job.identity.app,
-      status: { notIn: ['SUCCEEDED', 'ABORTED'] },
+      status: { notIn: ['SUCCEEDED', 'ABORTED', 'SUPERSEDED'] },
     },
     orderBy: [{ createdAt: 'asc' }, { operationKey: 'asc' }],
   });
   if (
     !saved ||
     saved.ownerId !== ownerId ||
-    ['SUCCEEDED', 'ABORTED'].includes(saved.stage) ||
+    ['SUCCEEDED', 'ABORTED', 'SUPERSEDED'].includes(saved.stage) ||
     (head?.request as { jobId?: string } | null)?.jobId !== job.jobId
   )
     throw new Error('FIFO terminal or controller owner no longer owns native admission');

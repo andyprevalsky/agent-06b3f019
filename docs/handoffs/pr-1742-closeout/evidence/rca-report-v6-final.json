@@ -1,0 +1,72 @@
+{
+ "failures": [
+  {
+   "id": "9d36055101cf4e18bbf54fc423186d7d",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "gate": "deploy-command-structural",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "Only deploy-test-cycle failed: Cycle.test_failed_infra_canary_is_execution_only_and_requires_positive_release raised 'native cleanup: old controller still active' during the concurrent final sweep (12 gates + live cloud smoke). The PR diff does not touch deploy_test_cycle.py, deploy_test_native_cleanup.py or that test. It passes 3/3 in isolation at 337aa6318.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v6/attempts/8/final/deploy-command-structural/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate now that the concurrent sweep and cloud smoke have finished.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v6/attempts/8/final/deploy-command-structural/output.log"
+  },
+  {
+   "id": "3c63bdfc2cd7413cb828f7d1aaf03945",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "gate": "cloudbench-controller",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/cbcontroller/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/cbcontroller",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "multi-workstream 'readiness active-retry must preserve completed task and exact worker retirement' and selected-pytest cloudbench_codex_auth_test::test_explicit_codex_driver_wait_owns_spawn_signal_boundary[spawn-direct] (FileNotFoundError on a private-handoff owner.json under pytest tmp) failed during the concurrent final sweep. The PR diff touches no cloudbench code or tests. The pytest case passes 4/4 in isolation at 337aa6318; the same gate passed in this cycle's initial sweep on e1475b6e0.",
+   "evidence": "/var/tmp/iso-codex-driver.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate now that the concurrent sweep and cloud smoke have finished.",
+   "assigned_evidence": "/var/tmp/iso-codex-driver.log"
+  },
+  {
+   "id": "d9b4ac72c5f54fd78ded788b5dfddee8",
+   "check": "backend-coverage-blackbox/blackbox:browser-session",
+   "gate": "backend-coverage-blackbox",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/home/boxes/deploy-workers/backend"
+   ],
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "browser-session resume-custody case asserted /hydration outcome remains unknown/ but got 'Browser resume is still in progress' (timing race) during the concurrent final sweep; 249 other backend cases passed. The PR diff touches no browser-session code. The browser-session domain passes in isolation at 337aa6318 (run-blackbox-tests.sh browser-session exit 0) and passed in this cycle's initial sweep on e1475b6e0.",
+   "evidence": "/var/tmp/iso-browser-session.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate now that the concurrent sweep and cloud smoke have finished.",
+   "assigned_evidence": "/var/tmp/iso-browser-session.log"
+  }
+ ]
+}

@@ -40,6 +40,7 @@ function toListItem(agent: ListedAgent) {
     taskProgressEstimates: agent.taskProgressEstimates ?? {},
     status: agent.status,
     status_message: agent.statusMessage,
+    user_control_revision: agent.userControlRevision,
     temporal_workflow_id: agent.temporalWorkflowId,
     token_count: agent.tokenCount,
     tokens_in: agent.tokensIn,
@@ -248,6 +249,14 @@ async function noteWorkerPollConsumption(
   await noteAgentMessagesConsumed(agentId, messages, options.browserToolCallId ?? null);
 }
 
+/** Project summary workers render into the agent's prompts (agents/utils/prompts.py). */
+function projectSummary(
+  project: { name: string; repoUrl: string | null; defaultBranch: string } | null
+) {
+  if (project === null) return null;
+  return { name: project.name, repo_url: project.repoUrl, default_branch: project.defaultBranch };
+}
+
 export async function getAgentDetail(agentId: string, options: AgentDetailOptions = {}) {
   const rawAgent = await repo.findAgentWithRelations(agentId, options.userId);
   const agent = rawAgent === null ? null : (await hydrateProgressEstimates([rawAgent]))[0];
@@ -280,6 +289,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       taskProgressEstimates: agent.taskProgressEstimates ?? {},
       status: agent.status,
       status_message: agent.statusMessage,
+      user_control_revision: agent.userControlRevision,
       temporal_workflow_id: agent.temporalWorkflowId,
       token_count: agent.tokenCount,
       tokens_in: agent.tokensIn,
@@ -296,6 +306,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       world_model_mode: agent.worldModelMode,
       memory_enabled: agent.memoryEnabled,
       project_id: agent.projectId,
+      project: projectSummary(agent.project),
       folder_id: agent.folderId,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,

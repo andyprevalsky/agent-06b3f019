@@ -1,0 +1,13 @@
+{
+ "check": "smoke/background-agent-message-smoke",
+ "native_task": {
+  "name": "background-agent-message-smoke",
+  "status": "COMPLETED",
+  "benchmark_status": "FAILED",
+  "passed": false,
+  "failure_reason": "Declared evaluator smoke_rfc_semantics failed: The first contradicted requirement is the exact titles in the final structured output. Its title fields are 'RFC 9110: HTTP Semantics' and 'RFC 9111: HTTP Caching', rather than the required 'HTTP Semantics' and 'HTTP Caching'. The later web_fetch results explicitly identify those unprefixed document titles.\n\nThe remaining document fields are supported: there are exactly two records, both published June 2022, with official rfc-editor.org URLs and the exact forwarded marker in both notes.\n\nRouting evidence supports delivery and resumption. mid_run_feedback identifies the active explore task, and wait_for reports it running when the user message arrives. background_task_routing records an inbox message and send_message_to_agent delivery to that same task. Although its first run finished before delivery, the send result verifies that delivery started its next run. Later research rows, a second completed result containing both markers, and the final wait_for completion notification verify resumed work and completion. No external message is shown. These successes do not cure the exact-title mismatch.",
+  "agent_id": "1cb7ead6-4286-4632-a470-8fc527eef13b"
+ },
+ "log": null,
+ "sha256": "afa0dbb2b9622d51bc7d0ab0becb2ab7e969a11eab3798e2425b02a6bd57c677"
+}

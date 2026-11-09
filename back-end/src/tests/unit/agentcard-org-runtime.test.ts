@@ -15,6 +15,17 @@ const ENV_NAMES = [
   'AGENTCARD_OAUTH_CLIENT_SECRET',
 ] as const;
 
+/** Budget-bounded retry tests advance this instead of waiting out the backoff in real time. */
+function virtualClock(): { now: () => number; sleep: (ms: number) => Promise<void> } {
+  let nowMs = Date.now();
+  return {
+    now: () => nowMs,
+    sleep: async (ms) => {
+      nowMs += ms;
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   try {
@@ -219,7 +230,7 @@ async function main(): Promise<void> {
         // exhausted throttle must stay recognisable to it.
         /too many requests|rate.?limit|\b429\b/i.test(error.message)
     );
-    assert.equal(exhaustedCalls, 3, 'rate-limit retries must stay bounded');
+    assert.equal(exhaustedCalls, 5, 'rate-limit retries on a read must stay bounded');
 
     // A window reset further out than the delay budget must fail fast rather than parking the
     // request: nested callers (the 20-attempt release observer) would otherwise multiply the wait.
@@ -319,10 +330,14 @@ async function main(): Promise<void> {
     assert.equal(toolThrottledCalls, 2, 'a tool-level throttle on a read must be retried');
 
     let stuckToolThrottleCalls = 0;
-    const stuckToolThrottleRuntime = new AgentCardOrgRuntime(async () => {
-      stuckToolThrottleCalls += 1;
-      return apiKeyThrottle;
-    });
+    const stuckToolThrottleRuntime = new AgentCardOrgRuntime(
+      async () => {
+        stuckToolThrottleCalls += 1;
+        return apiKeyThrottle;
+      },
+      fetch,
+      virtualClock()
+    );
     await assert.rejects(
       () =>
         stuckToolThrottleRuntime.callTool('get_cardholder_kyc_status', { cardholder_id: 'ch-1' }),
@@ -332,7 +347,7 @@ async function main(): Promise<void> {
         error.code === 'agentcard_org_mcp_rate_limited' &&
         /API key rate limit exceeded/.test(error.message)
     );
-    assert.equal(stuckToolThrottleCalls, 3, 'tool-level throttle retries must stay bounded');
+    assert.equal(stuckToolThrottleCalls, 5, 'tool-level throttle retries must stay bounded');
 
     // A tool-level throttle can arrive after a multi-step mutation already changed provider state,
     // so a mutation's result is handed back untouched for its caller to interpret.

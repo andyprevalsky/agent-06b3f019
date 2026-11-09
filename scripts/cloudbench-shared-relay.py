@@ -169,13 +169,21 @@ class Broker:
             try:
                 await frame_write(writer,b'ping');raw=await frame_read(reader)
                 need(raw.startswith(b'ok '),'invalid Fly agent PING response');ping=json.loads(raw[3:])
-                need(str(ping.get('Version','')).removeprefix('v')==VERSION,'unsupported Fly agent version')
                 pid=ping.get('PID');need(type(pid)is int and pid>1,'invalid Fly agent PID')
                 peer,uid,_=struct.unpack('3i',writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
                 need(peer==pid and uid==os.getuid(),'Fly agent PING peer differs')
                 stamp=birth(pid)
                 need(stamp and Path('/proc',str(pid)).stat().st_uid==os.getuid(),'foreign Fly agent process')
-                self.agent=dict(pid=pid,birth=stamp,version=VERSION,socket_identity=[info.st_dev,info.st_ino]);self.agent_current()
+                version=str(ping.get('Version','')).removeprefix('v')
+                self.agent=dict(pid=pid,birth=stamp,version=version,socket_identity=[info.st_dev,info.st_ino]);self.agent_current()
+                # Capture the authenticated peer even when its protocol version
+                # is refused. This is custody evidence, never route admission.
+                save(self.directory/'startup-agent.json',dict(
+                    schema='shared-relay-startup-agent-v1',authority_sha256=self.digest,
+                    broker=dict(pid=os.getpid(),birth=birth(os.getpid())),
+                    parent=dict(pid=self.auth['parent_pid'],birth=self.auth['parent_start']),
+                    uid=os.getuid(),socket=self.auth['agent_socket'],agent=self.agent))
+                need(version==VERSION,'unsupported Fly agent version')
             finally:await closed(writer)
     async def dial(self, route):
         self.agent_current()

@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1757-a6353fb70/rca-evidence.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "adf5b0e6efd9d5c3ecfd4ed4871d0dfeb6fcf39e190d6ebe73c9a374b8d811aa",
+  "gzip_sha256": "c5135bafb4215b192bbba474a598c3d102a4dab0a68d6efd8d4db4b283241c85",
+  "stored_bytes": 318197181,
+  "frames": 38,
+  "files": 413,
+  "original_bytes": 1879334818,
+  "manifest_sha256": "d9ad3494672c72419081ab5d48c0e0ca74c439aa019334aadbc02be99b8a4af4",
+  "full_readback_verified": true
+}

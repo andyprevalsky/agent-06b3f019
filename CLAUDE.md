@@ -1269,7 +1269,7 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 
 25. **No benchmark reward hacking** - Never change benchmark task definitions, prompts, expected tools, pass criteria, load sizes, timeouts, concurrency limits, or production behavior just to make a benchmark pass. Do not raise a benchmark/tool timeout as a workaround for a timeout failure. First prove why it timed out with diagnostics: resource contention, memory growth, blocked external tool/session, retry loop, verifier/schema issue, slow database/API calls, or an unintended parameter/config change. Then reduce the underlying resource use, remove the stall, or fix the broken flow. Get explicit approval before changing any benchmark definition or timeout. General reliability rule: any Temporal activity wrapper that calls an LLM must allow at least 60 seconds; sub-60-second verifier/LLM activity timeouts are product bugs, not benchmark tuning.
 
-25a. **Never add runtime nudges to the harness** — synthetic user/tool messages injected into the planning LLM's trajectory (network monitors that fabricate tool failures, supervisor recovery nudges, skip-recovery guards, OTP/handoff autofill, classifier recovery constraints wired into message assembly, etc.) are almost always overfitting. Let the model act on real tool results. Deploy Step 0c requires human approval (or a `GROUNDED` golden-reference review, rule 26a) if you touch harness trajectory-injection sites.
+25a. **Never add runtime nudges to the harness** — synthetic user/tool messages injected into the planning LLM's trajectory (network monitors that fabricate tool failures, supervisor recovery nudges, skip-recovery guards, OTP/handoff autofill, classifier recovery constraints wired into message assembly, etc.) are almost always overfitting. Let the model act on real tool results. The deploy trajectory-injection guard requires human approval (or a `GROUNDED` golden-reference review, rule 26a) if you touch harness trajectory-injection sites.
 
 25b. **Avoid string-matching classifiers in our harness** — that is an ANTI-PATTERN.
 
@@ -1429,6 +1429,33 @@ Code: `agents/providers/planner_memory/`, backend `src/domains/planner-memory/` 
   bundles into `agents/benchmarks/fixtures/memory/<n>.json`; `run_benchmark.py` loads them into the local stack's
   history table (internal PUT) for `memory: "on"` tasks. Global kill switch: `PLANNER_MEMORY_ENABLED=0`.
 
+## GitHub token pool
+
+Several GitHub identities share the load because each has its own API quota
+(5,000/h for a user): `GITHUB_TOKEN` (Andy's user token), optional
+machine-account tokens `GITHUB_TOKEN_2` … `GITHUB_TOKEN_9`, the org's GitHub App
+`rose-labs-agents` (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`,
+`GITHUB_APP_PRIVATE_KEY_B64`; the backend mints its hourly installation tokens
+in production, or anywhere `GITHUB_APP_POOL=on`) and `GITHUB_DISPATCH_TOKEN`,
+which the backend ranks after every usable member. Members live in
+`agents/.env`, `back-end/.env` and Render; add one to the boxes.dev managed env
+when Andy supplies it. Backend reads (repo visibility, branch heads, merge
+facts, admin-health commits) use `githubFetch` / `githubTokenCandidates`
+(`back-end/src/providers/githubTokenPool.ts`), which prefer the member with the
+most quota left and move on when one is rate limited. Writes that act as Andy
+never rotate onto a machine account or the App: code-agent clone/push credentials
+read `GITHUB_TOKEN` directly, publishing a PR calls `githubFetch` with
+`identity: 'primary'` (`GITHUB_TOKEN` alone), and agent repo creation uses
+`GITHUB_TOKEN`, falling back to `GITHUB_DISPATCH_TOKEN` only when it is
+rejected. When a read-only script or REST call hits a rate limit, take the token
+with the most quota left from `python3 scripts/github_token_pool.py pick`; never
+use it for pushes, PRs or other writes, and treat a 404 from the App or a
+machine account as not authoritative (it may lack access to a private repo; retry
+with `GITHUB_TOKEN`). `status` shows each member's quota without printing tokens.
+On a boxes.dev devbox the `gh` wrapper ignores `GH_TOKEN`, so pass the picked
+token to `/opt/devbox-tools/gh/current/bin/gh` or `curl`. Never print or commit a
+token, and never revoke or replace a member without Andy's explicit OK.
+
 ## Production Logs (Render)
 
 Fetch backend prod logs via Render API:
@@ -1479,6 +1506,7 @@ if it regresses. Keep secret values out of logs, chat and Git.**
 - **Vercel frontend:** read `cd front-end && vercel env ls production`; set `cd front-end && vercel env add KEY production`; env key management is autonomous under the rule above.
 - **Supabase functions:** read `cd agents && source .env && supabase secrets list --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; set `cd agents && source .env && supabase secrets set KEY=VALUE --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; env key management is autonomous under the rule above.
 - **boxes.dev Template box:** whenever you set an env var, also set it in the project's managed env so the Template box and future devboxes get it: `printf %s "$VALUE" | dvb-onbox env set --file <agents/.env|back-end/.env> --name KEY --value-stdin` (needs the `edit-project-settings` permission).
+- **Rose project env files:** we are migrating from boxes.dev to Rose, so also set every env var in the Rose app's project env file: `PUT https://api.roselabs.ai/api/projects/1ec468d5-95dc-4754-a385-1c9abe784cd4/env-files/<fileId>` with body `{"variables":[{"name":"KEY","value":"VALUE"}]}` and the headers `X-API-Key: $BACKEND_API_KEY` and `X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30`. `GET .../env-files` lists each file's id and variable names; values are never returned. Send values from a script, never in shell argv or output.
 
 ## Autonomous Agent Testing
 
@@ -1639,7 +1667,8 @@ one batched incremental review, and at most one verification review. Never
 review every intermediate push or use `gh pr checks --watch`; use
 `scripts/wait-for-code-review` for the exact immutable HEAD, batch all valid
 findings before pushing, and require `deploy_review_cycle.py require-mergeable`
-before merge. A fourth cycle blocks the deploy as review-unstable.
+before merge. The ledger refuses a fourth cycle: defer the remaining non-security findings with
+`deploy_review_cycle.py override` and merge (`.claude/commands/deploy.md` Review).
 
 ## Ralph Instructions
 

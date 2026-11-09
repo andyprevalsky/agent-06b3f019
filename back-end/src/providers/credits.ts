@@ -194,7 +194,7 @@ export async function getUserUsage(userId: string) {
   };
 }
 
-/* c8 ignore start -- hasCreditsRemaining and addSubscriptionCredit have no callers in the codebase */
+/* c8 ignore start -- addSubscriptionCredit has no callers; hasCreditsRemaining gates resumes (directChatResume, agentMessageResume) */
 /**
  * Check if user has sufficient credits to continue
  */

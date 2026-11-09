@@ -69,6 +69,7 @@ for (const variable of [
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
   'BLACKBOX_TEST_FAKE_WHATSAPP',
   'BENCHMARK_SHARE_SECRET',
+  'DISABLE_PURCHASE_HOLD_RECONCILE',
 ]) {
   assert.equal(
     autoRcaEnv.match(new RegExp(`^export ${variable}=`, 'gm'))?.length ?? 0,
@@ -460,6 +461,16 @@ assert.match(
   unitRunner,
   /fileLabel\.replace\(\/\\\.test\\\.ts\$\/, '\.log'\)[\s\S]*mkdir\(dirname\(logPath\)/,
   'unit logs must preserve nested paths instead of colliding on basenames'
+);
+assert.match(
+  unitRunner,
+  /child\.once\('close', \(code, signal\) => \{\s*resolveExit\(describeChildTermination\(code, signal\)\)/,
+  'unit runner must keep the signal of a child that dies without output'
+);
+assert.match(
+  unitRunner,
+  /ended with \$\{terminationLabel\}[\s\S]*writeFile\(logPath, result\.output\)/,
+  'a silent child death must leave its exit code or signal in the per-file log'
 );
 assert.match(
   coverageScript,

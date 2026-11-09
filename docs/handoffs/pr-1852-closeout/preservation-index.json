@@ -1,0 +1,42 @@
+{
+  "merged_sha": "a31af4a1d497a6c82be129b428653c509352faf7",
+  "objects": [
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "9c0908b82a5c33e0c57ab86ddc0909e0d103a5988137ec85bcb71c606f3a6a70",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 12823,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 73,
+      "full_readback_verified": true,
+      "gzip_sha256": "ac4bd785a0d9dc3e968e4e478f9021c222007d04aac13836e1af5bcb118f02ea",
+      "key": "devbox-closeouts/pr-1852/workspace-context-20261108-v1.enc",
+      "manifest_sha256": "f73d13a24e2820ec989b4573f68f7974185d44da177a635d6bdf53c80e6615ea",
+      "original_bytes": 2605724996,
+      "stored_bytes": 607534116
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "81dccfee048c02f6eafc69906dcd86e7eaf94acff4e208dc8e502ba66be88a94",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 1,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 1,
+      "full_readback_verified": true,
+      "gzip_sha256": "9f8b333415ea583c7b33c7cf96acfe8f2b88e5372485e3349a20b57e83d7ec11",
+      "key": "devbox-closeouts/pr-1852/agents-context-20261108-v1.enc",
+      "manifest_sha256": "04689b47bbe8a1d3037641124b9de3b05e82e882d5530d1a51d1d6d9ee5b831f",
+      "original_bytes": 1131,
+      "stored_bytes": 924
+    }
+  ],
+  "pr": 1852,
+  "restore": "agents/venv/bin/python3 docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt <receipt> --destination <empty dir> (see docs/handoffs/pr-1831-closeout/RECOVERY.md)",
+  "reused_objects": [
+    {
+      "key": "devbox-closeouts/pr-1831/refs-inherited-20261108-v1.enc",
+      "reason": "inherited Template-box local-only branch/stash tips identical to PR1831's archive",
+      "refs": 601
+    }
+  ]
+}

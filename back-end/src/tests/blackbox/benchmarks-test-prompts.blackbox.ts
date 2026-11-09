@@ -266,19 +266,14 @@ async function testPrompts_lastFivePassedReflectsRunHistory() {
   if (!fs.existsSync(ledgerPath)) {
     throw new Error(`task_attempts.jsonl missing at ${ledgerPath}`);
   }
+  // The ledger is the base file plus per-writer shards (history_ledger.py);
+  // the exported reader returns their union in recorded order.
+  const { readTaskAttempts } = await import('../../domains/benchmarks/config');
   const byTask = new Map<string, boolean[]>();
-  for (const line of fs.readFileSync(ledgerPath, 'utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as { task?: unknown; passed?: unknown };
-      if (typeof parsed.task !== 'string' || parsed.task === '') continue;
-      const list = byTask.get(parsed.task) ?? [];
-      list.push(parsed.passed === true);
-      byTask.set(parsed.task, list);
-    } catch {
-      // skip malformed
-    }
+  for (const attempt of readTaskAttempts()) {
+    const list = byTask.get(attempt.task) ?? [];
+    list.push(attempt.passed);
+    byTask.set(attempt.task, list);
   }
 
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
@@ -342,6 +337,56 @@ async function testPrompts_idempotentSameResponse() {
   }
 }
 
+async function testPrompts_attemptsLedgerReadsBaseAndShards() {
+  // The attempts ledger is its base file plus per-writer shards
+  // `task_attempts.<YYYYMMDD>.<branch>.jsonl` (agents/benchmarks/history_ledger.py):
+  // concurrent PRs each add their own shard instead of editing one shared file,
+  // so readers must return the union — base rows in file order, then shard rows
+  // in recorded order — or a merged branch's runs vanish from lastFivePassed.
+  const fs = await import('fs');
+  const os = await import('os');
+  const path = await import('path');
+  const { readTaskAttempts } = await import('../../domains/benchmarks/config');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attempts-ledger-'));
+  try {
+    const row = (agent: string, passed: boolean, timestamp: string) =>
+      JSON.stringify({
+        task: 'ledger-task',
+        passed,
+        status: 'COMPLETED',
+        timestamp,
+        agent_id: agent,
+      }) + '\n';
+    const base = path.join(dir, 'task_attempts.jsonl');
+    fs.writeFileSync(
+      base,
+      row('base-2', true, '2026-10-02T00:00:00+00:00') +
+        row('base-1', false, '2026-10-01T00:00:00+00:00')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'task_attempts.20261107.feat-b.jsonl'),
+      row('b', true, '2026-11-07T12:00:00+00:00')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'task_attempts.20261107.feat-a.jsonl'),
+      row('a', false, '2026-11-07T10:00:00+00:00')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'task_durations.20261107.feat-a.jsonl'),
+      row('not-an-attempt', true, '2026-11-07T11:00:00+00:00')
+    );
+    const agents = readTaskAttempts(base).map((attempt) => attempt.agent_id);
+    const expected = ['base-2', 'base-1', 'a', 'b'];
+    if (JSON.stringify(agents) !== JSON.stringify(expected)) {
+      throw new Error(
+        `attempts ledger union ${JSON.stringify(agents)} != ${JSON.stringify(expected)}`
+      );
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ==================== RUNNER ====================
 
 async function runAll() {
@@ -361,6 +406,10 @@ async function runAll() {
     {
       name: 'lastFivePassed reflects run history streaks',
       fn: testPrompts_lastFivePassedReflectsRunHistory,
+    },
+    {
+      name: 'attempts ledger reads base file and shards',
+      fn: testPrompts_attemptsLedgerReadsBaseAndShards,
     },
     { name: 'idempotent same response', fn: testPrompts_idempotentSameResponse },
   ];

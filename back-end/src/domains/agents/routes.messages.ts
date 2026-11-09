@@ -18,6 +18,7 @@ import * as messageLookupService from './agentMessageLookupService';
 import * as attachmentService from './agentAttachmentService';
 import * as queryService from './agentQueryService';
 import { resolveAgentReadAccess } from './routes.guards';
+import { workerWriteGeneration } from '../../providers/codeResumeGeneration';
 
 const log = createLogger('Agents');
 const router = Router({ mergeParams: true });
@@ -75,7 +76,9 @@ router.post(
       // terminal "Tool interrupted by deployment" error. Leave it undefined and
       // let the service attribute the write to the agent's live generation.
       const generation =
-        req.isInternal === true ? req.header('x-agent-workflow-generation') : undefined;
+        req.isInternal === true
+          ? await workerWriteGeneration(req.params.id, req.header('x-agent-workflow-generation'))
+          : undefined;
       const result = await messageService.postMessage(
         req.params.id,
         body,

@@ -18,8 +18,6 @@
  *   Any task + web client --> preview banner --> open app | automatic download fallback
  *   Any task + Mac client ---------------------> no preview banner
  *   <=1 thinking stream --> one indicator; >1 streams --> one per stream
- *   Root view --> CodeAgentWaitStatus under the chips (Rose Desktop only; renders
- *     nothing when no code agent is live or asking)
  *
  * MOBILE ENTRY ANIMATION:
  * The container scope lets CSS disable only direct message root entry
@@ -38,7 +36,6 @@ import {
 } from './useMessageFiltering';
 import type { MessageAnimationState } from './useMessageList';
 import { ChatModeActions } from './ChatModeActions';
-import { CodeAgentWaitStatus } from './CodeAgentWaitStatus';
 import { MessageListItems } from './MessageListItems';
 import { StatusBanners, WebPreviewBanner } from './StatusBanners';
 import { ThinkingIndicator } from './ThinkingIndicator';
@@ -191,17 +188,6 @@ function TrajectoryItems({
       compressWork={compressWork}
       workStatus={agent?.status}
       workEndedAt={agent?.updated_at}
-      activityIndicator={
-        thinkingVisible && (
-          <ThinkingIndicators
-            visible={thinkingVisible}
-            compact
-            streaming={streaming}
-            streamingTokenCount={thinkingTokenCount(metrics, subAgentId)}
-            animatedTokenCount={props.animatedTokenCount}
-          />
-        )
-      }
       filteredMessages={liveMessages}
       webSearchGrouping={webSearchGrouping}
       currentAnimatingId={animation.currentAnimatingId}
@@ -263,7 +249,6 @@ export function MessageListView(props: MessageListViewProps) {
         metrics={streamingMetricsBySubAgentId}
         compressWork={compressWork}
       />
-      {subAgentId === undefined && <CodeAgentWaitStatus />}
       {chatActionsVisible && (
         <ChatModeActions filteredMessages={filteredMessages} selectedAgentId={selectedAgentId} />
       )}

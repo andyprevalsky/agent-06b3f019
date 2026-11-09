@@ -27,6 +27,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_TARGET_LOCAL,
     E2B_CAPACITY_EXHAUSTED_CODE,
+    GITHUB_RATE_LIMITED_CODE,
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from domains.spawn_claude_code_agent.service import (
@@ -228,6 +229,11 @@ def _e2b_capacity_exhausted(error: BaseException) -> Optional[ApplicationError]:
     return _typed_application_error(error, E2B_CAPACITY_EXHAUSTED_CODE)
 
 
+def _github_rate_limited(error: BaseException) -> Optional[ApplicationError]:
+    """GitHub's rate limit stopped session create: a hard failure carrying the reset time."""
+    return _typed_application_error(error, GITHUB_RATE_LIMITED_CODE)
+
+
 def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
     """``metadata.code_agent`` for a run that failed before or outside the activity result."""
     return {**code_agent_metadata(target_info), "state": "failed", "failure_message": message}
@@ -357,6 +363,13 @@ def _user_pause_message(metadata: Dict[str, Any]) -> str:
     )
 
 
+def _note_code_provider(workflow_instance: Any, tool_call_id: str, code_provider: Any) -> None:
+    """Keep the CLI on the spawn's background record (wait_for names it 'code:<provider>')."""
+    note = getattr(workflow_instance, "_note_background_code_provider", None)
+    if callable(note):
+        note(tool_call_id, code_provider)
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -404,12 +417,23 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         if tool_call.get("_fresh_conversation") is True:
             # continue_conversation=false resume: same session and sandbox, new CLI conversation.
             code_session_request = {**(code_session_request or {}), "fresh_conversation": True}
+        task_name = tool_call.get("task_name")
+        if isinstance(task_name, str) and task_name:
+            # Rides in the request dict so the activity's positional arguments are unchanged.
+            code_session_request = {**(code_session_request or {}), "task_name": task_name}
+        resume_cli_settings = tool_call.get("_resume_cli_settings")
+        if isinstance(resume_cli_settings, dict) and resume_cli_settings:
+            # The model / effort / speed the person picked on the turn that resumes it.
+            code_session_request = {**(code_session_request or {}), "cli_settings": dict(resume_cli_settings)}
         requested_target = normalize_code_target(tool_call.get("target"))
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
         # Resolve requested attachments from workflow context
         attachments = _resolve_attachments(workflow_instance, requested_attachments, agent_id)
+        # Files the owner attached to the typed turn that resumes this code agent
+        # (backend directChatResume.ts; set only by a user resume, never by the model).
+        attachments += [item for item in tool_call.get("_user_attachments") or [] if isinstance(item, dict)]
 
         # A previous generation parked this exact tool call across a deploy
         # (continue_as_new) while its sandbox kept running. The chip is still
@@ -482,6 +506,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 )
                 return
 
+        if isinstance(task_name, str) and task_name:
+            # metadata.code_agent.title: the code-agent view's header when opened without one.
+            target_info["title"] = task_name
         if code_session is None:
             local_device_name = target_info.get("device_name")
             yield ToolEvent(
@@ -536,7 +563,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if code_session is not None and code_session.get("code_provider"):
                 code_provider = code_session["code_provider"]
             else:
-                default_code_provider = _select_code_provider(workflow_instance, gpt_token)
+                # A user resume keeps the stopped session's CLI so its conversation continues.
+                resume_provider = tool_call.get("_resume_code_provider")
+                default_code_provider = (
+                    resume_provider
+                    if resume_provider in ("claude", "codex")
+                    else _select_code_provider(workflow_instance, gpt_token)
+                )
                 code_provider = await workflow.execute_activity(
                     resolve_code_agent_provider_activity,
                     args=[default_code_provider],
@@ -549,6 +582,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 code_provider=code_provider,
                 compute_token_provider=getattr(workflow_instance, "compute_token_provider", None),
             )
+            _note_code_provider(workflow_instance, tool_call_id, code_provider)
 
             async with span(
                 "claude_code_activity_wait",
@@ -643,7 +677,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                                     )
                             soft = (
                                 None
-                                if _local_target_unavailable(e) is not None or _e2b_capacity_exhausted(e) is not None
+                                if _local_target_unavailable(e) is not None
+                                or _e2b_capacity_exhausted(e) is not None
+                                or _github_rate_limited(e) is not None
                                 else _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
                             )
                             if soft is not None:
@@ -769,6 +805,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             tool_usage = _workflow_tool_usage(result)
 
             code_provider = result.get("code_provider") or code_provider
+            # A usage-limit provider switch inside the activity updates the record.
+            _note_code_provider(workflow_instance, tool_call_id, code_provider)
             success = result.get("success") is True
             output_files = result.get("output_files", [])
             paused = result.get("status") == CODE_AGENT_PAUSED_STATUS
@@ -875,6 +913,29 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "code_provider": code_provider,
                         "error_code": E2B_CAPACITY_EXHAUSTED_CODE,
                         "code_agent": _failed_code_agent(target_info, capacity.message),
+                    },
+                )
+                return
+
+            github_limited = _github_rate_limited(e)
+            if github_limited is not None:
+                # GitHub is rate limited: fail the tool now with the backend's exact
+                # message, which names the reset time, instead of retrying into the limit.
+                logger.error(
+                    "[ClaudeCode] GitHub rate limit stopped session create; failing the tool call",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=github_limited.message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": GITHUB_RATE_LIMITED_CODE,
+                        "code_agent": _failed_code_agent(target_info, github_limited.message),
                     },
                 )
                 return

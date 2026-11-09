@@ -43,9 +43,9 @@ async function inspectOldContent(page: Page) {
   const group = page.getByTestId('trajectory-work-group').first();
   const disclosure = group.getByRole('button', { name: /Worked/ });
   await disclosure.click();
-  await expect(group.getByTestId('trajectory-history-entry')).toHaveCount(20);
-  await group.getByRole('button', { name: 'Next activities' }).click();
-  await expect(group.getByTestId('trajectory-history-entry')).toHaveCount(8);
+  // 50 a page: all 28 activities fit on one page, with no pager.
+  await expect(group.getByTestId('trajectory-history-entry')).toHaveCount(28);
+  await expect(group.getByRole('button', { name: 'Next activities' })).toHaveCount(0);
   await expect(group.getByText('Inspect audit source 0/21', { exact: true })).toBeVisible();
   await first.scrollIntoViewIfNeeded();
   return disclosure;

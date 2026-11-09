@@ -9,6 +9,7 @@
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { rateLimitResponse, toResponse, type FixtureResponse } from '../helpers/fake-github';
 
 const databaseUrl = process.env.DATABASE_URL ?? '';
 assert(
@@ -17,14 +18,23 @@ assert(
 );
 process.env.GITHUB_AGENT_REPOS = 'on';
 process.env.GITHUB_TOKEN = 'github-agent-repo-test-token';
-delete process.env.GITHUB_DISPATCH_TOKEN;
+// Blank, not deleted: database.ts's dotenv would re-add the .env value as a second token-pool member.
+process.env.GITHUB_DISPATCH_TOKEN = '';
 process.env.GITHUB_REPO_CREATE_MIN_INTERVAL_MS = '0';
 
 const creates: string[] = [];
+/** Repo-visibility reads that reached "GitHub", and the reply to give them. */
+const visibilityReads: string[] = [];
+let visibilityReply: FixtureResponse | null = null;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (!url.startsWith('https://api.github.com/')) return realFetch(input, init);
+  if (url.startsWith('https://api.github.com/repos/rose-test/')) {
+    assert.notEqual(visibilityReply, null, 'a visibility read needs a scripted reply');
+    visibilityReads.push(url);
+    return toResponse(visibilityReply as FixtureResponse);
+  }
   assert.equal(url, 'https://api.github.com/user/repos');
   const name = (JSON.parse(String(init?.body)) as { name: string }).name;
   creates.push(name);
@@ -34,7 +44,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 
 async function main(): Promise<void> {
   const { prisma } = await import('../../providers/database');
-  const { ensureAgentTreeRepo, fetchGithubBranchHeadSha } = await import('../../providers/github');
+  const { checkGithubRepoAccess, ensureAgentTreeRepo, fetchGithubBranchHeadSha } =
+    await import('../../providers/github');
+  const { GithubRateLimitedError, resetGithubRateLimitStateForTests } =
+    await import('../../providers/githubRateLimit');
+  const { prepareSessionProject } = await import('../../providers/projects/session');
   await verifyHeadLookupTimeout(fetchGithubBranchHeadSha);
   const userId = `gh-repo-${crypto.randomUUID()}`;
   const rootId = crypto.randomUUID();
@@ -88,6 +102,51 @@ async function main(): Promise<void> {
     assert.equal(creates.length, 1);
     process.stdout.write(
       'PASS an agent tree gets one GitHub repo on its first code session, reused after, none for projects\n'
+    );
+
+    // A rate-limited access check says so, with the reset time; it is not a denial.
+    resetGithubRateLimitStateForTests();
+    const resetEpochS = Math.floor(Date.now() / 1000) + 3600;
+    const resetAt = new Date(resetEpochS * 1000).toISOString();
+    visibilityReply = rateLimitResponse('primary', { resetEpochS });
+    const limited = await checkGithubRepoAccess(userId, 'https://github.com/rose-test/limited');
+    assert.equal(limited.allowed, false);
+    assert.equal(limited.rateLimit?.kind, 'primary', 'the limit is reported, not swallowed');
+    assert.equal(new Date(limited.rateLimit?.resetAtMs ?? 0).toISOString(), resetAt);
+    assert.ok((limited.error ?? '').includes(resetAt), 'the reason carries the reset time');
+    assert.doesNotMatch(
+      limited.error ?? '',
+      /permission|access denied/i,
+      'a limit is not a denial'
+    );
+    assert.equal(visibilityReads.length, 1);
+    await checkGithubRepoAccess(userId, 'https://github.com/rose-test/limited');
+    assert.equal(visibilityReads.length, 1, 'while blocked, no call reaches GitHub');
+    // A repo the owner was already granted needs no GitHub call, limit or not.
+    await prisma.githubRepoAccess.create({
+      data: { userId, repoUrl: 'https://github.com/rose-test/granted' },
+    });
+    const granted = await checkGithubRepoAccess(userId, 'https://github.com/rose-test/granted');
+    assert.equal(granted.allowed, true);
+    assert.equal(visibilityReads.length, 1, 'the allowlist is the cache: no GitHub call');
+    // A project session cannot be cloned while the limit holds: it fails with the
+    // reset time instead of cloning without credentials or into an empty checkout.
+    const limitedProject = await prisma.project.create({
+      data: {
+        userId,
+        name: `limited-${rootId}`,
+        repoUrl: 'https://github.com/rose-test/limited',
+        syncSalt: 'salt',
+      },
+    });
+    await assert.rejects(
+      prepareSessionProject(userId, limitedProject.id),
+      (error: unknown) => error instanceof GithubRateLimitedError && error.resetAt === resetAt
+    );
+    assert.equal(visibilityReads.length, 1, 'the project clone check made no GitHub call');
+    resetGithubRateLimitStateForTests();
+    process.stdout.write(
+      'PASS a rate-limited access check reports the limit and its reset time, never "access denied"\n'
     );
   } finally {
     await prisma.agent.deleteMany({ where: { userId } });

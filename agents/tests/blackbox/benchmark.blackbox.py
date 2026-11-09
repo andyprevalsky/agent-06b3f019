@@ -1164,6 +1164,33 @@ def test_code_bench_evaluator_proofs_are_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_code_agent_checks_are_in_permanent_gate():
+    """code-agent-rose-repo checks (agents/benchmarks/code_agent_checks_test.py).
+
+    Startup-time phases parse from the worker and backend log lines, the check
+    fails closed (no spawn, no CLI ready, no project checkout, over budget), every
+    code_agent_* check is registered and dispatched, and the task stays on the
+    predeploy floor for both surfaces.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(repo_root / "agents/benchmarks/code_agent_checks_test.py"),
+            str(repo_root / "agents/benchmarks/declared_evaluators_run_all_test.py"),
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -3613,6 +3640,141 @@ async def test_agentcard_setup_retries_transient_upstream_failure():
         assert calls == [409]
 
 
+async def test_agentcard_setup_retries_only_the_structured_org_rate_limit():
+    """2026-11-08 deploy smoke: prepare-residual returned the org-wide MCP throttle.
+
+    The backend answers a throttled AgentCard Organization MCP call with a 429
+    whose structured code is ``agentcard_org_mcp_rate_limited``; the upstream
+    refused the call, and every setup action converges on retry. Wait out that
+    window instead of failing the task 9 seconds in. Any other 4xx stays terminal.
+    """
+    import json as _json
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    throttled = _json.dumps(
+        {
+            "error": "AgentCard Organization MCP rate limit exceeded",
+            "code": "agentcard_org_mcp_rate_limited",
+            "retryAfterSeconds": None,
+        }
+    )
+    throttled_with_hint = throttled.replace('"retryAfterSeconds": null', '"retryAfterSeconds": 7')
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self.text = body
+
+        def json(self):
+            return _json.loads(self.text)
+
+    def fake_client(responses):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                status, body = responses[min(len(calls), len(responses) - 1)]
+                calls.append((status, json["action"]))
+                return FakeResponse(status, body)
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    ready = (200, '{"status":"residual_ready"}')
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client([(429, throttled), (429, throttled_with_hint), ready])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual") == {
+                "status": "residual_ready"
+            }
+        assert calls == [(429, "prepare-residual")] * 2 + [(200, "prepare-residual")]
+        # A null hint waits a bounded share of the org window; an explicit hint is honored.
+        assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3, 7.0]
+
+        sleeps.clear()
+        client, calls = fake_client([(429, throttled)])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except RuntimeError as error:
+                assert "agentcard_org_mcp_rate_limited" in str(error)
+            else:
+                raise AssertionError("a persistent org throttle must raise after its bounded attempts")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        # PR #1813 smoke, 2026-11-08: recover_funds got the provider's intermittent 401 on a healthy
+        # secret. The typed code is the same transient org state; every setup action converges.
+        unauthorized = _json.dumps(
+            {
+                "error": "AgentCard Organization MCP recover_funds failed: Invalid or expired organization token",
+                "code": "agentcard_org_mcp_unauthorized",
+            }
+        )
+        sleeps.clear()
+        client, calls = fake_client([(401, unauthorized), ready])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual") == {
+                "status": "residual_ready"
+            }
+        assert calls == [(401, "prepare-residual"), (200, "prepare-residual")]
+        assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3]
+
+        sleeps.clear()
+        client, calls = fake_client([(401, unauthorized)])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except RuntimeError as error:
+                assert "agentcard_org_mcp_unauthorized" in str(error)
+            else:
+                raise AssertionError("a sustained org auth rejection must raise after its bounded attempts")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        # Any other 401, including one without the typed provider code, stays terminal.
+        for untyped in ('{"error":"Unauthorized"}', '{"code":"api_key_invalid"}', "Invalid API key"):
+            sleeps.clear()
+            client, calls = fake_client([(401, untyped), ready])
+            with patch.object(bench.httpx, "AsyncClient", client):
+                try:
+                    await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"an untyped 401 must stay terminal: {untyped}")
+            assert calls == [(401, "prepare-residual")] and sleeps == []
+
+        # A 429 without the structured transient code is not proof the call never ran.
+        for unstructured in ('{"error":"Too many requests"}', "rate limit exceeded", '{"code":"other_limit"}'):
+            sleeps.clear()
+            client, calls = fake_client([(429, unstructured), ready])
+            with patch.object(bench.httpx, "AsyncClient", client):
+                try:
+                    await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"unstructured 429 must stay terminal: {unstructured}")
+            assert calls == [(429, "prepare-residual")] and sleeps == []
+
+
 def test_agentcard_setup_attention_failure_fails_the_task_with_its_cause():
     """The poll loop must surface a failed setup fixture instead of swallowing it as a warning."""
     import inspect
@@ -5848,7 +6010,11 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
     asked for a lease, so both copies ended ERROR and the campaign counted them INFRA.
     Per Andy, an exhausted or cooled-down token pool is a skipped test: the run record,
-    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR."""
+    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR.
+    Andy 2026-11-06: a missing Codex token must not break the judge at once; the spawn leases
+    its own credential (subscriptions, then the funded Azure key). Only when every funded path
+    is exhausted, at the credential-plan preflight or inside the spawn itself, is the judge a
+    compute-token SKIP."""
     import importlib.util
     from dataclasses import replace
     from benchmarks import run_benchmark as bench
@@ -5886,48 +6052,85 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
         try:
             await bench._run_declared_evaluators(judged_task, {"messages": []})
         except Exception as error:  # the real judge path owns the raised type
-            judge_error = error
+            preflight_error = error
         else:
             raise AssertionError("judge must not succeed without a compute token")
-    assert isinstance(judge_error, bench.ComputeTokenUnavailable), judge_error
-    assert "Codex compute token unavailable for agentic benchmark judge" in str(judge_error)
+    assert isinstance(preflight_error, bench.ComputeTokenUnavailable), preflight_error
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(preflight_error)
 
-    logs = {"failure_evidence": {"errors": []}}
-    with contextlib.ExitStack() as stack:
-        for name in (
-            "_apply_live_fixtures",
-            "_apply_memory_fixtures",
-            "_apply_auth_test_site",
-            "_restore_live_fixture_scenarios_async",
-            "_release_auth_test_site",
-        ):
-            stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
-        for name, replacement in {
-            "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
-            "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
-            "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
-            "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
-            "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
-            "delete_agent": AsyncMock(return_value=None),
-        }.items():
-            stack.enter_context(patch.object(bench, name, replacement))
-        result = await bench._run_single_task_as_run_user(
-            "https://fixture.invalid", task, False, None, "", None, None, None
-        )
-    assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
-    assert result.failure_reason.startswith(
-        f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
-        "failed: Codex compute token unavailable for agentic benchmark judge"
-    ), result.failure_reason
-    assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
-
-    spec = importlib.util.spec_from_file_location(
-        "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
+    # The plan still had a credential at preflight but the spawn found every subscription and
+    # funded path exhausted (or hit a usage limit): the judge ran, returned no verdict and must
+    # still be a compute-token SKIP, never a no-verdict 0.0 task FAIL.
+    codex_funded = {"claude": False, "codex": True, "next_credential": {"provider": "codex", "tier": "funded"}}
+    exhausted_at_spawn = AsyncMock(
+        return_value={
+            "failure_kind": "no_credentials",
+            "usage_limit": {"provider": "codex"},
+            "structured_response": None,
+            "output_files": [],
+        }
     )
-    campaign = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(campaign)
-    verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
-    assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch(
+            "domains.spawn_claude_code_agent.repo.fetch_code_credential_availability",
+            AsyncMock(return_value=codex_funded),
+        ),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+        patch(
+            "helpers.attachments.upload_to_storage",
+            AsyncMock(return_value={"id": "evidence-1", "storage_path": "judge/benchmark_evidence.json"}),
+        ),
+        patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", exhausted_at_spawn),
+    ):
+        try:
+            await bench._run_declared_evaluators(judged_task, {"messages": []})
+        except Exception as error:  # the real judge path owns the raised type
+            spawn_error = error
+        else:
+            raise AssertionError("judge must not succeed with every funded credential exhausted")
+    exhausted_at_spawn.assert_awaited_once()
+    assert isinstance(spawn_error, bench.ComputeTokenUnavailable), spawn_error
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(spawn_error)
+
+    for judge_error in (preflight_error, spawn_error):
+        logs = {"failure_evidence": {"errors": []}}
+        with contextlib.ExitStack() as stack:
+            for name in (
+                "_apply_live_fixtures",
+                "_apply_memory_fixtures",
+                "_apply_auth_test_site",
+                "_restore_live_fixture_scenarios_async",
+                "_release_auth_test_site",
+            ):
+                stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+            for name, replacement in {
+                "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
+                "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
+                "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
+                "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
+                "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
+                "delete_agent": AsyncMock(return_value=None),
+            }.items():
+                stack.enter_context(patch.object(bench, name, replacement))
+            result = await bench._run_single_task_as_run_user(
+                "https://fixture.invalid", task, False, None, "", None, None, None
+            )
+        assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
+        assert result.failure_reason.startswith(
+            f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
+            "failed: Codex compute token unavailable for agentic benchmark judge"
+        ), result.failure_reason
+        assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+
+        spec = importlib.util.spec_from_file_location(
+            "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
+        )
+        campaign = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(campaign)
+        verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
+        assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
 
 
 async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login():
@@ -6227,6 +6430,51 @@ async def test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_o
             assert isinstance(caught.value, bench.AgentCardReleaseStall) == (flag == "1")
             assert "last observed" in str(caught.value)
     assert calls == {"reads": 0, "recoveries": 0}
+
+
+async def test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error():
+    """PR #1781 deploy smoke (2026-11-08 05:17Z): one lifecycle read got AgentCard's transient 401,
+    the next read observed the exact release stall, and the idempotent abandon re-POST was still
+    in flight at the reconciliation deadline. The superseded read error must not veto the waiver
+    for the fresh exact-stall observation (it saved ERROR while cleanup printed the SKIP)."""
+    import pytest
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+
+    task = get_task_by_name("agent-payment-abandonment")
+    reads = {"count": 0}
+
+    async def read(_base, _aid):
+        reads["count"] += 1
+        if reads["count"] == 1:
+            raise RuntimeError(
+                'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP '
+                'list_transfers failed: Invalid or expired organization token"}'
+            )
+        return _agentcard_release_stall_lifecycle()
+
+    async def slow_recover(_base, _aid):
+        await asyncio.sleep(5)
+        raise AssertionError("the deadline must cancel the in-flight recovery")
+
+    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
+        with pytest.raises(RuntimeError) as caught:
+            await asyncio.wait_for(
+                bench._wait_for_expected_payment_lifecycle(
+                    "http://benchmark.invalid",
+                    "exact-owned-agent",
+                    task,
+                    _agentcard_release_stall_lifecycle(),
+                    timeout_seconds=0.3,
+                    poll_interval_seconds=0.01,
+                    fetch_lifecycle=read,
+                    recover_lifecycle=slow_recover,
+                    resume_pending_after_seconds=0.001,
+                ),
+                timeout=2,
+            )
+    assert reads["count"] == 2
+    assert isinstance(caught.value, bench.AgentCardReleaseStall), caught.value
 
 
 async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation():
@@ -6905,6 +7153,58 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
     )
     for invalid_result in invalid_terminal_markers:
         assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
+
+
+async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
+    """.claude/commands/DEPRECATED_deploy.md Step 13c (orig L3407-3434): when the non-admin
+    production identity is missing, `agent-payment-production-abandonment` stops before any live
+    spend and its own error carries the exact provisioning command, the credential source and the
+    guardrails, so the agent that hits it needs no other document and never asks the user."""
+    import contextlib
+    import io
+
+    import httpx
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_client = httpx.AsyncClient
+    seen = []
+    printed = io.StringIO()
+
+    def missing_identity(request):
+        seen.append(request)
+        return httpx.Response(200, json={"tier": None, "remaining": 0})
+
+    assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME == "agent-payment-production-abandonment"
+    assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME in bench.AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES
+    with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
+         patch.object(bench.httpx, "AsyncClient",
+                      side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing_identity), **kw)):
+        with pytest.raises(RuntimeError) as raised, contextlib.redirect_stdout(printed):
+            await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+    assert [(r.url.path, r.url.params.get("userId")) for r in seen] == [
+        ("/api/credits/usage", "00000000-0000-4000-8000-000000000107")]
+    message = str(raised.value)
+    command = (
+        "  cd back-end && set -a && . ./.env && set +a && \\\n"
+        '    DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
+        "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
+        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \\\n"
+        '    --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"\n'
+    )
+    assert command in message
+    for rule in (
+        "is not provisioned: it has no Subscription row",
+        "Every credential it needs is already in back-end/.env; do not ask the user",
+        "the 6543 pooler fails",
+        "EXISTING dedicated benchmark cardholder only",
+        "never create an identity automatically or bypass pending KYC",
+        "never enter a card number",
+        "one-time hosted Stripe Checkout link: a human saves the live card there once",
+    ):
+        assert rule in message, rule
+    assert message in printed.getvalue()  # printed in full, not only raised
 
 
 def test_production_payment_lifecycle_refuses_sandbox_target():
@@ -24593,17 +24893,19 @@ def test_history_ledger_task_names_still_exist_in_catalog():
     import json as _json
     from pathlib import Path
 
+    from benchmarks import history_ledger
     from benchmarks.benchmark_tasks import all_tasks
 
     ledger = Path(__file__).resolve().parents[2] / "benchmarks" / "history" / "task_durations.jsonl"
-    if not ledger.exists() or ledger.stat().st_size == 0:
+    # The ledger is its base file plus per-writer shards (history_ledger.py).
+    lines = history_ledger.read_lines(ledger)
+    if not lines:
         return  # fresh checkout — nothing recorded yet
     recorded = set()
-    with ledger.open() as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                recorded.add(_json.loads(line)["task"])
+    for line in lines:
+        line = line.strip()
+        if line:
+            recorded.add(_json.loads(line)["task"])
     catalog_names = {t.name for t in all_tasks()}
     orphaned = sorted(recorded - catalog_names)
     assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"
@@ -25569,6 +25871,52 @@ def test_multi_task_run_record_survives_a_long_task_name_list():
         assert paths[0] != paths[1], "distinct suites collapsed onto one run-record filename"
 
 
+async def test_abandon_retries_typed_org_auth_rejection_after_reconciling():
+    """A provider 401 on the idempotent abandon POST is the same org state as its throttle.
+
+    PR #1813 smoke, 2026-11-08: a healthy secret was rejected as "Invalid or expired
+    organization token". Reconcile through the read endpoint first, then wait the org window.
+    An untyped 401 proves nothing about the provider and stays terminal.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    typed = (
+        'Failed to abandon test payment: 401 {"error":"AgentCard Organization MCP close_card failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+    posts = []
+
+    async def abandon(_base_url, _agent_id):
+        posts.append(_agent_id)
+        if len(posts) == 1:
+            raise Exception(typed)
+        return {"purchase": {"status": "VOIDED"}}
+
+    reads = []
+
+    async def lifecycle(_base_url, agent_id):
+        reads.append(agent_id)
+        return {"purchase": {"status": "HELD"}}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench.asyncio, "sleep", fake_sleep):
+        result = await bench._start_payment_abandonment_with_recovery(
+            "http://backend", "agent-1", abandon_payment=abandon, fetch_lifecycle=lifecycle
+        )
+    assert result == {"purchase": {"status": "VOIDED"}}
+    assert posts == ["agent-1", "agent-1"] and reads == ["agent-1"]
+    assert sleeps == [bench.ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3]
+
+    assert bench._rate_limit_retry_delay('Failed to abandon test payment: 401 {"error":"Unauthorized"}') is None
+    assert bench._rate_limit_retry_delay('Failed to abandon test payment: 401 {"code":"api_key_invalid"}') is None
+
+
 def test_abandon_retry_waits_out_upstream_rate_limit_window():
     """A rate-limited abandon waits for the server's retryAfter, not a fixed short delay.
 
@@ -25651,6 +25999,16 @@ def test_predeploy_selector_rejects_production_only_tasks():
     for surface in ("local", "cloud"):
         with tempfile.TemporaryDirectory() as folder:
             test_predeploy_excludes_production_only_even_with_pass_streak(Path(folder), surface)
+
+
+def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
+    from benchmarks.select_predeploy_benches_test import (
+        test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
+    )
+
+    for surface in ("local", "cloud"):
+        with tempfile.TemporaryDirectory() as folder:
+            test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(Path(folder), surface)
 
 
 async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
@@ -25787,6 +26145,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_disposable_volume_ownership_is_in_permanent_gate", "disposable_volume_ownership_permanent_gate"),
         ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
         ("test_code_bench_evaluator_proofs_are_in_permanent_gate", "code_bench_evaluator_proofs_permanent_gate"),
+        ("test_code_agent_checks_are_in_permanent_gate", "code_agent_checks_permanent_gate"),
         ("test_sms_runner_scoring_contract_is_in_permanent_gate", "sms_runner_scoring_contract_permanent_gate"),
         ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
@@ -26961,6 +27320,16 @@ async def run_all_tests():
         "test_display_root_inline_html_page_is_read",
     ):
         await r.record_async(name, getattr(display_check_tests, name))
+    from benchmarks import thinking_rows_check_tests
+
+    for name in (
+        "test_thinking_rows_measured_root_and_code_agent_pass",
+        "test_thinking_rows_without_recorded_generation_fail",
+        "test_thinking_rows_required_only_on_evidence_of_thinking",
+        "test_thinking_rows_without_evidence_or_rows_are_an_explicit_na",
+        "test_thinking_rows_cli_crash_is_a_failure_not_an_exception",
+    ):
+        r.record(name, getattr(thinking_rows_check_tests, name))
     r.record(
         "archived_diagnostic_projection_requires_authenticated_bindings",
         test_archived_diagnostic_projection_requires_authenticated_bindings,
@@ -27032,6 +27401,10 @@ async def run_all_tests():
         "agentcard_release_policy_fetch_cancel_strict",
         test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
     )
+    await r.record_async(
+        "agentcard_release_policy_fresh_stall_after_recovered_read_error",
+        test_agentcard_release_policy_skips_fresh_stall_after_a_recovered_read_error,
+    )
 
     await r.record_async(
         "benchmark_native_checks_overlap_judges_without_losing_ownership",
@@ -27049,6 +27422,7 @@ async def run_all_tests():
     r.record("local_worlds_controls", test_local_worlds_controls)
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
+    r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
     r.record(
         "local_cleanup_preserves_run_id_observers",
         test_local_cleanup_does_not_signal_processes_that_only_mention_run_id,
@@ -27155,6 +27529,7 @@ async def run_all_tests():
             ("disposable_volume_ownership_permanent_gate", test_disposable_volume_ownership_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
             ("code_bench_evaluator_proofs_permanent_gate", test_code_bench_evaluator_proofs_are_in_permanent_gate),
+            ("code_agent_checks_permanent_gate", test_code_agent_checks_are_in_permanent_gate),
             ("sms_runner_scoring_contract_permanent_gate", test_sms_runner_scoring_contract_is_in_permanent_gate),
             (
                 "live_query_proof_zero_spend_admission",
@@ -27956,6 +28331,14 @@ async def run_all_tests():
         "agentcard_setup_retries_transient_upstream_failure",
         test_agentcard_setup_retries_transient_upstream_failure,
     )
+    await r.record_async(
+        "agentcard_setup_retries_only_the_structured_org_rate_limit",
+        test_agentcard_setup_retries_only_the_structured_org_rate_limit,
+    )
+    await r.record_async(
+        "abandon_retries_typed_org_auth_rejection",
+        test_abandon_retries_typed_org_auth_rejection_after_reconciling,
+    )
     r.record(
         "agentcard_setup_attention_failure_fails_task",
         test_agentcard_setup_attention_failure_fails_the_task_with_its_cause,
@@ -28143,6 +28526,10 @@ async def run_all_tests():
     r.record(
         "production_payment_rejects_sandbox_target",
         test_production_payment_lifecycle_refuses_sandbox_target,
+    )
+    await r.record_async(
+        "production_payment_identity_gap_prints_its_provisioning_rules",
+        test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules,
     )
     r.record(
         "production_frontend_ignores_stale_local_manifest",

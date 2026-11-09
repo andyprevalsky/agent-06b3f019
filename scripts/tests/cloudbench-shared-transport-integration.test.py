@@ -114,6 +114,15 @@ class FakeUnixAgent:
         for thread in self.threads:thread.join(timeout=2)
 
 
+def kernel_socket_buffer_capacity():
+    """Upper bound of bytes one TCP hop plus one Unix hop can hold in kernel buffers on this host."""
+    def maximum(name):
+        try:return int(Path('/proc/sys/net',name).read_text().split()[-1])
+        except (OSError,ValueError):return 0
+    return (maximum('ipv4/tcp_wmem')+maximum('ipv4/tcp_rmem')
+            +maximum('core/wmem_max')+maximum('core/rmem_max'))
+
+
 def birth(pid):
     return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()[19]
 
@@ -323,7 +332,10 @@ class SharedRelay(unittest.TestCase):
     def test_backpressure_bounds_memory_and_keeps_control_responsive(self):
         f=RelayFixture(self);owner=f.owner();lease=f.acquire(owner,'a'*32);f.agent.mode='backpressure'
         client=f.connect(lease);client.settimeout(8)
-        payload=b'x'*(16*1024*1024);finished=threading.Event();errors=[]
+        # The kernel's own socket buffers on the client->broker and broker->agent hops can hold a
+        # payload without any relay buffering (Blacksmith VMs tune tcp_[rw]mem far above 16 MiB), so
+        # send more than those hops can absorb; the relay's RSS bound below is unchanged.
+        payload=b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity());finished=threading.Event();errors=[]
         def sender():
             try:client.sendall(payload)
             except OSError as error:errors.append(error)
@@ -379,7 +391,8 @@ class SharedRelay(unittest.TestCase):
         client=f.connect(lease);client.settimeout(5)
         finished=threading.Event()
         def sender():
-            try:client.sendall(b'x'*(16*1024*1024))
+            # More than the host's kernel socket buffers can absorb (see the backpressure test).
+            try:client.sendall(b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity()))
             except OSError:pass  # Explicit route release may interrupt delivery.
             finally:finished.set()
         thread=threading.Thread(target=sender,daemon=True);thread.start()
@@ -687,17 +700,33 @@ with (root/'wireguard-calls').open('a')as stream:
         cases = [({}, 200),
                  (dict(name='foreign', organization=dict(slug='fixture-org'), network='default'), 200),
                  (dict(name='fixture', organization={}, network='default'), 200),
-                 (dict(name='fixture', organization=dict(slug='fixture-org')), 200),
                  (dict(name='fixture', organization=dict(slug='fixture-org'), network=5), 200),
                  (dict(message='not authorized'), 403), (b'<html>provider error</html>', 200), (None, 500)]
         for payload, status in cases:
             with self.subTest(payload=payload, status=status):
                 environment['FLY_FLAPS_BASE_URL'] = self.app_metadata_endpoint(payload, status)
-                with patch.dict(os.environ, environment, clear=True):
-                    with self.assertRaisesRegex(ValueError, 'app metadata unavailable'):
-                        module['start_shared_relay'](repo, f.root/'campaign', repo, f.feed, time.monotonic()+15)
-                self.assertFalse((f.root/'proxy-calls').exists())
+                value = None
+                try:
+                    with patch.dict(os.environ, environment, clear=True):
+                        with self.assertRaisesRegex(ValueError, 'app metadata unavailable'):
+                            value = module['start_shared_relay'](repo, f.root/'campaign', repo, f.feed, time.monotonic()+15)
+                    self.assertFalse((f.root/'proxy-calls').exists())
+                finally:
+                    # An unexpected successful start must not leak its peer into later subcases.
+                    if value is not None:
+                        self.assertTrue(module['stop_shared_relay'](value), 'unexpected relay failed cleanup')
         f.close()
+
+    def test_metadata_reader_omitted_network_uses_default(self):
+        # Native App responses may omit network; the retained helper normalizes that to default.
+        environment = dict(os.environ, FLY_API_TOKEN='fixture-bearer',
+                           FLY_FLAPS_BASE_URL=self.app_metadata_endpoint(dict(name='fixture', organization=dict(slug='org'))))
+        environment.pop('FLY_FORCE_INSTANCE_ID', None)
+        result = subprocess.run([sys.executable, '-S', str(ROOT/'scripts/cloudbench-campaign-machines.py'),
+                                 'fixture', '2', '--app-metadata'], env=environment, capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), dict(Name='fixture', Organization=dict(Slug='org'), Network=''))
+        self.assertEqual(self.metadata_requests, [('/v1/apps/fixture', 'Bearer fixture-bearer')])
 
     def test_metadata_reader_preserves_custom_network_and_escaped_app(self):
         environment = dict(os.environ, FLY_API_TOKEN='fixture-bearer',
@@ -776,6 +805,48 @@ with (root/'wireguard-calls').open('a')as stream:
                 self.assertNotIn('FLY_AGENT_ISOLATED',child)
                 self.assertTrue(module['stop_shared_relay'](value))
                 self.assertTrue((f.root/'agent-eof-joined').exists())
+        finally:
+            if value:
+                for name in ('process','bootstrap'):
+                    process=value[name]
+                    if process.poll()is None:process.terminate();process.wait(timeout=4)
+                for name in ('log','bootstrap_log'):
+                    if not value[name].closed:value[name].close()
+
+    def test_relay_app_metadata_read_retries_a_transient_fly_stall(self):
+        """A transient metadata-read stall retries without restoring aggregate status reads."""
+        from unittest.mock import patch
+        f,repo,home,module,environment=self.campaign_relay_fixture()
+        relay_globals=module['read_relay_app_metadata'].__globals__
+        run=subprocess.run
+        calls=[]
+        always_stall=False
+        def metadata_read(argv,*args,**kwargs):
+            if '--app-metadata' in argv:
+                self.assertEqual(argv[:3],[sys.executable,'-S',str(repo/'scripts/cloudbench-campaign-machines.py')])
+                self.assertLessEqual(float(argv[4]),1)
+                calls.append(list(argv))
+                if always_stall or len(calls)==1:
+                    raise subprocess.TimeoutExpired(argv,kwargs['timeout'])
+            self.assertNotEqual(argv[:2],['flyctl','status'],'aggregate inventory is not App metadata')
+            return run(argv,*args,**kwargs)
+        value=None
+        try:
+            with patch.dict(os.environ,environment,clear=True),patch.dict(relay_globals,RELAY_METADATA_TIMEOUT=1), \
+                 patch('subprocess.run',side_effect=metadata_read):
+                started=time.monotonic()
+                value=module['start_shared_relay'](repo,f.root/'campaign',repo,f.feed,time.monotonic()+15)
+                self.assertLess(time.monotonic()-started,12)
+                self.assertEqual(len(calls),2)
+                self.assertIsNone(value['process'].poll())
+                self.assertTrue(module['stop_shared_relay'](value))
+            # Every attempt stays bounded and the final timeout is still a failure.
+            calls.clear();always_stall=True
+            with patch.dict(os.environ,environment,clear=True),patch.dict(relay_globals,RELAY_METADATA_TIMEOUT=1), \
+                 patch('subprocess.run',side_effect=metadata_read):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    module['read_relay_app_metadata']('fixture',repo,dict(os.environ),time.monotonic()+15)
+            self.assertEqual(len(calls),3)
         finally:
             if value:
                 for name in ('process','bootstrap'):

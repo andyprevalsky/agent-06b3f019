@@ -2689,9 +2689,14 @@ require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
 require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
   'bash "$ROOT_DIR/scripts/tests/cloudbench-acceptance-autoscale.test.sh"' \
   "pre-deploy cloud gate must reject every autoscale off-state"
-require_text "$ROOT_DIR/.claude/commands/deploy.md" \
-  'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh' \
+# deploy.md carries no test list: the deploy plan's cloudbench-controller gate
+# (scripts/run-cloudbench-controller-local.py) executes the regression.
+require_text "$ROOT_DIR/scripts/run-cloudbench-controller-local.py" \
+  "('autoscale', 'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh')," \
   "deploy must execute the permanent mandatory-autoscale regression"
+require_text "$ROOT_DIR/scripts/deploy_test_plan.py" \
+  '{"name": "cloudbench-controller", "command": [sys.executable, "scripts/run-cloudbench-controller-local.py"],' \
+  "the deploy plan must run the cloudbench-controller gate that executes the autoscale regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
@@ -3738,6 +3743,44 @@ PY
   [ "$selected" = "$free_port" ] || fail "select_central_hub_port must return preferred free port (got $selected)"
 ) || fail "central hub free-port selection contract broken"
 
+# A refused connect only proves no listener. A bound-but-not-listening socket
+# (like a loopback client's ephemeral port or its TIME_WAIT) still fails the
+# hub's bind, so selection must skip it rather than re-pick it every attempt.
+(
+  bound_port_file="$TMP_ROOT/tcp-bound-port"
+  python3 - "$bound_port_file" <<'PY' &
+import pathlib, socket, sys, time
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+pathlib.Path(sys.argv[1]).write_text(str(s.getsockname()[1]))
+while True:
+    time.sleep(1)
+PY
+  bound_pid=$!
+  trap 'kill "$bound_pid" 2>/dev/null || true' EXIT
+  for _ in $(seq 1 100); do
+    [ -s "$bound_port_file" ] && break
+    sleep 0.05
+  done
+  [ -s "$bound_port_file" ] || fail "bound-only socket did not become ready"
+  bound_port="$(cat "$bound_port_file")"
+  rc=0
+  cloudbench_tcp_listener_present "$bound_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a bound-only socket must probe as no listener (got $rc)"
+  rc=0
+  cloudbench_tcp_port_bindable "$bound_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a bound-only socket must probe as in use (got $rc)"
+  selected="$(cloudbench_select_central_hub_port "$bound_port" "/tmp/no-such-hub-root")" ||
+    fail "selection must skip, not refuse, a bound-only preferred port"
+  [ -n "$selected" ] && [ "$selected" != "$bound_port" ] ||
+    fail "a bound-only preferred port must not be selected (got ${selected:-empty})"
+  kill "$bound_pid" 2>/dev/null || true
+  wait "$bound_pid" 2>/dev/null || true
+  rc=0
+  cloudbench_tcp_port_bindable "$bound_port" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a released port must probe as bindable (got $rc)"
+) || fail "central hub bound-only port contract broken"
+
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
 # (cloudbench-multi scenario 14) and cement ordering vs the production-only
 # classifier so a missing tasks.json never swallows the parallel-safety message.
@@ -4301,3 +4344,124 @@ assert run.index('STACK_ENV=(') < start < run.index('env "${STACK_ENV[@]}" bash 
     'the authority must be in the stack env before run.sh starts'
 PYWIRE
 ) || fail "cloud guests must delegate compute-token state to the shared authority"
+
+# The donor snapshot listing must outlast a provider window that answers a valid empty list. On 2026-11-07 one of nine
+# smoke controllers spent its 45 s budget inside such a window ("No complete snapshot"), and the campaign's 1-of-9 infra
+# stop cancelled the other eight. Execute the real function against a stubbed provider and clock.
+python3 - "$ROOT_DIR" <<'PYSNAP' || fail "donor snapshot listing must survive a minutes-long empty-list window"
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+from pathlib import Path
+
+root = Path(sys.argv[1])
+src = (root / "scripts/run-bench-fleet").read_text()
+match = re.search(r"^list_donor_snapshots\(\) \{\n.*?^\}\n", src, flags=re.M | re.S)
+assert match, "list_donor_snapshots helper is missing"
+function = match.group(0)
+assert src.count("list_donor_snapshots\n") >= 1 and "for _snap_attempt in 1 2 3 4 5 6" not in src, \
+    "the controller must read the donor listing through the retrying helper"
+good = json.dumps([{"id": "vs_ok", "status": "created", "created_at": "2026-11-07T07:00:00Z",
+                    "size": 123456, "digest": "ab" * 32}])
+
+
+def scenario(replies):
+    with tempfile.TemporaryDirectory() as tmp:
+        counter = Path(tmp) / "reads"
+        counter.write_text("0")
+        script = textwrap.dedent(
+            """
+            set -uo pipefail
+            %s
+            SNAPSHOT_SELECTOR_SCRIPT=%s
+            VOL_ID=vol_test APP=app_test
+            REPLIES=%s
+            FLY() {
+                local n; n="$(cat %s)"; printf '%%s' "$((n + 1))" > %s
+                python3 -c 'import json,sys; r=json.loads(sys.argv[1]); i=int(sys.argv[2]); sys.stdout.write(r[min(i, len(r)-1)])' "$REPLIES" "$n"
+            }
+            slept=0
+            sleep() { slept=$((slept + $1)); }
+            list_donor_snapshots
+            printf '%%s|%%s|%%s\\n' "$SNAPSHOT_LIST_ATTEMPTS_USED" "$slept" "$SNAPSHOTS_JSON"
+            """
+        ) % (function, root / "scripts/cloudbench-select-snapshot.py", "'" + json.dumps(replies).replace("'", "'\\''") + "'", counter, counter)
+        path = Path(tmp) / "scenario.sh"
+        path.write_text(script)
+        out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+        attempts, slept, listing = out.split("|", 2)
+        return int(attempts), int(slept), listing
+
+
+attempts, _, listing = scenario(["[]"] * 5 + [good])
+assert (attempts, "vs_ok" in listing) == (6, True), (attempts, listing)
+attempts, _, listing = scenario(["Error: rate limit exceeded"] * 3 + [good])
+assert (attempts, "vs_ok" in listing) == (4, True), (attempts, listing)
+attempts, slept, listing = scenario(["[]"])
+assert (attempts, listing) == (12, "[]") and slept >= 240, (attempts, slept, listing)  # was 6 attempts, 45 s
+attempts, slept, listing = scenario(["Error: rate limit exceeded"])
+assert (attempts, listing) == (12, "") and slept >= 240, (attempts, slept, listing)
+PYSNAP
+
+# A scaled-down worker is destroyed right after its runtime evidence is captured, and one failed flyctl transport read
+# ("api.fly.io/graphql: EOF") used to lose that evidence and fail a passing run (test-mass-agent-run-0, 2026-11-07:
+# "worker ... runtime evidence was not preserved"). Execute the real capture against a stubbed provider.
+python3 - "$ROOT_DIR" <<'PYCAPTURE' || fail "worker runtime evidence capture must retry its transport and still fail closed"
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+from pathlib import Path
+
+root = Path(sys.argv[1])
+src = (root / "scripts/run-bench-fleet").read_text()
+match = re.search(r"^cloudbench_capture_worker_runtime_evidence\(\) \{[^\n]*\n.*?^\}\n", src, flags=re.M | re.S)
+assert match, "cloudbench_capture_worker_runtime_evidence is missing"
+function = match.group(0)
+
+
+def scenario(console_failures, verify_rc):
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "snap").mkdir()
+        (tmp / "snap/cloudbench-worker-evidence.py").write_text(f"import sys\nsys.exit({verify_rc})\n")
+        base = tmp / "out/worker-runtime-evidence/abc123"
+        base.mkdir(parents=True)
+        (base / "owner.json").write_text('{"version": 1, "machine_id": "abc123", "run_token": "tok-1"}')
+        script = textwrap.dedent(
+            """
+            set -uo pipefail
+            %s
+            APP=app_test
+            CLOUDBENCH_SCRIPT_SNAPSHOT=%s
+            out=%s
+            retained=0 console_calls=0 sftp_calls=0
+            cloudbench_preserve_unlaunched_worker() { return 1; }
+            cloudbench_retain_runtime_evidence() { retained=$((retained + 1)); }
+            sleep() { :; }
+            fly_with_timeout() {
+                shift
+                case "$1 $2" in
+                    "ssh console") console_calls=$((console_calls + 1)); [ "$console_calls" -gt %d ] ;;
+                    "ssh sftp") sftp_calls=$((sftp_calls + 1)); : > "$out/worker-runtime-evidence/abc123/evidence.tar" ;;
+                    *) return 99 ;;
+                esac
+            }
+            cloudbench_capture_worker_runtime_evidence "$out" abc123; rc=$?
+            printf '%%s %%s %%s %%s\\n' "$rc" "$console_calls" "$sftp_calls" "$retained"
+            """
+        ) % (function, tmp / "snap", tmp / "out", console_failures)
+        path = tmp / "scenario.sh"
+        path.write_text(script)
+        out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=60, check=True).stdout.split()
+        return tuple(int(value) for value in out)
+
+
+assert scenario(2, 0) == (0, 3, 1, 0), "a transport that recovers on the third read must preserve the evidence"
+assert scenario(99, 0) == (1, 4, 0, 1), "an unreachable worker must still fail closed after four reads"
+assert scenario(0, 1) == (1, 1, 1, 1), "a verification failure is a verdict on the bytes and is not retried"
+PYCAPTURE

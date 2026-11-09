@@ -21,6 +21,18 @@ from typing import Sequence
 WINDOW = 10
 
 
+def _history_ledger():
+    """agents/benchmarks/history_ledger.py: a ledger is its base file plus per-writer shards."""
+    import importlib.util
+
+    source = Path(__file__).resolve().parents[1] / "agents" / "benchmarks" / "history_ledger.py"
+    spec = importlib.util.spec_from_file_location("benchmark_history_ledger", source)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def default_attempts() -> Path:
     return (
         Path(__file__).resolve().parent.parent
@@ -37,21 +49,24 @@ def recent_outcomes(
     ledger merges branches with union, so rows are ordered by timestamp and
     only then by file position.
     """
+    ledger = _history_ledger()
+    if not any(Path(path).is_file() for path in ledger.ledger_files(attempts)):
+        # A missing ledger is unreadable evidence, never "no recorded attempts".
+        raise FileNotFoundError(f"no attempts ledger or shard at {attempts}")
     found: dict[str, list[tuple[str, int, bool]]] = {task: [] for task in tasks}
-    with attempts.open() as handle:
-        for index, raw_line in enumerate(handle):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            rows = found.get(entry.get("task"))
-            if rows is not None:
-                rows.append(
-                    (str(entry.get("timestamp") or ""), index, bool(entry.get("passed")))
-                )
+    for index, raw_line in enumerate(ledger.read_lines(attempts)):  # base + shards
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        rows = found.get(entry.get("task"))
+        if rows is not None:
+            rows.append(
+                (str(entry.get("timestamp") or ""), index, bool(entry.get("passed")))
+            )
     return {
         task: [passed for _timestamp, _index, passed in sorted(rows)[-window:]]
         for task, rows in found.items()

@@ -28,6 +28,7 @@ import {
   deliverUserTurnToCodeSession,
 } from '../../providers/codeSessionTurns';
 import { markPaused } from '../../providers/codeSessions/store';
+import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 import * as codeSessionSandbox from '../../providers/e2bCodeSessionSandbox';
 import type { CodeSessionLifecycleContext } from './code-sessions-lifecycle.cases';
 
@@ -74,14 +75,14 @@ rl.on('line',line=>{
 rl.on('close',()=>{const done=()=>process.exit(0);if(loop)loop.on('exit',done);else done();});
 `;
 
-interface LiveServer {
+export interface LiveServer {
   child: ChildProcess;
   port: number;
   dir: string;
   alive: () => boolean;
 }
 
-function processAlive(pid: number | undefined): boolean {
+export function processAlive(pid: number | undefined): boolean {
   if (pid === undefined) return false;
   try {
     process.kill(pid, 0);
@@ -92,7 +93,7 @@ function processAlive(pid: number | undefined): boolean {
 }
 
 /** Start the ws-server as `node <home>/ws-server.mjs` (the sandbox's argv) with the stub CLI. */
-async function startLiveServer(
+export async function startLiveServer(
   home: string,
   previousTaskId: string,
   env: Record<string, string> = {}
@@ -146,13 +147,13 @@ async function startLiveServer(
   throw new Error(`ws-server never listened:\n${out}`);
 }
 
-function counterLines(dir: string): number[] {
+export function counterLines(dir: string): number[] {
   const path = join(dir, 'counter.txt');
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(Number);
 }
 
-function turns(dir: string): Array<{ turn: number; text: string; pid: number }> {
+export function turns(dir: string): Array<{ turn: number; text: string; pid: number }> {
   const path = join(dir, 'turns.jsonl');
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8')
@@ -161,7 +162,7 @@ function turns(dir: string): Array<{ turn: number; text: string; pid: number }> 
     .map((line) => JSON.parse(line) as { turn: number; text: string; pid: number });
 }
 
-async function until(what: string, predicate: () => boolean, timeoutMs = 15_000) {
+export async function until(what: string, predicate: () => boolean, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
@@ -178,7 +179,7 @@ function thaw(server: LiveServer): void {
   process.kill(-(server.child.pid as number), 'SIGCONT');
 }
 
-async function pausedSession(ctx: CodeSessionLifecycleContext, label: string) {
+export async function pausedSession(ctx: CodeSessionLifecycleContext, label: string) {
   const agentId = randomUUID();
   await prisma.agent.create({
     data: { id: agentId, userId: ctx.userA, busId: agentId, goal: `Live resume ${label}` },
@@ -235,14 +236,14 @@ type AttachLive = (
   turnToken?: (taskId: string) => string
 ) => Promise<{ attached: boolean; reason: string; historyEvents?: number }>;
 
-function attachLiveCodeCli(): AttachLive {
+export function attachLiveCodeCli(): AttachLive {
   const attach = (codeSessionSandbox as unknown as { attachLiveCodeCli?: AttachLive })
     .attachLiveCodeCli;
   assert.equal(typeof attach, 'function', 'e2bCodeSessionSandbox exports attachLiveCodeCli');
   return attach as AttachLive;
 }
 
-const CLAUDE_KEYS = [
+export const CLAUDE_KEYS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
   'CLAUDE_CODE_CREDENTIALS',
@@ -351,6 +352,100 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
       );
     } finally {
       server.child.kill('SIGKILL');
+      try {
+        process.kill(-(server.child.pid as number), 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+  });
+
+  test('duplicate creates of one spawn that attached to the live CLI create once and never restart it', async () => {
+    // RCA 2026-11-06-code-spawn-create-retry-duplicated-sessions x the live attach: the agents
+    // activity retries a create that outlives its read while the first request keeps running.
+    // Each duplicate used to repeat the attach (a second goal turn) or, when the CLI was
+    // still starting, take the restart path that stops the CLI the first request started.
+    process.env.BACKEND_API_KEY ??= 'code-sessions-live-resume-key';
+    const { agentId, home, row, previous, fake } = await pausedSession(ctx, 'dup-create');
+    const server = await startLiveServer(home, previous.id);
+    let creates = 0;
+    try {
+      await until('the loop to start writing', () => counterLines(server.dir).length >= 5);
+      freeze(server);
+      ctx.patchConnect(async () => {
+        thaw(server);
+        return fake.sandbox;
+      });
+      const goal = 'Task:\nReport how many lines counter.txt has';
+      // The production create for a paused sandbox: resume it, attach the goal to its
+      // live CLI, record the task.
+      const create = async (
+        codeSession: Parameters<typeof codeSessionSandbox.acquireCodeSessionSandbox>[0]
+      ) => {
+        creates += 1;
+        const acquired = await codeSessionSandbox.acquireCodeSessionSandbox(
+          codeSession,
+          async () => {
+            throw new Error('a paused sandbox is resumed, never replaced');
+          }
+        );
+        const taskId = randomUUID();
+        const wsUrl = `ws://127.0.0.1:${server.port}`;
+        const attached = await attachLiveCodeCli()(acquired.sandbox, codeSession, {
+          provider: 'claude',
+          wsUrl,
+          taskId,
+          text: goal,
+          envs: { ANTHROPIC_API_KEY: 'stub-key' },
+          credentialKeys: CLAUDE_KEYS,
+        });
+        assert.equal(attached.attached, true, 'the live CLI takes the goal');
+        await prisma.claudeCodeSession.create({
+          data: {
+            id: taskId,
+            agentId,
+            sandboxId: acquired.sandbox.sandboxId,
+            goal,
+            status: 'ACTIVE',
+            codeSessionId: codeSession?.id,
+            codeProvider: 'claude',
+          },
+        });
+        return { taskId, wsUrl, resumedFrom: 'live_cli' as const };
+      };
+      const params = {
+        agentId,
+        userId: ctx.userA,
+        repoUrl: null,
+        codeProvider: 'claude' as const,
+        codeSessionId: row.id,
+        leaseOwner: `tool:${agentId}:tc-dup-create`,
+      };
+      const results = await Promise.all([
+        createWithCodeSession(params, create as never),
+        createWithCodeSession(params, create as never),
+        createWithCodeSession(params, create as never),
+      ]);
+      assert.equal(creates, 1, 'one spawn runs its create once');
+      assert.equal(new Set(results.map((result) => result.session.taskId)).size, 1);
+      assert.equal(fake.calls.killed, 0, 'no sandbox is killed or replaced');
+      await until('the CLI to read the goal', () => turns(server.dir).length >= 2);
+      await until('the loop to finish', () => counterLines(server.dir).length >= LOOP_LINES);
+      assert.deepEqual(
+        counterLines(server.dir),
+        Array.from({ length: LOOP_LINES }, (_, i) => i + 1),
+        'the in-flight loop ran once, start to finish: the CLI was never restarted'
+      );
+      const seen = turns(server.dir);
+      assert.deepEqual(
+        seen.map((turn) => turn.text),
+        ['Task:\nRun the counter loop', goal],
+        'the goal reached the CLI exactly once'
+      );
+      assert.equal(new Set(seen.map((turn) => turn.pid)).size, 1, 'one CLI process');
+      assert.ok(server.alive(), 'the live ws-server was never stopped');
+    } finally {
+      ctx.restoreConnect();
       try {
         process.kill(-(server.child.pid as number), 'SIGKILL');
       } catch {

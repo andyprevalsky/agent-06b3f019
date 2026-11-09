@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "sha": "87b887bd39f8d762976fb33511aaafcb8e023512",
+  "pr": 1751,
+  "status": "PASS",
+  "started_at": "2026-11-07T15:55:33Z",
+  "finished_at": "2026-11-07T15:55:33Z",
+  "changed_files": 87,
+  "selected": [
+    "agentcard"
+  ],
+  "lanes": {
+    "render": {
+      "status": "PASS",
+      "reason": "Render serves the merged backend (live)",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-07T15:40:47Z",
+      "finished_at": "2026-11-07T15:48:02Z",
+      "exit_code": 0,
+      "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-render --merged-sha 87b887bd39f8d762976fb33511aaafcb8e023512 --state-dir /home/boxes/rose/.context/deploy-pipeline",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/render.log",
+      "carried_forward": true
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent runtime or deploy-agents.yml change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no front-end/ change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #1751 without MAC-APP-RELEASE)",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "backend-probes": {
+      "status": "PASS",
+      "reason": "/health + /api/agents 200, endpoint smoke passed, Render log clean",
+      "applicable": true,
+      "depends_on": [
+        "render"
+      ],
+      "started_at": "2026-11-07T15:48:02Z",
+      "finished_at": "2026-11-07T15:48:07Z",
+      "exit_code": 0,
+      "command": "GET https://navi-j9a9.onrender.com/health && GET https://navi-j9a9.onrender.com/api/agents (X-API-Key=$BACKEND_API_KEY, X-User-Id=1f85ff25-6e29-4c1b-8739-f917bd101a30) && cd back-end && env -u SMOKE_BASE_URL -u SMOKE_HEALTH_URL -u SMOKE_FRONTEND_URL npx tsx scripts/prod-endpoint-smoke.ts && GET https://api.render.com/v1/logs?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=100&direction=backward",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/backend-probes.log",
+      "carried_forward": true
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent cutover",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "agentcard": {
+      "status": "SKIPPED-elected",
+      "reason": "elected: Production AgentCard lifecycle ran live and FAILED on one assertion, payment_lifecycle.stripeHold.livemode must be true (the Stripe hold and refund are test mode; making the production payment fixture live needs a KYC/billing change only the user can make: user decision 2026-11-06, skip such blocks and report them at the end). Original FAIL kept: run 20261107_155315_32f9e4b5-e084-462a-8fd0-821695458ad1, agent 398427cb-a40f-49f1-84dd-c696f358235e. Funds: purchase VOIDED, wallet funding RECLAIMED, AgentCard org transfer owt_00c1b7e9bd761a7ba6d14d17 reclaimed (transferred 0, released 100 cents), card CLOSED balance 0, Stripe PI pi_3UZBrqJyWRw3Eb951MU5Sv83 refunded (test mode); nothing stranded.",
+      "applicable": true,
+      "depends_on": [
+        "render"
+      ],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "semantic": {
+      "status": "PASS",
+      "reason": "chat-lifecycle-ratchet run 42388123699 success",
+      "applicable": true,
+      "depends_on": [
+        "render"
+      ],
+      "started_at": "2026-11-07T15:48:02Z",
+      "finished_at": "2026-11-07T15:54:59Z",
+      "exit_code": 0,
+      "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha 87b887bd39f8d762976fb33511aaafcb8e023512 --state-dir /home/boxes/rose/.context/deploy-pipeline && /home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 87b887bd39f8d762976fb33511aaafcb8e023512 --state-dir /home/boxes/rose/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/semantic.log",
+      "carried_forward": true
+    }
+  }
+}

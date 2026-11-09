@@ -290,11 +290,22 @@ async function main(): Promise<void> {
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'client-secret';
     delete process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN;
     try {
-      const runtime = new AgentCardOrgRuntime(undefined, (async () => ({
-        ok: false,
-        status: 401,
-        text: async () => JSON.stringify({ error: 'Invalid or expired organization token' }),
-      })) as unknown as typeof fetch);
+      // A sustained 401 exhausts the read auth-flap window; a virtual clock keeps that off the wall.
+      let nowMs = Date.now();
+      const runtime = new AgentCardOrgRuntime(
+        undefined,
+        (async () => ({
+          ok: false,
+          status: 401,
+          text: async () => JSON.stringify({ error: 'Invalid or expired organization token' }),
+        })) as unknown as typeof fetch,
+        {
+          now: () => nowMs,
+          sleep: async (ms) => {
+            nowMs += ms;
+          },
+        }
+      );
       await assert.rejects(
         () => runtime.callTool('get_company_wallet', {}),
         (error: unknown) => error instanceof AgentCardOrgRuntimeError && error.status === 401

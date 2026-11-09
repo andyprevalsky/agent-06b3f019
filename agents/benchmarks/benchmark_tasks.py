@@ -93,11 +93,13 @@ class BenchmarkTask:
     wmh_initial_state: Optional[dict] = None  # WHM EnvState for this simulated scenario; never copied from the live fixture
     description: Optional[str] = None  # One-line summary served to the FE test-prompts picker (falls back to title)
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
+    project: Optional[str] = None  # Name of the benchmark user's Project the root agent is created in (its repo is attached to code agents); resolved via GET /api/projects
     context_gates: Optional[dict] = None  # Per-task user-context gates (helpers/get_user_context.py keys → bool), forwarded at agent creation
     model: Optional[str] = None  # Pin the ROOT agent to one Rose pool (e.g. 'rose-labs/rose-1-oss'). Only for tasks whose prompt a default-pool primary declines; forwarded at agent creation.
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge | polar)
     process_spec: Optional[dict] = None  # Authored Process Bench obligations; evaluators are generated and drift-checked
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
+    run_all_evaluators: bool = False  # With enforce_declared_evaluators: run EVERY evaluator and report every verdict (no stop at the first failure), including for a failed or timed-out run (static checks only)
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
     group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | polar-bench | incomplete). Absent → backend derives from status/tags/bench.
     human_time: Optional[str] = None  # Approximate human-equivalent time for capability/complexity bucketing

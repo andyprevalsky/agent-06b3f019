@@ -1,0 +1,129 @@
+{
+ "schema_version": 1,
+ "pr": 1757,
+ "title": "fix(agents): stop per-turn recomputation that starved the mass-agent worker",
+ "assignment": "/goal test repair: cloud smoke test-mass-agent-run-0 'Declared evaluator t10-no-tool-failures failed: Observed tool failure: 4ec67f04:spawn_agent toolu_017WjLfYYfJsJW41EL4GJ68H status=ERROR' (PR #1752 deploy, originating merge 818f3669f, originating devbox 0f8c2d78); repair devbox 77d04b7f (Bugs folder)",
+ "merge_commit": "89906b0f3b8c51d85ceb6b3f610aa836dc500161",
+ "gated_source": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+ "branch_commits": [
+  "d18703e43 fix(agents): stop per-turn recomputation that starved the mass-agent worker",
+  "3152a844c feat(agents): log activity bodies that start long after Temporal started them",
+  "a6353fb70 merge origin/main",
+  "d3a8bd2f5 fix(agents): key schema projections weakly so per-turn model classes are not retained"
+ ],
+ "ledger_commit": "e21e0bffdc chore(benchmark-history): PR #1757 deploy smoke rows (latest run per task)",
+ "assigned_fix": {
+  "root_cause": "Recurrence of docs/rca/cases/2026-10-25-demo-replay-worker-cpu-starvation-normalization-and-live-jev.md. The single cloud worker's event loop was CPU-saturated during the 50-agent DEMO fan-out by per-turn O(turns^2) work: (1) re-redacting every earlier tool result, 13.8%; (2) rebuilding both schema projections, 16.5%; (3) a per-call httpx client SSLContext, 8.4%. Temporal-started post_agent_message attempts 2 and 3 began their bodies late and hit StartToClose without sending a request, so the completed explore surfaced as a spawn_agent ERROR.",
+  "fix": "Bounded redaction memo; weak-keyed schema projections per model class; pooled client for the compute-token lease and heartbeat; activity.dispatch_lag worker interceptor (observability).",
+  "regressions": [
+   "agents/tests/blackbox/llm.blackbox.py::test_repeated_history_render_redacts_and_projects_each_input_once",
+   "agents/tests/blackbox/llm.blackbox.py::test_per_turn_compute_lease_calls_reuse_the_pooled_client",
+   "agents/tests/blackbox/llm.blackbox.py::test_schema_projections_do_not_outlive_per_turn_model_classes",
+   "agents/tests/blackbox/worker.blackbox.py::test_late_activity_body_start_is_logged_with_its_dispatch_lag",
+   "agents/tests/blackbox/worker.blackbox.py::test_worker_registers_activity_dispatch_lag_interceptor"
+  ],
+  "pre_fix": "Regressions FAIL on 818f3669 (24 extra redaction passes and 16 schema rebuilds over 4 re-renders; 6 per-call AsyncClients; 20/20 per-turn classes retained). Exact local task with guest worker settings at CPUQuota=100%: buggy FAIL 'Timeout after 902s' with 331 activity timeouts and dispatch lag p50/max 23.6/39.2s (FE agent 23492d9d-8164-4245-b383-e26f8d70a87e); earlier 500-slot pair buggy FAIL 905s with 3x 'Tool spawn_agent failed: activity StartToClose timeout' (agent 7869a0c8).",
+  "post_fix": "Regressions PASS 5/5. Exact local task PASS 632s with 3 timeouts and lag max 23.8s (agent 5dbe4c05-b1ff-44c8-ad29-ed9835f69947). The original 9-task cloud smoke command, unchanged at d18703e43, PASSED 9/9 (campaign-20261107-113655-607889). The deploy smoke on a6353fb and on d3a8bd2f passed test-mass-agent-run-0 with 0 activity timeouts; guest post_agent_message lag max 15.6s.",
+  "adversarial_reviews": [
+   "RCA review (in-session sub-agent): GAPS (attempt 2/3 mechanism unproven), resolved by measuring activity.dispatch_lag under guest settings",
+   "code review (in-session sub-agent): one major finding (strongly keyed schema cache retained per-turn user-tool classes), fixed in d3a8bd2f"
+  ]
+ },
+ "rca_cases": [
+  "docs/rca/cases/2026-10-25-demo-replay-worker-cpu-starvation-normalization-and-live-jev.md (recurrence appended; status mitigated)"
+ ],
+ "review": {
+  "coderabbit": "cycle 1 on a6353fb70 closed unavailable: usage spending cap, superseded before review. Cycle 1 on d3a8bd2f clean: review 5812548524, no inline findings; advisory docstring-coverage check ignored as a style nit.",
+  "graphide": "skipped (free reviews exhausted)"
+ },
+ "validation": {
+  "final_cycle": "ready on d3a8bd2f: quick + 11 gates. Fresh cycle initial sweep PASS except backend browser-session (local test-backend ReadTimeout, NOT_INTRODUCED), whose owner rerun on an idle box passed 251/251.",
+  "superseded_cycle": "first d3a8bd2f cycle final sweep (archived as .context/deploy-pipeline-r1-d3a8bd2f-archived): 4 NOT_INTRODUCED load and infra flakes. cloudbench multi-workstream hub-stub EADDRINUSE; semantic-deploy fixture zombie kill -0; smoke INFRA STOP after one guest's seed-local compute-token sync crashed with empty stderr; report-bug Supabase signed-URL fetch failed. The smoke receipt kept an unreconciled cleanup owner, so the cycle was archived and re-initialized. CORRECTION 2026-11-08: that re-initialization bypassed the retained-owner guard and left six Machines started for about 22.5 hours; see deletion-readiness.json resource_correction.",
+  "omitted": "frontend-coverage-blackbox and agentcard-lifecycle: not selected (no trigger). mac-app coverage: platform-unavailable, unverified."
+ },
+ "production": {
+  "fly": "deploy-agents run 42386003546 attempt 1: success. Durable job ac0d3e6b55e6086628a78b664b6869d715ca83085f63fbf9724a11d3a660057e SUCCEEDED; monitor-cooperative-cutover --verify exit 0, live pointer hash 4b5b423cadef",
+  "workflow_migration_matrix": "validate-prod-workflow-migration --execute: 45/45 PASS (run 2). Run 1 had 4 FAILs because the local Prisma client predated PR #1716's Agent.userControlPaused; after prisma generate the rerun passed. Both logs are archived.",
+  "semantic": "chat-lifecycle-ratchet run 42387188965 on source 89906b0f3: all jobs success",
+  "render_vercel_mac_release": "not applicable (no back-end/front-end/mac-app paths)",
+  "agentcard_13c": "not applicable (no AgentCard paths)",
+  "mac_post_deploy": "SKIPPED - no Mac available: read-only LocalDevice query for owner 1f85ff25 returned 0 rows at 2026-11-07T15:37:05Z"
+ },
+ "ledger": {
+  "committed": "10 attempt + 10 duration rows (final sweep deploy-66281ab6, all passed) in e21e0bffdc",
+  "excluded": "local CPU-capped repro runs (artificial CPU caps and worker settings); preserved in the rca/final archives"
+ },
+ "followups": [
+  "seed-local.ts --compute-tokens-only intermittent native crash in guest token sync (memory seed-local-intermittent-segfault): log returncode/signal in _sync_compute_tokens",
+  "cloudbench-multi-workstream hub_stub probe-then-bind race (EADDRINUSE under host load)",
+  "semantic-deploy-gate cleanup_bench_fixtures kill -0 on a not-yet-reaped zombie",
+  "agent_link_server.py leaked after every smoke campaign (passed and cancelled), TERMed manually",
+  "worker headroom: root fetch_child_terminal_result dispatch lag up to 29.6s on the fixed guest (non-fatal); the RCA's infra option stays open",
+  "Unverified payment from the cancelled smoke run: purchase 2bbd1e62-496a-464a-95c4-7730831bf569, 4396 cents, CLEARED, no reclaim, livemode not recorded (deletion-readiness.json resource_correction)",
+  "Four retained local owner records refused by --recover-stale-owner (sealed runtime evidence absent); user decision on retirement"
+ ],
+ "archives": {
+  "rca": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1757-a6353fb70/rca-evidence.tar.gz.aesgcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "adf5b0e6efd9d5c3ecfd4ed4871d0dfeb6fcf39e190d6ebe73c9a374b8d811aa",
+   "gzip_sha256": "c5135bafb4215b192bbba474a598c3d102a4dab0a68d6efd8d4db4b283241c85",
+   "stored_bytes": 318197181,
+   "frames": 38,
+   "files": 413,
+   "original_bytes": 1879334818,
+   "manifest_sha256": "d9ad3494672c72419081ab5d48c0e0ca74c439aa019334aadbc02be99b8a4af4"
+  },
+  "cloud": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1757-a6353fb70/cloud-evidence.tar.gz.aesgcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "680a50ea72c2f4881dcd49566204275d2b465220d862e932c485427ff58ad8ad",
+   "gzip_sha256": "c637a3d0a582ea99b9f2a6945d935ab59b1774ce11ae74c83b53c098cc3b1067",
+   "stored_bytes": 695776381,
+   "frames": 83,
+   "files": 2306,
+   "original_bytes": 2375288547,
+   "manifest_sha256": "b32a7c174331705b19bfece476fe6579945aa259dc5d0601fb2dca6bdab7cd59"
+  },
+  "final": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1757-89906b0f3/final-evidence.tar.gz.aesgcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "7dc89c04c2b456515ea20fe18c1146a85f6ce6dd0d7bc4fe6a9f7471f9e34b50",
+   "gzip_sha256": "29815b45f36a48b16d80b1a1a2b2f45bb2b68e39ea8f15d797a726f5c67762b1",
+   "stored_bytes": 627279990,
+   "frames": 75,
+   "files": 11472,
+   "original_bytes": 1650827692,
+   "manifest_sha256": "961e01400ab435efdda16fcc6d353e8738fb8c9ea780ed2b309b5ad91e8d09aa"
+  },
+  "owner_recovery": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1757-89906b0f3/owner-recovery-evidence.tar.gz.aesgcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "c44f7105327808245e434aed1b9250a65aadb1573b7dcc662244eb3a47843d26",
+   "gzip_sha256": "eaed364276724b2a06a238fc5c8d793ae2a3dc6320d8fd0e43eaf390223e8b64",
+   "stored_bytes": 186755251,
+   "frames": 23,
+   "original_bytes": 568759451,
+   "manifest_sha256": "15742141af044e3b0e3040cdceb6afe8a443b8e4574dbeaf22be91fb3fe6c450",
+   "files": 322
+  }
+ },
+ "original_failure_archive": "devbox-closeout-private/pr1752-818f3669/mass-agent-spawn-agent-error-run.tar.gz.aesgcm (owned by the PR1752 closeout)",
+ "dispositions": {
+  "committed": "PR #1757 source and tests; RCA case; this manifest; evidence/ (final plan+cycle, superseded cycle, triage reports, review ledger, production receipt, regression outputs, archive receipts)",
+  "archived_rca": "/var/tmp/rca-mass work (Temporal histories, py-spy profile, repro logs, CPU samples, instrumented-arm worker logs, scripts); 4 local benchmark runs; the a6353fb cycle state; campaign records",
+  "archived_cloud": ".context/fleet/runs (d18703e43 cloud rerun) and .context/deploy-cloud/9d4da342 (first deploy smoke)",
+  "archived_final": ".context/deploy-pipeline (final), .context/deploy-pipeline-r1-d3a8bd2f-archived, .context/deploy-cloud/714d48a0 (INFRA-stopped) and 66281ab6 (final), deploy-runs, review/approval ledgers, factory-events, /var/tmp/rdw worker receipts/logs/coverage summaries, production logs",
+  "reproducible": "/var/tmp/rdw worker checkouts (clones of d3a8bd2f), raw V8 coverage and test-runs scratch (rerun backend-coverage-blackbox at d3a8bd2f), experiential-venv, node_modules/venv symlinks, py-spy tool venv",
+  "secrets": "agents/.env, back-end/.env, front-end/.env and .context/pr1634-archive-recovery.env are project-managed (boxes managed env / escrow per docs/handoffs/pr-1739-closeout/RECOVERY.md); never archived or committed",
+  "archived_owner_recovery": "2026-11-08 recovery logs, exact-owner ownership and audit records for nine owners, native Machine list, and the 714d48a0 evidence recaptured from the guests"
+ }
+}

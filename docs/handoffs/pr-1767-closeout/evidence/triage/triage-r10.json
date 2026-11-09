@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "94e38070721c457a912cd051f6ec02fc",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/var/tmp/rose-base-measure/agents/venv/bin/python3",
+    "/var/tmp/rose-base-measure/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "059cc72d317202669290c86c1d4b1364df007caf",
+    "digest": "70e874920332bf327b9554f5a05ebad06fa66eb1bbdd16abbb3e83c3f32d68d3"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "standing AgentCard sandbox release stall (closed card org transfer consumed, releasedCents=0); native row SKIPPED; recurred on every smoke run of this deploy",
+   "evidence": "/var/tmp/rose-base-measure/.context/deploy-cloud/bc470be025ab6266344ab5682fdcb85d08efbfc778a01fedbb9e22adc4153424/runs/20261108-002746-3188721/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "af1891d3106bbaae9c1f0bf52a24b7b7a7ebab6c1ea15a76d2c2e2fe60fff3dd",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_93563a431ee467fc132858de\", \"cardId\": \"card_47e833d7ae5ea04a15712b89\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 79222c2c-3b9a-467c-a677-622cc6709c0b | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard sandbox (org transfer release)",
+    "evidence": "/var/tmp/rose-base-measure/.context/deploy-cloud/bc470be025ab6266344ab5682fdcb85d08efbfc778a01fedbb9e22adc4153424/runs/20261108-002746-3188721/agent-payment-abandonment/cloudbench-run.json",
+    "confirmed_at": 1794099251.3127391
+   }
+  }
+ ]
+}

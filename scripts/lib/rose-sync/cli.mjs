@@ -3,7 +3,7 @@
  *
  *   rose-sync status   [--dir D] [--include P]... [--json]
  *   rose-sync push     [--dir D] [--project NAME|ID] [--include P]... [--setup CMD]...
- *                      [--no-prune] [--json]
+ *                      [--no-prune] [--files-only] [--json]
  *   rose-sync onboard  [--dir D] [--project NAME|ID]  import keys and configure setup
  *   rose-sync seed-rose [--dir D] [--json]     create/refresh the "Rose" project
  *                                              (startup script + six env files), then push
@@ -68,7 +68,14 @@ export const ROSE_STARTUP_SCRIPT_PATH =
 
 export function parseArgs(argv) {
   const [command = "help", ...rest] = argv;
-  const opts = { command, include: [], setup: [], prune: true, json: false };
+  const opts = {
+    command,
+    include: [],
+    setup: [],
+    prune: true,
+    filesOnly: false,
+    json: false,
+  };
   if (
     command === "agent-init" &&
     rest[0] !== undefined &&
@@ -89,9 +96,14 @@ export function parseArgs(argv) {
     else if (arg === "--api") opts.api = next();
     else if (arg === "--login-code") opts.loginCode = next();
     else if (arg === "--no-prune") opts.prune = false;
+    else if (arg === "--files-only") opts.filesOnly = true;
     else if (arg === "--json") opts.json = true;
     else throw new Error(`Unknown option ${arg}`);
   }
+  // Only `push` honors --files-only; seed-rose/onboard/status would otherwise
+  // discover and upload dotenv files, a git bundle and a patch despite it.
+  if (opts.filesOnly && command !== "push")
+    throw new Error(`--files-only is only supported by push, not ${command}`);
   return opts;
 }
 
@@ -194,7 +206,26 @@ async function resolveProject(call, opts, root) {
   return call("PUT", "/api/projects", { name });
 }
 
-function buildPush(capture, state, key, prune) {
+/**
+ * A files-only push omits the git artifacts, so the server keeps the stored
+ * bundle and patch, but its manifest replaces the previous one. Carry the stored
+ * git fields those artifacts depend on (the patch's base headSha and branch, the
+ * bundle's kind and branches, unpushed/dirty counts) over from the stored
+ * snapshot; otherwise a moved HEAD orphans the patch and a null bundleKind stops
+ * restoration from cloning the retained full bundle of a repository with no remote.
+ */
+export function retainArtifactGit(manifest, state) {
+  const previous = state.manifest?.git;
+  const retained =
+    state.gitBundleFingerprint != null || state.patchFingerprint != null;
+  if (!previous || !retained) return manifest;
+  return {
+    ...manifest,
+    git: { ...previous, remoteUrl: manifest.git.remoteUrl },
+  };
+}
+
+export function buildPush(capture, state, key, prune) {
   const stored = new Map(
     (state.files ?? []).map((f) => [f.path, f.fingerprint]),
   );
@@ -235,14 +266,21 @@ function buildPush(capture, state, key, prune) {
   return {
     baseRevision: state.revision,
     keyId: key.keyId,
-    manifest: capture.manifest,
+    manifest: capture.filesOnly
+      ? retainArtifactGit(capture.manifest, state)
+      : capture.manifest,
     files,
     prune,
-    gitBundle: artifact(capture.gitBundle, state.gitBundleFingerprint),
-    uncommittedPatch: artifact(
-      capture.uncommittedPatch,
-      state.patchFingerprint,
-    ),
+    // Omitted (not null) artifacts keep what the project already stores.
+    ...(capture.filesOnly
+      ? {}
+      : {
+          gitBundle: artifact(capture.gitBundle, state.gitBundleFingerprint),
+          uncommittedPatch: artifact(
+            capture.uncommittedPatch,
+            state.patchFingerprint,
+          ),
+        }),
   };
 }
 
@@ -448,8 +486,12 @@ export async function main(argv, { cli = "rose-sync" } = {}) {
       ({ project, capture } = await seedRose(call, opts, checkoutRoot(dir)));
     } else {
       capture = captureCheckout(dir, {
-        include: opts.include,
+        include:
+          opts.filesOnly && opts.include.length === 0
+            ? ROSE_PROJECT_ENV_FILES
+            : opts.include,
         setup: opts.setup,
+        filesOnly: opts.filesOnly,
       });
       if (opts.command === "onboard") {
         if (isRoseRepository(capture.manifest.git.remoteUrl)) {
@@ -490,7 +532,13 @@ export async function main(argv, { cli = "rose-sync" } = {}) {
         });
       }
     }
-    const result = await pushCapture(call, project.id, capture, opts.prune);
+    // --files-only never prunes: it must not delete files it did not capture.
+    const result = await pushCapture(
+      call,
+      project.id,
+      capture,
+      opts.prune && !opts.filesOnly,
+    );
     const onboarding =
       opts.command === "onboard"
         ? await verifyOnboarding(call, project.id, capture)
@@ -514,7 +562,7 @@ export async function main(argv, { cli = "rose-sync" } = {}) {
   }
   process.stdout.write(
     `usage: ${cli} status|push|onboard|seed-rose [--dir D] [--project NAME|ID] [--include PATH]... ` +
-      "[--setup CMD]... [--no-prune] [--api URL] [--json]\n" +
+      "[--setup CMD]... [--no-prune] [--files-only] [--api URL] [--json]\n" +
       `       ${cli} agent-init --login-code CODE | agent-init [status] [--json]\n`,
   );
   return opts.command === "help" ? 0 : 2;

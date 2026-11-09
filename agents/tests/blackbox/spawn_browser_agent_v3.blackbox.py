@@ -13795,6 +13795,73 @@ async def test_execute_action_request_payment_card_accepts_image_urls_rendered_o
     assert private_out["payment_request"]["line_items"][2]["image_url"].endswith("Canvas+Tote")
 
 
+async def test_verifier_history_keeps_card_receipt_image_urls_after_private_entry():
+    """Agent ce9d2ae6: the second browser task requested its card (with the three
+    rendered image URLs), then typed the card. Every later history read re-applied
+    the private-entry media policy and stripped `image_url` from that earlier typed
+    receipt, so the verifier never saw the image URLs the request carried and
+    rejected each completion at 50% until the 900s task timeout."""
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
+
+    card_number = "4000056655669176"
+    images = [_TEST_SHOP_PAGE_IMAGES[i] for i in (0, 2, 3)]
+    receipt = _test_shop_receipt(images)
+    dom = DOMService("ws://offline-verifier-receipt-control")
+    dom.register_secret_refs({"card_number": card_number})
+    history = ActionHistory()
+    history.bind_dom_service(dom)
+    history.restore_entries(
+        [
+            {
+                "step": 1,
+                "action": "request_payment_card",
+                "params": receipt,
+                "result": {
+                    "success": True,
+                    "status": "approved",
+                    "card_last4": "9176",
+                    "payment_request": receipt,
+                    "media": [{"kind": "product", "url": images[0], "caption": f"Receipt caption {card_number}"}],
+                },
+            },
+            {"step": 2, "action": "input_text", "index": 7, "params": {"text": card_number}},
+        ]
+    )
+    dom.mark_secret_used()
+
+    final_state = {"url": f"{_TEST_SHOP_ORIGIN}/test_payment", "dom_tree": "Payment confirmed tp_fixture"}
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        context = await bsvc.build_browser_verifier_context(
+            goal="Request the card with every visible descriptor, then pay",
+            current_url=final_state["url"],
+            browser_state=final_state,
+            action_history=history,
+            config=SimpleNamespace(),
+            session_id="sess",
+        )
+    context = _model_visible_browser_verifier_context(context, dom, final_state)
+    wire = json.dumps(context)
+    step = wire.split("Step 1: request_payment_card", 1)[1].split("Step 2:", 1)[0]
+    params, result = step.split("Result:", 1)
+    for image in images:
+        assert image in params, f"verifier lost request image_url {image}"
+        assert image in result, f"verifier lost receipt image_url {image}"
+    assert "'media'" in result, "public media disappeared from verifier history"
+    assert images[0] in result and "Receipt caption " in result
+    assert card_number not in wire, "card number reached the verifier"
+    # The browser model's own action history uses the same receipt projection.
+    entry = history.get_entries()[0]
+    assert [item["image_url"] for item in entry["result"]["payment_request"]["line_items"]] == images
+    assert [item["image_url"] for item in entry["params"]["line_items"]] == images
+    media = entry["result"]["media"][0]
+    assert media["kind"] == "product" and media["url"] == images[0]
+    assert media["caption"].startswith("Receipt caption ")
+    assert media["caption"] != f"Receipt caption {card_number}"
+    assert card_number not in media["caption"]
+
+
 async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -18849,7 +18916,9 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
 
     assert len(capture_disconnects) == 2
     assert "_pause_browser_for_approval" not in source
-    assert post_injection.count("await _disconnect_browser(dom_service)") == 6
+    # Terminal disconnects release through the bounded helper (multiplexer-close fallback).
+    assert post_injection.count("await _release_browser_client(dom_service)") == 6
+    assert "await _disconnect_browser(dom_service)" not in post_injection
     pause_helper = source.split("async def _close_browser_with_cleanup_receipt(", 1)[1].split(
         "state_prefetch =", 1
     )[0]
@@ -21680,6 +21749,116 @@ async def test_execute_goto_err_aborted_persists_attachment_download():
     assert out["download"]["path"] == "/tmp/downloads/rs.jpeg"
     assert "saved to session" in out["message"]
     ah.record_action.assert_awaited_once()
+
+
+async def test_execute_action_goto_download_fallback_uses_the_session_provider():
+    """CR 4501806264: the ERR_ABORTED goto fallback persisted by the ambient BROWSER_PROVIDER.
+
+    ``_execute_goto`` called the download helper without the session's provider
+    or user, so the helper resolved the provider from the BROWSER_PROVIDER env
+    (tilion on Fly). A Kernel session's download then landed in the Tilion
+    worker ledger instead of its session files, and a Tilion session's download
+    skipped the durable attachment copy. The provider and user ride from the
+    harness through ``execute_action`` to the persistence helper; the env is
+    pinned to the *other* provider so only the session's own value can pass.
+    """
+    from domains.spawn_browser_agent_v3 import tilion_worker
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    url = "https://files.example.com/export/report.pdf"
+    body = b"%PDF-1.4 goto fallback"
+    payload = {
+        "ok": True,
+        "status": 200,
+        "size": len(body),
+        "contentType": "application/pdf",
+        "filename": "report.pdf",
+        "base64": base64.b64encode(body).decode(),
+        "disposition": 'attachment; filename="report.pdf"',
+    }
+
+    class _AbortedNavigation:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    def dom_for_aborted_download():
+        cdp = SimpleNamespace(
+            session_id="cdp",
+            cdp_client=SimpleNamespace(
+                send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=AsyncMock(return_value={"result": {"value": payload}})))
+            ),
+        )
+        dom = MagicMock()
+        dom.selector_map = {}
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = SimpleNamespace(
+            event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_AbortedNavigation())),
+            get_or_create_cdp_session=AsyncMock(return_value=cdp),
+        )
+        return dom
+
+    async def goto_download(*, env_provider, session_provider, session_id):
+        upload = AsyncMock(return_value={"path": "/tmp/downloads/report.pdf", "size": len(body)})
+        storage = AsyncMock(return_value={"storage_path": "user-1/report.pdf", "file_name": "report.pdf"})
+        with (
+            patch.dict(os.environ, {"BROWSER_PROVIDER": env_provider}, clear=False),
+            patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", new=upload),
+            patch("helpers.attachments.upload_to_storage", new=storage),
+        ):
+            out = await execute_action(
+                dom_for_aborted_download(),
+                _mocked_action_history(),
+                {"action": "goto", "params": {"url": url}},
+                session_id=session_id,
+                config=_fake_config(),
+                user_id="user-1",
+                provider=session_provider,
+            )
+        return out, upload, storage
+
+    try:
+        # A Kernel session on a tilion-default worker keeps the session-files path.
+        out, upload, storage = await goto_download(
+            env_provider="tilion", session_provider="kernel", session_id="goto-dl-kernel"
+        )
+        assert out["success"] is True, out
+        assert out["download"]["path"] == "/tmp/downloads/report.pdf"
+        upload.assert_awaited_once()
+        assert upload.await_args.args[2:4] == ("report.pdf", body)
+        storage.assert_not_awaited()
+        assert tilion_worker.list_downloads("goto-dl-kernel") == [], "Kernel bytes never enter the Tilion ledger"
+
+        # A Tilion session on a kernel-default worker keeps the durable ledger path.
+        out, upload, storage = await goto_download(
+            env_provider="kernel", session_provider="tilion", session_id="goto-dl-tilion"
+        )
+        assert out["success"] is True, out
+        upload.assert_not_awaited()
+        storage.assert_awaited_once()
+        assert storage.await_args.kwargs["user_id"] == "user-1"
+        assert [entry["filename"] for entry in tilion_worker.list_downloads("goto-dl-tilion")] == ["report.pdf"]
+        assert tilion_worker.download_file_pointer("goto-dl-tilion", out["download"]["path"]) is not None
+    finally:
+        tilion_worker.release_session("goto-dl-kernel")
+        tilion_worker.release_session("goto-dl-tilion")
+
+
+def test_browser_handler_passes_the_session_provider_to_execute_action():
+    """The harness hands execute_action the live session provider (it changes on rotation)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index("_execute_action(\n")
+    call = source[start : source.index('if action_name == "phone":', start)]
+    assert 'provider=browser_session_metadata.get("provider")' in call
 
 
 # ── live challenge helpers ───────────────────────────────────────────
@@ -27441,6 +27620,7 @@ async def test_activity_cross_realm_action_redacts_reused_ref_values():
 
 
 def _assert_nonblocking_navigation_context(contexts, events, *, realm, success, error=None):
+    from urllib.parse import urlsplit
     assert len(contexts) == 2
     assert sum(kind == "navigate" for kind, _ in events) == 1, "navigation was repeated"
     assert events.count(("model", 2)) == 1, "actor missed the navigation result"
@@ -27449,6 +27629,7 @@ def _assert_nonblocking_navigation_context(contexts, events, *, realm, success, 
     tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
     result = json.loads(tools[0]["content"])
     assert result["success"] is success
+    assert urlsplit(result["current_url"]).hostname == realm, "result URL and current credential realm diverged"
     if error is not None:
         assert error in result["error"]
     auth = result["auth_context"]
@@ -27459,10 +27640,12 @@ def _assert_nonblocking_navigation_context(contexts, events, *, realm, success, 
     return auth
 
 
+
+
 @_in_browser_activity_context
 async def test_activity_redirected_goto_reports_realm_without_credential_reload():
     """Redirects report current realm and background status without a forced reload."""
-    for redirect, restoration_error in ((True, False), (False, False), (True, True)):
+    for redirect, restoration_error in ((True, False), (False, False), (True, True), (False, True)):
         contexts, _, events, _, _ = await _run_realm_transition_action_fixture("goto", redirect=redirect, restoration_error=restoration_error)
         _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=True)
 
@@ -28050,6 +28233,632 @@ async def test_neutral_resume_defers_inventory_at_web_url():
 async def test_neutral_resume_defers_inventory_without_metadata_url():
     """The first live page observation supplies the realm without blocking resume."""
     await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url=None)
+async def test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to():
+    """A reattached browser starts in the realm its credential material was prepared for.
+
+    Agent ae7983a2 (LinkedIn export): the root's logical browser was last on
+    linkedin.com, so `/browser-session/init` reattached it and returned
+    task-info passkeys for linkedin.com (none) without auth_options. A Gmail
+    check then started at mail.google.com; the worker paired google.com auth
+    options (three enabled passkeys) with that linkedin.com material and failed
+    before its first step: "Credential payload for google.com is missing
+    passkey material". The initial state must use the response's realm; the
+    first step boundary then prepares google.com through the realm transition.
+    """
+    from contextlib import ExitStack
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    # Task-info shape of a reattached logical browser: realm + material, no auth_options.
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "auth_realm": "linkedin.com",
+        "passwords": [],
+        "passkeys": [],
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+
+    from domains.spawn_browser_agent_v3 import handler
+    original_hydrate = handler.build_realm_credential_state
+    provider_entered, actor_entered = asyncio.Event(), asyncio.Event()
+    provider_release, hydrated, step_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    payloads = []
+    google_payload = {"auth_realm": "google.com", "auth_options": {"realm": "google.com"},
+                      "passwords": [], "passkeys": []}
+
+    async def prepare_current_realm(*_args, **kwargs):
+        assert kwargs["user_id"] == "user-1" and kwargs["session_id"] == "session-1"
+        assert kwargs["target_url"] == inbox_url
+        provider_entered.set()
+        await provider_release.wait()
+        return google_payload
+
+    async def record_hydration(payload, **kwargs):
+        payloads.append(copy.deepcopy(payload))
+        state = await original_hydrate(payload, **kwargs)
+        hydrated.set()
+        return state
+
+    async def observe_first_actor(**kwargs):
+        assert not provider_release.is_set(), "actor waited for provider credentials"
+        assert kwargs["dom_service"].allow_credential_reload is False
+        actor_entered.set()
+        return {"action": {"action": "scroll", "thinking": "Opening the inbox", "params": {"direction": "down"}},
+                "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+                "mode": "waterfall"}
+
+    prepare_auth = AsyncMock(side_effect=prepare_current_realm)
+    llm_step = AsyncMock(side_effect=observe_first_actor)
+
+    async def execute_step(*args, **kwargs):
+        await step_release.wait()
+        env.worker_shutdown()
+        return {"success": True, "message": "Scrolled down", "current_url": inbox_url}
+
+    inbox_url = "https://mail.google.com/mail/u/0/"
+
+    class _NavigationEvent:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            return None
+
+    reload_dispatch = MagicMock(return_value=_NavigationEvent())
+
+    class _InboxDomService(_FakeDomService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.session.event_bus = SimpleNamespace(dispatch=reload_dispatch)
+
+        async def get_browser_state(self, include_screenshot=False):
+            return {"url": inbox_url, "screenshot": None}
+
+        async def get_page_identity(self):
+            return {"url": inbox_url, "title": "Inbox"}
+
+        async def get_current_url(self, *, fallback: str = ""):
+            return inbox_url
+
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.prepare_browser_auth", prepare_auth),
+        patch("domains.spawn_browser_agent_v3.handler._wait_for_document_ready", AsyncMock(return_value="complete")),
+        patch("domains.spawn_browser_agent_v3.handler.build_realm_credential_state", side_effect=record_hydration),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _InboxDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        run = asyncio.create_task(env.run(
+            spawn_browser_agent_activity_v3,
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Check the inbox for the LinkedIn archive email",
+            tool_call_id="tool-1",
+            task_id="task-1",
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            start_url="https://mail.google.com/",
+        ))
+        try:
+            await asyncio.wait_for(asyncio.gather(provider_entered.wait(), actor_entered.wait()), timeout=10)
+            assert not run.done(), "activity ended before the concurrent preparation proof"
+            provider_release.set()
+            await asyncio.wait_for(hydrated.wait(), timeout=10)
+            step_release.set()
+            result = await asyncio.wait_for(run, timeout=10)
+        finally:
+            provider_release.set()
+            step_release.set()
+            if not run.done():
+                run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+
+    # Setup succeeded and the run reached a step boundary on the inbox.
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["current_url"] == inbox_url, result
+    assert result["auth_realm"] == "google.com", result
+    assert payloads == [google_payload], "reattached LinkedIn material was mixed into Google hydration"
+    assert prepare_auth.await_count == 1
+    navigations = [call.args[0].url for call in reload_dispatch.call_args_list]
+    assert navigations == ["https://mail.google.com/"], (
+        f"credential preparation forced an extra navigation: {navigations}"
+    )
+
+
+@_in_browser_activity_context
+async def test_data_setup_failure_disconnects_the_connected_browser_clients():
+    """A real parallel data-side failure adopts and releases already-connected clients."""
+    from contextlib import ExitStack
+    from domains.spawn_browser_agent_v3 import handler
+    validated = asyncio.Event()
+    sentinel = RuntimeError("data setup failed after validated attach")
+
+    async def data_setup_failure(*_args, **_kwargs):
+        await validated.wait()
+        raise sentinel
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    _FakeDomService.last_instance = None
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(dict(_PARALLEL_SETUP_SESSION), fake_browser, _FakeDomService, **{
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(new=data_setup_failure),
+            "domains.spawn_browser_agent_v3.handler._require_live_playwright_client": dict(new=_validated_setup_attach(validated)),
+        }):
+            stack.enter_context(target)
+        earlier = set(handler._background_browser_cleanup_tasks)
+        with pytest.raises(RuntimeError, match="data setup failed after validated attach") as caught:
+            await asyncio.wait_for(handler.spawn_browser_agent_activity_v3(
+                user_id="user-1", agent_id="agent-1", goal="Check the inbox", tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False, start_url="https://example.com"), timeout=10)
+        assert caught.value is sentinel
+        pending = set(handler._background_browser_cleanup_tasks) - earlier
+        if pending:
+            await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=10)
+        assert validated.is_set() and _FakeDomService.last_instance is not None
+        _FakeDomService.last_instance.disconnect.assert_awaited()
+        fake_browser.close.assert_awaited()
+        fake_browser._fixture_playwright_instance.stop.assert_awaited()
+
+
+async def test_background_malformed_credentials_report_error_without_blocking_actor():
+    """Real malformed hydration becomes a safe background status, never a setup failure."""
+    from domains.spawn_browser_agent_v3.credential_runtime import (
+        AsyncCredentialPreparation, OwnedCredentialTasks, build_realm_credential_state,
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    owner = OwnedCredentialTasks()
+    secret = "fixture-private-credential-label"
+    payload = {"auth_realm": "example.com", "auth_options": {
+        "realm": "example.com", "passkeys": [{"id": secret}]}, "passwords": [], "passkeys": []}
+    errors = []
+
+    async def hydrate(_url, _current):
+        entered.set()
+        await release.wait()
+        try:
+            return await build_realm_credential_state(payload, decryption_key=None)
+        except RuntimeError as error:
+            errors.append(str(error))
+            raise
+
+    preparation = AsyncCredentialPreparation(owner, hydrate)
+    try:
+        pending = preparation.request("https://example.com", ("session-1", "example.com"), "example.com")
+        assert pending["credential_preparation_status"] == "pending"
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        # An independent actor turn completes while the actual builder remains blocked.
+        actor = AsyncMock(return_value="ordinary public action")
+        assert await actor() == "ordinary public action" and not release.is_set()
+        release.set()
+        await asyncio.wait_for(preparation.task, timeout=10)
+        state = preparation.request("https://example.com", ("session-1", "example.com"), "example.com")
+        assert errors and "missing passkey material" in errors[0] and secret in errors[0]
+        assert state == {"auth_realm": "example.com", "credential_preparation_status": "error",
+                         "credential_preparation_error": "Saved credential preparation failed"}
+        assert secret not in json.dumps(state)
+    finally:
+        release.set()
+        await owner.close()
+    assert not owner.tasks
+
+
+def _validated_setup_attach(event):
+    from domains.spawn_browser_agent_v3 import handler
+    original = handler._require_live_playwright_client
+
+    def validated(*args, **kwargs):
+        original(*args, **kwargs)
+        event.set()
+    return validated
+
+
+def _parallel_setup_patches(session_data, fake_browser, dom_service_class, **overrides):
+    """Patches for driving the real activity through its parallel browser/data setup."""
+    instance = _FakePlaywright(fake_browser)
+    fake_browser._fixture_playwright_instance = instance
+    targets = {
+        "domains.spawn_browser_agent_v3.handler.load_config": dict(return_value=_fake_config()),
+        "domains.spawn_browser_agent_v3.handler.activity.heartbeat": dict(),
+        "domains.spawn_browser_agent_v3.handler.init_browser_session": dict(new=AsyncMock(return_value=session_data)),
+        "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(
+            new=AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})
+        ),
+        "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials": dict(
+            new=AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
+        ),
+        "domains.spawn_browser_agent_v3.handler.close_browser_session": dict(new=AsyncMock()),
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message": dict(new=AsyncMock()),
+        "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message": dict(new=AsyncMock()),
+        "browser_tools.dom_service.DOMService": dict(new=dom_service_class),
+        "browser_tools.humanizer.BrowserHumanizer": dict(new=_FakeHumanizer),
+        "playwright.async_api.async_playwright": dict(return_value=_FakeAsyncPlaywright(instance)),
+    }
+    targets["domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation"] = dict(
+        new=AsyncMock(side_effect=AssertionError("actor entered before failed/cancelled setup ended")))
+    targets.update(overrides)
+    return [patch.dict(os.environ, {"BROWSER_AGENT_PARALLEL_CDP_CONNECT": "0"}),
+            *[patch(target, **kwargs) for target, kwargs in targets.items()]]
+
+
+_PARALLEL_SETUP_SESSION = {
+    "task_id": "task-1",
+    "session_id": "session-1",
+    "debug_url": "https://steel.example/debug",
+    "ws_url": "ws://live",
+    "fingerprint_injection": None,
+    "passwords": [],
+    "auth_options": {"realm": "example.com"},
+    "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+    "user_settings": {},
+}
+
+
+@_in_browser_activity_context
+async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clients():
+    """Cancelling the activity after the browser connected still releases its CDP clients.
+
+    Parallel data setup is still running when the activity is cancelled (user pause,
+    heartbeat cancel). The browser side already attached DOMService and
+    Playwright; those handles must reach the finally-scheduled cleanup instead
+    of being dropped with the cancelled gather.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    connected, validated, data_entered, data_release = (asyncio.Event() for _ in range(4))
+
+    class _ConnectingDomService(_FakeDomService):
+        async def connect(self):
+            connected.set()
+
+    async def data_setup_never_finishes(*_args, **_kwargs):
+        data_entered.set()
+        await data_release.wait()
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _ConnectingDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(new=data_setup_never_finishes),
+                "domains.spawn_browser_agent_v3.handler._require_live_playwright_client": dict(new=_validated_setup_attach(validated)),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+            },
+        ):
+            stack.enter_context(target)
+        earlier_cleanups = set(handler._background_browser_cleanup_tasks)
+        run = asyncio.create_task(
+            spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Check the inbox",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+        )
+        try:
+            await asyncio.wait_for(asyncio.gather(connected.wait(), validated.wait(), data_entered.wait()), timeout=10)
+            assert not run.done(), "parallel data setup was not held at the intended boundary"
+            run.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run
+        finally:
+            data_release.set()
+            if not run.done():
+                run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+        own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+        if own_cleanups:
+            await asyncio.wait_for(asyncio.gather(*own_cleanups, return_exceptions=True), timeout=10)
+    _FakeDomService.last_instance.disconnect.assert_awaited()
+    fake_browser.close.assert_awaited()
+
+    fake_browser._fixture_playwright_instance.stop.assert_awaited()
+
+
+@_in_browser_activity_context
+async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser():
+    """A browser side cancelled mid-connect stays owned until its wedged disconnect is bounded.
+
+    Data setup fails after DOMService connected but while the browser side
+    is still attaching. The cancelled browser side tears down its client itself.
+    With production ordering (the 20s disconnect bound outlives the parallel
+    setup's 10s wait), the still-releasing side must stay tracked for the
+    worker's drain, and its wedged CDP stop must be detached at its own bound,
+    not awaited inline forever.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    connected = asyncio.Event()
+    release = asyncio.Event()
+
+    async def still_connecting(*_args, **_kwargs):
+        await release.wait()
+
+    async def wedged_stop(*_args, **_kwargs):
+        # Like DomService.disconnect, a cancel while draining continues into a wedged stop.
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    class _StillConnectingDomService(_FakeDomService):
+        def __init__(self, *args, cdp_multiplexer=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.cdp_multiplexer = cdp_multiplexer
+            self.session.get_current_page = still_connecting
+            self.disconnect = AsyncMock(side_effect=wedged_stop)
+
+        async def connect(self):
+            connected.set()
+
+    multiplexer = SimpleNamespace(close=AsyncMock())
+
+    async def data_setup_fails_after_connect(*_args, **_kwargs):
+        await connected.wait()
+        raise RuntimeError("credential setup failed")
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _StillConnectingDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(
+                    new=data_setup_fails_after_connect
+                ),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+                "domains.spawn_browser_agent_v3.handler.open_browser_cdp_connection": dict(
+                    new=AsyncMock(return_value=("ws://127.0.0.1:1/devtools/browser/rose-single-cdp", multiplexer))
+                ),
+                # Production ordering: the disconnect bound outlives the setup wait.
+                "domains.spawn_browser_agent_v3.handler.BROWSER_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.5),
+                "domains.spawn_browser_agent_v3.handler.BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.05),
+            },
+        ):
+            stack.enter_context(target)
+        earlier_cleanups = set(handler._background_browser_cleanup_tasks)
+        try:
+            with pytest.raises(RuntimeError, match="credential setup failed"):
+                await asyncio.wait_for(
+                    spawn_browser_agent_activity_v3(
+                        user_id="user-1",
+                        agent_id="agent-1",
+                        goal="Check the inbox",
+                        tool_call_id="tool-1",
+                        output_schema={"fields": [{"name": "result", "type": "string"}]},
+                        use_claude_mode=False,
+                        start_url="https://example.com",
+                    ),
+                    timeout=10,
+                )
+            _FakeDomService.last_instance.disconnect.assert_awaited()
+            own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            setup_sides = [task for task in own_cleanups if task.get_name() == "browser-setup:agent-1"]
+            assert setup_sides and not setup_sides[0].done(), (
+                "a browser side still releasing after the setup wait must stay tracked for the worker's drain"
+            )
+            await asyncio.wait(setup_sides, timeout=5)
+            assert setup_sides[0].done(), "the detached browser side must finish once its disconnect is bounded"
+            multiplexer.close.assert_awaited_once()  # a timed-out disconnect proves no release
+            own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            assert any(
+                task.get_name() == handler._EXPIRED_OPTIONAL_CDP_TASK_NAME and not task.done()
+                for task in own_cleanups
+            ), "the wedged disconnect must be detached at its own bound, not awaited inline forever"
+        finally:
+            release.set()
+            pending = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            if pending:
+                await asyncio.wait(pending, timeout=10)
+
+
+@_in_browser_activity_context
+async def test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wedged():
+    """A failed activity whose DOMService disconnect wedges still frees Tilion's CDP slot.
+
+    Browser setup connected and handed its clients to the activity, then parallel data
+    setup failed. The error handler's bounded disconnect timed out; a timeout does
+    not prove the loopback client detached, so the multiplexer (captured before
+    disconnect clears it) must be closed.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    release = asyncio.Event()
+    browser_ready, validated = asyncio.Event(), asyncio.Event()
+
+    async def wedged_stop(*_args, **_kwargs):
+        # Like DomService.disconnect, a cancel while draining continues into a wedged stop.
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    class _WedgedDisconnectDomService(_FakeDomService):
+        def __init__(self, *args, cdp_multiplexer=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.cdp_multiplexer = cdp_multiplexer
+            self.disconnect = AsyncMock(side_effect=wedged_stop)
+
+        async def connect(self):
+            browser_ready.set()
+
+    async def data_setup_fails_after_browser(*_args, **_kwargs):
+        await asyncio.gather(browser_ready.wait(), validated.wait())
+        raise RuntimeError("credential setup failed")
+
+    multiplexer = SimpleNamespace(close=AsyncMock())
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _WedgedDisconnectDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(
+                    new=data_setup_fails_after_browser
+                ),
+                "domains.spawn_browser_agent_v3.handler._require_live_playwright_client": dict(new=_validated_setup_attach(validated)),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+                "domains.spawn_browser_agent_v3.handler.open_browser_cdp_connection": dict(
+                    new=AsyncMock(return_value=("ws://127.0.0.1:1/devtools/browser/rose-single-cdp", multiplexer))
+                ),
+                "domains.spawn_browser_agent_v3.handler.BROWSER_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.05),
+            },
+        ):
+            stack.enter_context(target)
+        earlier_cleanups = set(handler._background_browser_cleanup_tasks)
+        try:
+            with pytest.raises(RuntimeError, match="credential setup failed"):
+                await asyncio.wait_for(
+                    spawn_browser_agent_activity_v3(
+                        user_id="user-1",
+                        agent_id="agent-1",
+                        goal="Check the inbox",
+                        tool_call_id="tool-1",
+                        output_schema={"fields": [{"name": "result", "type": "string"}]},
+                        use_claude_mode=False,
+                        start_url="https://example.com",
+                    ),
+                    timeout=20,
+                )
+            _FakeDomService.last_instance.disconnect.assert_awaited()
+            multiplexer.close.assert_awaited()
+        finally:
+            release.set()
+            pending = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            if pending:
+                await asyncio.wait(pending, timeout=10)
+
+
+@_in_browser_activity_context
+async def test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom():
+    """A hung Playwright stop after a failed CDP attach does not block the DOMService release.
+
+    The Playwright side's own teardown runs before the browser setup's DOMService
+    disconnect; an unbounded stop there would keep the connected DOM client (and
+    Tilion's single CDP slot) attached indefinitely.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    release, data_entered, attach_refused = (asyncio.Event() for _ in range(3))
+
+    async def hung_stop(*_args, **_kwargs):
+        await release.wait()
+
+    async def data_setup_never_finishes(*_args, **_kwargs):
+        data_entered.set()
+        await release.wait()
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    instance = _FakePlaywright(fake_browser)
+    async def refuse_attach(*_args, **_kwargs):
+        await data_entered.wait()
+        attach_refused.set()
+        raise RuntimeError("cdp attach refused")
+
+    instance.chromium.connect_over_cdp = AsyncMock(side_effect=refuse_attach)
+    instance.stop = AsyncMock(side_effect=hung_stop)
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    _FakeDomService.last_instance = None
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _FakeDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(new=data_setup_never_finishes),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+                "playwright.async_api.async_playwright": dict(return_value=_FakeAsyncPlaywright(instance)),
+            },
+        ):
+            stack.enter_context(target)
+        try:
+            with pytest.raises(RuntimeError, match="cdp attach refused"):
+                await asyncio.wait_for(
+                    spawn_browser_agent_activity_v3(
+                        user_id="user-1",
+                        agent_id="agent-1",
+                        goal="Check the inbox",
+                        tool_call_id="tool-1",
+                        output_schema={"fields": [{"name": "result", "type": "string"}]},
+                        use_claude_mode=False,
+                        start_url="https://example.com",
+                    ),
+                    timeout=20,
+                )
+        finally:
+            release.set()
+    assert data_entered.is_set() and attach_refused.is_set()
+    instance.stop.assert_awaited()
+    _FakeDomService.last_instance.disconnect.assert_awaited()
+
 
 async def _run_browser_activity_cancelled_mid_step(cancellation_details):
     """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
@@ -37930,6 +38739,10 @@ async def run_all_tests():
         test_execute_action_request_payment_card_accepts_image_urls_rendered_on_page,
     )
     await r.record_async(
+        "verifier_history_keeps_card_receipt_image_urls_after_private_entry",
+        test_verifier_history_keeps_card_receipt_image_urls_after_private_entry,
+    )
+    await r.record_async(
         "execute_action_request_payment_card_no_image_urls_skips_page_read",
         test_execute_action_request_payment_card_without_image_urls_skips_page_read,
     )
@@ -38541,6 +39354,14 @@ async def run_all_tests():
     await r.record_async(
         "goto_err_aborted_persists_download_to_session",
         test_goto_err_aborted_persists_download_to_session,
+    )
+    await r.record_async(
+        "execute_action_goto_download_uses_session_provider",
+        test_execute_action_goto_download_fallback_uses_the_session_provider,
+    )
+    r.record(
+        "handler_passes_session_provider_to_execute_action",
+        test_browser_handler_passes_the_session_provider_to_execute_action,
     )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
     await r.record_async(
@@ -39316,6 +40137,32 @@ async def run_all_tests():
     await r.record_async("neutral_resume_reaches_first_browser_step", test_neutral_resume_reaches_first_browser_step)
     await r.record_async("neutral_resume_defers_inventory_at_web_url", test_neutral_resume_defers_inventory_at_web_url)
     await r.record_async("neutral_resume_defers_inventory_without_metadata_url", test_neutral_resume_defers_inventory_without_metadata_url)
+    await r.record_async("background_malformed_credentials_report_error_without_blocking_actor",
+                         test_background_malformed_credentials_report_error_without_blocking_actor)
+    await r.record_async(
+        "reattached_session_starts_in_its_credential_realm",
+        test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to,
+    )
+    await r.record_async(
+        "credential_setup_failure_disconnects_connected_browser_clients",
+        test_data_setup_failure_disconnects_the_connected_browser_clients,
+    )
+    await r.record_async(
+        "activity_cancelled_mid_setup_releases_connected_browser_clients",
+        test_activity_cancelled_mid_setup_releases_the_connected_browser_clients,
+    )
+    await r.record_async(
+        "setup_failure_bounds_hung_disconnect_of_connecting_browser",
+        test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser,
+    )
+    await r.record_async(
+        "failed_activity_closes_multiplexer_when_disconnect_wedged",
+        test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wedged,
+    )
+    await r.record_async(
+        "playwright_connect_failure_hung_stop_still_disconnects_dom",
+        test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom,
+    )
     await r.record_async(
         "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",
         test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow,

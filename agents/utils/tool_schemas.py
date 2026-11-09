@@ -1286,7 +1286,8 @@ class SpawnAgentTool(BaseModel):
             "Optional when type='code'. GitHub repository URL to clone and sync to. "
             "Ignored for every other type. Only provide this when the user supplied a real, "
             "accessible repository URL; do not invent placeholder repositories. If omitted, "
-            "the GitHub repo defaults to a repo automatically created for this agent tree."
+            "uses the current project's repo when the agent is in a project, otherwise a repo "
+            "created for this agent tree."
         ),
     )
     code_session_id: Optional[str] = Field(

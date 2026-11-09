@@ -4,10 +4,13 @@ import { TrajectoryWorkGroup } from '@/features/terminal-component-group/compone
 import { groupTrajectoryWork } from '@/features/terminal-component-group/components/trajectoryWorkGroups';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
-import { ThinkingIndicator } from '@/features/terminal-component-group/components/ThinkingIndicator';
 import { makeCtx } from './browser-agent-chip.fixtures';
 import { msg } from './code-agent-steering.fixtures';
 import { renderWithProviders } from './test-wrapper';
+import { extractUpdatePayload } from '@/lib/realtime-types/extractors';
+import { handleUpdateAgent } from '@/features/agent-context/hooks/realtimeHandlers';
+import { reconcileAgent } from '@/lib/progressEstimate';
+import type { AgentDetail } from '@/lib/api';
 vi.mock('@/components/ThinkingAnimation', () => ({ default: () => null }));
 const start = Date.UTC(2026, 9, 21, 12);
 function activity(toolName: string, id = toolName, at = start, toolStatus = 'IN_PROGRESS') {
@@ -52,6 +55,50 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe('current work batch elapsed time and ring semantics', () => {
+  it('keeps the captured database pause at 1h 21m and accepts the canonical refresh', () => {
+    // Retained realtime.messages frames for 77783ad2 on 2026-11-07. The database
+    // trigger serializes TIMESTAMP WITHOUT TIME ZONE, unlike the API emitter.
+    const id = '77783ad2-f547-473d-8191-a98c173edc97';
+    const rows = [activity('read_file', 'work', Date.parse('2026-11-07T18:58:57.979Z'))];
+    let agent = {
+      ...makeCtx(rows).agent,
+      agent_id: id,
+      status: 'ACTIVE',
+      updated_at: '2026-11-07T19:46:29.358Z',
+      user_control_revision: 0,
+    } as AgentDetail;
+    const tree = () => (
+      <AgentContext.Provider value={{ ...makeCtx(rows), agent, selectedAgentId: id }}>
+        <MessageList showThinkingIndicator={false} />
+      </AgentContext.Provider>
+    );
+    const view = renderWithProviders(tree());
+    for (const updatedAt of ['2026-11-07T20:20:51.002', '2026-11-07T20:20:51.226']) {
+      const update = extractUpdatePayload({
+        payload: {
+          schema: 'public',
+          table: 'Agent',
+          record: { id, updatedAt, status: 'PAUSED', userControlRevision: 1 },
+        },
+      });
+      expect(update).not.toBeNull();
+      handleUpdateAgent(
+        update!,
+        (next) => {
+          agent = (typeof next === 'function' ? next(agent) : next)!;
+        },
+        () => {},
+      );
+      view.rerender(tree());
+      expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(
+        'Interrupted after 1h 21m',
+      );
+      expect(agent.updated_at).toBe(`${updatedAt}Z`);
+    }
+    const refreshed = { ...agent, title: 'Refreshed', updated_at: '2026-11-07T20:20:51.226Z' };
+    expect(reconcileAgent(agent, refreshed)).toMatchObject({ title: 'Refreshed' });
+  });
+
   it('shows elapsed time, keeps its start when the activity rotates, and stops its timer after compression', () => {
     vi.useFakeTimers();
     vi.setSystemTime(start + 2000);
@@ -199,16 +246,43 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('3.0s');
     expect(renderMessage.mock.calls.length).toBe(rendersWhenOpened);
   });
+  it('stays on the newest page while open as a running batch crosses a multiple of 50', () => {
+    const batch = (n: number) =>
+      group(Array.from({ length: n }, (_, i) => activity('read_file', `grow-${i}`, start + i)));
+    const show = (m: { message_id: string }) => <span>{m.message_id}</span>;
+    const view = render(<TrajectoryWorkGroup group={batch(100)} renderMessage={show} />);
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+    expect(screen.getByText('grow-99')).toBeInTheDocument();
+    view.rerender(<TrajectoryWorkGroup group={batch(101)} renderMessage={show} />);
+    // A new third page appeared; the open view follows it (the 50 newest: 51–100).
+    expect(screen.getByText('3 / 3')).toBeInTheDocument();
+    expect(screen.getByText('grow-100')).toBeInTheDocument();
+    expect(screen.getByText('grow-51')).toBeInTheDocument();
+    expect(screen.queryByText('grow-50')).toBeNull();
+    // An older page stays one page back from the newest: pages count back from
+    // the newest activity, so its rows slide by one as each new activity lands.
+    fireEvent.click(screen.getByRole('button', { name: 'Previous activities' }));
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    expect(screen.getByText('grow-1')).toBeInTheDocument();
+    expect(screen.getByText('grow-50')).toBeInTheDocument();
+    view.rerender(<TrajectoryWorkGroup group={batch(102)} renderMessage={show} />);
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    expect(screen.queryByText('grow-1')).toBeNull();
+    expect(screen.getByText('grow-2')).toBeInTheDocument();
+    expect(screen.getByText('grow-51')).toBeInTheDocument();
+  });
   it('opens a long running batch on its latest page and names the history it controls', () => {
-    const messages = Array.from({ length: 45 }, (_, i) =>
+    const messages = Array.from({ length: 120 }, (_, i) =>
       activity('read_file', `long-${i}`, start + i),
     );
     render(<TrajectoryWorkGroup group={group(messages)} renderMessage={() => null} />);
     const toggle = screen.getByRole('button');
     expect(toggle).not.toHaveAttribute('aria-controls');
     fireEvent.click(toggle);
+    // 50 a page, anchored at the newest: the latest page holds the 50 most recent.
     expect(screen.getByText('3 / 3')).toBeInTheDocument();
-    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(5);
+    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(50);
     expect(toggle).toHaveAttribute(
       'aria-controls',
       screen.getByTestId('trajectory-work-history').id,
@@ -255,28 +329,16 @@ describe('current work batch elapsed time and ring semantics', () => {
       'data-agent-start-phase',
     );
   });
-  it('thinking always shows the ↓ token counter, live before the first byte or persisted', () => {
+  it('thinking is a stock activity row and never shows a token count estimated from text', () => {
     const live = msg(
       { toolName: 'thought', title: 'Thinking', toolStatus: 'IN_PROGRESS', ephemeral: true },
       { message_id: 'streaming:thinking', timestamp: '' },
     );
-    render(
-      <TrajectoryWorkGroup
-        group={group([live])}
-        renderMessage={() => null}
-        indicator={
-          <ThinkingIndicator
-            compact
-            isClaudeStreaming={false}
-            streamingTokenCount={0}
-            animatedTokenCount={0}
-          />
-        }
-      />,
-    );
+    render(<TrajectoryWorkGroup group={group([live])} renderMessage={() => null} />);
     const line = () => screen.getByTestId('trajectory-activity-line');
-    expect(line()).toHaveTextContent(/^Thinking0 tokens$/);
-    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
+    expect(line()).toHaveTextContent(/^Thinking$/);
+    expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
+    expect(screen.queryByTestId('thinking-indicator')).toBeNull();
     cleanup();
     const thought = msg(
       {},
@@ -288,11 +350,9 @@ describe('current work batch elapsed time and ring semantics', () => {
       },
     );
     render(<TrajectoryWorkGroup group={group([thought])} renderMessage={() => null} />);
-    expect(line()).toHaveTextContent(/^Thinking100 tokens$/);
-    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
-    expect(
-      screen.getByTestId('trajectory-work-group').querySelector('.lucide-lightbulb'),
-    ).not.toBeNull();
+    expect(line()).toHaveTextContent(/^Thinking$/);
+    expect(line().querySelector('.lucide-arrow-down')).toBeNull();
+    expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
   });
   it('does not invent elapsed time for a missing timestamp', () => {
     const untimed = { ...activity('read_file'), timestamp: '' };

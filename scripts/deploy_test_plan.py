@@ -35,29 +35,32 @@ PATHS = {
     'semantic-stack': ['front-end/*', 'back-end/*', 'agents/*', 'scripts/*', '.github/*'],
     'live-probes': ['back-end/*', 'agents/*', 'scripts/*', '.github/*'],
     'e2b-smoke': ['agents/*', 'back-end/*', 'scripts/*', '.github/*'],
-    'agentcard-lifecycle': ['back-end/src/domains/agentcard/*', 'back-end/src/domains/purchases/*',
-                           'back-end/src/providers/*', 'agents/domains/request_payment_card/*',
-                           'front-end/src/features/test-payment/*', 'agents/benchmarks/*',
-                           'scripts/run*', 'back-end/prisma/*'],
     'seed-cache-decision': ['back-end/*', 'agents/*', 'scripts/*'],
     'canonical-seed-whatsapp-content': ['back-end/*', 'agents/*', 'scripts/*'],
     'seed-memory-ratchet': ['back-end/*', 'agents/*', 'scripts/*'],
+    'mac-app-static': ['mac-app/*'],
+}
+# Quick static checks that run only when triggered; every other quick category is mandatory.
+CONDITIONAL_QUICK = {'mac-app-static'}
+# Original /deploy Step 4m-lint (DEPRECATED_deploy.md L1380-1388): the Mac-app verifier when mac-app/ changed.
+# Darwin-only; elsewhere a triggered run is recorded as a platform omission, never a pass.
+MAC_APP_STATIC = {'name': 'mac-app-static', 'category': 'mac-app-static',
+                  'command': ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check'],
+                  'cwd': 'mac-app', 'platform': 'darwin', 'timeout_seconds': 600, 'checks': ['mac-app-static']}
+# Categories selected on every deploy regardless of the diff, with the reason recorded as evidence.
+ALWAYS = {
+    'e2b-smoke': ('every deploy: the Claude Code E2B sandbox smoke is never diff-skipped '
+                  '(DEPRECATED_deploy.md 6c L2226; measured ~106 s, ~840 MB)'),
 }
 
 
-def select(template: dict, changed: list[str], result: dict, binding: dict, base: str = 'origin/main',
-           skip_agentcard: str | None = None) -> dict:
-    if skip_agentcard is not None and not skip_agentcard.strip():
-        raise ValueError('AgentCard opt-out requires a nonempty reason')
+def select(template: dict, changed: list[str], result: dict, binding: dict | None,
+           base: str = 'origin/main') -> dict:
+    """binding=None is selection-only: the same inclusions/omissions, no worker checks or plan validation."""
     gates, omitted = [], []
     for recipe in template['gates']:
         gate = dict(recipe)
         category = gate.get('category', gate['name'])
-        if category == 'agentcard-lifecycle' and skip_agentcard is not None:
-            omitted.append({'gate': gate['name'], 'category': category,
-                            'reason': 'explicit AgentCard opt-out: ' + skip_agentcard.strip(),
-                            'disposition': 'SKIPPED', 'executed': False})
-            continue
         if category in {'eslint', 'format'} and any(
                 Path(arg).name == 'check_deploy_static.py' for arg in gate['command']):
             command = list(gate['command'])
@@ -67,11 +70,8 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
                 command.extend(['--base', base])
             gate['command'] = command
         quick = category in QUICK
-        if gate.get("platform") and gate["platform"] != sys.platform and gate["name"] not in binding:
-            omitted.append({"gate": gate["name"], "reason": "platform not available; not a test pass"})
-            continue
         evidence = []
-        if quick:
+        if quick and category not in CONDITIONAL_QUICK:
             evidence.append('mandatory quick check')
         if result['all']:
             evidence.extend(result['reasons'] or ['dependency graph fallback ALL'])
@@ -80,6 +80,8 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
                 raise ValueError(f"{gate['name']}: graph lane {lane!r} is not defined by select_affected_tests")
             if result['lanes'][lane]:
                 evidence.append(f"dependency graph {lane}: {len(result['lanes'][lane])} affected test units")
+        if category in ALWAYS:
+            evidence.append(ALWAYS[category])
         if any(fnmatchcase(path, pattern) for path in changed for pattern in PATHS.get(category, [])):
             evidence.append('runtime/contract path trigger')
         # A new/unregistered category is not silently dropped.
@@ -89,9 +91,15 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
             omitted.append({'gate': gate['name'], 'reason': 'no dependency or runtime-path trigger',
                             'changed_files': changed})
             continue
+        if gate.get("platform") and gate["platform"] != sys.platform and gate["name"] not in (binding or {}):
+            omitted.append({"gate": gate["name"], "category": category,
+                            "reason": "platform not available; not a test pass",
+                            "disposition": "PLATFORM_OMITTED", "executed": False,
+                            "platform": gate["platform"], "selection_evidence": evidence})
+            continue
         gate.update(category=category, quick=quick, selection_evidence=evidence)
         gate.pop('after', None)  # no sibling gate is a prerequisite
-        if not quick:
+        if not quick and binding is not None:
             worker = binding.get(gate['name'])
             if not worker:
                 raise ValueError(f"{gate['name']}: independent worker binding missing")
@@ -121,17 +129,26 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
                 gate.update(worker_recipe=worker['recipe'], case_protocol=True,
                             result_transport=worker.get('result_transport', 'file'))
         gates.append(gate)
-    planned = {'version': 1, 'base': base, 'source': source(ROOT), 'changed_files': changed,
-               'selection': result, 'gates': gates, 'omitted': omitted,
+    planned = {'version': 1, 'base': base, 'source': source(ROOT) if binding is not None else None,
+               'changed_files': changed, 'selection': result, 'gates': gates, 'omitted': omitted,
                'policy': 'quick-parallel / selected-parallel / RCA / focus / failed-gates / final'}
-    validate_plan(planned)
+    if binding is not None:
+        validate_plan(planned)
     return planned
 
 
-def standard_template() -> dict:
+# Blacksmith gates run on their own VMs, so their worker counts must not follow the coordinating host's live
+# MemAvailable: a few hundred MB of drift flipped the structural gate's --max-workers between 4 and 5, so a
+# regenerated plan no longer matched the staged cycle ("bound to a different plan or source") and a refresh could
+# not be resumed. This is the 8-CPU / 16 GB devbox profile with healthy headroom (structural gate: 4 workers, the count the first sweep of PR #1751 ran).
+BLACKSMITH_REFERENCE_HOST = ("--host-cpus", "8", "--host-mem-mb", "13500", "--host-total-mem-mb", "16000",
+                             "--host-watchdog-mb", "14400")
+
+
+def standard_template(host: tuple = ()) -> dict:
     result = subprocess.run([sys.executable, str(ROOT / "scripts/run_deploy_pipeline.py"),
         "plan", "--group", "all", "--backend", "--frontend", "--agents", "--smoke", "cloud",
-        "--agentcard", "--live-probes", "--semantic-stack", "--e2b-smoke"],
+        "--live-probes", "--semantic-stack", "--e2b-smoke", *host],
         cwd=ROOT, check=True, capture_output=True, text=True, timeout=PLANNING_TIMEOUT_SECONDS)
     lanes = json.loads(result.stdout)["lanes"]
     gates = [{"name": lane["name"], "category": lane["name"], "command": lane["command"],
@@ -163,34 +180,44 @@ def standard_template() -> dict:
          "cwd": "back-end", "checks": ["seed-memory-ratchet"]},
         {"name": "mac-app-coverage-blackbox", "command": ["npm", "run", "test:coverage"],
          "cwd": "mac-app", "platform": "darwin", "checks": ["mac-app-coverage-blackbox"]},
+        dict(MAC_APP_STATIC, command=list(MAC_APP_STATIC['command']), checks=list(MAC_APP_STATIC['checks'])),
     ]
     return {"gates": gates}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--template', type=Path, help='optional case-aware recipes; default existing full gate commands')
-    workers = parser.add_mutually_exclusive_group(required=True)
+    workers = parser.add_mutually_exclusive_group()
     workers.add_argument('--workers', type=Path, help='explicit existing adapter bindings')
     workers.add_argument('--inventory', type=Path, help='prepared worker identities; generate full-suite bindings')
     parser.add_argument('--base', default='origin/main')
-    parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--skip-agentcard', metavar='REASON',
-                        help='explicitly skip the optional AgentCard lifecycle category, recording why')
-    args = parser.parse_args()
-    if args.skip_agentcard is not None and not args.skip_agentcard.strip():
-        parser.error('--skip-agentcard requires a nonempty reason')
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--list-selected', action='store_true',
+                        help='print the same selection as JSON (selected/quick/needs_worker/omitted) '
+                             'without worker bindings; writes nothing')
+    args = parser.parse_args(argv)
+    if args.list_selected and (args.workers or args.inventory or args.output):
+        parser.error('--list-selected takes no --workers, --inventory or --output')
+    if not args.list_selected and not (args.workers or args.inventory):
+        parser.error('one of the arguments --workers --inventory is required')
+    if not args.list_selected and args.output is None:
+        parser.error('the following arguments are required: --output')
     changed = changed_files(args.base, None)
     selected = Selector().select(changed)
     result = {'all': selected.all_lanes, 'reasons': selected.reasons,
               'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
     template = json.loads(args.template.read_text()) if args.template else standard_template()
-    binding_template = ({**template, 'gates': [gate for gate in template['gates']
-                         if gate.get('category', gate['name']) != 'agentcard-lifecycle']}
-                        if args.skip_agentcard is not None else template)
-    bindings = (generate_bindings(binding_template, json.loads(args.inventory.read_text()), ROOT)
+    if args.list_selected:
+        selection = select(template, changed, result, None, base=args.base)
+        gates = selection['gates']
+        print(json.dumps({'selected': [g['name'] for g in gates], 'quick': [g['name'] for g in gates if g['quick']],
+                          'needs_worker': [g['name'] for g in gates if not g['quick']],
+                          'omitted': selection['omitted']}))
+        return 0
+    bindings = (generate_bindings(template, json.loads(args.inventory.read_text()), ROOT)
                 if args.inventory else json.loads(args.workers.read_text()))
-    plan = select(template, changed, result, bindings, base=args.base, skip_agentcard=args.skip_agentcard)
+    plan = select(template, changed, result, bindings, base=args.base)
     write(args.output, plan)
     print(json.dumps({'selected': [g['name'] for g in plan['gates']], 'omitted': plan['omitted']}))
     return 0

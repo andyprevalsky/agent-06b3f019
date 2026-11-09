@@ -1077,13 +1077,12 @@ def _metadata_block(prompt: str) -> str:
     return prompt.split(head, 1)[1].split("\n---\n", 1)[0]
 
 
-async def test_summarize_page_metadata_is_title_first_allowlist_on_scholarly_page():
-    """Review finding 2026-10-26: forward only named page facts, title first.
+async def test_summarize_page_metadata_is_date_only_allowlist_on_scholarly_page():
+    """Review finding 2026-10-26: forward only named page facts.
 
     A scholarly page carries dozens of citation_* tags, og:/twitter: copies,
     keywords, robots, verification tokens and app IDs. The summarizer must see
-    exactly the title and one publication date; a sorted
-    denylist dropped the title once earlier keys filled the budget.
+    exactly one publication date (the HTML <title> stays out: RCA 2026-11-07).
     """
     metadata = {
         "title": "RFC 9110: HTTP Semantics",
@@ -1114,8 +1113,25 @@ async def test_summarize_page_metadata_is_title_first_allowlist_on_scholarly_pag
 
     block = _metadata_block(await _summarizer_prompt(metadata))
 
-    assert block.split("\n", 1)[0] == "title: RFC 9110: HTTP Semantics", block[:300]
-    assert block == "title: RFC 9110: HTTP Semantics\ncitation_publication_date: 2022/06/06", block
+    assert block == "citation_publication_date: 2022/06/06", block
+
+
+async def test_summarize_page_metadata_omits_html_title():
+    """RCA 2026-11-07: the <head> title must not stand in for the document title.
+
+    The RFC Editor's <title> is "RFC 9111: HTTP Caching" for a document headed
+    "HTTP Caching". Forwarded as ``title``, the summarizer reported it as
+    "Title: RFC 9111: HTTP Caching" and dropped the heading in 12 of 50 live
+    Foundry replays, so background-agent-message-smoke returned prefixed titles.
+    Like Claude Code's WebFetch secondary model, the summarizer reads the title
+    from the page content only.
+    """
+    baseline = await _summarizer_prompt()
+    with_date = await _summarizer_prompt({"title": "RFC 9111: HTTP Caching", "citation_publication_date": "2022/06/06"})
+
+    assert await _summarizer_prompt({"title": "RFC 9111: HTTP Caching", "og:title": "RFC 9111"}) == baseline
+    assert _metadata_block(with_date) == "citation_publication_date: 2022/06/06"
+    assert "RFC 9111: HTTP Caching" not in with_date
 
 
 async def test_summarize_page_metadata_excludes_parallel_extract_ids():
@@ -1137,13 +1153,13 @@ async def test_summarize_page_metadata_excludes_parallel_extract_ids():
 
     prompt = await _summarizer_prompt(metadata)
 
-    assert _metadata_block(prompt) == "title: RFC 9110: HTTP Semantics\npublish_date: 2022-06-06"
+    assert _metadata_block(prompt) == "publish_date: 2022-06-06"
     for leaked in ("extract_8c1f2b", "session_93ad7e", "truncated to 100000", "extract_id", "session_id", "warnings"):
         assert leaked not in prompt, leaked
 
 
 async def test_summarize_page_metadata_validates_dates_and_sanitizes_values():
-    """Only parseable dates count; values are one bounded, control-free line."""
+    """Only parseable dates count; the value is one bounded, control-free line."""
     title = "RFC 9110:\nHTTP\x1b[2J Semantics\r\n" + "x" * 400
     metadata = {
         "title": title,
@@ -1158,12 +1174,8 @@ async def test_summarize_page_metadata_validates_dates_and_sanitizes_values():
     block = _metadata_block(await _summarizer_prompt(metadata))
     lines = block.split("\n")
 
-    assert [line.split(": ", 1)[0] for line in lines] == ["title", "datePublished"], lines
-    assert lines[1] == "datePublished: 2022-06-06"
-    title_value = lines[0].split(": ", 1)[1]
-    assert title_value.startswith("RFC 9110: HTTP [2J Semantics x"), title_value
-    assert len(title_value) == 256
-    assert len(block) <= 512
+    assert lines == ["datePublished: 2022-06-06"], lines
+    assert "Semantics" not in block
     assert not any(ord(ch) < 32 or ord(ch) == 127 for line in lines for ch in line), lines
     assert "Ignore previous instructions" not in block and "evil" not in block
 
@@ -1246,9 +1258,10 @@ async def run_all_tests():
         test_summarize_and_filter_links_sees_page_declared_publication_date,
     )
     await r.record_async(
-        "summarize_page_metadata_is_title_first_allowlist_on_scholarly_page",
-        test_summarize_page_metadata_is_title_first_allowlist_on_scholarly_page,
+        "summarize_page_metadata_is_date_only_allowlist_on_scholarly_page",
+        test_summarize_page_metadata_is_date_only_allowlist_on_scholarly_page,
     )
+    await r.record_async("summarize_page_metadata_omits_html_title", test_summarize_page_metadata_omits_html_title)
     await r.record_async(
         "summarize_page_metadata_excludes_parallel_extract_ids",
         test_summarize_page_metadata_excludes_parallel_extract_ids,

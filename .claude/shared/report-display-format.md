@@ -195,10 +195,11 @@ whose reason was not recorded use a muted amber pattern. Distinguish the work
 and wait rows by labels as well as color. Keep wait reasons visible.
 
 An explicit user/operator AgentCard election shows **SKIPPED — <reason>** for
-the elected local and/or production gate. Preserve original failures, cleanup
-obligations and unsettled funds; SKIPPED supplies no PASS, cleanup or financial
-settlement and skips no other gate. Keep the elected gate visible even when
-the staged planner uses `--skip-agentcard "<reason>"` (legacy: omit `--agentcard`).
+the elected production gate (or the legacy local lane). Preserve original failures,
+cleanup obligations and unsettled funds; SKIPPED supplies no PASS, cleanup or
+financial settlement and skips no other gate. Keep the elected gate visible even
+when `scripts/deploy production --skip-agentcard "<reason>"` elects it (legacy
+planner: omit `--agentcard`). The sandbox lifecycle tasks are smoke rows.
 
 A benchmark scorecard may be linked as supporting evidence, but must never
 replace this deploy card or its timeline. The benchmark template below
@@ -430,5 +431,5 @@ the originating deploy. Preserve entries across refreshes and resume.
 In the fixed **EXTERNAL PROVIDER FAILURES** box, show each
 unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING**
 with affected checks and evidence. Keep the shared-axis stage timeline last.
-Outages and exhausted credits are non-blocking and create no repair agent. Waived or failed checks never become
+Outages, exhausted credits and credential or billing changes only the user can make are non-blocking and create no repair agent. Waived or failed checks never become
 PASS; preserve original measurements and native outcomes.

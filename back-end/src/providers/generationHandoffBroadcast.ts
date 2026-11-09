@@ -12,6 +12,10 @@
  *        ▼
  *   agents/helpers/wait_condition_or_handoff.py: idle parks wake, read the
  *   pointer once (continuation admission) and continue_as_new.
+ *        +
+ *   moveStrandedResumeRuns(fromQueue, liveQueue): a code/browser resume run a
+ *   new backend started on the old queue before the flip (its workers lack
+ *   those workflow types) restarts on the live queue (codeAgentResumeWorkflow.ts).
  *
  * 10k agents: O(agents) signals once per deploy instead of one pointer
  * activity + backend read per waiting agent every 30s. Best-effort by design:
@@ -21,6 +25,7 @@
  */
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { getTemporalClient, withTemporalControlDeadline } from './temporal';
+import { moveStrandedResumeRuns } from './codeAgentResumeWorkflow';
 
 export const GENERATION_HANDOFF_SIGNAL = 'generation_handoff_available';
 export const AGENT_WORKFLOW_TYPE = 'AgentWorkflow';
@@ -39,6 +44,8 @@ export interface GenerationHandoffBroadcastDependencies {
   signal(workflowId: string, signal: string, arg: string): Promise<'signalled' | 'gone'>;
   sleep(ms: number): Promise<void>;
   now(): number;
+  /** Restart resume runs stranded on the old queue (absent: skipped, e.g. in tests). */
+  moveResumeRuns?(fromQueue: string, liveQueue: string): Promise<{ moved: number; failed: number }>;
 }
 
 export interface GenerationHandoffBroadcastReport {
@@ -50,6 +57,8 @@ export interface GenerationHandoffBroadcastReport {
   failed: number;
   batches: number;
   truncated: boolean;
+  resumeRunsMoved: number;
+  resumeRunsFailed: number;
 }
 
 export function generationHandoffBroadcastQuery(fromQueue: string): string {
@@ -81,6 +90,7 @@ function temporalDependencies(): GenerationHandoffBroadcastDependencies {
     },
     sleep: (ms: number) => new Promise((done) => setTimeout(done, ms)),
     now: () => Date.now(),
+    moveResumeRuns: (fromQueue, liveQueue) => moveStrandedResumeRuns(fromQueue, liveQueue),
   };
 }
 
@@ -103,6 +113,8 @@ export async function broadcastGenerationHandoff(
     failed: 0,
     batches: 0,
     truncated: false,
+    resumeRunsMoved: 0,
+    resumeRunsFailed: 0,
   };
   const seen = new Set<string>();
   let batch: string[] = [];
@@ -135,5 +147,15 @@ export async function broadcastGenerationHandoff(
     if (batch.length >= batchSize) await flush();
   }
   await flush();
+  if (deps.moveResumeRuns) {
+    try {
+      const moved = await deps.moveResumeRuns(fromQueue, liveQueue);
+      report.resumeRunsMoved = moved.moved;
+      report.resumeRunsFailed = moved.failed;
+    } catch {
+      // Best-effort like the signals: a resend of the turn moves the run too.
+      report.resumeRunsFailed += 1;
+    }
+  }
   return report;
 }

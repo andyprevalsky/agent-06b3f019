@@ -2993,6 +2993,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.custom_system_prompt = "Be concise"
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
+    wf.project_context_section = "## Project\nYou are working in the user's project \"Rose\"."
     wf.demo_cache_goal = "stable persisted goal"
     # A simulated agent's clock reads world time (two weeks before today here).
     wf.simulated_clock_offset_seconds = -1_209_600
@@ -3032,6 +3033,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     # The conversation rides in the context argument, which run() adopts after restore.
     assert "context" not in state["runtime_state"]
     assert args[6] == context
+    assert restored.project_context_section == wf.project_context_section
     assert restored.simulated_clock_offset_seconds == -1_209_600
     assert restored._continuation_resume_state() == state
     # Button (LLM speed) must survive continue_as_new even when DEMO cache is off.
@@ -3105,6 +3107,44 @@ def test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off
     restored.context = list(args[6])
     assert restored.context == context
     assert restored._continuation_resume_state() == args[16]
+
+
+async def test_workflow_project_context_appears_once_across_continuation():
+    """V2 (RCA 2026-11-06): the project section is derived from agent config, never duplicated.
+
+    It is kept apart from user_context_section (which a failed context fetch falls
+    back to), recomputed on every start, and carried across continue_as_new so a
+    failed config fetch on the new run keeps it exactly once.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    project = {"name": "Rose", "repo_url": "https://github.com/Rose-Ai-Labs/rose", "default_branch": "main"}
+    wf = _bare_workflow_instance()
+    wf.current_phase = "PLAN"
+    wf.user_context_section = "## Personal Information\nFull Name: Test User"
+    assert wf.project_context_section == ""
+
+    async def prompt(instance) -> str:
+        with patch.object(type(instance), "_advance_cloud_agent_lifecycle", new=AsyncMock()):
+            return await instance.build_system_prompt()
+
+    home_prompt = await prompt(wf)
+    wf._apply_agent_project({"response_schema": None, "project": project})
+    first = await prompt(wf)
+    assert first.count("## Project") == 1 and first.count("Rose-Ai-Labs/rose") == 1
+    assert "## Project" not in wf.user_context_section, "user context stays the per-user section"
+    wf._apply_agent_project({"response_schema": None, "project": project})
+    assert await prompt(wf) == first, "a repeated start recomputes, never appends"
+
+    restored = _bare_workflow_instance()
+    restored.current_phase = "PLAN"
+    restored.user_context_section = wf.user_context_section
+    # wf_continuation_state_round_trip proves project_context_section survives continue_as_new.
+    restored.project_context_section = wf.project_context_section
+    restored._apply_agent_project({})  # the new run's config fetch failed
+    assert await prompt(restored) == first, "a failed fetch keeps the section exactly once"
+    restored._apply_agent_project({"response_schema": None, "project": None})
+    assert await prompt(restored) == home_prompt, "an agent moved to Home drops the section"
 
 
 def test_pending_tool_records_copy_args_and_respect_the_handoff_budget():
@@ -3641,6 +3681,113 @@ async def test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff():
         assert wf._agent_config_unavailable is False
         assert await getter() == schema
         assert fetch.await_count == 11
+
+
+async def test_workflow_project_context_recovers_after_a_failed_startup_config_fetch():
+    """CR 4501806266: a failed startup fetch_agent_config dropped the project for the run.
+
+    ``_fetch_agent_config`` returns ``{}`` when its attempts fail, so the startup
+    project apply is skipped; the later recovery read only restored output_schema
+    (and only while it was missing). An agent created with its schema then ran
+    without its project section forever. Any later successful config read must
+    apply the project, independent of the schema: reads stay one per turn with
+    backoff, a failed read keeps the section restored from the previous run
+    exactly once, an accepted schema is never replaced by a read, and a healthy
+    start pays no extra fetch.
+    """
+    import contextlib
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    project = {"name": "Rose", "repo_url": "https://github.com/Rose-Ai-Labs/rose", "default_branch": "main"}
+    accepted = {"fields": [{"name": "accepted_field", "type": "str", "required": True}]}
+    stored = {"fields": [{"name": "stored_field", "type": "str", "required": True}]}
+
+    async def prompt(instance) -> str:
+        with patch.object(type(instance), "_advance_cloud_agent_lifecycle", new=AsyncMock()):
+            return await instance.build_system_prompt()
+
+    def failed_start(output_schema, restored_section):
+        instance = _bare_workflow_instance()
+        instance.agent_id = "project-agent"
+        instance.current_phase = "PLAN"
+        instance.user_context_section = "## Personal Information\nFull Name: Test User"
+        instance.output_schema = output_schema
+        instance.project_context_section = restored_section
+        instance._agent_config_unavailable = True
+        return instance
+
+    clock = {"now": datetime(2026, 11, 7, tzinfo=timezone.utc)}
+
+    @contextlib.contextmanager
+    def workflow_env(execute_activity):
+        with (
+            patch("workflows.agent_workflow.workflow.execute_activity", new=execute_activity),
+            patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+            patch("workflows.agent_workflow.workflow.now", side_effect=lambda: clock["now"]),
+            patch("workflows.agent_workflow.workflow.random", return_value=MagicMock(random=lambda: 0.5)),
+            patch("workflows.agent_workflow.asyncio.sleep", new=AsyncMock()),
+        ):
+            yield
+
+    # The schema was supplied at create time; only the project is unknown.
+    fetch = AsyncMock(side_effect=RuntimeError("activity StartToClose timeout"))
+    wf = failed_start(accepted, "")
+    with workflow_env(fetch):
+        assert "## Project" not in await prompt(wf)
+        assert fetch.await_count == 1, "one read per turn"
+        assert "## Project" not in await prompt(wf)
+        assert fetch.await_count == 1, "no read before the backoff deadline"
+
+        fetch.side_effect = None
+        fetch.return_value = {"response_schema": stored, "project": project}
+        clock["now"] = wf._agent_config_retry_at
+        recovered = await prompt(wf)
+        assert fetch.await_count == 2
+        assert recovered.count("## Project") == 1 and recovered.count("Rose-Ai-Labs/rose") == 1
+        assert wf._agent_config_unavailable is False
+        assert wf.output_schema == accepted, "a recovery read never replaces the accepted schema"
+        assert "accepted_field" in recovered and "stored_field" not in recovered
+        assert await prompt(wf) == recovered, "recovered once, then kept without another read"
+        assert fetch.await_count == 2
+
+    # Nothing in the config yet: the section restored by continue_as_new survives
+    # the failed reads and is not duplicated by the recovery.
+    restored_wf = _bare_workflow_instance()
+    restored_wf.current_phase = "PLAN"
+    restored_wf.user_context_section = "## Personal Information\nFull Name: Test User"
+    restored_wf.output_schema = accepted
+    restored_wf._apply_agent_project({"response_schema": None, "project": project})
+    expected = await prompt(restored_wf)
+    carried = failed_start(accepted, restored_wf.project_context_section)
+    outage = AsyncMock(side_effect=RuntimeError("activity StartToClose timeout"))
+    with workflow_env(outage):
+        failed_turn = await prompt(carried)
+        assert failed_turn.count("## Project") == 1
+        outage.side_effect = None
+        outage.return_value = {"response_schema": None, "project": project}
+        clock["now"] = carried._agent_config_retry_at
+        assert await prompt(carried) == failed_turn == expected
+
+    # A missing schema and the project are recovered by the same single read.
+    both = failed_start(None, "")
+    read = AsyncMock(return_value={"response_schema": stored, "project": project})
+    with workflow_env(read):
+        text = await prompt(both)
+    assert read.await_count == 1
+    assert text.count("## Project") == 1 and "stored_field" in text
+    assert both.output_schema == stored
+
+    # A healthy start (config fetched at startup) pays no extra fetch.
+    healthy = _bare_workflow_instance()
+    healthy.agent_id = "healthy-agent"
+    healthy.current_phase = "PLAN"
+    healthy.user_context_section = "## Personal Information\nFull Name: Test User"
+    healthy.output_schema = accepted
+    untouched = AsyncMock(return_value={"response_schema": stored, "project": project})
+    with workflow_env(untouched):
+        await prompt(healthy)
+    assert untouched.await_count == 0
 
 
 def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
@@ -4217,18 +4364,26 @@ class _FakeWorkflowModule:
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
-    """Swap workflows.agent_workflow.workflow with a fake; returns original."""
+    """Swap the ``workflow`` module AgentWorkflow's code uses with a fake; returns original.
+
+    Its billing path lives in workflows.usage_tracking (UsageTrackingMixin), so that
+    module's ``workflow`` is swapped with agent_workflow's.
+    """
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     original = m.workflow
     m.workflow = fake
+    usage.workflow = fake
     return original
 
 
 def _restore_workflow(original):
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     m.workflow = original
+    usage.workflow = original
 
 
 async def test_pause_episode_preserves_user_intent_across_automatic_signals():
@@ -14290,6 +14445,10 @@ async def run_all_tests():
         "wf_continuation_carries_context_once",
         test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off,
     )
+    await r.record_async(
+        "wf_project_context_once_across_continuation",
+        test_workflow_project_context_appears_once_across_continuation,
+    )
     r.record("pending_tool_records_budget", test_pending_tool_records_copy_args_and_respect_the_handoff_budget)
     r.record("wf_parks_only_live_run_agent_calls", test_workflow_parks_only_live_run_agent_tool_calls_within_budget)
     r.record(
@@ -14345,6 +14504,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_schema_reload_is_one_attempt_per_turn_with_backoff",
         test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff,
+    )
+    await r.record_async(
+        "wf_project_context_recovers_after_failed_startup_config_fetch",
+        test_workflow_project_context_recovers_after_a_failed_startup_config_fetch,
     )
     r.record(
         "wf_coalesce_for_each_items_fills_top_creators_analysis",

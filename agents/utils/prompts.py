@@ -1,3 +1,4 @@
+import re
 from textwrap import dedent
 from typing import Any, Dict, List, Optional, Union
 
@@ -252,6 +253,50 @@ Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION ph
 
 {WORKING_WITH_OTHER_AGENTS_PROMPT.strip()}
 """
+
+
+_GITHUB_REPO_SLUG = re.compile(r"^(?:https?://|git@)?(?:www\.)?github\.com[/:]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
+
+
+def render_project_context(project: Optional[Dict[str, Any]]) -> str:
+    """`## Project` section for an agent placed in a user project; "" for a Home agent.
+
+    ``project`` is the agent detail's ``{name, repo_url, default_branch}`` summary.
+    The backend's project restore owns a code session's checkout and ignores
+    ``github_repo_link`` (back-end/src/domains/claude-code/service.ts).
+    """
+    if not isinstance(project, dict):
+        return ""
+    name = str(project.get("name") or "").strip()
+    if not name:
+        return ""
+    repo_url = str(project.get("repo_url") or "").strip()
+    if not repo_url:
+        return (
+            f'## Project\nYou are working in the user\'s project "{name}", which has no GitHub repo; '
+            "code agents start in the project's workspace."
+        )
+    match = _GITHUB_REPO_SLUG.match(repo_url)
+    repo = f"{match.group(1)}/{match.group(2)}" if match else repo_url
+    branch = str(project.get("default_branch") or "").strip() or "main"
+    return (
+        f'## Project\nYou are working in the user\'s project "{name}" (GitHub repo {repo}, default branch '
+        f"{branch}). Code agents you spawn start inside a checkout of this repo on their own branch, with its "
+        "env files and startup script. Send them repo questions and code work directly; do not search for the "
+        "repo URL or pass github_repo_link."
+    )
+
+
+def user_context_with_project(user_context_section: str, project_context_section: str = "") -> str:
+    """User-context block body led by the project section; unchanged for a Home agent.
+
+    It leads the block, ahead of the long profile/communications/network lists,
+    and stays inside the dynamic block, so cached prefixes are unaffected.
+    """
+    project = project_context_section.strip()
+    if not project:
+        return user_context_section
+    return f"{project}\n\n{user_context_section.strip() or 'No additional user context.'}"
 
 
 def build_system_prompt(
@@ -716,6 +761,8 @@ __all__ = [
     "format_required_output_schema_system_section",
     "build_verifier_prompt",
     "build_planner_system_prompt",
+    "render_project_context",
+    "user_context_with_project",
     "EXPLORE_AGENT_SYSTEM_PROMPT",
     "VERIFICATION_RULES",
     "SELF_CONTAINED_GOAL_RULE",

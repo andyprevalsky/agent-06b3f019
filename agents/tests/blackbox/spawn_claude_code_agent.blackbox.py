@@ -96,6 +96,48 @@ async def test_claude_code_session_create_mock():
     )
 
 
+async def test_session_create_outwaits_a_slow_backend_and_heartbeats():
+    """A create the backend needs minutes for completes in one attempt (RCA
+    2026-11-06-code-spawn-create-retry-duplicated-sessions): its 60 s read timed
+    out at 150 s, the activity retried, and the retries started 3 tasks.
+
+    The client read outlasts the backend's own create budget (the shared E2B
+    create slot waits up to 15 min, plus the start itself) and the activity
+    heartbeats while it waits, so the heartbeat timeout never starts a second
+    attempt beside it.
+    """
+    import httpx
+
+    import domains.spawn_claude_code_agent.repo as repo
+
+    seen: dict = {}
+
+    async def slow_backend(request):
+        seen["timeout"] = request.extensions.get("timeout")
+        await asyncio.sleep(0.35)
+        return httpx.Response(
+            200,
+            json={"success": True, "task_id": "task-slow", "sandbox_id": "sb-slow", "ws_url": "wss://x"},
+        )
+
+    setup_mock_fn(slow_backend)
+    beats: list = []
+    try:
+        with (
+            patch.object(repo, "CODE_SESSION_CREATE_HEARTBEAT_S", 0.05),
+            patch.object(repo, "safe_heartbeat", lambda message, *details: beats.append(message)),
+        ):
+            data = await repo.create_e2b_session(agent_id="agent-slow", goal="status", user_id="u-1")
+    finally:
+        teardown_mock()
+    assert data["task_id"] == "task-slow"
+    read_timeout = (seen["timeout"] or {}).get("read")
+    # Backend bound: 15 min create-slot wait + the 150 s start observed in prod.
+    assert read_timeout is not None and read_timeout >= 15 * 60 + 150, seen["timeout"]
+    assert len(beats) >= 3, beats
+    assert set(beats) == {"Starting the code-agent sandbox"}, beats
+
+
 async def test_claude_code_session_health_mock():
     """Mock verifies Claude Code session health endpoint."""
     _setup()
@@ -1081,15 +1123,85 @@ async def test_repo_close_e2b_session_happy():
     assert body["additional_paths"] == ["/foo"]
 
 
-async def test_repo_close_e2b_session_non_200_returns_empty():
-    """close_e2b_session returns {} on non-200."""
+async def test_repo_close_e2b_session_non_200_is_unconfirmed():
+    """An unconfirmed close cannot masquerade as an empty completed result."""
     setup_mock({
         "/api/claude-code-session/close": {"status": 500, "json": {"error": "x"}},
     })
     from domains.spawn_claude_code_agent.repo import close_e2b_session
 
-    data = await close_e2b_session(task_id="t")
-    assert data == {}
+    from temporalio.exceptions import ApplicationError
+
+    try:
+        await close_e2b_session(task_id="t")
+    except ApplicationError as error:
+        assert error.type == "CodeSessionCloseUnconfirmed"
+        assert error.non_retryable is True, "generic activity retry would rerun the CLI"
+    else:
+        raise AssertionError("unconfirmed close returned as a completed result")
+
+
+async def test_close_timeout_reconciles_same_task_before_activity_completion():
+    """Replay the production ReadTimeout while the backend still holds the old lease."""
+    import httpx
+    from domains.spawn_claude_code_agent import repo, service
+
+    backend_done = asyncio.Event()
+    request_lost = asyncio.Event()
+    close_requests = []
+    beats = []
+    handoff = _collatz_handoff()
+    receipt = {"output_files": [], "handoff": {"status": "present", "content": json.dumps(handoff)},
+               "code_session": {"code_session_id": "session-close", "state": "PAUSED"}}
+
+    async def backend(request):
+        if request.url.path.endswith("/close"):
+            close_requests.append(json.loads(request.content))
+            assert request.extensions["timeout"]["read"] == 180.0
+            if len(close_requests) == 1:
+                request_lost.set()
+                raise httpx.ReadTimeout("production close response lost while lease held", request=request)
+            await backend_done.wait()
+            return httpx.Response(200, json=receipt)
+        return httpx.Response(200, json={"saved": True})
+
+    setup_mock_fn(backend)
+    create = AsyncMock(return_value={"task_id": "task-close", "sandbox_id": "sb-close",
+                                    "ws_url": "wss://fixture", "uploaded_files": []})
+    loop = AsyncMock(return_value=(0, True, [], 0, 0, _collatz_stream_events()))
+    activity_task = None
+    try:
+        with (
+            patch.dict("os.environ", {"ROSE_ENABLE_CODE_AGENT_VERIFIER": ""}),
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: AsyncMock()),
+            patch.object(service, "create_e2b_session", create),
+            patch.object(service, "_run_agentic_loop", loop),
+            patch.object(service, "persist_terminal_output", AsyncMock(return_value=None)),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value="fixture")),
+            patch("helpers.model_pricing.get_model_pricing_with_fallback",
+                  AsyncMock(return_value={"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.2})),
+            patch("temporalio.activity.heartbeat"),
+            patch.object(repo, "CODE_SESSION_CREATE_HEARTBEAT_S", 0.01),
+            patch.object(repo, "safe_heartbeat", lambda *args: beats.append(args)),
+        ):
+            activity_task = asyncio.create_task(service.spawn_claude_code_activity(
+                user_id="u", agent_id="a", goal="Compute Collatz from 27.",
+                tool_call_id="tc-close", output_schema=COLLATZ_OUTPUT_SCHEMA, model="rose-labs/rose-1-flash"))
+            await asyncio.wait_for(request_lost.wait(), 5)
+            await asyncio.sleep(0.05)
+            assert not activity_task.done(), "activity completed before the backend released its lease"
+            backend_done.set()
+            result = await asyncio.wait_for(activity_task, 5)
+            assert result["success"] is True, result["message"]
+            assert result["structured_response"] == handoff
+            assert create.await_count == 1 and loop.await_count == 1, "close retry must not re-enter the CLI"
+            assert len(close_requests) == 2 and close_requests[0] == close_requests[1]
+            assert beats, "a closing activity keeps heartbeating while its backend finishes"
+    finally:
+        backend_done.set()
+        if activity_task is not None:
+            await asyncio.gather(activity_task, return_exceptions=True)
+        teardown_mock()
 
 
 async def test_repo_check_sandbox_health_happy():
@@ -3323,6 +3435,33 @@ async def test_cc_execute_tool_happy_path_yields_finished():
     assert finished.data["usage"]["service"][0]["cost_cents"] == 0.05
 
 
+async def test_cc_execute_tool_notes_the_code_provider_on_the_spawn_record():
+    """The handler keeps the CLI on the spawn's background record (wait_for 'code:<provider>').
+
+    It notes the selected provider, then the provider the activity actually ran (a
+    usage-limit switch inside the activity wins), always under the spawn's tool_call_id.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    handle = _FakeActivityHandle(
+        result={"success": True, "message": "ok", "output_files": [], "code_provider": "codex"}
+    )
+    instance = _FakeCCWorkflowInstance()
+    noted = []
+    instance._note_background_code_provider = lambda task_id, provider: noted.append((task_id, provider))
+    restore = _patch_cc_workflow(_FakeCCWorkflow(handle))
+    try:
+        await _collect_cc_events(
+            SpawnClaudeCodeAgentManager().execute_tool(instance, {"goal": "fix it", "attachments": None}, "tc-cc")
+        )
+    finally:
+        restore()
+
+    assert len(noted) == 2, noted
+    assert {task_id for task_id, _ in noted} == {"tc-cc"}
+    assert noted[-1] == ("tc-cc", "codex")
+
+
 async def test_cc_execute_tool_records_forced_provider_without_serializing_credential():
     """Forced Claude is recorded while OAuth material stays out of workflow history."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
@@ -3856,6 +3995,10 @@ async def _run_all_tests():
     print("spawn-claude-code-agent blackbox tests:")
     r = BlackboxResult()
     await r.record_async("session_create_mock", test_claude_code_session_create_mock)
+    await r.record_async(
+        "session_create_outwaits_slow_backend_and_heartbeats",
+        test_session_create_outwaits_a_slow_backend_and_heartbeats,
+    )
     await r.record_async("session_health_mock", test_claude_code_session_health_mock)
     # pure helpers
     r.record("terminal_fatal_ignores_banner_text", test_terminal_fatal_ignores_banner_text)
@@ -3937,7 +4080,8 @@ async def _run_all_tests():
         test_format_code_events_transcript_reports_project_startup,
     )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
-    await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
+    await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_is_unconfirmed)
+    await r.record_async("close_timeout_reconciles_same_task", test_close_timeout_reconciles_same_task_before_activity_completion)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
     await r.record_async("repo_health_non200", test_repo_check_sandbox_health_non_200_returns_none)
     await r.record_async("repo_health_exception", test_repo_check_sandbox_health_http_exception_returns_none)
@@ -4078,6 +4222,7 @@ async def _run_all_tests():
     await r.record_async("spawn_activity_error_reraises", test_spawn_activity_error_reraises_after_cleanup)
     # SpawnClaudeCodeAgentManager.execute_tool
     await r.record_async("cc_exec_happy", test_cc_execute_tool_happy_path_yields_finished)
+    await r.record_async("cc_exec_notes_code_provider", test_cc_execute_tool_notes_the_code_provider_on_the_spawn_record)
     await r.record_async(
         "cc_exec_forced_claude_no_serialized_credential",
         test_cc_execute_tool_records_forced_provider_without_serializing_credential,
@@ -4380,6 +4525,18 @@ def test_format_code_events_transcript_reports_project_startup():
         "[Claude] Project startup (Rose): ok in 12.3s",
         "[Claude] Project startup (Rose): failed (exit 3) in 0.4s",
         "[Claude] Project startup (Rose): timed out after 120s",
+    ]
+
+    # The Codex ws-server emits the same event stamped provider "codex".
+    codex = format_code_events_transcript(
+        [
+            {"type": "project_startup", "provider": "codex", "status": "ok", "project": "Rose", "durationMs": 2000},
+            {"type": "project_startup", "provider": "codex", "status": "failed", "project": "Rose", "exitCode": 1},
+        ]
+    )
+    assert codex.splitlines() == [
+        "[Codex] Project startup (Rose): ok in 2.0s",
+        "[Codex] Project startup (Rose): failed (exit 1)",
     ]
 
 
@@ -5804,16 +5961,29 @@ async def test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume()
     for tool_call, expected in (
         ({"goal": "g", "_fresh_conversation": True}, {"fresh_conversation": True}),
         ({"goal": "g"}, None),
+        # The spawn's task_name rides in the same request dict (the code agent's list title).
+        ({"goal": "g", "task_name": "fix_parser"}, {"task_name": "fix_parser"}),
+        (
+            {"goal": "g", "task_name": "fix_parser", "_fresh_conversation": True},
+            {"fresh_conversation": True, "task_name": "fix_parser"},
+        ),
     ):
         fake = _SequencedCCWorkflow(_CC_COMPLETED)
         restore = _patch_cc_workflow(fake)
         try:
-            await _collect_cc_events(
+            events = await _collect_cc_events(
                 SpawnClaudeCodeAgentManager().execute_tool(_HandoffCCWorkflowInstance(), tool_call, "tc-fresh")
             )
         finally:
             restore()
         assert fake.started[0][16] == expected, fake.started[0][16]
+        # metadata.code_agent.title names the code agent (its view header when opened from a URL).
+        titles = {
+            (getattr(event, "metadata", None) or {}).get("code_agent", {}).get("title")
+            for event in events
+            if (getattr(event, "metadata", None) or {}).get("code_agent")
+        }
+        assert titles == {tool_call.get("task_name")}, titles
 
     _setup()
     await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1", fresh_conversation=True)
@@ -5826,6 +5996,13 @@ async def test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume()
     await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1")
     body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
     assert "fresh_conversation" not in body, body
+    assert "task_name" not in body, body
+
+    clear_captures()
+    _setup()
+    await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1", task_name="fix_parser")
+    body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
+    assert body["task_name"] == "fix_parser", body
 
 async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
     """A drained activity restarts against the same sandbox, not a new session."""

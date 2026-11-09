@@ -147,12 +147,22 @@ with workflow.unsafe.imports_passed_through():
     from utils.prompts import (
         build_system_prompt,
         build_verifier_prompt,
+        render_project_context,
+        user_context_with_project,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
     from utils.user_tool_models import is_user_tool_name
     from workflows.agent_control import AgentControlMixin
     from workflows.background_agents import BackgroundAgentsMixin
+    from workflows.browser_agent_resume import BrowserAgentResumeWorkflow
+    from workflows.code_agent_resume import CodeAgentResumeWorkflow
     from workflows.environment_context import EnvironmentContextMixin
+    from workflows.usage_tracking import UsageTrackingMixin
+
+# Workflows served on the agent generation queue beside AgentWorkflow (worker.py).
+# Imported here so the replay-surface hash (scripts/agent_workflow_surface_hash.py)
+# covers them: a change to one rolls the generation like a change to this file.
+COMPANION_WORKFLOWS = (CodeAgentResumeWorkflow, BrowserAgentResumeWorkflow)
 
 logger = context_logger()
 
@@ -831,7 +841,7 @@ class FinalPresentationError(ValueError):
 
 
 @workflow.defn
-class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContextMixin):
+class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContextMixin, UsageTrackingMixin):
     """
     Main workflow for autonomous agent task execution.
 
@@ -912,8 +922,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
-        # The startup agent-config read failed, so output_schema is unknown
-        # (not known-absent) until a later read succeeds.
+        # The startup agent-config read failed, so output_schema and the project
+        # section are unknown (not known-absent) until a later read succeeds.
         self._agent_config_unavailable: bool = False
         # Getter reloads back off across turns while the read keeps failing.
         self._agent_config_retry_count: int = 0
@@ -970,6 +980,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.own_cost_cents: float = 0.0  # This agent's direct cost (LLM + tools)
         self.children_cost_cents: Dict[str, float] = {}  # child_agent_id -> subtree_cost
         self.subtree_cost_cents: float = 0.0  # own + sum(children) - what we report to parent
+        # The tree cost the backend stored at our last write: it adds the resume spend
+        # under us (resumed code/browser agents; never in any workflow's memory).
+        # Limit checks use the larger of the two.
+        self._persisted_tree_cents: float = 0.0
         self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
         self._cost_limit_reached: bool = False  # Flag for cost limit status
         # When a successful spawn_browser_agent return itself trips the price
@@ -1026,6 +1040,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # User customization (fetched at workflow start for dynamic name in approvals/SMS)
         self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
         self.custom_system_prompt: Optional[str] = None  # Custom personality prompt to inject
+        # `## Project` section from the agent's project placement ("" = Home); kept
+        # apart from the per-user user_context_section and recomputed each start.
+        self.project_context_section: str = ""
 
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
@@ -1301,6 +1318,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             ("custom_system_prompt", "custom_system_prompt"),
             ("agent_source", "agent_source"),
             ("user_context_section", "user_context_section"),
+            ("project_context_section", "project_context_section"),
             ("fast_cache_goal", "demo_cache_goal"),
             ("root_goal", "root_goal"),
         ):
@@ -1536,6 +1554,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "custom_system_prompt": self.custom_system_prompt,
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
+                "project_context_section": self.project_context_section,
                 "fast_cache_goal": self.demo_cache_goal,
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
@@ -2548,6 +2567,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             if not (self._deployment_resume and isinstance(response_schema, dict) and response_schema.get("fields")):
                 response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
+            self._apply_agent_project(agent_config)
             self.output_schema = response_schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
             workflow.logger.info(
@@ -3179,14 +3199,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         return generate
 
     async def _load_output_schema(self, *, poll_until_present: bool, max_attempts: int = 5) -> None:
-        """Read output_schema from the agent row while it is missing.
+        """Read the agent config while its output_schema or project is unknown.
 
         ``poll_until_present`` keeps polling a successful read that returns no
         schema yet (async schema generation at completion); otherwise the first
         successful read is final: no schema then means the task has none.
+
+        A failed startup read leaves the project section unknown too, so any
+        later successful read applies it, even when output_schema is already set
+        (an accepted schema is never replaced by a read).
         """
         attempt = 0
-        while self.output_schema is None and attempt < max_attempts:
+        while (self.output_schema is None or self._agent_config_unavailable) and attempt < max_attempts:
             attempt += 1
             try:
                 agent_config = await workflow.execute_activity(
@@ -3203,7 +3227,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._agent_config_unavailable = False
             self._agent_config_retry_count = 0
             self._agent_config_retry_at = None
-            self.output_schema = agent_config.get("response_schema")
+            self._apply_agent_project(agent_config)
+            if self.output_schema is None:
+                self.output_schema = agent_config.get("response_schema")
             workflow.logger.info(
                 f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
             )
@@ -3224,18 +3250,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
             if self.output_schema is None and self._agent_config_unavailable:
-                await self._reload_output_schema_with_backoff()
+                await self._reload_agent_config_with_backoff()
             return self.output_schema
 
         return get_schema
 
-    async def _reload_output_schema_with_backoff(self) -> None:
+    async def _reload_agent_config_with_backoff(self) -> None:
         """One config read per turn; failures back off exponentially across turns.
 
-        The getter runs every main-loop turn, so retries must not stack inside a
-        turn. Delay 1 s doubling to a 60 s cap plus up to 25% jitter (claude-code
-        withRetry.ts getRetryDelay; codex async-utils backoff.rs) spreads a
-        correlated backend outage. workflow.now()/random() keep it deterministic.
+        Recovers the output schema and the project section after a failed
+        startup read. The getter and the system-prompt builder run every
+        main-loop turn, so retries must not stack inside a turn. Delay 1 s
+        doubling to a 60 s cap plus up to 25% jitter (claude-code withRetry.ts
+        getRetryDelay; codex async-utils backoff.rs) spreads a correlated
+        backend outage. workflow.now()/random() keep it deterministic.
         """
         now = workflow.now()
         if self._agent_config_retry_at is not None and now < self._agent_config_retry_at:
@@ -3595,6 +3623,15 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_refresh_failed_revision = 0
         self._response_schema_refresh_error = None
 
+    def _apply_agent_project(self, agent_config: Dict[str, Any]) -> None:
+        """Derive the project section from a fetched agent config.
+
+        An empty config (failed fetch) keeps the section restored from the
+        previous run, so continue_as_new never loses or duplicates it.
+        """
+        if agent_config:
+            self.project_context_section = render_project_context(agent_config.get("project"))
+
     def _phase_tool_lists(self) -> Tuple[List[str], List[str]]:
         """(PLAN tools, EXECUTE tools) for this agent; root-only tools join for eligible roots."""
         if matches_demo_goal(self.goal):
@@ -3607,11 +3644,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         Called by run_agent before each LLM call.
         """
         await self._advance_cloud_agent_lifecycle(STARTING_REASONING_TITLE, "IN_PROGRESS")
+        if self._agent_config_unavailable:
+            # The startup config read failed: recover the project section (and
+            # a missing schema) instead of running without them for the rest of
+            # the run. Bounded to one read per turn with backoff.
+            await self._reload_agent_config_with_backoff()
         return build_system_prompt(
             phase=self.current_phase,
             enabled_tools=self._current_tools,
             disabled_tools=self._disabled_tools,
-            user_context_section=self.user_context_section,
+            user_context_section=user_context_with_project(self.user_context_section, self.project_context_section),
             response_schema=self.output_schema,
             tool_prompts=TOOL_PROMPTS,
         )
@@ -3803,10 +3845,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         ``helpers.generation_handoff.park_pending_tool``). Returns False when
         the tool must instead close its chip with DEPLOY_INTERRUPTED.
         """
-        if tool_call_id in self._background_tasks:
+        record = self._background_tasks.get(tool_call_id)
+        if record is not None and not record.get("foreground"):
             # Background records already travel in the continuation snapshot;
             # keep the hint so the next generation relaunches it in the background.
-            self._background_tasks[tool_call_id]["resume"] = dict(resume)
+            # A foreground spawn's record is only its address: the call itself parks
+            # below and is re-entered through _execute_tool like any foreground tool.
+            record["resume"] = dict(resume)
             workflow.logger.info(f"Parked background task {tool_call_id} for generation handoff")
             return True
         if not self._tool_parking_enabled:
@@ -4404,8 +4449,21 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         moved this agent to that child's finish, so the next "now" it sees is
         the world's.
         Outside a WMH world no cursor exists and nothing extra runs.
+
+        A foreground explore/browser/code spawn is recorded under its task path
+        while it runs (workflows/background_agents.py), so it is addressable.
         """
-        result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        tracked = self._tracks_foreground_spawn(tool_name, tool_args)
+        if tracked:
+            refused = await self._begin_foreground_spawn(tool_name, tool_args, tool_call_id)
+            if refused is not None:
+                return refused
+        result: Any = None
+        try:
+            result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        finally:
+            if tracked:
+                await self._end_foreground_spawn(tool_call_id, result)
         await self._refresh_world_time_cursor_after_tool()
         return result
 
@@ -5025,215 +5083,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # price calls must still update the child subtree reported to the parent.
         await self._update_cost_and_signal_parent()
 
-    async def _track_usage(
-        self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None,
-        browser_completed: bool = False,
-    ) -> None:
-        """
-        Track usage from any activity result.
-
-        This is THE SINGLE POINT where all costs are:
-        1. Calculated (LLM tokens → cost via pricing)
-        2. Added to own_cost_cents
-        3. Written to ToolUsage table (if tool_name provided)
-        4. Signaled to parent for hierarchical relay
-
-        Args:
-            usage: Dict with "llm" and/or "service" lists
-            tool_name: Tool name for ToolUsage table (optional for internal LLM calls)
-            call_site: Label identifying the LLM call source (e.g., planner, explore_agent, browser_agent).
-                       Falls back to tool_name if not provided.
-        """
-        if not usage:
-            return
-
-        paused_before = self.is_paused
-        cost_limit_before = self._cost_limit_reached
-        pause_sequence_before = self._pause_signal_sequence
-
-        total_cost_cents = 0
-        usage_items_for_db = []
-
-        # Process LLM usage items
-        for llm in usage.get("llm", []):
-            tokens_in = llm.get("tokens_in", 0)
-            tokens_out = llm.get("tokens_out", 0)
-            model = llm.get("model") or self.model
-            provider = llm.get("provider") or model
-            effective_call_site = call_site or tool_name or "unknown"
-            cache_read = llm.get("cache_read_input_tokens", 0)
-            cache_write = llm.get("cache_creation_input_tokens", 0)
-            cache_sequence_id = llm.get("cache_sequence_id")
-            from_fast_cache = bool(llm.get("from_fast_cache"))
-
-            if from_fast_cache:
-                workflow.logger.info(
-                    f"💰 $0 cost (fast cache replay): actual_model={model}, "
-                    f"in={tokens_in}, out={tokens_out}, cache_read={cache_read}, call_site={effective_call_site}"
-                )
-                usage_items_for_db.append(
-                    {
-                        "type": "llm",
-                        "cost_cents": 0,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "model": model,
-                        "cache_read_input_tokens": cache_read,
-                        "cache_creation_input_tokens": cache_write,
-                        "from_fast_cache": True,
-                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
-                    }
-                )
-                continue
-
-            # own_cost_cents and price_limit_cents are the user's charge ledger.
-            # Foundry's separate Azure bill is monitored through Azure billing;
-            # it must not consume a user's $0 compute-token limit.
-            if isinstance(model, str) and model.endswith(("-claude", "-gpt", "-foundry")):
-                workflow.logger.info(
-                    f"💰 $0 user charge: actual_model={model}, "
-                    f"in={tokens_in}, out={tokens_out}, call_site={effective_call_site}"
-                )
-                usage_items_for_db.append(
-                    {
-                        "type": "llm",
-                        "cost_cents": 0,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "model": model,
-                        "cache_read_input_tokens": cache_read,
-                        "cache_creation_input_tokens": cache_write,
-                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
-                    }
-                )
-                continue
-
-            # Get pricing for this model (fetch if not cached)
-            pricing = await self._get_model_pricing(model)
-            if not pricing:
-                workflow.logger.warning(
-                    f"⚠️ No pricing for model {model}, skipping cost for {tokens_in}/{tokens_out} tokens"
-                )
-                continue
-
-            input_rate = pricing["input_cents_per_1k"]
-            output_rate = pricing["output_cents_per_1k"]
-
-            # Apply provider-specific cache discounts if cache fields present
-            is_anthropic = model and ("claude" in model.lower() or model.lower().endswith("-claude"))
-            cache_read_mult = 0.1 if is_anthropic else 0.25
-            cache_write_mult = 1.25 if is_anthropic else 1.0
-
-            cost_cents = (
-                (tokens_in * input_rate / 1000)
-                + (cache_read * input_rate * cache_read_mult / 1000)
-                + (cache_write * input_rate * cache_write_mult / 1000)
-                + (tokens_out * output_rate / 1000)
-            )
-            usage_item = {
-                "type": "llm",
-                "cost_cents": cost_cents,
-                "call_site": effective_call_site,
-                "provider": provider,
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "model": model,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_write,
-                **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
-            }
-            if cost_cents > 0:
-                total_cost_cents += cost_cents
-                workflow.logger.info(
-                    f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out}, call_site={effective_call_site})"
-                )
-                usage_items_for_db.append(usage_item)
-
-        # Process service usage items (pre-calculated costs)
-        for svc in usage.get("service", []):
-            cost_cents = svc.get("cost_cents", 0)
-            provider = svc.get("provider", "Service")
-            if cost_cents > 0:
-                total_cost_cents += cost_cents
-                workflow.logger.info(f"💰 Service cost: +{cost_cents}c ({provider})")
-                effective_call_site = call_site or tool_name or "unknown"
-                usage_items_for_db.append(
-                    {
-                        "type": "service",
-                        "cost_cents": cost_cents,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                    }
-                )
-
-        if total_cost_cents > 0:
-            # Update workflow cost state
-            self.own_cost_cents += total_cost_cents
-            workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
-
-            # Admit the verified terminal result before any persistence/signal
-            # await can admit another child cost update and publish a cost stop.
-            if browser_completed:
-                self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
-                self._maybe_arm_cost_limit_wrapup_after_browser(
-                    tool_name=tool_name,
-                    result={"success": True},
-                    paused_before=paused_before,
-                    cost_limit_before=cost_limit_before or self._cost_limit_reached,
-                    pause_sequence_before=pause_sequence_before,
-                )
-            await self._update_cost_and_signal_parent()
-
-        # Write to ToolUsage table (if tool_name provided). This intentionally
-        # includes zero-cost direct-token LLM rows so cache/accounting diagnostics
-        # can see the same LLM calls that worker logs emit.
-        effective_call_site = call_site or tool_name or "unknown"
-        if tool_name and usage_items_for_db:
-            try:
-                await workflow.execute_activity(
-                    save_tool_usage,
-                    args=[
-                        self.agent_id,
-                        self.user_id,
-                        effective_call_site,
-                        usage_items_for_db,
-                        self._usage_checkpoint(),
-                    ],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-            except Exception as e:
-                workflow.logger.warning(f"Failed to save tool usage to DB: {e}")
-
-    async def _get_model_pricing(self, model: str) -> Optional[Dict[str, float]]:
-        """Get pricing for a model, using cache or fetching if needed."""
-        # Check if it's the workflow's primary model
-        if model == self.model and (self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0):
-            return {
-                "input_cents_per_1k": self.input_cents_per_1k,
-                "output_cents_per_1k": self.output_cents_per_1k,
-            }
-
-        # Check cache
-        if model in self.model_pricing_cache:
-            return self.model_pricing_cache[model]
-
-        # Pricing is an in-process constant table. Keep this on the workflow
-        # path so cost accounting cannot stall user-visible tools behind the
-        # activity queue under benchmark load.
-        pricing = get_in_process_model_pricing(model)
-        if pricing is None:
-            pricing = get_default_pricing(model)
-            workflow.logger.warning(f"💰 Using default pricing fallback for {model}: {pricing}")
-        else:
-            workflow.logger.info(f"💰 Resolved pricing for {model}: {pricing}")
-        self.model_pricing_cache[model] = pricing
-        return pricing
-
     # =========================================================================
     # COST LIMIT HELPERS
     # =========================================================================
@@ -5699,8 +5548,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if self._is_finished:
             return  # No further work to authorize; see docstring.
 
-        if self.subtree_cost_cents >= self.price_limit_cents and not self._cost_limit_reached:
-            workflow.logger.warning(f"💰 Cost limit exceeded: {self.subtree_cost_cents}c >= {self.price_limit_cents}c")
+        effective_cost = max(self.subtree_cost_cents, self._persisted_tree_cents)
+        if effective_cost >= self.price_limit_cents and not self._cost_limit_reached:
+            workflow.logger.warning(f"💰 Cost limit exceeded: {effective_cost}c >= {self.price_limit_cents}c")
             self._cost_limit_reached = True
             self.is_paused = True
 
@@ -5727,9 +5577,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         "COST_LIMIT_REACHED",
                         0.0,
                         (
-                            f"Cost limit reached: {self.subtree_cost_cents:.1f}c >= "
+                            f"Cost limit reached: {effective_cost:.1f}c >= "
                             f"{self.price_limit_cents}c (own {self.own_cost_cents:.1f}c + "
-                            f"children {sum(self.children_cost_cents.values()):.1f}c)"
+                            f"children {sum(self.children_cost_cents.values()):.1f}c"
+                            f"{self._resume_spend_note(effective_cost)})"
                         ),
                         self.token_count,
                         self.context_size,
@@ -5779,12 +5630,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 except Exception as e:
                     workflow.logger.warning(f"Failed to cascade cost_limit_reached to child: {e}")
 
+    def _resume_spend_note(self, effective_cost: float) -> str:
+        """The resume spend the stored tree adds beyond our in-memory total, for the stop message."""
+        extra = effective_cost - self.subtree_cost_cents
+        return f" + resumed agents {extra:.1f}c" if extra > 0 else ""
+
     async def _persist_tree_cost(self) -> None:
         """Persist subtree cost and own cost to DB."""
         from helpers.update_tokens import update_agent_tree_cost_activity
 
         try:
-            await workflow.execute_activity(
+            stored = await workflow.execute_activity(
                 update_agent_tree_cost_activity,
                 args=[self.agent_id, int(self.subtree_cost_cents), self.own_cost_cents],
                 start_to_close_timeout=timedelta(seconds=10),
@@ -5792,6 +5648,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to persist tree cost: {e}")
+            return
+        if isinstance(stored, (int, float)) and not isinstance(stored, bool):
+            self._persisted_tree_cents = float(stored)
+            # A root whose stored tree (with resume spend) reached its limit stops now.
+            if self.parent_workflow_id is None and self._persisted_tree_cents >= self.price_limit_cents:
+                await self._check_cost_limit()
 
     async def _update_tree_state(
         self,

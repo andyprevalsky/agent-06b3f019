@@ -1,0 +1,56 @@
+{
+ "archives": {
+  "cloud": {
+   "archive_sha256": "80923a80ed814a197ba1f76f2c1f51551d7f2d40d8fa645cd224d5d2d424b818",
+   "archive_size_bytes": 1246100274,
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "chunk_size": 67108864,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "files": 5020,
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+   "key_prefix": "devbox-closeout-private/pr1811-bb486bea/20261108-cloud/",
+   "members": [
+    "/home/boxes/rose/.context/deploy-cloud"
+   ],
+   "name": "pr1811-bb486bea/20261108-cloud",
+   "parts": 19,
+   "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+   "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+  },
+  "core": {
+   "archive_sha256": "eba9cb47bdacca60df3ed0f822d4d423f350b89e5436135cad13fe60d02a4ba0",
+   "archive_size_bytes": 112432283,
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "chunk_size": 67108864,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "files": 18164,
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+   "key_prefix": "devbox-closeout-private/pr1811-bb486bea/20261108-core/",
+   "members": [
+    "/var/tmp/pr1811-evidence",
+    "/home/boxes/rose/.context/deploy-approval-batch.diff",
+    "/home/boxes/rose/.context/deploy-approval-batch.json",
+    "/home/boxes/rose/.context/deploy-collect.json",
+    "/home/boxes/rose/.context/deploy-merged.json",
+    "/home/boxes/rose/.context/deploy-pipeline",
+    "/home/boxes/rose/.context/deploy-pipeline.archived-20261108T090340Z",
+    "/home/boxes/rose/.context/deploy-pipeline.archived-20261108T111534Z",
+    "/home/boxes/rose/.context/deploy-pipeline.archived-20261108T120752Z",
+    "/home/boxes/rose/.context/deploy-pr.json",
+    "/home/boxes/rose/.context/deploy-review-cycle.json",
+    "/home/boxes/rose/.context/deploy-review-dispositions.jsonl",
+    "/home/boxes/rose/.context/deploy-runs",
+    "/home/boxes/rose/.context/factory-events.jsonl",
+    "/home/boxes/rose/.context/frontend-builds",
+    "/home/boxes/rose/.context/ngrok.log",
+    "/home/boxes/rose/.context/pr1634-archive-recovery.env",
+    "/home/boxes/rose/.context/services.json",
+    "/home/boxes/rose/.context/tsbuildinfo"
+   ],
+   "name": "pr1811-bb486bea/20261108-core",
+   "parts": 2,
+   "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+   "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+  }
+ }
+}

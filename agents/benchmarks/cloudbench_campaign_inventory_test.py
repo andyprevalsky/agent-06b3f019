@@ -442,6 +442,11 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
         "trap finish EXIT\ntrap 'exit 143' TERM\n"
         + boundary
+        # Admission may already have issued this job's native reads. Join the
+        # snapshot loop's own reads relative to that baseline, not a total.
+        + "fixture_job_machine_reads() { python3 -c 'import json,os;p=os.environ[\"FIXTURE_CALLS\"];print(sum(row[\"kind\"]==\"machines\" and row.get(\"job_id\")==os.environ[\"RUN_BENCH_CAMPAIGN_JOB_ID\"] for row in map(json.loads,open(p))) if os.path.exists(p) else 0)'; }\n"
+        'fixture_reads_before_loop=0\n'
+        '[ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || fixture_reads_before_loop="$(fixture_job_machine_reads)"\n'
         + "start_machines_snapshot_loop\n"
         'if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then\n'
         ' python3 -c \'import json,os;from pathlib import Path;a=json.loads(os.environ["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"]);d=Path(os.environ["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"]);assert a["directory"]==str(d.resolve());assert a["owner"]==dict(line.split("=",1) for line in (d/"owner").read_text().splitlines());Path(os.environ["FIXTURE_ROOT"],os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"],"authority.json").write_text(json.dumps(a))\'\n'
@@ -450,7 +455,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         # the first asynchronous refresh before ending the scenario whose
         # assertion counts that refresh; startup only joins the initial read.
         'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
-        ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
+        ' while [ "$(fixture_job_machine_reads)" -lt "$((fixture_reads_before_loop + 2))" ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
         'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
@@ -2660,8 +2665,8 @@ def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withho
     assert result['admission'] == 'local-defaults-derived-native-guards-required'
 
     env = module.stress_default_environment(result, {})
-    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '160'
-    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '56'
+    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '1000'
+    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '300'
     assert env['CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION'] == '1'
     assert module.stress_default_environment(result, {'CLOUDBENCH_APP_MACHINE_CEILING': '1'})['CLOUDBENCH_APP_MACHINE_CEILING'] == '1'
     with pytest.raises(ValueError, match='unknown native baseline'):
@@ -4229,3 +4234,32 @@ def test_campaign_scheduled_stop_refuses_linked_scope_parent_before_parent(tmp_p
             namespace['main']()
     popen.assert_not_called()
     assert not list(protected.iterdir())
+
+
+def test_worker_slot_admission_uses_the_startup_machine_ceiling_default(tmp_path):
+    """RCA 2026-11-07: startup admitted a fleet under the 300-Machine default while
+    reserve_worker_machine_slot still defaulted to 56, so a 13-task deploy smoke on an
+    app with 60 Machines refused test-mass-agent-run-0's mandatory autoscaler worker
+    ("60 app Machines + 0 reserved + 1 requested > ceiling 56")."""
+    fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
+    defaults = {line.split('CLOUDBENCH_APP_MACHINE_CEILING:-', 1)[1].split('}', 1)[0]
+                for line in fleet.splitlines() if 'CLOUDBENCH_APP_MACHINE_CEILING:-' in line}
+    assert defaults == {'300'}, defaults
+
+    def function(name):
+        start = fleet.index(name + '() {')
+        return fleet[start:fleet.index('\n}\n', start) + 3]
+
+    inventory = json.dumps([{'id': f'm{i}'} for i in range(60)])
+    script = tmp_path / 'worker-slot.sh'
+    script.write_text('\n'.join([
+        'set -u', 'unset CLOUDBENCH_APP_MACHINE_CEILING CLOUDBENCH_CAMPAIGN_INVENTORY_DIR SNAPSHOT_LOOP_PID',
+        f'FLY() {{ printf %s {shlex.quote(inventory)}; }}',
+        function('capacity_reserve_slots'), function('reserve_worker_machine_slot'),
+        f'CAPACITY_RESERVATION_ROOT={shlex.quote(str(tmp_path / "capacity"))}',
+        'APP=fixture-app', 'FLEET_OWNER_HOST="$(hostname)"', 'RUN_ID=fixture-run',
+        'FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed \'s/^[[:space:]]*//; s/[[:space:]]*$//\')"',
+        'reserve_worker_machine_slot aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-worker-1', '']))
+    result = subprocess.run(['bash', str(script)], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr

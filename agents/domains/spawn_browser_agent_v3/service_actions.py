@@ -733,6 +733,8 @@ class _ActionContext:
     prefetched_browser_state: Optional[Dict[str, Any]] = None
     model_params: Optional[Dict[str, Any]] = None
     navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None
+    # The session's own browser provider; None only for adapters that do not know it.
+    provider: Optional[str] = None
 
 
 async def _refuse_navigation(
@@ -1370,6 +1372,8 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             prepare_credentials_for_url=context.prepare_credentials_for_url,
             browser_network_recorder=context.browser_network_recorder,
             navigation_admission=context.navigation_admission,
+            provider=context.provider,
+            user_id=context.user_id,
         )
     if context.action_name == "navback":
         guard = _navigation_guard_error(context, action="navback")
@@ -1746,6 +1750,7 @@ async def execute_action(
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
     successful_secret_refs: Optional[set[str]] = None,
     navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve private values and report successful use privately to the caller."""
     if successful_secret_refs is not None:
@@ -1914,6 +1919,7 @@ async def _execute_resolved_action(
     model_params: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
     navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1985,6 +1991,7 @@ async def _execute_resolved_action(
             prefetched_browser_state=prefetched_browser_state,
             model_params=model_params,
             navigation_admission=navigation_admission,
+            provider=provider,
         )
         if action_name in _INTERACTION_ACTIONS:
             result = await _execute_interaction_action(context)
@@ -4182,8 +4189,10 @@ async def _execute_goto(
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
     browser_network_recorder: Optional[Any] = None,
     navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
+    provider: Optional[str] = None,
+    user_id: str = "",
 ) -> Dict[str, Any]:
-    """Prepare a target realm's credentials, then execute navigation."""
+    """Prepare credentials/admission before navigation; persist downloads for this session's provider/user."""
     from browser_use.browser.events import NavigateToUrlEvent
 
     original_url = params.get("url", "")
@@ -4228,6 +4237,8 @@ async def _execute_goto(
                     url=url,
                     session_id=session_id,
                     config=config,
+                    provider=provider,
+                    **({"user_id": user_id} if user_id else {}),
                 )
             except Exception as persist_error:
                 logger.warning(

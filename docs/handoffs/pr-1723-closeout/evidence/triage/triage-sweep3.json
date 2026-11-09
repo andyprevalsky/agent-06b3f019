@@ -1,0 +1,78 @@
+{
+ "failures": [
+  {
+   "id": "983b454528ed46dd98d121e5f2b4e1bb",
+   "native_result": "UNVERIFIED",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "0d7de94dcece9ffd58482e9e7bc8ceddba89e2ea",
+    "digest": "8cca455c2d4744d5c95810caeacbe9138628487915957521d3d52f69f2d3d71b"
+   },
+   "attribution": "INTRODUCED",
+   "description": "deploy-command-structural: suite deploy-test-plan failed (InterruptedCustody cloud=True: \"original Hub listener/socket consumer remains\"); native exit 1, aggregate UNVERIFIED",
+   "evidence": "Gate: INTRODUCED as integration work, pre-existing on main. The failing bytes reached this deploy through the merge of origin/main into the branch (0d7de94dc); the PR's own diff does not touch them and the gate passed on the pre-merge source. The aggregate gate is UNVERIFIED (incomplete), which the cycle cannot waive or hand off, so this deploy owns the repair in this PR. Cause 1: the new fixture pins the default Hub port 8765 while a leaked agent_link_server Hub from an earlier deploy listens on 127.0.0.1:8765. Local repro on the unchanged source in a scratch clone: `python3 -B scripts/tests/deploy-test-plan.test.py InterruptedCustody.test_static_and_cloud_reconcile_preserve_originals_and_history` FAILS in 1.5s with the same error; it passes after the fixture takes a free port, with the foreign listener still bound. Cause 2: namespace_quiet failed on a transient EACCES reading /proc/<pid>/fd (7 of 40 runs on this loaded host); now re-observed up to 5x0.2s and still fail-closed while the process stays unreadable and alive. 40/40 pass after, full file 40 tests twice. Registered regressions in scripts/tests/deploy-test-plan.test.py (listener on the fixture port is still refused; re-observation and fail-closed branches). RCA case docs/rca/cases/2026-11-07-deploy-test-plan-fixture-hub-port-collided-with-host-hub-and-proc-scan-eacces.md. Native log: /var/tmp/deploy-workers/structural/.context/deploy-worker/f20a1a31951e9e17085cf26a1a0f93211f7b258d354474db357f3eb907cc8ce2/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log"
+  },
+  {
+   "id": "4cdde6604ed845e0aa6b2740a371d7f9",
+   "native_result": "UNVERIFIED",
+   "check": "agents-coverage-blackbox/agents-coverage-blackbox",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/var/tmp/deploy-workers/agents-coverage/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/agents-coverage",
+    "--stdio"
+   ],
+   "source": {
+    "head": "0d7de94dcece9ffd58482e9e7bc8ceddba89e2ea",
+    "digest": "8cca455c2d4744d5c95810caeacbe9138628487915957521d3d52f69f2d3d71b"
+   },
+   "attribution": "INTRODUCED",
+   "description": "agents-coverage-blackbox: spawn-browser-agent-v3 failed test_build_usage_items_carries_browser_pool_model and test_build_usage_items_emits_one_row_per_actual_model (AssertionError on provider in (\"Kernel Browser\", \"Steel.dev Browser\")); 123 of 124 domains passed; aggregate UNVERIFIED",
+   "evidence": "Gate: INTRODUCED as environment/integration work, pre-existing on main. The failing bytes reached this deploy unchanged on main; this PR changes nothing under agents/. The test reads the ambient BROWSER_PROVIDER, which is tilion in this devbox's agents/.env (rewritten 23:26:16, after the previous sweep's agents gate had started). The aggregate gate is UNVERIFIED (incomplete), which the cycle cannot waive or hand off, so this deploy owns the repair in this PR. Local repro on the unchanged source in a scratch clone, calling the two functions directly: BROWSER_PROVIDER=tilion -> both AssertionError; BROWSER_PROVIDER=kernel -> both pass. Fix pins BROWSER_PROVIDER=kernel inside both tests with patch.dict like their neighbours; with it, both pass under tilion, steel, browser-use and kernel. RCA case docs/rca/cases/2026-11-07-agents-usage-blackbox-assumed-ambient-browser-provider.md. Native log: /var/tmp/deploy-workers/agents-coverage/.context/test-runs/agents-coverage-20261107-001148-185987/spawn-browser-agent-v3.log"
+  },
+  {
+   "id": "e4c3ab55c9a44a7da61f7165e59723b3",
+   "native_result": "FAIL",
+   "check": "backend-coverage-blackbox/blackbox:treasury-rails",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/var/tmp/deploy-workers/backend-coverage"
+   ],
+   "source": {
+    "head": "0d7de94dcece9ffd58482e9e7bc8ceddba89e2ea",
+    "digest": "8cca455c2d4744d5c95810caeacbe9138628487915957521d3d52f69f2d3d71b"
+   },
+   "attribution": "NOT_INTRODUCED",
+   "description": "blackbox:treasury-rails: 11 earlier unused mints older than the 24h reclaim deadline are still not returned to the pool",
+   "evidence": "Gate: NOT_INTRODUCED. The probe lists unused mints recorded in /home/boxes/.cache/rose-labs/treasury-rails-pending-mints.jsonl that are 27.3h-50.0h old, past the 24.0h reclaim deadline, with provider row null. This PR does not touch treasury, cards or mints. Standing user instruction 2026-10-29: treasury failures are SKIPPED, reported as warnings and never block a deploy; no treasury or financial record is mutated, reclaimed or deleted. Native log: /var/tmp/deploy-workers/backend-coverage/back-end/coverage/blackbox-run-shard2/treasury-rails.log",
+   "standing_policy": {
+    "name": "treasury-failures-skip-and-warn-2026-10-29",
+    "reason": "treasury-rails blackbox: unused mint(s) never returned to the pool past the 24h reclaim deadline; pending obligations stay visible",
+    "affected_records": [
+     "card_066facfe4950b32b091314e0",
+     "card_520310f8adbdaac4cfd922f6",
+     "card_557224c4c38b6de93d58c117",
+     "card_60421d128e5ec66a7f3ecaec",
+     "card_6a82b4bae63534e14fd924d8",
+     "card_7c7907f68ef95ca82b934a1f",
+     "card_a168beb8d81ea47c902b82b1",
+     "card_ce07094b78330dec35387fcf",
+     "card_dedc46034f8bdfa2a9805b64",
+     "card_ecb5d51046c73a522c209284",
+     "card_ff268c77729c647ea62bc38e"
+    ],
+    "evidence_at": 1794021022.0441332
+   }
+  }
+ ]
+}

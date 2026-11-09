@@ -49,6 +49,7 @@ from domains.spawn_claude_code_agent.repo import (
     keepalive_e2b_session,
     persist_terminal_output,
     report_code_usage_limit,
+    report_undelivered_code_turns,
     resize_e2b_session,
     save_claude_code_message,
     save_code_transcript_batch,
@@ -917,6 +918,10 @@ async def _run_agentic_loop(
     user_turns_seen = 0
     sdk_results_seen = 0
     native_codex_terminal: dict[str, Any] | None = None
+    # Agent turns the ws-server accepted (`queued`) and lost when the session
+    # ended (`user_turn_undelivered`): their senders are told once (the backend
+    # is idempotent per turn; this set only skips repeats within one attach).
+    reported_undelivered: set[str] = set()
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -990,6 +995,14 @@ async def _run_agentic_loop(
         # Events before this spawn's goal turn (attached to a live CLI) are the
         # earlier turns' history: their usage limit or login failure is not this run's.
         history = event_index < history_events
+        if not history and event.get("type") == "user_turn_undelivered":
+            lost = [
+                str(turn_id)
+                for turn_id in event.get("turn_ids") or []
+                if isinstance(turn_id, str) and turn_id and turn_id not in reported_undelivered
+            ]
+            reported_undelivered.update(lost)
+            await report_undelivered_code_turns(agent_id, task_id, lost, str(event.get("reason") or "rejected"))
         usage_limit = None if history else usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
@@ -2579,6 +2592,9 @@ def _merge_close_code_session_facts(
             # True only when GitHub confirms the PR merged and the target contains head (C4).
             "merged": merge.get("merged") is True,
             "merge_target_contains_head": merge.get("merge_target_contains_head"),
+            # How GitHub answered; `merged` is only a confirmed fact when it did.
+            "merge_source": merge.get("source"),
+            "rate_limited_until": merge.get("rate_limited_until"),
         }
     )
     return merged
@@ -2976,7 +2992,15 @@ def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
     if isinstance(pr, dict) and pr.get("number"):
         lines.append(f"PR: #{pr['number']} {pr.get('state') or ''} {pr.get('url') or ''}".rstrip())
     if facts.get("branch"):
-        lines.append(f"Merged: {'yes' if facts.get('merged') else 'no'} (confirmed with GitHub)")
+        source = facts.get("merge_source")
+        until = facts.get("rate_limited_until")
+        if source == "github_rate_limited":
+            retry = f"; retry after {until}" if until else ""
+            lines.append(f"Merged: unknown (GitHub rate limit reached{retry})")
+        elif source == "github_unavailable":
+            lines.append("Merged: unknown (GitHub could not be reached)")
+        else:
+            lines.append(f"Merged: {'yes' if facts.get('merged') else 'no'} (confirmed with GitHub)")
     return "\n".join(lines)
 
 
@@ -3218,6 +3242,7 @@ async def spawn_claude_code_activity(
         code_session_request: ``{"code_session_id": ...}`` to resume a specific
             persistent code session; omitted, the backend resumes the spawning
             agent's latest session for the repo (or creates one on a new branch).
+            ``task_name`` (the spawn's) is stored on the task row as its title.
 
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
@@ -3275,6 +3300,10 @@ async def spawn_claude_code_activity(
         code_agent_meta["folder"] = attached["folder"]
     if isinstance(attached, dict) and attached.get("preview_url"):
         code_agent_meta["preview_url"] = attached["preview_url"]
+    task_name = (code_session_request or {}).get("task_name")
+    if isinstance(task_name, str) and task_name:
+        # metadata.code_agent.title: the code-agent view's header when opened without one.
+        code_agent_meta["title"] = task_name
     if isinstance(attached, dict) and isinstance(attached.get("sandbox_size"), dict):
         code_agent_meta["sandbox_size"] = attached["sandbox_size"]
 
@@ -3408,6 +3437,8 @@ async def spawn_claude_code_activity(
                 target=target,
                 local_device_id=local_device_id,
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
+                task_name=(code_session_request or {}).get("task_name"),
+                cli_settings=(code_session_request or {}).get("cli_settings"),
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)
@@ -3426,6 +3457,10 @@ async def spawn_claude_code_activity(
             if isinstance(session_data.get("sandbox_size"), dict):
                 # vCPUs / memory of the E2B sandbox (C16).
                 code_agent_meta["sandbox_size"] = session_data["sandbox_size"]
+            if isinstance(session_data.get("startup"), dict):
+                # How long the sandbox's ws-server took to serve and its repo clone
+                # ({ws_ready_ms, clone_ms}); the code-agent benchmark reads it.
+                code_agent_meta["startup"] = session_data["startup"]
 
             logger.info(
                 "[ClaudeCode] Session created",
@@ -3477,10 +3512,10 @@ async def spawn_claude_code_activity(
                     "folder": code_agent_meta.get("folder"),
                 }
             )
-        # An attempt's first heartbeat goes out at once and later ones only every
-        # throttle interval, so nothing may heartbeat before the session rides
-        # along, and the session must ride along before anything else can fail:
-        # a crash in either window would hide the sandbox from the retry.
+        # The session must ride along before anything else can fail. The create
+        # heartbeats while it waits, so this beat can sit out one throttle
+        # interval; a retry after a crash in that window creates again and the
+        # backend hands back this same running task (createWithCodeSession).
         session_heartbeats.enter_context(
             heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}, retry_state)
         )

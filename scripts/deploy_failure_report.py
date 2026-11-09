@@ -18,6 +18,8 @@ import tempfile
 from urllib.parse import urlparse, parse_qs, unquote
 
 TREASURY_SKIP = 'treasury / skipped with warning'
+# User decision 2026-11-06: a credential or billing change only the user can make is skipped and reported at the end.
+EXTERNAL_REASONS = {"outage", "credits exhausted", "credential or billing change"}
 TREASURY_POLICY = 'treasury-failures-skip-and-warn-2026-10-29'
 
 
@@ -69,8 +71,8 @@ def decision(entry: dict) -> str:
             raise ValueError("External provider failures must not have a repair handoff")
         if attribution != "NOT_INTRODUCED":
             raise ValueError("An introduced defect or unknown cause is not an external-provider exception")
-        if external.get("reason") not in {"outage", "credits exhausted"} or not external.get("name"):
-            raise ValueError("Record the evidenced provider and outage/credit-exhaustion reason")
+        if external.get("reason") not in EXTERNAL_REASONS or not external.get("name"):
+            raise ValueError("Record the evidenced provider and an outage, credit-exhaustion or user-only credential/billing reason")
         return "external / waived"
     if link:
         if attribution != "NOT_INTRODUCED":

@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  BUG_REPORT_DEDUP_LINE,
   BUG_REPORT_SCREENSHOT_URL_TTL_SECONDS,
   ReportBugForbiddenError,
   ReportBugValidationError,
@@ -58,9 +59,19 @@ function testPromptIncludesRcaAndAgentId(): void {
 }
 
 function testManualPromptLeadsWithDeployGoal(): void {
+  // Bug threads run in parallel: check the active ones by their work, not titles.
+  for (const phrase of [
+    'boxes-read-threads',
+    'Bugs folder',
+    'actual work and evidence',
+    'not titles',
+  ]) {
+    assert.ok(BUG_REPORT_DEDUP_LINE.includes(phrase), phrase);
+  }
   assert.equal(
     buildManualBugReportPrompt('abc-123', '  It crashed after pause.  '),
     '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful\n' +
+      `${BUG_REPORT_DEDUP_LINE}\n` +
       '/rca the following bug for agent with ID: [abc-123]\nIt crashed after pause.'
   );
 }
@@ -102,6 +113,7 @@ async function testReportAgentBugDoesNotTextOrRequireSms(): Promise<void> {
     name: 'Checkout never finished',
     promptText:
       '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful\n' +
+      `${BUG_REPORT_DEDUP_LINE}\n` +
       '/rca the following bug for agent with ID: [agent-xyz]\nCheckout never finished',
     idempotencyKey: buildBugReportIdempotencyKey('agent-xyz', 'Checkout never finished'),
   });

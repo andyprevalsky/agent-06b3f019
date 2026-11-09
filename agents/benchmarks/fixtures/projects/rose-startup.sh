@@ -28,19 +28,31 @@ sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 
 
 # Mint a fresh workspace identity for this devbox. The snapshot carries the
 # Template box's .cloud-env, and scripts/run.sh derives the Temporal task
-# queue and ngrok domain from it; devboxes must never share those.
-if [ -f .cloud-env ] && [ -f scripts/lib/workspace-env.sh ]; then
+# queue and ngrok domain from it; devboxes must never share those. On Linux a
+# missing file is created (a session from the base template has none) and, when
+# system Postgres is installed, selects it: Docker is not used on sandboxes.
+# Other platforms only re-key a file that already exists.
+if [ -f scripts/lib/workspace-env.sh ] && { [ -f .cloud-env ] || [ "$(uname -s)" = Linux ]; }; then
 bash -s <<'REKEY' || echo "warning: could not re-key .cloud-env; scripts/run.sh re-keys it on a new boot"
 set -eu
 . scripts/lib/workspace-env.sh
-port="$(cloud_env_value .cloud-env CONDUCTOR_PORT)"
+port="$(cloud_env_value .cloud-env CONDUCTOR_PORT 2>/dev/null || true)"
 write_cloud_env .cloud-env "${port:-3001}" "$(new_cloud_workspace_name)" "$PWD" "$(cloud_env_boot_id)" "$(cloud_env_agent_id)"
+if command -v pg_ctlcluster >/dev/null 2>&1; then echo 'export ROSE_USE_SYSTEM_PG=true' >>.cloud-env; fi
 REKEY
 fi
 
 # Local Postgres backs the stack and the test suites; never restarted here.
+PG_UP=0
 if command -v pg_ctlcluster >/dev/null 2>&1 || [ -x /etc/init.d/postgresql ]; then
   sudo -n service postgresql start >/dev/null 2>&1 || say "warning: could not start Postgres"
+  if command -v pg_isready >/dev/null 2>&1; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      pg_isready -q -h localhost 2>/dev/null && { PG_UP=1; break; }
+      sleep 1
+    done
+    [ "$PG_UP" = 1 ] || say "warning: Postgres is not accepting connections"
+  fi
 else
   say "note: PostgreSQL is not installed here; database-backed tests are unavailable"
 fi
@@ -62,7 +74,13 @@ ensure_swap() {
   fi
 }
 
-js_hash() { cat package.json back-end/package.json front-end/package.json back-end/package-lock.json front-end/package-lock.json 2>/dev/null | sha; }
+# Same definition as rose-sync.sh: native addons are built per Node ABI, so the
+# Node major is part of the stamp.
+js_hash() {
+  local base
+  base="$(cat package.json back-end/package.json front-end/package.json back-end/package-lock.json front-end/package-lock.json 2>/dev/null | sha)"
+  printf '%s\nnode%s\n' "$base" "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null)" | sha
+}
 
 js_ready() { [ -x node_modules/.bin/tsx ] || [ -x back-end/node_modules/.bin/tsx ]; }
 
@@ -143,6 +161,25 @@ py_deps() {
   say "py: ready in $((SECONDS - began))s"
 }
 
+reference_metadata() {
+  local dir repair=0 saved=0 rc=0 record=prompt-review/REF_SHAS.txt
+  # Old snapshots stripped .git from reference sources. Repair existing trees;
+  # a session without reference sources has no metadata to migrate.
+  for dir in openclaw hermes-agent codex prime-agent kimi-code; do
+    if [ -d "$dir" ] && [ ! -e "$dir/.git" ]; then repair=1; break; fi
+  done
+  [ "$repair" = 1 ] || return 0
+  say "refs: restoring reference git metadata..."
+  if [ -f "$record" ]; then
+    cp -p "$record" "$ROSE_TMP/ref-record" || return 1
+    saved=1
+  fi
+  bash scripts/sync-reference-repos.sh || rc=$?
+  # The source pins are unchanged; keep the caller's exact tracked tip record.
+  if [ "$saved" = 1 ]; then cp -p "$ROSE_TMP/ref-record" "$record" || return 1; fi
+  return "$rc"
+}
+
 # Run one step with its output line-prefixed; its status lands in $ROSE_TMP/<name>.
 step() {
   local name="$1"
@@ -154,10 +191,11 @@ step() {
 
 step js js_deps &
 step py py_deps &
+step refs reference_metadata &
 wait
 
 failed=""
-for name in js py; do
+for name in js py refs; do
   [ "$(cat "$ROSE_TMP/$name" 2>/dev/null)" = 0 ] || failed="$failed $name"
 done
 
@@ -168,6 +206,27 @@ case " $failed " in
       say "check: backend seed-cache imports ready"
     else
       failed="$failed check"
+    fi
+    ;;
+esac
+
+# The snapshot's local `victoria` follows the schema it was synced at; main may have
+# moved schema.prisma since. Push only the delta (local-only, refuses non-localhost).
+LOCAL_DB=postgresql://postgres:postgres@localhost:5432/victoria
+case " $failed " in
+  *" js "*) ;;
+  *)
+    if [ "$PG_UP" = 1 ] && PGPASSWORD=postgres psql -h localhost -U postgres -d victoria -tAc 'select 1' >/dev/null 2>&1; then
+      want="$(sha <back-end/prisma/schema.prisma)"
+      if [ "$(cat "$ROSE_STATE/dbschema" 2>/dev/null)" = "$want" ]; then
+        say "db: schema unchanged; skipped"
+      elif (cd back-end && DATABASE_URL="$LOCAL_DB" DIRECT_URL="$LOCAL_DB" npm run prisma:push:local -- --accept-data-loss --skip-generate >/dev/null \
+          && DATABASE_URL="$LOCAL_DB" DIRECT_URL="$LOCAL_DB" LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh >/dev/null); then
+        mkdir -p "$ROSE_STATE" && printf '%s\n' "$want" >"$ROSE_STATE/dbschema"
+        say "db: schema pushed"
+      else
+        failed="$failed db"
+      fi
     fi
     ;;
 esac

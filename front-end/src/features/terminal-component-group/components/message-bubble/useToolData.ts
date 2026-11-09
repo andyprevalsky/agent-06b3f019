@@ -8,6 +8,7 @@ import { useMemo } from 'react';
 import { userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../../hooks';
 import { buildAgentToolData } from './agentToolData';
+import { thoughtGeneration } from '../thoughtGeneration';
 import type { ToolMessageData } from './types';
 
 interface UseToolDataArgs {
@@ -15,6 +16,13 @@ interface UseToolDataArgs {
   isStreaming: boolean;
   isAssistant: boolean;
   isTool: boolean;
+}
+
+/** The row's text for the user; a code agent's own output (verbatimText) is never scrubbed. */
+function visibleText(message: Message): string {
+  return message.metadata?.verbatimText === true
+    ? message.text
+    : userFacingMessageText(message.text);
 }
 
 export function useToolData({
@@ -44,7 +52,8 @@ export function useToolData({
         toolName: 'thought',
         title: 'Thought',
         status: 'FINISHED',
-        message: userFacingMessageText(message.text),
+        message: visibleText(message),
+        generation: thoughtGeneration(message.metadata),
       };
     }
 
@@ -77,7 +86,7 @@ export function useToolData({
       toolName,
       title,
       status: toolStatus,
-      message: hideToolMessage ? '' : userFacingMessageText(message.text),
+      message: hideToolMessage ? '' : visibleText(message),
       error: Boolean(metadata.error),
       progressComplete: metadata.progressComplete as number | undefined,
       actionMetadata,
@@ -93,6 +102,7 @@ export function useToolData({
         (attentionMeta.simulated as boolean | undefined),
       actionType: metadata.action_type as string | undefined,
       codeProvider: metadata.code_provider === 'codex' ? 'codex' : 'claude',
+      generation: toolName === 'thought' ? thoughtGeneration(metadata) : null,
     };
   }, [isAssistant, isTool, message, isStreaming]);
 }

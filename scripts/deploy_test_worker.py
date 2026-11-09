@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 
+import deploy_gate_progress as progress
 from deploy_test_cycle import ROOT, command, digest, read, source, write
 from deploy_test_isolation import validate_tmpdir_request
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
@@ -113,6 +114,7 @@ def execute(request: dict, root: Path) -> dict:
                     rows[name] = {'status': 'UNVERIFIED', 'reason': 'setup failed or worker interrupted'}
                 else:
                     rows[name] = run_step(name, cases[name], root, folder)
+                    report_case(name, rows[name], folder)
         finally:
             cleanup = recipe.get('cleanup')
             if cleanup:
@@ -137,13 +139,48 @@ def execute(request: dict, root: Path) -> dict:
     return result
 
 
+def owned_benchmark_draining(root: Path, token: str, since: float) -> bool:
+    """A benchmark owner this cycle request started is still live under this worker root.
+
+    benchmarks/local.py can be the case's group leader while it drains its runner and stack;
+    the staged cycle's token-bound benchmark_teardown waits for it within the controller's own
+    shutdown budget. A ten-second group KILL here would skip its cleanup traps instead.
+    An unreadable inventory proves nothing, so it keeps the existing group KILL.
+    """
+    import run_deploy_pipeline as lanes
+    try:
+        owned, _ = lanes.lane_owned_processes(token)
+        records, _ = lanes.lane_owner_records(root / '.context' / 'benchmarks', since)
+    except OSError:
+        return False
+    return any(record['pid'] in owned for record in records if record['pid'] is not None)
+
+
+def progress_path(folder: Path) -> str:
+    """The gate's live progress file: the coordinator's, else one beside this worker's evidence."""
+    return os.environ.get(progress.ENV) or str(folder / 'progress.jsonl')
+
+
+def report_case(name: str, row: dict, folder: Path) -> None:
+    """One case row the moment a case finishes, so a failure is visible before the gate ends."""
+    status = row['status']
+    progress.report(name, status, scope='case', case=name, path=progress_path(folder), log=row.get('log', ''),
+                    detail='' if status == 'PASS' else row.get('tail', ''))
+
+
 def run_step(name: str, spec: dict, root: Path, folder: Path) -> dict:
+    from run_deploy_pipeline import LANE_TOKEN_ENV
     log = folder / (hashlib.sha256(name.encode()).hexdigest() + '.log')
-    env = {**os.environ, **spec.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
+    env = {**os.environ, **spec.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1',
+           # Test runners append per-unit rows here as they finish (deploy_gate_progress).
+           progress.ENV: progress_path(folder), progress.CASE_ENV: name}
     started = time.time()
+    token = env.get(LANE_TOKEN_ENV)
+    retain = (lambda: owned_benchmark_draining(root, token, started)) if token else None
     with log.open('wb') as stream:
         code, timeout, cancelled, lingering = run_command(command(spec['command']),
-            cwd=root / spec.get('cwd', '.'), env=env, output=stream, timeout=spec.get('timeout_seconds'))
+            cwd=root / spec.get('cwd', '.'), env=env, output=stream, timeout=spec.get('timeout_seconds'),
+            retain_owned=retain)
     status = 'PASS' if code == 0 else 'FAIL'
     if code not in (0, 1) or timeout or cancelled or lingering or (code and spec.get('aggregate')):
         status = 'UNVERIFIED'

@@ -1,0 +1,37 @@
+{
+  "format": "PR1770-PRODUCTION-EXTERNAL-QUALIFICATIONS-V1",
+  "merged_sha": "5066feea73da4a966aa7655ccbc40ea8c26529a8",
+  "production_report_sha256": "f69705671fc0b28e012aaa4b58d0f6954320d507893bc1b07354915e8b17b20d",
+  "failure_report_sha256": "ffcd00a798b9872f6cf967bcbea0e1464bc67d86e46a38570f19cebb359dc344",
+  "lanes": {
+    "mac-release": {
+      "failure_id": "pr1770-production-mac-electron-download-504",
+      "native_run_id": 42472479080,
+      "native_job_id": 128706291709,
+      "run_capture": {
+        "path": "/home/boxes/rose/.context/rca-77783ad2/mac-release-5066-native.json",
+        "sha256": "4fe4e0d71ab93ed13464fc2c2b06ea3ccea619a57732471db946b3e600ee80b9"
+      },
+      "failed_log": {
+        "path": "/home/boxes/rose/.context/rca-77783ad2/mac-release-5066-failed.log",
+        "sha256": "c124c7b9e11630c7166757937272947adeca2041228675335e4a85e41a732951"
+      }
+    },
+    "agentcard": {
+      "failure_id": "pr1770-production-mixed-stripe-agentcard-mode",
+      "repair_key": "production-mixed-mode",
+      "native_record": {
+        "path": "/home/boxes/rose/agents/benchmarks/runs/20261108_105810_d379f0ec-1d3e-4aa5-99f0-418b79febdac_agent-payment-production-abandonment.json",
+        "sha256": "6406e12ac2cb0454d12354d5b123e3a917dfe5fb081f9a6fae4ef79daddf3019"
+      },
+      "failed_log": {
+        "path": "/home/boxes/rose/.context/deploy-pipeline/production-logs/agentcard.log",
+        "sha256": "39e20089d817ad0d14236ce37314c3879c8ed4723f8a93cc8671d10d4c16388a"
+      },
+      "cleanup_capture": {
+        "path": "/home/boxes/pr1770-preservation/production-agentcard-collection-capture.json",
+        "sha256": "c11584a64a58ff1a7ac87c5943904cdb95b6fefdf5c58b149e6c29b361f10936"
+      }
+    }
+  }
+}

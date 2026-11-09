@@ -13,9 +13,11 @@ messaging both speak the same ws-server protocol::
 ``duplicate`` (this ``id`` was already delivered: retries never repeat a
 turn) or ``rejected`` with a ``reason``:
 
-* ``relay_paused`` – the user is chatting with this session directly; an
-  ``agent`` turn must wait until the user hands back (retry later with the
-  same id). User turns are never paused.
+* ``relay_paused`` – only a spawn attaching to the live CLI while the user
+  is chatting with it directly. A plain ``agent`` turn during that chat is
+  acked ``queued`` and delivered after the hand back. User turns are never
+  paused.
+* ``relay_queue_full`` – 50 agent turns already wait for the hand back.
 * ``session_ended`` – the CLI finished (or its stdin closed); ask the parent to
   continue in a new session instead.
 * ``provider_unsupported`` – the provider cannot take mid-run turns (Codex).
@@ -54,7 +56,9 @@ TURN_TOKEN_CONTEXT = "rose-code-session-turn:v1:"
 DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_ATTEMPTS = 3
 
-TurnStatus = Literal["delivered", "duplicate", "rejected", "unreachable"]
+# "queued": the CLI has not been given its task yet, so the ws-server holds the turn and writes
+# it right after the task prompt (it has not reached the CLI, and it is not a refusal).
+TurnStatus = Literal["delivered", "duplicate", "queued", "rejected", "unreachable"]
 TurnSender = Literal["user", "agent"]
 
 
@@ -144,8 +148,9 @@ async def deliver_user_turn_to_code_session(
     Safe to call again with the same ``turn_id``: the ws-server answers
     ``duplicate`` instead of writing a second turn. Transport failures retry
     with the same id; a definite ``rejected`` ack is returned immediately.
-    ``sender="agent"`` marks a turn written by a Rose agent; it is rejected
-    with ``relay_paused`` while the user is chatting with the session.
+    ``sender="agent"`` marks a turn written by a Rose agent; while the user is
+    chatting with the session it is acked ``queued`` and delivered after the
+    hand back.
     """
     payload = {
         "type": "user_turn",
@@ -178,6 +183,8 @@ async def deliver_user_turn_to_code_session(
                 status = "delivered"
             elif raw_status == "duplicate":
                 status = "duplicate"
+            elif raw_status == "queued":
+                status = "queued"
             reason = ack.get("reason")
             logger.info(
                 "[CodeSessionTurns] Turn acknowledged",

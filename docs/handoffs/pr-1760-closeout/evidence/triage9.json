@@ -1,0 +1,57 @@
+{
+ "failures": [
+  {
+   "id": "dd49b1b56d594b53925b1b4011a55ec4",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "6e347fb7f9aa64c98e2c5257de93903da8b7db6e",
+    "digest": "e270db06fc09c7aa4a7a2a65f919d8cb4b376c48ad60c8b254d97b112a193b67"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-command-structural: original600-portable-operator RunBenchShardedRouting.test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once errored in its fixture cleanup: 'OSError: [Errno 39] Directory not empty: .git' (entries written 0.1-0.35 s before rmtree), a cleanup race in the test fixture.",
+   "evidence": "cycle attempt 2 initial/deploy-command-structural remote-artifact deploy-worker log; the same suite passed in the four previous attempts; PR diff touches only run-blackbox-tests.sh DB naming, local-db-container helper/test, the report-bug fixture, the test-only fetch cache and docs",
+   "assigned_repair": true,
+   "assigned_reason": "UNVERIFIED aggregate gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate and hands the fixture cleanup race to a post-merge repair.",
+   "assigned_evidence": "remote-artifact log lines 'fixture cleanup of /tmp/tmpxwd72jlx failed: OSError(39, Directory not empty)'"
+  },
+  {
+   "id": "511eb00a038c437eb4fe039e38c26e94",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "6e347fb7f9aa64c98e2c5257de93903da8b7db6e",
+    "digest": "e270db06fc09c7aa4a7a2a65f919d8cb4b376c48ad60c8b254d97b112a193b67"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "Standing AgentCard sandbox release stall (closed zero-balance card, org transfer consumed, releasedCents=0); natively SKIPPED, never PASS.",
+   "evidence": "smoke result.json evidence row (native SKIPPED, receipt sha b071e7a52bda94eeaaa37937a23f78c5a054a996a34abaffa4b61a936d9b26d7)",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "b071e7a52bda94eeaaa37937a23f78c5a054a996a34abaffa4b61a936d9b26d7",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_93670817e1b7304d932f2283\", \"cardId\": \"card_9933d2c932abb3281772f91f\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 79e95f18-eee3-42d8-bd9b-96aa5993f2fe | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard (sandbox)",
+    "evidence": "orgTransfer consumed releasedCents=0 on a CLOSED zero-balance card; docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md",
+    "confirmed_at": 1794093642.5340319
+   }
+  }
+ ]
+}

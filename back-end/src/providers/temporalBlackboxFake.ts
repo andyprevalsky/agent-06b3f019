@@ -19,6 +19,8 @@ interface FakeExecution {
   status: 'RUNNING' | 'TERMINATED';
   startTime: Date;
   signals: BlackboxTemporalSignal[];
+  type: string;
+  taskQueue: string;
 }
 
 const executionsByClient = new WeakMap<object, Map<string, FakeExecution>>();
@@ -81,6 +83,8 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
           status: { name: execution.status },
           runId: execution.firstExecutionRunId,
           startTime: execution.startTime,
+          type: execution.type,
+          taskQueue: execution.taskQueue,
           raw: {
             workflowExecutionInfo: {
               firstRunId: execution.firstExecutionRunId,
@@ -110,6 +114,7 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
 
   type FakeStartOptions = {
     workflowId: string;
+    taskQueue?: string;
     args?: unknown[];
     workflowIdConflictPolicy?: WorkflowIdConflictPolicy;
     workflowIdReusePolicy?: WorkflowIdReusePolicy;
@@ -152,6 +157,8 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
           status: 'RUNNING',
           startTime: new Date(),
           signals: [],
+          type: workflowType,
+          taskQueue: options.taskQueue ?? '',
         };
         executions.set(options.workflowId, execution);
         return getHandle(options.workflowId, execution.firstExecutionRunId);

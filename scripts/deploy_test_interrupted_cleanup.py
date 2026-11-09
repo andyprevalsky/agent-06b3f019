@@ -11,6 +11,8 @@ import subprocess
 import time
 from datetime import datetime
 
+from deploy_test_native_cleanup import fleet_audit_root, fleet_ownership_root
+
 KIND = 'interrupted-preallocation-cleanup-v1'
 RENEWAL_KIND = 'interrupted-policy-witness-renewal-v1'
 POLICIES = {'scripts/run-bench-fleet', 'scripts/lib/cloudbench-env.sh',
@@ -72,38 +74,8 @@ def namespace_quiet(namespace, ports):
                 continue
             need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
 
-    def real_uid(process):
-        for line in (process / 'status').read_text().splitlines():
-            if line.startswith('Uid:'):
-                return int(line.split()[1])
-        raise PermissionError(f'{process}: no Uid line')
-
-    for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
-        deadline, unreadable = time.monotonic() + 2, False
-        while True:
-            try:
-                if not unreadable and process.stat().st_uid != os.geteuid():
-                    break
-                inspect(process)
-                break
-            except (FileNotFoundError, ProcessLookupError):
-                break
-            except PermissionError:
-                # A same-user process can turn unreadable mid-scan (non-dumpable, or exec of a setuid
-                # binary that keeps our real uid). Re-observe: skip it only once it exits or its real
-                # uid is another user's; one that stays unreadable is refused, never assumed quiet.
-                unreadable = True
-                try:
-                    if real_uid(process) != os.getuid():
-                        break
-                except (FileNotFoundError, ProcessLookupError):
-                    break
-                except PermissionError:
-                    pass  # An unreadable status proves nothing either; keep re-observing to the deadline.
-                need(time.monotonic() < deadline, f'original namespace process {process.name} is unverifiable')
-                time.sleep(0.05)
+    from deploy_test_process import scan_same_user_processes
+    scan_same_user_processes(inspect, lambda pid: need(False, f'original namespace process {pid} is unverifiable'))
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()
@@ -279,7 +251,7 @@ def cloud(root, gate, receipt, folder, proof, evidence):
                             'runtime_evidence_missing': False, 'successful_runtime_inferred': False}
              and all(disposable[k] is False for k in ('guest_cleanup_missing', 'runtime_evidence_missing', 'successful_runtime_inferred')),
              'original disposable facts changed')
-        local, audit = fleet / 'teardown-ownership', root / '.git/cloudbench-fleet-audits' / token
+        local, audit = fleet / 'teardown-ownership', fleet_audit_root(root) / token
         seal = evidence.tree(local)
         need(seal == evidence.tree(audit) == life['audit_sha256']
              and evidence.fields(local / 'source-audit') == {'path': str(audit), 'sha256': seal}, 'native audit seals differ')
@@ -289,7 +261,7 @@ def cloud(root, gate, receipt, folder, proof, evidence):
              and meta.get('workspace_root') == str(root) and meta.get('status') == 'provider-teardown-verified', 'canonical zero-resource release required')
         epoch = float(evidence.raw(audit / 'provider-teardown-verified.epoch'))
         need(math.isfinite(epoch) and stamp(job['started_at']) <= epoch <= proof['confirmed_at'], 'native release clock')
-        registry = root / '.git/cloudbench-fleet-ownership' / token
+        registry = fleet_ownership_root(root) / token
         need(not registry.exists() and not registry.is_symlink(), 'native ownership registry remains')
         for name in ('owned-clones.ids', 'owned-clones.names'):
             need(evidence.raw(audit / name) == b'', 'a provider allocation was recorded')

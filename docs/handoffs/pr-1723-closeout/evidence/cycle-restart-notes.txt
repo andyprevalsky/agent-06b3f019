@@ -1,0 +1,34 @@
+PR #1691 staged deploy notes (devbox 211c7467). Reuse at your discretion; the paths are from my box.
+
+Worker prep: prepare_workers.sh.
+  python3 scripts/deploy_test_worker.py --root <canonical> --prepare-checkout /var/tmp/deploy-workers/<name> --copy-config
+  Then: alternates to the canonical objects, git repack -a -d -l, and symlinks for node_modules, back-end/node_modules, front-end/node_modules and agents/venv.
+Frontend worker: patch-ui-lifecycle.mjs rejects dependency dirs outside the worker. Use REAL copies (cp -a) of root node_modules, front-end/node_modules and back-end/node_modules there, not symlinks. Keep any moved symlinks OUTSIDE the tree, or the source digest changes.
+Advancing workers: git -C <worker> checkout --detach <sha> in each worker. Verify the digest with deploy_test_cycle.source(root) == source(worker) for every worker.
+Env: cycle_env.sh. Every cycle command runs under env -i with a fixed PATH; the environment digest is bound at init.
+Gate launch: run_gates.sh, launched as
+  sudo systemd-run --scope -p MemoryHigh=11G -p MemorySwapMax=infinity -- sudo -u boxes -H run_gates.sh
+  The sudo -u keeps the docker group.
+  umask 022 inside the wrapper is REQUIRED. Under sudo -u, umask 0002 breaks the smoke relay ("unsafe relay path") and code-preview's swc native binding.
+drive_cycle.sh: runs one cycle pass and prints the state.
+Inventory: inventory.json. Every local slot needs timeout_seconds (I used 14400). Generate the backend slot recipe with deploy_test_backend.py --handoff-slot.
+Prereqs:
+  - lsof installed.
+  - flyctl symlinked into /usr/local/bin (env -i drops ~/.fly/bin).
+  - bash scripts/run-deploy-stage --start in EVERY worker.
+  - PUSH the frozen SHA to origin before smoke (a side ref is fine). Otherwise every smoke controller fails with "not fetchable from origin".
+Disk: keep at least 20 GB free (df -h /). backend-coverage .context grows about 5 GB per failed run. Never glob-delete under test-runs: .port-locks and browser-provider-custody live there.
+Shared bench image: if the smoke canary fails with "warm image/volume JavaScript dependencies do not match", compare node dependency fingerprints. Then rebuild and activate an image from a clean committed checkout (scripts/run-bench image-build / image-activate). I activated one built from 493df3405 (main-compatible deps) at about 23:10Z on 11-05.
+Smoke native owner: a smoke campaign that never launched or was refused leaves an unreconcilable native owner. Verify on Fly that nothing was allocated, then move cycle.json, attempts/ and plan aside and re-init.
+Structural gate: deploy-test-worker and run-deploy-pipeline timing cases flake under full fan-out. reexecute works when the receipt has no lingering group; a passing suite with a reaped orphan has no reconcile path.
+moved aside: cycle.aa01493d1-smoke-owner-1794039342.json attempts.aa01493d1-smoke-owner-1794039342 (smoke canary dep mismatch; clones 8744d67b062068 d8911375ce1358 absent from navi-whisper-lux-bench, volumes vol_vgnq9ox056lglkz4 vol_491jmp75y3qod3zr pending_destroy at 2026-11-07T08:15:45Z)
+v1 cycle READY on 6c91048a7 preserved as *.6c91048a7-v1-ready-1794074306; v2 gates start on 7b243b4ec 2026-11-07T17:58:26Z
+2026-11-07T18:41:14Z stopped exact-owned idle smoke guests 820222a7635418 (fleet d9affd84…, agent-payment-setup-resume) and 83d1300b51d3d8 (fleet 79296cde…, claude-code-agent): dep-sync FATAL before any task; --recover-stale-owner refused (no sealed runtime evidence); IDs, volumes and evidence retained
+2026-11-07T18:59:45Z v2 cycle on 7b243b4ec moved aside (*-v2-depsmismatch-1794077985): smoke guests refused Python deps of shared warm image; refreshed donor snapshot vs_ZPnK9baJYXkfQ9qlBAA; structural UNVERIFIED (deploy-test-cycle /proc EACCES on Blacksmith runner, main's scanner)
+2026-11-07T19:44:03Z v2 cycle 7b243b4ec moved aside (*-v2-capacity-1794080643): smoke 11 PASS, agent-payment-abandonment AgentCard release stall SKIPPED, test-mass-agent-run-0 REAL PASS but mandatory autoscaler refused 'Machine-count capacity unavailable' (49 app machines vs default ceiling 56); backend code-session-inspect C15 FAIL (codex_funded_cooldown; passes 3/3 locally). Rerun with CLOUDBENCH_APP_MACHINE_CEILING=90 (org cap 1000).
+2026-11-07T21:25:39Z v2 cycle READY on 7b243b4ec preserved (*-v2-ready-1794086739); main moved 62 commits (INDEX-only conflict) -> 233012993, fresh gates
+2026-11-07T22:57:36Z cycle READY on 233012993 preserved (*-ready-1794092256); main moved 103 commits with real conflicts in github.ts/mergeFacts.ts (githubRateLimit) -> composed in 55524eb88, fresh gates
+2026-11-08T00:01:52Z cycle READY on 55524eb88 (all 16 PASS) preserved (*-ready-env-GH_TOKEN-1794096112): merge verify exit 5 because the cycle bound an exported GH_TOKEN that the daemon rotated at 23:40Z; rerunning with GH_TOKEN unset
+2026-11-08T01:46:25Z cycle READY on 55524eb88 (clean env, 16 PASS) preserved (*-ready-sessionenv-1794102385): session restart changed os.environ; main moved 65 (INDEX-only) -> a48ed602f; gates+merge now via deploy_env.sh (env -i)
+2026-11-08T02:55:59Z TERMed 14 idle agent_link_server hubs from this devbox's finished deploy smoke campaigns (deploy-cloud hashes referenced by .context/deploy-pipeline attempts); left fleet/runs hubs (other threads)
+2026-11-08T03:33:04Z stopped own idle fleet/runs hub 4091628 (CLAUDE_CODE_SESSION_ID=this session) and flyctl agent daemon; left boxes.dev codex app-server 1464602 (platform runtime, parent systemd)
