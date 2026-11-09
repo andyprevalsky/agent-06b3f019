@@ -1,7 +1,7 @@
 /**
  * Remote-browser selection for the compute-grants domain.
  *
- * Kernel is the DEFAULT. Steel, Browser Use and Tilion stay selectable via
+ * Tilion is the fresh-session default. Other providers stay selectable via
  * `COMPUTE_GRANT_BROWSER_PROVIDER` so a provider outage does not block
  * account connect or grant recovery -- the two paths that, when broken, silently
  * push every request onto paid models.

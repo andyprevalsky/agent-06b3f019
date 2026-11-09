@@ -7,6 +7,7 @@
 
 import { readPhoneTarget, readCriticalReason } from '@/lib/api/phoneAttention';
 import { useMemo } from 'react';
+import { liveViewSessionIdentity } from './liveViewDisplay';
 import { BROWSER_INIT_ACTION_TYPES } from '@/lib/backendToolNames';
 import { useAgentContext, type Message } from '../../hooks';
 import type {
@@ -64,14 +65,27 @@ function extractStepProgress(browserMessages: Message[]): StepProgress | null {
   return null;
 }
 
+/** Reduce partial metadata for the latest native session without inheriting an old exit. */
 function extractBrowserSessionMetadata(browserMessages: Message[]): BrowserSessionMetadata | null {
+  let metadata: BrowserSessionMetadata | null = null;
+  let bindingKey: string | undefined;
   for (let i = browserMessages.length - 1; i >= 0; i--) {
-    const raw = browserMessages[i].metadata?.browser_session_metadata;
+    const message = browserMessages[i];
+    const nextUrl = message.metadata?.browser_url;
+    // Stop at the binding boundary; old exits never describe its replacement.
+    if (typeof nextUrl === 'string') {
+      const nextKey = liveViewSessionIdentity(nextUrl);
+      if (bindingKey !== undefined && nextKey !== bindingKey) break;
+      bindingKey = nextKey;
+    }
+    const raw = message.metadata?.browser_session_metadata;
     if (raw && typeof raw === 'object') {
-      return raw as BrowserSessionMetadata;
+      // Same-session reattachment emits a profile-only delta. Newer fields win,
+      // while omitted proxy fields retain the last observation of this session.
+      metadata = { ...raw, ...metadata } as BrowserSessionMetadata;
     }
   }
-  return null;
+  return metadata;
 }
 
 function extractPendingApproval(messages: Message[]): PendingWriteLockApproval | null {

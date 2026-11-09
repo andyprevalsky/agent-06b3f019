@@ -778,5 +778,137 @@ class Dispatch(unittest.TestCase):
             self.assertTrue(f'scripts/deploy {name}' in doc, f'deploy.md does not document {name}')
 
 
+class ReviewNextInputValidation(unittest.TestCase):
+    def invoke(self, options, stop_at_start=False):
+        import deploy_review_cycle as cycle
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ledger = root / 'ledger.json'
+            ledger.write_text(json.dumps({'schema_version': 1, 'cycles': [
+                dict(number=i, kind=kind, head=str(i)*40, status='completed', result='clean')
+                for i, kind in enumerate(('initial', 'incremental', 'verification'), 1)
+            ]}))
+            before = ledger.read_bytes()
+            pr = root / 'pr.json'
+            pr.write_text(json.dumps({'pr': 1708}))
+            calls = []
+
+            def boundary(argv, **kwargs):
+                calls.append(argv)
+                self.assertEqual(argv[1:3], ['scripts/deploy_review_cycle.py', 'start'])
+                if stop_at_start:
+                    return 1
+                with patch.object(sys, 'argv', [argv[1], '--state', str(ledger), *argv[2:]]):
+                    try:
+                        return cycle.main()
+                    except SystemExit as error:
+                        if not isinstance(error.code, int):
+                            print(str(error.code), file=sys.stderr)
+                            return 1
+                        return error.code or 0
+
+            out, err = io.StringIO(), io.StringIO()
+            with patch.object(d, 'ROOT', root), patch.object(d, 'PR_FILE', pr), \
+                    patch.object(d, 'uncommitted', return_value=[]), \
+                    patch.object(d, 'unapplied_ledger_rows', return_value=False), \
+                    patch.object(d, 'head', return_value='d'*40) as read_head, \
+                    patch.object(d, 'git', side_effect=AssertionError('unexpected git')) as git, \
+                    patch.object(cycle, 'git', side_effect=AssertionError('unexpected ledger git')) as ledger_git, \
+                    patch.object(d, 'write_json', side_effect=AssertionError('unexpected PR write')) as write_pr, \
+                    patch.object(cycle, 'write_state', side_effect=AssertionError('unexpected ledger write')) as write_ledger, \
+                    patch.object(d, 'factory', side_effect=AssertionError('unexpected review event')) as event, \
+                    patch.object(d, 'run', side_effect=boundary), \
+                    patch.object(d.subprocess, 'run', side_effect=AssertionError('unexpected subprocess')) as process, \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = d.main(['review-next', *options])
+            self.assertEqual(before, ledger.read_bytes())
+            for blocked in (git, ledger_git, write_pr, write_ledger, event, process):
+                blocked.assert_not_called()
+            return {'code': code, 'stderr': err.getvalue(), 'calls': calls, 'head_reads': read_head.call_count}
+
+    def test_partial_or_empty_final_pair_is_rejected_before_delegation(self):
+        for options in (
+            ['--one-final-review-approval', 'user:decision'],
+            ['--approved-head', 'd'*40],
+            ['--one-final-review-approval', '', '--approved-head', 'd'*40],
+            ['--one-final-review-approval', 'user:decision', '--approved-head', ''],
+            ['--one-final-review-approval', '', '--approved-head', ''],
+        ):
+            with self.subTest(options=options):
+                result = self.invoke(options)
+                self.assertEqual(result['code'], 1, result)
+                self.assertEqual(result['calls'], [], result)
+                self.assertEqual(result['head_reads'], 0, result)
+                self.assertIn('both required', result['stderr'], result)
+
+    def test_final_pair_cannot_be_combined_with_verification_approval(self):
+        for approval in ('other', ''):
+            with self.subTest(approval=approval):
+                result = self.invoke(['--one-final-review-approval', 'user:decision',
+                                      '--approved-head', 'd'*40, '--verification-approval', approval])
+                self.assertEqual(result['code'], 1, result)
+                self.assertEqual(result['calls'], [], result)
+                self.assertEqual(result['head_reads'], 0, result)
+                self.assertIn('cannot combine', result['stderr'], result)
+
+    def test_complete_final_pair_preserves_the_exact_native_arguments(self):
+        result = self.invoke(['--one-final-review-approval', 'user:decision',
+                              '--approved-head', 'd'*40], stop_at_start=True)
+        self.assertEqual(result['code'], 1, result)
+        self.assertEqual(result['calls'], [[sys.executable, 'scripts/deploy_review_cycle.py',
+            'start', '--kind', 'verification', '--head', 'd'*40,
+            '--one-final-review-approval', 'user:decision', '--approved-head', 'd'*40,
+            '--repo', result['calls'][0][-1]]])
+
+
+
+class PostFindingsCLIProposalTest(unittest.TestCase):
+    def options(self):
+        return ['--post-findings-review-approval', 'fixture:NEW', '--approved-head', 'e'*40,
+                '--prior-ledger-sha256', 'b'*64]
+
+    def test_missing_pair_or_combined_flags_fail_before_state_or_subprocess(self):
+        cases = [['--post-findings-review-approval', 'fixture:NEW'],
+                 self.options()[:-2], ['--prior-ledger-sha256', 'b'*64],
+                 self.options() + ['--verification-approval', ''],
+                 self.options() + ['--one-final-review-approval', '']]
+        for options in cases:
+            with self.subTest(options=options), \
+                    patch.object(d, 'read_json', side_effect=AssertionError('state read forbidden')), \
+                    patch.object(d, 'run', side_effect=AssertionError('subprocess forbidden')), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(d.main(['review-next', *options]), 1)
+
+    def dispatch(self, admission):
+        calls = []
+        def run(argv):
+            calls.append(argv)
+            return admission if len(calls) == 1 else 0
+        with patch.object(d, 'read_json', return_value={'pr': 1708}), \
+                patch.object(d, 'uncommitted', return_value=[]), \
+                patch.object(d, 'unapplied_ledger_rows', return_value=False), \
+                patch.object(d, 'head', return_value='e'*40), patch.object(d, 'run', side_effect=run), \
+                patch.object(d, 'factory') as event, patch.object(d, 'write_json') as write, \
+                patch.object(d.subprocess, 'run', side_effect=AssertionError('real subprocess forbidden')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = d.main(['review-next', *self.options()])
+        return result, calls, event.call_count, write.call_count
+
+    def test_admission_refusal_prevents_push_request_event_and_write(self):
+        result, calls, events, writes = self.dispatch(1)
+        self.assertEqual((result, len(calls), events, writes), (1, 1, 0, 0))
+        self.assertEqual(calls[0][1:3], ['scripts/deploy_review_cycle.py', 'start'])
+        self.assertIn('--post-findings-review-approval', calls[0])
+        self.assertIn('--prior-ledger-sha256', calls[0])
+
+    def test_normal_full_request_follows_admission_only(self):
+        result, calls, events, writes = self.dispatch(0)
+        self.assertEqual((result, len(calls), events, writes), (0, 3, 1, 1))
+        self.assertEqual(calls[0][1:3], ['scripts/deploy_review_cycle.py', 'start'])
+        self.assertEqual(calls[1], ['git', 'push', 'origin', 'HEAD'])
+        self.assertEqual(calls[2], ['gh', 'pr', 'comment', '1708', '--body', '@coderabbitai review'])
+
+
 if __name__ == '__main__':
     unittest.main()

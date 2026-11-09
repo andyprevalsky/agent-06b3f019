@@ -643,7 +643,7 @@ class InterruptedCustody(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value) if isinstance(value, (dict, list)) else value)
 
-    def fixture(self, cloud=False):
+    def fixture(self, cloud=False, static='backend-structural'):
         import hashlib, shutil, time, runpy
         from datetime import datetime, timezone
         import deploy_test_interrupted_cleanup as m
@@ -660,7 +660,10 @@ class InterruptedCustody(unittest.TestCase):
         gate = (dict(name='smoke', category='smoke', native_cloud=True, worker_transport='benchmark-cloud-cli',
                      command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')],cwd=str(self.root),checks=['task'],env={})
                 if cloud else dict(name='backend-structural',category='backend-structural',quick=True,
-                                   command=['npm','run','test:structural'],cwd='back-end',checks=['backend-structural'],env={}))
+                                   command=['npm','run','test:structural'],cwd='back-end',checks=['backend-structural'],env={})
+                if static == 'backend-structural' else dict(name='format',category='format',quick=True,
+                                   command=[sys.executable,'scripts/check_deploy_static.py','format','--base','origin/main'],
+                                   checks=['format']))
         source = c.source(self.root)
         folder = self.root / '.context/deploy-pipeline/attempts/16/focused' / gate['name']
         token = 'a'*32
@@ -791,6 +794,43 @@ class InterruptedCustody(unittest.TestCase):
                 state['plan']['gates'][0]['command']=['replacement']
                 self.assertFalse(self.m.still_bound(state,r,entry))
                 self.assertTrue(all(Path(p).read_bytes()==raw for p,raw in bytes_before.items()))
+
+    def test_format_quick_gate_term_cancellation_uses_the_static_route(self):
+        # A TERM'd coordinator also cancels the root format check; it releases like backend-structural.
+        state,r,proof=self.fixture(static='format')
+        original=copy.deepcopy(state)
+        c.reconcile(state,r['token'],proof);c.interrupted_boundary(state)
+        self.assertEqual(state['attempts'],original['attempts'])
+        entry=state['reconciled_owners'][c.sha_file(Path(r['log']).parent/'receipt.json')]
+        self.assertFalse(entry['credit_granted']);self.assertTrue(self.m.still_bound(state,r,entry))
+        for command in (['python3','scripts/check_deploy_static.py','eslint','--base','origin/main'],
+                        ['python3','scripts/other.py','format','--base','origin/main']):
+            gate={**state['plan']['gates'][0],'command':command}
+            with self.subTest(command=command),self.assertRaisesRegex(ValueError,'static quick routes'):
+                self.m.static_worker(self.root,gate,r,Path(r['log']).parent,None)
+
+    def test_budget_expired_static_quick_gate_reconciles_only_when_fully_reaped(self):
+        # backend-structural can hit its own quick budget inside a phase that is later cancelled:
+        # timed out, TERM'd and reaped by its supervisor. That terminal shape releases like a TERM.
+        def expired(**process):
+            state,r,proof=self.fixture()
+            folder=Path(r['log']).parent
+            r.update(cancelled=False,timed_out=True);self.put(folder/'receipt.json',r)
+            doc=json.loads((folder/'output.log.process.json').read_text())
+            doc.update(cancelled=False,timed_out=True);doc.update(process);self.put(folder/'output.log.process.json',doc)
+            self.rebind(proof)
+            return state,r,proof
+        state,r,proof=expired()
+        original=copy.deepcopy(state)
+        c.reconcile(state,r['token'],proof);c.interrupted_boundary(state)
+        self.assertEqual(state['attempts'],original['attempts'])
+        entry=state['reconciled_owners'][c.sha_file(Path(r['log']).parent/'receipt.json')]
+        self.assertFalse(entry['credit_granted']);self.assertTrue(self.m.still_bound(state,r,entry))
+        for change in (dict(cancelled=True),dict(remaining=[2147483003]),dict(kill_sent=[2147483001])):
+            self.tearDown();self.setUp()
+            state,r,proof=expired(**change)
+            with self.subTest(change=change),self.assertRaisesRegex(ValueError,'interrupted custody proof refused'):
+                c.reconcile(state,r['token'],proof)
 
     def policy_relocation_fixture(self):
         import time
@@ -1166,5 +1206,131 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
+
+import hashlib
+from deploy_test_run_artifact import read_run_artifact, ForensicValue
+
+class NativeRunArtifact(unittest.TestCase):
+ def setUp(self):self.tmp=tempfile.TemporaryDirectory();self.p=Path(self.tmp.name)/'run.json'
+ def tearDown(self):self.tmp.cleanup()
+ def read(self,raw,limit=4096,expected=None):
+  self.p.write_bytes(raw);return read_run_artifact(self.p,expected or hashlib.sha256(raw).hexdigest(),limit)
+ def test_large_forensics_preserve_all_control_fields_and_raw_bytes(self):
+  value={'run_id':'original','status':'failed','controller_exit_code':1,'tasks':[{'name':'original','passed':True,'logs':{'messages':['a'*600 for _ in range(40)]},'owned_roots':[{'root_agent_id':'root','logs':{'messages':['b'*600 for _ in range(40)]}}]}]};raw=json.dumps(value).encode();v=self.read(raw)
+  self.assertEqual(self.p.read_bytes(),raw);self.assertEqual(v['status'],'failed');self.assertEqual(v['controller_exit_code'],1);self.assertTrue(v['tasks'][0]['passed']);self.assertIsInstance(v['tasks'][0]['logs'],ForensicValue);self.assertEqual(v['tasks'][0]['owned_roots'][0]['root_agent_id'],'root')
+ def test_raw_cap_keeps_size_refusal_and_unknown_metadata_remains_bounded(self):
+     # Native results serialize task logs as dictionaries of arrays; only these paths are opaque.
+     raw=json.dumps({'tasks':[{'logs':{'worker_logs':['x'*128]*40}}]}).encode()
+     self.p.write_bytes(raw);digest=hashlib.sha256(raw).hexdigest()
+     with self.assertRaisesRegex(ValueError,'proof file too large'):
+         read_run_artifact(self.p,digest,4096,raw_limit=len(raw)-1)
+     self.assertEqual(raw,self.p.read_bytes())
+     value=read_run_artifact(self.p,digest,4096,raw_limit=len(raw))
+     self.assertIsInstance(value['tasks'][0]['logs'],ForensicValue)
+     metadata=json.dumps({'padding':'x'*4097}).encode()
+     self.p.write_bytes(metadata)
+     with self.assertRaisesRegex(ValueError,'metadata document byte bound'):
+         read_run_artifact(self.p,hashlib.sha256(metadata).hexdigest(),4096,raw_limit=len(metadata))
+     self.assertEqual(metadata,self.p.read_bytes())
+
+ def test_big_nonforensic_metadata_refused(self):
+  with self.assertRaisesRegex(ValueError,'bound'):self.read(json.dumps({'tasks':[{'unknown':['x'*600 for _ in range(40)]}]}).encode())
+ def test_wrong_hash_including_opaque_bytes_refused(self):
+  with self.assertRaisesRegex(ValueError,'hash'):self.read(b'{"tasks":[{"logs":{"data":"changed"}}]}',expected='0'*64)
+ def test_symlink_refused(self):
+  self.p.write_text('{}');q=self.p.with_name('link');q.symlink_to(self.p)
+  with self.assertRaisesRegex(ValueError,'canonical'):read_run_artifact(q,hashlib.sha256(b'{}').hexdigest(),4096)
+ def test_malformed_opaque_payloads_refused_even_with_matching_hash(self):
+  for raw in [b'{"tasks":[{"logs":{"x":"bad\\q"}}]}',b'{"tasks":[{"logs":{"x":"bad\\uZ000"}}]}',b'{"tasks":[{"logs":[1,]}]}',b'{"tasks":[{"logs":{"x":01}}]}',b'{"tasks":[{"logs":{"x":"bad\xff"}}]}',b'{"tasks":[{"logs":{"x":"bad\x01"}}]}',b'{"tasks":[{"logs":{"x":truefalse}}]}',b'{"tasks":[{"logs":{"x":1,"x":2}}]}',b'{"tasks":[{"logs":{}}]}garbage']:
+   with self.subTest(raw_hash=hashlib.sha256(raw).hexdigest()):
+    with self.assertRaises((ValueError,UnicodeDecodeError)):self.read(raw)
+ def test_large_scalar_and_depth_refused(self):
+  for raw in [b'{"tasks":[{"logs":"'+b'x'*5000+b'"}]}',b'{"tasks":[{"logs":'+b'['*140+b'0'+b']'*140+b'}]}']:
+   with self.assertRaisesRegex(ValueError,'bound|depth'):self.read(raw)
+ def test_nonobject_and_duplicate_control_keys_refused(self):
+  for raw in [b'[]',b'{"run_id":"good","run_id":"foreign"}']:
+   with self.assertRaises(ValueError):self.read(raw)
+ def test_strings_numbers_whitespace_match_stdlib_for_metadata(self):
+  value={'run_id':'\u2603\\"','status':'failed','number':-1.25e-4,'flag':True,'empty':None,'tasks':[{'owned_roots':[],'passed':False}]};self.assertEqual(self.read(json.dumps(value).encode()),value)
+
+ def test_nonforensic_whitespace_counts_toward_wire_budget(self):
+     with self.assertRaisesRegex(ValueError, 'metadata document byte bound'):
+         self.read(b'{' + b' ' * 32768 + b'"status":"failed"}', limit=4096)
+
+ def test_truncation_child_is_python_refusal_not_signal(self):
+     import textwrap
+     program = textwrap.dedent('\n            import sys, tempfile, hashlib, resource\n            from pathlib import Path\n            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n            sys.path.insert(0, sys.argv[1])\n            import deploy_test_run_artifact as m\n            with tempfile.TemporaryDirectory() as folder:\n                p=Path(folder)/\'run.json\';raw=b\'{"tasks":[{"logs":[\'+b\'"x",\'*30000+b\'"x"]}]}\';p.write_bytes(raw)\n                original=m._Reader.value\n                fired=False\n                def raced(self,*args):\n                    global fired\n                    if not fired:\n                        fired=True\n                        with p.open(\'r+b\') as writer:writer.truncate(0)\n                    return original(self,*args)\n                m._Reader.value=raced\n                try:m.read_run_artifact(p,hashlib.sha256(raw).hexdigest(),4096)\n                except (OSError,ValueError):print(\'SAFE_REFUSAL\')\n                else:raise AssertionError(\'truncation accepted\')\n')
+     r=subprocess.run([sys.executable,'-B','-c',program,str(Path(__file__).resolve().parents[1])],capture_output=True,text=True)
+     self.assertEqual(0,r.returncode,r.stderr)
+     self.assertIn('SAFE_REFUSAL',r.stdout)
+
+ def test_fifo_cancel_deadline_and_default_raw_bound(self):
+     import time
+     from deploy_test_process import CANCEL
+     fifo=self.p.with_name('fifo');os.mkfifo(fifo)
+     with self.assertRaisesRegex(ValueError,'regular fd'):
+         read_run_artifact(fifo,'0'*64,4096)
+     self.p.write_bytes(b'{}');digest=hashlib.sha256(b'{}').hexdigest()
+     CANCEL.set()
+     try:
+         with self.assertRaisesRegex(ValueError,'cancelled'):
+             read_run_artifact(self.p,digest,4096)
+     finally:CANCEL.clear()
+     with self.assertRaisesRegex(ValueError,'deadline'):
+         read_run_artifact(self.p,digest,4096,deadline=time.monotonic()-1)
+     with self.assertRaisesRegex(ValueError,'raw file byte bound'):
+         read_run_artifact(self.p,digest,4096,raw_limit=1)
+
+ def test_explicit_raw_budget_charges_each_regular_descriptor_and_stays_aggregate(self):
+     import deploy_test_run_artifact as artifact
+     raw=b'{"tasks":[{"logs":"'+b'x'*700+b'"}],"status":"failed"}'
+     self.p.write_bytes(raw);other=self.p.with_name('other.json');other.write_bytes(raw)
+     digest=hashlib.sha256(raw).hexdigest();remaining=[1024]
+     value=read_run_artifact(self.p,digest,4096,raw_limit=1024,raw_remaining=remaining)
+     self.assertEqual('failed',value['status'])
+     self.assertEqual([1024-len(raw)],remaining)
+     with self.assertRaisesRegex(ValueError,'aggregate'):
+         read_run_artifact(other,digest,4096,raw_limit=1024,raw_remaining=remaining)
+     self.assertEqual(64*1024*1024,artifact.MAX_RECEIPT_BYTES)
+
+ def test_malformed_shared_raw_budgets_refuse_before_reading(self):
+     raw=b'{}';self.p.write_bytes(raw);digest=hashlib.sha256(raw).hexdigest()
+     for remaining in [[],[0],[-1],[True],[1025],[1024,1024],'1024']:
+         with self.subTest(remaining=remaining):
+             with self.assertRaisesRegex(ValueError,'aggregate'):
+                 read_run_artifact(self.p,digest,4096,raw_limit=1024,raw_remaining=remaining)
+
+
+ def test_opaque_sibling_objects_release_transient_key_memory(self):
+     raw=b'{"status":"failed","tasks":[{"logs":['+b','.join([b'{"a":0}']*3000)+b']}]}';before=hashlib.sha256(raw).hexdigest()
+     value=self.read(raw)
+     self.assertEqual('failed',value['status'])
+     self.assertIsInstance(value['tasks'][0]['logs'],ForensicValue)
+     self.assertEqual(before,hashlib.sha256(self.p.read_bytes()).hexdigest())
+
+ def test_opaque_owned_root_siblings_release_transient_key_memory(self):
+     raw=b'{"tasks":[{"owned_roots":[{"logs":['+b','.join([b'{"a":0}']*3000)+b']}]}]}'
+     value=self.read(raw)
+     self.assertIsInstance(value['tasks'][0]['owned_roots'][0]['logs'],ForensicValue)
+
+ def test_opaque_live_object_and_nested_key_sets_remain_bounded(self):
+     wide=b'{'+b','.join(b'"k'+str(i).encode()+b'":0' for i in range(500))+b'}'
+     nested=b'0'
+     for _ in range(12):
+         nested=b'{'+b','.join(b'"k'+str(i).encode()+b'":0' for i in range(10))+b',"child":'+nested+b'}'
+     for payload in (wide,nested):
+         with self.subTest(payload_length=len(payload)),self.assertRaisesRegex(ValueError,'materialization bound'):
+             self.read(b'{"tasks":[{"logs":'+payload+b'}]}')
+
+ def test_opaque_tail_still_checks_decoded_duplicates_and_grammar(self):
+     prefix=b'{"tasks":[{"logs":['+b','.join([b'{"a":0}']*3000)+b','
+     for tail in (b'{"a":0,"\\u0061":1}]}]}',b'{"x":"bad\\q"}]}]}',b'{"x":01}]}]}',b'{"x":"bad\xff"}]}]}'):
+         with self.subTest(tail=repr(tail)),self.assertRaisesRegex((ValueError,UnicodeDecodeError),'duplicate|escape|scalar|utf-8'):
+             self.read(prefix+tail)
+
+ def test_retained_sibling_values_keep_materialization_accounting(self):
+     raw=b'{"retained":['+b','.join([b'"a"']*500)+b']}'
+     with self.assertRaisesRegex(ValueError,'materialization bound'):
+         self.read(raw)
 
 if __name__=='__main__':unittest.main()

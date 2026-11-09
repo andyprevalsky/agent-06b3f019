@@ -13,6 +13,8 @@
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
  *   [ANY] --openAgentBrowserTab(agent) (task id unknown)--> [AGENT(agent's first tab)],
  *     else no selection + pending switch: the agent's tab takes over when it registers
+ *   [ANY] --openAgentBrowser(agent, task)--> [AGENT(agent, task)] and clears any pending
+ *     switch: a later-registering tab of that agent never replaces the explicit task
  *   [AGENT(id, taskId)] --click Root tab--> [ROOT]
  *   selectedAgentId changes | Browser opens --> [AGENT(selected)] if it has a
  *     browser tab, else [NO_SESSION] (an agent is selected) or [ROOT] (Home).
@@ -185,6 +187,7 @@ function useDrawerWidthState() {
   return { drawerWidth, setDrawerWidth };
 }
 
+/** Coordinate app drawers and deferred browser-tab selection for the selected agent. */
 export function RoseAppsProvider({
   children,
   agents = [],
@@ -236,7 +239,7 @@ export function RoseAppsProvider({
   // may register after the selection, so a pending switch completes on register.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
-  const pendingSwitchRef = useRef<string | null>(null);
+  const pendingSwitchRef = useRef<string | null>(selectedAgentId);
   const isFirstSelectionRef = useRef(true);
   useEffect(() => {
     if (isFirstSelectionRef.current) {
@@ -272,6 +275,7 @@ export function RoseAppsProvider({
       if (app === 'browser' && openApp !== 'browser') {
         setBrowserRootChosen(false);
         const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
+        pendingSwitchRef.current = tab ? null : selectedAgentId;
         setBrowserSelection((current) => {
           if (
             current &&
@@ -294,6 +298,9 @@ export function RoseAppsProvider({
       setBrowserMode('remote');
       focusTask(agentId, taskId);
       setBrowserRootChosen(false);
+      // An explicit task beats a pending agent switch: another task of that agent
+      // registering later must not replace it.
+      pendingSwitchRef.current = null;
       setBrowserSelection({ agentId, taskId });
       setOpenApp('browser');
     },
@@ -317,6 +324,7 @@ export function RoseAppsProvider({
         (t) => t.agentId === agentId && (taskId === undefined || t.taskId === taskId),
       );
       setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
+      pendingSwitchRef.current = null;
       setBrowserRootChosen(agentId === null);
       if (agentId !== null && agentId !== selectedAgentId) onSelectAgent?.(agentId);
     },

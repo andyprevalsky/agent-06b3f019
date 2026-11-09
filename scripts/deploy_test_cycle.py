@@ -1099,7 +1099,8 @@ def adjudicate(state: dict, report: dict) -> None:
         prior = state["failure_phase"]
         state["phase"] = {"quick": state.get("next_after_quick", "initial"), "initial": "ready",
                           "focused": "failed-gates", "failed-gates": "quick", "final": "ready",
-                          "refresh": "needs-focused-plan" if state["repair_gates"] else "final"}[prior]
+                          "refresh": "needs-focused-plan" if state["repair_gates"] else "final",
+                          "needs-focused-plan": "needs-focused-plan"}[prior]
         if prior == "failed-gates":
             state["next_after_quick"] = "final"
         if state["phase"] == "triage":
@@ -1751,19 +1752,35 @@ def settled_round49_missing_request(state, directory, gate, request_path):
 
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
-              excluded_roots=()) -> None:
+              excluded_roots=(), repair_independent: bool = False,
+              include_repair_local: bool = False) -> None:
     if (source(root) != state["source"] or digest(plan) != state["plan_digest"]
             or environment_digest() != state["environment"]
             or input_fingerprints(plan, root) != state["input_fingerprints"]):
         raise ValueError("source/plan changed; refresh after RCA before running")
+    origin_phase = state.get('phase')
+    if repair_independent and not independent:
+        raise ValueError('repair observation requires independent full execution')
+    if include_repair_local and not repair_independent:
+        raise ValueError('local repair observation requires the explicit repair-independent action')
     if independent:
-        if (state.get('phase') != 'triage' or not state.get('pending') or state.get('ready')
-                or CANCEL.is_set() or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
-            raise ValueError('independent FULL observation requires quiescent unresolved triage')
+        boundary = (origin_phase == 'needs-focused-plan' and not state.get('pending')
+                    and bool(state.get('repair_gates'))) if repair_independent else (
+                        origin_phase == 'triage' and bool(state.get('pending')))
+        if (not boundary or state.get('ready') or CANCEL.is_set() or 'live_failures' in state
+                or state.get('running') or state.get('resume_phase')):
+            raise ValueError('independent FULL observation requires a quiescent focused-repair boundary'
+                             if repair_independent else
+                             'independent FULL observation requires quiescent unresolved triage')
         validate_plan(plan, root)
         excluded = {Path(p).resolve() for p in excluded_roots}
-        pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state['pending']}
+        pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}
+        if repair_independent and not include_repair_local:
+            pending_gates.update(state['repair_gates'])
         selected = [g for g in plan['gates'] if not g.get('quick') and g['name'] not in pending_gates
+                    and not (repair_independent and (g.get('native_cloud')
+                             or g.get('worker_transport') != 'local-isolated'
+                             or g.get('category') == CLOUD_SMOKE))
                     and not reusable_full_pass(state, g)
                     and (g.get('worker_transport') != 'local-isolated'
                          or local_admission_root(g, root) not in excluded)]
@@ -1859,9 +1876,21 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         print(f"DEPLOY_GATE_EARLY_LIMIT gate={gate['name']} limit={EARLY_LIMIT}: "
                               "further failures of this gate arrive with its result", flush=True)
 
-            futures = {submit(gate): gate for gate in selected if gate is not held}
+            # Quick checks keep their short budget only on an otherwise idle host (a focused phase can
+            # repair them beside heavy workers): launch the workers once every quick check finished.
+            quick = [g for g in selected if g.get('quick') and g is not held]
+            deferred = [g for g in selected if not g.get('quick') and g is not held] if quick else []
+            futures = {submit(gate): gate for gate in (quick or [g for g in selected if g is not held])}
             pending = set(futures)
-            while pending:
+            while pending or deferred:
+                if deferred and not any(futures[f].get('quick') for f in pending):
+                    if not CANCEL.is_set():
+                        for gate in deferred:
+                            started = submit(gate)
+                            futures[started] = gate
+                            pending.add(started)
+                    deferred = []
+                    continue
                 done, pending = wait(pending, timeout=EARLY_POLL_SECONDS, return_when=FIRST_COMPLETED)
                 scan([futures[f] for f in pending])
                 for future in done:
@@ -1896,11 +1925,21 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             state['attempts'].append({'phase': 'triage', 'source': state['source'], 'results': results,
                                      'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded),
                                      'interrupted': CANCEL.is_set(), 'stale': changed})
+            if repair_independent:
+                state['attempts'][-1].update(origin_phase=origin_phase,
+                    original_repair_gates=list(state['repair_gates']),
+                    include_repair_local=include_repair_local, cloud_execution_allowed=False)
             for result in results:
                 state.get('carried_passes', {}).pop(result['gate'], None)
             state['failures'].extend(failures)
-            state['pending'] = list(dict.fromkeys([*state['pending'], *[f['id'] for f in failures]]))
-            state.update(phase='triage', ready=False)
+            pending = list(dict.fromkeys([*state.get('pending', []), *[f['id'] for f in failures]]))
+            if pending:
+                state.update(pending=pending, phase='triage', ready=False)
+                if repair_independent:
+                    state['failure_phase'] = origin_phase
+            else:
+                state.pop('pending', None)
+                state.update(phase=origin_phase, ready=False)
         elif CANCEL.is_set():
             state["attempts"].append({"phase": state["phase"], "results": results, "interrupted": True})
             state.update(resume_phase=state["phase"], phase="interrupted", ready=False)
@@ -2333,7 +2372,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -2342,6 +2381,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--donor-sha256')
     parser.add_argument('--donor-index-sha256')
     parser.add_argument("--historical-no-retry-proof", type=Path)
+    parser.add_argument('--include-repair-local', action='store_true',
+                        help='repair-independent: also observe complete original local repair gates; cloud stays deferred')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -2354,6 +2395,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
+        if args.include_repair_local and args.action != 'repair-independent':
+            raise ValueError('--include-repair-local requires repair-independent')
         if args.historical_no_retry_proof is not None and args.action not in {'refresh', 'import-historical-no-retry'}:
             raise ValueError('--historical-no-retry-proof applies only to refresh or import-historical-no-retry')
         if args.donor_sha256 is not None and args.action not in {'prepare-historical-import', 'admit-historical-import', 'import-historical-custody'}:
@@ -2402,10 +2445,12 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError("--input focused command plan required")
                 focused_plan(state, plan, read(args.input))
-            elif args.action == 'triage-independent':
+            elif args.action in {'triage-independent', 'repair-independent'}:
                 with cancellation_handlers():
                     run_phase(plan, state, directory, args.root, args.rca_launcher,
-                              independent=True, excluded_roots=args.exclude_root)
+                              independent=True, excluded_roots=args.exclude_root,
+                              repair_independent=args.action == 'repair-independent',
+                              include_repair_local=args.include_repair_local)
             elif args.action == "triage-quick":
                 with cancellation_handlers():
                     triage_quick(plan, state, directory, args.root)
