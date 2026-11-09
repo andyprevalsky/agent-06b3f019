@@ -5673,6 +5673,89 @@ class Cycle(unittest.TestCase):
         receipt['token'] = 'new'
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
+    def test_campaign_failed_allocated_infra_canary_requires_exact_link_and_provider_release(self):
+        """2026-11-09 PR #1865 smoke: a host suspend failed two jobs' infra-canary preflights, one after
+        allocating clones and one before. Both were provider-teardown-verified, but the ordinary campaign
+        proof refused every failed canary, so the gate owner could never be reconciled."""
+        self.failed_campaign_canary(allocated=True)
+
+    def test_campaign_failed_zero_allocation_infra_canary_requires_exact_link_and_provider_release(self):
+        self.failed_campaign_canary(allocated=False)
+
+    def failed_campaign_canary(self, *, allocated):
+        import hashlib
+        import shutil
+        def reseal(fleet, life_path):
+            audit = fleet / 'teardown-ownership'
+            (audit / 'source-audit').unlink()
+            life = c.read(life_path)
+            canonical = self.root / '.git/cloudbench-fleet-audits' / life['fleet_owner_token']
+            shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+            digest = hashlib.sha256()
+            for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+                if path.is_file():
+                    for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                        digest.update(len(raw).to_bytes(8, 'big')); digest.update(raw)
+            life['audit_sha256'] = digest.hexdigest(); c.write(life_path, life)
+            (audit / 'source-audit').write_text(f'path={canonical}\nsha256={digest.hexdigest()}\n')
+            return canonical
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        fleet = parents[0].parent / 'canary'
+        life_path = fleet / '_batch/lifecycle.json'
+        life = c.read(life_path)
+        life.update(status='failed', controller_exit_code=1 if allocated else 143)
+        c.write(life_path, life)
+        if not allocated:
+            audit = fleet / 'teardown-ownership'
+            (audit / 'owned-clones.ids').write_text('')
+            (audit / 'owned-clones.names').write_text('')
+            shutil.rmtree(audit / 'fresh')
+            for name in ('execution-provenance.json', 'execution-task-matrix.json'): (fleet / name).unlink()
+        reseal(fleet, life_path)
+        names = [b['name'] for b in json.loads((fleet / '_batch/benches.json').read_text())]
+        c.write(fleet / '_batch/run.json', dict(run_id=fleet.name, controller_exit_code=life['controller_exit_code'],
+            status='failed', tasks=[dict(name=n, status='INFRA_ERROR', passed=False, lifecycle_stage='released',
+                failure_reason='no current run artifact produced') for n in names]))
+        log = Path(proof['campaign']) / 'r001-j0003.log'
+        monitor = f'{self.root}/scripts/run-bench monitor {fleet}'
+        log.write_text(log.read_text().replace(monitor,
+            f"ref    : {state['source']['head']}  (committed source)\n"
+            'mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n' + monitor + '\n'
+            f"owner: {life['fleet_owner_token']}; private controller diagnostics stay in this run directory."))
+        def bind():
+            proof['files'] = {p: c.sha_file(p) for p in proof['files'] if Path(p).is_file()}
+        bind()
+        original = copy.deepcopy(state)
+        reconciled = copy.deepcopy(state)
+        c.reconcile(reconciled, occurrence['id'], proof)
+        entry = reconciled['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted'])
+        self.assertIn(str(fleet), entry['participants'])
+        self.assertEqual(original['attempts'], reconciled['attempts'])
+        self.assertEqual([], c.retained_owners(reconciled, [occurrence['gate']]))
+        meta = fleet / 'teardown-ownership/meta'
+        controls = [
+            ('canary provider release', meta,
+             lambda v: v.replace('status=provider-teardown-verified', 'status=pending')),
+            ('failed canary parent link', log,
+             lambda v: v.replace('mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n', '')),
+            ('failed canary source/owner linkage', log, lambda v: v.replace(state['source']['head'], 'f' * 40)),
+            ('failed canary source/owner linkage', log,
+             lambda v: v.replace('owner: ' + life['fleet_owner_token'], 'owner: ' + 'e' * 32)),
+        ]
+        for message, path, mutate in controls:
+            raw, life_raw = path.read_bytes(), life_path.read_bytes()
+            path.write_text(mutate(path.read_text()))
+            if path == meta: reseal(fleet, life_path)
+            bind()
+            candidate = copy.deepcopy(original)
+            with self.assertRaisesRegex(ValueError, message):
+                c.reconcile(candidate, occurrence['id'], proof)
+            self.assertEqual(original, candidate)
+            path.write_bytes(raw); life_path.write_bytes(life_raw)
+            if path == meta: reseal(fleet, life_path)
+            bind()
+
     def test_campaign_missing_cleanup_and_mutations_refuse_atomically(self):
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
         before = copy.deepcopy(state)

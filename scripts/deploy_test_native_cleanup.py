@@ -1072,7 +1072,12 @@ def validate(receipt, owner, proof):
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
-        failed_canary = isolated and fleet not in parents and life.get('status') == 'failed'
+        # A job's linked infra-canary preflight may fail in any campaign-v1 proof (isolated implies
+        # campaign-v1). It grants no task credit and must still prove its exact parent/source/owner link and
+        # provider release below; unlinked or foreign failures refuse.
+        failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
+        if failed_canary and run is None:
+            run = document(run_path, RUN_RECORD_MAX_BYTES)
         need(type(life.get('version')) is int and life['version'] == 1 and life['run_id'] == fleet.name
              and life['workspace_root'] == str(root) and life['hub_publication_failed'] is False
              and type(life['controller_exit_code']) is int
