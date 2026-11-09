@@ -559,57 +559,74 @@ class CurrentCodeModeHost(unittest.TestCase):
                 self.assertIn(123, self.live())
 
 
-class IdleDaemonCodexServer(unittest.TestCase):
-    """2026-11-08 (PR #1778 closeout): the daemon's idle codex app-server kept every devbox NOT_READY."""
-    EXE = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/bin/codex'
+class SharedCodexServer(unittest.TestCase):
+    """2026-11-09 (PR #1866 closeout): the daemon's shared codex app-server kept the devbox NOT_READY whenever a Codex
+    thread had used it, and after a daemon restart orphaned it to PID 1. Its tool host is harness too; the tools that
+    host runs stay live work."""
+    BIN = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/vendor/bin'
+    EXE = f'{BIN}/codex'
+    HOST = f'{BIN}/codex-code-mode-host'
     ARGV = f'{EXE} app-server --listen ws://127.0.0.1:33351 --enable goals'
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.proc = Path(self.tmp.name) / 'proc'
-        self.sessions = Path(self.tmp.name) / 'sessions'
-        self.sessions.mkdir(parents=True)
-        (self.proc).mkdir()
-        (self.proc / 'stat').write_text(f'cpu 1 2 3\nbtime {int(time.time()) - 1000}\n')
-        tick = os.sysconf('SC_CLK_TCK')
-        self.add(10, 1, f'/opt/devbox-runtime/node/current/bin/node {d.DAEMON_DIR}/bundle/sprite-daemon.mjs', 1)
-        self.add(20, 10, self.ARGV, 500 * tick)  # started 500 s ago
-        self.old = self.sessions / '2026' / 'old.jsonl'
-        self.old.parent.mkdir()
-        self.old.write_text('{}')
-        os.utime(self.old, (time.time() - 900, time.time() - 900))
+        self.root = Path(self.tmp.name) / 'checkout'
+        self.root.mkdir()
+        self.proc.mkdir()
+        self.add(10, 1, f'/opt/devbox-runtime/node/current/bin/node {d.DAEMON_DIR}/bundle/sprite-daemon.mjs',
+                 '/opt/devbox-runtime/node/current/bin/node', cwd=Path('/'))
+        self.add(20, 10, self.ARGV, self.EXE)
+        self.add(30, 20, self.HOST, self.HOST)
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def add(self, pid, ppid, argv, start):
+    def add(self, pid, ppid, argv, exe, cwd=None):
         folder = self.proc / str(pid)
         folder.mkdir()
-        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + f' {start} 0\n')
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + ' 100 0\n')
         (folder / 'cmdline').write_bytes(argv.replace(' ', '\0').encode())
+        (folder / 'cwd').symlink_to(cwd or self.root)
+        (folder / 'exe').symlink_to(exe)
 
-    def idle(self, exe=EXE, argv=ARGV):
-        return d.idle_daemon_codex_server(20, exe, argv, self.proc, self.sessions)
+    def reparent(self, pid, ppid):
+        stat = self.proc / str(pid) / 'stat'
+        fields = stat.read_text().split(' ')
+        fields[3] = str(ppid)
+        stat.write_text(' '.join(fields))
 
-    def test_idle_daemon_server_is_not_live_work(self):
-        self.assertTrue(self.idle())
+    def live(self):
+        with patch.object(d, 'own_pids', return_value=set()), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            return {row['pid'] for row in d.live_processes(self.root)}
 
-    def test_running_child_blocks(self):
-        self.add(30, 20, 'bash -lc npm test', 1)
-        self.assertFalse(self.idle())
+    def test_busy_shared_server_and_its_host_are_harness_but_their_tools_are_live(self):
+        self.add(40, 30, 'bash -lc npm test', '/usr/bin/bash')
+        self.add(41, 20, 'python3 -m pytest', '/usr/bin/python3')
+        self.assertEqual({40, 41}, self.live())
 
-    def test_session_rollout_since_start_blocks(self):
-        (self.sessions / '2026' / 'new.jsonl').write_text('{}')
-        self.assertFalse(self.idle())
+    def test_server_orphaned_by_a_daemon_restart_stays_harness(self):
+        self.reparent(20, 1)
+        self.assertEqual(set(), self.live())
 
-    def test_not_parented_by_the_daemon_blocks(self):
-        (self.proc / '10' / 'cmdline').write_bytes(b'bash\0-l')
-        self.assertFalse(self.idle())
+    def test_server_not_started_by_the_daemon_is_live_with_its_host(self):
+        self.add(5, 1, 'bash -l', '/usr/bin/bash', cwd=Path('/'))
+        self.reparent(20, 5)
+        self.assertEqual({20, 30}, self.live())
 
-    def test_other_codex_commands_and_lookalikes_block(self):
-        self.assertFalse(self.idle(argv=f'{self.EXE} exec --cd /home/boxes/rose'))
-        self.assertFalse(self.idle(exe='/home/boxes/bin/codex'))
-        self.assertFalse(self.idle(exe=None))
+    def test_other_codex_commands_lookalikes_and_foreign_hosts_are_live(self):
+        cases = ((self.EXE, f'{self.EXE} exec --cd /home/boxes/rose app-server --listen x'),
+                 (self.EXE, f'{self.EXE} app-server'),
+                 ('/home/boxes/bin/codex', f'/home/boxes/bin/codex app-server --listen x'),
+                 (f'{self.BIN}/codex-evil', f'{self.BIN}/codex-evil app-server --listen x'))
+        for exe, argv in cases:
+            with self.subTest(exe=exe, argv=argv):
+                self.assertFalse(d.shared_codex_server(20, exe, argv, self.proc))
+        self.assertFalse(d.shared_codex_server(20, None, self.ARGV, self.proc))
+        self.assertFalse(d.shared_code_mode_host(30, '/tmp/codex-code-mode-host', self.proc))
+        other = self.HOST.replace('0.166.0', 'other')
+        self.assertFalse(d.shared_code_mode_host(30, other, self.proc))
+        (self.proc / '20' / 'cmdline').write_bytes(f'{self.EXE}\0exec'.encode())
+        self.assertEqual({20, 30}, self.live())
 
 
 class DeletionCheck(Repo):
