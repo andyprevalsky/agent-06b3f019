@@ -1706,9 +1706,21 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         print(f"DEPLOY_GATE_EARLY_LIMIT gate={gate['name']} limit={EARLY_LIMIT}: "
                               "further failures of this gate arrive with its result", flush=True)
 
-            futures = {submit(gate): gate for gate in selected if gate is not held}
+            # Quick checks keep their short budget only on an otherwise idle host (a focused phase can
+            # repair them beside heavy workers): launch the workers once every quick check finished.
+            quick = [g for g in selected if g.get('quick') and g is not held]
+            deferred = [g for g in selected if not g.get('quick') and g is not held] if quick else []
+            futures = {submit(gate): gate for gate in (quick or [g for g in selected if g is not held])}
             pending = set(futures)
-            while pending:
+            while pending or deferred:
+                if deferred and not any(futures[f].get('quick') for f in pending):
+                    if not CANCEL.is_set():
+                        for gate in deferred:
+                            started = submit(gate)
+                            futures[started] = gate
+                            pending.add(started)
+                    deferred = []
+                    continue
                 done, pending = wait(pending, timeout=EARLY_POLL_SECONDS, return_when=FIRST_COMPLETED)
                 scan([futures[f] for f in pending])
                 for future in done:

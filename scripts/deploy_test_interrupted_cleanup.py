@@ -160,8 +160,9 @@ def static_worker(root, gate, receipt, folder, evidence):
          and receipt.get('cleanup_owner') is None, 'original static TERM receipt required')
     path = folder / 'output.log.process.json'
     process = evidence.doc(path)
-    need(process.get('native_exit') == -15 and process.get('cancelled') is True
-         and process.get('timed_out') is False and process.get('quiescent') is True
+    need(process.get('native_exit') == -15
+         and (process.get('cancelled'), process.get('timed_out')) == (receipt.get('cancelled'), receipt.get('timed_out'))
+         and process.get('quiescent') is True
          and process.get('remaining') == [] and process.get('error') is None
          and type(process.get('orphaned_children')) is bool and process.get('kill_sent') == [],
          'genuine terminal supervisor evidence required')
@@ -393,8 +394,12 @@ def validate(state, receipt, proof, gate, *, relocations=None):
     root = Path(proof['root'])
     need(root.is_absolute() and root.resolve(strict=True) == root
          and subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], cwd=root, text=True).strip() == str(root), 'original canonical root required')
+    # A cancelled phase TERMs every owned group; a static quick check can also reach its own
+    # budget first (timed out, then TERM'd and reaped by its supervisor) inside that phase.
+    stopped = (receipt.get('cancelled'), receipt.get('timed_out'))
+    need(stopped == (True, False) or (stopped == (False, True) and receipt.get('gate') != 'smoke'),
+         'interrupted or budget-expired static receipt required')
     need(receipt.get('executed') is True and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
-         and receipt.get('cancelled') is True and receipt.get('timed_out') is False
          and receipt.get('lingering_group') is True and receipt.get('worker_result') is None
          and receipt.get('native_cleanup_reference') is None and receipt.get('command') == gate['command']
          and receipt.get('cases') == {name: 'UNVERIFIED' for name in gate['checks']}

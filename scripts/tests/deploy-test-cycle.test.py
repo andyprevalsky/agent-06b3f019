@@ -5999,6 +5999,39 @@ assert len(list(p.iterdir()))==2
         self.assertNotEqual(0,result['native_exit'])
 
 
+    def test_focused_phase_launches_workers_only_after_its_quick_checks(self):
+        # A focused repair of a quick check keeps that check's short budget on an idle host:
+        # a worker it shares the phase with starts only after every quick check has returned.
+        state=copy.deepcopy(self.state)
+        state.update(phase='focused',repair_gates=['backend-structural','api'],
+                     focused={'backend-structural':{'command':['true'],'checks':['backend-structural']},
+                              'api':{'command':['true'],'checks':['a','b']}})
+        import time
+        events,lock=[],threading.Lock()
+        def fake(gate,state,*_args,**_kwargs):
+            with lock:events.append(('start',gate['name']))
+            time.sleep(.2 if gate.get('quick') else 0)
+            with lock:events.append(('end',gate['name']))
+            return {**self.result(gate['name'],**{k:'PASS' for k in gate['checks']}),'gate':gate['name']}
+        with patch.object(c,'execute',side_effect=fake):
+            c.run_phase(self.plan,state,self.directory,self.root)
+        self.assertLess(events.index(('end','backend-structural')),events.index(('start','api')))
+        self.assertEqual({'backend-structural','api'},{r['gate'] for r in state['attempts'][-1]['results']})
+
+    def test_cancel_during_quick_checks_never_launches_deferred_workers(self):
+        state=copy.deepcopy(self.state)
+        state.update(phase='focused',repair_gates=['backend-structural','api'],
+                     focused={'backend-structural':{'command':['true'],'checks':['backend-structural']},
+                              'api':{'command':['true'],'checks':['a','b']}})
+        launched=[]
+        def fake(gate,state,*_args,**_kwargs):
+            launched.append(gate['name']);c.CANCEL.set()
+            return {**self.result(gate['name'],**{k:'UNVERIFIED' for k in gate['checks']}),'gate':gate['name'],'cancelled':True}
+        with patch.object(c,'execute',side_effect=fake):
+            c.run_phase(self.plan,state,self.directory,self.root)
+        self.assertEqual(['backend-structural'],launched)
+        self.assertEqual('interrupted',state['phase'])
+
     def test_ambiguous_rca_submit_is_not_automatically_repeated(self):
         f=self.failure();paths=c.rca_requests(self.state,self.directory)
         count=self.root/'.context'/'submitted'

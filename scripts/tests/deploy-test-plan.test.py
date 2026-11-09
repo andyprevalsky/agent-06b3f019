@@ -809,6 +809,29 @@ class InterruptedCustody(unittest.TestCase):
             with self.subTest(command=command),self.assertRaisesRegex(ValueError,'static quick routes'):
                 self.m.static_worker(self.root,gate,r,Path(r['log']).parent,None)
 
+    def test_budget_expired_static_quick_gate_reconciles_only_when_fully_reaped(self):
+        # backend-structural can hit its own quick budget inside a phase that is later cancelled:
+        # timed out, TERM'd and reaped by its supervisor. That terminal shape releases like a TERM.
+        def expired(**process):
+            state,r,proof=self.fixture()
+            folder=Path(r['log']).parent
+            r.update(cancelled=False,timed_out=True);self.put(folder/'receipt.json',r)
+            doc=json.loads((folder/'output.log.process.json').read_text())
+            doc.update(cancelled=False,timed_out=True);doc.update(process);self.put(folder/'output.log.process.json',doc)
+            self.rebind(proof)
+            return state,r,proof
+        state,r,proof=expired()
+        original=copy.deepcopy(state)
+        c.reconcile(state,r['token'],proof);c.interrupted_boundary(state)
+        self.assertEqual(state['attempts'],original['attempts'])
+        entry=state['reconciled_owners'][c.sha_file(Path(r['log']).parent/'receipt.json')]
+        self.assertFalse(entry['credit_granted']);self.assertTrue(self.m.still_bound(state,r,entry))
+        for change in (dict(cancelled=True),dict(remaining=[2147483003]),dict(kill_sent=[2147483001])):
+            self.tearDown();self.setUp()
+            state,r,proof=expired(**change)
+            with self.subTest(change=change),self.assertRaisesRegex(ValueError,'interrupted custody proof refused'):
+                c.reconcile(state,r['token'],proof)
+
     def policy_relocation_fixture(self):
         import time
         state, receipt, proof = self.fixture(True)
