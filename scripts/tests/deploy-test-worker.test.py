@@ -3505,4 +3505,187 @@ class CerebrasRatchetHeadroom(unittest.TestCase):
         self.assertEqual([('dedicated',self.reserve)],seen)  # registry production_reserve_fraction 0.2
 
 
+class StoppedPreStackIsolation(unittest.TestCase):
+    """Versioned pre-stack receipts exercise the complete native admission consumer."""
+    DRIVER_SHA256 = '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521'
+
+    def setUp(self):
+        import base64
+        import gzip
+        import hashlib
+        import deploy_test_native_cleanup as native
+        self.native = native
+        spec = importlib.util.spec_from_file_location('native_cycle_fixtures', ROOT / 'scripts/tests/deploy-test-cycle.test.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fixture = module.Cycle()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.addCleanup(fixture.tearDown)
+        self.root = fixture.root
+        # The fixture uses the actual versioned driver, not a mock of its SHA.
+        # Driver changes require a newly reviewed before-stack contract.
+        self.driver = (ROOT / 'scripts/cloudbench-run.sh').read_bytes()
+        self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
+        target = self.root / 'scripts/cloudbench-run.sh'
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(self.driver)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'reviewed startup driver'], check=True)
+        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+        self.state, self.failure, self.paths, self.proof, self.gate, self.packet = fixture.isolated_campaign_state()
+        def replace(value):
+            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+            if isinstance(value, list): return [replace(v) for v in value]
+            return head if value == 'a' * 40 else value
+        self.state, self.proof = replace(self.state), replace(self.proof)
+        for path in (self.root / '.context').rglob('*.json'):
+            try: value = json.loads(path.read_text())
+            except ValueError: continue
+            cycle.write(path, replace(value))
+        self.fleet = Path(self.proof['campaign']).parent.parent / 'runs/20261103-080440-310001'
+        self.output = self.fleet / self.gate['name']
+        self.output.mkdir(exist_ok=True)
+        self.owner = cycle.read(self.fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        self.token = self.owner + '-0'
+        self.machine, self.volume = 'old-machine', 'old-volume'
+        (self.output / '.cid').write_text('clone ' + self.machine + '\n')
+        cycle.write(self.output / 'runtime-evidence.owner.json',
+                    dict(version=1, machine_id=self.machine, run_token=self.token))
+        self.payload = self.output / 'cloudbench-boot-payload.json.gz'
+        self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+            'cloudbench-run.sh': base64.b64encode(self.driver).decode()})).encode()))
+        self.log = self.output / 'remote-logs/cloudbench-driver.log'
+        self.log.parent.mkdir()
+        self.log.write_text(
+            f'RUNSTAMP-{self.token}\n[cloudbench] verified checkout {head}\n'
+            '[cloudbench 20:01:29] STEP git_sync\n[cloudbench 20:01:29] STEP env_decode\n'
+            '[cloudbench 20:01:30] STEP dep_sync\n'
+            '[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref\n'
+            '[cloudbench 20:01:31] FATAL: cloudbench dependency synchronization failed\n'
+            f'::CLOUDBENCH-DONE:: token={self.token} exit=1\n'
+            '[boot 20:01:31] driver cleanup evidence interrupt_status=0 cleanup_ack=1\n')
+        self.rows = cycle.read(self.packet)['rows']
+        self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+        self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+        self.raw_machine = dict(id=self.machine, state='stopped', config=dict(
+            env=dict(REF=head, CLOUDBENCH_RUN_TOKEN=self.token), mounts=[dict(volume=self.volume, path='/data')]))
+        self.raw_volume = dict(id=self.volume, state='created', attached_machine_id=self.machine)
+        self.machine_row['metadata'].update(state='stopped')
+        self.volume_row['metadata'].update(state='created', attached_machine_id=self.machine)
+        self.proof['execution_quiescence'][self.machine]['startup_rejection_log'] = str(self.log)
+        self.reseal()
+
+    def reseal(self):
+        import hashlib
+        for row, data in ((self.machine_row, self.raw_machine), (self.volume_row, self.raw_volume)):
+            path = self.root / '.context' / ('raw-' + row['kind'] + '.json')
+            cycle.write(path, data)
+            row.update(raw_response=str(path), response_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        cycle.write(self.packet, dict(endpoint_origin='https://api.machines.dev', app='fixture', rows=self.rows))
+        receipt = cycle.read(self.paths['receipt'])
+        receipt['native_cleanup_reference']['result_sha256'] = cycle.sha_file(self.paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+        cycle.write(self.paths['receipt'], receipt)
+        self.state['attempts'][-1]['results'][0] = receipt
+        self.proof.update(owner=copy.deepcopy(receipt['cleanup_owner']),
+                          receipt_sha256=cycle.sha_file(self.paths['receipt']),
+                          worker_result_sha256=cycle.sha_file(self.paths['adapter']))
+        self.proof['files'] = {str(p): cycle.sha_file(p) for base in (
+            self.fleet.parent, Path(self.proof['campaign']), self.root / '.git/cloudbench-fleet-audits',
+            self.root / '.git/cloudbench-fleet-ownership') for p in base.rglob('*') if p.is_file()}
+        for path in (self.paths['receipt'].parent / 'request.json', self.fleet.parent.parent / 'cli.log',
+                     self.packet, Path(self.machine_row['raw_response']), Path(self.volume_row['raw_response']),
+                     self.root / 'scripts/cloudbench-run.sh'):
+            self.proof['files'][str(path)] = cycle.sha_file(path)
+
+    def validate(self):
+        receipt = cycle.read(self.paths['receipt'])
+        return self.native.validate(receipt, receipt['cleanup_owner'], self.proof)
+
+    def test_stopped_pre_stack_launch_preserves_original_failures_and_cleanup_debt(self):
+        before = copy.deepcopy(self.state)
+        original = self.paths['receipt'].read_bytes()
+        cycle.reconcile(self.state, self.failure['id'], self.proof)
+        entry = next(iter(self.state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved'])
+        self.assertEqual('isolated-validation', entry['purpose'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
+        self.assertEqual({self.machine: self.volume, 'machine1': 'vol_fixture'}, entry['excluded_resources'])
+        self.assertEqual([], cycle.retained_owners(self.state, [self.gate['name']]))
+        self.assertEqual({'UNVERIFIED'}, set(cycle.read(self.paths['receipt'])['cases'].values()))
+        self.assertTrue((self.root / '.git/cloudbench-fleet-ownership' / self.owner).is_dir())
+
+    def test_stopped_pre_stack_rejects_unsafe_provider_or_current_identity(self):
+        cases = ('started', 'unknown', 'current-token', 'source', 'mount', 'forged-raw-state', 'raw-token',
+                 'detached-volume', 'wrong-volume-state', 'quarantine-missing')
+        originals = copy.deepcopy((self.rows, self.raw_machine, self.raw_volume))
+        registry = self.root / '.git/cloudbench-fleet-ownership' / self.owner
+        for case in cases:
+            with self.subTest(case=case):
+                self.rows, self.raw_machine, self.raw_volume = copy.deepcopy(originals)
+                self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+                self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+                if case in ('started', 'unknown'): self.machine_row['metadata']['state'] = case
+                if case == 'current-token': self.machine_row['metadata']['source_binding']['CLOUDBENCH_RUN_TOKEN'] = 'new-request-0'
+                if case == 'source': self.machine_row['metadata']['source_binding']['REF'] = 'f' * 40
+                if case == 'mount': self.raw_machine['config']['mounts'][0]['volume'] = 'foreign'
+                if case == 'forged-raw-state': self.raw_machine['state'] = 'started'
+                if case == 'raw-token': self.raw_machine['config']['env']['CLOUDBENCH_RUN_TOKEN'] = 'foreign'
+                if case == 'detached-volume': self.volume_row['metadata']['attached_machine_id'] = None
+                if case == 'wrong-volume-state': self.volume_row['metadata']['state'] = 'restoring'
+                if case == 'quarantine-missing': registry.rename(registry.with_name('held'))
+                self.reseal()
+                try:
+                    with self.assertRaises(ValueError): self.validate()
+                finally:
+                    if case == 'quarantine-missing': registry.with_name('held').rename(registry)
+
+    def test_stopped_pre_stack_rejects_unknown_driver_and_incomplete_terminal_receipts(self):
+        import base64
+        import gzip
+        original_log, original_payload = self.log.read_bytes(), self.payload.read_bytes()
+        driver_path = self.root / 'scripts/cloudbench-run.sh'
+        for case in ('driver-tamper', 'later-stack-step', 'missing-ack', 'missing-done', 'wrong-done-token', 'unknown-driver'):
+            with self.subTest(case=case):
+                self.log.write_bytes(original_log); self.payload.write_bytes(original_payload)
+                driver_path.write_bytes(self.driver)
+                if case in ('driver-tamper', 'unknown-driver'):
+                    changed = self.driver + b'\n# unreviewed driver\n'
+                    self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+                        'cloudbench-run.sh': base64.b64encode(changed).decode()})).encode()))
+                    if case == 'unknown-driver':
+                        driver_path.write_bytes(changed)
+                        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+                        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                                        'user.email=test@example.com', 'commit', '-qm', 'unreviewed driver'], check=True)
+                        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+                        receipt = cycle.read(self.paths['receipt'])
+                        old_head = receipt['source']['head']
+                        def replace(value):
+                            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+                            if isinstance(value, list): return [replace(v) for v in value]
+                            return head if value == old_head else value
+                        self.state, self.proof = replace(self.state), replace(self.proof)
+                        for path in (self.root / '.context').rglob('*.json'):
+                            try: value = json.loads(path.read_text())
+                            except ValueError: continue
+                            cycle.write(path, replace(value))
+                        self.raw_machine['config']['env']['REF'] = head
+                        self.machine_row['metadata']['source_binding']['REF'] = head
+                        self.log.write_bytes(original_log.replace(old_head.encode(), head.encode()))
+                if case == 'later-stack-step': self.log.write_bytes(original_log + b'[cloudbench 20:01:32] STEP stack\n')
+                if case == 'missing-ack': self.log.write_bytes(original_log.replace(b'cleanup_ack=1', b'cleanup_ack=0'))
+                if case == 'missing-done': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE::', b'not-DONE'))
+                if case == 'wrong-done-token': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE:: token=', b'::CLOUDBENCH-DONE:: token=wrong'))
+                self.reseal()
+                expected = 'unreviewed pre-stack driver' if case == 'unknown-driver' else ('driver payload changed' if case == 'driver-tamper' else 'positive terminal boundary')
+                with self.assertRaisesRegex(ValueError, expected): self.validate()
+
+
 if __name__=='__main__': unittest.main()
