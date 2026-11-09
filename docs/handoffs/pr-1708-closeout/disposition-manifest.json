@@ -14,6 +14,12 @@
   "sha256": "258c153cee25aacb95a6d7e1c2185486b8dc27cea8238d6b28f410509e695243",
   "detail": "gzip tar of the checkout evidence after PR #1708 production verification (170,722 entries; entry list verified against the source) in the durable project filesystem /project."
  },
+ "agents/.context/": {
+  "disposition": "archived",
+  "archive": "/project/devbox-closeouts/pr-1708/agents-context-20261109.tar.gz",
+  "sha256": "eafdb9a4dd850321a03cf8b8a497e7dc3b9bbbed761ca16255da0202c4f971a9",
+  "detail": "run-bench report-card.json from the PR #1708 production AgentCard lane rerun (2 entries, verified)"
+ },
  "agents/.env": "reproducible: boxes.dev managed project env / Template box injection; never committed",
  "agents/.env.benchmark-temporal": "reproducible: boxes.dev managed project env / Template box injection; never committed",
  "agents/.env.cloudbench-upsert.lock": "reproducible: transient lock file",
