@@ -1,0 +1,11 @@
+{
+  "pr": 1866,
+  "merged_sha": "7577a6573682179b3715fa25e9433e27cf9e24e6",
+  "production": "render, fly, backend-probes, workflow-migration, semantic: PASS on the merged SHA",
+  "followups": [
+    {"item": "PR #1697 deploy-custody tooling (~14k lines) remains unshipped", "state": "open PR, branch fix/rca-agent-7a2ead9f-browser at 4d425f3b0 pushed; its round-97 cycle preserved in .context/deploy-pipeline-release on devbox 669a4893", "blocker": "23 failing deploy-command-structural tooling tests; local custody refuses on an unreadable root socat port forwarder"},
+    {"item": "AgentCard sandbox release stall on smoke agent-payment-abandonment", "state": "SKIPPED_WITH_WARNING (resource_skip agentcard_release_stall), never PASS", "unreleased": "$43.96 sandbox (transfer owt_7120d1852917a2187c2b2bad, transferredCents 4396 / releasedCents 0)", "agent": "06918ec3-674e-4c27-95c6-601a891de61e"},
+    {"item": "mac-app-coverage-blackbox", "state": "platform omitted on Linux; unverified, not a pass"},
+    {"item": "Devbox deletion readiness", "state": "NOT_READY (see deletion-readiness.json)", "reasons": ["PR #1697 workspace and 24 GB .context evidence still needed by its open follow-up", "14 agent_link_server processes left by PR #1697 smoke runs, plus other threads' Codex app-server and the flyctl agent: not started by this deploy, not stopped", "74 historical unpushed template branches and one stash entry without an archive disposition"]}
+  ]
+}
