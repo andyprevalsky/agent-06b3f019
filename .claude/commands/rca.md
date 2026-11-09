@@ -8,7 +8,7 @@ Use for any bug, flake, regression or "why did X happen". This skill is the whol
 
 ## Done
 
-A local repro failed on the buggy code and the identical command passes after the fix, with the assertion unweakened; the fix is landed with its regression in the owning suite; a case file is written and validated; and exactly one outcome event is recorded (`rca outcome fixed`, `rca outcome diagnosis-ready` or `rca outcome blocked`). Without a repro, report preliminary findings plus an observability gap, add the missing capture and keep the RCA open.
+A local repro failed on the buggy code and the identical command passes after the fix, with the assertion unweakened; the fix is landed with its regression in the owning suite; a case file is written and validated; and exactly one outcome event is recorded (`rca outcome fixed`, `rca outcome diagnosis-ready` or `rca outcome blocked`), with any failed event write reported. `fixed` needs the reported symptom itself reproduced and gone; when the link to what the user saw is unproven, record `diagnosis-ready` or an open gap. Without a repro, report preliminary findings plus an observability gap, add the missing capture and keep the RCA open.
 
 ## Process
 
@@ -49,7 +49,7 @@ For a slow, stalled or failed agent, run the first three in parallel, then expan
 - Never reason from code alone when runtime evidence exists: logs show what happened, code shows what should have.
 - A self-report is a lead to confirm with runtime evidence; an HTTP error or 404 means the wrong backend or a missing row, not "no report"; for Hub runs read the `report_bug` TOOL row's `metadata.bugReportDescription` from `GET https://api.roselabs.ai/api/agents/<root_id>`.
 - An archive hit is a lead: adopt its cause only when your evidence reaches its `first_bad_boundary`, read its `## Solution` and `## Human feedback`, never re-propose a rejected approach (also check `docs/rca/process-feedback.md`), and treat a recurrence as a failed guardrail whose case you extend.
-- Report which searches you ran and whether the incident is a recurrence, a relative or novel.
+- Report the queries you ran and whether the incident is a recurrence, a relative or novel; weigh every relative's lesson against your diagnosis and fix, and say why it does or does not apply.
 - Temporal proximity is not causation; trace the actual data flow.
 
 ## Repro
@@ -59,11 +59,13 @@ For a slow, stalled or failed agent, run the first three in parallel, then expan
 - Recreate production-only or third-party state by capturing and replaying it at the owned boundary; "not feasible" never completes an RCA, and adding a missing log is not a stop.
 - When the suspect is an LLM, provider, gateway, token or parser boundary, rebuild the exact failing request (messages, system prompt, tools, schema, model, auth path, generation config, failing span), replay it through the same local client path, then vary inputs to isolate the condition; never stop at "model/provider timeout".
 - For a benchmark failure, the repro is an isolated local one at the failing boundary, never a whole-benchmark rerun; when the fix needs an end-to-end check, run just that task once on the cloud fleet with `scripts/run-bench <task> --wait`, not `--local` (in `/descend` only through a parent-granted check slot); in `/descend` the next batch run is the outcome proof.
+- The repro must produce the reported symptom itself (the literal values the user saw); another bug found on the way is a separate finding, never the repro.
 - If the evidence shows the repro targets the wrong boundary, record that and build the corrected repro before using it as the acceptance test.
+- Read each command's exit code directly, never through a pipe such as `| tail`.
 
 ## Classify
 
-- Classify before fixing: our bug (fix our code), third-party failure (surface it, no masking fallback), input error (validate at entry), configuration error (fix the config through the autonomous env workflow), test bug (fix the test), model intelligence limitation, or unresolved (keep open).
+- Classify before fixing: our bug (fix our code), third-party failure (surface it, no masking fallback), input error (validate at entry), configuration error (fix the config through the autonomous env workflow), test bug (fix the test, only after showing production behaves correctly for every legitimate input; a fake that triggers a production crash a real input could also trigger is our bug), model intelligence limitation, or unresolved (keep open).
 - **Model intelligence limitation** needs the original model failing and the upgraded model passing with all non-model variables held constant (same client path and inputs); report repeated trial counts.
 - Benchmark issue classes, one per issue: Faulty Evaluator, Prompting Inconsistency, Underspecified Task, Context Drift, Lacking Tool, Broken Tool, Product Defect, Agent Reasoning Failure, Fixture/Data Mismatch, Resource/Performance Failure, External Blocker, Infrastructure Failure, Observability Gap, Other; evaluator-versus-task conflicts are Faulty Evaluator, and an owned broken recovery path is never External Blocker.
 - Treat a timeout as a symptom: decompose lost time into per-decision cost times decision count; identify a killed activity by span duration of at least StartToClose minus 10 s against the Hub; read `loop.lag` with process CPU (low CPU is starvation, full CPU is saturation) and prove starvation with Fly `fly_instance_cpu_throttle`, `steal` and `cpu_balance`.
@@ -83,10 +85,12 @@ For a slow, stalled or failed agent, run the first three in parallel, then expan
 
 - Fix the class of bug at the most upstream point where the data is wrong, in the layer that owns it, reusing existing logic and adding no untested path.
 - First ask whether deleting redundant state or unifying to one source of truth removes the bug; otherwise add the narrowest guard, keeping the change as small as that allows.
+- Fix every same-class site you find in the same change, or record why one cannot be fixed now.
 - Never add a defensive fallback, a speculative handler or silent degradation; fail loudly.
+- Never edit the repro's own fixture or assertion to make it pass.
 - Never choose a weaker point fix, fallback, test change or wrong-layer workaround to keep the diff approval-free.
 - Run the golden-reference check only when the fix changes an approval-gated surface (otherwise record `Golden reference: not applicable (no approval-gated hunk)`): open each reference harness's analog (`bash scripts/sync-reference-repos.sh` restores clones), record its `path:line` and behavior, and converge on their shared pattern or say why not.
-- Land the repro as a blackbox test in the suite that owns the first bad data (`back-end/src/tests/blackbox/<domain>.blackbox.ts`, `agents/tests/blackbox/<domain>.blackbox.py`, `front-end/src/tests/blackbox/<domain>.blackbox.tsx`), and verify `python3 scripts/select_affected_tests.py` maps the surface to it.
+- Land the repro as a blackbox test in the suite that owns the first bad data (`back-end/src/tests/blackbox/<domain>.blackbox.ts`, `agents/tests/blackbox/<domain>.blackbox.py`, `front-end/src/tests/blackbox/<domain>.blackbox.tsx`), and verify `python3 scripts/select_affected_tests.py` maps the surface to it; when it maps to no lane, register it in its owning deploy gate and never argue another mode covers it. The regression also asserts the neighbouring behavior that must not change (a negative control), so an overbroad fix fails it.
 
 ## Delivery
 

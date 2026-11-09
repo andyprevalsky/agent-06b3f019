@@ -38,7 +38,7 @@ Over 32 simultaneous copies (most `full` runs) route to the sharded operator, wh
 - Cloud startup, recovery, image builds and LIVE acceptance details are in the Operations Runbook in `agents/benchmarks/README.md`.
 
 ### Monitoring
-- A sub-agent owns each run: launch, monitoring, infra `/RCA` and exact-owner cleanup, and its handoff carries all four; it starts `/RCA` on the first infra failure at once; it may adopt an already-launched run, and adoption counts only after its own first sample of that run's printed handle.
+- A sub-agent owns each run: launch, monitoring, infra `/RCA` and exact-owner cleanup, and its handoff carries all four; it starts `/RCA` (the `/rca` skill or a background RCA sub-agent) on the first infra failure at once, and its report is not finished until that RCA has started; it may adopt an already-launched run, and adoption counts only after its own first sample of that run's printed handle.
 - Whoever launches, checks or adopts a run owns it until its release is verified: watch the exact printed handle until the controller exits, or hand it to a sub-agent; never stop after one sample or ask whether to keep watching, and a stale observation never justifies a restart.
 - A `-k` campaign or sharded run is owned by its foreground process (no `--wait`), so launch it in the background; it prints `python3 -m json.tool <summary.json>` plus one handle per job, and `jobs[].controller_exit_code` reports each controller's exit.
 - Copy the first failure's logs and stop receipts before metadata rotates, and report it to the parent at once.
