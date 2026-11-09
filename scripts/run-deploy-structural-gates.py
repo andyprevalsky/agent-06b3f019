@@ -357,6 +357,7 @@ GATES = (
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh"), expected_seconds=118),
+    Gate("descend-handoff", ("python3", "scripts/tests/descend-handoff.test.py"), expected_seconds=5),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py"), expected_seconds=700, shards=6),
     Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
     Gate("select-affected-tests", ("python3", "scripts/tests/select-affected-tests.test.py")),
@@ -420,6 +421,8 @@ GATES = (
         ("bash", "scripts/tests/check-llm-trajectory-injection-approval.test.sh"),
     ),
     Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
+    Gate("rca-model-intelligence-category", ("bash", "scripts/tests/rca-model-intelligence-category.test.sh")),
+    Gate("rca-prompt-edit-abstraction", ("bash", "scripts/tests/rca-prompt-edit-abstraction.test.sh")),
     Gate(
         "durable-evidence-links",
         ("bash", "scripts/tests/durable-evidence-links.test.sh"),
