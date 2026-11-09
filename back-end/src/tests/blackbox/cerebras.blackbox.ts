@@ -114,7 +114,14 @@ async function run(): Promise<void> {
     const archived = await fetch(CEREBRAS_API_URL.replace('/chat/completions', '/models'), {
       headers: { Authorization: `Bearer ${liveKey}` },
     });
-    assert.equal(archived.ok, true, 'Cerebras /models must be reachable for the live probe');
+    const inventoryFailure = archived.ok
+      ? ''
+      : (await archived.text()).replaceAll(liveKey, '[REDACTED]').slice(0, 500);
+    assert.equal(
+      archived.ok,
+      true,
+      `Cerebras /models must be reachable for the live probe: HTTP ${archived.status} ${inventoryFailure}`
+    );
     const catalog = (await archived.json()) as { data?: Array<{ id?: string }> };
     const ids = new Set((catalog.data ?? []).map((row) => row.id).filter(Boolean));
     assert.equal(

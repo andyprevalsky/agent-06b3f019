@@ -108,6 +108,9 @@ export async function classifyFundingResumeFailure(
     state.walletFundingPrepared &&
     ((boundaryError instanceof PurchaseError &&
       boundaryError.code === 'agentcard_company_funding_in_progress') ||
+      // A resumed intent may have committed on an earlier attempt. A billing/preflight
+      // refusal on this call says nothing about that prior keyed card or transfer.
+      state.fundingRetryClaimed ||
       ambiguousExternalOutcome ||
       funding?.status === PurchaseWalletFundingStatus.FAILED ||
       walletWasFunded);

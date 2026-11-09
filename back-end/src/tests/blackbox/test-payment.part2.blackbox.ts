@@ -12,6 +12,7 @@ import 'dotenv/config';
 import {
   assertV2LifecycleContract,
   assertV2SandboxSettlementContract,
+  assertV2SandboxLedgerDatabaseContract,
 } from './test-payment-v2-lifecycle.cases';
 import {
   confirmPhoneBenchmarkPayment,
@@ -87,6 +88,10 @@ async function withStubbedStripe<T>(
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    'v2 exact cleared ledger atomically consumes funding; unknown or reclaiming obligations stay pending',
+    assertV2SandboxLedgerDatabaseContract,
+  ],
   [
     'v2 lifecycle observes exact transfer and cursor integrity without legacy identity',
     assertV2LifecycleContract,

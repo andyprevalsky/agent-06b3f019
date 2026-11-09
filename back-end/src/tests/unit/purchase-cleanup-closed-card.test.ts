@@ -2,6 +2,7 @@
 /** Regression coverage for closed AgentCard cleanup and admin no-charge reclaim retries. */
 
 import assert from 'node:assert/strict';
+import { assertIssuedLedgerCleanup } from '../blackbox/purchases-issued-ledger.cases';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { AgentCardProviderError, type CardProvider } from '../../providers/card-provider';
@@ -69,6 +70,7 @@ async function seedPurchase(
 }
 
 async function main(): Promise<void> {
+  assertIssuedLedgerCleanup(process.cwd());
   await prisma.user.create({ data: { userId, isAnonymous: true } });
   const agent = await prisma.agent.create({
     data: { userId, goal: 'closed card cleanup test', status: 'COMPLETED' },

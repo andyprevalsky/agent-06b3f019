@@ -95,3 +95,54 @@ The real sandbox lifecycle was rerun after the billing-mode guard and passed.
 Sandbox CLI fixture validation/seeding passed with an explicitly connected v2 user.
 Existing users need a one-time v2 connection; legacy card cleanup stays available.
 No production deployment was performed by this task.
+
+
+2026-11-09 browser verification and remaining limits
+The unchanged test-shop E2E passed after REST settlement/observer repairs in
+230.6 seconds: one purchase, card, funding, Stripe intent and provider transfer;
+4,396 cents captured in Stripe test mode, company funding consumed, card closed
+with zero balance. Its terminal viewer/recording and exact-owned cleanup were
+verified. Other browser scenarios and repeated browser stability remain separate.
+
+Earlier setup-resume failed because the REST adapter changed the established
+setup attention category. That category is restored while the v2 phase remains
+separate. Local world cleanup now accepts the producer's supported version-2
+receipt through its strict native-identity validator. Fresh-user setup uses the
+v2 exclusive writer; child seeding depends on its selected task, not its cohort.
+
+The cohort03 payment actually cleared at AgentCard, despite Rose rejecting the
+response and later abandoning it. Its original POST response is unarchived; the
+specific rejecting field is unobserved. A documented nullable embedded card
+user_id is now supported after authoritative precharge ownership checks. Exact
+cleared ledger recovery never replays the charge. Cleanup checks exact transaction
+evidence under the wallet lock before abandoning or reclaiming a paid card.
+Partial, foreign, incomplete and active-reclaim evidence stays unresolved;
+legitimate already-reclaimed Stripe refund retries retain their behavior.
+
+Another regression proves a prior ambiguous keyed card mint could lose its
+funding marker/backing hold after a later billing or mode refusal. Funding retries
+now preserve the original obligation and keys; first-attempt known-no-effect
+failures still compensate safely. These boundaries passed five repeated probes.
+The complete agent suite produced 131 passing domains, 214 demo-cache tests and
+187 unit tests, with 85% coverage against 80%; its adopted orphaned shell's raw
+wait status is unrecorded and is not represented as a captured exit code.
+
+PR #1891 independently documents the separate never-charged sandbox card release
+failure across MCP and v2. It is not the paid-card accounting issue above. Do not
+mint cards or retry reclaims to manufacture release; pending/SKIP is never PASS.
+Production minting remains disabled (AGENTCARD_MINT_ENABLED=false). Live wallet
+company funding and webhook registration were read-only verified; the dedicated
+live fixture still needs consented v2 setup and live billing. No rollout or live
+charge/refund was performed. Managed cloud environment updates remain blocked
+because the edit-project-settings request expired; no workaround was used.
+
+Final sandbox browser outcomes on November 9
+- Test-shop: PASS, 230.6 seconds after REST settlement repair.
+- Setup/resume: PASS, 241.2 seconds; expected setup attention resumed the purchase.
+- Two-browser card reuse: PASS, 500.7 seconds; both mint-route calls reused exactly one purchase, card, funding, provider transfer and Stripe intent.
+- New-user journey: PASS, 207.7 seconds; the existing ordered evaluator verified subscription gating, paid Stripe test Checkout, approval and purchase.
+The last three ran on a frozen final runtime snapshot with unchanged task catalog, evaluators, assertions and timeouts. Native terminal recordings and exact-owned cleanup are checked separately from task verdicts. Five consecutive component regression runs are not a measured browser flake rate.
+
+Unused-card abandonment remains unverified because of the separately documented AgentCard release stall (PR #1891); no additional abandonment cards were minted to force a result. The two production AgentCard tasks have not run. The final staged cloud gate sweep and deployment remain blocked, including the expired managed settings grant and incomplete live fixture. These gaps are not relabeled as passes.
+
+All three final task verdicts passed and their owned databases, processes and ports were released. Setup and reuse terminal recordings were verified; new-user recording publication failed because its browser recording was not correctly attached, so durable new-user replay remains incomplete. Source and environment files were byte-identical throughout the run. The aggregate inherited process-environment hash differed and cannot be localized from the retained aggregate-only launch proof; this is a separate provenance gap, not evidence of a specific credential or mode change. Native card/transfer/Stripe receipts confirm sandbox mode for all three.

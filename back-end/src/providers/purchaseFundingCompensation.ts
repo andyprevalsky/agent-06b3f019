@@ -1,3 +1,4 @@
+import { reconcileIssuedPurchaseEvidence } from './purchaseIssuedEvidence';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { createCardProviderForAgent, type CardProvider } from './card-provider';
 import { AgentCardProviderError } from './card-provider/errors';
@@ -132,6 +133,8 @@ async function compensateAbandonedPurchase(
 ): Promise<void> {
   let purchase = await loadAbandonedPurchase(purchaseId);
   if (purchase === null) return;
+  const evidence = await reconcileIssuedPurchaseEvidence(purchase.id);
+  if (evidence === 'settled' || evidence === 'pending') return;
 
   const paymentIntentId =
     purchase.stripePaymentIntentId ??
@@ -181,6 +184,8 @@ async function compensateAbandonedPurchase(
     return;
   }
 
+  const issuedEvidence = await reconcileIssuedPurchaseEvidence(purchase.id);
+  if (issuedEvidence === 'settled' || issuedEvidence === 'pending') return;
   const reclaimClaim = await beginPurchaseWalletReclaim(purchase.id);
   if (reclaimClaim.status === 'already_owned') return;
   await activeCardProvider.closeCard(issued.cardId);
@@ -210,10 +215,22 @@ async function compensateAbandonedPurchase(
 
 /** Terminal-agent hook: stop user-owned retries before releasing their Stripe authorization. */
 export async function abandonAgentFundingPending(agentId: string): Promise<void> {
-  await prisma.purchaseSpend.updateMany({
+  const purchases = await prisma.purchaseSpend.findMany({
     where: { agentId, status: PurchaseSpendStatus.FUNDING_PENDING },
-    data: { status: PurchaseSpendStatus.FUNDING_ABANDONED },
+    select: { id: true, updatedAt: true },
   });
+  for (const purchase of purchases) {
+    const evidence = await reconcileIssuedPurchaseEvidence(purchase.id);
+    if (evidence === 'settled' || evidence === 'pending') continue;
+    await prisma.purchaseSpend.updateMany({
+      where: {
+        id: purchase.id,
+        status: PurchaseSpendStatus.FUNDING_PENDING,
+        updatedAt: purchase.updatedAt,
+      },
+      data: { status: PurchaseSpendStatus.FUNDING_ABANDONED },
+    });
+  }
 }
 
 /** Cron lease: attempts older than the active workflow retry window become compensation-owned. */
@@ -228,6 +245,8 @@ export async function abandonStaleFundingPending(scope?: FundingCompensationScop
     select: { id: true, updatedAt: true },
   });
   for (const purchase of purchases) {
+    const evidence = await reconcileIssuedPurchaseEvidence(purchase.id);
+    if (evidence === 'settled' || evidence === 'pending') continue;
     await prisma.purchaseSpend.updateMany({
       where: {
         id: purchase.id,

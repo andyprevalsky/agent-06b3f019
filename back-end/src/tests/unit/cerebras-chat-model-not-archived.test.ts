@@ -8,6 +8,7 @@
  * body fields (`clear_thinking`) that would 400 and re-arm the waterfall.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
 
 import {
@@ -22,6 +23,39 @@ import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebr
 import { getPool } from '../../providers/rose/pools';
 
 describe('cerebras chat model inventory', () => {
+  it('reports rejected inventory status and provider evidence without exposing the key', () => {
+    const key = 'fixture-cerebras-inventory-key-no-network';
+    const target = new URL('../blackbox/cerebras.blackbox.ts', import.meta.url).href;
+    for (const status of [401, 403, 429, 503]) {
+      const script = `
+        process.env.CEREBRAS_API_KEY = ${JSON.stringify(key)};
+        globalThis.fetch = async (input) => {
+          if (String(input) !== 'https://api.cerebras.ai/v1/models') {
+            throw new Error('Unexpected outbound request');
+          }
+          return new Response(JSON.stringify({ error: 'fixture_catalog_rejection', credential: ${JSON.stringify(key)} }), {
+            status: ${status}, headers: { 'Content-Type': 'application/json' },
+          });
+        };
+        await import(${JSON.stringify(target)});
+      `;
+      const result = spawnSync(
+        process.execPath,
+        ['--import', 'tsx', '--input-type=module', '-e', script],
+        {
+          encoding: 'utf8',
+        }
+      );
+      const output = result.stdout + result.stderr;
+      assert.notEqual(result.status, 0, 'inventory rejection must remain a failure');
+      assert.match(
+        output,
+        new RegExp(`Cerebras /models.*HTTP ${status}.*fixture_catalog_rejection`)
+      );
+      assert.equal(output.includes(key), false, 'provider evidence must redact credentials');
+    }
+  });
+
   it('pins synchronous chat to rose-fast Qwen (not archived GLM / gpt-oss / dead gemma)', () => {
     assert.equal(ARCHIVED_CEREBRAS_CHAT_MODEL, 'zai-glm-4.7');
     assert.notEqual(

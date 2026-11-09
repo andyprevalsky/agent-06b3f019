@@ -142,3 +142,20 @@ sleep or global clock changes. Poll sleeps now fit the existing deadline and
 expired reads remain pending; authentication failures still escape as failures.
 The owning wallet unit passed five consecutive runs. This local proof does not
 substitute for the unchanged browser abandonment/refund outcome.
+
+
+## 2026-11-09 prior ambiguity and paid-card evidence
+
+A real REST client/provider plus charge-orchestration regression proves one keyed
+card can commit while every response is lost. A later safe billing or mode refusal
+does not prove the previous call had no effect. The failure classifier had ignored
+fundingRetryClaimed, discarded the marker and reversed the backing hold. It now
+preserves that obligation and the same keys until reconciliation; first-attempt
+known-no-effect compensation remains. Five registered probes and owning suites pass.
+
+Cohort03 was not an unused-card release stall: its exact-card transaction ledger
+proves a cleared 4,396-cent payment. The original POST response is unavailable.
+Nullable embedded ownership is supported after exact precharge ownership proof,
+and closed-card confirmation/cleanup consult exact ledger evidence without replaying
+charges. Unknown or partial evidence remains pending; closed/zero balance alone
+proves neither merchant settlement nor released funding.
