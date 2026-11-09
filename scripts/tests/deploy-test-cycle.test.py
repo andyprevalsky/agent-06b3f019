@@ -5211,6 +5211,26 @@ class Cycle(unittest.TestCase):
         ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
         with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
 
+    def test_isolated_validation_binds_a_fleet_run_record_beyond_the_receipt_cap(self):
+        """2026-11-09 PR #1865 smoke: the isolated proof re-binds all original evidence at the end with the
+        receipt cap, so one verified 28 MB _batch/run.json refused the whole proof ('proof file too large')."""
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        record = next(Path(p) for p in proof['files'] if p.endswith('/_batch/run.json'))
+        cap = max([Path(p).stat().st_size for p in proof['files'] if not p.endswith('/_batch/run.json')]
+                  + [paths['receipt'].stat().st_size, paths['adapter'].stat().st_size])
+        value = json.loads(record.read_text())
+        value['padding'] = 'x' * (cap + 1)
+        record.write_text(json.dumps(value))
+        proof['files'][str(record)] = c.sha_file(record)
+        import deploy_test_native_cleanup as n
+        with patch.object(c, 'MAX_RECEIPT_BYTES', cap):
+            reconciled = copy.deepcopy(state)
+            c.reconcile(reconciled, failure['id'], proof)
+            entry = reconciled['reconciled_owners'][proof['receipt_sha256']]
+            self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+            with patch.object(n, 'RUN_RECORD_MAX_BYTES', cap), self.assertRaisesRegex(ValueError, 'proof file too large'):
+                c.reconcile(copy.deepcopy(state), failure['id'], proof)
+
     def test_isolated_next_inventory_may_add_cases_without_releasing_original_debt(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         c.reconcile(state, failure['id'], proof)

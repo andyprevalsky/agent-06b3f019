@@ -1209,7 +1209,9 @@ def validate(receipt, owner, proof):
                                       'disposition': 'retained-exact-owner-transfer-required'}
         need(retained, 'retained service evidence missing')
         for path in bindings:
-            bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
+            # Retain and re-hash ALL original debt evidence, including retained Hub owners. Fleet run
+            # records keep the larger cap they were first bound with above.
+            bound(path, RUN_RECORD_MAX_BYTES if path.endswith('/_batch/run.json') else MAX_RECEIPT_BYTES)
     need(used == set(bindings), 'proof file closure')
     result = {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
