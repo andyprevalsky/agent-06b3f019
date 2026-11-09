@@ -105,8 +105,7 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
           drained = true;
         });
         await Promise.resolve();
-        if (stage !== undefined)
-          assert.equal(drained, false, 'terminal owner waits for pending archive');
+        const drainedBeforeRelease = drained;
         const callsBeforeDrain = providerCalls;
         releaseRoot();
         await drain;
@@ -122,6 +121,8 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
         });
         const dump = JSON.parse(fs.readFileSync(recovered.latest.path, 'utf8'));
         assert.equal(dump.root_agent_id, rootId);
+        if (stage !== undefined)
+          assert.equal(drainedBeforeRelease, false, 'terminal owner waits for pending archive');
         assert.equal(recovered.baseCallCount, 1);
         assert.equal(recovered.updateCount, 0);
         assert.equal(dump.agent_id, agentId);
@@ -134,7 +135,45 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
         assert(dump.dump_id);
       }
     }
-    assert.equal(providerCalls, 9, 'archival never adds provider calls');
+    const chronologyRoot = randomUUID();
+    const open = async (content: string) => {
+      const options = buildGeneratorCompletionOptions({
+        agentId: chronologyRoot,
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content }],
+        providerRoute: 'direct-cerebras',
+        speed: 'standard',
+      });
+      assert(options.dump_context);
+      options.dump_context.root_agent_id = chronologyRoot;
+      const stream = await createStreamingCompletion(options);
+      const iterator = stream[Symbol.asyncIterator]();
+      assert.equal((await iterator.next()).done, false);
+      return iterator;
+    };
+    const older = await open('Older offline call fixture');
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const newer = await open('Newer offline call fixture');
+    await newer.return?.();
+    await drainLlmCaptures([chronologyRoot]);
+    await older.return?.();
+    await drainLlmCaptures([chronologyRoot]);
+    const chronology = await materializeArchiveLlmDumps(
+      chronologyRoot,
+      path.join(directory, 'chronology'),
+      {
+        list: (root) => listArchivedObjects(root, { throwOnError: true }),
+        read: (rootAgentId, objectPath) => readArchivedArtifactStrict({ rootAgentId, objectPath }),
+      }
+    );
+    assert.equal(chronology.baseCallCount, 2);
+    const latest = JSON.parse(fs.readFileSync(chronology.latest.path, 'utf8'));
+    assert.equal(
+      latest.messages[0].content,
+      'Newer offline call fixture',
+      'latest call follows recorded start clock despite reverse completion order'
+    );
+    assert.equal(providerCalls, 11, 'archival never adds provider calls');
   } finally {
     global.fetch = originalFetch;
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];

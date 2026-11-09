@@ -4,6 +4,8 @@ import {
   encryptArtifact,
   readArchivedArtifact,
 } from '../../providers/traceArchive';
+import { ownLlmCapture } from '../../providers/llmCaptureTasks';
+import { finalizeAgent, storeWorkerArtifact } from '../../providers/traceArchiveLifecycle';
 import { readPlainArchivedArtifact } from '../../providers/traceArchiveStrict';
 
 export async function assertLateArchiveBatchConvergence(params: {
@@ -149,4 +151,95 @@ export async function assertLateArchiveManifestConvergence(params: {
     publicManifest.artifacts.some((ref) => ref.path === latePath),
     'public manifest did not converge on the late worker artifact'
   );
+}
+
+export async function assertDirectCaptureFinalizationOwnership(params: {
+  rootAgentId: string;
+  childAgentId: string;
+}): Promise<void> {
+  const gate = () => {
+    let release = () => {};
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  };
+  const first = gate();
+  const second = gate();
+  const registered = gate();
+  const objectPath = 'llm/direct-finalize-owner.json.gz.enc';
+  const payload = {
+    root_agent_id: params.rootAgentId,
+    agent_id: params.childAgentId,
+    dump_id: 'direct-finalize-owner',
+    call_site: 'archive_ownership_fixture',
+    messages: [{ role: 'user', content: 'Explicit offline archive fixture' }],
+    extra: { output: 'Explicit completed fixture response' },
+  };
+  const encrypted = encryptArtifact(
+    objectPath,
+    Buffer.from(JSON.stringify(payload)),
+    'application/json'
+  );
+  assert(encrypted);
+  ownLlmCapture(
+    params.rootAgentId,
+    first.promise.then(() => {
+      ownLlmCapture(
+        params.childAgentId,
+        second.promise.then(async () => {
+          await storeWorkerArtifact({
+            rootAgentId: params.rootAgentId,
+            path: objectPath,
+            ciphertextB64: encrypted.ciphertext.toString('base64'),
+            metadata: encrypted.metadata,
+          });
+        })
+      );
+      registered.release();
+    })
+  );
+  const finalization = finalizeAgent({ rootAgentId: params.rootAgentId });
+  let settled = false;
+  void finalization.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    }
+  );
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.strictEqual(settled, false, 'finalization returned with an owned writer held');
+    first.release();
+    await registered.promise;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.strictEqual(settled, false, 'finalization missed the newly registered child writer');
+    second.release();
+    assert((await finalization).manifest);
+    const manifest = await readArchivedArtifact({
+      rootAgentId: params.rootAgentId,
+      objectPath: 'manifest.json.gz.enc',
+    });
+    assert(manifest);
+    const value = JSON.parse(decryptAndValidateArtifact(manifest).toString()) as {
+      artifacts: { path: string }[];
+    };
+    assert(value.artifacts.some((item) => item.path === objectPath));
+    const stored = await readArchivedArtifact({ rootAgentId: params.rootAgentId, objectPath });
+    assert(stored);
+    assert.deepStrictEqual(JSON.parse(decryptAndValidateArtifact(stored).toString()), payload);
+    const failure = new Error('owned archive writer fixture failure');
+    ownLlmCapture(params.childAgentId, Promise.reject(failure));
+    await Promise.resolve();
+    await assert.rejects(
+      () => finalizeAgent({ rootAgentId: params.rootAgentId }),
+      (error: unknown) => error instanceof Error && error.cause === failure
+    );
+  } finally {
+    first.release();
+    second.release();
+    await finalization.catch(() => undefined);
+  }
 }
