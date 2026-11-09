@@ -875,7 +875,7 @@ async def test_monitor_keeps_held_session_open_and_never_writes_to_cli():
         ]
         # Only the goal and the user's turn ever reached the CLI: no relay.
         texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
-        assert texts == ["Task:\nFix the bug in calc.py so test_calc.py passes", "rename add to plus"], texts
+        assert texts == ["/goal Task:\nFix the bug in calc.py so test_calc.py passes", "rename add to plus"], texts
         revisions = sink.revisions()
         assert len(revisions) == len(set(revisions)), revisions  # each record revision persisted once
         persisted = {r["id"]: r for batch in sink.batches for r in batch["records"]}

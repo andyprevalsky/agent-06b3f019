@@ -786,15 +786,28 @@ def validate(receipt, owner, proof):
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
+    historical_sources = {}
     need(isinstance(bindings, dict), 'missing file bindings')
 
-    def bound(path, limit=MAX_RECEIPT_BYTES):
+    def bound(path, limit=MAX_RECEIPT_BYTES, *, historical_head=None):
         path = Path(path)
-        need(path.is_absolute() and path.resolve() == path and path.is_file() and not path.is_symlink(), 'noncanonical proof file')
-        need(path.stat().st_size <= limit, 'proof file too large')
-        raw = path.read_bytes()
+        historical_head = historical_head or historical_sources.get(str(path))
+        need(path.is_absolute() and path.resolve() == path and not path.is_symlink(), 'noncanonical proof file')
+        if historical_head is not None:
+            need(isinstance(historical_head, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', historical_head),
+                 'historical producer head')
+            relative = path.relative_to(root)
+            need(relative.parts[0] == 'scripts', 'historical producer scope')
+            raw = subprocess.check_output(['git', '-C', str(root), 'show', historical_head + ':' + relative.as_posix()])
+            need(len(raw) <= min(limit, MAX_RECEIPT_BYTES), 'proof file too large')
+        else:
+            need(path.is_file(), 'noncanonical proof file')
+            need(path.stat().st_size <= limit, 'proof file too large')
+            raw = path.read_bytes()
         need(bindings.get(str(path)) == hashlib.sha256(raw).hexdigest(), 'file hash mismatch: ' + str(path))
         used.add(str(path))
+        if historical_head is not None:
+            historical_sources[str(path)] = historical_head
         return raw
 
     def document(path, limit=MAX_RECEIPT_BYTES):
@@ -821,6 +834,21 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-ref-preflight-v1':
+        from deploy_test_native_ref_preflight import validate_ref_preflight
+        result = validate_ref_preflight(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'proof file closure')
+        return result
+    if layout == 'campaign-prelaunch-v1':
+        from deploy_test_native_prelaunch import validate_prelaunch
+        result = validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'proof file closure')
+        return result
+    if layout == 'campaign-cleanup-prepare-v1':
+        from deploy_test_native_prepare import validate_prepare
+        result = validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'prepare proof file closure')
+        return result
     if layout == 'campaign-dispatch-refusal-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
@@ -863,7 +891,7 @@ def validate(receipt, owner, proof):
     mixed = layout == 'campaign-mixed-preallocation-v1'
     staged_preallocation = preallocation or mixed
     supervision = None
-    if layout in {'campaign-v1','campaign-preallocation-v1','campaign-mixed-preallocation-v1'}:
+    if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and (reference.get('native_directory') == str(campaign) or preallocation
@@ -920,7 +948,11 @@ def validate(receipt, owner, proof):
                              and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
                              for v in skips.values()),
                      'mixed original exclusion inventory')
-                expected_cases.update(dict.fromkeys(skips, 'SKIP'))
+            else:
+                skips = request.get('skips')
+                need(isinstance(skips, dict) and not set(checks).intersection(skips),
+                     'preallocation active/skip inventory')
+            expected_cases.update(dict.fromkeys(skips, 'SKIP'))
             need(summary['status'] in {'failed','cancelled'} and not proof.get('purpose')
                  and not proof.get('recovered_runtime') and (mixed or not summary.get('workspace_binding'))
                  and receipt['cases'] == expected_cases,
@@ -1011,13 +1043,32 @@ def validate(receipt, owner, proof):
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    admission_parents = frozenset()
+    if layout == 'campaign-admission-rejected-v1':
+        from deploy_test_native_admission import validate_campaign
+        admission_parents = validate_campaign(receipt, proof, root, runs, parents, participants, bound, document)
+    cancelled_parent_zero = frozenset()
+    if 'cancelled_parent_admission' in proof:
+        from deploy_test_native_cancelled_parent import cancelled_parent_admission
+        cancelled_parent_zero = cancelled_parent_admission(receipt, proof, adapter, root, parents, participants, bound, document, tree)
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
     for fleet in sorted(participants):
         benches = json.loads(bound(fleet / '_batch/benches.json'))
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
-        run = document(fleet / '_batch/run.json', RUN_RECORD_MAX_BYTES)  # Bind original outcomes without regrading them.
+        run_path = fleet / '_batch/run.json'
+        if isolated or preallocation or mixed or fleet in admission_parents:
+            run = document(run_path, RUN_RECORD_MAX_BYTES)
+        else:
+            # Native task logs can exceed the small control-receipt cap. Preserve
+            # the full hash and JSON-object contract without loading those logs.
+            from native_json_evidence import verify_native_object
+            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
+            verify_native_object(run_path, bindings.get(str(run_path)))
+            need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
+            used.add(str(run_path))
+            run = None
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
@@ -1060,9 +1111,13 @@ def validate(receipt, owner, proof):
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+        admission_parent = fleet in admission_parents
+        if admission_parent:
+            from deploy_test_native_admission import validate_parent
+            validate_parent(fleet, life, benches, run, root, bound, document, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if preallocation or mixed and fleet in zero_parents or failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
-            pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
+        if (preallocation or (mixed and fleet in zero_parents) or (failed_canary and zero_allocation) or admission_parent or fleet in cancelled_parent_zero) and not provenance_path.exists() and not matrix_path.exists():
+            pass  # Positive native admission boundary and sealed ownership; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
             need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)
@@ -1273,7 +1328,7 @@ def reconcile(state, occurrence_id, proof):
             # promoted to triage. Its retained owner still requires exact proof.
             need(not state.get('running') and 'live_failures' not in state and not CANCEL.is_set()
                  and state.get('attempts') and state['attempts'][-1].get('stale') is True
-                 and proof.get('layout') == 'campaign-startup-v1', 'quiescent stale startup required')
+                 and proof.get('layout') in {'campaign-startup-v1', 'campaign-prelaunch-v1'}, 'quiescent stale startup required')
             candidates = [r for r in latest_receipts(state).values()
                           if r.get('token') == occurrence_id]
             need(len(candidates) == 1, 'stale operation identity')

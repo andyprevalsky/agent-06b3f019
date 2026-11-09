@@ -765,34 +765,58 @@ class SingleCdpConnectionMultiplexer:
             return
 
         async def reapply() -> None:
+            """Restore each orphaned override on a still-bound session of its target."""
             if after is not None:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(after, timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
             for target_id, method in orphaned:
-                survivor = next((s for s, t in self._session_target.items() if t == target_id), None)
                 params = self._override_params(method)
-                if survivor is None or params is None:
+                if params is None:
                     continue
-                try:
-                    future = await self._send_session_command(survivor, method, params)
-                    response = await asyncio.wait_for(future, timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
-                except Exception as error:
-                    response = {"error": {"message": f"not sent: {type(error).__name__}"}}
-                if "error" in response:
-                    logger.error(
-                        "[CdpMux] %s holder for target %s detached and re-apply on %s failed: %s",
-                        method,
-                        target_id[:12],
-                        survivor[:12],
-                        str(response["error"])[:160],
-                    )
+                survivors = [s for s, t in self._session_target.items() if t == target_id]
+                saw_dead_session = False
+                for survivor in survivors:
+                    if self._session_target.get(survivor) != target_id:
+                        continue
+                    try:
+                        future = await self._send_session_command(survivor, method, params)
+                        response = await asyncio.wait_for(future, timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
+                    except Exception as error:
+                        response = {"error": {"message": f"not sent: {type(error).__name__}"}}
+                    failure = response.get("error") or {}
+                    if failure.get("code") == -32001 and failure.get("message") == "Session with given id not found.":
+                        saw_dead_session = True
+                        # Native detach can precede its event. Retire that
+                        # confirmed-dead locator and use another session of
+                        # the SAME target; do not abandon its emulation.
+                        if self._session_target.get(survivor) == target_id:
+                            self._reapply_overrides_after_detach([survivor])
+                        continue
+                    if "error" in response:
+                        logger.error(
+                            "[CdpMux] %s holder for target %s detached and re-apply on %s failed: %s",
+                            method,
+                            target_id[:12],
+                            survivor[:12],
+                            str(failure)[:160],
+                        )
+                    elif self._session_target.get(survivor) != target_id:
+                        continue
+                    else:
+                        self.overrides_reapplied += 1
+                        self._override_holder[(target_id, method)] = survivor
+                        self._override_claim[(target_id, method)] = survivor
+                        logger.info("[CdpMux] Re-applied %s on %s after its holder detached", method, survivor[:12])
+                    if method == "Emulation.setLocaleOverride":
+                        await self._verify_child_locale(survivor)
+                    break
                 else:
-                    self.overrides_reapplied += 1
-                    self._override_holder[(target_id, method)] = survivor
-                    self._override_claim[(target_id, method)] = survivor
-                    logger.info("[CdpMux] Re-applied %s on %s after its holder detached", method, survivor[:12])
-                if method == "Emulation.setLocaleOverride":
-                    await self._verify_child_locale(survivor)
+                    if saw_dead_session and (target_id, method) not in self._override_holder:
+                        logger.error(
+                            "[CdpMux] %s holder for target %s detached; every surviving locator was lost",
+                            method,
+                            target_id[:12],
+                        )
 
         task = asyncio.create_task(reapply())
         self._background.add(task)

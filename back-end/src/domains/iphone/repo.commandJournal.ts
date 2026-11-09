@@ -60,6 +60,11 @@ export async function createCommandJournal(
     command,
     execute: true,
     taskBound,
-    ...(agent ? { executionGeneration: agent.temporalWorkflowId ?? agent.id } : {}),
+    ...(agent
+      ? {
+          executionGeneration: agent.temporalWorkflowId ?? agent.id,
+          executionFirstExecutionRunId: agent.temporalFirstExecutionRunId ?? undefined,
+        }
+      : {}),
   };
 }

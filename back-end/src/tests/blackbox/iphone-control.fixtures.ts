@@ -1,7 +1,23 @@
+import type { ImessageAuthLossVerifier } from '../../providers/phoneAuthLoss';
+import {
+  listen,
+  PNG,
+  SYNTHETIC_AUTH_LOSS_UNKNOWN,
+  type ProviderCall,
+  type Lease,
+  type ApiData,
+  type ApiResult,
+} from './iphone-control.transport-fixture';
+export type { ProviderCall, Lease, ApiData, ApiResult } from './iphone-control.transport-fixture';
+import type { SetupAgentLauncher } from '../../domains/iphone/service.connection';
 import { phoneFixtureNumber } from './phone-fixture-users';
 import imessageRouter from '../../domains/imessage/routes';
 import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
-import { syntheticConfiguration } from './iphone-control.synthetic-setup';
+import {
+  syntheticConfiguration,
+  syntheticSetupContext,
+  createSyntheticControlAgent,
+} from './iphone-control.synthetic-setup';
 import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import userSettingsRouter from '../../domains/user-settings/routes';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
@@ -9,7 +25,6 @@ import type { SetupVerifier } from '../../providers/phoneSetupVerifier';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { prisma } from '../../providers/database';
 import { PhoneHarnessClient } from '../../providers/phoneHarness';
@@ -20,34 +35,8 @@ import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 export const CANARY_KEY = 'synthetic-phone-account-key-DO-NOT-EXPOSE';
 export const CANARY_TOKEN = 'synthetic-phone-control-token-DO-NOT-EXPOSE';
 export const CANARY_PASSWORD = 'synthetic-phone-password-DO-NOT-EXPOSE';
-export const PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=',
-  'base64'
-);
-export interface Lease {
-  id: string;
-  status: string;
-  queuePosition?: number | null;
-  controlOwner?: string;
-  [key: string]: unknown;
-}
-export interface ApiData extends Record<string, unknown> {
-  lease?: Lease;
-  operation?: { id: string; status: string; errorCode: string | null; result: unknown };
-}
-export interface ApiResult {
-  status: number;
-  data: ApiData;
-  headers: Headers;
-  bytes: Uint8Array;
-}
-export interface ProviderCall {
-  method: string;
-  path: string;
-  body?: Record<string, unknown>;
-  authorization?: string;
-  idempotencyKey?: string;
-}
+export { PNG };
+
 export interface Fixture {
   phone: string;
   userId: string;
@@ -74,10 +63,7 @@ function barrier(): Barrier {
   });
   return { entered, settled, enter, release };
 }
-async function listen(server: Server): Promise<string> {
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-}
+
 async function closeServer(server: Server | undefined): Promise<void> {
   if (server === undefined) return;
   server.closeIdleConnections();
@@ -91,6 +77,10 @@ export class Harness {
   private readonly transportPrefix = `/phone-fixture-${randomUUID()}`;
   readonly calls: ProviderCall[] = [];
   clientCreations = 0;
+  framePng?: Buffer;
+  launchResult?: unknown;
+  authLossVerifier?: ImessageAuthLossVerifier;
+  setupAgentLauncher?: SetupAgentLauncher;
   messageVerifier: MessageVerifier = async () => ({
     status: 'allowed',
     x: 50,
@@ -282,7 +272,7 @@ export class Harness {
             await held.settled;
           }
           res.writeHead(200, { 'Content-Type': 'image/png' });
-          res.end(PNG);
+          res.end(this.framePng ?? PNG);
           return;
         }
         if (method === 'POST' && path.endsWith('/op')) {
@@ -331,9 +321,11 @@ export class Harness {
                 ? { text: kw.s, error: kw.s }
                 : op === 'screen.bounds'
                   ? this.screenBounds
-                  : op === 'screen.text'
-                    ? (this.observationResult ?? { text: 'Visible screen observation' })
-                    : true,
+                  : op === 'apps.launch'
+                    ? (this.launchResult ?? true)
+                    : op === 'screen.text'
+                      ? (this.observationResult ?? { text: 'Visible screen observation' })
+                      : true,
           });
           return;
         }
@@ -359,6 +351,12 @@ export class Harness {
     app.use(
       '/api/iphone',
       createIPhoneRouter({
+        authLossVerifier: (input) =>
+          this.authLossVerifier?.(input) ?? Promise.resolve(SYNTHETIC_AUTH_LOSS_UNKNOWN),
+        setupAgentLauncher: (...args) =>
+          this.setupAgentLauncher
+            ? this.setupAgentLauncher(...args)
+            : Promise.reject(new Error('Synthetic setup launcher not configured')),
         messageVerifier: (input) => this.messageVerifier(input),
         setupVerifier: (input) => this.setupVerifier(input),
         credentialVerifier: (input) => this.credentialVerifier(input),
@@ -457,6 +455,10 @@ export class Harness {
 
   resetControls(): void {
     this.physicalOperations.length = 0;
+    this.framePng = undefined;
+    this.launchResult = undefined;
+    this.authLossVerifier = undefined;
+    this.setupAgentLauncher = undefined;
     this.beforeSavedExecute = undefined;
     this.beforeStop = undefined;
     this.holds.forEach((held) => held.release());
@@ -480,9 +482,7 @@ export class Harness {
   }
 
   async createAgent(userId: string) {
-    return prisma.agent.create({
-      data: { userId, status: 'ACTIVE', goal: 'Synthetic phone control blackbox' },
-    });
+    return createSyntheticControlAgent(userId);
   }
 
   async fixture(): Promise<Fixture> {
@@ -525,6 +525,7 @@ export class Harness {
     });
     const agent = await this.createAgent(userId);
     const lease = await this.acquire(userId, agent.id);
+    await syntheticConfiguration(userId, lease.id);
     return {
       phone,
       userId,
@@ -559,7 +560,7 @@ export class Harness {
   ): Promise<ApiResult> {
     const operationLease = /^\/leases\/([^/]+)\/operations$/.exec(path)?.[1];
     if (operationLease && options.actor !== 'user') {
-      const context = await syntheticConfiguration(userId, operationLease);
+      const context = await syntheticSetupContext(userId, operationLease);
       if (
         context &&
         options.actor !== 'user' &&

@@ -47,10 +47,14 @@ const block = source.slice(
   source.indexOf("class CodexAppServer {"),
   source.indexOf("function stageDirectAttachments("),
 );
+// Files the thread-goal objective writes (schema, over-cap task), by path.
+const goalFiles = new Map();
 const sandbox = {
   log: () => {},
   workDir: "/work",
   codexUsageLimit: () => null,
+  mkdirSync: () => {},
+  writeFileSync: (path, data) => goalFiles.set(path, String(data)),
 };
 const {
   Native,
@@ -115,6 +119,17 @@ function fixture(options = {}) {
         result = { turn: { id: `turn-${++serial}` } };
       if (request.method === "turn/steer")
         result = { turnId: request.params.expectedTurnId };
+      if (request.method === "thread/goal/set" && options.failGoal) {
+        queueMicrotask(() =>
+          child.stdout.write(
+            JSON.stringify({
+              id: request.id,
+              error: { code: -32600, message: "goals feature is disabled" },
+            }) + "\n",
+          ),
+        );
+        return;
+      }
       queueMicrotask(() =>
         child.stdout.write(JSON.stringify({ id: request.id, result }) + "\n"),
       );
@@ -1443,4 +1458,99 @@ test("Codex never routes through a Rose proxy or the demo cache", () => {
       `ws-server must not contain ${forbidden}: Codex talks to its provider directly`,
     );
   }
+});
+
+// Every code-agent task is also the thread's native goal (Andy, 2026-11-08,
+// root 0874662a): Codex keeps the thread going until the goal is complete, and
+// the objective carries the task with its end condition (writing the handoff).
+const HANDOFF_MARKER =
+  "\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n";
+const GOAL_SCHEMA = '{"type":"object","required":["rose_handoff"]}';
+test("a worker task sets the native thread goal after its first turn", async () => {
+  goalFiles.clear();
+  const { native, calls } = fixture();
+  // The task body may hold its own "Task:" line; the objective is the whole task.
+  const task =
+    "Remove the ring.\nNext Task:\nkeep the launcher.\n\nEnd condition: write the handoff.";
+  const raw = `${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`;
+  await native.initialize(
+    null,
+    `System instructions:\nbe good\n\nTask:\n${raw}`,
+    raw,
+  );
+  const methods = calls.map((c) => c.method);
+  assert.ok(
+    methods.indexOf("thread/goal/set") > methods.indexOf("turn/start"),
+    methods.join(","),
+  );
+  const goal = calls.find((c) => c.method === "thread/goal/set").params;
+  assert.deepEqual(goal, {
+    threadId: "thread",
+    objective: `Task:\n${task}`,
+    status: "active",
+  });
+  assert.equal(
+    goalFiles.get("/home/user/.rose/handoff.schema.json"),
+    GOAL_SCHEMA,
+  );
+});
+test("a task over the objective cap goes to the task file the objective names", async () => {
+  goalFiles.clear();
+  const { native, calls } = fixture();
+  const task = "y".repeat(5000);
+  const raw = `${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`;
+  await native.initialize(null, `Task:\n${raw}`, raw);
+  const { objective } = calls.find(
+    (c) => c.method === "thread/goal/set",
+  ).params;
+  assert.ok(objective.length <= 4000, String(objective.length));
+  assert.match(objective, /\/home\/user\/\.rose\/task\.md/);
+  assert.equal(goalFiles.get("/home/user/.rose/task.md"), task);
+});
+test("goal lifecycle is reported; an unavailable goal does not stop the run", async () => {
+  const { native, events } = fixture({ failGoal: true });
+  await native.initialize(null, `Task:\ndo it${HANDOFF_MARKER}${GOAL_SCHEMA}`);
+  assert.equal(events.find((e) => e.type === "goal").status, "unavailable");
+  native.receive({
+    method: "thread/goal/updated",
+    params: { threadId: "thread", goal: { status: "complete", tokensUsed: 9 } },
+  });
+  assert.equal(
+    events.filter((e) => e.type === "goal").at(-1).status,
+    "complete",
+  );
+  native.receive({
+    method: "thread/goal/cleared",
+    params: { threadId: "thread" },
+  });
+  assert.equal(
+    events.filter((e) => e.type === "goal").at(-1).status,
+    "cleared",
+  );
+});
+test("a plain task without a result schema sets no goal", async () => {
+  const { native, calls } = fixture();
+  await native.initialize(null, "hello");
+  assert.equal(
+    calls.some((c) => c.method === "thread/goal/set"),
+    false,
+  );
+});
+test("a new spawn's goal turn (headed Task:) becomes the whole objective", async () => {
+  const { native, calls } = fixture();
+  await native.initialize(null, "hello");
+  const task = "Fix it.\nTask:\nthen test it.";
+  await native.deliver(
+    {
+      id: "spawn-2",
+      sender: "agent",
+      text: `Task:\n${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`,
+      settings: {},
+    },
+    [{ type: "text", text: "x" }],
+  );
+  const goal = calls
+    .filter((c) => c.method === "thread/goal/set")
+    .at(-1).params;
+  assert.equal(goal.objective, `Task:\n${task}`);
 });

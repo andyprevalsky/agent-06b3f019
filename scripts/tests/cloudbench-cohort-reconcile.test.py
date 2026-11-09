@@ -147,6 +147,17 @@ exit "$status"
 
 
 class CohortReconciliation(unittest.TestCase):
+    def test_actual_checked_in_dependency_pair_reaches_reconciliation(self):
+        # Run the real fleet shell against its actual checked-in sibling pair;
+        # no fixture-rewritten hash, alternate dependency, or fake loader.
+        fixture = ReconciliationFixture(self, width=1)
+        with mock.patch.dict(os.environ, CLOUDBENCH_TEST_RECONCILE_HELPER_DIR=str(MODULE.parent)):
+            code, out, err = fixture.join(fixture.spawn(0))
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue((fixture.ticket.cohort / 'stale-reconcile.completed.json').exists())
+        self.assertTrue(fixture.metadata())
+        fixture.assert_records_preserved()
+
     def test_canonical_snapshot_loads_reviewed_tickets_and_rejects_any_other_bytes(
         self,
     ):

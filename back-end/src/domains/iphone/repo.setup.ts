@@ -1,35 +1,55 @@
+import type { Agent } from '@prisma/client';
 /** Caller owns device lock. Only the active exact task can see the configured identity. */
 import {
   setupState,
   sealSetup,
   setupIdentity,
   type SetupState,
+  configurationState,
+  configurationProvenanceBound,
 } from '../../providers/phoneSetupState';
 import type { Transaction, IPhoneDevice, IPhoneLease } from './types';
 import { verificationDto } from '../../providers/phoneSetupVerification';
 import { databaseNow } from './repo.clock';
 
 export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneLease) {
+  const configuration = configurationState(state);
   const active =
     lease.status === 'ACTIVE' &&
     lease.releaseRequestedAt === null &&
     state.attempt?.leaseId === lease.id &&
     state.attempt.taskId === lease.browserTaskId;
-  const verification = verificationDto(state.verification, {
-    attemptId: state.attempt?.id,
-    profileRevision: state.profileRevision,
-    workflowId: state.attempt?.workflowId,
-    providerEpoch: device.providerEpoch,
-    expectedPhone: state.expectedPhone ?? null,
-    expectedGoogleIdentity: state.expectedGoogleIdentity,
-    allowGooglePasscodeException: state.allowGooglePasscodeException,
-    floorAt: state.attempt?.floorAt,
-    floorCursor: state.attempt?.floorCursor,
-  });
+  const verification = verificationDto(
+    configuration.verification,
+    {
+      attemptId: configuration.attempt?.id,
+      profileRevision: state.profileRevision,
+      workflowId: configuration.attempt?.workflowId,
+      providerEpoch: device.providerEpoch,
+      expectedPhone: state.expectedPhone ?? null,
+      expectedGoogleIdentity: state.expectedGoogleIdentity,
+      allowGooglePasscodeException: state.allowGooglePasscodeException,
+      floorAt: configuration.attempt?.floorAt,
+      floorCursor: configuration.attempt?.floorCursor,
+    },
+    {
+      value: state.verification,
+      context: {
+        attemptId: state.attempt?.id,
+        profileRevision: state.profileRevision,
+        workflowId: state.attempt?.workflowId,
+        providerEpoch: device.providerEpoch,
+        expectedPhone: state.expectedPhone ?? null,
+        floorAt: state.attempt?.floorAt,
+        floorCursor: state.attempt?.floorCursor,
+      },
+    }
+  );
   const required =
+    !configurationProvenanceBound(state) ||
     !verification.configurationReady ||
     device.setupState !== 'ready' ||
-    state.verified?.profileRevision !== state.profileRevision ||
+    configuration.verified?.profileRevision !== state.profileRevision ||
     state.expectedAppleIdentity === undefined;
   return {
     required,
@@ -40,7 +60,7 @@ export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneL
     ...(active && state.allowGooglePasscodeException === true
       ? { googlePasscodeExceptionAllowed: true }
       : {}),
-    identityVerified: state.verified?.profileRevision === state.profileRevision,
+    identityVerified: configuration.verified?.profileRevision === state.profileRevision,
     ...(active && state.expectedGoogleIdentity !== undefined
       ? { expectedGoogleAccountIdentifier: state.expectedGoogleIdentity }
       : {}),
@@ -71,16 +91,32 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
       : null;
   const expectedPhone = owner?.phone ?? null;
   const generation = agent?.temporalWorkflowId ?? agent?.id;
+  const configured =
+    device.setupState === 'ready' &&
+    !setupDto(device, state, lease).required &&
+    state.expectedPhone === expectedPhone &&
+    configurationProvenanceBound(state);
   if (
     lease.status === 'ACTIVE' &&
     lease.releaseRequestedAt === null &&
     lease.browserTaskId !== null &&
     (state.attempt?.leaseId !== lease.id ||
       state.attempt.workflowId !== generation ||
+      state.attempt.firstExecutionRunId !== (agent?.temporalFirstExecutionRunId ?? undefined) ||
       state.attempt.taskId !== lease.browserTaskId ||
       state.expectedPhone !== expectedPhone)
   ) {
     const now = await databaseNow(tx);
+    if (!configured) delete state.completedConfiguration;
+    if (configured && !state.completedConfiguration)
+      state.completedConfiguration = structuredClone({
+        attempt: state.attempt!,
+        verified: state.verified!,
+        verification: state.verification!,
+      });
+    delete state.readinessAdmission;
+    await captureReadiness(tx, device, state, lease, agent, generation, expectedPhone);
+    if (state.expectedPhone !== expectedPhone) delete state.connection;
     state.expectedPhone = expectedPhone;
     state.claimRevision++;
     state.attempt = {
@@ -90,18 +126,22 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
       taskId: lease.browserTaskId,
       agentId: lease.agentId,
       workflowId: generation!,
+      ...(agent?.temporalFirstExecutionRunId !== undefined &&
+      agent.temporalFirstExecutionRunId !== null &&
+      agent.temporalFirstExecutionRunId !== ''
+        ? { firstExecutionRunId: agent.temporalFirstExecutionRunId }
+        : {}),
       floorCursor: lease.actionCursor,
       floorAt: now.toISOString(),
       ...(state.expectedAppleIdentity === undefined
         ? { reasonCode: 'configuration_unavailable' }
         : {}),
     };
-    const ready = false;
     device = await tx.iPhoneDevice.update({
       where: { id: device.id },
       data: {
         setupEncrypted: sealSetup(state),
-        setupState: ready
+        setupState: configured
           ? 'ready'
           : state.expectedAppleIdentity !== undefined
             ? 'in_progress'
@@ -119,4 +159,36 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
     });
   }
   return { device, state, dto: setupDto(device, state, lease) };
+}
+
+async function captureReadiness(
+  tx: Transaction,
+  device: IPhoneDevice,
+  state: SetupState,
+  lease: IPhoneLease,
+  agent: Agent | null,
+  generation: string | undefined,
+  expectedPhone: string | null
+) {
+  if (lease.browserTaskId === null) return;
+  if (
+    device.setupState === 'ready' &&
+    setupDto(device, state, lease).verification.configurationReady &&
+    state.verified?.profileRevision === state.profileRevision &&
+    state.expectedPhone === expectedPhone &&
+    agent !== null &&
+    agent.temporalFirstExecutionRunId !== null &&
+    agent.temporalFirstExecutionRunId !== '' &&
+    configurationProvenanceBound(state)
+  ) {
+    state.readinessAdmission = {
+      leaseId: lease.id,
+      taskId: lease.browserTaskId,
+      agentId: lease.agentId,
+      workflowId: generation!,
+      firstExecutionRunId: agent.temporalFirstExecutionRunId,
+      profileRevision: state.profileRevision,
+      providerEpoch: device.providerEpoch,
+    };
+  }
 }

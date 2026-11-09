@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import time
 
 KIND = 'local-supervisor-cleanup-v1'
@@ -164,20 +165,36 @@ def quiet(root):
         scan_same_user_processes(inspect, lambda pid: need(False, f'worker root process {pid} is unverifiable'))
 
 
+def structural_original_gate(original, current):
+    """Authenticate only a selection-explanation change, never an execution change."""
+    from deploy_test_cycle import digest
+    need(isinstance(original, dict) and set(original) == set(current)
+         and all(isinstance(gate.get('selection_evidence'), list)
+                 and all(isinstance(item, str) for item in gate['selection_evidence'])
+                 for gate in (original, current)), 'structural original contract shape')
+    need(digest({k: v for k, v in original.items() if k != 'selection_evidence'}) ==
+         digest({k: v for k, v in current.items() if k != 'selection_evidence'}),
+         'structural execution contract changed')
+
+
 def structural_cleanup(state, receipt, proof):
     """A fully reaped failed structural suite may launch again, without test credit."""
     import hashlib
     from deploy_test_cycle import bounded_read, digest, sha_file
     gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    if 'original_gate' in proof:
+        structural_original_gate(proof['original_gate'], gate)
+        gate = proof['original_gate']
     root = Path(gate['worker_root']).resolve(strict=True)
     name = gate['name']
     need(gate.get('category') == name == 'deploy-command-structural'
          and gate.get('worker_transport') == 'local-isolated' and gate.get('case_protocol') is True
-         and gate.get('result_transport') == 'stdout' and str(root) == gate['worker_root'] == gate.get('cwd')
+         and gate.get('result_transport') in ('stdout', 'file') and str(root) == gate['worker_root'] == gate.get('cwd')
          and not gate.get('native_cloud') and not gate.get('native_backend'), 'owned structural binding')
     command = gate['command']
-    need(receipt.get('command') == command and len(command) == 5
-         and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root), '--stdio'],
+    need(receipt.get('command') == command
+         and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root)]
+         + (['--stdio'] if gate['result_transport'] == 'stdout' else []),
          'native structural command')
     binding = receipt.get('execution_binding', {})
     need(binding.get('contract_digest') == digest(gate)
@@ -187,7 +204,7 @@ def structural_cleanup(state, receipt, proof):
          'structural execution/admission contract changed')
     need(receipt.get('lifecycle') == 'owned' and receipt.get('executed') is True
          and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
-         and type(receipt.get('native_exit')) is int and receipt['native_exit'] == 1
+         and type(receipt.get('native_exit')) is int and receipt['native_exit'] in (0, 1)
          and receipt.get('lingering_group') is True and not receipt.get('cleanup_owner')
          and receipt.get('native_cleanup_reference') is None
          and all(receipt.get(k) is False for k in ('timed_out', 'cancelled')), 'failed structural receipt required')
@@ -207,19 +224,30 @@ def structural_cleanup(state, receipt, proof):
     need(request.get('worker_root') == result.get('worker_root') == str(root)
          and request.get('worker_recipe') == gate.get('worker_recipe')
          and result.get('recipe_digest') == digest(request['worker_recipe']), 'structural root/recipe mismatch')
+    native_exit = receipt['native_exit']
+    inner_status = 'PASS' if native_exit == 0 else 'UNVERIFIED'
     need(request.get('checks') == gate['checks'] == [name] and request.get('skips') == {}
-         and receipt.get('cases') == result.get('cases') == {name: 'UNVERIFIED'}
-         and result.get('complete') is False and result.get('cleanup_complete') is True
+         and receipt.get('cases') == {name: 'UNVERIFIED'}
+         and result.get('cases') == {name: inner_status}
+         and result.get('complete') is (native_exit == 0) and result.get('cleanup_complete') is True
          and result.get('reused') is False and not result.get('cleanup_owner'), 'structural result incomplete cleanup')
     recipe = request['worker_recipe']
-    need(recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
+    service_recipe = (recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
         'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
-         and recipe['cleanup'].get('cwd', '.') == '.' and set(recipe['cases']) == {name}
-         and recipe['cases'][name].get('aggregate') is True, 'native structural cleanup recipe')
+        and recipe['cleanup'].get('cwd', '.') == '.')
+    structural_case = recipe.get('cases', {}).get(name, {})
+    cases_only = (set(recipe) == {'cases'}
+                  and set(structural_case) == {'command', 'cwd', 'env', 'aggregate'}
+                  and structural_case.get('command') == [
+                      'python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5']
+                  and structural_case.get('cwd') == '.')
+    need((service_recipe or cases_only) and set(recipe['cases']) == {name}
+         and structural_case.get('aggregate') is True, 'native structural cleanup recipe')
     case = result['evidence'][name]
     native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
     log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
-    need(case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] == 1
+    need(case.get('status') == inner_status and type(case.get('native_exit')) is int
+         and case['native_exit'] == native_exit
          and case.get('command') == recipe['cases'][name]['command'] and case.get('log') == str(log)
          and log.resolve(strict=True) == log and sha_file(log) == case.get('sha256')
          and all(case.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group'))
@@ -228,21 +256,27 @@ def structural_cleanup(state, receipt, proof):
     need(type(process.get('native_exit')) is int and process['native_exit'] == receipt['native_exit']
          and process.get('quiescent') is True and process.get('orphaned_children') is True
          and all(process.get(k) is False for k in ('cancelled', 'timed_out'))
-         and process.get('remaining') == [] and process.get('kill_sent') == []
+         and process.get('remaining') == []
          and process.get('error') is None, 'structural supervisor closure incomplete')
     child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
-    rows, terms = process.get('reaped'), process.get('term_sent')
+    rows, terms, kills = (process.get(key) for key in ('reaped', 'term_sent', 'kill_sent'))
     need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
          and isinstance(rows, list) and len(rows) > 1 and isinstance(terms, list) and terms
+         and isinstance(kills, list)
          and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
                  and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
                  and type(row['status']) is int and 0 <= row['status'] <= 65535
                  and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
          'unknown structural descendant wait records')
     reaped = {row['pid']: row['status'] for row in rows}
-    need(len(reaped) == len(rows) and reaped.get(child) == 256
-         and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms)
-         and len(set(terms)) == len(terms), 'structural owned descendants not all reaped')
+    need(len(reaped) == len(rows) and reaped.get(child) == native_exit << 8
+         and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms + kills)
+         and len(set(terms)) == len(terms) and len(set(kills)) == len(kills)
+         and set(kills) <= set(terms)
+         # kill_sent records accepted requests, not which signal won an exit race.
+         and all(os.WIFSIGNALED(reaped[pid])
+                 and os.WTERMSIG(reaped[pid]) in (signal.SIGTERM, signal.SIGKILL)
+                 for pid in kills), 'structural owned descendants not all reaped')
     quiet(root)
     return gate
 
@@ -432,8 +466,19 @@ def interrupted_worker(state, receipt, proof):
 
 
 def validate(state, receipt, proof):
+    if proof.get('layout') == 'nativebackend-post-execution-cleanup-v1':
+        from deploy_test_backend_post_cleanup import validate as validate_post_execution
+        return validate_post_execution(state, receipt, proof)
+    if proof.get('layout') == 'backend-prisma-preflight-v1':
+        from deploy_test_backend_preflight_cleanup import validate as validate_preflight
+        return validate_preflight(state, receipt, proof)
     from deploy_test_cycle import bounded_read, digest, sha_file
-    need(set(proof) == {'kind', 'files', 'confirmed_at', 'observed_by'} and proof['kind'] == KIND,
+    fields = {'kind', 'files', 'confirmed_at', 'observed_by'}
+    if (receipt.get('gate') == 'deploy-command-structural'
+            and receipt.get('cancelled') is False and receipt.get('lifecycle') == 'owned'
+            and 'original_gate' in proof):
+        fields.add('original_gate')
+    need(set(proof) == fields and proof['kind'] == KIND,
          'proof fields')
     need(isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'independent observer missing')
     confirmed = proof['confirmed_at']
@@ -544,6 +589,7 @@ def reconcile(state, occurrence_id, proof):
 
 
 def still_bound(state, receipt, entry):
+    from deploy_test_cycle import digest
     need(entry.get('kind') == KIND and entry.get('gate') == receipt['gate']
          and entry.get('token') == receipt['token'] and entry.get('credit_granted') is False, 'reconciliation changed')
     # Cleanup belongs to the original execution contract; a refreshed full
@@ -551,9 +597,18 @@ def still_bound(state, receipt, entry):
     gate = entry.get('execution_gate')
     original = {**state, 'plan': {'gates': [gate]}} if gate is not None else state
     try:
+        if 'original_gate' in entry['proof']:
+            need(entry['gate'] == 'deploy-command-structural'
+                 and isinstance(gate, dict) and digest(gate) == digest(entry['proof']['original_gate']),
+                 'original structural witness changed')
         if gate is not None:
             from deploy_test_result import preserve_contract
             current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+            if 'original_gate' in entry['proof']:
+                structural_original_gate(gate, current)
+            if entry['proof'].get('layout') == 'nativebackend-post-execution-cleanup-v1':
+                from deploy_test_backend_post_cleanup import current_gate
+                current_gate(gate, current)
             preserve_contract(gate, current)
             need(set(gate['checks']) <= set(current['checks']), 'original checks removed')
         validate(original, receipt, entry['proof'])

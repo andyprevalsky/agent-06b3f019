@@ -440,16 +440,24 @@ run_playwright() {
   exec node "$PLAYWRIGHT_CLI" "$@"
 }
 
-# The CLI --reporter replaces playwright.config.ts's reporters, so append the live
-# deploy-gate progress reporter here too, only when the gate worker names a progress
-# file (DEPLOY_GATE_PROGRESS). Relative to this cwd (front-end/); list output is unchanged.
+# Optional native evidence output; the ordinary command and test policy stay intact.
 SEMANTIC_REPORTERS=list
+# Enable live progress before appending optional native evidence reporters.
 if [[ -n "${DEPLOY_GATE_PROGRESS:-}" ]]; then
   SEMANTIC_REPORTERS="list,./src/tests/gate-progress/playwrightReporter.ts"
 fi
+SEMANTIC_OUTPUT_ARGS=()
+if [[ -n "${SEMANTIC_NATIVE_REPORT_PREFIX:-}" ]]; then
+  [[ "$SEMANTIC_NATIVE_REPORT_PREFIX" = /* ]] || { echo "Native report prefix must be absolute" >&2; exit 2; }
+  export PLAYWRIGHT_JSON_OUTPUT_FILE="${SEMANTIC_NATIVE_REPORT_PREFIX}.json"
+  export DEPLOY_SEMANTIC_LIFECYCLE="${SEMANTIC_NATIVE_REPORT_PREFIX}.jsonl"
+  [[ ! -e "$PLAYWRIGHT_JSON_OUTPUT_FILE" && ! -e "$DEPLOY_SEMANTIC_LIFECYCLE" && ! -e "${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts" ]] || { echo "Native report already exists" >&2; exit 2; }
+  SEMANTIC_REPORTERS="$SEMANTIC_REPORTERS,json,$REPO_DIR/scripts/deploy-semantic-reporter.cjs"
+  SEMANTIC_OUTPUT_ARGS=("--output=${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts")
+fi
 
 if [[ $# -eq 0 ]]; then
-  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS")
+  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"})
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
     PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
   fi
@@ -468,4 +476,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS"
+run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"}

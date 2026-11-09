@@ -1,10 +1,13 @@
+import { syntheticConfiguration } from './iphone-control.synthetic-setup';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { Harness } from './iphone-control.fixtures';
 export async function fixture(h: Harness) {
   const f = await h.fixture();
-  const context = await prisma.browserContext.create({
-    data: { userId: f.userId, contextId: randomUUID() },
+  const context = await prisma.browserContext.upsert({
+    where: { userId: f.userId },
+    create: { userId: f.userId, contextId: randomUUID() },
+    update: {},
   });
   const task = await prisma.browserSession.create({
     data: {
@@ -16,6 +19,7 @@ export async function fixture(h: Harness) {
     },
   });
   await prisma.iPhoneLease.update({ where: { id: f.leaseId }, data: { browserTaskId: task.id } });
+  await syntheticConfiguration(f.userId, f.leaseId);
   const body = {
     agentId: f.agentId,
     authRealm: 'iphone',

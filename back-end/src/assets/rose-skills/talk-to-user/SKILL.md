@@ -9,8 +9,9 @@ The user never reads this terminal. Messages, results, scorecards and visuals
 reach them only through the Rose tools: the `rose` CLI on PATH (`rose --help`)
 or the same tools on the `rose` MCP server (`send_message_to_user`, `display`).
 
-You cannot ask the user questions. Decide with your best judgment, and state
-the assumptions you made in your message or final response.
+You cannot ask the user questions, and nobody answers questions you end a
+turn with. Decide with your best judgment, proceed, and state the assumptions
+you made in your message and in your result handoff.
 
 ## When to use
 

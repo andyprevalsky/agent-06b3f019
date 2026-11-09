@@ -7632,7 +7632,14 @@ exit 143
         return
     receipt = json.loads(receipt_path.read_text())
     assert receipt["verified"] is False, receipt
-    assert receipt["verified_state"] == initial, receipt
+    assert receipt["verified_state"] == initial, {
+        "receipt": receipt,
+        "native_returncode": result.returncode,
+        "native_stdout": result.stdout,
+        "native_stderr": result.stderr,
+        "fake_calls": (fake / "calls").read_text(),
+        "elapsed_seconds": elapsed,
+    }
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
     if case == "stop-always-fails":
         # The owning deadline uses Bash SECONDS, whose integer ticks can reach
@@ -25882,6 +25889,36 @@ def test_all_buffered_provider_json_names_are_unexported_before_fleet_execs() ->
         "POOL_INVENTORY_JSON",
         "SNAPSHOTS_JSON",
     }.issubset(set(guard.split()))
+
+
+@pytest.mark.parametrize("ceiling,inventory", [(None, 299), (56, 55)])
+def test_autoscaler_default_matches_approved_app_ceiling(tmp_path: Path, ceiling, inventory) -> None:
+    """Worker reservations use the app policy and honor a stricter explicit cap."""
+    functions = "\n".join(
+        _extract_fleet_function(fleet_source_text(), name + "() {")
+        for name in ("capacity_reserve_slots", "reserve_worker_machine_slot")
+    )
+    payload = tmp_path / "inventory.json"
+    payload.write_text(json.dumps([{"id": str(i)} for i in range(inventory)]))
+    policy = "unset CLOUDBENCH_APP_MACHINE_CEILING" if ceiling is None else f"CLOUDBENCH_APP_MACHINE_CEILING={ceiling}"
+    script = f"""set -uo pipefail
+APP=fixture-app
+RUN_ID=fixture-run
+FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+FLEET_OWNER_HOST="$(hostname)"
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+CAPACITY_RESERVATION_ROOT={shlex.quote(str(tmp_path / 'capacity'))}
+unset CLOUDBENCH_CAMPAIGN_INVENTORY_DIR SNAPSHOT_LOOP_PID
+{policy}
+FLY() {{ cat {shlex.quote(str(payload))}; }}
+{functions}
+reserve_worker_machine_slot "$FLEET_OWNER_TOKEN-first" || exit 11
+status=0
+reserve_worker_machine_slot "$FLEET_OWNER_TOKEN-second" || status=$?
+test "$status" = 1 || exit 12
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_worker_capacity_reservation_streams_full_provider_inventory_without_exec_size_limit() -> None:
