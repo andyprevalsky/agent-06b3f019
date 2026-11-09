@@ -31,6 +31,9 @@ async function main() {
       /Blackbox proxy reuse required/
     );
     assert.equal(calls, 0, 'actual SDK create must be refused before provider fetch');
+    await assert.rejects(kernel.browsers.create({}), /Blackbox proxy reuse required/);
+    await assert.rejects(kernel.profiles.create({}), /Blackbox proxy reuse required/);
+    assert.equal(calls, 0, 'browser/profile SDK creates must also stop before fetch');
     await kernel.proxies.list({ query: 'existing', limit: 100 });
     assert.equal(calls, 1, 'listing shared proxies remains available');
     await kernel.proxies.retrieve('shared');

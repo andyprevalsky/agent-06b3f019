@@ -3812,11 +3812,11 @@ guest_temporal_case() {  # <case> ; prints nothing on success
   local case_name="$1" dir="$TMP_ROOT/guest-temporal-$1"
   mkdir -p "$dir/repo/agents" "$dir/repo/back-end" "$dir/tmp"
   chmod 700 "$dir/tmp"
-  printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=prod.example:7233\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/repo/agents/.env"
+  printf 'BROWSER_PROVIDER=kernel\nOPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=prod.example:7233\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/repo/agents/.env"
   if [ "$case_name" = appended ]; then
-    printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks' > "$dir/repo/back-end/.env"
+    printf 'BROWSER_PROVIDER=kernel\nDATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks' > "$dir/repo/back-end/.env"
   else
-    printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=prod-ns.acct\r\nTEMPORAL_API_KEY="prod-secret-key"\r\nTEMPORAL_ADDRESS=prod.example:7233\r\n' > "$dir/repo/back-end/.env"
+    printf 'BROWSER_PROVIDER=kernel\r\nDATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=prod-ns.acct\r\nTEMPORAL_API_KEY="prod-secret-key"\r\nTEMPORAL_ADDRESS=prod.example:7233\r\n' > "$dir/repo/back-end/.env"
   fi
   chmod 600 "$dir/repo/agents/.env" "$dir/repo/back-end/.env"
   local override="$dir/repo/agents/.env.benchmark-temporal"
@@ -3860,7 +3860,10 @@ guest_temporal_case() {  # <case> ; prints nothing on success
       explicit-missing) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE="$dir/absent" ;;
       *) unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE ;;
     esac
-    validate_environment_contract() { CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER=kernel; }
+    validate_environment_contract() {
+      CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER=kernel
+      cloudbench_write_guest_browser_env_files agents/.env back-end/.env kernel kernel "$1"
+    }
     resolve_durable_github_token() { echo gh-token; }
     assert_app_environment_lock_ownership() { return 0; }
     environment_activation_targets() { printf 'pool\tpool-1\n'; }
@@ -3919,8 +3922,8 @@ guest_temporal_case() {  # <case> ; prints nothing on success
       [ "$manifest_namespace" = None ] || fail "$case_name: manifest must not claim a guest namespace"
       ;;
     applied)
-      printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/expected-agents"
-      printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=bench-ns.acct\r\nTEMPORAL_API_KEY=guest-secret-key\r\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\r\n' > "$dir/expected-backend"
+      printf 'BROWSER_PROVIDER=kernel\nOPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/expected-agents"
+      printf 'BROWSER_PROVIDER=kernel\r\nDATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=bench-ns.acct\r\nTEMPORAL_API_KEY=guest-secret-key\r\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\r\n' > "$dir/expected-backend"
       cmp -s "$dir/staged-agents.env" "$dir/expected-agents" || fail "applied: guest agents env must change only the three Temporal keys"
       cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "applied: guest backend env must change only the three Temporal keys"
       grep -Fq 'guest Temporal namespace override: bench-ns.acct' "$dir/stdout" || fail "applied: staging must report the guest namespace"
@@ -3932,7 +3935,7 @@ guest_temporal_case() {  # <case> ; prints nothing on success
         fail "bench-applied: staged guest agents env must carry the committed bench namespace"
       ;;
     appended)
-      printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
+      printf 'BROWSER_PROVIDER=kernel\nDATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
       cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "appended: absent guest Temporal keys must be appended"
       ;;
   esac

@@ -1670,8 +1670,9 @@ validate_environment_contract() {
     local prod_backend prod_worker
     prod_backend="$(resolve_prod_backend_browser_provider)" || exit 1
     prod_worker="$(resolve_prod_worker_browser_provider)" || exit 1
+    cloudbench_write_guest_browser_env_files agents/.env back-end/.env "$prod_backend" "$prod_worker" "$1" || exit 1
     cloudbench_validate_browser_provider_contract \
-        agents/.env back-end/.env "$prod_backend" "$prod_worker" || exit 1
+        "$1/agents.env" "$1/backend.env" "$prod_backend" "$prod_worker" || exit 1
     # Refuse to stage a BACKEND_ENV_B64 that cannot run AgentCard payment tasks.
     cloudbench_require_agentcard_org_oauth back-end/.env || exit 1
     CLOUDBENCH_PROD_BROWSER_PROVIDER="$prod_backend"
@@ -1882,9 +1883,12 @@ _inject_secrets_locked() {
         echo "❌ agents/.env and back-end/.env are required to inject secrets." >&2
         exit 1
     fi
-    validate_environment_contract
+    local browser_env_dir
+    browser_env_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-browser-env.XXXXXX")" || exit 1
+    trap "rm -rf -- $(printf '%q' "$browser_env_dir")" EXIT
+    validate_environment_contract "$browser_env_dir"
     local agents_b64 backend_b64 gh_token agents_sha backend_sha
-    local agents_src=agents/.env backend_src=back-end/.env
+    local agents_src="$browser_env_dir/agents.env" backend_src="$browser_env_dir/backend.env"
     local guest_temporal_override guest_env_dir="" guest_temporal_namespace=""
     # Guest-only Temporal namespace (see cloudbench_guest_temporal_override_file):
     # the staged blobs get the override; local and production env files do not.
@@ -1892,7 +1896,7 @@ _inject_secrets_locked() {
     if [ -n "$guest_temporal_override" ]; then
         guest_env_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-guest-env.XXXXXX")" || exit 1
         if ! guest_temporal_namespace="$(cloudbench_write_guest_temporal_env_files \
-                agents/.env back-end/.env "$guest_temporal_override" "$guest_env_dir")"; then
+                "$agents_src" "$backend_src" "$guest_temporal_override" "$guest_env_dir")"; then
             rm -rf "$guest_env_dir"
             exit 1
         fi
@@ -1941,6 +1945,18 @@ _inject_secrets_locked() {
     else
         echo "   ⚠️  No validated durable GitHub token — staging empty GITHUB_TOKEN to clear stale secret"
     fi
+    python3 - "$browser_env_dir" <<'PYBROWSERSEAL'
+import hashlib, json, sys
+from pathlib import Path
+folder=Path(sys.argv[1]); manifest=json.loads((folder/'browser-projection.json').read_text())
+for name, source in (('agents.env',Path('agents/.env')),('backend.env',Path('back-end/.env'))):
+    row=manifest['files'][name]
+    if hashlib.sha256(source.read_bytes()).hexdigest()!=row['original_sha256'] or hashlib.sha256((folder/name).read_bytes()).hexdigest()!=row['projected_sha256']:
+        raise SystemExit('guest browser projection changed before staging')
+PYBROWSERSEAL
+    [ "$?" -eq 0 ] || exit 1
+    mkdir -p "$ROOT_DIR/.context"
+    cp "$browser_env_dir/browser-projection.json" "$ROOT_DIR/.context/cloudbench-browser-projection.json" || exit 1
     assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
@@ -1976,6 +1992,7 @@ with open(path, "w") as handle:
         "browser_provider": provider,
         "worker_browser_provider": worker_provider,
         "guest_temporal_namespace": guest_namespace or None,
+        "browser_projection": json.load(open(".context/cloudbench-browser-projection.json")),
         "production_sources": {
             "backend": "render:Navi",
             "worker": "fly:navi-whisper-lux",

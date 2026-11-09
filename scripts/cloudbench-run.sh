@@ -1448,7 +1448,7 @@ fi
 # Health alone is insufficient: confirm this backend actually loaded custody
 # before payment preparation or benchmark tasks can perform any live action.
 if [ "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" = 1 ] && ! gosu "$APP_USER" env "NODE_OPTIONS=$KERNEL_PROXY_NODE_OPTIONS" node \
-    "$REPO_DIR/back-end/scripts/verify-kernel-proxy-custody.cjs" "http://localhost:$BACKEND_PORT"; then
+    "$REPO_DIR/back-end/scripts/verify-kernel-proxy-custody.cjs" "http://localhost:$BACKEND_PORT" --all-resources; then
     log "FATAL: cloud guest backend did not prove Kernel proxy custody"
     finish 1
 fi

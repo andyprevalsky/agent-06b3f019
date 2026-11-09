@@ -4,9 +4,11 @@
 // Kernel proxies, but cannot allocate new project-wide proxy resources.
 function isKernelProxyCreate(input, init) {
   const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
-  const configured = process.env.KERNEL_BASE_URL;
-  const endpoints = ['https://api.onkernel.com/proxies', 'https://api.kernel.sh/proxies'];
-  if (configured) endpoints.push(`${configured.replace(/\/+$/, '')}/proxies`);
+  const origins = ['https://api.onkernel.com', 'https://api.kernel.sh'];
+  for (const configured of [process.env.KERNEL_BASE_URL, process.env.KERNEL_API_BASE_URL]) {
+    if (configured) origins.push(configured.replace(/\/+$/, ''));
+  }
+  const endpoints = origins.flatMap((origin) => ['proxies', 'browsers', 'profiles'].map((resource) => `${origin}/${resource}`));
   const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
   return (
     method === 'POST' &&
@@ -25,7 +27,7 @@ function installKernelProxyCustody(originalFetch = globalThis.fetch) {
       return new Response(
         JSON.stringify({
           message:
-            'Blackbox proxy reuse required: no existing matching Kernel proxy was available. New shared proxies are not provisioned by tests.',
+            'Blackbox proxy reuse required: no existing matching Kernel proxy was available. New Kernel proxies, browsers and profiles are not provisioned by tests.',
         }),
         {
           status: 409,
@@ -36,6 +38,7 @@ function installKernelProxyCustody(originalFetch = globalThis.fetch) {
     return originalFetch(input, init);
   };
   globalThis[Symbol.for('rose.test.kernelProxyCustody')] = true;
+  globalThis[Symbol.for('rose.test.kernelResourceCustody')] = true;
 }
 
 installKernelProxyCustody();

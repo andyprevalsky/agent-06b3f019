@@ -59,3 +59,67 @@ The user retains source/deployment ownership in the parent, requires Freedom pre
 ## Reusable lesson
 
 Compare each environment value to the production surface that owns its meaning, and carry independent authorities independently through staging and guest validation.
+
+## Recurrence — approved worker dotenv differed from production during activation (2026-11-09)
+
+Native activation0115 on 482cc9d0cbedf61234cdf10ec24fc660b997a81d failed
+`benchmark worker env does not match production: local=tilion prod=kernel`.
+The backend contract passed. The later unfinished finish/lease error is a separate
+repair; the original failed intent is not rewritten. Source-level read-only
+inspection confirmed the worker enum is a fallback: actual backend session
+metadata carries the explicit provider. Nevertheless challenge recovery can
+create Kernel browsers and profiles, so proxy-only custody cannot prove the
+standing zero-Kernel-allocation requirement.
+
+The native authenticated production enum reads now feed a private guest-only
+projection. Exactly one explicit worker BROWSER_PROVIDER assignment may change;
+the backend provider must already match production and its bytes stay identical.
+The original complete dotenv files are never edited. A nonsecret derivation
+manifest binds original/projected hashes, provider enums and the one allowed key.
+The existing contract validates the projected files before staging, source and
+projection hashes are checked again immediately before staging, and existing
+Temporal-only overrides compose from these private copies. Final staged hashes
+remain in the existing native environment manifest. No caller environment enum
+or new override can replace the actual production readback.
+
+The existing test/guest Node guard now refuses known Kernel SDK collection
+creates for browsers and profiles as well as proxies before provider fetch.
+Reads, matching existing-proxy reuse and session/profile retrieval remain
+available. A new resource-custody health marker is emitted only when the stronger
+preload installed its marker; the cloud pre-task verifier requires that marker,
+so an old proxy-only backend cannot authorize live tasks. Production without the
+isolated preload has no new marker or policy setting. A missing reusable resource
+fails closed, not by allocating a replacement. Provider routing/task assertions,
+timeouts, concurrency and native maintenance authority are unchanged.
+
+The exact original provider mismatch is reproduced using the real native
+contract and synthetic authenticated production-read functions. The same
+projected path passes with original source bytes unchanged. The registered guest
+suite passes13 controls, including malformed/missing/duplicate provider settings,
+backend disagreement, invalid production enums, private-file modes, hashes,
+no-secret manifest, all three create denials and reuse reads. Real SDK unit
+creates are denied without network. The full owning image CLI suite passes124
+cases. Eleven existing Temporal staging cases pass from an offline extraction
+with original assertions and synthetic staging. No live provider or DB operation
+is performed. An actual private projection of the approved local inputs also
+passed and retained both original hashes; those temporary secret copies were
+removed without exposing their contents.
+
+Independent review found the real boot fixture still proved only proxy custody.
+The original fixture under the stronger verifier fails before task admission;
+adding the genuine installed resource symbol assertion and corresponding health
+header makes the unchanged case pass (8.84s). All 13 original assertions and both 15-second bounds remain. The first private attempt lacked a clone-local
+Python launcher and a separate diagnostic collection lacked benchmarks on
+PYTHONPATH; these setup failures are retained, not counted as application red.
+A private executable shim to the existing interpreter and correct import path
+established the exact original fixture red (19.40s), then green. No dependency
+installation or shared dependency mutation occurred.
+
+Gate: NOT_INTRODUCED for the original contract disagreement by the recent
+lint/retirement repairs: the dotenv provider inputs and strict production
+comparison were unchanged. This fixes its assigned environment handoff rather
+than waiving the native contract. Parent instructions require immutable approved
+environments, no new Kernel allocation, review before integration and parent-owned
+native activation; this is not a new direct human approval. The original failed
+activation, seven cloud debts and six financial obligations remain unchanged;
+this case stays open until real parent-owned current-source validation.
