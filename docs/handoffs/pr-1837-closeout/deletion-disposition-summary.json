@@ -1,5 +1,5 @@
 {
-  "status": "PRESERVATION_VERIFIED_NATIVE_READINESS_RECHECK_REQUIRED",
+  "status": "REQUIRED_RECORDS_PRESERVED_NATIVE_RECEIPT_AND_CLI_ARE_AUTHORITY",
   "native_deletion_check_run": true,
   "observed_source": "dcf0af7fa5a4957b0305779af052ca9ba8c505c8",
   "worktrees": 1,
@@ -31,5 +31,5 @@
   "fast_cache_original_bytes_preserved": 150758,
   "fast_cache_files": 6,
   "fast_cache_proof": "proofs/fast-cache-bytecode-coverage.json",
-  "native_final_result": "See committed deletion-readiness.json and subsequent source-bound native CLI evidence in this PR discussion"
+  "native_final_result": "Actual committed deletion-readiness.json and source-bound native CLI exit0 evidence in the records PR discussion are authoritative; JSON alone does not substitute for the CLI."
 }
