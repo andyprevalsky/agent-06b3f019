@@ -285,7 +285,7 @@ export const deviceCases: Case[] = [
     },
   ],
   [
-    'device frame refuses private input and in-flight phone operations',
+    'device frame shows the owner a private phase but refuses internal callers and in-flight operations',
     async (h) => {
       const f = await h.fixture();
       const device = await bootSession(h, f.userId, f.leaseId);
@@ -314,10 +314,14 @@ export const deviceCases: Case[] = [
         },
       });
       const start = h.calls.length;
-      const hidden = await h.request(f.userId, '/device/frame', user);
+      // Same boundary as the lease frame: the owner keeps their own PNG during a private phase;
+      // internal (agent/model) callers are refused before any provider read.
+      const hidden = await h.request(f.userId, '/device/frame');
       assert.equal(hidden.status, 409);
       assert.equal(hidden.data.state, 'private');
-      assert.equal(h.calls.length, start, 'Private frame contacted the provider');
+      assert.equal(h.calls.length, start, 'Private internal frame contacted the provider');
+      const owner = await h.request(f.userId, '/device/frame', user);
+      assert.equal(owner.status, 200, 'Owner lost their own screen during a private phase');
     },
   ],
   [

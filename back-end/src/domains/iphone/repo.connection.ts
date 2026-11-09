@@ -11,6 +11,7 @@ import {
   type PhoneConnectionReservation,
 } from '../../providers/phoneConnectionState';
 import { setupProgress } from '../../providers/phoneSetupVerification';
+import { resumedPrivacy } from './privacy';
 import * as leases from './repo';
 import { IPhoneError, type IPhoneDevice, type Transaction } from './types';
 
@@ -113,14 +114,25 @@ export async function reserve(userId: string, expectedRevision: number, requestK
       requestKey,
       active
     );
-    if (!result.reused)
+    if (!result.reused) {
+      // Connect is the owner's explicit hand-off of the phone to setup, so it resumes a private
+      // phase left by an ended user-control session (known values stay for redaction). A phase
+      // the user still controls is left alone.
+      const userControl = await tx.iPhoneLease.findFirst({
+        where: { deviceId: device.id, status: 'ACTIVE', controlOwner: 'user' },
+        select: { id: true },
+      });
       await tx.iPhoneDevice.update({
         where: { id: device.id },
         data: {
           setupEncrypted: sealSetup(state),
           setupState: 'not_started',
+          ...(userControl === null
+            ? { privateInputEncrypted: resumedPrivacy(device.privateInputEncrypted) }
+            : {}),
         },
       });
+    }
     return {
       dto: connectionDto({ ...device, setupState: 'not_started' }, state, true, true),
       reservation: result.reservation,

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { connectionAgentHash } from '../../providers/phoneConnectionState';
 import { setupState } from '../../providers/phoneSetupState';
+import { openPhoneValue, sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { Case } from './iphone-control.cases';
 
 export const connectionCases: Case[] = [
@@ -240,6 +241,14 @@ export const connectionCases: Case[] = [
         'setting_up'
       );
       await prisma.agent.update({ where: { id: firstAgent }, data: { status: 'PAUSED' } });
+      // A private phase left by an ended user-control session (the production incident) must not
+      // stall the relaunched setup: Connect is the owner's explicit hand-off of the phone.
+      await prisma.iPhoneDevice.update({
+        where: { id: f.deviceId },
+        data: {
+          privateInputEncrypted: sealPhoneValue({ version: 1, active: true, values: ['typed'] }),
+        },
+      });
       const stalled = await h.request(f.userId, '/connection', { actor: 'user' });
       assert.equal(
         stalled.data.status,
@@ -254,6 +263,12 @@ export const connectionCases: Case[] = [
         'Connect must start a fresh setup agent'
       );
       assert.deepEqual(launched, [firstAgent, second.data.setupAgentId]);
+      const resumed = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
+      const privacy = openPhoneValue<{ active: boolean; values: string[] }>(
+        resumed.privateInputEncrypted as string
+      );
+      assert.equal(privacy.active, false, 'Connect left the phone in a private phase');
+      assert.deepEqual(privacy.values, ['typed'], 'Connect must keep known secrets for redaction');
       assert.equal(
         (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
         'setting_up'
