@@ -189,6 +189,11 @@ SKILL_OVERLAY_PATHS = (
     "docs/rca/process-feedback.md",
     "docs/internal",
     "docs/testing.md",
+    # Tools the rewritten skills call by name; older snapshots predate them.
+    "scripts/descend",
+    "scripts/descend_cli.py",
+    "scripts/select_affected_tests.py",
+    "scripts/test-map",
 )
 
 
