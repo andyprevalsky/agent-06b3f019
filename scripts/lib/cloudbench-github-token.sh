@@ -45,11 +45,13 @@ cloudbench_github_token_from_env_file() {
 # The token-pool member with the most core quota (GITHUB_TOKEN, GITHUB_TOKEN_2..9,
 # the org GitHub App, GITHUB_DISPATCH_TOKEN), for READ-ONLY use only. Prints
 # nothing when the pool is absent, disabled (CLOUDBENCH_GITHUB_TOKEN_POOL=0) or
-# has no usable member. Never prints anything but the token.
+# has no usable member. Never prints anything but the token. Always succeeds:
+# an absent or disabled pool is empty output, so a `set -e` caller continues to
+# the identity chain.
 cloudbench_github_token_pool_pick() {
   local root="${1:-.}"
-  [ "${CLOUDBENCH_GITHUB_TOKEN_POOL:-1}" != "0" ] || return 1
-  [ -f "$root/scripts/github_token_pool.py" ] || return 1
+  [ "${CLOUDBENCH_GITHUB_TOKEN_POOL:-1}" != "0" ] || return 0
+  [ -f "$root/scripts/github_token_pool.py" ] || return 0
   if command -v timeout >/dev/null 2>&1; then
     (cd "$root" && timeout 60 python3 scripts/github_token_pool.py pick --resource core 2>/dev/null) || true
   else

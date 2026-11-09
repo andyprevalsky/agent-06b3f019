@@ -139,3 +139,22 @@ def test_runner_labels_a_filtered_domain_as_partial(monkeypatch, tmp_path):
     monkeypatch.setenv(CASE_FILTER_ENV, "test_two")
     name, passed, message = asyncio.run(runner.run_single_domain(domain, "fixture"))
     assert passed and "partial" in message
+
+
+def test_runner_fails_a_filtered_domain_that_ran_no_selected_case(monkeypatch, tmp_path):
+    domain = tmp_path / "fixture.blackbox.py"
+    domain.write_text(
+        "from _test_utils import BlackboxResult\n\n"
+        "def test_one():\n    pass\n\n"
+        "async def run_all_tests():\n"
+        "    r = BlackboxResult()\n"
+        "    r.record('one', test_one)\n"
+        "    return True\n"
+    )
+    runner = _load_runner()
+    monkeypatch.setenv(CASE_FILTER_ENV, "test_missing")
+    name, passed, message = asyncio.run(runner.run_single_domain(domain, "fixture"))
+    assert not passed and "no selected case" in message
+    monkeypatch.setenv(CASE_FILTER_ENV, "test_one")
+    name, passed, message = asyncio.run(runner.run_single_domain(domain, "fixture"))
+    assert passed and "partial" in message

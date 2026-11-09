@@ -1550,13 +1550,18 @@ def attribute_flaky(state: dict, occurrence_id: str, entry: dict, root: Path) ->
     occurrence = next((f for f in state.get("flaky", []) if f["id"] == occurrence_id), None)
     if occurrence is None:
         raise ValueError("only a recorded FLAKY occurrence can be attributed")
-    occurrence["attribution"] = quarantine.validate_attribution(occurrence, entry, root)
-    if "post_merge" in occurrence["attribution"] and not any(
-            p["id"] == occurrence_id for p in state.get("pending_post_merge", [])):
+    if "resolved_post_merge" in (occurrence.get("attribution") or {}):
+        raise ValueError("this FLAKY occurrence's post-merge repair is already resolved; it cannot be re-attributed")
+    attribution = quarantine.validate_attribution(occurrence, entry, root)  # validate before mutating state
+    occurrence["attribution"] = attribution
+    # A re-attribution replaces this occurrence's pending packet; only one carrying post_merge queues one.
+    pending = [p for p in state.get("pending_post_merge", []) if p["id"] != occurrence_id]
+    if "post_merge" in attribution:
         # The existing completion block: dispatch after merge, then `resolve` with the repair link.
-        state.setdefault("pending_post_merge", []).append({
-            "id": occurrence_id, "check": occurrence["check"], "gate": occurrence["gate"],
-            "native_result": "FLAKY", "packet": occurrence["attribution"]["post_merge"]})
+        pending.append({"id": occurrence_id, "check": occurrence["check"], "gate": occurrence["gate"],
+                        "native_result": "FLAKY", "packet": attribution["post_merge"]})
+    if pending or "pending_post_merge" in state:
+        state["pending_post_merge"] = pending
 
 
 def settle_early(state: dict, result: dict, fresh: list[dict]) -> list[dict]:

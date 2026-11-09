@@ -294,6 +294,15 @@ class NoReviewablePathsTest(unittest.TestCase):
                      ".github/workflows/deploy.yml", ".github/notes.md"):
             self.assertTrue(MODULE.is_reviewable(name, include, exclude), name)
 
+    def test_a_negated_extglob_in_a_middle_segment_stops_at_that_segment(self) -> None:
+        middle = MODULE.glob_regex("a/!(b)/c.py")
+        self.assertIsNone(middle.match("a/b/c.py"))
+        self.assertIsNotNone(middle.match("a/x/c.py"))
+        self.assertIsNotNone(middle.match("a/bb/c.py"))
+        include, exclude, _ = MODULE.path_filters(self.repo, "HEAD")
+        self.assertTrue(MODULE.is_reviewable("docs/handoffs/note.txt", include, exclude))
+        self.assertFalse(MODULE.is_reviewable("docs/plans/note.txt", include, exclude))
+
     def test_unsupported_glob_syntax_refuses_rather_than_guessing(self) -> None:
         for pattern in ("src/{a,b}/**", "**/[ab].py", "+(a).py", "a//b", ""):
             with self.subTest(pattern=pattern), self.assertRaises(MODULE.ReviewCycleError):

@@ -84,6 +84,9 @@ RUNNABLE = {'quick', 'initial', 'focused', 'failed-gates', 'final'}
 STRUCTURAL_GATE, SEMANTIC_GATE = 'deploy-command-structural', 'semantic-stack'
 STRUCTURAL_WORKERS = 2  # standard template: run-deploy-structural-gates.py --max-workers 5
 SEMANTIC_WORKER_PROCESSES = 2  # run-deploy-semantic-stack.sh default: WORKER_PROCESSES=8
+# select_affected_tests.py --stability keeps nproc CPU load slots busy by default; on the local executor it
+# shares this host with the other gates, so its load is bounded. A Blacksmith VM runs it alone, unchanged.
+STABILITY_GATE, LOCAL_STABILITY_LOAD_WORKERS = 'new-test-stability', 2
 SEMANTIC_ENV = 'DEPLOY_SEMANTIC_WORKER_PROCESSES'
 # Executors (2026-11-06): Blacksmith VMs remove this host's memory/CPU queueing; local keeps the cuts above.
 EXECUTORS = ('blacksmith', 'local')
@@ -496,6 +499,9 @@ def build_template(structural_workers: int, semantic_worker_processes: int, stan
     if executor == 'blacksmith':  # neither cut gate is in BLACKSMITH_LOCAL_GATES
         return template
     for gate in template['gates']:
+        if gate['name'] == STABILITY_GATE and '--load-workers' not in gate['command']:
+            gate['command'] = [*gate['command'], '--load-workers', str(LOCAL_STABILITY_LOAD_WORKERS)]
+            continue
         if gate['name'] == STRUCTURAL_GATE:
             command = list(gate['command'])
             if command.count('--max-workers') != 1 or command.index('--max-workers') + 1 >= len(command):

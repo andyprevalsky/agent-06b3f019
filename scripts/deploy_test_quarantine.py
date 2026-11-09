@@ -213,14 +213,32 @@ _UNSAFE = re.compile(r'[^A-Za-z0-9_.:/\[\]()<>=,+@#|~ -]')
 _OPAQUE = re.compile(r'(?=[A-Za-z0-9+/=]*\d)(?=[A-Za-z0-9+/=]*[A-Za-z])[A-Za-z0-9+/=]{24,}|(?i:[a-f0-9]{24,})')
 
 
+# Streak dedupe keys bound every unit to this tail; a ledger line's unit budget is never smaller.
+UNIT_KEY_LIMIT = 64
+
+
+def _sanitize(text: str) -> str:
+    text = _UNSAFE.sub('?', ' '.join(str(text).split()))
+    return _OPAQUE.sub('<redacted>', text)
+
+
 def safe_line(text: str) -> str:
     """One bounded, secret-free ledger line: unsafe characters replaced, opaque tokens redacted."""
-    text = _UNSAFE.sub('?', ' '.join(str(text).split()))
-    return _OPAQUE.sub('<redacted>', text)[:LINE_LIMIT]
+    return _sanitize(text)[:LINE_LIMIT]
+
+
+def bounded_unit(unit: str, limit: int = LINE_LIMIT) -> str:
+    """A sanitized unit of at most `limit` characters that keeps its trailing test name ('...' + tail)."""
+    text = _sanitize(unit)
+    return text if len(text) <= limit else '...' + text[len(text) - (limit - 3):]
 
 
 def ledger_line(gate: str, row: dict) -> str:
-    return safe_line(f"{row['status']} {gate}::{row['unit']} at={int(row.get('at') or 0)}")
+    """`<status> <gate>::<unit> at=<epoch>` within LINE_LIMIT: only the unit's head is cut, never `at=`."""
+    head, tail = _sanitize(f"{row['status']} {gate}::"), f" at={int(row.get('at') or 0)}"
+    # Gate names are short fixed identifiers, so the budget is never below the streak key's tail.
+    budget = max(UNIT_KEY_LIMIT, LINE_LIMIT - len(head) - len(tail))
+    return head + bounded_unit(row['unit'], budget) + tail
 
 
 def test_lines(rows: list[tuple[str, dict]], limit: int = DETAIL_LIMIT) -> dict:
@@ -428,7 +446,7 @@ def unit_matches(marker: dict, unit: str) -> bool:
         return False
     base = re.sub(r'\[.*\]$', '', unit)  # pytest parametrisation
     return any(candidate == name or candidate.endswith(sep + name)
-               for candidate in (unit, base, safe_line(unit))
+               for candidate in (unit, base, bounded_unit(unit))
                for sep in ('::', '.', ' > ', ' :: ', '/'))
 
 
@@ -471,7 +489,8 @@ def streak(marker: dict, observations: list[dict]) -> dict:
     seen = {}
     for obs in observations:
         if obs['status'] in QUARANTINED and (obs.get('at') or 0) >= floor and unit_matches(marker, obs['unit']):
-            seen[(safe_line(obs['unit']), int(obs['at']), obs['status'])] = obs  # ledger + local copy count once
+            # ledger + local copy count once: the same bounded tail whether or not the ledger cut the unit
+            seen[(bounded_unit(obs['unit'], UNIT_KEY_LIMIT), int(obs['at']), obs['status'])] = obs
     ordered = sorted(seen.values(), key=lambda o: o['at'])
     count = 0
     for obs in ordered:

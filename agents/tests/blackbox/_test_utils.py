@@ -213,6 +213,7 @@ def case_selected(fn: Callable) -> bool:
 
 
 def _record_case_receipt(fn: Callable) -> None:
+    _EXECUTED_CASES.append(getattr(fn, "__name__", ""))
     path = os.environ.get(CASE_RECEIPT_ENV)
     if path and case_filter() is not None:
         with open(path, "a") as handle:
@@ -224,10 +225,18 @@ def _record_case_receipt(fn: Callable) -> None:
 # otherwise reach results.json with an empty message: the runner reads this to
 # name the failing cases and their first error.
 _RECORDED_FAILURES: list[str] = []
+# Every selected case record()/record_async() actually started since the last reset:
+# the runner's independent proof that a case-filtered domain ran something.
+_EXECUTED_CASES: list[str] = []
 
 
 def reset_recorded_failures() -> None:
     _RECORDED_FAILURES.clear()
+    _EXECUTED_CASES.clear()
+
+
+def executed_case_count() -> int:
+    return len(_EXECUTED_CASES)
 
 
 def recorded_failures() -> list[str]:

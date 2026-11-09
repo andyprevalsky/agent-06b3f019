@@ -240,6 +240,7 @@ class GitHub:
         self.read_name, self.read_token, self.read_remaining = None, None, None
         self.read_picked_at = self.read_attempted_at = float('-inf')
         self.read_fallbacks = 0  # reads a pool member could not answer, retried with the launch token
+        self.read_denied: set[str] = set()  # pool identities refused (401/403/404) where the launch token was not
         self.served = identity(token)  # identity that produced the last response (selects the 304 cache)
         self.until = None  # epoch every request must finish by (the stop-cancel bound); None: 60 s per request
 
@@ -248,18 +249,26 @@ class GitHub:
         if self.read_picker is None:
             return None
         now = time.time()
-        stale = (self.read_token is None or now - self.read_picked_at >= READ_REPICK_SECONDS
+        denied = self.read_token is not None and identity(self.read_token) in self.read_denied
+        stale = (self.read_token is None or denied or now - self.read_picked_at >= READ_REPICK_SECONDS
                  or (self.read_remaining is not None and self.read_remaining < READ_LOW_REMAINING))
         if stale and now - self.read_attempted_at >= READ_REPICK_RETRY_SECONDS:
             self.read_attempted_at = now
             picked = self.read_picker()
-            if picked:
+            if picked and identity(picked[1]) not in self.read_denied:  # never hand out a denied member again
                 (self.read_name, self.read_token), self.read_picked_at, self.read_remaining = picked, now, None
-        return self.read_token if self.read_token and self.read_token != self.token else None
+        token = self.read_token
+        return token if token and token != self.token and identity(token) not in self.read_denied else None
 
     def tokens(self, method: str) -> list[str]:
-        read = self._read() if method in READ_METHODS else None
+        # A bounded stop window (until) spends nothing on a pool pick or a second identity: launch token only.
+        read = self._read() if method in READ_METHODS and self.until is None else None
         return [read, self.token] if read else [self.token]
+
+    def _settle_denied(self, denied: str | None, token: str) -> None:
+        """A pool member's 401/403/404 is remembered only once the launch token answered the same read."""
+        if denied is not None and token == self.token:
+            self.read_denied.add(denied)
 
     def _note_quota(self, token: str, headers) -> None:
         if token == self.read_token:
@@ -272,6 +281,7 @@ class GitHub:
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
         opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
         tokens, index, attempt = self.tokens(method), 0, 0
+        denied = None  # identity of a pool member that refused this read, pending the launch token's answer
         while attempt < 5:
             if self.until is not None and time.time() >= self.until:
                 raise urllib.error.URLError(f'stop-cancel bound exhausted before {method} {path}')
@@ -287,6 +297,7 @@ class GitHub:
                 with opener.open(req, timeout=timeout) as response:
                     body = response.read()
                     self.served = key
+                    self._settle_denied(denied, token)
                     self._note_quota(token, response.headers)
                     if conditional and response.headers.get('ETag'):
                         self.etags[(key, url)] = response.headers['ETag']
@@ -295,6 +306,7 @@ class GitHub:
             except urllib.error.HTTPError as error:
                 self.served = key
                 if error.code == 304 and (key, url) in self.cache:
+                    self._settle_denied(denied, token)
                     return 304, error.headers, None
                 if error.code in (301, 302, 303, 307, 308) and not redirect:
                     return error.code, error.headers, b''
@@ -306,6 +318,8 @@ class GitHub:
                 if index + 1 < len(tokens) and (limited or error.code in (401, 403, 404)):
                     # A pool member's 401/403/404 is not authoritative and its quota is not the launch
                     # identity's: ask the launch token before treating this as GitHub's answer.
+                    if not limited:
+                        denied = key  # remembered only if the launch token then answers (both 404: GitHub's answer)
                     index += 1
                     self.read_fallbacks += 1
                     if limited or error.code == 401:

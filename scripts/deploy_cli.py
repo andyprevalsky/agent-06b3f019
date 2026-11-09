@@ -354,6 +354,20 @@ def cmd_review_finish(args: argparse.Namespace) -> int:
     return code
 
 
+def recorded_no_review(sha: str) -> bool:
+    """Whether the ledger's latest entry already records SHA as no-reviewable-paths (False when unreadable)."""
+    status = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'status'], cwd=ROOT,
+                            capture_output=True, text=True)
+    if status.returncode:
+        return False
+    try:
+        cycles = json.loads(status.stdout).get('cycles') or []
+    except (json.JSONDecodeError, AttributeError):
+        return False
+    latest = cycles[-1] if cycles and isinstance(cycles[-1], dict) else {}
+    return latest.get('kind') == NO_REVIEW and latest.get('head') == sha
+
+
 def cmd_review_next(args: argparse.Namespace) -> int:
     opened = read_json(PR_FILE, 'open-pr')
     if pending := uncommitted():
@@ -364,7 +378,9 @@ def cmd_review_next(args: argparse.Namespace) -> int:
         print('DEPLOY_REVIEW_NEXT BLOCKED: parked benchmark-history rows are not committed; run '
               '`scripts/deploy ledger` so the review covers them', file=sys.stderr)
         return 1
-    if no_reviewable_paths(head(), pr=opened['pr']) is not None:
+    if recorded_no_review(head()) or no_reviewable_paths(head(), pr=opened['pr']) is not None:
+        # A HEAD already recorded as no-reviewable-paths (its push failed last time) resumes at the push:
+        # re-recording would refuse it as "already the latest recorded HEAD" and request a review.
         if run(['git', 'push', 'origin', 'HEAD']):
             return 1
         write_json(PR_FILE, {**opened, 'head': head()})

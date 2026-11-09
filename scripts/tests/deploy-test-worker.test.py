@@ -712,6 +712,16 @@ class Cloud(unittest.TestCase):
         result,_,_,rows,_=self.run_smoke([(verdicts,details,True,fleet)],catalog)
         self.assertEqual('UNVERIFIED',result['cases']['failing']);self.assertEqual([],rows)  # unknown still blocks
 
+    def test_quarantined_smoke_task_skip_and_infra_outcomes_stay_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)],catalog)
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('quarantine',result['evidence']['failing'])
+                self.assertEqual([],rows);self.assertNotIn('TEST_QUARANTINE',out)
+
     def test_invalid_task_quarantine_marker_is_refused_before_launch(self):
         for bad in ({**self.QMETA,'repair':'https://example.com/x'},{k:v for k,v in self.QMETA.items() if k!='evidence'},
                     {**self.QMETA,'since':'2026-13-01'},{**self.QMETA,'extra':'x'},'quarantined'):

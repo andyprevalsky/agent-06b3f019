@@ -67,7 +67,11 @@ pass=$((pass + 1))
 
 # The gate setup routes both GitHub Releases tools through the helper.
 setup="$ROOT/scripts/ci/deploy-gate-setup.sh"
-grep -q 'release_tool flyctl "\$HOME/.fly/bin/flyctl" install_flyctl' "$setup" || fail "setup bypasses release_tool for flyctl"
+# flyctl and ngrok are optional too: an outage costs two attempts, not the default six.
+grep -q 'RELEASE_TOOL_ATTEMPTS=2 release_tool flyctl "\$HOME/.fly/bin/flyctl" install_flyctl' "$setup" \
+  || fail "setup bypasses release_tool or the two-attempt budget for flyctl"
+grep -q 'RELEASE_TOOL_ATTEMPTS=2 release_tool ngrok /usr/local/bin/ngrok install_ngrok' "$setup" \
+  || fail "setup bypasses release_tool or the two-attempt budget for ngrok"
 grep -q 'RELEASE_TOOL_ATTEMPTS=2 release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared' "$setup" \
   || fail "setup bypasses release_tool for cloudflared"
 grep -q 'cloudflared is required for isolated benchmark public tunnels' "$ROOT/scripts/run.sh" \

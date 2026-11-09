@@ -345,6 +345,19 @@ class Executor(unittest.TestCase):
         self.assertEqual('2', structural['command'][-1])
         self.assertEqual('2', semantic['env'][g.SEMANTIC_ENV])
 
+    def test_local_new_test_stability_bounds_its_cpu_load_and_blacksmith_keeps_nproc(self):
+        def with_stability():
+            template = standard()
+            template['gates'].append({'name': 'new-test-stability', 'checks': ['new-test-stability'], 'command': [
+                'python3', 'scripts/select_affected_tests.py', '--stability', '--base', 'origin/main']})
+            return template
+        remote = next(gate for gate in g.build_template(2, 2, with_stability, executor='blacksmith')['gates']
+                      if gate['name'] == 'new-test-stability')
+        self.assertNotIn('--load-workers', remote['command'])
+        local = next(gate for gate in g.build_template(2, 2, with_stability, executor='local')['gates']
+                     if gate['name'] == 'new-test-stability')
+        self.assertEqual(['--load-workers', str(g.LOCAL_STABILITY_LOAD_WORKERS)], local['command'][-2:])
+
     def test_cli_defaults_to_blacksmith_and_refuses_host_cuts_there(self):
         with patch.object(g, 'run', return_value=0) as run, patch.object(g, 'ROOT', self.root):
             g.main([])
@@ -848,6 +861,38 @@ class PoolReads(unittest.TestCase):
             client.request('GET', '/actions/runs/1')
         self.assertEqual(404, raised.exception.code)
         self.assertEqual(['pool', 'launch'], [token for _, token, _ in seen])
+
+    def test_a_member_the_launch_token_outranked_is_never_handed_out_again(self):
+        for code in (404, 403, 401):
+            client, seen, _ = self.client(
+                lambda method, token, etag, code=code: self.http_error(code) if token == 'pool' else self.ok(),
+                picks=(('GITHUB_APP', 'pool'), ('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+            client.request('GET', '/actions/runs/1/artifacts')
+            client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+            client.request('GET', '/actions/runs/2')  # the re-pick returns the denied member: refused
+            client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+            client.request('GET', '/actions/runs/3')
+            self.assertEqual(['pool', 'launch', 'launch', 'pool2'], [token for _, token, _ in seen], code)
+            self.assertEqual({gh.identity('pool')}, client.read_denied)
+        # Both identities answered 404: that is GitHub's answer, and the member keeps serving reads.
+        client, seen, _ = self.client(
+            lambda method, token, etag: self.http_error(404) if len(seen) <= 2 else self.ok())
+        with self.assertRaises(gh.urllib.error.HTTPError):
+            client.request('GET', '/actions/runs/1')
+        client.request('GET', '/actions/runs/2')
+        self.assertEqual(['pool', 'launch', 'pool'], [token for _, token, _ in seen])
+        self.assertEqual(set(), client.read_denied)
+
+    def test_a_bounded_stop_window_reads_with_the_launch_token_only(self):
+        picked = []
+        client, seen, _ = self.client(lambda method, token, etag: self.ok())
+        client.read_picker = lambda: picked.append(1) or ('GITHUB_APP', 'pool')
+        client.until = 1_000_010.0
+        self.assertEqual(['launch'], client.tokens('GET'))
+        client.request('GET', '/actions/runs/1')
+        self.assertEqual(([], [('GET', 'launch', None)]), (picked, seen))
+        client.until = None
+        self.assertEqual(['pool', 'launch'], client.tokens('GET'))
 
     def test_a_drained_pool_member_asks_the_launch_token_before_the_existing_reset_wait(self):
         limit = b'{"message": "API rate limit exceeded"}'

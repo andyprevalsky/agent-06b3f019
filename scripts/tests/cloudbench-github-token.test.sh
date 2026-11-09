@@ -139,6 +139,15 @@ unset CLOUDBENCH_GITHUB_TOKEN
 RESOLVED="$(CLOUDBENCH_GITHUB_TOKEN_POOL=0 PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")"
 [ "$RESOLVED" = "$GOOD_TOKEN" ] && [ ! -s "$TMP/pool-calls" ] \
   || fail "CLOUDBENCH_GITHUB_TOKEN_POOL=0 must keep reads on the identity chain without probing the pool"
+# A disabled or absent pool is empty output, never a failure: an errexit caller reaches the identity chain.
+for disabled in CLOUDBENCH_GITHUB_TOKEN_POOL=0 absent; do
+  [ "$disabled" = absent ] && mv "$TMP/repo/scripts/github_token_pool.py" "$TMP/pool.py.aside"
+  RESOLVED="$(env $([ "$disabled" = absent ] || echo "$disabled") PATH="$PATH_NO_GH" bash -c \
+    'set -euo pipefail; shopt -s inherit_errexit; . "$1"; cloudbench_resolve_github_read_token "$2"; echo " ok"' \
+    _ "$ROOT_DIR/scripts/lib/cloudbench-github-token.sh" "$TMP/repo")" || true
+  [ "$RESOLVED" = "$GOOD_TOKEN ok" ] || fail "an errexit caller with the pool $disabled did not reach the identity chain"
+  [ "$disabled" = absent ] && mv "$TMP/pool.py.aside" "$TMP/repo/scripts/github_token_pool.py"
+done
 unset GITHUB_DISPATCH_TOKEN
 pool_fake "$POOL_NO_ACCESS_TOKEN"
 if PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo" >/dev/null 2>&1; then

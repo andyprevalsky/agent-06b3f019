@@ -81,7 +81,7 @@ install_flyctl() { curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/nul
 # Optional like cloudflared: hunt round 9 (cold disk) lost 10 of 11 gates, most never calling flyctl,
 # to fly.io/install.sh 504s. A gate that drives Fly fails at first use with "flyctl: command not found".
 command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] \
-  || release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl \
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl \
   || echo "⚠️ flyctl unavailable; only gates that drive Fly fail, at first use" >&2
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
@@ -92,7 +92,7 @@ step "tunnel tools"
 # tunnel uses it, and that refuses explicitly when ngrok is missing.
 install_ngrok() { sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null; }
 command -v ngrok >/dev/null \
-  || release_tool ngrok /usr/local/bin/ngrok install_ngrok \
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool ngrok /usr/local/bin/ngrok install_ngrok \
   || echo "⚠️ ngrok unavailable; run.sh refuses any public tunnel that needs it" >&2
 install_cloudflared() {
   local tmp status=0

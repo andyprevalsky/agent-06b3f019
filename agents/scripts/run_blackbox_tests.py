@@ -185,7 +185,12 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
         if not passed_cases:
             return (domain, False, failure_message)
         if os.environ.get("BLACKBOX_CASE_FUNCTIONS") is not None:
-            # Never let a case-filtered domain read like a full pass, whatever run_all_tests returns.
+            # Never let a case-filtered domain read like a full pass, whatever run_all_tests returns:
+            # the independent executed-case count must show a selected case actually ran.
+            from _test_utils import executed_case_count
+
+            if executed_case_count() == 0:
+                return (domain, False, "case-filtered run executed no selected case (BLACKBOX_CASE_FUNCTIONS)")
             passed = result is True or result is None or (isinstance(result, dict) and not result.get("failed"))
             return (domain, passed, "case-filtered partial run (BLACKBOX_CASE_FUNCTIONS)")
         if result is True or result is None:

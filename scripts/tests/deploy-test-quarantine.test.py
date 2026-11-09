@@ -182,6 +182,39 @@ class CycleQuarantine(unittest.TestCase):
         self.assertEqual(MARKED, (self.root / 'tests' / 'test_unit.py').read_text())
         self.assertIn('no marker names', _refusal(self.root, occurrence['id']))  # already linked
 
+    def test_flaky_reattribution_reconciles_the_pending_packet_and_stops_once_resolved(self):
+        self.run_gate("p.report('test_flaky_unit','FLAKY',case='a',attempts=2)")
+        [occurrence] = self.state['flaky']
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        (self.root / 'tests' / 'test_unit.py').write_text(MARKED.replace(REPAIR, f"pending-handoff:{occurrence['id']}"))
+        not_introduced = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca', 'marker': 'tests/test_unit.py',
+                          'post_merge': packet}
+        c.attribute_flaky(self.state, occurrence['id'], not_introduced, self.root)
+        self.assertEqual([occurrence['id']], [p['id'] for p in self.state['pending_post_merge']])
+        # A refused re-attribution leaves the recorded attribution and its packet untouched.
+        with self.assertRaisesRegex(ValueError, 'UNKNOWN'):
+            c.attribute_flaky(self.state, occurrence['id'], {'attribution': 'UNKNOWN', 'evidence': 'rca'}, self.root)
+        self.assertEqual('NOT_INTRODUCED', occurrence['attribution']['attribution'])
+        self.assertEqual(1, len(self.state['pending_post_merge']))
+        # Re-attributed as INTRODUCED (fixed before merge): the stale post-merge packet is withdrawn.
+        (self.root / 'tests' / 'test_unit.py').write_text('def test_flaky_unit():\n    pass\n')
+        (self.root / 'code').write_text('fixed')
+        fix = commit(self.root, 'fix')
+        c.attribute_flaky(self.state, occurrence['id'], {'attribution': 'INTRODUCED', 'evidence': 'rca',
+                          'fix_commit': fix}, self.root)
+        self.assertEqual([], self.state['pending_post_merge'])
+        self.assertIsNone(c.pending_completion_block(self.state))
+        # Back to NOT_INTRODUCED: exactly one packet, then resolved — no further re-attribution.
+        (self.root / 'tests' / 'test_unit.py').write_text(MARKED.replace(REPAIR, f"pending-handoff:{occurrence['id']}"))
+        c.attribute_flaky(self.state, occurrence['id'], not_introduced, self.root)
+        c.attribute_flaky(self.state, occurrence['id'], not_introduced, self.root)
+        self.assertEqual(1, len(self.state['pending_post_merge']))
+        c.resolve_post_merge(self.state, occurrence['id'], REPAIR)
+        with self.assertRaisesRegex(ValueError, 'already resolved'):
+            c.attribute_flaky(self.state, occurrence['id'], not_introduced, self.root)
+        self.assertEqual(REPAIR, occurrence['attribution']['resolved_post_merge'])
+        self.assertEqual([], self.state['pending_post_merge'])
+
     def test_introduced_flake_needs_a_fix_commit_newer_than_the_flaky_source(self):
         self.run_gate("p.report('test_flaky_unit','FLAKY',case='a',attempts=2)")
         [occurrence] = self.state['flaky']
@@ -333,6 +366,25 @@ class ReleaseReport(unittest.TestCase):
         self.assertEqual((2, 2, False), (row['runs'], row['streak'], row['ready']))
         self.write_ledger(['QUARANTINED_PASS'] * 5, unit='other::test_unrelated', start=50)
         self.assertEqual(2, self.rows([attempts])['test_flaky_unit']['streak'])
+
+    def test_a_long_unit_keeps_its_test_name_and_timestamp_and_counts_once(self):
+        unit = 'tests/test_unit.py::Suite::' + 'p' * 200 + '::test_flaky_unit'
+        rows = [('api', progress.row(unit, 'QUARANTINED_PASS', at=self.epoch + i, quarantine=META)) for i in range(5)]
+        lines = q.test_lines(rows)['lines']
+        self.assertEqual(5, len(lines))
+        for i, line in enumerate(lines):
+            self.assertLessEqual(len(line), q.LINE_LIMIT)
+            self.assertTrue(line.endswith(f'::test_flaky_unit at={int(self.epoch) + i}'), line)
+        with self.ledger.open('a') as stream:
+            stream.write(json.dumps({'workflow': 'deploy', 'event': 'stage-finish', 'value': 'runtime-blackbox',
+                                     'detail': {'tests': {'lines': lines}}}) + '\n')
+        attempts = self.root / 'attempts'
+        gate = attempts / '1' / 'initial' / 'api'
+        gate.mkdir(parents=True)
+        with (gate / 'progress.jsonl').open('w') as stream:  # the full-unit local copies of the same rows
+            stream.writelines(json.dumps(row) + '\n' for _, row in rows)
+        row = self.rows([attempts])['test_flaky_unit']
+        self.assertEqual((5, 5, True), (row['runs'], row['streak'], row['ready']))
 
     def write_catalog(self, marker=None):
         catalog = self.root / 'agents' / 'benchmarks' / 'tasks.json'

@@ -403,10 +403,14 @@ def execute(request, root):
                 cases[name] = 'PASS'
                 reason = str((details[name].get('native_task') or {}).get('failure_reason') or '')
                 emit(name, progress.FLAKY, detail=f'first attempt failed: {reason}', log=second['log'], attempts=2)
+    # The rerun's outcome filter: only an executed test failure is quarantined; SKIPPED and infra stay FAIL.
+    executed_failures = set(rerun_candidates(cases, details, {}))
     for name, meta in quarantines.items():
         verdict = cases.get(name)
         if verdict not in ('PASS', 'FAIL'):
             continue  # an unverified quarantined task stays blocking: it is unknown, not a non-blocking failure
+        if verdict == 'FAIL' and name not in executed_failures:
+            continue  # SKIPPED and infra outcomes keep their blocking /RCA handling; only a test failure is quarantined
         status = 'QUARANTINED_FAIL' if verdict == 'FAIL' else 'QUARANTINED_PASS'
         task = (details.get(name) or {}).get('native_task') or {}
         emit(name, status, detail=str(task.get('failure_reason') or '') if verdict == 'FAIL' else '',

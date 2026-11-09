@@ -443,6 +443,25 @@ class ReviewApprovalLedger(Repo):
         self.assertEqual(json.loads(d.PR_FILE.read_text())['head'], d.head())
         event.assert_not_called()
 
+    def test_review_next_resumes_at_the_push_when_head_is_already_recorded_no_review(self):
+        self.opened()
+        calls = []
+        latest = {'kind': 'no-reviewable-paths', 'head': d.head(), 'status': 'completed'}
+        status = subprocess.CompletedProcess([], 0, stdout=json.dumps({'cycles': [latest]}), stderr='')
+        real = subprocess.run
+        only_status = lambda argv, **kw: (status if argv[1:] == ['scripts/deploy_review_cycle.py', 'status']
+                                          else real(argv, **kw))
+        with patch.object(d.subprocess, 'run', side_effect=only_status), patch.object(d, 'factory') as event, \
+             patch.object(d, 'no_reviewable_paths') as unreviewable, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_review_next, verification_approval=None)
+        self.assertEqual(code, 0, out)
+        unreviewable.assert_not_called()
+        self.assertEqual(calls, [['git', 'push', 'origin', 'HEAD']], 'no re-record, no ledger start, no request')
+        self.assertIn('review=no-reviewable-paths', out)
+        self.assertEqual(json.loads(d.PR_FILE.read_text())['head'], d.head())
+        event.assert_not_called()
+
     def test_open_pr_on_an_existing_pr_skips_the_request_when_no_path_is_reviewable(self):
         sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
         viewed = subprocess.CompletedProcess([], 0, stdout='7\n', stderr='')

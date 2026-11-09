@@ -899,6 +899,9 @@ class Template(unittest.TestCase):
         self.assertTrue(backend[0]['native_backend'] and len(backend[0]['checks']) > 1)
         structural, = [gate for gate in cut['gates'] if gate['name'] == g.STRUCTURAL_GATE]
         self.assertEqual('2', structural['command'][structural['command'].index('--max-workers') + 1])
+        stability, = [gate for gate in cut['gates'] if gate['name'] == g.STABILITY_GATE]
+        self.assertEqual(str(g.LOCAL_STABILITY_LOAD_WORKERS),
+                         stability['command'][stability['command'].index('--load-workers') + 1])
 
 
 class Memory(unittest.TestCase):

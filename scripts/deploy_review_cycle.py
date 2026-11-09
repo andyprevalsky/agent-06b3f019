@@ -363,7 +363,8 @@ def _glob_segment(segment: str) -> str:
                 raise ReviewCycleError(f"unsupported CodeRabbit path filter segment: {segment!r}")
             alternatives = "|".join(_glob_segment(alt) for alt in segment[index + 2:close].split("|"))
             rest = _glob_segment(segment[close + 1:])
-            return out + f"(?:(?!(?:{alternatives}){rest}$)[^/]*?){rest}"
+            # The excluded values end at this segment's boundary (a "/" or the path's end), not the path's end.
+            return out + f"(?:(?!(?:{alternatives}){rest}(?![^/]))[^/]*?){rest}"
         if char == "*":
             out += "[^/]*"
         elif char == "?":

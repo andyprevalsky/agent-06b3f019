@@ -184,7 +184,8 @@ def standard_template(host: tuple = ()) -> dict:
          "cwd": "mac-app", "platform": "darwin", "checks": ["mac-app-coverage-blackbox"]},
         dict(MAC_APP_STATIC, command=list(MAC_APP_STATIC['command']), checks=list(MAC_APP_STATIC['checks'])),
         # A non-quick gate: `scripts/deploy gates --executor blacksmith` gives it a remote Blacksmith slot
-        # (deploy_gates.layout), so the five loaded runs also execute once on that executor's VM.
+        # (deploy_gates.layout), so the five loaded runs also execute once on that executor's VM. Under
+        # --executor local, deploy_gates.build_template bounds its --load-workers beside the other host gates.
         {"name": "new-test-stability", "category": "new-test-stability",
          "command": [sys.executable, "scripts/select_affected_tests.py", "--stability", "--base", "origin/main"],
          "checks": ["new-test-stability"]},
