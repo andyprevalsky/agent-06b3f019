@@ -350,7 +350,11 @@ def interrupted_card(state, receipt, proof):
 
 
 def interrupted_worker(state, receipt, proof):
-    """Account fully reaped interrupted custody; a missing adapter earns no credit."""
+    """Account fully reaped interrupted custody; a missing adapter earns no credit.
+
+    A KILL escalation (-9) and a coordinator TERM cancellation (-15) are both supported. A TERM'd
+    supervisor that exited before writing its receipt has no wait records: then only the
+    coordinator's own token-bound clean teardown record plus root/port quiescence can release it."""
     from deploy_test_cycle import bounded_read, digest, sha_file
     gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
     root = Path(gate['worker_root']).resolve(strict=True)
@@ -367,7 +371,7 @@ def interrupted_worker(state, receipt, proof):
          and native_command and receipt.get('command') == command, 'interrupted native local worker binding')
     need(receipt.get('lifecycle') == 'owned' and receipt.get('executed') is True
          and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
-         and type(receipt.get('native_exit')) is int and receipt['native_exit'] == -9
+         and type(receipt.get('native_exit')) is int and receipt['native_exit'] in (-9, -15)
          and receipt.get('cancelled') is True and receipt.get('timed_out') is False
          and receipt.get('lingering_group') is True and not receipt.get('cleanup_owner')
          and receipt.get('worker_result') is None and receipt.get('native_cleanup_reference') is None,
@@ -379,7 +383,15 @@ def interrupted_worker(state, receipt, proof):
          and receipt['host_admission'].get('lock') == str(root / '.context/native-worker-admission.lock'),
          'interrupted execution/admission contract changed')
     folder = Path(receipt['log']).parent
-    names = {'request.json', 'receipt.json', 'output.log.process.json'}
+    signal = -receipt['native_exit']
+    sidecar = folder / 'output.log.process.json'
+    attempt = folder.parent.parent.name  # attempts/<round>/<phase>/<gate>: stable across later rounds
+    need(attempt.isdigit(), 'interrupted attempt identity')
+    teardown = f"teardown/attempt-{attempt}-{receipt['gate']}.json"
+    supervised = sidecar.exists() or sidecar.is_symlink()
+    names = ({'request.json', 'receipt.json', 'output.log.process.json'} if supervised
+             else {'request.json', 'receipt.json', teardown})
+    need(supervised or signal == 15, 'a KILLed supervisor must leave its wait records')
     need(Path(receipt['log']) == folder / 'output.log' and folder.resolve(strict=True) == folder
          and isinstance(proof['files'], dict) and set(proof['files']) == names
          and not any((folder / n).exists() or (folder / n).is_symlink()
@@ -391,32 +403,42 @@ def interrupted_worker(state, receipt, proof):
         need(not path.is_symlink() and path.resolve(strict=True) == path
              and sha_file(path) == proof['files'][name], 'interrupted artifact changed: ' + name)
         docs[name] = bounded_read(path, 'interrupted cleanup ' + name)
-    request, recorded, process = (docs[n] for n in ('request.json', 'receipt.json', 'output.log.process.json'))
+    request, recorded = docs['request.json'], docs['receipt.json']
     need(recorded == receipt and all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_root') == str(root) and request.get('worker_recipe') == gate.get('worker_recipe')
          and isinstance(request.get('skips'), dict) and set(request['skips']) <= set(gate['checks'])
          and request.get('checks') == [case for case in gate['checks'] if case not in request['skips']]
          and request['checks'] and receipt.get('cases') == {case: 'SKIP' if case in request['skips'] else 'UNVERIFIED'
                                                          for case in gate['checks']}, 'interrupted request identity/inventory')
-    need(type(process.get('native_exit')) is int and process['native_exit'] == -9
-         and process.get('cancelled') is True and process.get('timed_out') is False
-         and process.get('quiescent') is True and process.get('remaining') == []
-         and type(process.get('orphaned_children')) is bool and process.get('error') is None,
-         'interrupted supervisor closure unknown')
-    child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
-    rows, terms, kills = (process.get(k) for k in ('reaped', 'term_sent', 'kill_sent'))
-    need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
-         and isinstance(rows, list) and rows and isinstance(terms, list) and isinstance(kills, list) and kills
-         and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
-                 and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
-                 and type(row['status']) is int and 0 <= row['status'] <= 65535
-                 and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
-         'interrupted wait records unknown')
-    reaped = {r['pid']: r['status'] for r in rows}
-    need(len(reaped) == len(rows) and reaped.get(child) == 9 and child in kills
-         and all(type(pid) is int and pid > 1 and pid in reaped for pid in terms + kills)
-         and len(set(terms)) == len(terms) and len(set(kills)) == len(kills) and set(kills) <= set(terms),
-         'interrupted owned targets were not all reaped')
+    if supervised:
+        process = docs['output.log.process.json']
+        need(type(process.get('native_exit')) is int and process['native_exit'] == -signal
+             and process.get('cancelled') is True and process.get('timed_out') is False
+             and process.get('quiescent') is True and process.get('remaining') == []
+             and type(process.get('orphaned_children')) is bool and process.get('error') is None,
+             'interrupted supervisor closure unknown')
+        child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
+        rows, terms, kills = (process.get(k) for k in ('reaped', 'term_sent', 'kill_sent'))
+        need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
+             and isinstance(rows, list) and rows and isinstance(terms, list) and isinstance(kills, list)
+             and (bool(kills) if signal == 9 else kills == [])
+             and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
+                     and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
+                     and type(row['status']) is int and 0 <= row['status'] <= 65535
+                     and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
+             'interrupted wait records unknown')
+        reaped = {r['pid']: r['status'] for r in rows}
+        need(len(reaped) == len(rows) and reaped.get(child) == signal and child in (kills if signal == 9 else terms)
+             and all(type(pid) is int and pid > 1 and pid in reaped for pid in terms + kills)
+             and len(set(terms)) == len(terms) and len(set(kills)) == len(kills) and set(kills) <= set(terms),
+             'interrupted owned targets were not all reaped')
+    else:
+        # The coordinator's own token-bound teardown observed this lane after the TERM.
+        record = docs[teardown]
+        need(record.get('token') == receipt['token'] and record.get('lane') == receipt['gate']
+             and record.get('attempt') == int(attempt) and record.get('outcome') == 'clean'
+             and all(record.get(k) == [] for k in ('survivors', 'lingering', 'owned', 'foreign')),
+             'interrupted teardown did not observe a clean lane')
     from deploy_test_isolation import _ports
     port = gate.get('env', {}).get('CONDUCTOR_PORT')
     need(isinstance(port, str) and port.isdigit(), 'interrupted port identity')

@@ -6510,6 +6510,62 @@ class InterruptedLocalRecovery(unittest.TestCase):
         self.assertEqual(original,saved['attempts']);self.assertFalse(saved['ready']);self.assertNotIn('resume_phase',saved)
         self.assertEqual(raw,{n:p.read_bytes() for n,p in self.paths.items()})
 
+    def term_cancelled(self):
+        """The coordinator's TERM cancellation (-15): no KILL escalation, every TERM target reaped."""
+        self.receipt.update(native_exit=-15)
+        self.process.update(native_exit=-15,orphaned_children=True,kill_sent=[],term_sent=[124,125],
+                            reaped=[{'pid':124,'status':15},{'pid':125,'status':15}])
+        self.seal()
+
+    def test_term_cancelled_worker_reconciles_from_supervisor_wait_records(self):
+        self.term_cancelled();original=copy.deepcopy(self.state['attempts'])
+        self.assertEqual([self.gate['name']],c.retained_owners(self.state,[self.gate['name']]))
+        self.reconcile()
+        c.interrupted_boundary(self.state)
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_term_cancelled_worker_refuses_unreaped_target_or_kill_escalation(self):
+        for change in [dict(reaped=[{'pid':124,'status':15}]),dict(remaining=[125]),dict(quiescent=False),
+                       dict(reaped=[{'pid':124,'status':9},{'pid':125,'status':15}]),dict(kill_sent=[124])]:
+            self.term_cancelled();self.process.update(change);self.seal()
+            with self.subTest(change=change),self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+
+    def missing_supervisor_receipt(self,**teardown):
+        """A TERM'd supervisor that exited before writing its wait records leaves only the coordinator teardown."""
+        self.receipt.update(native_exit=-15);(self.folder/'output.log.process.json').unlink(missing_ok=True)
+        name=f"teardown/attempt-{self.folder.parent.parent.name}-{self.gate['name']}.json"
+        record=dict(attempt=int(self.folder.parent.parent.name),lane=self.gate['name'],token=self.receipt['token'],
+                    outcome='clean',survivors=[],lingering=[],owned=[],foreign=[])
+        record.update(teardown)
+        (self.folder/'teardown').mkdir(exist_ok=True);c.write(self.folder/name,record)
+        self.paths={n:self.folder/n for n in ['request.json','receipt.json']}
+        for n,v in [('request.json',self.request),('receipt.json',self.receipt)]:c.write(self.paths[n],v)
+        files={n:c.sha_file(p) for n,p in self.paths.items()};files[name]=c.sha_file(self.folder/name)
+        self.proof=dict(kind=KIND,files=files,confirmed_at=201,observed_by='native-interrupted-review')
+
+    def test_term_cancelled_worker_without_supervisor_receipt_needs_clean_teardown_and_quiet_root(self):
+        self.missing_supervisor_receipt();original=copy.deepcopy(self.state['attempts'])
+        proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError):self.reconcile()
+        finally:
+            proc.terminate();proc.wait(timeout=2)
+        self.reconcile()
+        c.interrupted_boundary(self.state)
+        self.assertEqual(original,self.state['attempts'])
+
+    def test_term_cancelled_worker_without_supervisor_receipt_refuses_unclean_or_foreign_teardown(self):
+        for change in [dict(outcome='killed'),dict(survivors=[{'pid':126}]),dict(token='other'),dict(lingering=[126])]:
+            self.state.pop('reconciled_owners',None)
+            self.missing_supervisor_receipt(**change)
+            with self.subTest(change=change),self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+        self.receipt.update(native_exit=-9);c.write(self.paths['receipt.json'],self.receipt)
+        self.proof['files']['receipt.json']=c.sha_file(self.paths['receipt.json'])
+        with self.assertRaisesRegex(ValueError,'KILLed supervisor must leave its wait records'):self.reconcile()
+
     def test_refresh_requires_all_closure_and_preserves_original_source_and_clock(self):
         (self.coordinator/'code').write_text('new');new={**self.plan,'source':c.source(self.coordinator)}
         before=copy.deepcopy(self.state)

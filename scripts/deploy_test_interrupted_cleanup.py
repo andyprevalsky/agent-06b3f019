@@ -138,14 +138,24 @@ def policy(root, receipt, proof, evidence, name):
     return path if isinstance(relocated, bytes) else Path(relocated), original
 
 
+def static_command(gate):
+    """The original root quick routes: backend structural, and the format check over the deploy diff."""
+    command = gate.get('command')
+    if gate.get('name') == 'backend-structural':
+        return command == ['npm', 'run', 'test:structural'] and gate.get('cwd') == 'back-end'
+    return (gate.get('name') == 'format' and isinstance(command, list) and len(command) == 5
+            and Path(command[1]) == Path('scripts/check_deploy_static.py') and command[2:4] == ['format', '--base']
+            and gate.get('cwd') in (None, '.'))
+
+
 def static_worker(root, gate, receipt, folder, evidence):
-    need(gate.get('name') == gate.get('category') == 'backend-structural' and gate.get('quick') is True
-         and gate.get('command') == ['npm', 'run', 'test:structural'] and gate.get('cwd') == 'back-end'
-         and gate.get('checks') == ['backend-structural']
+    need(gate.get('name') == gate.get('category') and gate.get('name') in {'backend-structural', 'format'}
+         and gate.get('quick') is True and static_command(gate)
+         and gate.get('checks') == [gate['name']]
          and not gate.get('env') and not any(gate.get(k) for k in
              ('worker', 'worker_root', 'worker_transport', 'worker_recipe', 'worker_host', 'worker_thread',
               'remote_python', 'native_cloud', 'native_backend', 'case_protocol', 'result_transport', 'services')),
-         'only the original static structural route is supported')
+         'only the original static quick routes are supported')
     need(receipt.get('lifecycle') == 'owned' and receipt.get('native_exit') == -15
          and receipt.get('cleanup_owner') is None, 'original static TERM receipt required')
     path = folder / 'output.log.process.json'

@@ -643,7 +643,7 @@ class InterruptedCustody(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value) if isinstance(value, (dict, list)) else value)
 
-    def fixture(self, cloud=False):
+    def fixture(self, cloud=False, static='backend-structural'):
         import hashlib, shutil, time, runpy
         from datetime import datetime, timezone
         import deploy_test_interrupted_cleanup as m
@@ -660,7 +660,10 @@ class InterruptedCustody(unittest.TestCase):
         gate = (dict(name='smoke', category='smoke', native_cloud=True, worker_transport='benchmark-cloud-cli',
                      command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')],cwd=str(self.root),checks=['task'],env={})
                 if cloud else dict(name='backend-structural',category='backend-structural',quick=True,
-                                   command=['npm','run','test:structural'],cwd='back-end',checks=['backend-structural'],env={}))
+                                   command=['npm','run','test:structural'],cwd='back-end',checks=['backend-structural'],env={})
+                if static == 'backend-structural' else dict(name='format',category='format',quick=True,
+                                   command=[sys.executable,'scripts/check_deploy_static.py','format','--base','origin/main'],
+                                   checks=['format']))
         source = c.source(self.root)
         folder = self.root / '.context/deploy-pipeline/attempts/16/focused' / gate['name']
         token = 'a'*32
@@ -791,6 +794,20 @@ class InterruptedCustody(unittest.TestCase):
                 state['plan']['gates'][0]['command']=['replacement']
                 self.assertFalse(self.m.still_bound(state,r,entry))
                 self.assertTrue(all(Path(p).read_bytes()==raw for p,raw in bytes_before.items()))
+
+    def test_format_quick_gate_term_cancellation_uses_the_static_route(self):
+        # A TERM'd coordinator also cancels the root format check; it releases like backend-structural.
+        state,r,proof=self.fixture(static='format')
+        original=copy.deepcopy(state)
+        c.reconcile(state,r['token'],proof);c.interrupted_boundary(state)
+        self.assertEqual(state['attempts'],original['attempts'])
+        entry=state['reconciled_owners'][c.sha_file(Path(r['log']).parent/'receipt.json')]
+        self.assertFalse(entry['credit_granted']);self.assertTrue(self.m.still_bound(state,r,entry))
+        for command in (['python3','scripts/check_deploy_static.py','eslint','--base','origin/main'],
+                        ['python3','scripts/other.py','format','--base','origin/main']):
+            gate={**state['plan']['gates'][0],'command':command}
+            with self.subTest(command=command),self.assertRaisesRegex(ValueError,'static quick routes'):
+                self.m.static_worker(self.root,gate,r,Path(r['log']).parent,None)
 
     def policy_relocation_fixture(self):
         import time
