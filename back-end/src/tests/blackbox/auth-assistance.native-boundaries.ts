@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
+import { USER_CONTROL_TIMEOUT_MS } from '../../providers/phoneAccountPolicy';
 import { retryWithBackoff } from '../../providers/retry';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 import { fixture, withPhone } from './auth-assistance.native-fixtures';
@@ -89,9 +90,10 @@ export const nativeBoundaryTests: Test[] = [
         const waiting = await h.acquire(f.userId, agent.id);
         assert.equal(waiting.status, 'WAITING');
         const original = await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: waiting.id } });
+        // Heartbeat expired, still inside USER_CONTROL_TIMEOUT_MS: pending auth keeps the phone.
         await prisma.iPhoneLease.update({
           where: { id: f.leaseId },
-          data: { leaseExpiresAt: new Date(0) },
+          data: { leaseExpiresAt: new Date(Date.now() - 60_000) },
         });
         assert.equal(
           (await h.request(f.userId, `/leases/${f.leaseId}`)).data.lease?.status,
@@ -139,6 +141,15 @@ export const nativeBoundaryTests: Test[] = [
         assert.equal(
           (await prisma.userAuthAssistanceRequest.findUniqueOrThrow({ where: { id } })).completedAt,
           null
+        );
+        // The pending-auth hold is bounded: past the user-control grace it expires.
+        await prisma.iPhoneLease.update({
+          where: { id: f.leaseId },
+          data: { leaseExpiresAt: new Date(Date.now() - USER_CONTROL_TIMEOUT_MS - 60_000) },
+        });
+        assert.equal(
+          (await h.request(f.userId, `/leases/${f.leaseId}`)).data.lease?.status,
+          'EXPIRED'
         );
       }),
   ],

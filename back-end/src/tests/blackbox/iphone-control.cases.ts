@@ -1,3 +1,8 @@
+import { fixtureGenerationCases } from './iphone-control.fixture-generation.cases';
+import { continuityCases } from './iphone-control.continuity.cases';
+import { authLossCases } from './iphone-control.auth-loss.cases';
+import { portraitCases } from './iphone-control.portrait.cases';
+import { connectionCases } from './iphone-control.connection.cases';
 import { messageCases } from './iphone-control.messages.cases';
 import { savedCredentialCases } from './iphone-control.saved-credential.cases';
 import { rolloutCases } from './iphone-control.rollout.cases';
@@ -5,6 +10,7 @@ import { setupCases } from './iphone-control.setup.cases';
 import { privacyCases } from './iphone-control.privacy.cases';
 import { viewCases } from './iphone-control.view.cases';
 import { cleanupCases } from './iphone-control.cleanup.cases';
+import { deviceCases } from './iphone-control.device.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -67,13 +73,19 @@ async function queued(h: Harness, userId: string) {
   return waiter;
 }
 export const cases: Case[] = [
+  ...fixtureGenerationCases,
+  ...continuityCases,
+  ...authLossCases,
+  ...connectionCases,
   ...messageCases,
   ...savedCredentialCases,
   ...rolloutCases,
   ...setupCases,
+  ...portraitCases,
   ...privacyCases,
   ...cleanupCases,
   ...viewCases,
+  ...deviceCases,
   [
     'invalid lease requests and queued input cannot trigger cleanup for a pending phone',
     async (h) => {

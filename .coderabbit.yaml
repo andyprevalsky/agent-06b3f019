@@ -66,9 +66,9 @@ reviews:
     # 4) Docs, markdown, harness config
     # Keep this recovery utility and its records in review scope.
     - "!docs/!(handoffs)/**"
-    - "!docs/handoffs/!(pr-1831-closeout|pr-1857-closeout|pr-1837-closeout)/**"
+    - "!docs/handoffs/!(pr-1831-closeout|pr-1857-closeout|pr-1859-closeout|pr-1885-closeout|pr-1837-closeout)/**"
     - "!*.md"
-    - "!**/!(pr-1831-closeout|pr-1857-closeout|pr-1837-closeout)/*.md"
+    - "!**/!(pr-1831-closeout|pr-1857-closeout|pr-1859-closeout|pr-1885-closeout|pr-1837-closeout)/*.md"
     - "!.claude/**"
     - "!.coderabbit.yaml"
     - "!.gitignore"

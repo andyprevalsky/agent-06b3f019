@@ -23,6 +23,18 @@ export const index01WebhookUpload = multer({
   limits: { fileSize: 100 * 1024 * 1024 },
 });
 
+/**
+ * Public origin of this API as the Index 01 app must call it (the app runs on a
+ * phone, so a request-derived localhost origin is useless there). Override with
+ * PUBLIC_API_BASE_URL for staging.
+ */
+export function getPublicApiBaseUrl(): string {
+  const configured = process.env.PUBLIC_API_BASE_URL;
+  return (
+    configured !== undefined && configured !== '' ? configured : 'https://api.roselabs.ai'
+  ).replace(/\/+$/, '');
+}
+
 /** Read a {{VAR_NAME}} prompt secret from its PROMPT_SECRET_* env var. */
 export function getPromptSecret(varName: string): string | undefined {
   return process.env[`PROMPT_SECRET_${varName}`];

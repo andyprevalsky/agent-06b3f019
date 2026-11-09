@@ -186,6 +186,10 @@ export interface Message {
     spawnGroupId?: string;
     forEachAggregate?: boolean;
     inlineView?: import('../realtime-types/message-metadata').InlineViewMessageMetadata;
+    /** Browser-only: the optimistic send this USER row came from (stable render key). */
+    clientMessageId?: string;
+    /** Browser-only: sent but not yet picked up by the agent's next step. */
+    clientDelivery?: 'sending';
     [key: string]: unknown;
   };
   file_pointer?: FilePointer; // File attachment (OAI-style: one file per message)

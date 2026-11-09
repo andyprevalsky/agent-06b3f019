@@ -199,6 +199,13 @@ export interface PlaidLinkTokenResponse {
   request_id: string;
 }
 
+/** What the Index app's webhook screen needs, from POST /api/index01/credentials. */
+export interface Index01Credentials {
+  webhook_url: string;
+  header_name: string;
+  header_value: string;
+}
+
 /** One provider quota window; `usedPct` is 0-100 as of `ComputeAccountUsage.observedAt`. */
 export interface ComputeUsageWindow {
   usedPct: number;

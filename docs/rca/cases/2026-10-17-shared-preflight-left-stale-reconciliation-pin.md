@@ -44,3 +44,16 @@ The user asked to simplify startup and explain repeated failures to reach full p
 ## Reusable lesson
 
 When a source-pinned dependency changes, verify its direct consumers with the real new bytes. A parent-flow fixture that substitutes the downstream helper cannot certify the helper's protocol pin.
+
+
+## 2026-11-08 recurrence: changed cleanup-ticket dependency, unchanged caller pin
+
+Status: owning regression fixed; normal combined-source validation and cloud retry remain pending.
+
+The Google400 experiment16 stopped before task clone admission. The immutable controller reported `cleanup reconciliation dependency source changed`: `cloudbench-cohort-reconcile.py` still authenticated the baseline module SHA256 `29c2f6e4c71bf45a182f2beb59298e63f7a82e1e0bddd3956ac7d603a823c81b`, while this branch's cleanup-ticket module was `b67ac4790306e542a06b2ad607d88b9582c8173f2eecc37cdcffc3df991b4734`. The changed module adds conservative accounting for positively absent standalone legacy owners. Its direct caller's pin was not updated. This integration failure is INTRODUCED relative to bf26; the guard correctly failed closed.
+
+The actual checked-in sibling pair reproduces the failure under the existing isolated reconciliation fixture. The identical new owning method passes after changing only the caller's static pin to the reviewed dependency. All eight owning tests pass, including the existing tamper rejection, and their supervisors are quiescent without orphan or supervisor TERM/KILL. No provider call is permitted by that fixture. The suite existed in the conditional test runner but was absent from the normal structural registry; it is now registered there. Run `python3 scripts/tests/cloudbench-cohort-reconcile.test.py` through the normal supervisor to exercise the registered owner. No dynamic self-trust, assertion, timeout or concurrency relaxation was introduced, and historical source maps are unchanged.
+
+Original experiment16 outcomes remain nine UNVERIFIED cases, one failed controller and eight cancelled controllers, plus the five separately authorized financial SKIPs. The PG15 seed and exact native snapshot completed before this later guard failed. Nine sealed zero-allocation audits qualified supported preallocation reconciliation for launch only; two exact-owner Hub records remain preserved and their original PIDs are absent. This grants no task, financial-release or production acceptance credit. Warm-source refresh and snapshot creation were real provider operations; this was not a globally mutation-free run.
+
+Evidence: source11fac9a37942fb472e1ef146f7099d0a6e563ba3, native campaign fd095281f30cbb4d7669ca8c9cdeef51dd31791563a1c587606b319112a438b0, owning `CohortReconciliation.test_actual_checked_in_dependency_pair_reaches_reconciliation`, and the retained native result/process records. Agent RCA and parent review identified the missing dependency coupling and registry entry. There was no incident-specific human feedback about this pin; the user's separate financial skip does not waive this failure.

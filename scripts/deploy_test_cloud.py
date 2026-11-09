@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import runpy
 from pathlib import Path
 import sys
@@ -25,7 +26,12 @@ from deploy_test_process import cancellation_handlers, run_command
 
 
 class SourceRefusal(ValueError):
-    """The source guard refused before this request could admit any resources."""
+    """The source or custody-locator guard refused before this request could admit any resources."""
+
+    def __init__(self, message, reason_code=None):
+        """Source refusals carry no reason code; custody locator refusals carry theirs."""
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def collect(request, root, runs, started, native_exit):
@@ -129,9 +135,15 @@ def campaign_width(checks, deadline=None):
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
+    requested = len(checks)
+    limit = os.environ.get('DEPLOY_CLOUD_CONCURRENCY')
+    if limit is not None:
+        if not re.fullmatch(r'[1-9][0-9]*', limit):
+            raise ValueError('DEPLOY_CLOUD_CONCURRENCY must be a positive integer')
+        requested = min(requested, int(limit))
     if deadline is None:
         deadline = time.time() + provider_headroom.DEFAULT_WAIT_SECONDS
-    return provider_headroom.admitted_width(len(checks), registry, probes=provider_headroom.live_probes(),
+    return provider_headroom.admitted_width(requested, registry, probes=provider_headroom.live_probes(),
                                             deadline=deadline)
 
 
@@ -295,13 +307,23 @@ def execute(request, root):
         if directory.exists() or directory.is_symlink():
             raise ValueError('unpushed cloud source with an existing request namespace')
         raise SourceRefusal(unpushed_reason(request['source']['head']))
-    from deploy_test_historical_custody import admission
-    admission(request, root)
-    runs = directory / 'runs'
-    runs.mkdir(parents=True, exist_ok=False)
+    from deploy_test_historical_custody import AdmissionRefusal, admission
+    try:
+        admission(request, root)
+    except AdmissionRefusal as error:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('historical custody refused with an existing request namespace') from error
+        if error.detail:
+            print(f'DEPLOY_CLOUD custody detail: {error.detail}', file=sys.stderr)
+        raise SourceRefusal(str(error), error.reason_code) from error
+    # Retain the adapter namespace without admitting this request's run until width is known.
+    directory.parent.mkdir(parents=True, exist_ok=True)
     width = campaign_width(checks)
     if width < 1:
         raise ValueError('provider capacity cannot admit one smoke task')
+    directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    runs = directory / 'runs'
+    runs.mkdir(parents=True, exist_ok=False)
     campaign = directory / 'campaigns' / ('deploy-' + directory.name)
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
            'DEPLOY_NATIVE_HUB_JOIN': '1',
@@ -360,6 +382,8 @@ def main():
                        cleanup_complete=True, reused=False, evidence={}, native_exit=2,
                        native_command=[], fleet_directory=None, reason=str(error),
                        admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+        if error.reason_code:
+            receipt['reason_code'] = error.reason_code
         write(Path(os.environ['DEPLOY_GATE_RESULT']), receipt)
         print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
         return 2

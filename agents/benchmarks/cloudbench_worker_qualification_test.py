@@ -54,11 +54,17 @@ def test_incomplete_worker_cannot_qualify(tmp_path,monkeypatch,defect):
  assert verify(out,claims).returncode!=0
 
 def test_actual_ready_producer(tmp_path):
+ from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function
+ helpers='\n'.join(_extract_fleet_function(FLEET,name+'() {')for name in (
+  'worker_ledger_lock_acquire','worker_ledger_lock_release','worker_is_tracked','reconcile_worker_ready_outcomes'))
+ (tmp_path/'worker-clones.ids').write_text('worker\n')
+ (tmp_path/'worker-ready.ids').touch()
  start=FLEET.index('      publish_worker_ready() {');end=FLEET.index('      log_worker_stage()',start)
- script=FLEET[start:end]+'\npublish_worker_ready'
+ script=helpers+'\n'+FLEET[start:end]+'\npublish_worker_ready'
  env={'out':str(tmp_path),'wid':'worker','runtime_run_token':'run','primary_id':'primary','QUALIFY_WORKER':'1'}
  result=shell(script,env);assert result.returncode==0,result.stderr
  assert (tmp_path/'worker-worker.qualification-ready').read_text()=='worker|run|primary\n'
+ assert (tmp_path/'worker-ready.ids').read_text()=='worker\n'
 
 @pytest.mark.parametrize('defect',['multiple','infra','skip','keep','update','shape','simulate'])
 def test_selection_refuses_before_provider(defect):

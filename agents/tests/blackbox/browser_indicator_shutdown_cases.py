@@ -70,11 +70,13 @@ async def check_real_remote_indicator_shutdown() -> None:
             headless=True, args=[f"--remote-debugging-port={port}"]
         )
         dom = None
+        dom_services = []
         try:
             await browser.new_page()
             with urlopen(f"http://127.0.0.1:{port}/json/version", timeout=10) as response:
                 endpoint = json.load(response)["webSocketDebuggerUrl"]
             dom = DOMService(cdp_url=endpoint)
+            dom_services.append(dom)
             await dom.connect()
             # Ordinary live telemetry still updates before shutdown.
             updated = asyncio.Event()
@@ -91,11 +93,16 @@ async def check_real_remote_indicator_shutdown() -> None:
             dom.start_captcha_telemetry_indicator(idle)
             await asyncio.wait_for(updated.wait(), timeout=10)
             await dom.disconnect()
+            assert dom.disconnect_confirmed, "first native session cleanup was not confirmed"
             assert browser.is_connected(), "worker disconnect killed the provider browser"
+            dom = DOMService(cdp_url=endpoint)
+            dom_services.append(dom)
             await dom.connect()
             await check_indicator_completion_racing_disconnect(dom)
             assert browser.is_connected(), "racing disconnect killed the provider browser"
         finally:
-            if dom is not None and dom.session is not None:
-                await dom.disconnect()
-            await browser.close()
+            try:
+                for service in reversed(dom_services):
+                    await service.disconnect()
+            finally:
+                await browser.close()

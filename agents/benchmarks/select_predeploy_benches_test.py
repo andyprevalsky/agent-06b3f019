@@ -973,9 +973,9 @@ def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    combined = result.stdout + result.stderr
-    assert "HARD CAP HIT" in combined or "HARD CAP" in combined
-    assert "DROPPED" in combined
+    for stream in (result.stdout, result.stderr):
+        assert "HARD CAP HIT" in stream or "HARD CAP" in stream
+        assert "DROPPED" in stream
 
 
 def test_cli_cap_clamps_above_default(tmp_path: Path) -> None:
@@ -1082,3 +1082,58 @@ def test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixt
             "agent-payment-abandonment|agent-payment-setup-resume)"
         )
         assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver[case : driver.index(";;", case)]
+
+
+@pytest.mark.parametrize("output_format", ["names", "json"])
+@pytest.mark.parametrize("drop_extra", [False, True])
+def test_cli_machine_formats_keep_cap_warning_on_stderr(
+    tmp_path: Path, output_format: str, drop_extra: bool,
+) -> None:
+    """A full selection remains machine-readable, with the complete warning on stderr."""
+    catalog, attempts = tmp_path / "tasks.json", tmp_path / "attempts.jsonl"
+    tasks = [
+        {"name": "smoke", "tags": ["smoke"]},
+        {"name": "payment", "tags": ["payment"], "deploy_canary": True},
+    ]
+    if drop_extra:
+        tasks.append({"name": "payment-extra", "tags": ["payment"]})
+    catalog.write_text(json.dumps(tasks))
+    _write_attempts(attempts, [(task["name"], True) for task in tasks for _ in range(3)])
+    result = subprocess.run(
+        [sys.executable, str(SELECTOR), "--catalog", str(catalog),
+         "--attempts-file", str(attempts), "--surface", "cloud", "--cap", "2",
+         "--changed-file", "back-end/src/domains/agentcard/service.ts",
+         "--repo-root", str(ROOT), "--format", output_format],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    if output_format == "names":
+        assert result.stdout.splitlines() == ["smoke", "payment"]
+    else:
+        payload = json.loads(result.stdout)
+        assert payload["selected"] == ["smoke", "payment"]
+        assert payload["cap"] == 2 and payload["total"] == 2
+        assert payload["cap_hit"] is drop_extra
+        assert payload["dropped"] == (["payment-extra"] if drop_extra else [])
+    warning = "PREDEPLOY BENCH HARD CAP HIT" if drop_extra else "PREDEPLOY BENCH COUNT AT HARD CAP"
+    assert warning in result.stderr
+    if drop_extra:
+        assert "payment-extra" in result.stderr and "DROPPED" in result.stderr
+
+
+@pytest.mark.parametrize("output_format", ["names", "json"])
+def test_machine_readable_cap_output_keeps_warnings_on_stderr(tmp_path: Path, output_format: str) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    tasks = [{"name": f"smoke-{i}", "tags": ["smoke"], "timeout_seconds": 60,
+              "deploy_category": "harness"} for i in range(DEFAULT_CAP)]
+    catalog.write_text(json.dumps(tasks))
+    attempts.write_text("")
+    result = subprocess.run([sys.executable, str(SELECTOR), "--catalog", str(catalog),
+        "--attempts-file", str(attempts), "--format", output_format, "--cap", str(DEFAULT_CAP),
+        "--repo-root", str(tmp_path)], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    selected = json.loads(result.stdout)["selected"] if output_format == "json" else result.stdout.splitlines()
+    assert set(selected) == {task["name"] for task in tasks}
+    assert len(selected) == DEFAULT_CAP
+    assert "HARD CAP" in result.stderr

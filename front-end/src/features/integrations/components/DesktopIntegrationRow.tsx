@@ -93,7 +93,11 @@ export interface DesktopIntegrationView {
   extra?: ReactNode;
 }
 
-const ACTION_CLASSES =
+/** Shared row look (the iPhone row reuses these so every integration row matches). */
+export const DESKTOP_ROW_CLASSES = 'border-b border-border/60 py-2.5';
+export const DESKTOP_ROW_NAME_CLASSES =
+  'min-w-0 flex-1 truncate text-sm font-medium text-foreground';
+export const ACTION_CLASSES =
   'shrink-0 text-[12.5px] font-semibold text-[#e8507f] hover:opacity-80 disabled:opacity-50 dark:text-[#ff7aa2]';
 const BADGE_CLASSES =
   'shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground';
@@ -255,12 +259,10 @@ function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
 export default function DesktopIntegrationRow({ view }: { view: DesktopIntegrationView }) {
   const connected = view.accounts.length > 0;
   return (
-    <div className="border-b border-border/60 py-2.5" data-testid={`integration-row-${view.key}`}>
+    <div className={DESKTOP_ROW_CLASSES} data-testid={`integration-row-${view.key}`}>
       <div className="flex items-center gap-3">
         <RowIcon view={view} />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-          {view.name}
-        </span>
+        <span className={DESKTOP_ROW_NAME_CLASSES}>{view.name}</span>
         {!connected && <RowAction view={view} />}
       </div>
       {connected && <AccountsBlock view={view} />}

@@ -117,3 +117,14 @@ preserved privately under
 Its exact native container was verified absent and all 232 captured source hashes
 still matched the executed checkout. Cleanup did not retain the readiness output
 directories, so their receipt contents were not independently reread afterward.
+
+
+## November 8, 2026 — retain the task's actual readiness failure evidence
+
+Full validation on `bd5db328d8fa593357444ca4dab5a04d277b3652` failed the active-retry assertion after one worker was retired and its replacement logged queue readiness. All eleven other controller steps passed. The failing task's primary bench log and phase ledger were removed with the fixture directory; controller/autoscaler tails alone cannot prove which cleanup/readiness phase expired. The original cause remains UNKNOWN. The existing readiness-only command subsequently passed with verified cleanup and is a NONREPRO, not a behavior fix or waiver.
+
+This recurrence concerns the evidence-loss boundary noted in the earlier followup. The fake driver's existing failure branch now records its actual failed-worker identity, last observed ready list, elapsed time and remaining deadline. The existing `fail()` diagnostic also includes the newest three task bench logs through the unchanged 30-line, five-second bounded dump, preserving the primary failure and exit 1. The original 30-second readiness deadline, poll intervals, all assertions, cleanup and retention policy remain unchanged.
+
+A regression appended to the already registered fixture-process-cleanup suite invokes the actual Bash `fail()` on private evidence under a path containing spaces. Against the original producer it failed because the task bench reason was lost; the identical test passed after the repair, preserving exit 1, the primary failure and the original log bytes. Both runs were supervised and quiescent with no remaining descendants or TERM/KILL. Exact diff, commands, hashes and RED/GREEN are retained in `round55-active-rca/controller-observability-candidate/result.json`. This proves durable diagnostic output only; normal full-controller validation remains required, and the original readiness behavior is not declared fixed.
+
+The complete canonical fixture-process-cleanup command then passed with the new regression included; its supervisor was quiescent with no remaining descendants, TERM/KILL or error. This owning evidence is retained in `round55-active-rca/controller-canonical-owning/`.

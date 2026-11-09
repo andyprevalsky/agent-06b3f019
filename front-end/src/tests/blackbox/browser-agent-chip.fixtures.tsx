@@ -37,6 +37,7 @@ export function makeCtx(messages: Message[]): AgentContextValue {
     stagePendingAgentCreation: () => {},
     reconcilePendingAgentCreation: async () => {},
     rollbackPendingAgentCreation: () => false,
+    stageUserMessage: () => ({ confirm: () => {}, drop: () => {} }),
   };
 }
 

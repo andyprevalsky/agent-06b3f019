@@ -1,3 +1,4 @@
+import { phoneSmsNotice } from './servicePhoneSms';
 /** Pages for the code, link and sign-up flows. */
 
 import { normalizeEmail } from './serviceSignIn';
@@ -48,6 +49,7 @@ const CODE_PAGES: Record<CodePage, { verify: string; resend: string; label: stri
  * known member made agents doubt the account instead of waiting for the code.
  */
 function codeNotice(site: AuthTestSite, page: CodePage, rawTarget: string): string {
+  if (page === 'sms' && site.scenario === 'phone_sms_otp') return phoneSmsNotice(site);
   const digits = (value: string | null) => (value ?? '').replace(/\D/g, '');
   // Match on the normalized address the agent typed (case, surrounding space),
   // not the HTML-escaped display string, or a known member reads the hedge.
@@ -82,7 +84,7 @@ export function renderCodeEntryPage(
   options: { target: string; error?: string; next?: NextPage }
 ): string {
   const next = options.next ?? null;
-  const target = escapeHtml(options.target);
+  const target = site.scenario === 'phone_sms_otp' ? '' : escapeHtml(options.target);
   const field = page === 'sms' ? 'phone' : 'email';
   const paths = CODE_PAGES[page];
   return layout(
@@ -140,7 +142,7 @@ export function renderSmsRequestPage(
     <form method="post" action="${siteUrl(site, '/login/sms')}">
       ${nextField(next)}
       <label for="phone">Phone number</label>
-      <input id="phone" name="phone" type="tel" autocomplete="tel" required value="${escapeHtml(options.phone ?? '')}">
+${site.scenario === 'phone_sms_otp' ? '<p>Use the registered phone on your membership.</p>' : `      <input id="phone" name="phone" type="tel" autocomplete="tel" required value="${escapeHtml(options.phone ?? '')}">`}
       <button type="submit">Text me a sign-in code</button>
     </form>
     <p><a href="${siteUrl(site, '/login')}${nextQuery(next)}">Back to sign in</a></p>`
