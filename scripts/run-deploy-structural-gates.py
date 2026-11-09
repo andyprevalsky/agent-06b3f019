@@ -350,6 +350,9 @@ GATES = (
     ),
     Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    # Live scratch-database Prisma push checks need a local Postgres and ~55 s; on the coordinator they pushed
+    # the quick backend-structural chain past its 120 s budget, so they run here on the gate VM instead.
+    Gate("prisma-local-push", ("bash", "back-end/scripts/prisma-local-push.test.sh"), expected_seconds=60),
     Gate(
         "canonical-seed-whatsapp-content",
         ("bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"),
