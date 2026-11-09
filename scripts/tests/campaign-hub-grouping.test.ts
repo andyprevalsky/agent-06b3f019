@@ -1875,10 +1875,19 @@ test("a released runner ERROR attempt is the infrastructure attempt its campaign
   let mirrored = "";
   mirror.stdout.on("data", (chunk) => (mirrored += chunk));
   await once(mirror, "close");
-  assert.equal(mirrored.trim(), "True", "hub_upload final_record_matches disagrees with taskSummary");
+  assert.equal(
+    mirrored.trim(),
+    "True",
+    "hub_upload final_record_matches disagrees with taskSummary",
+  );
   // The retry's starting registration (live) must be admitted, not 409'd.
   const retry: any = infraAttempt("runner-error-group", "m1", 2);
-  retry.tasks[0] = { name: "repeat-task", status: "starting", passed: null, lifecycle_stage: "starting" };
+  retry.tasks[0] = {
+    name: "repeat-task",
+    status: "starting",
+    passed: null,
+    lifecycle_stage: "starting",
+  };
   await owner.putRun(retry, { live: true });
   const detail = await owner.getRunDetail("runner-error-group");
   assert.equal(detail.tasks[0].child_run_id, retry.run_id);
@@ -1973,7 +1982,10 @@ test(
       readFileSync(path.join(campaigns, "infra-stop/summary.json"), "utf8"),
     );
     assert.notEqual(run.exitCode, 0, stdout + stderr);
-    assert.ok(elapsed < 40, `campaign kept running ${elapsed}s after the breach`);
+    assert.ok(
+      elapsed < 40,
+      `campaign kept running ${elapsed}s after the breach`,
+    );
     const receipt = summary.infra_stop;
     assert.ok(receipt, "summary.json must carry the infra stop breach receipt");
     assert.equal(receipt.job_id, "r004-j0007");
