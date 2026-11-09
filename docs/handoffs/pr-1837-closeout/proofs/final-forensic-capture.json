@@ -1,5 +1,5 @@
 {
-  "status": "VERIFIED_MAIN_FORENSIC_ARCHIVE_RECEIPT_TAIL_PENDING",
+  "status": "VERIFIED_MAIN_ARCHIVE_AND_FINITE_RECEIPT_TAIL",
   "capture_native_exit": 0,
   "snapshot_source": "b7a69ec4ef61d5612ea3534e2e00c7d7cfc9d50c",
   "bounded_logical_manifest_sha256": "746765351a1360b62286974f99efd38dc5f8512000014ca57f7d607e4ac603f3",
@@ -44,5 +44,6 @@
   "exact_restored_membership_verified": true,
   "every_authenticated_manifest_member_equals_native_approved_logical_metadata": true,
   "native_preservation_proof_sha256": "18ee0a40d6f0d359c32a9c915cec1448db3cc9cb10a1451e25c5c2df037e934e",
-  "remaining": "Finite terminal verification-receipt tail and reviewed Git closure; no all-future-context claim"
+  "remaining": "No later private execution remains; compact own transfer/control metadata, reviewed GitHub records merge, native deletionREADY and static visual have finite public closure.",
+  "finite_tail_proof": "finite-receipt-tail.json"
 }

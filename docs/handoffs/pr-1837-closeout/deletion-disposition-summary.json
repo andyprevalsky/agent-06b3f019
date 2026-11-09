@@ -1,6 +1,6 @@
 {
-  "status": "PRESERVATION_VERIFIED_NATIVE_DELETION_CHECK_PENDING",
-  "native_deletion_check_run": false,
+  "status": "PRESERVATION_VERIFIED_NATIVE_READINESS_RECHECK_REQUIRED",
+  "native_deletion_check_run": true,
   "observed_source": "dcf0af7fa5a4957b0305779af052ca9ba8c505c8",
   "worktrees": 1,
   "independent_old_checkout": "Separate git archive checkout; private source deltas/raw records preserved, not a registered worktree.",
@@ -25,5 +25,11 @@
     "proofs/finite-receipt-tail.json",
     "proofs/inherited-ref-recovery.json"
   ],
-  "later_controlled_metadata": "Finite reviewed remote Git/GitHub and published visual closure; no future-whole-context claim"
+  "later_controlled_metadata": "Finite reviewed remote Git/GitHub and published visual closure; no future-whole-context claim",
+  "actual_current_ignored_paths_observed": 81,
+  "initial_native_result": "NOT_READY: uncommitted proof edits and missing collapsed fast-cache disposition; both corrected before final native check",
+  "fast_cache_original_bytes_preserved": 150758,
+  "fast_cache_files": 6,
+  "fast_cache_proof": "proofs/fast-cache-bytecode-coverage.json",
+  "native_final_result": "See committed deletion-readiness.json and subsequent source-bound native CLI evidence in this PR discussion"
 }

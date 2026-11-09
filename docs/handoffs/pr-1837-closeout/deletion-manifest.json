@@ -252,6 +252,14 @@
     "disposition": "reproducible",
     "reason": "Every bytecode member has its actual tracked Python source; recreate with pinned interpreter/setup."
   },
+  "agents/providers/fast_cache/": {
+    "archive": "devbox-closeouts/report-bug-fetch-944bdbf4/receipt-tail-9b82e8e4993c411c9ca216fb7f45ab53.enc",
+    "coverage": "Exact six current bytecodes join authenticated per-path main/existing carriers in restored tail inventory; no blanket reconstructible assumption.",
+    "disposition": "archived",
+    "proof": "proofs/fast-cache-bytecode-coverage.json",
+    "receipt": "receipts/receipt-tail.json",
+    "sha256": "115a2439ee0bdc8f958fdc0295326a7449488160f73abb7d36dada95668d5601"
+  },
   "agents/providers/fast_cache/__pycache__/": {
     "archive": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
     "disposition": "archived",

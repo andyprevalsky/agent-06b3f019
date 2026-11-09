@@ -21,13 +21,13 @@
     },
     {
       "path": "deletion-disposition-summary.json",
-      "size": 1996,
-      "sha256": "f5af29f3d63cf96f2def8e9a2078a1a7e6463552b81b71f67ba09cd761ebfa2f"
+      "size": 2474,
+      "sha256": "3d6c4e18c250532066859a581dc06dd69da8bf68cf58185c72cce54f9019087b"
     },
     {
       "path": "deletion-manifest.json",
-      "size": 72422,
-      "sha256": "d9b3da34f177a54c24dfc14d1badca42a6224d289b019e37c29c385209b25c3f"
+      "size": 72953,
+      "sha256": "2b16ab31ef362199104f4988983c2a956e477f06928b2b6c5762bf05c0ed8884"
     },
     {
       "path": "final-forensic-scope.json",
@@ -75,14 +75,24 @@
       "sha256": "d06e6e5c186b6965e6f5eeada511cb9e61937da56be3eee960afa175aae7cb42"
     },
     {
+      "path": "proofs/deletion-check-initial-repair.json",
+      "size": 1171,
+      "sha256": "858c3fc841c789722d3d56cdf2b158b806bb1aa373b770776ca30b70e3c6754b"
+    },
+    {
       "path": "proofs/dns-supplement.json",
       "size": 834,
       "sha256": "8d80d571546bb67f00626b12a01f85a9e62be3354957d5a922dbb50eb6ceb063"
     },
     {
+      "path": "proofs/fast-cache-bytecode-coverage.json",
+      "size": 5531,
+      "sha256": "e0cd5b5f1e03462c1ff325b2d30915253c25ec4ac1d8fb6c7b527ce9d31970c9"
+    },
+    {
       "path": "proofs/final-forensic-capture.json",
-      "size": 2998,
-      "sha256": "2b61548dc0453fa07ba415ff7f0b632ff8675c9077b43df063d187d11752d93e"
+      "size": 3120,
+      "sha256": "8e51c0eda1fe95dd92540d89d4fc6ffb03cf26b1e6cac94b6a3692092e8718b8"
     },
     {
       "path": "proofs/final-forensic-preservation.json",
@@ -96,8 +106,8 @@
     },
     {
       "path": "proofs/final-preservation-preflight-review.json",
-      "size": 1577,
-      "sha256": "9baf98e3b82e9e33d4fb77a4eb0c0f4b9ace8e979fd0780dc4801afdcdcec403"
+      "size": 1730,
+      "sha256": "8dfe9b0f74c3d4fa117f445fea811eca45416d993fdaaf44a00b4f5f05ccf82c"
     },
     {
       "path": "proofs/finite-closure-policy.json",
