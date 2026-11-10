@@ -109,8 +109,11 @@ review is recorded in the deploy approval receipt, not inferred from these leads
 ## Solution
 
 Extract SMS's formatter and selected profile fields unchanged into
-`providers/userProfileContext.ts`. Chat reads that selected profile once per
-turn, in parallel with its transcript and project lookup. Initial routing,
+`providers/userProfileContext.ts`. Ordinary chat reads that selected profile once per
+turn, in parallel with its transcript and project lookup after checking the
+existing effective DEMO eligibility (including root-goal inheritance). Shared
+DEMO fixtures omit the live private profile, including recorder-account cache
+misses, because their goal-keyed cache deliberately ignores dynamic context. Initial routing,
 after-search routing, ordinary generation and speculative generation receive
 the same snapshot. Each new turn reloads the profile. Both model builders retain
 the static cache prefix and append project plus profile context after its
@@ -118,8 +121,10 @@ boundary. SMS retains its existing formatter output and import compatibility.
 
 This also prevents missing personal identity, delivery recipient and address
 fields in follow-ups without persisting private context as chat messages.
-At 10k concurrent agents, the change adds one indexed unique-user lookup per
-chat turn, no polling, global fan-in or tree-wide work. Grep retains the shared
+The privacy regression verifies zero profile reads for DEMO roots/children,
+including write-through-enabled live misses, and an empty profile suffix for
+both phases. At 10k concurrent agents, the change adds bounded indexed agent
+eligibility reads and one unique-user lookup per ordinary chat turn, no polling, global fan-in or tree-wide work. Grep retains the shared
 service's existing limits and lifecycle; a separately owned oversized-result
 incident is outside this profile repair and is not claimed fixed here.
 
