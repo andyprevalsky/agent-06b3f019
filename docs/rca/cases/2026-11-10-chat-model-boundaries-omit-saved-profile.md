@@ -59,8 +59,7 @@ loaded Message rows, and its model builders deliberately ignore persisted
 SYSTEM rows, so adding a SYSTEM row cannot repair the profile-delivery boundary.
 
 The unchanged permanent blackbox seeds two isolated users and captures the
-actual serialized provider requests from the real chat handler. On original
-source and again on current-main baseline `1f1e176a4`, six direct/search
+actual serialized provider requests from the real chat handler. In the retained current-main baseline `1f1e176a4` execution, six direct/search
 Router/Generator requests omit all ten populated fixture profile fields:
 `AssertionError ... 6 !== 0`. On the fixed source it passes, verifies the fresh
 address on the next turn, preserves SYSTEM filtering, prevents profile
@@ -129,7 +128,13 @@ service's existing limits and lifecycle; a separately owned oversized-result
 incident is outside this profile repair and is not claimed fixed here.
 
 Local causal fail/pass is complete; deployment and live outcome verification
-are pending. No historical original-request or original-model replay is claimed.
+are pending. Full gates found two source-location guards that still searched
+for inline declarations in the pre-extraction files: the router cache stage
+catalog unit and the SMS benchmark judge's selected-profile-field check. Their
+unchanged tests failed before adaptation. The fixes follow the actual imported
+catalog/selector, retaining canonical stage names and both exact profile-field
+equalities. Independent review confirmed the guarded contracts are preserved.
+These are test-location corrections; the extracted production data is unchanged. No historical original-request or original-model replay is claimed.
 
 ## Human feedback
 
