@@ -1200,7 +1200,7 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
             return still_bound(state, receipt, entry)
         if entry and entry.get("kind") == "native-cloud-cleanup-v1":
             from deploy_test_native_cleanup import still_bound
-            return still_bound(entry, receipt, owner)
+            return still_bound(entry, receipt, owner, state)
         return bool(entry) and entry.get("token") == receipt.get("token") and receipt.get("worker_result") \
             and entry.get("worker_result_sha256") == sha_file(receipt["worker_result"]) \
             and entry.get("owner") == {k: owner.get(k) for k in OWNER_FIELDS}
@@ -1208,16 +1208,34 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
 
 
+def isolated_obligation_gates(state: dict) -> set[str]:
+    """Both current and archived originals remain obligations after normal retirement."""
+    rows = [*state.get('reconciled_owners', {}).values(), *state.get('reconciled_owner_history', [])]
+    return {e['gate'] for e in rows if e.get('purpose') == 'isolated-validation'
+            or 'retired_isolation_sha256' in e}
+
+
 def isolated_admissions(state: dict, gate: str):
     from deploy_test_native_cleanup import still_bound
-    entries = [e for e in state.get('reconciled_owners', {}).values()
-               if e.get('purpose') == 'isolated-validation' and e.get('gate') == gate]
-    for entry in entries:
+    for origin in state.get('reconciled_owner_history', []):
+        if origin.get('gate') == gate and origin.get('purpose') == 'isolated-validation':
+            active = state.get('reconciled_owners', {}).get(origin['proof']['receipt_sha256'])
+            if not active or (active.get('purpose') != 'isolated-validation'
+                              and 'retired_isolation_sha256' not in active):
+                raise ValueError(f'{gate}: archived isolated-validation obligation lost; refuse launch/completion')
+    obligations = [e for e in state.get('reconciled_owners', {}).values()
+                   if e.get('gate') == gate and (e.get('purpose') == 'isolated-validation'
+                                                or 'retired_isolation_sha256' in e)]
+    for entry in obligations:
+        matching = [(key, row) for key, row in state.get('reconciled_owners', {}).items()
+                    if row.get('token') == entry.get('token')]
+        if len(matching) != 1 or matching[0][0] != entry['proof']['receipt_sha256']:
+            raise ValueError(f'{gate}: original isolated-validation obligation ambiguous; refuse launch/completion')
         receipts = [r for a in state.get('attempts', []) for r in a.get('results', [])
                     if r.get('gate') == gate and r.get('token') == entry.get('token')]
-        if len(receipts) != 1 or not still_bound(entry, receipts[0], receipt_owner(gate, receipts[0])):
+        if len(receipts) != 1 or not still_bound(entry, receipts[0], receipt_owner(gate, receipts[0]), state):
             raise ValueError(f'{gate}: original isolated-validation obligation changed; refuse launch/completion')
-    return entries
+    return [e for e in obligations if e.get('purpose') == 'isolated-validation']
 
 
 def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: dict) -> list[dict]:
@@ -2506,9 +2524,10 @@ def pending_completion_block(state: dict) -> str | None:
         blocked = election_block(state)
         if blocked:
             return blocked
-        for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
-                     if e.get('purpose') == 'isolated-validation'}:
-            isolated_admissions(state, gate)
+        for gate in isolated_obligation_gates(state):
+            active = isolated_admissions(state, gate)
+            if not active:
+                continue  # Recheck retired custody without restoring an isolated launch restriction.
             latest = latest_receipts(state).get(gate, {})
             full = next(g for g in state['plan']['gates'] if g['name'] == gate)
             if (set(latest.get('cases', {})) != set(full['checks'])
@@ -2552,8 +2571,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
         for gate in plan['gates']:
             if gate['name'] in state.get('carried_passes', {}) and not carried_pass(state, gate):
                 return 5
-        for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
-                     if e.get('purpose') == 'isolated-validation'}:
+        for gate in isolated_obligation_gates(state):
             isolated_admissions(state, gate)
         blocked = quarantine.attribution_block(state.get('flaky', []), root)
         if blocked:

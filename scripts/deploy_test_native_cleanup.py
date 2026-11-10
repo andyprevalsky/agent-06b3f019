@@ -1698,7 +1698,7 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     reconciliation_occurrence(state, entry, successor)
     # Re-run the unchanged normal validator: all native file hashes, audits, retained Hub custody,
     # provider release and publication closure are required even when this result is incomplete.
-    need(still_bound(entry, successor, owner), 'strict normal successor proof changed')
+    need(still_bound(entry, successor, owner, state), 'strict normal successor proof changed')
     need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
          and finite(successor.get('finished_at'))
          and original['finished_at'] <= successor['started_at'] <= successor['finished_at'],
@@ -1784,6 +1784,61 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
                 'witness': copy.deepcopy(renewal_witness)})
 
 
+def retired_isolation_origin(state, entry):
+    """Keep the complete isolated evidence binding after a separate normal retirement."""
+    from deploy_test_cycle import digest
+    seal = entry.get('retired_isolation_sha256')
+    need(isinstance(seal, str) and re.fullmatch(r'[0-9a-f]{64}', seal), 'retired isolation seal')
+    origins = [row for row in state.get('reconciled_owner_history', []) if digest(row) == seal]
+    need(len(origins) == 1, 'one archived isolated origin required')
+    prior = origins[0]
+    need(prior.get('kind') == KIND and prior.get('purpose') == 'isolated-validation'
+         and 'retired_isolation_sha256' not in prior
+         and all(prior.get(k) == entry.get(k) for k in ('gate', 'token', 'owner', 'occurrence'))
+         and prior['proof']['receipt_sha256'] == entry['proof']['receipt_sha256'],
+         'archived isolated origin identity')
+    return prior
+
+
+def retire_known_isolation(state, occurrence_id, proof, key, prior):
+    """Admit strict normal cleanup for a known original without rewriting its result."""
+    from deploy_test_cycle import CANCEL, digest, receipt_owner, source
+    need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
+         and not state.get('running') and 'live_failures' not in state and not CANCEL.is_set(),
+         'quiescent repair boundary required')
+    need([k for k, e in state.get('reconciled_owners', {}).items()
+          if e.get('token') == prior['token']] == [key], 'token already reconciled elsewhere')
+    need(not any(k in proof for k in ('purpose', 'validation_source', 'execution_quiescence', 'excluded_resources'))
+         and proof.get('layout') == 'campaign-v1' and key == proof.get('receipt_sha256')
+         and occurrence_id in {prior['token'], prior.get('occurrence')}, 'original retirement identity')
+    need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']),
+         'native_cloud gate required')
+    receipts = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
+                if row.get('gate') == prior['gate'] and row.get('token') == prior['token']]
+    need(len(receipts) == 1, 'original receipt identity')
+    receipt = receipts[0]
+    owner = receipt_owner(prior['gate'], receipt)
+    need(state['source'] == state['plan'].get('source') == source(Path(owner['worker_root'])),
+         'current source binding')
+    reconciliation_occurrence(state, prior, receipt)
+    need(still_bound(prior, receipt, owner, state), 'prior native proof changed')
+    entry = validate(receipt, owner, proof)
+    entry['occurrence'] = prior['occurrence']
+    if 'retired_isolation_sha256' in prior:
+        need(proof == prior['proof'], 'normal retirement replay changed')
+        entry['retired_isolation_sha256'] = prior['retired_isolation_sha256']
+        need(entry == prior, 'normal retirement replay changed')
+        return
+    need(prior.get('purpose') == 'isolated-validation', 'isolated origin required')
+    seal = digest(prior)
+    need(not any(digest(row) == seal for row in state.get('reconciled_owner_history', [])),
+         'isolated origin already archived')
+    entry['retired_isolation_sha256'] = seal
+    # Publish only after every original and normal guard has passed.
+    state.setdefault('reconciled_owner_history', []).append(copy.deepcopy(prior))
+    state['reconciled_owners'][key] = entry
+
+
 def reconcile(state, occurrence_id, proof, renewal_witness=None):
     """Record verified retirement while preserving the original native result and credit."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
@@ -1792,6 +1847,12 @@ def reconcile(state, occurrence_id, proof, renewal_witness=None):
         existing = [entry for entry in state.get('reconciled_owners', {}).values()
                     if entry.get('kind') == KIND and entry.get('purpose') == 'isolated-validation'
                     and entry.get('token') == proof.get('request_token')]
+        known = [(key, entry) for key, entry in state.get('reconciled_owners', {}).items()
+                 if entry.get('kind') == KIND and entry.get('token') == proof.get('request_token')
+                 and (entry.get('purpose') == 'isolated-validation' or 'retired_isolation_sha256' in entry)]
+        if proof.get('purpose') is None and known:
+            need(renewal_witness is None and len(known) == 1, 'one original retirement required')
+            return retire_known_isolation(state, occurrence_id, proof, *known[0])
         if proof.get('purpose') == 'isolated-validation' and existing:
             need(len(existing) == 1, 'one prior reconciliation required')
             prior = existing[0]
@@ -1841,9 +1902,15 @@ def reconcile(state, occurrence_id, proof, renewal_witness=None):
     state.setdefault('reconciled_owners', {})[key] = entry
 
 
-def still_bound(entry, receipt, owner):
+def still_bound(entry, receipt, owner, state=None):
     try:
+        if 'retired_isolation_sha256' in entry:
+            need(state is not None, 'retired isolation custody state required')
+            origin = retired_isolation_origin(state, entry)
+            reconciliation_occurrence(state, origin, receipt)
+            need(still_bound(origin, receipt, owner), 'archived isolated proof changed')
         actual = validate(receipt, owner, entry['proof'])
-        return actual == {k: v for k, v in entry.items() if k != 'occurrence'}
+        return actual == {k: v for k, v in entry.items()
+                          if k not in {'occurrence', 'retired_isolation_sha256'}}
     except (OSError, ValueError, KeyError, TypeError):
         return False

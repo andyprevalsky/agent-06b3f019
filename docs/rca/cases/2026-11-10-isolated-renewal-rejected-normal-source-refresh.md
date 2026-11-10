@@ -52,3 +52,15 @@ The user requires a completed deployment on repaired source while preserving ori
 ## Reusable lesson
 
 A normal refresh must expose a safe renewal boundary. Preserve prelaunch refusals as failed coverage while distinguishing them narrowly from actual native execution for launch-only authority.
+
+## Strict normal retirement after a newer successful cohort
+
+A later source refresh exposed a different admission gap. The latest full native cohort legitimately executes twelve eligible cases and preserves one historical financial case as SKIP with false execution completeness. Isolated successor renewal refuses its all-thirteen-complete requirement. That refusal remains correct; historical custody never becomes execution credit.
+
+The original operation now independently satisfies the unchanged normal cleanup validator: fifteen participants and 303 authentic file bindings, versus the isolated proof's 230. Public reconciliation nevertheless selected only the latest incomplete operation, refusing both original selectors after a newer complete result. Exact same-suite public-command assertions reproduce both refusals before the repair.
+
+The correction admits a separate normal campaign proof only for the unique already reconciled original at the existing quiescent repair boundary. It authenticates the original receipt, selector, source, owner, current checkout and every prior proof binding, then runs unchanged normal validation. The entire prior isolated entry moves to sealed history; the active normal record grants zero test credit. Admission and completion continue rechecking the archived original, including five original-only bindings. Exact replay is idempotent; changed replay or missing, duplicated or altered origin evidence refuses atomically. Latest receipts, original native failures, cleanup flags, financial custody and all clocks stay untouched. Normal retained-Hub custody remains distinct from separately verified current process retirement.
+
+The new unchanged owning regression fails before the source fix and passes afterward. Full suite, independent review, canonical frozen-source retirement, fresh full native acceptance and deployment are tracked separately; this local result is not completed deployment proof.
+
+Independent adversarial review found two candidate defects before freeze: saved completion/verification selected only active isolation, and the new early-return transition missed an unsealed conflicting token entry. Existing owning controls reproduce seven failures before correction. The repair now selects obligations from active entries and archived isolated origins at launch, saved verification and completion; only active isolation retains the later full-coverage restriction. Global token/key uniqueness remains mandatory at retirement and subsequent admission. Saved-verification controls bind a legal disposable plan and establish a clean baseline before corrupting the actual archived origin. Earlier candidate suite PASS and interrupted stability results do not validate these later bytes; final full-suite, five consecutive loaded runs and follow-up review are separate evidence.

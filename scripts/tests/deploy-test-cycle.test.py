@@ -5788,6 +5788,121 @@ class Cycle(unittest.TestCase):
         self.assertNotIn('purpose',entry);self.assertEqual(before,state['attempts'])
         self.assertTrue(c._reconciled(state,state['attempts'][-1]['results'][0],proof['owner']))
 
+    def test_known_isolation_can_retire_normally_after_newer_complete_result(self):
+        state, occurrence, paths, normal, fleet = self.normal_failed_canary_state()
+        isolated = dict(copy.deepcopy(normal), purpose='isolated-validation',
+                        validation_source=copy.deepcopy(state['source']),
+                        execution_quiescence={'machine1': {'sealed_native_release': True}})
+        extra = self.root / '.context/isolation-only.txt'
+        extra.write_text('Retained original isolation evidence')
+        isolated['files'][str(extra)] = c.sha_file(extra)
+        c.reconcile(state, occurrence['id'], isolated)
+        state.update(phase='quick', ready=False, source=c.source(self.root))
+        state['plan']['source'] = copy.deepcopy(state['source'])
+        # A newer result must never replace the original receipt used by retirement.
+        state['attempts'].append(dict(phase='focused', results=[dict(
+            gate=occurrence['gate'], token='newer-complete-operation', complete=True,
+            status='PASS', cases={'fixture': 'PASS'})]))
+        original = state
+        for selector in (normal['request_token'], occurrence['id']):
+            with self.subTest(selector=selector):
+                state = copy.deepcopy(original)
+                before = copy.deepcopy(state)
+                key = normal['receipt_sha256']
+                prior = copy.deepcopy(state['reconciled_owners'][key])
+                c.reconcile(state, selector, normal)
+                current = state['reconciled_owners'][key]
+                self.assertNotIn('purpose', current)
+                self.assertFalse(current['credit_granted'])
+                self.assertEqual([prior], state['reconciled_owner_history'])
+                for field in before.keys() - {'reconciled_owners', 'reconciled_owner_history'}:
+                    self.assertEqual(before[field], state[field], field)
+                self.assertEqual([], c.isolated_admissions(state, occurrence['gate']))
+                same = copy.deepcopy(state)
+                c.reconcile(state, selector, normal)
+                self.assertEqual(same, state)
+        # This file is absent from the new normal proof but remains mandatory.
+        (self.root / '.context/isolation-only.txt').write_text('changed')
+        with self.assertRaises(ValueError):
+            c.isolated_admissions(state, occurrence['gate'])
+
+    def test_known_isolation_normal_retirement_rejects_drift_atomically(self):
+        state, occurrence, paths, normal, fleet = self.normal_failed_canary_state()
+        isolated = dict(copy.deepcopy(normal), purpose='isolated-validation',
+                        validation_source=copy.deepcopy(state['source']),
+                        execution_quiescence={'machine1': {'sealed_native_release': True}})
+        extra = self.root / '.context/isolation-only.txt'
+        extra.write_text('Retained original isolation evidence')
+        isolated['files'][str(extra)] = c.sha_file(extra)
+        c.reconcile(state, occurrence['id'], isolated)
+        state.update(phase='quick', ready=False, source=c.source(self.root))
+        state['plan']['source'] = copy.deepcopy(state['source'])
+        # A newer result must never replace the original receipt used by retirement.
+        state['attempts'].append(dict(phase='focused', results=[dict(
+            gate=occurrence['gate'], token='newer-complete-operation', complete=True,
+            status='PASS', cases={'fixture': 'PASS'})]))
+        original = state
+        key = normal['receipt_sha256']
+        mutations = {
+            'ready': lambda s, p: s.update(ready=True),
+            'running': lambda s, p: s.update(running={'smoke': {}}),
+            'live-failure': lambda s, p: s.update(live_failures=[]),
+            'phase': lambda s, p: s.update(phase='interrupted'),
+            'source': lambda s, p: s['source'].update(head='e' * 40),
+            'plan-source': lambda s, p: s['plan']['source'].update(digest='e' * 64),
+            'owner': lambda s, p: p['owner'].update(request_token='foreign'),
+            'token': lambda s, p: p.update(request_token='unknown'),
+            'receipt': lambda s, p: p.update(receipt_sha256='0' * 64),
+            'adapter': lambda s, p: p.update(worker_result_sha256='0' * 64),
+            'purpose': lambda s, p: p.update(purpose='unrecognized'),
+            'validation-source': lambda s, p: p.update(validation_source=s['source']),
+            'exclusion': lambda s, p: p.update(excluded_resources={}),
+            'missing-binding': lambda s, p: p['files'].pop(next(iter(p['files']))),
+            'ambiguous': lambda s, p: s['reconciled_owners'].update(duplicate=copy.deepcopy(s['reconciled_owners'][key])),
+            'foreign-unsealed': lambda s, p: s['reconciled_owners'].update(foreign=dict(kind='foreign', token=p['request_token'])),
+            'native-unsealed': lambda s, p: s['reconciled_owners'].update(foreign=dict(kind=p['kind'], token=p['request_token'])),
+            'prior-proof': lambda s, p: s['reconciled_owners'][key]['proof']['files'].update({str(self.root / '.context/isolation-only.txt'): '0' * 64}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                state, proof = copy.deepcopy(original), copy.deepcopy(normal)
+                mutate(state, proof)
+                before = copy.deepcopy(state)
+                with self.assertRaises(ValueError):
+                    c.reconcile(state, occurrence['id'], proof)
+                self.assertEqual(before, state)
+        c.reconcile(original, occurrence['id'], normal)
+        changed = dict(normal, confirmed_at=normal['confirmed_at'] + .001)
+        before = copy.deepcopy(original)
+        with self.assertRaises(ValueError):
+            c.reconcile(original, occurrence['id'], changed)
+        self.assertEqual(before, original)
+        # Bind a saved verification fixture without inventing any native result.
+        saved = copy.deepcopy(original)
+        next(g for g in saved['plan']['gates'] if g['name'] == occurrence['gate']).update(
+            worker_transport='benchmark-cloud-cli',
+            command=[sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')])
+        saved.update(phase='ready', ready=True, plan_digest=c.digest(saved['plan']),
+                     environment=c.environment_digest(),
+                     input_fingerprints=c.input_fingerprints(saved['plan'], self.root))
+        c.write(self.directory / 'cycle.json', saved)
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        for name in ('missing-origin', 'duplicate-origin', 'changed-origin', 'lost-marker', 'duplicate-active'):
+            with self.subTest(name=name):
+                state = copy.deepcopy(original)
+                if name == 'missing-origin': state['reconciled_owner_history'] = []
+                elif name == 'duplicate-origin': state['reconciled_owner_history'] *= 2
+                elif name == 'changed-origin': state['reconciled_owner_history'][0]['credit_granted'] = True
+                elif name == 'lost-marker': state['reconciled_owners'][key].pop('retired_isolation_sha256')
+                else: state['reconciled_owners']['duplicate'] = copy.deepcopy(state['reconciled_owners'][key])
+                with self.assertRaises(ValueError):
+                    c.isolated_admissions(state, occurrence['gate'])
+                self.assertIn('obligation', c.pending_completion_block(state) or '')
+                state.update(phase='ready', ready=True, plan=copy.deepcopy(saved['plan']), plan_digest=saved['plan_digest'],
+                             environment=saved['environment'], input_fingerprints=saved['input_fingerprints'])
+                c.write(self.directory / 'cycle.json', state)
+                self.assertEqual(2, c.verify_saved(self.directory, self.root))
+
     def test_normal_zero_failed_canary_requires_absence(self):
         state,occurrence,paths,proof,fleet=self.normal_failed_canary_state(zero=True)
         before=copy.deepcopy(state)

@@ -634,3 +634,15 @@ current binding and complete transferred obligations. Removing any protected
 failure/history/projection fails closed during ordinary guard/admission/verify
 as well as replay. Duplicate identities and changed debt wrappers are rejected
 before atomic publication. No provider timestamps are refreshed.
+
+An already reconciled isolated native operation may later satisfy strict normal
+cleanup itself. At the existing quiescent renewal boundary, submit a **new separate**
+normal campaign-v1 proof with the original token or occurrence to `reconcile`.
+The original receipt, owner, source and prior file bindings must still validate;
+all normal native cleanup guards also run. This does not use a newer successor
+or change its completeness requirements. The coordinator archives the entire
+isolated entry under a verified history seal and records zero-credit normal
+retirement at the original receipt key. Exact replay is idempotent; changed
+replay refuses. Future admission/completion still rechecks the archived evidence.
+Retained service custody does not claim a historical service termination or a
+new test execution. Original failures and financial no-retry custody remain.
