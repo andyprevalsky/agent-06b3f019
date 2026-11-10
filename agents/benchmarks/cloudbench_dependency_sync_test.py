@@ -37,6 +37,8 @@ import pytest
 from benchmarks.fixture_host_guard import FIXTURE_DRAIN_SECONDS, FIXTURE_HOST_GUARD_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
 PRISMA_SYNC_SCRIPT = ROOT / "scripts" / "cloudbench-sync-prisma-client.sh"
 ENV_HELPER_SCRIPT = ROOT / "scripts" / "lib" / "cloudbench-env.sh"
@@ -35249,10 +35251,13 @@ fleet_clone_with_queue_admission 2 {shlex.quote(str(task_root / "primary.ids"))}
                     environment.pop(key, None)
             process = subprocess.Popen(["bash", "-c", script], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             children.append(process); native_pids[job] = process.pid + (99999 if case == "foreign" else 0)
-        until = time.monotonic() + 10
-        while not all((tmp_path / f"ready-{index}").exists() for index in range(count)):
-            assert time.monotonic() < until
-            time.sleep(.01)
+        def all_children_ready():
+            ready = all((tmp_path / f"ready-{index}").exists() for index in range(count))
+            if not ready:
+                assert all(child.poll() is None for child in children), "child exited before readiness"
+            return ready
+
+        wait_until(all_children_ready, timeout=10, description="all campaign children ready")
         (barrier / "manifest.json").write_text(json.dumps(dict(cohort_id="c001", jobs=native_pids, e2e_deadline_monotonic=deadline))); (barrier / "manifest.json").chmod(0o600)
         if case == "abort": (barrier / "abort.json").touch()
         if case == "unheld": fcntl.flock(lock, fcntl.LOCK_UN)
@@ -35285,10 +35290,13 @@ fleet_clone_with_queue_admission 2 {shlex.quote(str(task_root / "primary.ids"))}
                         waiting += 1
                 return waiting
 
-            until = time.monotonic() + 3
-            while waiting_pace_processes() < count:
-                assert time.monotonic() < until
-                time.sleep(.01)
+            def all_pace_children_waiting():
+                ready = waiting_pace_processes() >= count
+                if not ready:
+                    assert all(child.poll() is None for child in children), "child exited before pace wait"
+                return ready
+
+            wait_until(all_pace_children_waiting, timeout=3, description="all strict-primary pace waiters")
             assert not any((tmp_path / f"rpc-{index}").exists() for index in range(count))
             if case == "queued_abort": (barrier / "abort.json").touch()
             elif case == "queued_finished":

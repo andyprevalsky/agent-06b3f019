@@ -287,7 +287,7 @@ test('dark mobile agents use robots and retain one-layer disclosure', async ({ p
   expect(contrast.text).toBeGreaterThanOrEqual(4.5);
   expect(contrast.robot).toBeGreaterThanOrEqual(3);
   await expect(root.locator('svg.lucide-bot')).toBeVisible();
-  await expect(drawer.locator('[data-letter]')).toHaveCount(0);
+  await expect(drawer.locator('[data-testid^="rose-agent-row-"] [data-letter]')).toHaveCount(0);
   await drawer.getByRole('button', { name: 'Expand Launch a product', exact: true }).click();
   await expect(drawer.getByTestId('rose-agent-row-research')).toBeVisible();
   await expect(drawer.getByTestId('rose-agent-row-competitors')).toHaveCount(0);
@@ -299,7 +299,12 @@ test('dark mobile agents use robots and retain one-layer disclosure', async ({ p
   await expect(
     drawer.getByTestId('rose-agent-row-competitors').locator('svg.lucide-bot'),
   ).toBeVisible();
-  await expect(drawer.locator('[data-letter]')).toHaveCount(0);
+  await expect(drawer.locator('[data-testid^="rose-agent-row-"] [data-letter]')).toHaveCount(0);
+  for (const id of ['build', 'landing']) {
+    const codeRow = drawer.getByTestId(`rose-code-agent-row-${id}`);
+    await expect(codeRow).toHaveAttribute('data-provider', 'codex');
+    await expect(codeRow.locator('[data-letter]')).toHaveCount(1);
+  }
   await expect(drawer.getByRole('button', { name: /Build landing page/ })).toBeVisible();
   await page.screenshot({ path: '/tmp/rose-dark-mobile-agents.png' });
   await drawer.getByRole('button', { name: 'Collapse Launch a product', exact: true }).click();

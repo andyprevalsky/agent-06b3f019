@@ -2031,7 +2031,8 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
     if state['phase'] in {'initial', 'final'}:
         for gate in selected:
             for path in (directory / 'attempts').glob('*/' + '*/' + gate['name'] + '/request.json'):
-                if not (path.parent / 'receipt.json').is_file():
+                if (not (path.parent / 'receipt.json').is_file()
+                        and not settled_round49_missing_request(state, directory, gate, path)):
                     raise ValueError('prior worker request has unknown terminal ownership')
     held_rows = []
     prerequisite = cloud_smoke_prerequisite(plan, state, selected)
@@ -2885,9 +2886,14 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path |
             raise ValueError('FINAL refresh requires the exact saved native cycle')
         if retained_owners(state, [g['name'] for g in old['gates']]):
             raise ValueError('FINAL refresh has unreconciled worker ownership')
-        if any(not (path.parent / 'receipt.json').is_file()
-               for path in (directory / 'attempts').glob('*/*/*/request.json')):
-            raise ValueError('FINAL refresh has a worker request with unknown terminal ownership')
+        for path in (directory / 'attempts').glob('*/*/*/request.json'):
+            if (path.parent / 'receipt.json').is_file():
+                continue
+            # Retirement belongs to the saved selection, before any source rebind.
+            gates = [gate for gate in old['gates'] if gate['name'] == path.parent.name]
+            if (len(gates) != 1
+                    or not settled_round49_missing_request(state, directory, gates[0], path)):
+                raise ValueError('FINAL refresh has a worker request with unknown terminal ownership')
     unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))

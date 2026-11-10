@@ -603,8 +603,16 @@ def keep_receipt_image_urls(receipt: Any, visible: Any, project: Any) -> None:
     for original, visible_item in zip(original_items, visible_items):
         if not isinstance(original, dict) or not isinstance(visible_item, dict):
             continue
+        visible_item.pop("image_url", None)
         url = original.get("image_url")
-        if isinstance(url, str) and url.startswith(("https://", "http://")):
+        if not isinstance(url, str):
+            continue
+        try:
+            parsed = urlparse(url)
+            valid_url = parsed.scheme in ("http", "https") and bool(parsed.hostname)
+        except ValueError:
+            valid_url = False
+        if valid_url:
             visible_item["image_url"] = project(url)
 
 

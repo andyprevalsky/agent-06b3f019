@@ -1779,6 +1779,9 @@ async def execute_action(
     for key in ("agent_id", "browser_task_id", "tool_call_id_decision", "phone_snapshot"):
         execution.pop(key)
     execution.pop("successful_secret_refs")
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
     previous_action_step = None
     action_execution_started = False
     if successful_secret_refs is not None:
@@ -1837,7 +1840,7 @@ async def execute_action(
             original_text = model_params.get("text")
             if isinstance(original_text, str):
                 used_credential = (credential_refs_by_secret_ref or {}).get(original_text)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, WorkflowGenerationSealed, TemporalCancelledError):
         raise
     except Exception as error:
         error_text = visible(str(error))
@@ -1868,6 +1871,8 @@ async def execute_action(
         with secret_logging_context(refs):
             return await prepare_browser_result(action_name, safe_result, user_id=user_id,
                                                 agent_id=current_agent_id() or "", session_id=session_id or "")
+    except (WorkflowGenerationSealed, TemporalCancelledError):
+        raise
     except Exception as error:
         return {"success": False, "error": visible(f"Action result retention failed; action may have executed: {error}")}
 

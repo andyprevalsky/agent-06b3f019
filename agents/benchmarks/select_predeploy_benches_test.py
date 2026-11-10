@@ -1225,3 +1225,36 @@ def test_refresh_omits_only_explicit_deploy_quarantines(tmp_path, monkeypatch):
     catalog.write_text(json.dumps(rows))
     with pytest.raises(ValueError):
         quarantine.deploy_selection_omissions(tmp_path, {**before, "category": "backend"}, after)
+
+
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+@pytest.mark.parametrize("fields,eligible", [
+    ({}, True),
+    ({"status": "retired"}, False),
+    ({"status": "incomplete"}, False),
+    ({"production_only": True}, False),
+])
+def test_manual_eligibility_bypasses_only_deploy_quarantine(tmp_path, surface, fields, eligible):
+    from .select_predeploy_benches import _eligible, load_tasks
+
+    catalog = tmp_path / "tasks.json"
+    catalog.write_text(json.dumps([{
+        "name": "manual-task", "tags": ["smoke"],
+        "deploy_quarantine": "user-directed deploy omission", **fields,
+    }]))
+    task = load_tasks(catalog)[0]
+    assert not _eligible(task, surface)
+    assert _eligible(task, surface, for_deploy=False) is eligible
+
+
+def test_manual_cloud_eligibility_still_rejects_local_only(tmp_path):
+    from .select_predeploy_benches import _eligible, load_tasks
+
+    catalog = tmp_path / "tasks.json"
+    catalog.write_text(json.dumps([{
+        "name": "manual-local", "tags": ["local-only"],
+        "deploy_quarantine": "user-directed deploy omission",
+    }]))
+    task = load_tasks(catalog)[0]
+    assert _eligible(task, "local", for_deploy=False)
+    assert not _eligible(task, "cloud", for_deploy=False)

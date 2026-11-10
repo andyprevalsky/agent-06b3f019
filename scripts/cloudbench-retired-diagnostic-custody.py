@@ -237,8 +237,30 @@ def recover(registry, common, native_read, volume_read, guard_fd, pid, birth):
                'normal_runtime_verified':False,'guest_ack_observed':False,'diagnostic_only':True,
                'binding':p,'native':observed,'small_originals_b64':originals,
                'verifier_sha256':sha(read(Path(__file__),1048576))}
-    P['save'](destination / 'receipt.json', receipt)
+    receipt_path = destination / 'receipt.json'
+    if receipt_path.exists():
+        previous = json.loads(read(receipt_path, 16 * 1048576))
+        need(isinstance(previous, dict) and set(previous) == set(receipt), 'saved diagnostic receipt schema changed')
+        need(all(previous[key] == value for key, value in receipt.items() if key != 'native'),
+             'saved diagnostic receipt binding changed')
+        native = previous['native']
+        need(isinstance(native, dict) and set(native) == set(observed), 'saved native observation schema changed')
+        old_machine, old_volume = native.get('machine'), native.get('volume')
+        need(isinstance(old_machine, dict) and set(old_machine) == set(observed['machine'])
+             and all(old_machine[key] == value for key, value in observed['machine'].items() if key != 'updated_at'),
+             'saved native Machine identity changed')
+        need(isinstance(old_volume, dict) and set(old_volume) == set(observed['volume'])
+             and old_volume.get('state') in ('pending_destroy', 'destroyed')
+             and all(old_volume[key] == value for key, value in observed['volume'].items() if key != 'state'),
+             'saved native Volume identity changed')
+        need(all(re.fullmatch('[0-9a-f]{64}', str(native[key])) for key in ('machine_sha256', 'volume_sha256')),
+             'saved native observation hash malformed')
+        receipt = previous  # Fresh native reads above prove closure; retain the original observation.
+    else:
+        P['save'](receipt_path, receipt)
+    saved_bytes = read(receipt_path, 16 * 1048576)
     need(plan(registry, common) == p, 'custody changed before latch retirement')
+    need(read(receipt_path, 16 * 1048576) == saved_bytes, 'saved receipt changed before latch retirement')
     (Path(registry) / 'runtime-evidence-unconfirmed').unlink();P['sync'](Path(registry))
     return receipt
 

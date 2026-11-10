@@ -6,6 +6,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
 import { handleRouteError } from './routes.helpers';
+import { resolveAgentReadAccess } from './routes.guards';
 import { updateStatusSchema } from './types';
 import { workerWriteGeneration } from '../../providers/codeResumeGeneration';
 import { applyResumeCost } from './agentResumeCostService';
@@ -19,7 +20,8 @@ router.get(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const result = await queryService.getAgentStatus(req.params.id);
+      const { userId } = resolveAgentReadAccess(req);
+      const result = await queryService.getAgentStatus(req.params.id, userId);
       if (result === null) {
         res.status(404).json({ error: 'Agent not found' });
         return;

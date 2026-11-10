@@ -136,6 +136,13 @@ def test_existing_catalog_rows_unchanged():
         for row in rows:
             validate_task_quarantine(row, row['name'])
             row.pop('quarantine', None)
+            if 'deploy_quarantine' in row:
+                assert row['name'] == 'test-mass-agent-run-0'
+                assert row.pop('deploy_quarantine') == (
+                    'User-directed indefinite exclusion from all deploys (2026-11-10, PR1682): '
+                    'flaky mass-agent test. Keep explicit benchmark execution and historical '
+                    'failures; do not count this omission as PASS.'
+                )
     # Sync retains every row from the reviewed main snapshot; phone tasks append only.
     assert current[:len(old)] == old
 

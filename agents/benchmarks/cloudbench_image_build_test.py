@@ -28,6 +28,8 @@ import pytest
 from benchmarks.cloudbench_image_cli_test import _image_dependency_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import WaitTimeout, wait_until
 IMAGES = ("Dockerfile.cloudbench-warm", "Dockerfile.cloudbench")
 
 
@@ -409,9 +411,8 @@ def test_cloudbench_image_build_stages_an_exact_git_seed_and_removes_it(tmp_path
     with (tmp_path / "private-cli.log").open("wb") as log:
         controller = subprocess.Popen(arguments, env=env, stdout=log, stderr=log, process_group=0)
         try:
-            deadline = time.monotonic() + 60
-            while not observed.exists() and controller.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.05)
+            wait_until(lambda: observed.exists() or controller.poll() is not None,
+                       timeout=60, description="publisher observation or early CLI exit")
             assert observed.is_file(), (tmp_path / "private-cli.log").read_text()
             record = json.loads(observed.read_text())
             seed = context / ".cloudbench-git-seed"
@@ -430,9 +431,12 @@ def test_cloudbench_image_build_stages_an_exact_git_seed_and_removes_it(tmp_path
                                                  stdout=competing_log, stderr=competing_log,
                                                  process_group=0)
                     try:
-                        deadline = time.monotonic() + 15
-                        while competing.poll() is None and not competing_observed.exists() and not early_ready.exists() and time.monotonic() < deadline:
-                            time.sleep(.02)
+                        try:
+                            wait_until(lambda: competing.poll() is not None or competing_observed.exists() or early_ready.exists(),
+                                       timeout=15, description="contender refusal or controlled client readiness")
+                        except WaitTimeout:
+                            # The original test cancels a still-blocked contender at this deadline.
+                            pass
                         if competing.poll() is None:
                             competing.send_signal(signal.SIGTERM)
                         competing.wait(timeout=30)
@@ -560,8 +564,9 @@ def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
         controller = subprocess.Popen(arguments, env=env, stdout=log, stderr=log, process_group=0)
         try:
             deadline = time.monotonic() + 60
-            while not ownership.exists() and controller.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.05)
+            wait_until(lambda: ownership.exists() or controller.poll() is not None,
+                       timeout=max(0, deadline - time.monotonic()),
+                       description="publisher ownership or early CLI exit")
             assert ownership.is_file(), "controlled publisher did not start"
             record = json.loads(ownership.read_text())
             processes = record["processes"]
@@ -578,10 +583,15 @@ def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
             )
             controller.send_signal(signal.SIGTERM)
             controller.wait(timeout=60)
-            states = [_image_build_process_state(pid, birth) for pid, birth in processes]
-            while "unknown" in states and time.monotonic() < deadline:
-                time.sleep(0.1)
+            states = []
+            def publisher_states_known():
+                nonlocal states
                 states = [_image_build_process_state(pid, birth) for pid, birth in processes]
+                return "unknown" not in states
+
+            # Retain the original shared deadline; controller.wait does not reset it.
+            wait_until(publisher_states_known, timeout=max(0, deadline - time.monotonic()),
+                       description="owned publisher process identities known")
             assert all(state in {"absent", "terminal", "replaced"} for state in states), (
                 f"owned publisher states after CLI exit: {states}"
             )

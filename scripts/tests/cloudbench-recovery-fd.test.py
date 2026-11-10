@@ -11,6 +11,8 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 
 
 def function(source, name, required=True):
@@ -21,13 +23,13 @@ def function(source, name, required=True):
 
 
 def wait_file(path, process=None):
-    deadline = time.monotonic() + 10
-    while not path.exists():
+    def ready():
+        if path.exists():
+            return True
         if process is not None and process.poll() is not None:
-            raise AssertionError('controller exited before ' + str(path))
-        if time.monotonic() >= deadline:
-            raise AssertionError('fixture readiness deadline: ' + str(path))
-        time.sleep(0.01)
+            raise AssertionError("owned fixture process exited before " + str(path))
+        return False
+    wait_until(ready, timeout=10, description="fixture readiness: " + str(path))
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "native FD receipt uses Linux procfs")

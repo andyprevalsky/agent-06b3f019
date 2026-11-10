@@ -109,7 +109,7 @@ test.describe('mobile-layout', () => {
     page,
   }) => {
     const rec = attachRecorder(page);
-    const task = await loadBenchmarkTask('claude-code-agent');
+    const task = await loadBenchmarkTask('chat-mode');
     const agentId = await createAgent(task.prompt);
 
     try {

@@ -11,17 +11,19 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 HELPER = ROOT / 'scripts/cloudbench-infra-canary-preflight.py'
 
 
 def wait_file(path, process=None):
-    deadline = time.monotonic() + 10
-    while not path.exists():
+    def ready():
+        if path.exists():
+            return True
         if process is not None and process.poll() is not None:
-            raise AssertionError('preflight exited before fixture readiness')
-        if time.monotonic() >= deadline:
-            raise AssertionError('fixture readiness missing: ' + str(path))
-        time.sleep(.01)
+            raise AssertionError("owned fixture process exited before " + str(path))
+        return False
+    wait_until(ready, timeout=10, description="fixture readiness: " + str(path))
 
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'FD receipts use Linux procfs')
@@ -94,14 +96,11 @@ raise SystemExit(int(os.environ['NATIVE_STATUS']))
                             self.assertFalse((base / 'daemon.done').exists())
                             self.assertNotIn(str(lock), native_receipt['fds'].values(),
                                              'native Fly inherited canary transaction custody')
-                            deadline=time.monotonic()+5
-                            while True:
-                                try:
-                                    fcntl.flock(challenger, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                                    break
-                                except BlockingIOError:
-                                    if time.monotonic()>=deadline:raise
-                                    time.sleep(.01)
+                            def guard_released():
+                                fcntl.flock(challenger, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                return True
+                            wait_until(guard_released, timeout=5, description="canary guard released after native join",
+                                       ignore_exceptions=(BlockingIOError,))
                     finally:
                         (base / 'native.release').touch()
                         if helper.poll() is None:

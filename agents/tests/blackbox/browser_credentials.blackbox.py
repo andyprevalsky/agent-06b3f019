@@ -1913,6 +1913,7 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async("action_boundary_propagates_generation_cancellation", test_action_boundary_propagates_generation_cancellation)
     await runner.record_async("deferred_passkey_injection_never_navigates", test_deferred_passkey_injection_never_navigates)
     await runner.record_async("background_credentials_ignore_late_realm_and_session_results", test_background_credentials_ignore_late_realm_and_session_results)
     await runner.record_async("background_credential_failure_is_safe_tool_state", test_background_credential_failure_is_safe_tool_state)
@@ -2352,3 +2353,35 @@ async def test_neutral_hydration_rejects_missing_context_and_nonempty_inventory(
             pass
         else:
             raise AssertionError(f"Accepted inconsistent neutral inventory: {mutation!r}")
+
+
+async def test_action_boundary_propagates_generation_cancellation():
+    import asyncio
+    from unittest.mock import patch
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    for stage in ("execute", "retention"):
+        errors = [WorkflowGenerationSealed("sealed"), TemporalCancelledError("cancelled"), asyncio.CancelledError()]
+        if stage == "execute":
+            errors.append(TimeoutError("timeout"))
+        for error in errors:
+            dom = DOMService("ws://fixture.invalid/never-connect")
+            execute = AsyncMock(side_effect=error) if stage == "execute" else AsyncMock(return_value={"success": True})
+            retain = AsyncMock(side_effect=error) if stage == "retention" else AsyncMock(side_effect=lambda _name, value, **kwargs: value)
+            with patch.object(service_actions, "_execute_resolved_action", execute), patch.object(service_actions, "prepare_browser_result", retain):
+                try:
+                    await service_actions.execute_action(dom, ActionHistory(), {"action": "wait", "params": {"time_ms": 1}})
+                except BaseException as observed:
+                    assert observed is error
+                else:
+                    raise AssertionError(f"{stage} swallowed {type(error).__name__}")
+            if stage == "execute":
+                retain.assert_not_awaited()
+            assert "WorkflowGenerationSealed" not in execute.call_args.kwargs
+            assert "TemporalCancelledError" not in execute.call_args.kwargs
+    with patch.object(service_actions, "_execute_resolved_action", AsyncMock(side_effect=ValueError("ordinary action failure"))), patch.object(service_actions, "prepare_browser_result", AsyncMock(side_effect=lambda _name, value, **kwargs: value)):
+        result = await service_actions.execute_action(DOMService("ws://fixture.invalid/never-connect"), ActionHistory(), {"action": "wait", "params": {"time_ms": 1}})
+    assert result["success"] is False and "ordinary action failure" in result["error"]

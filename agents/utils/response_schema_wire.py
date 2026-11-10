@@ -60,8 +60,10 @@ def wire_model(internal=False, reasoning=False, title=False):
         "Output fields. Use file_pointer for open-ended multi-attribute collections; keep small results inline. "
         "constraints set size bounds; required=false permits omission."
     )
-    fields = {
-        "nodes": (
+    fields = {}
+    if reasoning:
+        fields["reasoning"] = (str, Field(description="Analysis of the concrete outputs required."))
+    fields["nodes"] = (
             list[node],
             Field(
                 min_length=1 if reasoning else 0,
@@ -71,10 +73,7 @@ def wire_model(internal=False, reasoning=False, title=False):
                 ),
             ),
         )
-    }
     fields["presentation"] = (FinalPresentation | None, None)
-    if reasoning:
-        fields["reasoning"] = (str, Field(description="Analysis of the concrete outputs required."))
     if title:
         fields["title"] = (
             str,

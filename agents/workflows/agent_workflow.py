@@ -6331,6 +6331,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             await self._mark_complete(context, structured_response)
         except CompletionSupersededError:
             await self._flush_pending_messages()
+            await self._prepare_response_schema_continuation()
             workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
         except FinalPresentationError as error:
             await self._mark_failed(

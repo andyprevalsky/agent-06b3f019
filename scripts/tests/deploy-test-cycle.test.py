@@ -14,6 +14,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 # Source of the original round-37 inventory-init failure whose exact producer bytes the native validator pins.
 INVENTORY_INIT_PRODUCER_SOURCE = 'ce016428eeb484b19b503a6f65884eb92f1e3fde'
 # The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
@@ -11528,10 +11530,11 @@ class LocalCleanupQuietScan(unittest.TestCase):
                 children = (proc_dir / 'task' / str(child.pid) / 'children').read_text().split()
                 return uids == [str(os.getuid()), '0'] and bool(children)
             try:
-                deadline = time.monotonic() + 10
-                while not steady():
-                    self.assertLess(time.monotonic(), deadline, 'sudo never ran its command as root')
-                    time.sleep(0.05)
+                def sudo_command_ready():
+                    self.assertIsNone(child.poll(), "sudo fixture exited before root command readiness")
+                    return steady()
+                wait_until(sudo_command_ready, timeout=10,
+                           description="sudo runs its owned command as root")
                 with self.assertRaises(PermissionError):
                     (proc_dir / 'cwd').resolve(strict=True)
                 real_stat, seen = Path.stat, []
@@ -11546,13 +11549,16 @@ class LocalCleanupQuietScan(unittest.TestCase):
                     local.quiet(root)
                 self.assertEqual(seen, [proc_dir])
             finally:
-                deadline = time.monotonic() + 10
-                while child.poll() is None:
+                def owned_sudo_reaped():
+                    if child.poll() is not None:
+                        return True
                     try:
                         child.terminate()  # refused only while sudo briefly holds a root real uid
                     except PermissionError:
-                        self.assertLess(time.monotonic(), deadline, 'sudo fixture could not be stopped')
-                    time.sleep(0.05)
+                        pass  # pending, never terminal evidence
+                    return child.poll() is not None
+                wait_until(owned_sudo_reaped, timeout=10,
+                           description="owned sudo fixture stopped and reaped")
 
 
 class BackendPrismaPreflightCleanup(unittest.TestCase):
@@ -11926,7 +11932,11 @@ class Round49RetirementCertificates(unittest.TestCase):
             # The observer executes while the one exact admission fd remains locked.
             if inspect is not None:
                 import fcntl
-                lock = self.active_root / '.context/native-worker-admission.lock'
+                # Recognition can re-audit any committed gate, not only the last issued certificate.
+                closure = dict(zip(inspect.__code__.co_freevars,
+                                   (cell.cell_contents for cell in (inspect.__closure__ or ()))))
+                audited_root = closure.get('root', self.active_root)
+                lock = audited_root / '.context/native-worker-admission.lock'
                 with lock.open('r') as other:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -12202,6 +12212,84 @@ class Round49RetirementCertificates(unittest.TestCase):
         persisted = json.loads(path.read_text())
         self.assertTrue(c.settled_round49_missing_request(persisted, self.directory, self.gate, Path(self.proof['old_request'])))
         self.assertEqual(persisted['attempts'], self.state['attempts'])
+
+    def _final_retirement_boundary(self):
+        # Issue real certificates from the committed journal, not a mocked verifier.
+        for proof in self.proofs.values():
+            self.issue(proof)
+        self.state.update(phase='final', pending=[], running=False)
+        self.state['plan']['source'] = copy.deepcopy(self.state['source'])
+        self.state['plan_digest'] = c.digest(self.state['plan'])
+        self.state['environment'] = 'e' * 64
+        self.state['input_fingerprints'] = {g['name']: 'd' * 64 for g in self.gates}
+        self.put(self.directory / 'cycle.json', self.state)
+
+    def _assert_final_retirement_boundary(self, refresh, *, refused=False):
+        class BeforeNativeWork(Exception):
+            pass
+        original = copy.deepcopy(self.state)
+        before = {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
+        plan = self.state['plan']
+        with patch.object(c, 'validate_plan'), patch.object(c, 'initial_deferrals', return_value={}), \
+             patch.object(c, 'retained_owners', return_value=[]), \
+             patch.object(c, 'environment_digest', return_value=self.state['environment']), \
+             patch.object(c, 'input_fingerprints', return_value=self.state['input_fingerprints']), \
+             patch.object(c, 'records', return_value=self.gates), \
+             patch.object(c, 'cloud_smoke_prerequisite', side_effect=BeforeNativeWork) as launch_boundary, \
+             patch.object(c, 'source', side_effect=BeforeNativeWork if refresh else None,
+                          return_value=self.state['source']) as source_boundary:
+            expected = ValueError if refused else BeforeNativeWork
+            with self.assertRaises(expected):
+                if refresh:
+                    # _refresh reaches source(root) only after the saved-FINAL guards;
+                    # stop there, before any rebind, carry, write or native launch.
+                    c._refresh(self.state, plan, copy.deepcopy(plan), self.repo,
+                               directory=self.directory)
+                else:
+                    c.run_phase(plan, self.state, self.directory, self.repo)
+            if refresh:
+                self.assertEqual(source_boundary.call_count, 0 if refused else 1)
+                launch_boundary.assert_not_called()
+            else:
+                self.assertEqual(launch_boundary.call_count, 0 if refused else 1)
+        self.assertEqual(self.state, original)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()})
+        self.assertTrue(all(not Path(p).exists() for p in self.proposal['original_missing_outer_paths']))
+        self.assertTrue(all(row['status'] == 'FAIL' and row['complete'] is False
+                            for row in self.state['attempts'][0]['results']))
+
+    def test_final_run_phase_accepts_committed_retirement_before_native_launch(self):
+        self._final_retirement_boundary()
+        self._assert_final_retirement_boundary(False)
+
+    def test_saved_final_refresh_accepts_committed_old_plan_retirement_before_rebind(self):
+        self._final_retirement_boundary()
+        self._assert_final_retirement_boundary(True)
+
+    def test_final_guards_refuse_invalid_committed_certificate(self):
+        self._final_retirement_boundary()
+        self.state['historical_launch_retirements'][self.proof['old_request']]['credit_granted'] = True
+        self.put(self.directory / 'cycle.json', self.state)
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+                self._assert_final_retirement_boundary(refresh, refused=True)
+
+    def test_final_guards_refuse_unknown_missing_outer_request(self):
+        self._final_retirement_boundary()
+        # Same selected gate, but outside the one exact retired request path.
+        folder = self.directory / 'attempts/99/final' / self.gate['name']
+        folder.mkdir(parents=True)
+        self.put(folder / 'request.json', {'gate': self.gate['name'], 'token': 'unretired'})
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+                self._assert_final_retirement_boundary(refresh, refused=True)
+
+    def test_saved_final_refresh_refuses_missing_request_for_unknown_old_gate(self):
+        self._final_retirement_boundary()
+        folder = self.directory / 'attempts/99/final/unknown-gate'
+        folder.mkdir(parents=True)
+        self.put(folder / 'request.json', {'gate': 'unknown-gate', 'token': 'unknown'})
+        self._assert_final_retirement_boundary(True, refused=True)
 
     def test_current_source_guard_still_refuses_with_retirement(self):
         self.issue()

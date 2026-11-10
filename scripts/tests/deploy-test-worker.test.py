@@ -3957,7 +3957,9 @@ class StoppedPreStackIsolation(unittest.TestCase):
         self.root = fixture.root
         # The fixture uses the actual versioned driver, not a mock of its SHA.
         # Driver changes require a newly reviewed before-stack contract.
-        self.driver = (ROOT / 'scripts/cloudbench-run.sh').read_bytes()
+        fixture_record = json.loads((ROOT / 'scripts/tests/fixtures/stopped-pre-stack-driver.fixture.json').read_text())
+        self.assertEqual(self.DRIVER_SHA256, fixture_record['sha256'])
+        self.driver = gzip.decompress(base64.b64decode(fixture_record['gzip_base64']))
         self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
         target = self.root / 'scripts/cloudbench-run.sh'
         target.parent.mkdir(exist_ok=True)

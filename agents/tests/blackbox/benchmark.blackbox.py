@@ -26253,10 +26253,15 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             else:
                 await case()
 
+    outer_failures = _test_utils._RECORDED_FAILURES
+    outer_cases = _test_utils._EXECUTED_CASES
+    outer_failures_before, outer_cases_before = list(outer_failures), list(outer_cases)
     with (
         contextlib.redirect_stdout(io.StringIO()),
         contextlib.redirect_stderr(io.StringIO()),
         patch.dict(globals(), replacements),
+        patch.object(_test_utils, "_RECORDED_FAILURES", []),
+        patch.object(_test_utils, "_EXECUTED_CASES", []),
         patch.object(BlackboxResult, "record", record_registered),
         patch.object(BlackboxResult, "record_async", record_registered_async),
         patch.object(
@@ -26264,6 +26269,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ),
     ):
         await run_all_tests()
+    assert _test_utils._RECORDED_FAILURES is outer_failures
+    assert _test_utils._EXECUTED_CASES is outer_cases
+    assert outer_failures == outer_failures_before and outer_cases == outer_cases_before
     assert sorted(invoked_controllers) == sorted(name for name, _ in controller_cases)
     assert reported_controllers == controller_names, "native results must preserve registration order"
     assert invoked_judges == [name for name, _ in judge_cases]

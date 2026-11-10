@@ -13,6 +13,8 @@ ROOT=Path(os.environ.get('I30_SOURCE_ROOT',Path(__file__).resolve().parents[2]))
 BASE=Path(os.environ.get('I30_BASE_ROOT',Path(__file__).resolve().parents[2]))
 OLD=runpy.run_path(str(BASE/'scripts/tests/cloudbench-archived-owner-stop.test.py'))
 A=runpy.run_path(str(BASE/'scripts/cloudbench-native-release-audit.py'))
+# Deliberately exceed the reconciliation deadline to prove no late projection is published.
+SIMULATED_API_LATENCY_SECONDS = 0.2
 PATH=ROOT/'scripts/cloudbench-forensic-resource-closure.py'
 F=runpy.run_path(str(PATH)) if PATH.exists() else None
 
@@ -83,7 +85,7 @@ class Forensic(OLD['ArchivedStop']):
             app='navi-whisper-lux-bench';base='https://api.machines.dev'
             def api(self,method,path,timeout,observer=None):
                 calls.append((method,path))
-                if path==delay_path:time.sleep(.2)
+                if path==delay_path:time.sleep(SIMULATED_API_LATENCY_SECONDS)
                 status,value=overrides.get(path,(200,{'name':self.app}) if path=='' else (200,[]) if path in ('/machines','/volumes') else (404,{'error':'not found'}))
                 if observer:observer(method,path,status,json.dumps(value).encode())
                 if status>=400:raise RuntimeError('HTTP '+str(status))
@@ -515,7 +517,8 @@ class Forensic(OLD['ArchivedStop']):
         with self.assertRaises(ValueError):F['reconcile'](self.admission,receipt,api)
         intent.write_bytes(original)
         api,calls=self.exact_api(delay_path='/machines/'+self.other_mid)
-        with self.assertRaises(F['S']['BASE']['Deadline']):F['reconcile'](self.admission,receipt,api,seconds=.05)
+        with self.assertRaises(F['S']['BASE']['Deadline']):
+            F['reconcile'](self.admission, receipt, api, seconds=SIMULATED_API_LATENCY_SECONDS / 4)
         self.assertEqual(list(self.admission.glob('forensic-release-projection-*.json')),[])
         self.assertEqual(list(self.admission.glob('current-resource-observation-*.json')),[])
 

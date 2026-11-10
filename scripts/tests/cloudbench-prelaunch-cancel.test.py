@@ -28,6 +28,8 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 SCRIPTS = ROOT / "scripts"
 TOKEN = "0805839042c94bccbcd73f3a77cd48c3-0"
 MACHINE = "8d967dda943528"
@@ -334,6 +336,55 @@ class CancelledAcceptedStartEligibility(unittest.TestCase):
 class DriverPrestackCancel(unittest.TestCase):
     """I5: real driver cleanup after dep_sync, before run.sh exists."""
 
+    def test_context_custody_skips_empty_checkout_and_preserves_current_run(self):
+        import shlex
+        driver = SCRIPTS / "cloudbench-run.sh"
+        helper = shell_function(driver, "prepare_current_context")
+        with tempfile.TemporaryDirectory(prefix="cloudbench-context-custody-") as temporary:
+            data = Path(temporary).resolve()
+            repo = data / "repo"
+            prefix = "\n".join(f"{key}={shlex.quote(str(value))}" for key, value in {
+                "REPO_DIR": repo, "DATA_DIR": data, "CLOUDBENCH_RUN_TOKEN": TOKEN,
+                "CONTEXT_CUSTODY_READY": "0"}.items())
+            # First call must not create the new checkout before fetch admission.
+            script = prefix + "\n" + helper + "\nprepare_current_context || exit 11\n" + \
+                'test ! -e "$REPO_DIR" || exit 12\nmkdir -p "$REPO_DIR/.git"\n' + \
+                'prepare_current_context || exit 13\n' + \
+                'printf current > "$REPO_DIR/.context/cloudbench/run.json"\n' + \
+                'prepare_current_context || exit 14\n'
+            result = subprocess.run(["bash", "-c", "set -uo pipefail\n" + script],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((repo / ".context/cloudbench/run.json").read_bytes(), b"current")
+            archive = data / f"cloudbench-prior-context-{TOKEN}"
+            self.assertEqual(list(archive.iterdir()), [])
+            # A second process cannot re-enter this token and rotate current data.
+            retry = subprocess.run(["bash", "-c", prefix + "\n" + helper + "\nprepare_current_context"],
+                                   capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(retry.returncode, 0)
+            self.assertEqual((repo / ".context/cloudbench/run.json").read_bytes(), b"current")
+
+    def test_context_custody_refuses_symlink_without_touching_evidence(self):
+        import shlex
+        helper = shell_function(SCRIPTS / "cloudbench-run.sh", "prepare_current_context")
+        with tempfile.TemporaryDirectory(prefix="cloudbench-context-symlink-") as temporary:
+            data = Path(temporary).resolve()
+            repo = data / "repo"
+            (repo / ".git").mkdir(parents=True)
+            foreign = data / "foreign"
+            foreign.mkdir()
+            (foreign / "run.json").write_bytes(b"unknown evidence")
+            (repo / ".context").symlink_to(foreign, target_is_directory=True)
+            prefix = "\n".join(f"{key}={shlex.quote(str(value))}" for key, value in {
+                "REPO_DIR": repo, "DATA_DIR": data, "CLOUDBENCH_RUN_TOKEN": TOKEN,
+                "CONTEXT_CUSTODY_READY": "0"}.items())
+            result = subprocess.run(["bash", "-c", prefix + "\n" + helper + "\nprepare_current_context"],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((foreign / "run.json").read_bytes(), b"unknown evidence")
+            self.assertTrue((repo / ".context").is_symlink())
+            self.assertFalse((data / f"cloudbench-prior-context-{TOKEN}").exists())
+
     def test_driver_cleanup_seals_prestack_evidence_for_both_collectors(self):
         import runpy
         with tempfile.TemporaryDirectory(prefix="cloudbench-driver-prestack-") as temporary:
@@ -342,6 +393,18 @@ class DriverPrestackCancel(unittest.TestCase):
             context = data / "repo/.context/cloudbench"
             context.mkdir(parents=True)
             token = TOKEN
+            (data / "repo/.git").mkdir()
+            inherited = {
+                "services.json": b'{"status":"stopped","prior":true}',
+                "run.json": b'{"prior":true}',
+                "stack.log": b"prior stack\n",
+                "logs/backend.log": b"prior backend\n",
+                "logs/worker.log": b"prior worker\n",
+            }
+            for name, raw in inherited.items():
+                target = context / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
             (data / "bench.log").write_text(
                 f"RUNSTAMP-{token}\n[cloudbench] STEP dep_sync\n"
                 "[cloudbench] guest shutdown requested; draining benchmark root before stack teardown\n"
@@ -350,7 +413,12 @@ class DriverPrestackCancel(unittest.TestCase):
             driver = SCRIPTS / "cloudbench-run.sh"
             script = "\n".join(shell_function(driver, name) for name in
                                ("publish_cleanup_ack", "cleanup_stack"))
+            # On the original driver no ownership helper exists: retaining the
+            # inherited files reproduces the missing ACK, not an import failure.
+            if "prepare_current_context()" in driver.read_text():
+                script = shell_function(driver, "prepare_current_context") + "\n" + script
             variables = {
+                "REPO_DIR": data / "repo", "CONTEXT_CUSTODY_READY": "0",
                 "DATA_DIR": data, "CONTEXT_DIR": context,
                 "CLOUDBENCH_RUN_TOKEN": token,
                 "CLEANUP_ACK_FILE": data / f"cloudbench-driver-clean-{token}.ack",
@@ -366,10 +434,14 @@ class DriverPrestackCancel(unittest.TestCase):
             prefix = "\n".join(f"{key}={shlex.quote(str(value))}" for key, value in variables.items())
             result = subprocess.run(["bash", "-c", "set -uo pipefail\n" + prefix +
                                      "\nlog() { :; }\n" + script +
+                                     "\nif declare -F prepare_current_context >/dev/null; then prepare_current_context || exit 1; fi"
                                      "\ntrap cleanup_stack EXIT\nexit 143\n"],
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 143, result.stderr)
             self.assertEqual((data / f"cloudbench-driver-clean-{token}.ack").read_text(), token + "\n")
+            archive = data / f"cloudbench-prior-context-{token}" / "cloudbench"
+            self.assertEqual({name: (archive / name).read_bytes() for name in inherited}, inherited)
+            self.assertFalse(any(context.rglob("*")))
             # The actual boot supervisor publishes exited only after the driver returns.
             (data / "cloudbench-driver.state").write_text("exited\n")
             server = runpy.run_path(str(SCRIPTS / "cloudbench-status-server.py"))
@@ -408,12 +480,22 @@ class DriverPrestackCancel(unittest.TestCase):
                                         "--port", str(port), "--directory", str(data), "--run-token", token],
                                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
-                for _ in range(100):
+                connection_attempts = 0
+                def status_server_ready():
+                    nonlocal connection_attempts
+                    if process.poll() is not None:
+                        raise AssertionError("owned status server exited before readiness")
+                    if connection_attempts >= 100:
+                        raise AssertionError("status server did not accept within 100 connection attempts")
+                    connection_attempts += 1
                     try:
                         with socket.create_connection(("127.0.0.1", port), timeout=.1):
-                            break
+                            return True
                     except OSError:
-                        time.sleep(.02)
+                        return False
+                # Original upper bound: 100 attempts at .1s plus 100 waits at .02s.
+                wait_until(status_server_ready, timeout=12, description="owned status server accepts connections",
+                           initial_interval=.02, max_interval=.02, backoff=1)
                 for kind in ("recovery", "controller"):
                     out = base / kind
                     (out / "remote-logs").mkdir(parents=True)

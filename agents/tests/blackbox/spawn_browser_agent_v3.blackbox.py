@@ -25370,7 +25370,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None, extraction_results=None, expected_activity_status="completed", credential_propagation_override=None):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None, extraction_results=None, expected_activity_status="completed", credential_propagation_override=None, actor_step_barrier=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -25479,6 +25479,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
 
     async def capture_actor(**kwargs):
         await asyncio.sleep(0)
+        if actor_step_barrier is not None:
+            await actor_step_barrier()
         decision_order.append("model")
         captured_turns.append(copy.deepcopy(kwargs["turn_messages"]))
         captured_system_context.append(kwargs["dynamic_system_context"])
@@ -25486,6 +25488,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
 
     actor_call = AsyncMock(side_effect=capture_actor)
     actor_call.captured_turns = captured_turns
+    actor_call.fixture_browser = fake_browser
+    actor_call.fixture_playwright = fake_playwright
     actor_call.captured_system_context = captured_system_context
     actor_call.decision_order = decision_order
     actor_call.close_call = close_mock
@@ -28562,9 +28566,10 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
     assert result["current_url"] == inbox_url, result
     assert result["auth_realm"] == "google.com", result
-    assert [call.args[2] for call in fetch_options.await_args_list] == ["linkedin.com"], (
-        "initial auth options must come from the realm the reattached material belongs to"
+    assert payloads == [google_payload], (
+        "only the observed Google realm payload may hydrate; never mix LinkedIn material with Google options"
     )
+    assert payloads[0]["auth_realm"] == payloads[0]["auth_options"]["realm"] == "google.com"
     assert [call.kwargs["target_url"] for call in prepare_auth.await_args_list] == [inbox_url], (
         "the first google.com observation must prepare that realm through the transition"
     )
@@ -28670,83 +28675,55 @@ def _validated_setup_attach(event):
 
 @_in_browser_activity_context
 async def test_data_setup_credential_failure_disconnects_connected_browser_clients():
-    """    Agent ae7983a2: credential preparation raised while the parallel browser
-    setup had already attached DOMService and Playwright. `asyncio.gather`
-    propagated the data error and dropped the browser result, so teardown saw
-    no clients; the orphaned loopback client kept Tilion's single CDP slot and
-    every later browser start for the agent failed with 4409 / connect() timeouts.
-    """
-    from domains.spawn_browser_agent_v3.handler import build_realm_credential_state, spawn_browser_agent_activity_v3
+    """Malformed optional credentials do not block the actor or leak attached clients."""
+    from domains.spawn_browser_agent_v3 import handler
 
-    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
-    session_data = {
-        "task_id": "task-1",
-        "session_id": "session-1",
-        "debug_url": "https://steel.example/debug",
-        "ws_url": "ws://live",
-        "fingerprint_injection": None,
-        "passwords": [],
-        "passkeys": [],
-        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
-        "user_settings": {},
-    }
-    # The incident requires both CDP clients acquired before credential setup
-    # fails. Owned Playwright startup yields to its tracked acquisition task.
-    clients_connected = asyncio.Event()
-    playwright = _FakePlaywright(fake_browser)
-    async def connected_playwright(*_args, **_kwargs):
-        clients_connected.set()
-        return fake_browser
-    playwright.chromium.connect_over_cdp = AsyncMock(side_effect=connected_playwright)
-    async def credentials_after_connect(*args, **kwargs):
-        await clients_connected.wait()
-        return await build_realm_credential_state(*args, **kwargs)
-    # Inventory names an enabled passkey whose material the session lacks.
-    auth_options = {"realm": "example.com", "passkeys": [{"id": "pk-1", "label": "Example passkey"}]}
+    attached, failed = asyncio.Event(), asyncio.Event()
+    build = handler.build_realm_credential_state
+    errors = []
+
+    async def malformed_after_attach(payload, **kwargs):
+        await attached.wait()
+        malformed = {
+            **payload,
+            "auth_realm": "example.com",
+            "auth_options": {"realm": "example.com", "passkeys": [{"id": "pk-1"}]},
+            "passkeys": [],
+        }
+        try:
+            return await build(malformed, **kwargs)
+        except RuntimeError as error:
+            errors.append(str(error))
+            failed.set()
+            raise
+
     _FakeDomService.last_instance = None
-    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    earlier = set(handler._background_browser_cleanup_tasks)
     with (
-        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
-        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
-        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
-        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
-        patch("domains.spawn_browser_agent_v3.handler.fetch_auth_options", AsyncMock(return_value=auth_options)),
-        patch("domains.spawn_browser_agent_v3.handler.build_realm_credential_state", new=credentials_after_connect),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
-            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
-        ),
-        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
-        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
-        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
-        patch("browser_tools.dom_service.DOMService", _FakeDomService),
-        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
-        patch(
-            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(playwright)
-        ),
+        patch.object(handler, "build_realm_credential_state", malformed_after_attach),
+        patch.object(handler, "_require_live_playwright_client", _validated_setup_attach(attached)),
     ):
-        with pytest.raises(RuntimeError, match="missing passkey material"):
-            await spawn_browser_agent_activity_v3(
-                user_id="user-1",
-                agent_id="agent-1",
-                goal="Check the inbox",
-                tool_call_id="tool-1",
-                output_schema={"fields": [{"name": "result", "type": "string"}]},
-                use_claude_mode=False,
-                start_url="https://example.com",
-                # Assert release at this activity's native cleanup-join boundary.
-                await_owner_cleanup=True,
-            )
+        actor, _judge = await asyncio.wait_for(
+            _exercise_browser_resume_user_input(
+                actor_responses_override=[{
+                    "action": {"action": "attempt_completion", "params": {"reasoning": "done"}},
+                    "usage": {},
+                }],
+                actor_step_barrier=failed.wait,
+            ),
+            timeout=10,
+        )
 
+    assert attached.is_set() and failed.is_set()
+    assert errors and "missing passkey material" in errors[0]
+    assert actor.await_count == 1 and actor.activity_result["status"] == "completed"
     dom_service = _FakeDomService.last_instance
-    assert dom_service is not None, "the browser side must have connected before the data side failed"
-    playwright.chromium.connect_over_cdp.assert_awaited_once()
+    assert dom_service is not None, "both browser clients attached before credential failure"
+    actor.fixture_playwright.chromium.connect_over_cdp.assert_awaited_once()
     dom_service.disconnect.assert_awaited()
-    fake_browser.close.assert_awaited()
+    actor.fixture_browser.close.assert_awaited()
+    actor.fixture_playwright.stop.assert_awaited()
+    assert not (set(handler._background_browser_cleanup_tasks) - earlier)
 
 
 def _parallel_setup_patches(session_data, fake_browser, dom_service_class, **overrides):
@@ -37358,6 +37335,7 @@ async def _exercise_disconnected_playwright_full_activity(mode="reconnect"):
             if mode != "healthy":
                 from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer, _Client
 
+                closure_order = []
                 class ClosedUpstream:
                     close_code = 1000
                     close_reason = ""
@@ -37365,20 +37343,32 @@ async def _exercise_disconnected_playwright_full_activity(mode="reconnect"):
                         return self
                     async def __anext__(self):
                         raise StopAsyncIteration
+                    async def close(self):
+                        closure_order.append("upstream-close")
+                    async def wait_closed(self):
+                        assert closure_order == ["upstream-close"]
+                        closure_order.append("upstream-closed")
 
                 class InputClient:
                     async def close(self, **kwargs):
+                        assert closure_order == ["upstream-close", "upstream-closed"]
+                        closure_order.append("input-closed")
                         fake_browser.contexts = []
                         fake_browser.is_connected = lambda: False
                         old_page.is_closed = lambda: True
+                    async def wait_closed(self):
+                        assert closure_order[-1] == "input-closed"
+                        closure_order.append("input-close-confirmed")
 
-                native_client = SimpleNamespace(close=AsyncMock())
+                native_client = SimpleNamespace(close=AsyncMock(), wait_closed=AsyncMock())
                 upstream = ClosedUpstream()
                 mux = SingleCdpConnectionMultiplexer("ws://fixture.invalid", arm_webauthn=False)
                 mux._upstream = upstream
                 mux._clients = {_Client(InputClient(), 1), _Client(native_client, 2)}
                 await mux._read_upstream(upstream)
                 native_client.close.assert_awaited_once()
+                native_client.wait_closed.assert_awaited_once()
+                assert closure_order == ["upstream-close", "upstream-closed", "input-closed", "input-close-confirmed"]
                 assert not fake_browser.is_connected()
                 # Native browser-use reconnect is external to this fixture;
                 # its existing DOM service is live for the next step.
@@ -40471,6 +40461,10 @@ async def run_all_tests():
     await r.record_async(
         "credential_setup_failure_disconnects_connected_browser_clients",
         test_data_setup_failure_disconnects_the_connected_browser_clients,
+    )
+    await r.record_async(
+        "background_credential_failure_disconnects_connected_browser_clients",
+        test_data_setup_credential_failure_disconnects_connected_browser_clients,
     )
     await r.record_async(
         "activity_cancelled_mid_setup_releases_connected_browser_clients",

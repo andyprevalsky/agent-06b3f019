@@ -14715,6 +14715,7 @@ async def run_all_tests():
     await r.record_async("workflow_final_value_presentation", test_workflow_final_value_presentation)
     await r.record_async("completion_caller_routes_late_revision_and_invalid_presentation", test_completion_caller_routes_late_revision_and_invalid_presentation)
     await r.record_async("completion_feedback_during_mark_finished_continues_current_requirement", test_completion_feedback_during_mark_finished_continues_current_requirement)
+    await r.record_async("completion_supersession_settles_schema_after_flush", test_completion_supersession_settles_schema_after_flush)
     await r.record_async("completion_routing_preserves_unrelated_failures", test_completion_routing_preserves_unrelated_failures)
     await r.record_async("workflow_final_value_rejects_stale_or_invalid", test_workflow_final_value_rejects_stale_or_invalid)
     await r.record_async("workflow_final_value_late_feedback", test_workflow_final_value_late_feedback)
@@ -15617,6 +15618,61 @@ async def run_all_tests():
 
     teardown_mock()
     return r.all_passed
+
+
+async def test_completion_supersession_settles_schema_after_flush():
+    from unittest.mock import AsyncMock
+    from workflows.agent_workflow import CompletionSupersededError
+
+    class Continued(Exception):
+        pass
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.goal, wf.model = "schema-continuation", "user", "Day", "rose-1-flash"
+    wf.max_iterations, wf.context_gates = 25, {}
+    wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}]}
+    wf._mark_complete = AsyncMock(side_effect=CompletionSupersededError("new feedback"))
+    wf._start_response_schema_refresh = lambda: None
+    wf._wake_background_waiters = lambda: None
+    wf._note_wait_wake = lambda *args: None
+    flushed, release = asyncio.Event(), asyncio.Event()
+    async def flush():
+        await wf.receive_user_response("Instead give the month")
+        flushed.set()
+    async def settle():
+        await release.wait()
+        wf.output_schema = {"fields": [{"name": "month", "type": "int", "required": True}]}
+        wf._response_schema_accepted_revision = wf._response_schema_revision
+        wf._response_schema_applied_revision = wf._response_schema_revision
+    wf._flush_pending_messages = flush
+    wf._wait_for_response_schema_refresh = settle
+    fake = _FakeWorkflowModule()
+    continuations = []
+    def continue_as_new(**kwargs):
+        continuations.append(kwargs)
+        raise Continued()
+    fake.continue_as_new = continue_as_new
+    original = _patch_workflow(fake)
+    task = asyncio.create_task(wf._finish_verified_completion([], {"day": 4}))
+    try:
+        await asyncio.wait_for(flushed.wait(), 5)
+        await asyncio.sleep(0)
+        assert not task.done(), "continuation raced ahead of the schema refresh accepted after flush"
+        release.set()
+        try:
+            await task
+        except Continued:
+            pass
+        else:
+            raise AssertionError("completion did not continue")
+        assert len(continuations) == 1
+        runtime = continuations[0]["args"][16]["runtime_state"]
+        assert runtime["response_schema_revision"] == runtime["response_schema_accepted_revision"] == 1
+        assert wf.output_schema["fields"][0]["name"] == "month"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        _restore_workflow(original)
 
 
 if __name__ == "__main__":

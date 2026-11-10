@@ -236,7 +236,7 @@ m['P']['B']['Fly']=Native;m['P']['B']['resolve_token']=lambda _: 'offline-not-a-
 m['main']()
 ''')
     fleet=Path(os.environ.get('ROSE_RETIRED_FLEET',ROOT/'scripts/run-bench-fleet'))
-    text=fleet.read_text();parts=extract((ROOT/'scripts/lib/cloudbench-inventory.sh').read_text(),'registry_meta_value')+'\n'+'\n'.join(extract(text,n)for n in ['cloudbench_primary_runtime_evidence_prelaunch','cloudbench_validate_primary_runtime_evidence','fleet_recovery_confirm_runtime_evidence'])
+    text=fleet.read_text();parts=extract((ROOT/'scripts/lib/cloudbench-inventory.sh').read_text(),'registry_meta_value')+'\n'+'\n'.join(extract(text,n)for n in ['cloudbench_primary_runtime_evidence_prelaunch','cloudbench_validate_primary_runtime_evidence','fleet_has_replaced_preconfig','fleet_recovery_verify_replaced_preconfig','fleet_recovery_prepare_replaced_preconfig','fleet_recovery_confirm_runtime_evidence'])
     import shlex
     q=shlex.quote
     script=parts+'\n'+f'''
@@ -272,3 +272,59 @@ def test_existing_evidence_routes_are_not_replaced(tmp_path,ordinary):
     write(target,'existing ordinary evidence')
     with pytest.raises(M['NotApplicable']):M['plan'](reg,common)
     assert (reg/'runtime-evidence-unconfirmed').exists()
+
+
+def test_recovery_resumes_saved_receipt_after_native_observation_changes(tmp_path):
+    reg, common, out, _, machine, volume = fixture(tmp_path)
+    fd, owner_birth = guarded(reg, common)
+    latch = reg / 'runtime-evidence-unconfirmed'
+    original_unlink = Path.unlink
+    def fail_latch(path, *args, **kwargs):
+        if path == latch:
+            raise OSError('fixture interruption after receipt save')
+        return original_unlink(path, *args, **kwargs)
+    try:
+        with patch.object(Path, 'unlink', fail_latch), pytest.raises(OSError):
+            M['recover'](reg, common, lambda _: machine, lambda _: volume, fd, os.getpid(), owner_birth)
+        saved = out.parent / '_retired-diagnostic-custody/receipt.json'
+        before = saved.read_bytes()
+        machine['updated_at'] = '2026-11-10T23:00:00Z'
+        result = M['recover'](reg, common, lambda _: machine, lambda _: volume, fd, os.getpid(), owner_birth)
+        assert saved.read_bytes() == before
+        assert result == json.loads(before)
+        assert not latch.exists()
+        assert result['proof_credit'] == 0 and result['normal_runtime_verified'] is False
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize('fault', ['credit', 'binding', 'verifier', 'machine', 'volume', 'hash', 'originals', 'extra'])
+def test_saved_diagnostic_receipt_tampering_keeps_recovery_latch(tmp_path, fault):
+    reg, common, out, _, machine, volume = fixture(tmp_path)
+    fd, owner_birth = guarded(reg, common)
+    latch = reg / 'runtime-evidence-unconfirmed'
+    unlink = Path.unlink
+    def interrupt(path, *args, **kwargs):
+        if path == latch:
+            raise OSError('fixture interruption after receipt save')
+        return unlink(path, *args, **kwargs)
+    try:
+        with patch.object(Path, 'unlink', interrupt), pytest.raises(OSError):
+            M['recover'](reg, common, lambda _: machine, lambda _: volume, fd, os.getpid(), owner_birth)
+        saved = out.parent / '_retired-diagnostic-custody/receipt.json'
+        value = json.loads(saved.read_bytes())
+        if fault == 'credit': value['proof_credit'] = 1
+        elif fault == 'binding': value['binding']['source'] = 'f' * 40
+        elif fault == 'verifier': value['verifier_sha256'] = '0' * 64
+        elif fault == 'machine': value['native']['machine']['state'] = 'started'
+        elif fault == 'volume': value['native']['volume']['state'] = 'created'
+        elif fault == 'hash': value['native']['machine_sha256'] = 'unknown'
+        elif fault == 'originals': value['small_originals_b64'][next(iter(value['small_originals_b64']))] = 'changed'
+        else: value['unexpected'] = 'not admitted'
+        saved.write_text(json.dumps(value))
+        before = saved.read_bytes()
+        with pytest.raises((ValueError, AssertionError)):
+            M['recover'](reg, common, lambda _: machine, lambda _: volume, fd, os.getpid(), owner_birth)
+        assert latch.exists() and saved.read_bytes() == before
+    finally:
+        os.close(fd)

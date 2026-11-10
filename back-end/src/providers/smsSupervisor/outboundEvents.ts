@@ -12,6 +12,8 @@
 import { createLogger } from '../logger';
 import { sendSms, sendMms, getUserPhone } from '../smsQueue';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
+import { isEmojiOnlyMessage } from './emoji';
+import { SMS_MAX_BODY_CHARACTERS } from '../smsDeliveryContract';
 import { markWhatsAppReachable, markWhatsAppUnreachable } from '../whatsappReachability';
 import { ROSE_LABS_URL, SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { getSignedUrl, uploadToStorage } from '../storage';
@@ -76,7 +78,8 @@ async function deliverAcrossChannels(
   notification: NotificationContent,
   channels: readonly SupervisorChannel[],
   send: (channel: SupervisorChannel, message: string) => Promise<ChannelSendResult>,
-  options?: SmsArchiveOptions
+  options?: SmsArchiveOptions,
+  channelNotifications: Partial<Record<SupervisorChannel, NotificationContent>> = {}
 ): Promise<ChannelSendResult & { message: string }> {
   let anchor: (ChannelSendResult & { message: string }) | undefined;
   let firstSuccess: (ChannelSendResult & { message: string }) | undefined;
@@ -84,11 +87,13 @@ async function deliverAcrossChannels(
   const correctionBudget = { remaining: MAX_NOTIFICATION_CORRECTIONS };
   let allFailuresDefinitive = true;
   for (const channel of channels) {
+    const override = channelNotifications[channel];
+    const content = override ?? { ...notification, message: channelMessage };
     const result = await deliverNotificationMessage({
       channel,
-      message: channelMessage,
-      requiredLinks: notification.requiredLinks,
-      preserveText: notification.preserveText,
+      message: content.message,
+      requiredLinks: content.requiredLinks,
+      preserveText: content.preserveText,
       agentId: options?.archiveRootAgentId,
       eventType: options?.archiveContext?.event_type,
       correctionBudget,
@@ -100,7 +105,7 @@ async function deliverAcrossChannels(
     }
     if (result.success && firstSuccess === undefined) firstSuccess = result;
     if (!result.success && result.definitiveFailure !== true) allFailuresDefinitive = false;
-    if (result.success) channelMessage = result.message;
+    if (result.success && override === undefined) channelMessage = result.message;
     if (channel === 'SMS' || anchor === undefined) anchor = result;
   }
   // A mirrored send succeeded if ANY channel delivered — so a successful result
@@ -116,7 +121,8 @@ async function sendLifecycleSms(
   phone: string,
   notification: NotificationContent,
   options?: SmsArchiveOptions,
-  channels: readonly SupervisorChannel[] = ['SMS']
+  channels: readonly SupervisorChannel[] = ['SMS'],
+  channelNotifications: Partial<Record<SupervisorChannel, NotificationContent>> = {}
 ): Promise<SmsSendResult> {
   const result = await deliverAcrossChannels(
     userId,
@@ -128,7 +134,8 @@ async function sendLifecycleSms(
         ...options,
         abortSignal: AbortSignal.timeout(30_000),
       }),
-    options
+    options,
+    channelNotifications
   );
   await recordLifecycleTurn(userId, result.message, result);
   return result;
@@ -601,6 +608,15 @@ export async function notifyCompletion(
 
   const prefix = agent.id.substring(0, 6);
   const message = buildCompletionSmsBody(agent.id, summary, outputs, finalAnswer);
+  const smsFallback =
+    finalAnswer !== undefined &&
+    (finalAnswer.length > SMS_MAX_BODY_CHARACTERS || isEmojiOnlyMessage(finalAnswer))
+      ? {
+          message: `Your result is ready: ${getAgentUrl(agent.id)}`,
+          requiredLinks: [getAgentUrl(agent.id)],
+          preserveText: true,
+        }
+      : undefined;
 
   const result = await sendLifecycleSms(
     userId,
@@ -614,7 +630,8 @@ export async function notifyCompletion(
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'completion', user_id: userId },
     },
-    channels
+    channels,
+    smsFallback ? { SMS: smsFallback } : {}
   );
 
   log.info('completion SMS sent', {

@@ -36,8 +36,11 @@ export function CompletionBubble({
     typeof completionData.answerText === 'string'
   ) {
     return (
-      <div className="whitespace-pre-wrap break-words" data-final-answer>
-        {completionData.answerText}
+      <div className="space-y-3">
+        <div className="whitespace-pre-wrap break-words" data-final-answer>
+          {completionData.answerText}
+        </div>
+        {onSubmitFeedback && <FeedbackBanner onSubmit={onSubmitFeedback} />}
       </div>
     );
   }

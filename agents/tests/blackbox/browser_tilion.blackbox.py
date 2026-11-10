@@ -2675,16 +2675,16 @@ async def test_multiplexer_holds_new_targets_until_emulation_lands():
                         )
                         assert popup["waitingForDebugger"] is False
                         facts = None
-                        for _ in range(100):
+                        async def emulation_settled():
+                            nonlocal facts
                             result = await client.send(
                                 "Runtime.evaluate",
                                 {"expression": "window.firstFacts || null", "returnByValue": True},
                                 popup["sessionId"],
                             )
                             facts = result["result"].get("value")
-                            if facts:
-                                break
-                            await asyncio.sleep(0.05)
+                            return bool(facts) and multiplexer.emulation_applied >= 2
+                        await _wait_until(emulation_settled, 5.0, "popup facts and emulation response accounting")
                         assert facts and facts[:2] == ["Asia/Tokyo", "de-DE"], facts
                         assert multiplexer.emulation_applied >= 2
                     finally:

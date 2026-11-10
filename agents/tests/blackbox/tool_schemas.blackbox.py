@@ -1261,6 +1261,7 @@ async def run_all_tests():
     # Recursive public schemas use a finite native node-table contract.
     r = BlackboxResult()
     r.record("final_presentation_native_shape", test_final_presentation_native_shape)
+    r.record("response_schema_reasoning_order", test_response_schema_reasoning_precedes_nodes)
     r.record("response_schema_nodes_legacy_forms", test_response_schema_nodes_name_preserves_legacy_input_forms)
     r.record("recursive_response_schema_public_native", test_recursive_response_schema_public_and_native_wire)
     r.record("recursive_response_schema_invalid_graphs", test_recursive_response_schema_wire_rejects_invalid_graphs)
@@ -1369,6 +1370,21 @@ async def run_all_tests():
     teardown_mock()
     r.record("all_phase_tools_superset", test_all_phase_tools_superset)
     return r.all_passed
+
+
+def test_response_schema_reasoning_precedes_nodes():
+    from helpers import llm
+    from providers.rose.schema import build_openai_response_format
+    from utils.response_schema_wire import wire_model
+
+    for internal in (False, True):
+        for title in (False, True):
+            schema = wire_model(internal=internal, reasoning=True, title=title).model_json_schema()
+            assert list(schema["properties"]) == ["reasoning", "nodes", "presentation"] + (["title"] if title else [])
+            ordinary = wire_model(internal=internal, title=title).model_json_schema()
+            assert list(ordinary["properties"]) == ["nodes", "presentation"] + (["title"] if title else [])
+    native = build_openai_response_format(llm._GeneratedResponseSchemaWithTitle)["json_schema"]["schema"]
+    assert list(native["properties"]) == ["reasoning", "nodes", "presentation", "title"]
 
 
 if __name__ == "__main__":

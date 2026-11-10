@@ -395,8 +395,8 @@ def categories_triggered_by_paths(changed_files: Sequence[str]) -> list[str]:
     return found
 
 
-def _eligible(task: TaskRef, surface: str) -> bool:
-    if task.raw.get("deploy_quarantine"):
+def _eligible(task: TaskRef, surface: str, *, for_deploy: bool = True) -> bool:
+    if for_deploy and task.raw.get("deploy_quarantine"):
         return False
     if not task.eligible_status or task.production_only:
         return False

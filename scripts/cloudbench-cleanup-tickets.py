@@ -170,6 +170,9 @@ def legacy_owner_absent(owner):
         except ValueError:raise ValueError('invalid legacy cleanup owner birth') from None
     try:
         if birth(owner['pid']):return False  # Live or reused PID retains its floor.
+        try:os.kill(owner['pid'], 0)
+        except ProcessLookupError:pass
+        except OSError:return False
         if Path('/proc/self/stat').exists():
             try:Path('/proc',str(owner['pid'])).stat()
             except (FileNotFoundError,ProcessLookupError):return True
@@ -234,10 +237,9 @@ def retire_legacy_standalone_accounting(root):
         if type(owner) is not dict or set(owner)!={'pid','birth'}:continue
         if type(owner['pid']) is not int or owner['pid']<=1 or type(owner['birth']) is not str or not owner['birth']:continue
         try:
-            os.kill(owner['pid'],0)
-        except ProcessLookupError:
-            del groups[identifier];changed=True
-        except OSError:
+            if legacy_owner_absent(owner):
+                del groups[identifier];changed=True
+        except (OSError, ValueError):
             pass
     if changed:write(path,state,replace=True)
 

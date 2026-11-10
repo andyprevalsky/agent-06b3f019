@@ -326,6 +326,60 @@ cleanup_stack() {
     fi
     exit "$original_rc"
 }
+# Establish run ownership before installing cleanup traps. Existing snapshot
+# evidence is retained outside the current context, never deleted or adopted.
+CONTEXT_CUSTODY_READY=0
+prepare_current_context() {
+    [ "$CONTEXT_CUSTODY_READY" = 0 ] || return 0
+    # A new checkout must stay absent/empty until fetch-ref has admitted it.
+    [ -d "$REPO_DIR/.git" ] || return 0
+    [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 1
+    python3 - "$REPO_DIR" "$DATA_DIR" "$CLOUDBENCH_RUN_TOKEN" <<'PY'
+import os
+from pathlib import Path
+import re
+import sys
+repo, data = map(Path, sys.argv[1:3])
+token = sys.argv[3]
+if not re.fullmatch(r"[A-Za-z0-9._-]+", token):
+    raise SystemExit("invalid context custody token")
+# No symlink traversal or ambiguous aliasing of retained/current evidence.
+for path in (repo, data, repo / ".context", repo / ".context/cloudbench"):
+    if path.is_symlink() or path.absolute() != path.resolve():
+        raise SystemExit("noncanonical context custody path")
+context = repo / ".context/cloudbench"
+archive = data / ("cloudbench-prior-context-" + token)
+if archive.exists() or archive.is_symlink():
+    raise SystemExit("context custody already entered; preserve partials")
+if context.exists() and not context.is_dir():
+    raise SystemExit("unexpected context object")
+# An exclusive destination is also the one-shot admission record. Failure after
+# entering it is ambiguous, never permission to move another context on retry.
+archive.mkdir(mode=0o700)
+def sync(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+sync(data)
+if context.exists():
+    os.rename(context, archive / "cloudbench")
+    sync(archive)
+    sync(context.parent)
+context.mkdir(parents=True, mode=0o700)
+sync(context)
+sync(context.parent)
+sync(repo)
+sync(data)
+PY
+    [ "$?" = 0 ] || return 1
+    CONTEXT_CUSTODY_READY=1
+}
+
+if [ -d "$REPO_DIR/.git" ]; then
+    prepare_current_context || { log "FATAL: context custody admission failed; preserving evidence"; exit 1; }
+fi
 trap cleanup_stack EXIT
 
 request_graceful_shutdown() {
@@ -767,11 +821,10 @@ if [ ! -d "$REPO_DIR/.git" ]; then
 fi
 cd "$REPO_DIR" || { log "FATAL: cannot cd $REPO_DIR"; finish 1; }
 
-# Snapshot clones retain the source machine's ignored .context tree. Clear it
-# before any setup step that can fail so an infrastructure error can never be
-# presented as a benchmark result from the snapshot's previous run.
-rm -rf "$CONTEXT_DIR"
-mkdir -p "$CONTEXT_DIR"
+# Fresh checkouts reach this boundary only after native empty-checkout admission.
+# Existing checkouts already entered it before the traps; never rotate a second
+# time, since anything written after that boundary belongs to this run.
+prepare_current_context || { log "FATAL: context custody admission failed; preserving evidence"; finish 1; }
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 touch "$RUN_OUTPUT_MARKER"
 printf '%s\n' "$$" > "$DATA_DIR/cloudbench-driver.pid"

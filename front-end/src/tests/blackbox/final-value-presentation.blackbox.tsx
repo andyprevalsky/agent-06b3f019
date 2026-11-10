@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 import MessageBubble from '@/features/terminal-component-group/components/MessageBubble';
 import { baseMessage, renderBubble } from './message-bubble.fixtures';
@@ -60,5 +60,27 @@ describe('explicit final value presentation', () => {
       '<img src=x onerror=alert(1)>',
     );
     expect(container.querySelector('[data-final-answer] img')).toBeNull();
+  });
+  it('keeps feedback available alongside an accepted value answer', () => {
+    const message = baseMessage({
+      role: 'TOOL',
+      metadata: {
+        toolName: 'completion_summary',
+        toolStatus: 'FINISHED',
+        isFinalSummary: true,
+        completionSummary: {
+          summary: 'Hidden report',
+          presentation: { version: 1, mode: 'value', field: 'day', encoding: 'text' },
+          answerText: '4',
+        },
+      },
+    });
+    const onSubmitFeedback = vi.fn().mockResolvedValue(undefined);
+    const { container } = renderBubble(
+      <MessageBubble message={message} onSubmitFeedback={onSubmitFeedback} />,
+    );
+    expect(container.querySelector('[data-final-answer]')?.textContent).toBe('4');
+    expect(screen.getByText(/How was this result\?/i)).toBeInTheDocument();
+    expect(screen.queryByText('Hidden report')).not.toBeInTheDocument();
   });
 });
