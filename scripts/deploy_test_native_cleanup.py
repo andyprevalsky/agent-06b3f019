@@ -210,6 +210,17 @@ for name in ('/','/data','/data/repo'):
 services=payload('/data/repo/.context/cloudbench/services.json',1048576)
 run=payload('/data/repo/.context/cloudbench/run.json',134217728)
 backend=payload('/data/repo/.context/cloudbench/logs/backend.log',67108864)
+def identity(path,follow=False):
+ fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|(0 if follow else os.O_NOFOLLOW))
+ try:
+  a=os.fstat(fd);assert stat.S_ISREG(a.st_mode) and a.st_size<=67108864
+  digest=hashlib.sha256();count=0
+  while count<a.st_size:
+   block=os.read(fd,min(65536,a.st_size-count));assert block;count+=len(block);digest.update(block)
+  z=os.fstat(fd);assert(a.st_dev,a.st_ino,a.st_mode,a.st_uid,a.st_gid,a.st_size,a.st_mtime_ns)==(z.st_dev,z.st_ino,z.st_mode,z.st_uid,z.st_gid,z.st_size,z.st_mtime_ns)
+  return dict(device=a.st_dev,inode=a.st_ino,mode=a.st_mode,uid=a.st_uid,sha256=digest.hexdigest())
+ finally:os.close(fd)
+roles={}
 rows=[];gone=[];errors=[]
 for p in sorted(Path('/proc').iterdir()):
  if not p.name.isdigit():continue
@@ -225,6 +236,15 @@ for p in sorted(Path('/proc').iterdir()):
   values=dict(x.split(b'=',1) for x in env.split(b'\0') if b'=' in x)
   row.update(run_token=values.get(b'CLOUDBENCH_RUN_TOKEN',b'').decode(errors='replace'),
    cwd=cwd,exe=exe,cmdline_b64=base64.b64encode(cmd).decode(),stat_after=(p/'stat').read_text())
+  args=[x for x in cmd.split(b'\0') if x]
+  if args in ([b'sleep',b'infinity'],[b'/bin/sleep',b'infinity'],[b'/usr/bin/sleep',b'infinity']) or (len(args)>1 and args[1]==b'/cloudbench-status-server.py'):
+   canonical=str(Path('/bin/sleep' if b'sleep' in args[0] else '/usr/bin/python3').resolve(strict=True))
+   info=dict(uid_status=(p/'status').read_text(),exe_path=canonical,exe=identity(canonical),proc_exe=identity(p/'exe',True),
+    fd_links={name:os.readlink(p/'fd'/name) for name in os.listdir(p/'fd')},
+    unsafe_startup={k.decode():hashlib.sha256(values[k]).hexdigest() for k in (b'PYTHONPATH',b'PYTHONHOME',b'PYTHONSTARTUP',b'PYTHONINSPECT',b'PYTHONUSERBASE',b'PYTHONEXECUTABLE',b'PYTHONPLATLIBDIR',b'LD_PRELOAD',b'LD_LIBRARY_PATH',b'LD_AUDIT') if values.get(k)})
+   if len(args)>1 and args[1]==b'/cloudbench-status-server.py':info['script']=identity('/cloudbench-status-server.py')
+   roles[str(pid)]=info
+  row['stat_after']=(p/'stat').read_text()
   rows.append(row)
  except FileNotFoundError:gone.append(int(p.name))
  except (PermissionError,OSError,ValueError) as e:errors.append(dict(pid=int(p.name),error=type(e).__name__))
@@ -238,6 +258,7 @@ for name in ('tcp','tcp6','udp','udp6'):
  assert len(sockets[name].encode())<=2097152
 print(json.dumps(dict(schema='original-runless-proc-scan-v1',binding=b,uid=os.geteuid(),machine_id=os.environ.get('FLY_MACHINE_ID'),
  boot=boot,repo_head=repo_head,self_pid=os.getpid(),ancestors=ancestry,processes=rows,gone=gone,errors=errors,sockets=sockets,
+ infrastructure=dict(roles=roles,driver_state=payload('/data/cloudbench-driver.state',4096).decode() if Path('/data/cloudbench-driver.state').exists() else None,driver_pid_b64=None if not Path('/data/cloudbench-driver.pid').exists() else base64.b64encode(payload('/data/cloudbench-driver.pid',4096)).decode()),
  filesystem=dict(mountinfo=mountinfo,mountinfo_after=Path('/proc/self/mountinfo').read_text(),paths=paths,payloads=payload_stats),
  services_b64=None if services is None else base64.b64encode(services).decode(),run_present=run is not None,
  backend_sha256=None if backend is None else hashlib.sha256(backend).hexdigest(),finished_epoch=time.time())))
@@ -465,6 +486,69 @@ def isolated_runless_os(fleet, owner, root, receipt, row, evidence, proof, bound
     for parent in ancestors:
         need(parent == pid and parent in index, 'collector process chain');pid=int(stat_fields(index[parent])[1])
     need(pid == 1, 'collector ancestry root')
+    infrastructure=set()
+    if 'infrastructure_prior' in packet:
+        prior=document(packet['infrastructure_prior']);past=document(prior['scan'])
+        prior_command=shlex.split(prior['command'])
+        need(prior['binding']==binding and prior['schema']=='original-runless-current-os-v1'
+             and prior['endpoint_origin']=='https://api.machines.dev' and prior['ssh_exit']==0
+             and len(prior_command)==9 and prior_command[:7]==['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c']
+             and hashlib.sha256(prior_command[7].encode()).hexdigest()==prior['program_sha256']=='aa33a7dc25dbc450b00f99556ca5349d9cab57bc36016aedabeacdeab8eadc43'
+             and json.loads(prior_command[8])==binding
+             and prior['ssh_argv']==['ssh','console','--quiet','-a',row['app'],'--machine',row['machine_id'],'-C',prior['command']]
+             and bound(prior['ssh_stderr']) in (b'',('Connecting to '+str(expected.get('private_ip',''))+'...\n').encode())
+             and json.loads(bound(prior['ssh_stdout']))==past and past['binding']==binding
+             and past['boot']==scan['boot'] and past['finished_epoch']<=scan['finished_epoch'], 'infrastructure prior authenticated scan')
+        for phase in ('before','after'):
+            native=document(prior[phase]);status,old=isolation_wire(native,'machine',row['machine_id'],row['volume_id'],bound)
+            need(native['app']==binding['app'] and status==200 and all(old.get(k)==expected.get(k) for k in ('id','name','instance_id','config')),
+                 'infrastructure prior original incarnation')
+        env=expected['config']['env'];port=env.get('CLOUDBENCH_STATUS_PORT');barrier=env.get('CLOUDBENCH_START_BARRIER')
+        need(isinstance(port,str) and port.isdigit() and 0<int(port)<=65535 and int(port) not in set(ports.values())
+             and barrier==binding['run_id'] and expected['config']['init']=={'cmd':['bash','/cloudbench-boot.sh']}, 'original metadata boot configuration')
+        expected_args=dict(sleep=[b'sleep',b'infinity'],status=[b'python3',b'/cloudbench-status-server.py',b'--directory',b'/data',b'--port',port.encode(),b'--barrier',barrier.encode(),b'--run-token',binding['run_token'].encode()])
+        injected={}
+        for target,digest in (('/cloudbench-status-server.py','738ad4b98a1aa1f441601ae078b3f9f405e275ec492ccc75f8a10621425c5093'),('/cloudbench-boot.sh','66ce198f59bc8f6c32e4667e11151dcec5fb81631ddafb86624a69540464fa9c')):
+            candidates=[f for f in expected['config']['files'] if f.get('guest_path')==target]
+            need(len(candidates)==1 and hashlib.sha256(base64.b64decode(candidates[0]['raw_value'],validate=True)).hexdigest()==digest, 'original metadata program source')
+            injected[target]=digest
+        info=scan['infrastructure'];need(info['driver_state']=='exited\n' and info['driver_pid_b64'] is None, 'original driver terminal metadata')
+        def trusted_file(value):
+            return (type(value['mode']) is int and __import__('stat').S_ISREG(value['mode']) and value['uid']==0
+                    and not value['mode']&0o022 and type(value['device']) is int and type(value['inode']) is int
+                    and re.fullmatch('[0-9a-f]{64}',value['sha256']) is not None)
+        for role,args in expected_args.items():
+            pins=[p for p in past['processes'] if 'cmdline_b64' in p and base64.b64decode(p['cmdline_b64'],validate=True).split(b'\0')[:-1]==args]
+            need(len(pins)==1 and pins[0]['pid'] in index, 'original infrastructure role missing or duplicated')
+            pin=pins[0];process=index[pin['pid']];values=stat_fields(process);evidence=info['roles'][str(process['pid'])]
+            need(base64.b64decode(process['cmdline_b64'],validate=True).split(b'\0')[:-1]==args
+                 and stat_fields(pin)[19]==values[19] and stat_fields(dict(process,stat=process['stat_after']))[19]==values[19]
+                 and values[1]=='1' and values[0] not in {'Z','X','x'} and process['run_token']==binding['run_token']
+                 and process['cwd']==('/app' if role=='sleep' else '/data/repo')
+                 and values[2]==('0' if role=='sleep' else str(process['pid']))
+                 and not any(int(stat_fields(p)[1])==process['pid'] for p in rows), 'infrastructure role epoch/ancestry differs')
+            uid_rows=[line.split()[1:] for line in evidence['uid_status'].splitlines() if line.startswith('Uid:')]
+            need(len(uid_rows)==1 and len(uid_rows[0])==4 and len(set(uid_rows[0]))==1 and uid_rows[0][0] in {'0','1001'}
+                 and not evidence['unsafe_startup'] and trusted_file(evidence['exe']) and evidence['exe']==evidence['proc_exe']
+                 and process['exe']==evidence['exe_path']
+                 and (process['exe']=='/usr/bin/sleep' if role=='sleep' else re.fullmatch('/usr/bin/python3(?:[.][0-9]+)?',process['exe']) is not None),
+                 'infrastructure UID/executable or startup differs')
+            if role=='status':
+                need(trusted_file(evidence['script']) and evidence['script']['sha256']==injected['/cloudbench-status-server.py'], 'metadata server script changed')
+                sockets={link[8:-1] for link in evidence['fd_links'].values() if re.fullmatch(r'socket:\[[0-9]+\]',link)}
+                listeners=[]
+                for protocol,raw in scan['sockets'].items():
+                    for line in raw.splitlines()[1:]:
+                        fields=line.split();need(len(fields)>=10,'metadata socket row malformed')
+                        if protocol.startswith('tcp') and fields[3]=='0A':
+                            if int(fields[1].rsplit(':',1)[1],16)==int(port):
+                                need(fields[9] in sockets, 'metadata port owned by another process')
+                                listeners.append(fields[9])
+                            if fields[9] in sockets:need(int(fields[1].rsplit(':',1)[1],16)==int(port), 'metadata server extra listener')
+                        if protocol.startswith('udp') and int(fields[1].rsplit(':',1)[1],16)==int(port):need(False,'metadata port is UDP')
+                need(len(listeners)==1, 'exact metadata listener missing or duplicated')
+            infrastructure.add(process['pid'])
+        need(set(info['roles'])=={str(pid) for pid in infrastructure}, 'unexpected infrastructure role')
     for process in rows:
         values=stat_fields(process)
         if int(values[6])&0x00200000 or values[0] in {'Z','X','x'}:continue
@@ -472,7 +556,7 @@ def isolated_runless_os(fleet, owner, root, receipt, row, evidence, proof, bound
         need(stat_fields(after_stat)[19]==values[19], 'process birth changed during scan')
         command=base64.b64decode(process['cmdline_b64'],validate=True)
         need(len(command)<=4194304,'bounded proc command')
-        if process['pid'] in ancestors:continue
+        if process['pid'] in ancestors or process['pid'] in infrastructure:continue
         scoped=(process['run_token']==binding['run_token'] or process['cwd']=='/data/repo'
                 or process['cwd'].startswith('/data/repo/') or process['exe'].startswith('/data/repo/')
                 or re.search(rb'(?<![A-Za-z0-9_./-])/data/repo(?:/|\x00|$)',command) is not None
@@ -488,7 +572,7 @@ def isolated_runless_os(fleet, owner, root, receipt, row, evidence, proof, bound
     # Missing historical run is preserved as debt; no synthetic empty run or cleanup receipt.
 
 
-def make_isolated_read_plan(root, fleet, machine, receipt_path, *, branch, delete_fence=None, delete_wire=None):
+def make_isolated_read_plan(root, fleet, machine, receipt_path, *, branch, delete_fence=None, delete_wire=None, infrastructure_prior=None):
     """Local-only constructor: bind original canonical bytes before any provider construction."""
     root, fleet, receipt_path = Path(root).absolute(), Path(fleet).absolute(), Path(receipt_path).absolute()
     files = {}
@@ -519,6 +603,12 @@ def make_isolated_read_plan(root, fleet, machine, receipt_path, *, branch, delet
                   and document(p/'runtime-evidence.owner.json').get('machine_id')==machine)
         plan.update(original_native=str(original),original_state=str(task/'guest-cleanup.state.json'),original_backend=str(task/'guest-cleanup.backend.log'))
         for key in ('original_state','original_backend'):bound(plan[key])
+        if infrastructure_prior is not None:
+            prior=Path(infrastructure_prior);packet=document(prior)
+            need(packet['binding']==binding and packet['schema']=='original-runless-current-os-v1', 'original infrastructure prior identity')
+            plan['infrastructure_prior']=str(prior)
+            for path in prior.parent.rglob('*'):
+                if path.is_file():bound(path)
     else:
         need(branch=='absent-pair' and delete_fence and delete_wire,'original absent fence required')
         plan.update(delete_fence=str(Path(delete_fence)),delete_wire=str(Path(delete_wire)))
@@ -582,6 +672,7 @@ def collect_isolated_witness(plan, output, *, fly_factory=None):
         return save(name+'.json',dict(rows=rows,app=binding['app'],started_epoch=started,finished_epoch=time.time())),values
     packet=dict(schema='original-absent-pair-v1' if plan['branch']=='absent-pair' else 'original-runless-current-os-v1',
                 binding=binding,endpoint_origin=fly.base)
+    if 'infrastructure_prior' in plan:packet['infrastructure_prior']=plan['infrastructure_prior']
     if plan['branch']=='absent-pair':
         pair,_=native_pair('current');packet.update(json.loads(Path(pair).read_bytes()),
             delete_fence=plan['delete_fence'],delete_wire=plan['delete_wire'])
