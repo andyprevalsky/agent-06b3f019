@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { ChatGrepParamsSchema } from './chatGrepSchema';
+
 import { ChatLlmTransientMissError } from './chatStructuredRetry';
 import { extractCompleteTopLevelFields, extractPartialStringField } from './routerJsonStream';
 
@@ -13,6 +15,11 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
     reasoning: z.string(),
     /** Run in parallel; each becomes its own web_search tool result. */
     queries: z.array(z.string().trim().min(1)).min(1),
+  }),
+  z.object({
+    action: z.literal('grep'),
+    reasoning: z.string(),
+    grep: ChatGrepParamsSchema,
   }),
   z.object({
     action: z.literal('start_superintelligence'),
@@ -219,9 +226,16 @@ export function requireRouterDecision(params: {
   stage?: RouterStage;
 }): RouterDecision {
   const decision = params.finalized.decision;
-  if (decision && params.stage === 'search_budget_spent' && decision.action === 'web_search') {
+  if (
+    decision &&
+    params.stage === 'search_budget_spent' &&
+    (decision.action === 'web_search' || decision.action === 'grep')
+  ) {
     // The spent-budget schema has no web_search action; a provider that ignores it missed.
-    throw new ChatLlmTransientMissError('parse', 'Router chose web_search after the search budget');
+    throw new ChatLlmTransientMissError(
+      'parse',
+      `Router chose ${decision.action} after the search budget`
+    );
   }
   if (decision) return decision;
   if (params.deadlineExpired) {

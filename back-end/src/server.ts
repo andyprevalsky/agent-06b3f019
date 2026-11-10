@@ -96,8 +96,8 @@ import {
 } from './providers/temporalBlackboxFake';
 import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
 import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
-import { grep as userDataGrep } from './domains/data/service';
-import { registerUserDataGrep } from './providers/userDataSearch';
+import { grep as userDataGrep, getSummary as userDataSummary } from './domains/data/service';
+import { registerUserDataGrep, registerUserDataSummary } from './providers/userDataSearch';
 import { registerCronJobs } from './serverCron';
 import { cleanupBenchmarkKernelProfiles } from './providers/browser/kernel';
 import { cleanupBenchmarkBrowserUseProfiles } from './providers/browser/browserUse';
@@ -118,6 +118,7 @@ if (!process.env.BACKEND_API_KEY) {
 // Wire the data domain's grep into the provider-side bridge so the SMS
 // supervisor can search user data without a provider→domain import.
 registerUserDataGrep(userDataGrep);
+registerUserDataSummary(userDataSummary);
 
 const app = express();
 const PORT = process.env.PORT || 3001;

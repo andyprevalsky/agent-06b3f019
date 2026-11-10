@@ -1,3 +1,6 @@
+import { zodToStrictJsonSchema } from '../rose/schema';
+import { ChatGrepParamsSchema } from './chatGrepSchema';
+
 /**
  * Universal structured-output schema for the chat router.
  *
@@ -15,7 +18,7 @@ export const ROUTER_JSON_SCHEMA = {
     },
     action: {
       type: 'string',
-      enum: ['direct_answer', 'web_search', 'start_superintelligence'],
+      enum: ['direct_answer', 'web_search', 'grep', 'start_superintelligence'],
       description:
         'The action to take. Use direct_answer only when the chat reply itself will contain the requested representation. A pointer or limitation is not direct_answer; use start_superintelligence.',
     },
@@ -24,6 +27,11 @@ export const ROUTER_JSON_SCHEMA = {
       items: { type: 'string' },
       description:
         'Search queries, run in parallel. One or more for web_search; empty array for other actions.',
+    },
+    grep: {
+      anyOf: [zodToStrictJsonSchema(ChatGrepParamsSchema), { type: 'null' }],
+      description:
+        'User-data search parameters for grep; null for other actions. Results return to the Router before answering.',
     },
     goal: {
       type: 'string',
@@ -39,7 +47,7 @@ export const ROUTER_JSON_SCHEMA = {
         'Agent start phase, chosen per Mode Selection. Required for start_superintelligence; ignored for other actions (pick either enum value).',
     },
   },
-  required: ['reasoning', 'action', 'queries', 'goal', 'mode'],
+  required: ['reasoning', 'action', 'queries', 'grep', 'goal', 'mode'],
   additionalProperties: false,
 };
 
@@ -58,5 +66,5 @@ export const ROUTER_SEARCH_BUDGET_SPENT_JSON_SCHEMA = {
     goal: ROUTER_JSON_SCHEMA.properties.goal,
     mode: ROUTER_JSON_SCHEMA.properties.mode,
   },
-  required: ROUTER_JSON_SCHEMA.required.filter((field) => field !== 'queries'),
+  required: ROUTER_JSON_SCHEMA.required.filter((field) => field !== 'queries' && field !== 'grep'),
 };

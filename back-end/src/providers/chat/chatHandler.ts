@@ -37,6 +37,7 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
 import type { Prisma } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
+import { formatUserContext, USER_PROFILE_SELECT } from '../userProfileContext';
 import { startAgentWorkflowExecution, type TemporalWorkflowExecutionRef } from '../temporal';
 import { normalizeWorldModelMode } from '../worldModelMode';
 import { createMessage } from '../messages';
@@ -44,7 +45,7 @@ import { acceptChatWorkflowExecution } from '../workflowGeneration';
 import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { MAX_CHAT_SEARCH_ROUNDS, type RouterStage } from './routerDecision';
-import { runChatWebSearchRound, type WebSearchDecision } from './chatWebSearchRound';
+import { runChatWebSearchRound, type ChatSearchDecision } from './chatWebSearchRound';
 import { callGeneratorLlm, type GeneratorResponse } from './generatorLlm';
 import { selectChatPhaseModels, type ChatPhaseModels } from './phaseModels';
 import { startInitialChatContext, loadChatModelMessages, type ChatMessage } from './initialContext';
@@ -88,7 +89,11 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     requestedModel: config.model,
   });
-  const messages = await initialContext.messages;
+  const [messages, userProfile] = await Promise.all([
+    initialContext.messages,
+    prisma.user.findUnique({ where: { userId: config.userId }, select: USER_PROFILE_SELECT }),
+  ]);
+  const userProfileContext = formatUserContext(userProfile);
   const chatContextConfig = { agentId: config.agentId, requestedModel: config.model };
 
   const runGenerator = async (
@@ -98,6 +103,7 @@ export async function handleChatMessage(config: {
     return callGeneratorLlm({
       agentId: config.agentId,
       messages: generatorMessages,
+      userProfileContext,
       model: phaseModels.generator,
       providerRoute: phaseModels.generatorProviderRoute,
       abortSignal: speculative?.abortSignal,
@@ -119,6 +125,7 @@ export async function handleChatMessage(config: {
     routerResponse = await callRouterLlm({
       agentId: config.agentId,
       messages,
+      userProfileContext,
       model: phaseModels.router,
       providerRoute: phaseModels.routerProviderRoute,
       onRouterStarted: shouldSpeculateDirectAnswer ? speculativeGenerator.start : undefined,
@@ -269,14 +276,15 @@ export async function handleChatMessage(config: {
   // ============================================
   let generatorMessages = messages;
   let earlyGeneratorResponse: GeneratorResponse | null;
-  if (decision.action === 'web_search') {
-    let search: WebSearchDecision = decision;
+  if (decision.action === 'web_search' || decision.action === 'grep') {
+    let search: ChatSearchDecision = decision;
     let earlyToolCallId = webSearchToolCallId;
     let searchRouterStreamId = routerStreamId;
     for (let round = 1; ; round += 1) {
       await runChatWebSearchRound({
         agentId: config.agentId,
         decision: search,
+        userId: config.userId,
         earlyToolCallId,
         routerStreamId: searchRouterStreamId,
       });
@@ -285,6 +293,7 @@ export async function handleChatMessage(config: {
         agentId: config.agentId,
         userId: config.userId,
         messages: generatorMessages,
+        userProfileContext,
         phaseModels,
         runGenerator,
         stage: round < MAX_CHAT_SEARCH_ROUNDS ? 'after_search' : 'search_budget_spent',
@@ -373,6 +382,7 @@ async function routeAfterSearch(params: {
   agentId: string;
   userId: string;
   messages: ChatMessage[];
+  userProfileContext: string;
   phaseModels: ChatPhaseModels;
   stage: Exclude<RouterStage, 'initial'>;
   runGenerator: (
@@ -393,6 +403,7 @@ async function routeAfterSearch(params: {
     routerResponse = await callRouterLlm({
       agentId: params.agentId,
       messages: params.messages,
+      userProfileContext: params.userProfileContext,
       model: params.phaseModels.router,
       providerRoute: params.phaseModels.routerProviderRoute,
       stage: params.stage,

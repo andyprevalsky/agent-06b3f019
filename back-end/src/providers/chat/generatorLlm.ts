@@ -178,6 +178,7 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
 type GeneratorLlmParams = {
   agentId: string;
   messages: ChatMessage[];
+  userProfileContext?: string;
   model: string;
   providerRoute?: ChatProviderRoute;
   abortSignal?: AbortSignal;
@@ -209,7 +210,7 @@ async function callGeneratorLlmCore(
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [markCacheable(GENERATOR_SYSTEM_PROMPT)];
+  }> = [markCacheable(GENERATOR_SYSTEM_PROMPT, params.userProfileContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {

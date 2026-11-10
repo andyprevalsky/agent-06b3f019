@@ -10,6 +10,8 @@
 export interface UserDataGrepParams {
   pattern?: string;
   source?: string;
+  sources?: string[];
+  agent_id?: string;
   filters?: Record<string, unknown>;
   role?: string;
   record_kind?: string;
@@ -86,4 +88,15 @@ export async function executeUserDataGrep(
     );
   }
   return grepExecutor(userId, params);
+}
+
+let summaryExecutor: ((userId: string) => Promise<unknown>) | null = null;
+
+export function registerUserDataSummary(fn: (userId: string) => Promise<unknown>): void {
+  summaryExecutor = fn;
+}
+
+export function executeUserDataSummary(userId: string): Promise<unknown> {
+  if (!summaryExecutor) throw new Error('[UserDataSearch] user data summary not initialized');
+  return summaryExecutor(userId);
 }

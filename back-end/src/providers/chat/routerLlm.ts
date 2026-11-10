@@ -217,6 +217,7 @@ export function buildRouterCompletionOptions(
 export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
+  userProfileContext?: string;
   model: string;
   providerRoute?: ChatProviderRoute;
   stage?: RouterStage;
@@ -234,7 +235,7 @@ export async function callRouterLlm(params: {
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [markCacheable(routerStage.systemPrompt)];
+  }> = [markCacheable(routerStage.systemPrompt, params.userProfileContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {

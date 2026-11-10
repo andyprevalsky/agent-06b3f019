@@ -66,30 +66,36 @@ const ROUTER_DIRECT_ANSWER = `1. direct_answer - Simple questions you can answer
 
 const ROUTER_WEB_SEARCH = `2. web_search - Current information needed (news, prices, facts, recent events). Give one or more queries; they run in parallel, and you route again once their results arrive`;
 
+const ROUTER_GREP = `grep - Search this user's synced records or prior agent runs using the same read-only data search available to explore agents. Supply grep parameters (pattern, sources and optional selectors). Consult provided user context and use grep for missing personal facts before asking the user. Use web_search for public information. Records, matches and pagination are returned as tool results before you route again.`;
+
 const ROUTER_ESCALATE = `start_superintelligence - Escalate to autonomous agent with mode selection`;
 
 const ROUTER_ACTIONS = `${ROUTER_DIRECT_ANSWER}
 ${ROUTER_WEB_SEARCH}
-3. ${ROUTER_ESCALATE}`;
+3. ${ROUTER_GREP}
+4. ${ROUTER_ESCALATE}`;
 
-const ROUTER_SEARCH_STEP = `Step 2: Does this need current/factual information?
+const ROUTER_SEARCH_STEP = `Step 2: Does this need evidence?
+  - For facts about this user, use provided user context or grep their relevant records
+  - For public information:
   - Current events, news, prices
   - "What is the latest...", "Who is..."
   - YES, route to web_search with one or more queries. Use several queries when the request has several parts or subjects, or when different phrasings could find it; they run in parallel`;
 
-const ROUTER_AFTER_SEARCH_ACTIONS = `This turn's web searches have run; their results are the latest [Tool Result] messages.
+const ROUTER_AFTER_SEARCH_ACTIONS = `This turn's searches have run; their results are the latest [Tool Result] messages.
 
 ${ROUTER_DIRECT_ANSWER}
 ${ROUTER_WEB_SEARCH}
-3. ${ROUTER_ESCALATE}`;
+3. ${ROUTER_GREP}
+4. ${ROUTER_ESCALATE}`;
 
 const ROUTER_AFTER_SEARCH_STEP = `Step 2: Do the search results contain what the user asked for?
   - YES, route to direct_answer
-  - NO, and a different search could find it, route to web_search with new queries
+  - NO, and a different search could find it, route to grep for user records or web_search for public information
   - NO otherwise, route to start_superintelligence
   - Reporting that the search did not find it, or asking the user to narrow it down, is not a direct_answer. When the user must clarify, start_superintelligence in plan mode asks them`;
 
-const ROUTER_SEARCH_BUDGET_SPENT_ACTIONS = `This turn's web searches have already run; their results are the latest [Tool Result] messages. Chat has used its ${MAX_CHAT_SEARCH_ROUNDS} rounds of searches for this turn, so web_search is not available now.
+const ROUTER_SEARCH_BUDGET_SPENT_ACTIONS = `This turn's web searches have already run; their results are the latest [Tool Result] messages. Chat has used its ${MAX_CHAT_SEARCH_ROUNDS} rounds of searches for this turn, so neither web_search nor grep is available now.
 
 1. direct_answer - Answer from the search results
 2. ${ROUTER_ESCALATE}`;
@@ -189,7 +195,7 @@ In this surface, you generate a chat reply for the user. Operate with the lowest
 
 # Context
 
-- You may have [Tool Result] messages containing web search results
+- You may have [Tool Result] messages containing web search results or user-data grep matches
 - Use those results to provide accurate, up-to-date information
 - Include relevant sources/citations when available
 

@@ -161,11 +161,13 @@ export function detectActionFromPartialJson(json: string): string | null {
   return match ? match[1] : null;
 }
 
-export type ClosedRouterAction = 'direct_answer' | 'web_search' | 'start_superintelligence';
+export type ClosedRouterAction =
+  'direct_answer' | 'web_search' | 'grep' | 'start_superintelligence';
 
 const CLOSED_ROUTER_ACTIONS = new Set<ClosedRouterAction>([
   'direct_answer',
   'web_search',
+  'grep',
   'start_superintelligence',
 ]);
 
