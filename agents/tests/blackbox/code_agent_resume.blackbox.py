@@ -18,7 +18,7 @@ and the real code-spawn handler's:
 import asyncio
 import uuid
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import BlackboxResult
 from temporalio import workflow
@@ -188,6 +188,63 @@ async def test_pause_signal_stops_a_supervised_run_through_the_spawn_pause_path(
     paused = [row for row in tool_rows if row[3].get("title") == "Code session paused"]
     assert paused, [row[3].get("title") for row in tool_rows]
     assert paused[-1][3]["excludeFromModel"] is True and paused[-1][3]["toolCallId"] == "toolu_code_spawn"
+
+
+async def test_user_turn_resumes_through_the_real_code_activity():
+    """A queued user turn must reach session create, not just the supervisor's activity stub."""
+    import json
+
+    from temporalio.exceptions import ApplicationError
+
+    from domains.spawn_claude_code_agent import service
+
+    handoff = {"rose_handoff": {
+        "status": "complete", "summary": "Changelog updated.",
+        "branch": None, "commit": None, "pr_url": None, "merged": None,
+    }}
+    for provider in ("claude", "codex"):
+        created = AsyncMock(return_value={
+            "task_id": "resumed-task", "sandbox_id": "sandbox", "ws_url": "wss://test",
+            "uploaded_files": [],
+        })
+        closed = AsyncMock(return_value={
+            "output_files": [], "usage": {},
+            "handoff": {"status": "present", "content": json.dumps(handoff)},
+        })
+        posted = []
+
+        async def spawn(*args):
+            try:
+                return await service.spawn_claude_code_activity(*args)
+            except ValueError as error:
+                # Bound the pre-fix deterministic error: production otherwise retries forever.
+                raise ApplicationError(str(error), non_retryable=True) from error
+
+        with (
+            patch.dict("os.environ", {"ROSE_ENABLE_CODE_AGENT_VERIFIER": ""}),
+            patch.object(service, "create_e2b_session", created),
+            patch.object(service, "close_e2b_session", closed),
+            patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: AsyncMock()),
+            patch.object(service, "_run_agentic_loop", AsyncMock(return_value=(0, True, [], 0, 0, []))),
+            patch.object(service, "persist_terminal_output", AsyncMock()),
+            patch.object(service, "save_claude_code_message", AsyncMock()),
+            patch.object(service, "save_code_transcript_batch", AsyncMock()),
+            patch("helpers.model_pricing.get_model_pricing_with_fallback", AsyncMock(return_value={
+                "input_cents_per_1k": 0, "output_cents_per_1k": 0,
+            })),
+        ):
+            result = await _run(_fakes(spawn, posted), _request(code_provider=provider))
+        assert not isinstance(result, Exception), f"{provider}: {result}"
+        created.assert_awaited_once()
+        request = created.call_args.kwargs
+        assert request["code_session_id"] == _request()["code_session_id"]
+        assert request["code_provider"] == provider
+        assert request["goal"].startswith(_request()["message"])
+        schema = json.loads(request["goal"].split("Result JSON Schema for ", 1)[1].split(":\n", 1)[1])
+        assert schema == service.DEFAULT_HANDOFF_SCHEMA
+        assert any(row[3].get("action_type") == "task_complete" and row[3].get("success") for row in posted)
 
 
 async def test_generation_handoff_continues_on_the_live_queue_and_reattaches():
@@ -528,6 +585,7 @@ async def test_a_root_whose_stored_tree_reached_its_cap_stops():
 async def run_all_tests():
     print("code_agent_resume blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("user_turn_real_code_activity", test_user_turn_resumes_through_the_real_code_activity)
     await r.record_async(
         "pause_stops_supervised_run", test_pause_signal_stops_a_supervised_run_through_the_spawn_pause_path
     )

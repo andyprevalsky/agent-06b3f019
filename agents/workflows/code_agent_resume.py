@@ -52,7 +52,12 @@ REQUIRED_FIELDS = ("agent_id", "user_id", "tool_call_id", "message")
 
 def resume_tool_call(request: Dict[str, Any]) -> Dict[str, Any]:
     """The code spawn's arguments for the resumed run (the message is its next turn)."""
-    tool_call: Dict[str, Any] = {"type": "code", "goal": request["message"]}
+    # A person supplies the next turn, not a planner's custom result fields.
+    # Declare no extra fields: the spawn still requires its standard rose_handoff
+    # (status, summary and git facts) and validates it on completion.
+    tool_call: Dict[str, Any] = {
+        "type": "code", "goal": request["message"], "output_schema": {"fields": []}
+    }
     if request.get("task_name"):
         tool_call["task_name"] = request["task_name"]
     if request.get("code_session_id"):

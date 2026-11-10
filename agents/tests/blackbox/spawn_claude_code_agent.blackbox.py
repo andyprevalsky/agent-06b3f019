@@ -2784,7 +2784,9 @@ async def test_spawn_activity_does_not_fetch_claude_credential_for_codex():
 
 
 async def test_spawn_activity_requires_output_schema():
-    """Missing output_schema raises ValueError before any sandbox work."""
+    """A missing contract fails once, before sandbox work, even with unlimited crash retries."""
+    from temporalio.exceptions import ApplicationError
+
     from domains.spawn_claude_code_agent import service
 
     try:
@@ -2796,8 +2798,10 @@ async def test_spawn_activity_requires_output_schema():
             output_schema=None,
         )
         raise AssertionError("should raise")
-    except ValueError as e:
+    except ApplicationError as e:
         assert "output_schema is required" in str(e)
+        assert e.non_retryable is True
+        assert e.type == "CODE_AGENT_OUTPUT_SCHEMA_REQUIRED"
 
 
 async def test_spawn_activity_happy_path_end_to_end():
