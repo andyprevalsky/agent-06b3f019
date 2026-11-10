@@ -5,6 +5,12 @@
  * does not broadcast to Supabase), and the realtime subscription that keeps
  * the list in sync via INSERT/UPDATE/DELETE events on the user channel. Also
  * exposes `refetch` for imperative refresh after an action.
+ *
+ * Polling state:
+ *   VISIBLE --every 10s--> refetch --same rows--> keep previous list (no commit)
+ *                                   --changed----> replace list
+ *   VISIBLE --document hidden--> PAUSED (interval ticks skip the request)
+ *   PAUSED  --visibilitychange to visible--> refetch now --> VISIBLE
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,6 +23,8 @@ import {
   unsubscribe,
 } from '../../hooks';
 import { supabase } from '@/lib/supabase';
+import { isSubscriptionAbort } from '@/lib/realtime';
+import { keepIfUnchanged } from '@/lib/stableData';
 import type { AttentionRequest } from './types';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -64,6 +72,7 @@ function recordToRequest(data: InsertRecord): AttentionRequest {
 function buildSubscriptionHandlers(
   setRequests: Dispatch<SetStateAction<AttentionRequest[]>>,
   scheduleReconnect: () => void,
+  isCancelled: () => boolean,
 ) {
   return {
     onInsert: (payload: unknown) => {
@@ -94,6 +103,8 @@ function buildSubscriptionHandlers(
       setRequests((prev) => prev.filter((req) => req.id !== data.id));
     },
     onDisconnect: () => {
+      // Our own unsubscribe on cleanup also surfaces as CLOSED; not a disconnect.
+      if (isCancelled()) return;
       console.warn('[AttentionInbox] Channel disconnected, scheduling reconnect');
       scheduleReconnect();
     },
@@ -110,6 +121,25 @@ export function unansweredCount(requests: AttentionRequest[]): number {
   return requests.filter((r) => !r.answered).length;
 }
 
+/**
+ * Initial fetch + polling fallback. Nothing is shown while the page is hidden,
+ * so polls pause then and a refetch runs as soon as it is visible again.
+ */
+function useVisiblePolling(refetch: () => Promise<void>): void {
+  useEffect(() => {
+    void refetch();
+    const pollVisible = () => {
+      if (!document.hidden) void refetch();
+    };
+    const pollInterval = setInterval(pollVisible, POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', pollVisible);
+    return () => {
+      clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', pollVisible);
+    };
+  }, [refetch]);
+}
+
 export function useAttentionRequests(realtimeReady: boolean): UseAttentionRequestsResult {
   const [requests, setRequests] = useState<AttentionRequest[]>([]);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -120,20 +150,13 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
   const refetch = useCallback(async () => {
     try {
       const fresh = await getAttentionRequests();
-      setRequests(fresh);
+      setRequests((previous) => keepIfUnchanged(previous, fresh));
     } catch (error) {
       console.error('Failed to fetch attention requests:', error);
     }
   }, []);
 
-  // Initial fetch + polling fallback
-  useEffect(() => {
-    void refetch();
-    const pollInterval = setInterval(() => {
-      void refetch();
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(pollInterval);
-  }, [refetch]);
+  useVisiblePolling(refetch);
 
   // Realtime subscription (wired once auth is ready)
   useEffect(() => {
@@ -146,9 +169,7 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       // down `window` — otherwise setup().catch can create a timer after unmount
       // that no later cleanup can clear.
       if (cancelled || typeof window === 'undefined') return;
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       const attempt = reconnectAttemptRef.current;
       const delay = Math.min(
         BASE_RECONNECT_DELAY_MS * Math.pow(2, attempt),
@@ -162,6 +183,9 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       }, delay);
     };
 
+    // Cancels a join still pending at teardown (channelRef is only set once SUBSCRIBED).
+    const pendingJoin = new AbortController();
+
     const setup = async () => {
       const session = getStoredSession();
       const userId = session?.user?.id;
@@ -173,10 +197,10 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       }
 
       try {
-        const channel = await subscribeToAttentionRequests(
-          userId,
-          buildSubscriptionHandlers(setRequests, scheduleReconnect),
-        );
+        const channel = await subscribeToAttentionRequests(userId, {
+          ...buildSubscriptionHandlers(setRequests, scheduleReconnect, () => cancelled),
+          signal: pendingJoin.signal,
+        });
         if (cancelled) {
           await supabase.removeChannel(channel);
           return;
@@ -185,6 +209,8 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
         reconnectAttemptRef.current = 0;
         await refetch();
       } catch (error) {
+        // Our own cancellation: the channel is already gone, nothing to retry.
+        if (cancelled && isSubscriptionAbort(error)) return;
         console.error('Failed to subscribe to attention requests:', error);
         scheduleReconnect();
       }
@@ -194,6 +220,7 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
 
     return () => {
       cancelled = true;
+      pendingJoin.abort();
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;

@@ -106,3 +106,22 @@ export async function resumeBrowserSession(taskId: string): Promise<BrowserSessi
 
   return (await response.json()) as BrowserSessionResumeResponse;
 }
+
+export type BrowserNavigationAction = 'back' | 'forward' | 'reload';
+
+/** Navigate the page in the selected remote session, preserving its history and login. */
+export async function navigateBrowserSession(
+  taskId: string,
+  action: BrowserNavigationAction,
+): Promise<{ url: string | null }> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/browser-session/task/${encodeURIComponent(taskId)}/navigation`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ action }),
+    },
+  );
+  if (!response.ok) throw new Error(`Browser navigation failed (${response.status})`);
+  return (await response.json()) as { url: string | null };
+}

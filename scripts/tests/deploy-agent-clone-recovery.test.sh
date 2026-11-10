@@ -24,7 +24,7 @@ if action == 'enqueue':
     assert path.stat().st_mode & 0o777 == 0o600
     plan = json.loads(path.read_text())
     assert plan['buildId'] == plan['sourceCommit']
-    assert plan['imageRef'] == 'registry.fly.io/test-prod@sha256:' + 'd' * 64
+    assert plan['imageRef'] == 'registry.fly.io/test-prod@sha256:' + os.environ.get('TEST_EXPECT_DIGEST_CHAR', 'd') * 64
     assert len(plan['surfaceHash']) == 12
     identity = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
     (folder / 'plan-readback.json').write_text(json.dumps(plan))
@@ -55,6 +55,12 @@ SH
 cat > "$TMP/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$*" == "buildx imagetools inspect registry.fly.io/test-prod:prebuilt-${TEST_PREBUILT_TREE:-none} "* ]]; then
+  printf 'inspect-prebuilt\n' >> "$TEST_QUEUE_DIR/journal"
+  [[ "${TEST_PREBUILT_PRESENT:-0}" == 1 ]] || exit 1
+  printf '"sha256:%064d"\n' 0 | tr 0 e
+  exit 0
+fi
 [[ "$*" == 'buildx imagetools inspect registry.fly.io/test-prod:cutover-'* ]] || exit 92
 if ! python3 - <<'PYAUTH'
 import json, os, pathlib
@@ -81,7 +87,12 @@ case "$*" in
   'rev-parse HEAD') printf '%s\n' "${TEST_CHECKOUT_SHA:-$BUILD_ID}";;
   'diff --quiet HEAD') exit "${TEST_DIRTY_SOURCE:-0}";;
   'ls-files --others --exclude-standard') exit 0;;
-  archive\ *:agents) tar -cf - --files-from /dev/null;;
+  # Only per-entry subtree archives are accepted: archiving the whole agents tree
+  # prefetches every benchmark blob in the blob-filtered workflow checkout.
+  "archive --prefix=workflows/ $BUILD_ID:agents/workflows") tar -cf - --files-from /dev/null;;
+  ls-tree\ *:agents) printf '040000 tree %s\tworkflows\n' 2222222222222222222222222222222222222222;;
+  'hash-object --stdin') cat >/dev/null; [[ -n "${TEST_PREBUILT_TREE:-}" ]] || exit 95; printf '%s\n' "$TEST_PREBUILT_TREE";;
+  rev-parse\ *:agents) [[ -n "${TEST_PREBUILT_TREE:-}" ]] || exit 95; printf '%s\n' "$TEST_PREBUILT_TREE";;
   *) exit 95;;
 esac
 SH
@@ -142,4 +153,25 @@ if TEST_AUTH_FAILURE=33 bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh
 fi
 [[ "$(cat "$TMP/journal")" == $'build\nauth' ]]
 [[ ! -e "$DOCKER_CONFIG/config.json" ]]
+# Prebuilt promotion: an image prebuilt for this exact agents tree is enqueued
+# by digest without rebuilding; a miss falls back to the normal build.
+export TEST_PREBUILT_TREE=1111111111111111111111111111111111111111
+: > "$TMP/journal"
+TEST_PREBUILT_PRESENT=1 TEST_EXPECT_DIGEST_CHAR=e \
+  bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/prebuilt.log" 2>&1 ||
+  { cat "$TMP/prebuilt.log" >&2; exit 1; }
+[[ "$(cat "$TMP/journal")" == $'auth\ninspect-prebuilt\nenqueue\nrun' ]] ||
+  { echo 'prebuilt image was not promoted without a rebuild' >&2; cat "$TMP/journal" >&2; exit 1; }
+grep -q 'Promoting prebuilt worker image registry.fly.io/test-prod@sha256:e' "$TMP/prebuilt.log"
+: > "$TMP/journal"
+rm -f "$DOCKER_CONFIG/config.json"
+bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/prebuilt-miss.log" 2>&1 ||
+  { cat "$TMP/prebuilt-miss.log" >&2; exit 1; }
+[[ "$(cat "$TMP/journal")" == $'auth\ninspect-prebuilt\nbuild\nauth\ninspect\nenqueue\nrun' ]] ||
+  { echo 'a prebuilt miss must build exactly as before' >&2; cat "$TMP/journal" >&2; exit 1; }
+: > "$TMP/journal"
+AGENTS_PREBUILT_REUSE=0 TEST_PREBUILT_PRESENT=1 \
+  bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/prebuilt-off.log" 2>&1
+[[ "$(cat "$TMP/journal")" == $'build\nauth\ninspect\nenqueue\nrun' ]]
+unset TEST_PREBUILT_TREE
 echo 'worker pool entry: PASS (allocation-free build, immutable enqueue, shared runner, failures before admission)'

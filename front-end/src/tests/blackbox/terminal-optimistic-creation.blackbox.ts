@@ -40,6 +40,7 @@ function makeArgs(overrides: Partial<UseMessageSendingArgs> = {}): UseMessageSen
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => true),
+    stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
     ...overrides,
   };
 }
@@ -113,7 +114,7 @@ describe('optimistic terminal agent creation', () => {
     expect(departed.result.current.messageInput).toBe('');
   });
 
-  it('a new agent started from a project sends project_id once; Home goals omit it', async () => {
+  it('a new agent started from a folder sends both IDs once; Home goals omit both', async () => {
     const bodies: Record<string, unknown>[] = [];
     server.use(
       http.post(`${API_BASE}/agents`, async ({ request }) => {
@@ -126,32 +127,55 @@ describe('optimistic terminal agent creation', () => {
     const { result } = renderHook(() => useMessageSending(args));
     expect(result.current.newAgentProjectId).toBeNull();
 
-    act(() => result.current.setNewAgentProjectId('p-rose'));
+    act(() => {
+      result.current.setNewAgentProjectId('p-rose');
+      result.current.setNewAgentFolderId('folder-rose');
+    });
     act(() => result.current.setMessageInput('in a project'));
     await act(async () => result.current.handleSendMessage());
     expect(bodies[0]).toEqual(
-      expect.objectContaining({ goal: 'in a project', project_id: 'p-rose' }),
+      expect.objectContaining({
+        goal: 'in a project',
+        project_id: 'p-rose',
+        folder_id: 'folder-rose',
+      }),
     );
     // Consumed by the created agent: the next new agent goes to Home.
     expect(result.current.newAgentProjectId).toBeNull();
+    expect(result.current.newAgentFolderId).toBeNull();
 
     act(() => result.current.setMessageInput('at home'));
     await act(async () => result.current.handleSendMessage());
     expect(bodies[1]).toEqual(expect.objectContaining({ goal: 'at home' }));
     expect(bodies[1]).not.toHaveProperty('project_id');
+    expect(bodies[1]).not.toHaveProperty('folder_id');
   });
 
-  it('a failed project create keeps the project for the retry', async () => {
+  it('a failed folder create keeps the project and folder for the retry', async () => {
+    const bodies: Record<string, unknown>[] = [];
     server.use(
-      http.post(`${API_BASE}/agents`, () =>
-        HttpResponse.json({ error: 'creation failed' }, { status: 500 }),
-      ),
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return bodies.length === 1
+          ? HttpResponse.json({ error: 'creation failed' }, { status: 500 })
+          : HttpResponse.json({ agent_id: body.agent_id });
+      }),
     );
     const args = makeArgs();
     const { result } = renderHook(() => useMessageSending(args));
     act(() => result.current.setNewAgentProjectId('p-rose'));
+    act(() => result.current.setNewAgentFolderId('folder-rose'));
     act(() => result.current.setMessageInput('retry in project'));
     await act(async () => result.current.handleSendMessage());
     expect(result.current.newAgentProjectId).toBe('p-rose');
+    expect(result.current.newAgentFolderId).toBe('folder-rose');
+    await act(async () => result.current.handleSendMessage());
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(body).toMatchObject({ project_id: 'p-rose', folder_id: 'folder-rose' });
+    }
+    expect(result.current.newAgentProjectId).toBeNull();
+    expect(result.current.newAgentFolderId).toBeNull();
   });
 });

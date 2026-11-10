@@ -54,6 +54,7 @@ export function isClaudeCodeChipAnchor(message: Message): boolean {
 
 function sanitizeTrajectoryMessage(message: Message): Message {
   if (message.role === 'USER' || message.role === 'SYSTEM') return message;
+  if (message.metadata?.verbatimText === true) return message;
   const text = userFacingMessageText(message.text);
   if (text === message.text) return message;
   return { ...message, text };
@@ -188,16 +189,26 @@ interface UseFilteredStreamingOptions {
   streamingTools: Map<string, StreamingTool>;
 }
 
-export function coalesceStreamingTools(
+function indexPersistedStreaming(messages: Message[]) {
+  const taskIds = new Set<string>();
+  const toolCallIds = new Set<string>();
+  const answerCallIds = new Set<string>();
+  for (const message of messages) {
+    const metadata = message.metadata;
+    if (typeof metadata?.taskId === 'string') taskIds.add(metadata.taskId);
+    if (typeof metadata?.toolCallId !== 'string') continue;
+    toolCallIds.add(metadata.toolCallId);
+    if (message.role === 'TOOL' && metadata.toolName === 'send_message_to_user')
+      answerCallIds.add(metadata.toolCallId);
+  }
+  return { taskIds, toolCallIds, answerCallIds };
+}
+
+function filterStreamingTools(
   streamingTools: Map<string, StreamingTool>,
-  persistedMessages: Message[],
+  persistedToolCallIds: ReadonlySet<string>,
   target: string | null,
 ): Map<string, StreamingTool> {
-  const persistedToolCallIds = new Set(
-    persistedMessages
-      .map((message) => message.metadata?.toolCallId)
-      .filter((toolCallId): toolCallId is string => typeof toolCallId === 'string'),
-  );
   return new Map(
     [...streamingTools].filter(
       ([toolCallId, tool]) =>
@@ -206,19 +217,16 @@ export function coalesceStreamingTools(
   );
 }
 
-function coalesceStreamingAttention(
-  attention: StreamingAttention | null,
+export function coalesceStreamingTools(
+  streamingTools: Map<string, StreamingTool>,
   persistedMessages: Message[],
   target: string | null,
-): StreamingAttention | null {
-  if (!attention || (attention.subAgentId ?? null) !== target) return null;
-  const hasCanonicalAnswer = persistedMessages.some(
-    (message) =>
-      message.role === 'TOOL' &&
-      message.metadata?.toolName === 'send_message_to_user' &&
-      message.metadata?.toolCallId === attention.tool_call_id,
+): Map<string, StreamingTool> {
+  return filterStreamingTools(
+    streamingTools,
+    indexPersistedStreaming(persistedMessages).toolCallIds,
+    target,
   );
-  return hasCanonicalAnswer ? null : attention;
 }
 
 export function useFilteredStreaming({
@@ -230,24 +238,31 @@ export function useFilteredStreaming({
   streamingTools,
 }: UseFilteredStreamingOptions): FilteredStreamingState {
   const target = subAgentId ?? null;
-  return useMemo(() => {
-    const exploreTaskIds = new Set(
-      persistedMessages
-        .map((message) => message.metadata?.taskId)
-        .filter((taskId): taskId is string => typeof taskId === 'string'),
-    );
-    const bubbles = new Map(
-      [...streamingBubbles].filter(
-        ([, b]) =>
-          (b.subAgentId ?? null) === target ||
-          (target === null && b.subAgentId != null && exploreTaskIds.has(b.subAgentId)),
+  const persisted = useMemo(() => indexPersistedStreaming(persistedMessages), [persistedMessages]);
+  const bubbles = useMemo(
+    () =>
+      new Map(
+        [...streamingBubbles].filter(
+          ([, b]) =>
+            (b.subAgentId ?? null) === target ||
+            (target === null && b.subAgentId != null && persisted.taskIds.has(b.subAgentId)),
+        ),
       ),
-    );
-    const tools = coalesceStreamingTools(streamingTools, persistedMessages, target);
-    const plan =
-      streamingPlan && (streamingPlan.subAgentId ?? null) === target ? streamingPlan : null;
-    const attention = coalesceStreamingAttention(streamingAttention, persistedMessages, target);
-
+    [streamingBubbles, target, persisted],
+  );
+  const tools = useMemo(
+    () => filterStreamingTools(streamingTools, persisted.toolCallIds, target),
+    [streamingTools, persisted, target],
+  );
+  const plan =
+    streamingPlan && (streamingPlan.subAgentId ?? null) === target ? streamingPlan : null;
+  const attention =
+    streamingAttention &&
+    (streamingAttention.subAgentId ?? null) === target &&
+    !persisted.answerCallIds.has(streamingAttention.tool_call_id)
+      ? streamingAttention
+      : null;
+  return useMemo(() => {
     let charCount = 0;
     let streamStartedAtMs: number | undefined;
     let isClaude = false;
@@ -271,14 +286,7 @@ export function useFilteredStreaming({
     }
 
     return { bubbles, plan, attention, tools, charCount, streamStartedAtMs, isClaude, isGpt };
-  }, [
-    target,
-    persistedMessages,
-    streamingBubbles,
-    streamingPlan,
-    streamingAttention,
-    streamingTools,
-  ]);
+  }, [bubbles, plan, attention, tools]);
 }
 
 export { mergeSubAgentTreeMessages, useSubAgentTreeMerge } from './useSubAgentTreeMerge';

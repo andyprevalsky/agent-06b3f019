@@ -17,6 +17,13 @@ cloud_env_boot_id() {
 # until its own store daemon starts. Trust the id only while the daemon that
 # wrote it is running.
 cloud_env_agent_id() {
+  local id
+  id="$(cloud_env_store_agent_id)"
+  [ -n "$id" ] || id="$(cloud_env_boxes_devbox_id)"
+  [ -z "$id" ] || printf '%s\n' "$id"
+}
+
+cloud_env_store_agent_id() {
   local dir="${CLOUD_ENV_AGENT_STORE_DIR:-/run/agent-store-fuse}" pid cmd
   pid="$(sed -n 's/^pid=//p' "$dir/ready" 2>/dev/null || true)"
   case "$pid" in '' | *[!0-9]*) return 0 ;; esac
@@ -30,8 +37,30 @@ cloud_env_agent_id() {
   cat "$dir/self-store-id" 2>/dev/null || true
 }
 
+# boxes.dev: a snapshot clone keeps the snapshot's kernel boot id, but every devbox
+# has its own id (BOXES_DEVBOX=1 is set on all of them). CLOUD_ENV_BOXES_DEVBOX_ID
+# overrides the lookup (tests); any failure yields no id.
+cloud_env_boxes_devbox_id() {
+  if [ "${CLOUD_ENV_BOXES_DEVBOX_ID+x}" = x ]; then
+    printf '%s\n' "$CLOUD_ENV_BOXES_DEVBOX_ID"
+    return 0
+  fi
+  [ "${BOXES_DEVBOX:-}" = 1 ] && command -v dvb-onbox >/dev/null 2>&1 || return 0
+  local json
+  if command -v timeout >/dev/null 2>&1; then
+    json="$(timeout 3 dvb-onbox whoami --json 2>/dev/null | tr -d '\n' || true)"
+  else
+    json="$(dvb-onbox whoami --json 2>/dev/null | tr -d '\n' || true)"
+  fi
+  printf '%s\n' "$json" | sed -n 's/.*"devboxId"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p'
+}
+
 cloud_env_value() {
   sed -n "s/^export $2=//p" "$1" | tail -n 1
+}
+
+cloud_env_selects_system_pg() {
+  grep -qx 'export ROSE_USE_SYSTEM_PG=true' "$1"
 }
 
 cloud_env_stamp() {
@@ -42,8 +71,11 @@ new_cloud_workspace_name() {
   printf 'cloud-%s\n' "$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 }
 
+# Usage: write_cloud_env file port name root boot_id [agent_id] [extra_line]
+# extra_line (e.g. 'export ROSE_USE_SYSTEM_PG=true') is written into the temp file
+# BEFORE the atomic mv, so a concurrent reader never sees the file without it.
 write_cloud_env() {
-  local file="$1" port="$2" name="$3" root="$4" boot_id="$5" agent_id="${6:-}" tmp
+  local file="$1" port="$2" name="$3" root="$4" boot_id="$5" agent_id="${6:-}" extra_line="${7:-}" tmp
   tmp="$(mktemp "$file.XXXXXX")"
   {
     printf '# rose-cloud-env\n'
@@ -53,6 +85,7 @@ write_cloud_env() {
     printf 'export CONDUCTOR_PORT=%s\n' "$port"
     printf 'export CONDUCTOR_WORKSPACE_NAME=%s\n' "$name"
     printf 'export CONDUCTOR_ROOT_PATH=%s\n' "$root"
+    [ -z "$extra_line" ] || printf '%s\n' "$extra_line"
   } >"$tmp"
   mv -f "$tmp" "$file"
 }
@@ -105,7 +138,11 @@ refresh_cloud_env_identity() {
       name="$(new_cloud_workspace_name)"
       echo "Re-keyed $file minted on another instance: CONDUCTOR_WORKSPACE_NAME ${stale_name:-unset} -> $name" >&2
     fi
-    write_cloud_env "$file" "${port:-3001}" "$name" "$root" "$boot_id" "$agent_id"
+    # The system-Postgres selection (boxes/E2B startup scripts) is not identity:
+    # it rides in the same atomic rewrite, never as a second append.
+    local keep_pg=""
+    ! cloud_env_selects_system_pg "$file" || keep_pg='export ROSE_USE_SYSTEM_PG=true'
+    write_cloud_env "$file" "${port:-3001}" "$name" "$root" "$boot_id" "$agent_id" "$keep_pg"
   ) 9<"$file"
 }
 
@@ -128,13 +165,16 @@ normalize_conductor_workspace_env() {
 
   pwd_physical="$(cd "$PWD" && pwd -P)"
   deploy_worktree_env="$pwd_physical/.context/deploy-worktree.env"
-  if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ]; then
+  if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ] \
+    && [ "${ROSE_STABILITY_UNIT_IDENTITY:-}" != "1" ]; then
     # /descend-created deploy worktrees are not registered with Conductor and
     # otherwise inherit their controller's identity and port range. Rehydrate
     # the durable child identity on every new shell before resolving resources.
     # A nested benchmark run already owns a separately reserved identity and
     # port range; rehydrating the parent here would collapse both stacks onto
-    # the deploy database.
+    # the deploy database. So does a new-test stability unit
+    # (select_affected_tests.py --stability): each concurrent backend unit owns
+    # its own victoria_<identity> database.
     . "$deploy_worktree_env"
     if [ "${ROSE_DEPLOY_WORKTREE_PATH:-}" != "$pwd_physical" ]; then
       echo "Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $pwd_physical." >&2

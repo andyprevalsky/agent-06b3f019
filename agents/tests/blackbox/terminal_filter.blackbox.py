@@ -142,6 +142,25 @@ def test_convert_eol_preserves_existing_crlf_and_chunk_split_cr():
     # Raw chunks stay untouched (ANSI strip only); normalize is display-path only.
     assert "Line A\r\n" in tf.get_raw_output()
 
+    # Preserve the old character-wise contract for every short control/text
+    # string and both prior-chunk CR states, including an empty chunk.
+    from itertools import product
+
+    def reference(data, last_was_cr):
+        out = []
+        for char in data:
+            if char == "\n" and not last_was_cr:
+                out.append("\r")
+            out.append(char)
+            last_was_cr = char == "\r"
+        return "".join(out), last_was_cr
+
+    for length in range(7):
+        for chars in product(("a", "\r", "\n", "\x1b", "界"), repeat=length):
+            data = "".join(chars)
+            for prior_cr in (False, True):
+                assert TerminalFilter._normalize_convert_eol(data, prior_cr) == reference(data, prior_cr)
+
 
 async def run_all_tests():
     print("terminal-filter blackbox tests:")

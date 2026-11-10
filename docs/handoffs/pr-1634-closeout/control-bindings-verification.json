@@ -1,0 +1,17 @@
+{
+  "at": "2026-11-05T08:39:15.343193+00:00",
+  "status": "PASS",
+  "counts": {
+    "control_records": 27413,
+    "authenticated_control_content_bindings": 21597
+  },
+  "original_deferred_paths": 7,
+  "deferred_paths_missing_later_inventory": 0,
+  "packet_manifests_authenticated": 278,
+  "closed_control_producers": 3,
+  "all_control_inventory_and_snapshot_maps_are_authenticated_members": true,
+  "source_payload_bytes_read": 0,
+  "method": "Every hash-bearing row in all three closed control inventories was independently matched to its exact full4 archive member size/SHA. Every old deferred path was checked for a later inventory record. Each complete raw control inventory, terminal summary and snapshot map is itself an authenticated member. Immutable staging/cache regeneration remains explicit in those inventories.",
+  "parent_publication_required": true,
+  "deletion_ready": false
+}

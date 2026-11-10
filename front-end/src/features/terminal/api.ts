@@ -25,8 +25,8 @@ import {
 
 // ── Agent list ────────────────────────────────────────────────────────────
 
-export async function fetchAgents() {
-  return getAllAgents();
+export async function fetchAgents(signal?: AbortSignal) {
+  return getAllAgents(signal);
 }
 
 // ── Agent detail ──────────────────────────────────────────────────────────

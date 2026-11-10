@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "b4fc555f6f0da68149c1130047affa6e6bd87c65",
+      "status": "completed",
+      "started_at": "2026-11-08T00:36:20.115721+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-08T01:45:53.872571+00:00"
+    }
+  ]
+}

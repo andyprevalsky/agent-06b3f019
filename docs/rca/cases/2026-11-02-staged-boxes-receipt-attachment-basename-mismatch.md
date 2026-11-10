@@ -1,0 +1,82 @@
+---
+id: 2026-11-02-staged-boxes-receipt-attachment-basename-mismatch
+date: 2026-11-02
+title: Native worker receipt attachments use the file stem before their delivery suffix
+surface: harness
+component: deploy-test-boxes
+classification: our-bug
+problem_class: fixture-environment-data-mismatch
+first_bad_boundary: Attachment collector searched result.json-- while native delivery writes result--
+symptoms:
+  - "attachment_missing"
+  - "CLI did not return an ok JSON envelope"
+tags:
+  - deploy
+  - worker-transport
+  - receipt-provenance
+sources:
+  - PR #1662
+  - commit cb6be800df7dde9db5d95d639b2564fdc4c30b9a
+repro: scripts/tests/deploy-test-worker.test.py Boxes.test_large_result_passes_via_attachment_or_hash_matching_inline_only
+status: fixed
+---
+
+## Problem
+
+While preparing the first actual cross-machine validation request, inspection
+of already delivered native attachments found `result--8d855be9a6b433a2bf8e.json`
+and `result--774eabb033749d359366.json`. The new collector and its fake transport
+instead agreed on the invented `result.json--` spelling. Small inline receipts
+masked that integration gap; large file-only receipts could never be found.
+
+## Diagnosis
+
+Gate: INTRODUCED. The first bad boundary is `find_attachment` in the new staged
+transport. The platform strips the original extension before adding its
+delivery suffix. Correcting the existing large-result fixture to use the
+observed native spelling makes the same test fail: both cases are UNVERIFIED
+after 30.126 seconds. No production gate or application failure is inferred.
+
+The archive contains earlier attachment-selection cases, but none cover this
+new boxes worker receipt collector. Native delivery evidence and the exact
+before/after logs are retained in `.context/preparation/transport-attachment-`
+`basename-{before,after}.log` on the originating deployment.
+
+## Solution
+
+Search the native `result--*.json` spelling as well as the old spelling. The
+declared full SHA256, request token, source, recipe, root, native exit and
+complete case inventory still determine acceptance; a matching filename alone
+proves nothing. Oversize, missing or mismatched files stay UNVERIFIED.
+
+The unchanged corrected large-result test passes after the collector fix:
+one test, 0.346 seconds. The real transfer then exposed a second fixture error:
+send acknowledgements use a top-level operation/disposition receipt, unlike
+the read/wait/result data envelope. A native send fixture now pins that parser
+and verifies the requested thread identity. Its two focused controls passed
+in 0.307 seconds. The initial UNVERIFIED transport result remains recorded.
+
+Recovery adopted the original accepted turn from the durable native send
+receipt, with exactly one send and one worker execution. At 20:03:57Z the
+small and large cases both passed; the received native file was 67337 bytes,
+SHA256 18077b982ccb03b3c0a1ec5ceda2827789b1b32ef30ca7bf9d3309cb04023d01.
+The worker host, source, root, recipe, cleanup and native exit were verified.
+Evidence: `.context/preparation/transport-probe-proof.json`, the native send
+receipt, and the original UNVERIFIED result on the originating deployment.
+These are transport checks, with no application-gate credit.
+
+## Human feedback
+
+The user requires complete parallel validation and a finished deployment, with
+native failure evidence preserved. A fake transport agreeing with itself is
+not sufficient evidence for the actual platform integration.
+
+## Reusable lesson
+
+Use observed platform artifact names in transport fixtures, and prove a
+file-only result large enough to exclude a conversational inline shortcut.
+
+## Pagination
+
+`scripts/deploy_test_boxes.py:345` (82d11ee0d) listed threads with `threads list --json`, which returns only the first page (`pagination.complete: false`); once newer RCA threads filled that page the prepared worker A was absent, `resolve_host` refused, and no send occurred (`.context/preparation/all-workers-probe-binding.json`, `.context/deploy-boxes/95262bce6ce430c22145305c40b2992e62fdbea6e1983e1e8338e7b5d19ed2cf/cli.log` on the owner's box; `--all` lists 85 threads, `complete: true`, A's exact host).
+Fix: `LIST_ARGV` uses `--all` and a `data.pagination.complete == false` inventory is refused as `thread_inventory_incomplete` (UNVERIFIED, zero sends). Regression: `Boxes.test_worker_is_resolved_from_the_complete_thread_inventory_not_the_first_page` in `scripts/tests/deploy-test-worker.test.py` (fails on the pre-image).

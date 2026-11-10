@@ -6,6 +6,7 @@ import { usePopstateSync } from './usePopstateSync';
 import { useRealtimeSubscription } from './useRealtimeSubscription';
 import { useVisibilityReconnect } from './useVisibilityReconnect';
 import type { AgentProviderState } from './useAgentProviderState';
+import { resetStreamingBubbles } from './realtimeHandlers';
 
 interface EffectOptions {
   canSubscribe: boolean;
@@ -52,7 +53,7 @@ export function useAgentProviderEffects(state: AgentProviderState, options: Effe
 
   useEffect(() => {
     if (agent?.status !== 'PAUSED') return;
-    setStreamingBubbles(new Map());
+    resetStreamingBubbles(setStreamingBubbles);
     setStreamingPlan(null);
     setStreamingTools(new Map());
   }, [agent?.status, setStreamingBubbles, setStreamingPlan, setStreamingTools]);

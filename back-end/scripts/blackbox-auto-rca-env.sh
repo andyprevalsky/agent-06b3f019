@@ -25,6 +25,12 @@ export BLACKBOX_TEST_FAKE_WHATSAPP=1
 # same HMAC secret, so the value only has to match between the two.
 export BENCHMARK_SHARE_SECRET=blackbox-benchmark-share-secret
 
+# The isolated backend shares its database with in-process purchase blackboxes that
+# build stale CHARGING fixtures. Its minute purchase reconciler sweeps every user's
+# stale rows and would compensate those fixtures mid-assertion; tests invoke each
+# reconciler directly with a user scope instead.
+export DISABLE_PURCHASE_HOLD_RECONCILE=1
+
 # Both launchers load this before backend boot, including coverage's independent server.
 if [[ -z "${BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON:-}" ]]; then
   export BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON='{"reasoning":"blackbox smoke fixture","tool_calls":[{"tool":"send_user_message","arguments":{"message":"Blackbox SMS smoke reply"}},{"tool":"attempt_completion","arguments":{}}]}'

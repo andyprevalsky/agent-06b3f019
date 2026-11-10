@@ -118,7 +118,11 @@ spec.loader.exec_module(mod)
 calls = []
 def fake_run(cmd, **kwargs):
     calls.append(cmd)
-    Path(cmd[cmd.index("-o") + 1]).write_text("<html></html>")
+    rendered = Path(cmd[cmd.index("-o") + 1])
+    rendered.parent.mkdir(parents=True, exist_ok=True)
+    rendered.write_text("<html></html>")
+    artifacts = Path(cmd[cmd.index("--artifacts-dir") + 1])
+    (artifacts / rendered.name).write_text("<html></html>")
     return subprocess.CompletedProcess(cmd, 0, stdout="https://example.r2.dev/dump.html?sig=1\n", stderr="")
 mod.subprocess.run = fake_run
 
@@ -127,6 +131,7 @@ with tempfile.TemporaryDirectory() as tmp:
     dump = Path(tmp) / "dump.json"
     dump.write_text("{}")
     html, url = mod.publish_llm_dump(dump, "agent-1")
+    assert html.is_file(), "canonical published HTML must exist"
     assert url == "https://example.r2.dev/dump.html?sig=1", url
     if mod.AGENTS_VENV_PYTHON.is_file():
         assert calls[0][0] == str(mod.AGENTS_VENV_PYTHON), calls[0][0]
@@ -291,14 +296,27 @@ bash "$ROOT/scripts/tests/publish_evidence_links_browser_validation.test.sh" \
 bash "$ROOT/scripts/tests/publish_evidence_links_composite.test.sh" \
   || fail "publish_evidence_links composite projection checks failed"
 
-# 4) Gate must stay wired into /deploy structural suites (both docs + registry).
-DEPLOY="$ROOT/.claude/commands/deploy.md"
+# 4) Gate must stay wired into /deploy structural suites. The concise deploy.md
+# carries no gate list; the registry is what `scripts/deploy gates` executes
+# (run-deploy-structural-gates.py), so assert each suite is registered with its
+# exact command and that the script exists.
 RUNNER="$ROOT/scripts/run-deploy-structural-gates.py"
-grep -Fq 'bash scripts/tests/durable-evidence-links.test.sh' "$DEPLOY" \
-  || fail "/deploy must list durable-evidence-links.test.sh"
-grep -Fq 'durable-evidence-links' "$RUNNER" \
-  || fail "run-deploy-structural-gates.py must register durable-evidence-links"
-grep -Fq 'publish-evidence-browser-validation' "$RUNNER" \
-  || fail "run-deploy-structural-gates.py must register publish-evidence-browser-validation"
+python3 - "$RUNNER" <<'PY' || fail "run-deploy-structural-gates.py must register the durable evidence suites with their exact commands"
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+root = Path(sys.argv[1]).resolve().parents[1]
+expected = {
+    "durable-evidence-links": "scripts/tests/durable-evidence-links.test.sh",
+    "publish-evidence-browser-validation": "scripts/tests/publish_evidence_links_browser_validation.test.sh",
+    "publish-evidence-composite-projection": "scripts/tests/publish_evidence_links_composite.test.sh",
+}
+for name, script in expected.items():
+    pattern = r'Gate\(\s*"%s",\s*\("bash", "%s"\)' % (re.escape(name), re.escape(script))
+    assert len(re.findall(pattern, source)) == 1, f"{name} must be registered exactly once with {script}"
+    assert (root / script).is_file(), script
+PY
 
 echo "All durable-evidence-links checks passed."

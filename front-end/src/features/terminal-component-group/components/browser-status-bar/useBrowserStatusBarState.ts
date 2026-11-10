@@ -5,7 +5,9 @@
  * BrowserStatusBar.tsx so the component file stays under the 300-line cap.
  */
 
+import { readPhoneTarget, readCriticalReason } from '@/lib/api/phoneAttention';
 import { useMemo } from 'react';
+import { liveViewSessionIdentity } from './liveViewDisplay';
 import { BROWSER_INIT_ACTION_TYPES } from '@/lib/backendToolNames';
 import { useAgentContext, type Message } from '../../hooks';
 import type {
@@ -27,6 +29,8 @@ interface RequestUserAuthenticationMeta {
   taskId?: string;
   authRealm?: string;
   liveViewUrl?: string;
+  target?: unknown;
+  criticalReason?: unknown;
 }
 
 function readRequestUserApproval(m: Message): RequestUserApprovalMeta | undefined {
@@ -61,14 +65,27 @@ function extractStepProgress(browserMessages: Message[]): StepProgress | null {
   return null;
 }
 
+/** Reduce partial metadata for the latest native session without inheriting an old exit. */
 function extractBrowserSessionMetadata(browserMessages: Message[]): BrowserSessionMetadata | null {
+  let metadata: BrowserSessionMetadata | null = null;
+  let bindingKey: string | undefined;
   for (let i = browserMessages.length - 1; i >= 0; i--) {
-    const raw = browserMessages[i].metadata?.browser_session_metadata;
+    const message = browserMessages[i];
+    const nextUrl = message.metadata?.browser_url;
+    // Stop at the binding boundary; old exits never describe its replacement.
+    if (typeof nextUrl === 'string') {
+      const nextKey = liveViewSessionIdentity(nextUrl);
+      if (bindingKey !== undefined && nextKey !== bindingKey) break;
+      bindingKey = nextKey;
+    }
+    const raw = message.metadata?.browser_session_metadata;
     if (raw && typeof raw === 'object') {
-      return raw as BrowserSessionMetadata;
+      // Same-session reattachment emits a profile-only delta. Newer fields win,
+      // while omitted proxy fields retain the last observation of this session.
+      metadata = { ...raw, ...metadata } as BrowserSessionMetadata;
     }
   }
-  return null;
+  return metadata;
 }
 
 function extractPendingApproval(messages: Message[]): PendingWriteLockApproval | null {
@@ -106,7 +123,9 @@ function extractPendingAuthAssistance(
     const authTaskId = auth.taskId ?? message.metadata?.task_id;
     if (authTaskId !== taskId) continue;
     if (message.metadata?.toolStatus !== 'IN_PROGRESS') return null;
-    if (!auth.requestId || !auth.liveViewUrl) return null;
+    const target = readPhoneTarget(auth.target);
+    if (!auth.requestId || (!auth.liveViewUrl && !target)) return null;
+    if (target && target.browserTaskId !== taskId) return null;
 
     return {
       requestId: auth.requestId,
@@ -114,7 +133,9 @@ function extractPendingAuthAssistance(
       request: auth.authRealm
         ? `Sign in to ${auth.authRealm} so I can continue`
         : 'Complete the sign-in so I can continue',
-      liveViewUrl: auth.liveViewUrl,
+      liveViewUrl: target ? undefined : auth.liveViewUrl,
+      target,
+      criticalReason: readCriticalReason(auth.criticalReason),
     };
   }
 

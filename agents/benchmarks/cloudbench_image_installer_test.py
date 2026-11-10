@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import cache
 import os
 import shutil
 import subprocess
@@ -13,6 +14,20 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@cache
+def installed_temporal_client():
+    """Locate the real client in either supported backend dependency layout."""
+    node = shutil.which("node")
+    assert node, "backend import coverage requires the installed Node toolchain"
+    manifest = subprocess.check_output(
+        [node, "-p", "require.resolve('@temporalio/client/package.json')"],
+        cwd=ROOT / "back-end",
+        text=True,
+    ).strip()
+    return str(Path(manifest).parent)
+
 
 INSTALLER = r"""
 import json,os,shutil,subprocess,sys,time
@@ -37,7 +52,7 @@ if tool=='npm':
             f.write(args[2]+'='+args[3]+'\n')
     elif args==['config','get','cache']:
         print(fixture/'home/.npm')
-    elif args==['install','--no-audit','--no-fund']:
+    elif args==['install','--include=dev','--legacy-peer-deps','--no-audit','--no-fund']:
         meet_peer('javascript')
         (cwd/'node_modules').mkdir(exist_ok=True)
         (cwd/'node_modules/installed.js').write_text('installed dependency')
@@ -57,6 +72,13 @@ if tool=='npm':
                     metadata=json.loads(package.read_text())
                     metadata['version']='0.0.0'
                     package.write_text(json.dumps(metadata))
+        client=cwd/'node_modules/@temporalio/client'
+        client.parent.mkdir(parents=True,exist_ok=True)
+        if os.environ.get('IMAGE_INSTALL_BACKEND_STATE')=='broken':
+            client.mkdir()
+            (client/'index.js').write_text("require('protobufjs/ext/protojson');")
+        else:
+            client.symlink_to(os.environ['IMAGE_INSTALL_REAL_TEMPORAL_CLIENT'],target_is_directory=True)
         (fixture/'javascript.finished').touch()
         raise SystemExit(int(os.environ['IMAGE_INSTALL_JS_STATUS']))
     elif args[:6]==['install','--ignore-scripts','--no-save','--package-lock=false','--no-audit','--no-fund']:
@@ -77,6 +99,8 @@ elif tool=='npx':
     assert args==['prisma','generate'] and cwd.name=='back-end'
     (cwd/'prisma-generated').touch()
 elif tool=='node':
+    if args[:1]==['--eval']:
+        raise SystemExit(subprocess.call([os.environ['IMAGE_INSTALL_REAL_NODE'],*args]))
     assert args in (['-'],['-','repair'],['-','verify'])
 elif tool=='python3':
     assert args==['-m','venv','agents/venv']
@@ -100,8 +124,8 @@ else:
 """
 
 
-@pytest.mark.parametrize("javascript,python", [(0, 0), (37, 0), (0, 41), (37, 41)])
-def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(tmp_path, javascript, python):
+@pytest.mark.parametrize("javascript,python,backend", [(0, 0, "present"), (37, 0, "present"), (0, 41, "present"), (37, 41, "present"), (0, 0, "broken")])
+def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(tmp_path, javascript, python, backend):
     work = tmp_path / "checkout"
     (work / "back-end").mkdir(parents=True)
     (work / "agents").mkdir()
@@ -131,13 +155,16 @@ def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(
             "IMAGE_INSTALL_FIXTURE_ROOT": str(tmp_path),
             "IMAGE_INSTALL_JS_STATUS": str(javascript),
             "IMAGE_INSTALL_PY_STATUS": str(python),
+            "IMAGE_INSTALL_BACKEND_STATE": backend,
+            "IMAGE_INSTALL_REAL_NODE": shutil.which("node"),
+            "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": installed_temporal_client(),
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
     stdout, stderr = process.communicate(timeout=30)
-    assert process.returncode == (0 if javascript == python == 0 else 1), stdout + stderr
+    assert process.returncode == (0 if javascript == python == 0 and backend == "present" else 1), stdout + stderr
     for kind in ("javascript", "python"):
         assert (tmp_path / f"{kind}.started").exists()
         assert (tmp_path / f"{kind}.finished").exists()
@@ -146,7 +173,10 @@ def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(
         pid = int((tmp_path / f"{kind}.started").read_text())
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
-    if javascript or python:
+    if backend == "broken":
+        assert "Cannot find module 'protobufjs/ext/protojson'" in stderr
+        assert not (work / "back-end/prisma-generated").exists()
+    if javascript or python or backend == "broken":
         assert not (work / "back-end/node_modules/.hoisted-to-root").exists()
         return
     assert (work / "node_modules/installed.js").read_text() == "installed dependency"
@@ -165,7 +195,7 @@ def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(
         "fetch-timeout=600000",
     ]
     commands = [json.loads(line) for line in (tmp_path / "commands.jsonl").read_text().splitlines()]
-    assert ["npm", "install", "--no-audit", "--no-fund"] in commands
+    assert ["npm", "install", "--include=dev", "--legacy-peer-deps", "--no-audit", "--no-fund"] in commands
     assert ["npx", "prisma", "generate"] in commands
     assert ["pip", "install", "--upgrade", "pip"] in commands
     assert ["pip", "install", "-r", "agents/requirements.txt"] in commands
@@ -260,6 +290,27 @@ Module._resolveFilename = function(request, parent, ...rest) {
     return graph, snapshot
 
 
+@pytest.fixture(scope="module")
+def frontend_native_archives(tmp_path_factory, frontend_graph):
+    """Lazily prepare immutable inputs only for cases using valid archives."""
+    @cache
+    def prepare():
+        graph, _ = frontend_graph
+        root = tmp_path_factory.mktemp("frontend-native-archives")
+        archives = []
+        for number, artifact in enumerate(graph["natives"]):
+            native = root / f"native-{number}"
+            shutil.copytree(artifact["source"], native)
+            tarball = root / f"native-{number}.tgz"
+            with tarfile.open(tarball, "w:gz", compresslevel=1) as archive:
+                archive.add(native, arcname="package")
+            tarball.chmod(0o444)
+            archives.append(tarball)
+        return tuple(archives)
+
+    return prepare
+
+
 FRONTEND_BUILD = r"""
 const path = require('node:path');
 (async () => {
@@ -300,7 +351,7 @@ const path = require('node:path');
     ],
 )
 def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_or_manifest_changes(
-    tmp_path, state, frontend_graph
+    tmp_path, state, frontend_graph, frontend_native_archives
 ):
     node, npm = shutil.which("node"), shutil.which("npm")
     assert node and npm, "frontend coverage requires the installed Node/npm toolchain"
@@ -309,16 +360,19 @@ def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_
     # extraction offline. Neither package names nor host/libc selection are faked.
     artifacts = {**graph, "natives": []}
     for number, artifact in enumerate(graph["natives"]):
-        native = tmp_path / f"native-{number}"
-        shutil.copytree(artifact["source"], native)
         if state == "wrong-version":
+            # This case changes registry input, never the shared valid archives.
+            native = tmp_path / f"native-{number}"
+            shutil.copytree(artifact["source"], native)
             package = native / "package.json"
             metadata = json.loads(package.read_text())
             metadata["version"] = "0.0.0"
             package.write_text(json.dumps(metadata))
-        tarball = tmp_path / f"native-{number}.tgz"
-        with tarfile.open(tarball, "w:gz", compresslevel=1) as archive:
-            archive.add(native, arcname="package")
+            tarball = tmp_path / f"native-{number}.tgz"
+            with tarfile.open(tarball, "w:gz", compresslevel=1) as archive:
+                archive.add(native, arcname="package")
+        else:
+            tarball = frontend_native_archives()[number]
         artifacts["natives"].append({**artifact, "tarball": str(tarball)})
     graph_file = tmp_path / "graph.json"
     graph_file.write_text(json.dumps(artifacts))
@@ -360,6 +414,7 @@ def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_
         "IMAGE_INSTALL_GRAPH_METADATA": str(graph_file),
         "IMAGE_INSTALL_NATIVE_STATE": state,
         "IMAGE_INSTALL_REAL_NPM": npm,
+        "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": installed_temporal_client(),
         "NPM_CONFIG_USERCONFIG": str(home / ".npmrc"),
         "NPM_CONFIG_CACHE": str(home / ".npm"),
         "NPM_CONFIG_OFFLINE": "true",
@@ -450,11 +505,24 @@ def test_vendored_python_wheels_install_offline_from_every_image_context(tmp_pat
     assert pins == ["world-model-harness==0.1.0+rose.8e6d55dd"], pins
 
     # An open openai range made pip walk every newer release before reaching
-    # browser-use's exact pin; keep ours equal to the installed browser-use requirement.
+    # browser-use's requirement; keep our exact openai pin inside the installed
+    # browser-use requirement (0.13.10/0.13.11 pin openai exactly, 0.13.12+ declare
+    # a range, so a fresh venv resolving the manifest's browser-use range must pass).
     from importlib.metadata import requires
 
-    browser_use_openai = [r for r in requires("browser-use") or [] if r.replace(" ", "").startswith("openai==")]
-    assert browser_use_openai and browser_use_openai[0].replace(" ", "") in lines, (browser_use_openai, "openai pin")
+    from packaging.requirements import Requirement
+
+    openai_pin = next((line for line in lines if re.fullmatch(r"openai==[^\s;]+", line)), None)
+    assert openai_pin, "agents/requirements.txt must pin openai exactly"
+    browser_use_openai = [
+        req
+        for req in (Requirement(r) for r in requires("browser-use") or [])
+        if req.name == "openai" and (req.marker is None or req.marker.evaluate({"extra": ""}))
+    ]
+    assert browser_use_openai, "browser-use must declare an openai requirement"
+    assert all(
+        req.specifier.contains(openai_pin.split("==", 1)[1], prereleases=True) for req in browser_use_openai
+    ), (openai_pin, [str(req) for req in browser_use_openai])
 
     vendor = ROOT / "agents/vendor"
     sources = (vendor / "SOURCES.txt").read_text()

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Usage: load.sh <seconds>; 16 CPU busy loops + ~5 GB memory hog.
+pids=()
+for i in $(seq 1 16); do (while :; do :; done) & pids+=($!); done
+python3 -c "import time; b=[bytearray(256*1024*1024) for _ in range(20)]; [x.__setitem__(slice(None,None,4096), b'x'*(len(x)//4096)) for x in b]; time.sleep($1)" & pids+=($!)
+sleep "$1"; kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null

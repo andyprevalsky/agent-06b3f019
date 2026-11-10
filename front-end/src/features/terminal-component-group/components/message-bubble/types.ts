@@ -11,6 +11,7 @@ import type { FeedbackData } from '../../types';
 import type { CodeProvider, ExploreStep, WaitForCheck } from '../../types';
 import type { Message } from '../../hooks';
 import type { SubAgentStreamingMetrics } from '../useMessageFiltering';
+import type { ThoughtGeneration } from '../thoughtGeneration';
 
 export interface MessageBubbleProps {
   message: Message;
@@ -68,6 +69,10 @@ export interface ToolMessageData {
     taskId?: string;
   };
   codeProvider?: CodeProvider;
+  /** A thought's recorded generation (duration · ↓ tokens · tok/s); never estimated. */
+  generation?: ThoughtGeneration | null;
+  /** wait_for on agents: the title rendered as task titles with agent icons (WaitAgentTargets). */
+  waitAgents?: { metadata: Record<string, unknown>; prefix: string; suffix: string };
 }
 
 /** Role-based visual config for the generic bubble fallback. */

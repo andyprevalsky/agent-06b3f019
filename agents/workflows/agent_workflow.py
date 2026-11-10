@@ -21,14 +21,13 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, FailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
-
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
     from domains.agent_messaging.handler import kill_agent, send_message_to_agent
+    from domains.report_bug.handler import report_bug, with_report_bug
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
@@ -73,7 +72,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers.llm import (
         call_llm_activity,
         fetch_compute_token_activity,
-        mark_compute_token_rate_limited_activity,
         persist_response_schema_activity,
         release_compute_token_lineage_activity,
         set_response_schema_activity,
@@ -90,7 +88,10 @@ with workflow.unsafe.imports_passed_through():
     )
     from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
     from helpers.wait_wake import note_context_snapshot, wake_mark
+    from helpers.wmh_activity_policy import wmh_activity_timeout_options
+    from helpers.workflow_safe import context_logger
     from helpers.world_model_runtime import world_clock_activity
+    from loop.context_utils import refresh_user_pause
     from loop.dag_executor import (
         TaskDAG,
         execute_dag,
@@ -120,12 +121,13 @@ with workflow.unsafe.imports_passed_through():
         raise_gate_direct,
     )
     from tools.google_oauth_demo import google_oauth_demo
-
-    # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
+
+    # Tool executors (map tool name → workflow helper)
+    from tools.read_tool_output import read_tool_output_for_workflow
     from tools.request_user_approval import (
         UserRejectedError,
         request_user_approval_direct,
@@ -144,14 +146,24 @@ with workflow.unsafe.imports_passed_through():
     from utils.prompts import (
         build_system_prompt,
         build_verifier_prompt,
+        render_project_context,
+        user_context_with_project,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
     from utils.user_tool_models import is_user_tool_name
     from workflows.agent_control import AgentControlMixin
     from workflows.background_agents import BackgroundAgentsMixin
+    from workflows.browser_agent_resume import BrowserAgentResumeWorkflow
+    from workflows.code_agent_resume import CodeAgentResumeWorkflow
     from workflows.environment_context import EnvironmentContextMixin
+    from workflows.usage_tracking import UsageTrackingMixin
 
-logger = structlog.get_logger()
+# Workflows served on the agent generation queue beside AgentWorkflow (worker.py).
+# Imported here so the replay-surface hash (scripts/agent_workflow_surface_hash.py)
+# covers them: a change to one rolls the generation like a change to this file.
+COMPANION_WORKFLOWS = (CodeAgentResumeWorkflow, BrowserAgentResumeWorkflow)
+
+logger = context_logger()
 
 # Loop-critical control-plane read (poll_new_messages), modelled on Claude
 # Code's session-transcript ingress client: 20 s per request
@@ -241,6 +253,7 @@ def _demo_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
+    "read_tool_output": read_tool_output_for_workflow,
     "google_workspace_run": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
@@ -257,6 +270,7 @@ TOOL_EXECUTORS = {
     "grep": grep,
     "send_message_to_agent": send_message_to_agent,
     "kill_agent": kill_agent,
+    "report_bug": report_bug,
 }
 
 # Tools requiring user approval before execution
@@ -811,10 +825,14 @@ CONTINUATION_BACKGROUND_SETTLE_SECONDS = 180.0
 # these history bounds (Temporal hard limits: 51,200 events / 50 MB).
 OVERFLOW_DEFER_MAX_HISTORY_EVENTS = 30_000
 OVERFLOW_DEFER_MAX_HISTORY_BYTES = 30 * 1024 * 1024
+# Temporal rejects a command whose payloads exceed ~2 MiB (TMPRL1103) and retries the
+# failed workflow task forever, so a continuation that big can never hand off. Warn well
+# before the limit so a growing context is visible instead of wedging a cutover.
+CONTINUATION_PAYLOAD_WARN_BYTES = 1_500_000
 
 
 @workflow.defn
-class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContextMixin):
+class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContextMixin, UsageTrackingMixin):
     """
     Main workflow for autonomous agent task execution.
 
@@ -842,6 +860,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # own spawn goal is not the catalog prefix.
         self.root_goal: Optional[str] = None
         self._browser_activity_cleanup_unknown: bool = False
+        self._browser_activity_cleanup_receipt: Optional[Dict[str, Any]] = None
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
         # User-authored tools pinned once per run (domains/user_tools); carried
@@ -869,6 +888,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.is_paused: bool = False
         # Authentication can pause itself while waiting for the user's reply.
         self._pause_signal_sequence: int = 0
+        self._user_pause_active: bool = False  # Explicit PAUSE signal, not budget/auth waits.
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         # Orphan detection: every child must stop once Temporal confirms that its
         # parent chain is gone. Otherwise an active child can keep spending after a
@@ -894,8 +914,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
-        # The startup agent-config read failed, so output_schema is unknown
-        # (not known-absent) until a later read succeeds.
+        # The startup agent-config read failed, so output_schema and the project
+        # section are unknown (not known-absent) until a later read succeeds.
         self._agent_config_unavailable: bool = False
         # Getter reloads back off across turns while the read keeps failing.
         self._agent_config_retry_count: int = 0
@@ -952,6 +972,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.own_cost_cents: float = 0.0  # This agent's direct cost (LLM + tools)
         self.children_cost_cents: Dict[str, float] = {}  # child_agent_id -> subtree_cost
         self.subtree_cost_cents: float = 0.0  # own + sum(children) - what we report to parent
+        # The tree cost the backend stored at our last write: it adds the resume spend
+        # under us (resumed code/browser agents; never in any workflow's memory).
+        # Limit checks use the larger of the two.
+        self._persisted_tree_cents: float = 0.0
         self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
         self._cost_limit_reached: bool = False  # Flag for cost limit status
         # When a successful spawn_browser_agent return itself trips the price
@@ -992,6 +1016,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id: Optional[str] = None
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
+        # The exact Integration row the active compute token was leased from;
+        # failure reports name it so they never reach the user's other logins.
+        self.compute_token_integration_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
         self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
@@ -1005,6 +1032,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # User customization (fetched at workflow start for dynamic name in approvals/SMS)
         self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
         self.custom_system_prompt: Optional[str] = None  # Custom personality prompt to inject
+        # `## Project` section from the agent's project placement ("" = Home); kept
+        # apart from the per-user user_context_section and recomputed each start.
+        self.project_context_section: str = ""
 
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
@@ -1118,6 +1148,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if self._resume_prior_status == "OUT_OF_CREDITS":
             self._has_credits = False
         self.is_paused = self._resume_prior_status in {"PAUSED", "COST_LIMIT_REACHED", "OUT_OF_CREDITS"}
+        self._user_pause_active = False
 
         runtime = state.get("runtime_state")
         if not isinstance(runtime, dict):
@@ -1126,6 +1157,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._deployment_validation = runtime.get("deployment_validation") is True
         self.last_message_check = self._restored_datetime(runtime.get("last_message_check"))
         self._paused_by_parent = runtime.get("paused_by_parent") is True
+        self._user_pause_active = self.is_paused and runtime.get("user_pause_active") is True
         pause_sequence = runtime.get("pause_signal_sequence")
         if type(pause_sequence) is int and pause_sequence >= 0:
             self._pause_signal_sequence = pause_sequence
@@ -1218,6 +1250,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._last_credit_check = int(runtime.get("last_credit_check", 0))
         self.write_lock_enabled = runtime.get("write_lock_enabled", True) is True
         self._browser_activity_cleanup_unknown = runtime.get("browser_activity_cleanup_unknown") is True
+        receipt = runtime.get("browser_activity_cleanup_receipt")
+        self._browser_activity_cleanup_receipt = dict(receipt) if isinstance(receipt, dict) else None
         self._signup_completed = runtime.get("signup_completed") is True
         self._signup_dismissed = runtime.get("signup_dismissed") is True
         if isinstance(runtime.get("context"), list):
@@ -1278,6 +1312,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             ("custom_system_prompt", "custom_system_prompt"),
             ("agent_source", "agent_source"),
             ("user_context_section", "user_context_section"),
+            ("project_context_section", "project_context_section"),
             ("fast_cache_goal", "demo_cache_goal"),
             ("root_goal", "root_goal"),
         ):
@@ -1296,6 +1331,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+        if (
+            self._resume_prior_status == "COST_LIMIT_REACHED"
+            and self._cost_limit_wrapup_pending
+            and not self._cost_limit_wrapup_consumed
+            and runtime.get("cost_limit_wrapup_paused") is False
+            and self._has_credits
+            and not self._user_pause_active
+            and not self._paused_by_parent
+        ):
+            self.is_paused = False
         self._restore_background_state(runtime.get("background_agents"))
         pending_tool_resumes = runtime.get("pending_tool_resumes")
         if isinstance(pending_tool_resumes, list):
@@ -1317,13 +1362,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         result: Any,
         paused_before: bool,
         cost_limit_before: bool,
+        pause_sequence_before: Optional[int] = None,
     ) -> None:
         """Allow one attempt_completion turn when browser costs newly trip the limit.
 
-        Only arms when THIS tool caused the cost-limit pause. User/parent pauses
-        that were already active before the tool ran stay intact.
+        Only arms for verified browser usage that newly crosses the limit.
+        Existing user/parent pauses and intervening pause signals stay intact.
         """
-        if tool_name != "spawn_browser_agent":
+        if tool_name not in {"spawn_browser_agent", "spawn_agent"}:
             return
         if not isinstance(result, dict):
             return
@@ -1333,10 +1379,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         }
         if not success:
             return
-        if not self._cost_limit_reached or not self.is_paused:
+        if not self._cost_limit_reached and (
+            self.parent_workflow_id is not None or self.subtree_cost_cents < self.price_limit_cents
+        ):
             return
         # Tool did not newly trip the limit — do not clear an unrelated pause.
-        if cost_limit_before or paused_before or self._paused_by_parent:
+        if cost_limit_before or paused_before or self._paused_by_parent or not self._has_credits:
+            return
+        # Terminal accounting arms before a budget pause. Any pause that is
+        # present now belongs to an independent control and must stay paused.
+        if pause_sequence_before is not None and (
+            self.is_paused or self._pause_signal_sequence != pause_sequence_before
+        ):
             return
         workflow.logger.warning(
             "💰 Successful spawn_browser_agent tripped the cost limit "
@@ -1344,6 +1398,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             "allowing one wrap-up turn for attempt_completion"
         )
         self.is_paused = False
+        self._user_pause_active = False
+        self._cost_limit_reached = True
         self._cost_limit_wrapup_pending = True
         self._cost_limit_wrapup_consumed = False
 
@@ -1365,14 +1421,21 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         elif status == "ACTIVE":
             self._resume_prior_status = "ACTIVE"
             self.is_paused = False
+            self._user_pause_active = False
             self._cost_limit_reached = False
             self._has_credits = True
         price_limit = agent_config.get("price_limit_cents")
         if isinstance(price_limit, int) and not isinstance(price_limit, bool) and price_limit > 0:
             self.price_limit_cents = price_limit
 
-    def _continuation_resume_state(self, context: Optional[List[Dict]]) -> Dict[str, Any]:
-        """Snapshot every mutable value needed after a continue-as-new boundary."""
+    def _continuation_resume_state(self) -> Dict[str, Any]:
+        """Snapshot every mutable value needed after a continue-as-new boundary.
+
+        The conversation is NOT part of this snapshot: it travels once as the
+        continuation's ``context`` argument. Carrying a second copy doubled the
+        payload, and Temporal fails the workflow task (TMPRL1103) when a command's
+        payloads exceed ~2 MB, which wedged a cooperative cutover for a 1 MB agent.
+        """
         # Tree totals are derived state. Recompute at the serialization boundary
         # so even a zero-cost/direct-token call cannot leave the durable tree
         # snapshot behind the own counters.
@@ -1415,8 +1478,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             **({"user_tools": dict(self.user_tools)} if getattr(self, "user_tools_pinned", False) else {}),
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
+                "cost_limit_wrapup_paused": self._cost_limit_wrapup_pending and self.is_paused,
                 "paused_by_parent": self._paused_by_parent,
                 "pause_signal_sequence": self._pause_signal_sequence,
+                "user_pause_active": self._user_pause_active,
                 "orphaned": self._orphaned,
                 "kill_request": dict(self._kill_request) if self._kill_request is not None else None,
                 "abort_info": dict(self._abort_info) if self._abort_info is not None else None,
@@ -1453,9 +1518,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "write_lock_enabled": self.write_lock_enabled,
                 **({"browser_activity_cleanup_unknown": True}
                    if self._browser_activity_cleanup_unknown else {}),
+                **({"browser_activity_cleanup_receipt": dict(self._browser_activity_cleanup_receipt)}
+                   if self._browser_activity_cleanup_receipt is not None else {}),
                 "signup_completed": self._signup_completed,
                 "signup_dismissed": self._signup_dismissed,
-                "context": list(context or self.context),
                 "cloud_agent_lifecycle_tool_call_id": self._cloud_agent_lifecycle_tool_call_id,
                 "cloud_agent_lifecycle_start_phase": self._cloud_agent_lifecycle_start_phase,
                 "cloud_agent_lifecycle_updates_sent": sorted(self._cloud_agent_lifecycle_updates_sent),
@@ -1482,6 +1548,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "custom_system_prompt": self.custom_system_prompt,
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
+                "project_context_section": self.project_context_section,
                 "fast_cache_goal": self.demo_cache_goal,
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
@@ -1509,7 +1576,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self.model,
             self.reasoning_max_tokens,
             self.verifier,
-            context,
+            # None means "the live conversation": run() adopts a list argument over restored state.
+            context if isinstance(context, list) else list(self.context),
             self.parent_workflow_id,
             self.parent_agent_id,
             self.depth,
@@ -1523,10 +1591,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # self.fast_mode_cache_enabled here or a button-on non-DEMO segment
             # loses provider_fast_mode across continue_as_new.
             self.provider_fast_mode,
-            self._continuation_resume_state(context),
+            self._continuation_resume_state(),
         ]
         if self.world_model_mode != "real":
             args.append(self.world_model_mode)
+        payload_bytes = len(_json.dumps(args, default=str))
+        if payload_bytes > CONTINUATION_PAYLOAD_WARN_BYTES:
+            workflow.logger.warning(
+                f"Continuation payload is {payload_bytes} bytes "
+                f"(Temporal rejects ~2 MiB); context messages={len(args[6] or [])}"
+            )
         return args
 
     def _iteration_resume_kwargs(self) -> Dict[str, int]:
@@ -1543,6 +1617,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
     # SIGNALS
     # =========================================================================
 
+    @workflow.signal
+    def browser_activity_cleanup_complete(self, receipt: Any) -> None:
+        """Release only the attempt whose worker has joined its browser teardown."""
+        expected = self._browser_activity_cleanup_receipt
+        if not isinstance(expected, dict) or not isinstance(receipt, dict):
+            return
+        if not all(
+            isinstance(receipt.get(key), str) and receipt[key] == expected.get(key)
+            for key in ("run_id", "activity_id")
+        ):
+            return
+        self._browser_activity_cleanup_receipt = {**expected, "completed": True}
+        self._browser_activity_cleanup_unknown = False
+
     @workflow.signal(name=GENERATION_HANDOFF_SIGNAL)
     def generation_handoff_available(self, task_queue: str) -> None:
         """Cutover owner: the live pointer moved to ``task_queue``; idle parks re-check now.
@@ -1554,10 +1642,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             workflow.logger.info(f"Generation handoff signalled: live={task_queue}")
 
     @workflow.signal
-    async def pause(self):
-        """Pause workflow execution."""
+    async def pause(self, cause: str = "user"):
+        """Pause with producer-supplied cause; omitted cause preserves legacy user controls."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self._pause_signal_sequence = getattr(self, "_pause_signal_sequence", 0) + 1
+        self._user_pause_active = cause == "user" or (self.is_paused and self._user_pause_active)
+        episode_cause = "user" if self._user_pause_active else cause
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 
@@ -1565,7 +1655,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
-                await handle.signal("pause")
+                # A user pause keeps the legacy zero-argument signal: a child on a
+                # draining older generation defines `pause(self)` and would fail its
+                # workflow task on every retry if given a cause.
+                if episode_cause == "user":
+                    await handle.signal("pause")
+                else:
+                    await handle.signal("pause", episode_cause)
             except Exception as e:
                 workflow.logger.warning(f"Failed to cascade pause to child: {e}")
 
@@ -1591,6 +1687,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._has_credits = True
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -2017,6 +2114,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.price_limit_cents = new_limit
         self._cost_limit_reached = False
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -2476,6 +2574,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             if not (self._deployment_resume and isinstance(response_schema, dict) and response_schema.get("fields")):
                 response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
+            self._apply_agent_project(agent_config)
             self.output_schema = response_schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
             workflow.logger.info(
@@ -2601,10 +2700,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # =====================================================================
         # Tool lists from centralized source of truth
         # =====================================================================
-        plan_tools = PLAN_PHASE_TOOLS
-        execute_tools = (
-            ["google_workspace_run", "attempt_completion"] if matches_demo_goal(self.goal) else EXECUTE_PHASE_TOOLS
-        )
+        plan_tools, execute_tools = self._phase_tool_lists()
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks
@@ -3108,14 +3204,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         return generate
 
     async def _load_output_schema(self, *, poll_until_present: bool, max_attempts: int = 5) -> None:
-        """Read output_schema from the agent row while it is missing.
+        """Read the agent config while its output_schema or project is unknown.
 
         ``poll_until_present`` keeps polling a successful read that returns no
         schema yet (async schema generation at completion); otherwise the first
         successful read is final: no schema then means the task has none.
+
+        A failed startup read leaves the project section unknown too, so any
+        later successful read applies it, even when output_schema is already set
+        (an accepted schema is never replaced by a read).
         """
         attempt = 0
-        while self.output_schema is None and attempt < max_attempts:
+        while (self.output_schema is None or self._agent_config_unavailable) and attempt < max_attempts:
             attempt += 1
             try:
                 agent_config = await workflow.execute_activity(
@@ -3132,7 +3232,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._agent_config_unavailable = False
             self._agent_config_retry_count = 0
             self._agent_config_retry_at = None
-            self.output_schema = agent_config.get("response_schema")
+            self._apply_agent_project(agent_config)
+            if self.output_schema is None:
+                self.output_schema = agent_config.get("response_schema")
             workflow.logger.info(
                 f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
             )
@@ -3153,18 +3255,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
             if self.output_schema is None and self._agent_config_unavailable:
-                await self._reload_output_schema_with_backoff()
+                await self._reload_agent_config_with_backoff()
             return self.output_schema
 
         return get_schema
 
-    async def _reload_output_schema_with_backoff(self) -> None:
+    async def _reload_agent_config_with_backoff(self) -> None:
         """One config read per turn; failures back off exponentially across turns.
 
-        The getter runs every main-loop turn, so retries must not stack inside a
-        turn. Delay 1 s doubling to a 60 s cap plus up to 25% jitter (claude-code
-        withRetry.ts getRetryDelay; codex async-utils backoff.rs) spreads a
-        correlated backend outage. workflow.now()/random() keep it deterministic.
+        Recovers the output schema and the project section after a failed
+        startup read. The getter and the system-prompt builder run every
+        main-loop turn, so retries must not stack inside a turn. Delay 1 s
+        doubling to a 60 s cap plus up to 25% jitter (claude-code withRetry.ts
+        getRetryDelay; codex async-utils backoff.rs) spreads a correlated
+        backend outage. workflow.now()/random() keep it deterministic.
         """
         now = workflow.now()
         if self._agent_config_retry_at is not None and now < self._agent_config_retry_at:
@@ -3524,17 +3628,37 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_refresh_failed_revision = 0
         self._response_schema_refresh_error = None
 
+    def _apply_agent_project(self, agent_config: Dict[str, Any]) -> None:
+        """Derive the project section from a fetched agent config.
+
+        An empty config (failed fetch) keeps the section restored from the
+        previous run, so continue_as_new never loses or duplicates it.
+        """
+        if agent_config:
+            self.project_context_section = render_project_context(agent_config.get("project"))
+
+    def _phase_tool_lists(self) -> Tuple[List[str], List[str]]:
+        """(PLAN tools, EXECUTE tools) for this agent; root-only tools join for eligible roots."""
+        if matches_demo_goal(self.goal):
+            return list(PLAN_PHASE_TOOLS), ["google_workspace_run", "attempt_completion"]
+        return with_report_bug(PLAN_PHASE_TOOLS, self), with_report_bug(EXECUTE_PHASE_TOOLS, self)
+
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.
 
         Called by run_agent before each LLM call.
         """
         await self._advance_cloud_agent_lifecycle(STARTING_REASONING_TITLE, "IN_PROGRESS")
+        if self._agent_config_unavailable:
+            # The startup config read failed: recover the project section (and
+            # a missing schema) instead of running without them for the rest of
+            # the run. Bounded to one read per turn with backoff.
+            await self._reload_agent_config_with_backoff()
         return build_system_prompt(
             phase=self.current_phase,
             enabled_tools=self._current_tools,
             disabled_tools=self._disabled_tools,
-            user_context_section=self.user_context_section,
+            user_context_section=user_context_with_project(self.user_context_section, self.project_context_section),
             response_schema=self.output_schema,
             tool_prompts=TOOL_PROMPTS,
         )
@@ -3659,16 +3783,31 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._check_parent_state()
         # Yield to event loop so Temporal processes any pending signals before we read is_paused
         await asyncio.sleep(0)
+        return self.is_paused
+
+    async def _check_paused_before_turn(self) -> bool:
+        """Consume browser wrap-up once per turn, never once per stream check."""
+        if await self._check_paused():
+            return True
         if self._cost_limit_wrapup_pending and self._cost_limit_reached and not self._is_finished:
             if not self._cost_limit_wrapup_consumed:
-                # First pause-check after arming wrap-up: allow one more turn.
+                # Admission belongs to the turn boundary, not stream polling.
                 self._cost_limit_wrapup_consumed = True
                 return False
             # Wrap-up turn used without completing — re-assert the cost pause.
-            self.is_paused = True
             self._cost_limit_wrapup_pending = False
-            return True
+            self._cost_limit_reached = False
+            await self._check_cost_limit()
         return self.is_paused
+
+    def _refund_unaccepted_browser_wrapup_turn(self) -> None:
+        """Keep the loop's bounded pre-response retry on the same allowance.
+
+        Accepted responses never call this hook; every provider attempt still
+        uses the normal accounting owner, and genuine pauses remain untouched.
+        """
+        if self._cost_limit_wrapup_pending and not self._is_finished:
+            self._cost_limit_wrapup_consumed = False
 
     async def _check_orphaned(self) -> bool:
         """Terminal abort signal for run_agent. True once this child has been
@@ -3711,10 +3850,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         ``helpers.generation_handoff.park_pending_tool``). Returns False when
         the tool must instead close its chip with DEPLOY_INTERRUPTED.
         """
-        if tool_call_id in self._background_tasks:
+        record = self._background_tasks.get(tool_call_id)
+        if record is not None and not record.get("foreground"):
             # Background records already travel in the continuation snapshot;
             # keep the hint so the next generation relaunches it in the background.
-            self._background_tasks[tool_call_id]["resume"] = dict(resume)
+            # A foreground spawn's record is only its address: the call itself parks
+            # below and is re-entered through _execute_tool like any foreground tool.
+            record["resume"] = dict(resume)
             workflow.logger.info(f"Parked background task {tool_call_id} for generation handoff")
             return True
         if not self._tool_parking_enabled:
@@ -3786,6 +3928,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     "context": list(self.context),
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
+            run_agent_kwargs["check_paused_before_turn"] = self._check_paused_before_turn
+            run_agent_kwargs["on_unaccepted_turn_retry"] = self._refund_unaccepted_browser_wrapup_turn
             run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
             # Read the latest known schema without waiting for async schema regeneration.
             run_agent_kwargs["get_jev_response_schema"] = lambda: self.output_schema
@@ -3902,6 +4046,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id = None
         self.gpt_code_token_source = None
         self.gpt_code_token_pool_id = None
+        self.compute_token_integration_id = None
         self.compute_token_fetched_at = None
         self.claude_max_token_fetched_at = None
 
@@ -3911,6 +4056,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         now = workflow.now()
         self._clear_compute_token()
         self.compute_token_provider = token.get("type")
+        self.compute_token_integration_id = token.get("integrationId")
         if token.get("lineageKey"):
             self.compute_token_lineage_key = token.get("lineageKey")
         if self.compute_token_provider == "claude":
@@ -4013,6 +4159,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "userId": self.user_id,
                 "source": self.claude_max_token_source,
                 "poolTokenId": self.claude_max_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -4026,6 +4173,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "accountId": self.gpt_code_account_id,
                 "source": self.gpt_code_token_source,
                 "poolTokenId": self.gpt_code_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -4281,6 +4429,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     message_id = msg.get("message_id") or msg.get("id")
                     if message_id:
                         if message_id in seen_message_ids:
+                            refresh_user_pause(self.context, msg)
                             continue
                         seen_message_ids.add(message_id)
                     else:
@@ -4305,8 +4454,21 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         moved this agent to that child's finish, so the next "now" it sees is
         the world's.
         Outside a WMH world no cursor exists and nothing extra runs.
+
+        A foreground explore/browser/code spawn is recorded under its task path
+        while it runs (workflows/background_agents.py), so it is addressable.
         """
-        result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        tracked = self._tracks_foreground_spawn(tool_name, tool_args)
+        if tracked:
+            refused = await self._begin_foreground_spawn(tool_name, tool_args, tool_call_id)
+            if refused is not None:
+                return refused
+        result: Any = None
+        try:
+            result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        finally:
+            if tracked:
+                await self._end_foreground_spawn(tool_call_id, result)
         await self._refresh_world_time_cursor_after_tool()
         return result
 
@@ -4343,6 +4505,30 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         role_alternation and causes the LLM to re-emit the same tool_calls
         (regression: smoke task `parallel-tool-calls`).
         """
+        if (
+            (self._cost_limit_wrapup_pending or self._cost_limit_wrapup_consumed)
+            and self._cost_limit_reached
+            and tool_name not in {"attempt_completion", "attempt_completion_with_result"}
+        ):
+            # Every productive call is refused, including an older turn that
+            # was already in flight when browser accounting armed the allowance.
+            # Only an admitted wrap-up turn can spend that future allowance.
+            if self._cost_limit_wrapup_consumed:
+                self._cost_limit_wrapup_pending = False
+                if not self.is_paused:
+                    self._cost_limit_reached = False
+                    await self._check_cost_limit()
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Cost limit reached",
+                    message="Cost limit reached",
+                    status=MessageStatus.ERROR,
+                ),
+                tool_call_id,
+                tool_name,
+            )
+            return {"error": True, "message": "Cost limit reached"}
         if tool_name == "attempt_completion":
             # Pending background agents do not block completion: the verifier
             # sees their status, and a finishing parent stops them.
@@ -4426,8 +4612,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         )
 
             executor = TOOL_EXECUTORS[tool_name]
-            paused_before_tool = self.is_paused
-            cost_limit_before_tool = self._cost_limit_reached
             self._active_tool_calls[tool_call_id] = (tool_name, dict(tool_args))
 
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
@@ -4493,13 +4677,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     # Extract actual result for caller
                     result = result.get("result", result)
 
-                self._maybe_arm_cost_limit_wrapup_after_browser(
-                    tool_name=tool_name,
-                    result=result,
-                    paused_before=paused_before_tool,
-                    cost_limit_before=cost_limit_before_tool,
-                )
-
                 # Route rotation signals from the per-tool summarizer through
                 # _on_tokens so pool-token rotation kicks in on 401/429/stall
                 # the same way it would for the main LLM call.
@@ -4550,12 +4727,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     if original_usage:
                         await self._track_usage(original_usage, tool_name=tool_name)
                     result = executor_result.get("result", executor_result)
-                    self._maybe_arm_cost_limit_wrapup_after_browser(
-                        tool_name=tool_name,
-                        result=result,
-                        paused_before=paused_before_tool,
-                        cost_limit_before=cost_limit_before_tool,
-                    )
                     return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
@@ -4917,200 +5088,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # price calls must still update the child subtree reported to the parent.
         await self._update_cost_and_signal_parent()
 
-    async def _track_usage(
-        self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None
-    ) -> None:
-        """
-        Track usage from any activity result.
-
-        This is THE SINGLE POINT where all costs are:
-        1. Calculated (LLM tokens → cost via pricing)
-        2. Added to own_cost_cents
-        3. Written to ToolUsage table (if tool_name provided)
-        4. Signaled to parent for hierarchical relay
-
-        Args:
-            usage: Dict with "llm" and/or "service" lists
-            tool_name: Tool name for ToolUsage table (optional for internal LLM calls)
-            call_site: Label identifying the LLM call source (e.g., planner, explore_agent, browser_agent).
-                       Falls back to tool_name if not provided.
-        """
-        if not usage:
-            return
-
-        total_cost_cents = 0
-        usage_items_for_db = []
-
-        # Process LLM usage items
-        for llm in usage.get("llm", []):
-            tokens_in = llm.get("tokens_in", 0)
-            tokens_out = llm.get("tokens_out", 0)
-            model = llm.get("model") or self.model
-            provider = llm.get("provider") or model
-            effective_call_site = call_site or tool_name or "unknown"
-            cache_read = llm.get("cache_read_input_tokens", 0)
-            cache_write = llm.get("cache_creation_input_tokens", 0)
-            cache_sequence_id = llm.get("cache_sequence_id")
-            from_fast_cache = bool(llm.get("from_fast_cache"))
-
-            if from_fast_cache:
-                workflow.logger.info(
-                    f"💰 $0 cost (fast cache replay): actual_model={model}, "
-                    f"in={tokens_in}, out={tokens_out}, cache_read={cache_read}, call_site={effective_call_site}"
-                )
-                usage_items_for_db.append(
-                    {
-                        "type": "llm",
-                        "cost_cents": 0,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "model": model,
-                        "cache_read_input_tokens": cache_read,
-                        "cache_creation_input_tokens": cache_write,
-                        "from_fast_cache": True,
-                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
-                    }
-                )
-                continue
-
-            # own_cost_cents and price_limit_cents are the user's charge ledger.
-            # Foundry's separate Azure bill is monitored through Azure billing;
-            # it must not consume a user's $0 compute-token limit.
-            if isinstance(model, str) and model.endswith(("-claude", "-gpt", "-foundry")):
-                workflow.logger.info(
-                    f"💰 $0 user charge: actual_model={model}, "
-                    f"in={tokens_in}, out={tokens_out}, call_site={effective_call_site}"
-                )
-                usage_items_for_db.append(
-                    {
-                        "type": "llm",
-                        "cost_cents": 0,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "model": model,
-                        "cache_read_input_tokens": cache_read,
-                        "cache_creation_input_tokens": cache_write,
-                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
-                    }
-                )
-                continue
-
-            # Get pricing for this model (fetch if not cached)
-            pricing = await self._get_model_pricing(model)
-            if not pricing:
-                workflow.logger.warning(
-                    f"⚠️ No pricing for model {model}, skipping cost for {tokens_in}/{tokens_out} tokens"
-                )
-                continue
-
-            input_rate = pricing["input_cents_per_1k"]
-            output_rate = pricing["output_cents_per_1k"]
-
-            # Apply provider-specific cache discounts if cache fields present
-            is_anthropic = model and ("claude" in model.lower() or model.lower().endswith("-claude"))
-            cache_read_mult = 0.1 if is_anthropic else 0.25
-            cache_write_mult = 1.25 if is_anthropic else 1.0
-
-            cost_cents = (
-                (tokens_in * input_rate / 1000)
-                + (cache_read * input_rate * cache_read_mult / 1000)
-                + (cache_write * input_rate * cache_write_mult / 1000)
-                + (tokens_out * output_rate / 1000)
-            )
-            usage_item = {
-                "type": "llm",
-                "cost_cents": cost_cents,
-                "call_site": effective_call_site,
-                "provider": provider,
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "model": model,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_write,
-                **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
-            }
-            if cost_cents > 0:
-                total_cost_cents += cost_cents
-                workflow.logger.info(
-                    f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out}, call_site={effective_call_site})"
-                )
-                usage_items_for_db.append(usage_item)
-
-        # Process service usage items (pre-calculated costs)
-        for svc in usage.get("service", []):
-            cost_cents = svc.get("cost_cents", 0)
-            provider = svc.get("provider", "Service")
-            if cost_cents > 0:
-                total_cost_cents += cost_cents
-                workflow.logger.info(f"💰 Service cost: +{cost_cents}c ({provider})")
-                effective_call_site = call_site or tool_name or "unknown"
-                usage_items_for_db.append(
-                    {
-                        "type": "service",
-                        "cost_cents": cost_cents,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                    }
-                )
-
-        if total_cost_cents > 0:
-            # Update workflow cost state
-            self.own_cost_cents += total_cost_cents
-            workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
-
-            # Signal parent for hierarchical cost relay
-            await self._update_cost_and_signal_parent()
-
-        # Write to ToolUsage table (if tool_name provided). This intentionally
-        # includes zero-cost direct-token LLM rows so cache/accounting diagnostics
-        # can see the same LLM calls that worker logs emit.
-        effective_call_site = call_site or tool_name or "unknown"
-        if tool_name and usage_items_for_db:
-            try:
-                await workflow.execute_activity(
-                    save_tool_usage,
-                    args=[
-                        self.agent_id,
-                        self.user_id,
-                        effective_call_site,
-                        usage_items_for_db,
-                        self._usage_checkpoint(),
-                    ],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-            except Exception as e:
-                workflow.logger.warning(f"Failed to save tool usage to DB: {e}")
-
-    async def _get_model_pricing(self, model: str) -> Optional[Dict[str, float]]:
-        """Get pricing for a model, using cache or fetching if needed."""
-        # Check if it's the workflow's primary model
-        if model == self.model and (self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0):
-            return {
-                "input_cents_per_1k": self.input_cents_per_1k,
-                "output_cents_per_1k": self.output_cents_per_1k,
-            }
-
-        # Check cache
-        if model in self.model_pricing_cache:
-            return self.model_pricing_cache[model]
-
-        # Pricing is an in-process constant table. Keep this on the workflow
-        # path so cost accounting cannot stall user-visible tools behind the
-        # activity queue under benchmark load.
-        pricing = get_in_process_model_pricing(model)
-        if pricing is None:
-            pricing = get_default_pricing(model)
-            workflow.logger.warning(f"💰 Using default pricing fallback for {model}: {pricing}")
-        else:
-            workflow.logger.info(f"💰 Resolved pricing for {model}: {pricing}")
-        self.model_pricing_cache[model] = pricing
-        return pricing
-
     # =========================================================================
     # COST LIMIT HELPERS
     # =========================================================================
@@ -5170,6 +5147,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 workflow.logger.warning("Parent workflow gone — orphaned child aborting")
                 self._orphaned = True
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
             self._parent_query_failures_while_paused = 0
             return
@@ -5187,6 +5165,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     )
                     self._orphaned = True
                     self.is_paused = False
+                    self._user_pause_active = False
                     self._paused_by_parent = False
             return
 
@@ -5206,15 +5185,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         elif parent_paused:
             if not self.is_paused:
                 workflow.logger.warning("Parent is paused — inheriting state")
+                self._user_pause_active = state.get("user_pause_active") is True
                 self.is_paused = True
                 self._paused_by_parent = True
                 await self._update_tree_state(status="PAUSED")
+            elif self._paused_by_parent:
+                self._user_pause_active = state.get("user_pause_active") is True
         else:
             # Parent is running — unpause if we were paused by parent
             if self._paused_by_parent:
                 workflow.logger.info("Parent resumed — clearing inherited pause")
                 self._cost_limit_reached = False
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
                 await self._update_tree_state(status="ACTIVE")
 
@@ -5327,30 +5310,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if claude_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
-                        f"marking {self.claude_max_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.claude_max_token_source} token failed"
                     )
-                    # Mark the offending token rate-limited in DB so the next fetch rotates:
-                    #   source='user' → next fetch falls back to pool
-                    #   source='pool' → fetchPoolToken skips this ID and returns a different pool token
-                    # The cooldown is time-windowed (5 min); token auto-heals after rateLimitedUntil.
-                    if self.claude_max_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "claude",
-                                    self.claude_max_token_source,
-                                    self.user_id,
-                                    self.claude_max_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    claude_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)
@@ -5386,26 +5352,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if gpt_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ GPT token {gpt_token_error}: actual_model={actual_model}, "
-                        f"marking {self.gpt_code_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.gpt_code_token_source} token failed"
                     )
-                    if self.gpt_code_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "gpt",
-                                    self.gpt_code_token_source,
-                                    self.user_id,
-                                    self.gpt_code_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    gpt_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)
@@ -5506,7 +5459,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         causes the activity timeouts that stall the loop and the out-of-order
         broadcasts that flicker the FE cost. Pass force=True on terminal/cost-limit
         transitions to flush the final value immediately. Parent cost signal and the
-        root cost-limit check always run so aggregation/enforcement stay real-time.
+        root cost-limit check normally run immediately. Verified browser terminal
+        usage settles its existing completion allowance before publishing a stop.
         """
         # Recalculate subtree cost
         self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
@@ -5599,8 +5553,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if self._is_finished:
             return  # No further work to authorize; see docstring.
 
-        if self.subtree_cost_cents >= self.price_limit_cents and not self._cost_limit_reached:
-            workflow.logger.warning(f"💰 Cost limit exceeded: {self.subtree_cost_cents}c >= {self.price_limit_cents}c")
+        effective_cost = max(self.subtree_cost_cents, self._persisted_tree_cents)
+        if effective_cost >= self.price_limit_cents and not self._cost_limit_reached:
+            workflow.logger.warning(f"💰 Cost limit exceeded: {effective_cost}c >= {self.price_limit_cents}c")
             self._cost_limit_reached = True
             self.is_paused = True
 
@@ -5627,9 +5582,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         "COST_LIMIT_REACHED",
                         0.0,
                         (
-                            f"Cost limit reached: {self.subtree_cost_cents:.1f}c >= "
+                            f"Cost limit reached: {effective_cost:.1f}c >= "
                             f"{self.price_limit_cents}c (own {self.own_cost_cents:.1f}c + "
-                            f"children {sum(self.children_cost_cents.values()):.1f}c)"
+                            f"children {sum(self.children_cost_cents.values()):.1f}c"
+                            f"{self._resume_spend_note(effective_cost)})"
                         ),
                         self.token_count,
                         self.context_size,
@@ -5679,12 +5635,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 except Exception as e:
                     workflow.logger.warning(f"Failed to cascade cost_limit_reached to child: {e}")
 
+    def _resume_spend_note(self, effective_cost: float) -> str:
+        """The resume spend the stored tree adds beyond our in-memory total, for the stop message."""
+        extra = effective_cost - self.subtree_cost_cents
+        return f" + resumed agents {extra:.1f}c" if extra > 0 else ""
+
     async def _persist_tree_cost(self) -> None:
         """Persist subtree cost and own cost to DB."""
         from helpers.update_tokens import update_agent_tree_cost_activity
 
         try:
-            await workflow.execute_activity(
+            stored = await workflow.execute_activity(
                 update_agent_tree_cost_activity,
                 args=[self.agent_id, int(self.subtree_cost_cents), self.own_cost_cents],
                 start_to_close_timeout=timedelta(seconds=10),
@@ -5692,6 +5653,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to persist tree cost: {e}")
+            return
+        if isinstance(stored, (int, float)) and not isinstance(stored, bool):
+            self._persisted_tree_cents = float(stored)
+            # A root whose stored tree (with resume spend) reached its limit stops now.
+            if self.parent_workflow_id is None and self._persisted_tree_cents >= self.price_limit_cents:
+                await self._check_cost_limit()
 
     async def _update_tree_state(
         self,
@@ -6684,6 +6651,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             "is_paused": self.is_paused,
             "is_cost_limit_reached": self._cost_limit_reached,
             "is_finished": self._is_finished,
+            "user_pause_active": self.is_paused and self._user_pause_active,
         }
 
     @workflow.query

@@ -2,10 +2,12 @@
  * Blackbox tests for the terminal agent-list request lifecycle.
  */
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { http, HttpResponse } from 'msw';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useAgentList } from '@/features/terminal/hooks/useAgentList';
+import { AGENT_POLL_INTERVAL_MS } from '@/features/terminal/config';
 
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { server } from './msw/server';
@@ -30,7 +32,48 @@ describe('useAgentList', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     localStorage.clear();
+  });
+
+  it('aborts an agent-list download when its view unmounts', async () => {
+    mockSession();
+    let signal: AbortSignal | null | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      signal = init?.signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {
+          once: true,
+        });
+      });
+    });
+    const { unmount } = renderHook(() => useAgentList(true));
+    unmount();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {});
+  });
+
+  it('suspends list polling while hidden and refreshes immediately when visible', async () => {
+    mockSession();
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response(JSON.stringify({ agents: [] })));
+    const { unmount } = renderHook(() => useAgentList(true));
+    try {
+      await act(async () => {});
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      visibility.mockReturnValue(true);
+      await act(async () => vi.advanceTimersByTimeAsync(AGENT_POLL_INTERVAL_MS * 3));
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      visibility.mockReturnValue(false);
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      unmount();
+    }
   });
 
   it('stays idle when auth prevents an agent-list request', async () => {
@@ -202,4 +245,32 @@ describe('useAgentList', () => {
     await act(async () => firstLoad);
     expect(result.current.agents[0]?.agent_id).toBe('newer-agent');
   });
+});
+
+it('StrictMode list replay aborts old ownership and ignores its late response', async () => {
+  mockSession();
+  const requests: Array<{
+    signal: AbortSignal | null | undefined;
+    resolve: (r: Response) => void;
+  }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(
+    (_input, init) => new Promise((resolve) => requests.push({ signal: init?.signal, resolve })),
+  );
+  const { result, unmount } = renderHook(() => useAgentList(true), { wrapper: StrictMode });
+  try {
+    expect(requests).toHaveLength(2);
+    expect(requests[0].signal?.aborted).toBe(true);
+    expect(requests[1].signal?.aborted).toBe(false);
+    await act(async () =>
+      requests[1].resolve(new Response(JSON.stringify({ agents: [{ agent_id: 'current' }] }))),
+    );
+    expect(result.current.agents[0]?.agent_id).toBe('current');
+    await act(async () =>
+      requests[0].resolve(new Response(JSON.stringify({ agents: [{ agent_id: 'stale' }] }))),
+    );
+    expect(result.current.agents[0]?.agent_id).toBe('current');
+    expect(result.current.isLoadingAgents).toBe(false);
+  } finally {
+    unmount();
+  }
 });

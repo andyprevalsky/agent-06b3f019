@@ -19,7 +19,11 @@
  * request (O(depth) indexed lookups), one short ws per code-agent message,
  * no fan-out and no shared channel.
  */
-import { mintAgentGraphToken, type AgentGraphClaims } from '../../providers/agentGraph/token';
+import {
+  mintAgentGraphToken,
+  type AgentGraphClaims,
+  type AccountSpawnGrant,
+} from '../../providers/agentGraph/token';
 import { executeUserDataGrep, type UserDataGrepResult } from '../../providers/userDataSearch';
 import * as graphRepo from './repoGraph';
 
@@ -33,6 +37,8 @@ export interface GraphCaller {
   userId: string;
   rootAgentId: string;
   self: GraphSelf;
+  accountAccess?: boolean;
+  accountSpawnGrant?: AccountSpawnGrant;
 }
 
 export class AgentGraphError extends Error {
@@ -54,7 +60,12 @@ export async function callerForAgent(agentId: string): Promise<GraphCaller> {
   if (agent === null) throw new AgentGraphError(404, 'Agent not found');
   const rootAgentId = await graphRepo.findGraphRootId(agent.id, agent.userId);
   if (rootAgentId === null) throw new AgentGraphError(404, 'Agent not found');
-  return { userId: agent.userId, rootAgentId, self: { kind: 'agent', id: agent.id } };
+  return {
+    userId: agent.userId,
+    rootAgentId,
+    self: { kind: 'agent', id: agent.id },
+    accountAccess: true,
+  };
 }
 
 /**
@@ -266,6 +277,8 @@ export function refreshCodeSessionToken(claims: AgentGraphClaims): {
     ownerAgentId: claims.ownerAgentId,
     sessionId: claims.sessionId,
     provider: claims.provider,
+    accountAccess: claims.accountAccess,
+    accountSpawnGrant: claims.accountSpawnGrant,
   });
   return { token, expires_at: expiresAt };
 }

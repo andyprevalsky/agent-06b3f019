@@ -17,6 +17,7 @@ import { resizeSession } from './resizeService';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { parseResetsAt, reportCodeTaskUsageLimit } from '../../providers/codeSessions/usageLimit';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
+import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 import {
   LocalTargetUnavailableError,
   localTargetUnavailableBody,
@@ -108,54 +109,45 @@ router.post(
   })
 );
 
+/** Typed create failures that map to a client error rather than a 500. */
+function createErrorResponse(error: unknown): { status: number; body: object } | null {
+  if (error instanceof MissingUserIdError) {
+    return { status: 400, body: { error: error.message, code: 'MISSING_USER_ID' } };
+  }
+  if (error instanceof GitHubAccessDeniedError) {
+    return { status: 403, body: { error: error.detail, code: 'GITHUB_ACCESS_DENIED' } };
+  }
+  if (error instanceof ProjectNotFoundForSessionError) {
+    return { status: 404, body: { error: error.message, code: 'PROJECT_NOT_FOUND' } };
+  }
+  return null;
+}
+
 router.post(
   '/create',
   authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const {
-        agent_id,
-        goal,
-        attachments,
-        github_repo_url,
-        user_id,
-        fast_mode_cache_enabled,
-        memory_enabled,
-        harness_mode,
-        rose_api_base_url,
-        code_session_id,
-        fresh_conversation,
-        lease_owner,
-        base_branch,
-        target,
-        device_id,
-      } = createSessionSchema.parse(req.body);
+      const body = createSessionSchema.parse(req.body);
 
       // C14: a local session runs on the agent tree's Mac with the user's own
       // login (no persistent code session: the work stays in the granted folder).
       const result =
-        target === 'local'
+        body.target === 'local'
           ? await createLocalCodeSessionResponse({
-              agentId: agent_id,
-              goal,
+              agentId: body.agent_id,
+              goal: body.goal,
               provider: 'codex',
-              expectedUserId: user_id,
-              deviceId: device_id,
+              expectedUserId: body.user_id,
+              deviceId: body.device_id,
+              taskName: body.task_name ?? null,
+              cliSettings: body.cli_settings,
+              resumeConfig: body.resume_config,
+              leaseOwner: body.lease_owner,
             })
           : await service.createSession({
-              agent_id,
-              goal,
-              attachments: attachments as FilePointer[] | undefined,
-              github_repo_url,
-              user_id,
-              fast_mode_cache_enabled,
-              memory_enabled,
-              harness_mode,
-              rose_api_base_url,
-              code_session_id,
-              fresh_conversation,
-              lease_owner,
-              base_branch,
+              ...body,
+              attachments: body.attachments as FilePointer[] | undefined,
             });
 
       res.json({ success: true, ...result });
@@ -172,12 +164,9 @@ router.post(
         res.status(403).json({ error: error.message, code: 'AGENT_OWNER_MISMATCH' });
         return;
       }
-      if (error instanceof MissingUserIdError) {
-        res.status(400).json({ error: error.message, code: 'MISSING_USER_ID' });
-        return;
-      }
-      if (error instanceof GitHubAccessDeniedError) {
-        res.status(403).json({ error: error.detail, code: 'GITHUB_ACCESS_DENIED' });
+      const known = createErrorResponse(error);
+      if (known !== null) {
+        res.status(known.status).json(known.body);
         return;
       }
       const sessionError = codeSessionHttpError(error);
@@ -286,19 +275,7 @@ router.post(
           res.status(400).json({ error: 'credential_feedback must contain at most 3 events' });
           return;
         }
-        const validSources = new Set(['initial', 'oauth', 'funded_api_key']);
-        const valid = rawCredentialFeedback.every((item) => {
-          if (typeof item !== 'object' || item === null) return false;
-          const candidate = item as Record<string, unknown>;
-          return (
-            typeof candidate.source === 'string' &&
-            validSources.has(candidate.source) &&
-            typeof candidate.reason === 'string' &&
-            candidate.reason.length > 0 &&
-            candidate.reason.length <= 2000
-          );
-        });
-        if (!valid) {
+        if (!rawCredentialFeedback.every(service.isCodexCredentialFeedback)) {
           res.status(400).json({ error: 'credential_feedback event is invalid' });
           return;
         }

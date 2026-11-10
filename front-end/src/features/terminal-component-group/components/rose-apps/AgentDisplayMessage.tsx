@@ -3,11 +3,12 @@
  *   Every display renders inline in the chat; there is no separate Agent Display
  *   panel or app icon. A chevron row (caption, else filename) discloses size:
  *
- *   [COLLAPSED] (default) the display is mounted inline as a short preview
- *        (clipped at PREVIEW_HEIGHT; one live frame)
- *     --click chevron row--> [EXPANDED]
- *   [EXPANDED] the same frame at full size (pages fill EXPANDED_FRAME_HEIGHT;
- *        images/media at natural size) --click chevron row--> [COLLAPSED]
+ *   [EXPANDED] (default) the display at full size: a page frame is as tall as
+ *        the page reports (very tall cap, see DisplayMediaGroup), so the chat
+ *        scrolls and the frame never scrolls inside it; images/media at natural
+ *        size --click chevron row--> [COLLAPSED]
+ *   [COLLAPSED] the same frame as a short preview (clipped at PREVIEW_HEIGHT;
+ *        one live frame) --click chevron row--> [EXPANDED]
  *   Toggling never remounts the frame (same element, only its box changes).
  *
  *   shouldType → completes the typing chain like other bubbles
@@ -18,11 +19,10 @@ import { useEffect, useId, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Message } from '../../hooks';
-import { isHtmlDisplayMedia, type DisplayMediaItem } from '../../hooks/codeAgentContract';
+import type { DisplayMediaItem } from '../../hooks/codeAgentContract';
 import { DisplayMediaGroup } from '../inline-media/DisplayMediaGroup';
 
 const PREVIEW_HEIGHT = 'max-h-[240px]';
-const EXPANDED_FRAME_HEIGHT = 'h-[80vh]';
 
 function displayLabel(items: DisplayMediaItem[]): string {
   const [lead] = items;
@@ -47,10 +47,9 @@ export function DisplayMediaListItem({
   useEffect(() => {
     if (shouldType) onTypingComplete();
   }, [shouldType, onTypingComplete]);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const bodyId = useId();
   const label = displayLabel(items);
-  const hasFrame = items.some(isHtmlDisplayMedia);
   return (
     <div
       data-message-id={message.message_id}
@@ -85,17 +84,9 @@ export function DisplayMediaListItem({
       <div
         id={bodyId}
         data-testid="display-body"
-        className={cn(
-          'flex min-w-0 flex-col',
-          expanded ? hasFrame && EXPANDED_FRAME_HEIGHT : cn(PREVIEW_HEIGHT, 'overflow-hidden'),
-        )}
+        className={cn('flex min-w-0 flex-col', !expanded && cn(PREVIEW_HEIGHT, 'overflow-hidden'))}
       >
-        <DisplayMediaGroup
-          items={items}
-          agentId={agentId}
-          fill={expanded && hasFrame}
-          hideCaption
-        />
+        <DisplayMediaGroup items={items} agentId={agentId} fullHeight={expanded} hideCaption />
       </div>
     </div>
   );

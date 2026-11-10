@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
+import json
+import os
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +24,36 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReviewWaitTest(unittest.TestCase):
+    def test_failed_wait_records_a_complete_review_window(self) -> None:
+        # Match the CLI's script import path when calling main in-process.
+        self.addCleanup(setattr, sys, "path", sys.path[:])
+        sys.path.insert(0, str(ROOT / "scripts"))
+        args = argparse.Namespace(pr="123", head="a" * 40, repo="acme/rose", timeout=600, poll=5,
+                                  after_rate_limit=False, rate_limit_max_wait=0.0, receipt_dir=None)
+        triggered = MODULE.parse_github_time("2026-10-01T23:54:31Z")
+        for error, trigger, fails_during_trigger, reason in (
+            (TimeoutError("review timed out"), triggered, False, "timeout"),
+            (MODULE.ReviewWaitError("PR HEAD changed"), None, False, "error"),
+            (MODULE.ReviewWaitError("trigger unavailable"), None, True, "error"),
+        ):
+            with self.subTest(error=str(error)), tempfile.TemporaryDirectory() as directory:
+                ledger = Path(directory) / "events.jsonl"
+                with patch.object(MODULE, "parse_args", return_value=args), \
+                     patch.object(MODULE, "latest_review_trigger_at", return_value=trigger,
+                                  side_effect=error if fails_during_trigger else None), \
+                     patch.object(MODULE, "wait_for_review", side_effect=error), \
+                     patch.dict(os.environ, {"FACTORY_EVENT_LOG": str(ledger)}):
+                    code = MODULE.main()
+                self.assertEqual(code, 2)
+                self.assertTrue(ledger.exists(), "failed review wait lost both timing events")
+                rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+                self.assertEqual([row["event"] for row in rows], ["review-request", "review-arrival"])
+                self.assertEqual(rows[0]["detail"]["reason"], "manual-trigger" if trigger else "waiter-start")
+                self.assertEqual(rows[1]["detail"]["reason"], reason)
+                self.assertGreaterEqual(rows[1]["recorded_epoch"], rows[0]["recorded_epoch"])
+                if trigger:
+                    self.assertEqual(rows[0]["recorded_epoch"], trigger.timestamp())
+
     def test_legacy_success_needs_no_started_at(self) -> None:
         head = "a" * 40
         payload = {
@@ -728,6 +762,254 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertEqual(payload["headRefOid"], head)
         self.assertEqual(payload["statusCheckRollup"][0]["context"], "CodeRabbit")
         self.assertGreaterEqual(len(calls), 2)
+
+
+
+class ReplyWrapperReviewTest(unittest.TestCase):
+    """The waiter reads only the CodeRabbit check on the exact HEAD, never a review count.
+
+    On PR 1656 (2026-10-31) CodeRabbit answered two ``[FIXED]`` thread replies
+    with empty-body COMMENTED reviews of the new HEAD while its check was
+    "Review rate limited"; a hand-rolled guard that counted reviews-by-HEAD
+    treated them as a delivered review. Reviews are not an input here, so
+    adding them to the payload must not end the wait; only the check does.
+    """
+
+    def test_reply_wrapper_reviews_never_end_the_wait(self) -> None:
+        head = "da2dbd8b14e25c77dcd5d3b0df3fb42e27e7d9ea"
+        wrappers = [
+            {"id": 5722158877, "user": {"login": "coderabbitai[bot]"}, "state": "COMMENTED",
+             "commit_id": head, "submitted_at": "2026-10-31T09:25:39Z", "body": ""},
+            {"id": 5722158908, "user": {"login": "coderabbitai[bot]"}, "state": "COMMENTED",
+             "commit_id": head, "submitted_at": "2026-10-31T09:25:40Z", "body": ""},
+        ]
+        pending = {"headRefOid": head, "reviews": wrappers, "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "CodeRabbit", "status": "IN_PROGRESS",
+             "conclusion": None, "startedAt": "2026-10-31T10:11:01Z"}]}
+        finished = {"headRefOid": head, "reviews": wrappers, "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "CodeRabbit", "status": "COMPLETED",
+             "conclusion": "SUCCESS", "title": "Finished", "startedAt": "2026-10-31T10:11:01Z"}]}
+        payloads = iter([pending, pending, pending, finished])
+        polls: list[float] = []
+        status = MODULE.wait_for_review(
+            pr="1656", expected_head=head, repo=None, timeout_seconds=600, poll_seconds=5,
+            loader=lambda _pr, _repo: next(payloads), sleeper=polls.append,
+            triggered_at=MODULE.parse_github_time("2026-10-31T10:10:02Z"),
+        )
+        self.assertEqual(len(polls), 3, "wrapper reviews must not shortcut the check wait")
+        self.assertEqual((status.state, status.successful), ("SUCCESS", True))
+        self.assertIsNone(MODULE.coderabbit_entry({"statusCheckRollup": [], "reviews": wrappers}))
+
+HEAD_C = "da2dbd8b14e25c77dcd5d3b0df3fb42e27e7d9ea"
+
+
+class ConditionalPollTest(unittest.TestCase):
+    """Each 5 s poll re-reads the REST commit status; an unchanged page must cost no REST quota.
+
+    The fake reproduces gh 2.94's real ``gh api --include`` output, captured
+    against a local server: status line and headers before the body, and a
+    304 that exits 1 with ``gh: HTTP 304``.
+    """
+
+    OK = ("HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+          'Etag: W/"abc"\r\nX-Ratelimit-Remaining: 4999\r\n\r\n')
+    NOT_MODIFIED = 'HTTP/2.0 304 Not Modified\r\nEtag: W/"abc"\r\n\r\n'
+
+    def setUp(self) -> None:
+        MODULE._CONDITIONAL_CACHE.clear()
+        MODULE._RESOLVED_SLUG.clear()
+        self.addCleanup(MODULE._CONDITIONAL_CACHE.clear)
+        self.addCleanup(MODULE._RESOLVED_SLUG.clear)
+
+    def test_repeated_status_polls_send_if_none_match_and_reuse_the_304(self) -> None:
+        body = json.dumps({"statuses": [{"context": "CodeRabbit", "state": "pending",
+                                         "description": "Review in progress",
+                                         "created_at": "2026-10-31T10:11:01Z"}]})
+        sent: list[list[str]] = []
+
+        def fake_run(command, check=False, capture_output=True, text=True, timeout=None):
+            del check, capture_output, text, timeout
+            sent.append(list(command))
+            if command[:3] == ["gh", "repo", "view"]:
+                return MODULE.subprocess.CompletedProcess(command, 0, stdout='{"nameWithOwner":"acme/rose"}',
+                                                          stderr="")
+            if any(part.startswith("If-None-Match:") for part in command):
+                return MODULE.subprocess.CompletedProcess(command, 1, stdout=self.NOT_MODIFIED,
+                                                          stderr="gh: HTTP 304\n")
+            return MODULE.subprocess.CompletedProcess(command, 0, stdout=self.OK + body, stderr="")
+
+        with patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            first = MODULE.gh_commit_status_rollup(HEAD_C, None, timeout=5.0)
+            second = MODULE.gh_commit_status_rollup(HEAD_C, None, timeout=5.0)
+        self.assertEqual(first, second)
+        self.assertEqual(second[0]["description"], "Review in progress")
+        status_calls = [command for command in sent if command[:2] == ["gh", "api"]]
+        self.assertEqual(len(status_calls), 2)
+        self.assertNotIn("-H", status_calls[0])
+        self.assertIn("--include", status_calls[0])
+        self.assertEqual(status_calls[1][-3:-1], ["-H", 'If-None-Match: W/"abc"'])
+        self.assertEqual(status_calls[1][-1], status_calls[0][-1])
+        self.assertEqual(sum(command[:3] == ["gh", "repo", "view"] for command in sent), 1,
+                         "the repository slug is resolved once, not on every poll")
+
+    def test_a_real_gh_failure_is_still_retryable_not_a_cache_hit(self) -> None:
+        def fake_run(command, check=False, capture_output=True, text=True, timeout=None):
+            del check, capture_output, text, timeout
+            return MODULE.subprocess.CompletedProcess(
+                command, 1, stdout="HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 0\r\n\r\n{}",
+                stderr="gh: API rate limit exceeded (HTTP 403)\n")
+
+        with patch.object(MODULE.subprocess, "run", side_effect=fake_run):
+            with self.assertRaisesRegex(MODULE.GhCommandError, "rate limit exceeded"):
+                MODULE.gh_commit_status_rollup(HEAD_C, "acme/rose", timeout=5.0)
+
+
+# PR 1656 (2026-10-31): CodeRabbit's overview comment as it read at 09:55:12Z,
+# naming the reviewed range ending at HEAD_C (deploy-review-cycle CAP_COMMENT).
+HEAD_A = "33d8cfbfed95812de3534a74bee0a0caa36f10fe"
+BOT = {"login": "coderabbitai[bot]"}
+CAP_COMMENT = {"id": 6541489860, "user": BOT, "created_at": "2026-10-31T09:06:05Z",
+               "updated_at": "2026-10-31T09:55:12Z", "body": (
+                   "<!-- coderabbit-ai-generated:v1 -->\n\n## Review limit reached\n\n"
+                   "Your organization has reached its usage spending cap. "
+                   "**Next included review available in 9 minutes.**\n\n"
+                   "<details><summary>Commits</summary>\n\nReviewing files that changed from the base of "
+                   f"the PR and between {HEAD_A} and {HEAD_C}.\n\n</details>")}
+# "Action not completed — Review rate limited." names no window and no HEAD.
+RATE_LIMIT_TIP = {"id": 6541932795, "user": BOT, "created_at": "2026-10-31T09:55:15Z",
+                  "updated_at": "2026-10-31T09:55:15Z", "body": (
+                      "<!-- coderabbit-ai-generated:v1 -->\n\n> [!TIP]\n> Action not completed\n"
+                      "> Review rate limited.\n")}
+
+
+class RateLimitRerequestTest(unittest.TestCase):
+    """CodeRabbit's quota is per account, so concurrent deploys rate-limit each other.
+
+    The waiter reads the window from the exact-HEAD rate-limit comment, sleeps
+    until it reopens, and spends exactly one ``@coderabbitai review`` on that
+    HEAD; anything it cannot prove leaves today's exit-3 path untouched.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.receipts = Path(self.tmp.name) / "context"
+        self.now = MODULE.parse_github_time("2026-10-31T09:56:00Z")
+        self.sleeps: list[float] = []
+        self.posts: list[str] = []
+        self.messages: list[str] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now = self.now + MODULE.timedelta(seconds=seconds)
+
+    def rerequest(self, comments: list[dict], *, head: str = HEAD_C, max_wait: float = 3600,
+                  actual_head: str = HEAD_C, poster=None):
+        return MODULE.rerequest_after_rate_limit(
+            pr="1656", head=head, max_wait_seconds=max_wait, receipt_dir=self.receipts,
+            comments_loader=lambda: comments, head_loader=lambda: actual_head,
+            poster=poster or (lambda: self.posts.append(head)), clock=lambda: self.now,
+            sleeper=self.sleep, progress=self.messages.append)
+
+    def test_window_wordings_parse(self) -> None:
+        parse = MODULE.parse_window_seconds
+        self.assertEqual(parse("**Next included review available in 29 minutes.**"), 29 * 60)
+        self.assertEqual(parse("Next included review available in 9 minutes."), 9 * 60)
+        self.assertEqual(parse("Please wait **29 minutes and 46 seconds** before requesting another review."),
+                         29 * 60 + 46)
+        self.assertEqual(parse("available in 1 hour and 5 minutes"), 3900)
+        self.assertEqual(parse("Next included review available in 45 seconds."), 45)
+        self.assertIsNone(parse("Review rate limited."))
+        self.assertIsNone(parse("Next included review available in 3 fortnights."))
+
+    def test_waits_out_the_window_then_posts_exactly_one_rerequest(self) -> None:
+        triggered = self.rerequest([CAP_COMMENT, RATE_LIMIT_TIP])
+        # 09:55:12 + 9 min + 60 s grace = 10:05:12; waited from 09:56:00.
+        self.assertEqual(self.sleeps, [552.0])
+        self.assertEqual(self.posts, [HEAD_C])
+        self.assertEqual(triggered, MODULE.parse_github_time("2026-10-31T10:05:12Z"))
+        self.assertTrue(any("waiting until 2026-10-31T10:05:12Z" in line for line in self.messages), self.messages)
+        receipt = json.loads(MODULE.rerequest_receipt_path(self.receipts, "1656", HEAD_C).read_text())
+        self.assertEqual((receipt["status"], receipt["head"], receipt["comment_id"]),
+                         ("posted", HEAD_C, 6541489860))
+
+    def test_a_restart_never_posts_twice(self) -> None:
+        first = self.rerequest([CAP_COMMENT])
+        again = self.rerequest([CAP_COMMENT])
+        self.assertEqual(self.posts, [HEAD_C], "a restarted waiter spent a second review")
+        self.assertEqual(again, first)
+        # CodeRabbit rate-limiting the one re-request again ends with exit 3, never a second post.
+        relimited = {**CAP_COMMENT, "updated_at": "2026-10-31T10:05:40Z"}
+        with self.assertRaisesRegex(MODULE.WindowUnavailable, "rate-limited again"):
+            self.rerequest([relimited])
+        self.assertEqual(self.posts, [HEAD_C])
+
+    def test_a_failed_post_is_not_retried(self) -> None:
+        def refuse() -> None:
+            raise MODULE.GhCommandError("HTTP 502")
+
+        with self.assertRaisesRegex(MODULE.WindowUnavailable, "failed"):
+            self.rerequest([CAP_COMMENT], poster=refuse)
+        with self.assertRaisesRegex(MODULE.WindowUnavailable, "failed to post"):
+            self.rerequest([CAP_COMMENT])
+        self.assertEqual(self.posts, [])
+
+    def test_no_rerequest_without_a_window_naming_this_head(self) -> None:
+        other_head = "f602c1814b6f5fddbbdd71a3f22f6862807ea06c"
+        human = {**CAP_COMMENT, "user": {"login": "andyprevalsky"}}
+        no_window = {**CAP_COMMENT, "body": CAP_COMMENT["body"].replace(
+            "**Next included review available in 9 minutes.**", "")}
+        for name, comments, head in (
+            ("tip names neither HEAD nor window", [RATE_LIMIT_TIP], HEAD_C),
+            ("cap comment names another HEAD", [CAP_COMMENT], other_head),
+            ("a human quoting the cap", [human], HEAD_C),
+            ("no parseable window", [no_window], HEAD_C),
+        ):
+            with self.subTest(name):
+                with self.assertRaisesRegex(MODULE.WindowUnavailable, "parseable review window"):
+                    self.rerequest(comments, head=head)
+        self.assertEqual((self.posts, self.sleeps), ([], []))
+
+    def test_a_window_beyond_the_max_is_not_waited_for(self) -> None:
+        with self.assertRaisesRegex(MODULE.WindowUnavailable,
+                                    r"opens at 2026-10-31T10:05:12Z .*beyond --rate-limit-max-wait 300s"):
+            self.rerequest([CAP_COMMENT], max_wait=300)
+        self.assertEqual((self.posts, self.sleeps), ([], []))
+        self.assertFalse(MODULE.rerequest_receipt_path(self.receipts, "1656", HEAD_C).exists())
+
+    def test_an_existing_trigger_after_the_limit_is_waited_for_not_duplicated(self) -> None:
+        manual = {"id": 1, "user": {"login": "andyprevalsky"}, "body": "@coderabbitai review",
+                  "created_at": "2026-10-31T10:06:00Z"}
+        triggered = self.rerequest([CAP_COMMENT, manual])
+        self.assertEqual(triggered, MODULE.parse_github_time("2026-10-31T10:06:00Z"))
+        self.assertEqual((self.posts, self.sleeps), ([], []))
+
+    def test_a_moved_head_is_never_rerequested(self) -> None:
+        with self.assertRaisesRegex(MODULE.ReviewWaitError, "PR HEAD changed"):
+            self.rerequest([CAP_COMMENT], actual_head="f" * 40)
+        self.assertEqual(self.posts, [])
+
+    def test_main_exits_3_without_a_window_and_waits_on_the_rerequest(self) -> None:
+        self.addCleanup(setattr, sys, "path", sys.path[:])
+        sys.path.insert(0, str(ROOT / "scripts"))
+        args = argparse.Namespace(pr="1656", head=HEAD_C, repo="acme/rose", timeout=600, poll=5,
+                                  after_rate_limit=True, rate_limit_max_wait=3600.0, receipt_dir=self.receipts)
+        triggered = MODULE.parse_github_time("2026-10-31T10:05:12Z")
+        delivered = MODULE.ReviewStatus("SUCCESS", True, True, "CheckRun", {})
+        with patch.dict(os.environ, {"FACTORY_EVENT_LOG": str(Path(self.tmp.name) / "events.jsonl")}), \
+             patch.object(MODULE, "parse_args", return_value=args), \
+             patch.object(MODULE, "latest_review_trigger_at") as plain:
+            with patch.object(MODULE, "rerequest_after_rate_limit",
+                              side_effect=MODULE.WindowUnavailable("no window")), \
+                 patch.object(MODULE, "wait_for_review") as waiter:
+                self.assertEqual(MODULE.main(), 3)
+            waiter.assert_not_called()
+            with patch.object(MODULE, "rerequest_after_rate_limit", return_value=triggered), \
+                 patch.object(MODULE, "wait_for_review", return_value=delivered) as waiter:
+                self.assertEqual(MODULE.main(), 0)
+            self.assertEqual(waiter.call_args.kwargs["triggered_at"], triggered)
+            self.assertEqual(waiter.call_args.kwargs["expected_head"], HEAD_C)
+            plain.assert_not_called()
 
 
 if __name__ == "__main__":

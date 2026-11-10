@@ -20,11 +20,13 @@ const GUARDS = ['authenticateInternal', 'requireInternal'];
 
 /** Every worker/agent-only route, as `<domain>/<file>` → routes. */
 const INTERNAL_ROUTES: Record<string, string[]> = {
+  'agents/routes.reportBug.ts': ['/:id/report-bug/by-agent'],
   'send-sms/routes.ts': ['/', '/direct', '/notify'],
   'vapi/routes.ts': ['/call', '/call/:id'],
   'demo-cache/routes.ts': ['/get', '/get-many', '/get-position', '/set', '/purge', '/agent-flag'],
   'archive/routes.ts': ['/artifacts', '/artifact'],
   'tool-usage/routes.ts': ['/'],
+  'agent-queue-pointer/routes.ts': ['/capabilities'],
   'external-http/routes.ts': ['/request'],
   'browser-session/routes.ts': [
     '/close',
@@ -130,7 +132,7 @@ assert.deepStrictEqual(
 // The Fast Mode proxies carry no Authorization; every trace route must verify
 // the server-minted capability (RCA 2026-10-26-internal-routes-trusted-any-user-jwt).
 const proxySource = fs.readFileSync(path.join(domainsDir, 'demo-cache/routes.proxy.ts'), 'utf8');
-for (const routerName of ['anthropicProxyRouter', 'codexProxyRouter']) {
+for (const routerName of ['anthropicProxyRouter']) {
   assert.ok(
     new RegExp(`${routerName}\\.use\\(\\s*'/:traceParam',\\s*requireProxyCapability`).test(
       proxySource
@@ -138,6 +140,8 @@ for (const routerName of ['anthropicProxyRouter', 'codexProxyRouter']) {
     `${routerName} must verify the proxy capability before any trace route`
   );
 }
+// Codex never routes through a Rose proxy (S30): no Codex trace router exists.
+assert.ok(!proxySource.includes('codexProxyRouter'), 'no Codex proxy router (S30)');
 assert.ok(
   !/parse(Anthropic|Codex)TraceParam\(req\.params/.test(proxySource),
   'proxy handlers must parse the verified trace segment, never the raw param'

@@ -50,7 +50,7 @@ for (const [name, harness] of [
 
   const prepSql = /<<'SQL'\n([\s\S]*?)\nSQL\n/.exec(harness)?.[1] ?? '';
   const scrub =
-    /DELETE FROM "Integration"\s+WHERE "userId" = '00000000-0000-0000-0000-000000000000'\s+AND name IN \('gpt_api_key_cooldown', 'anthropic_api_key_cooldown'\);/;
+    /DELETE FROM "Integration"\s+WHERE "userId" = '00000000-0000-0000-0000-000000000000'\s+AND name IN \('gpt_api_key_cooldown', 'anthropic_api_key_cooldown', 'codex_funded_cooldown'\);/;
   assert.match(
     prepSql,
     scrub,
@@ -67,10 +67,9 @@ assert.match(
   /FAST_MODE_ANTHROPIC_PROXY_URL="\$\{BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-\}"/,
   'isolated blackbox backend must not inherit a developer Fast Mode Anthropic tunnel'
 );
-assert.match(
-  blackboxScript,
-  /FAST_MODE_CODEX_PROXY_URL="\$\{BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-\}"/,
-  'isolated blackbox backend must not inherit a developer Fast Mode Codex tunnel'
+assert.ok(
+  !blackboxScript.includes('FAST_MODE_CODEX_PROXY_URL='),
+  'Codex never routes through a Rose proxy (S30): no Codex tunnel to export'
 );
 
 const codexSmokeIndex = codexBlackbox.indexOf('fn: testSmoke_codexCompletesE2bTask');
@@ -98,4 +97,45 @@ execFileSync(
     join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'),
   ],
   { stdio: 'inherit', timeout: 60_000 }
+);
+
+// Concurrent shards and the unit pass each get their own local Benchmark Hub:
+// its index lock is per database, so a shared index.json lets one shard's
+// upload cycle drop another shard's run (benchmark-share DELETE -> 404).
+const hubDirExport = coverageScript.match(/^export BENCHMARK_HUB_LOCAL_DIR=.*$/m)?.[0];
+assert.ok(hubDirExport, 'coverage harness must export a per-shard BENCHMARK_HUB_LOCAL_DIR');
+assert.ok(
+  coverageScript.indexOf(hubDirExport) > coverageScript.indexOf('SHARD_SUFFIX="-units'),
+  'per-shard Benchmark Hub directory must be set after SHARD_SUFFIX is known'
+);
+const hubDirFor = (suffix: string, inherited?: string) =>
+  execFileSync('bash', ['-c', `${hubDirExport}; printf %s "$BENCHMARK_HUB_LOCAL_DIR"`], {
+    encoding: 'utf8',
+    env: {
+      PATH: process.env.PATH,
+      ROOT_DIR: '/repo',
+      SHARD_SUFFIX: suffix,
+      ...(inherited ? { BENCHMARK_HUB_LOCAL_DIR: inherited } : {}),
+    },
+  });
+const hubDirs = ['-shard1', '-shard2', '-units', '-units-probe'].map((suffix) => hubDirFor(suffix));
+for (const [index, suffix] of ['-shard1', '-shard2', '-units', '-units-probe'].entries()) {
+  assert.match(
+    hubDirs[index],
+    new RegExp(`^/repo/\\.context/test-runs/backend-coverage-hub${suffix}-[0-9]+-[0-9]+$`)
+  );
+}
+assert.equal(new Set(hubDirs).size, hubDirs.length, 'each coverage lane owns its Hub');
+const unshardedHub = hubDirFor('');
+assert.match(unshardedHub, /^\/repo\/\.context\/test-runs\/backend-coverage-hub-[0-9]+-[0-9]+$/);
+assert.notEqual(hubDirFor(''), unshardedHub, 'each invocation owns a new Hub');
+for (const inherited of ['/repo/.context/benchmark-hub', '/explicit/hub']) {
+  const isolated = hubDirFor('', inherited);
+  assert.match(isolated, /^\/repo\/\.context\/test-runs\/backend-coverage-hub-[0-9]+-[0-9]+$/);
+  assert.notEqual(isolated, inherited, 'coverage must override inherited developer Hub storage');
+}
+assert.match(
+  blackboxScript,
+  /^export BENCHMARK_HUB_LOCAL_DIR="\$\{BENCHMARK_HUB_LOCAL_DIR:-\$ARTIFACT_DIR\/benchmark-hub\}"$/m,
+  'standalone blackbox runs must keep their local Benchmark Hub index in their own artifact directory'
 );

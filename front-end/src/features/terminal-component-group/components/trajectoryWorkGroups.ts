@@ -5,6 +5,7 @@ import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import { eventTimeMs, parseAgentToAgentMessage } from '../hooks/codeAgentContract';
 import { localizeTimestamps } from '@/lib/localDateTime';
 import { waitForRowLabel } from './waitForPhrase';
+import { buildAgentToolData, isInboundAgentMessage } from './message-bubble/agentToolData';
 
 export interface TrajectoryActivity {
   key: string;
@@ -36,6 +37,10 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
       kind: 'comms',
       label: `${a2a.from.label} → ${a2a.to.label} · ${a2a.text}`,
     };
+  // Another agent's message (USER or ASSISTANT row) is one more activity in the
+  // surrounding batch, like a tool call; history keeps its "Message from …" row.
+  const inbound = isInboundAgentMessage(message) ? buildAgentToolData(message) : null;
+  if (inbound) return { key: message.message_id, message, kind: 'work', label: inbound.title };
   // The message renderer displays plain assistant text as a synthetic Thought card.
   if (message.role === 'ASSISTANT' && message.text.trim())
     return { key: message.message_id, message, kind: 'thinking', label: 'Thinking' };

@@ -26,6 +26,16 @@
            general_purpose/for_each children (they stop as orphaned), record
            each as "failed"; late child_completed signals are ignored.
 
+Foreground explore/browser/code spawns (run_in_background=false) get the same
+record while they run, flagged ``foreground`` (``_begin_foreground_spawn``), so
+the address the schema promises, <own path>/<task_name>, resolves::
+
+    spawn_agent(run_in_background=false, id=T) ──▶ record T {foreground, running}
+        │  (tree state lists it: other agents' sends reach its inbox / CLI turn)
+        ▼  the executor's rows stay the model's result (never stamped FE-only)
+    returns ──▶ record finished (_end_foreground_spawn): no notification, no
+                wake; a send to it gets its state (background_message_refusal)
+
 Planned (DAG) spawns run in the background too (``_planned_dag_background``)::
 
     DAG task T ── spawn_agent ──▶ _start_background_spawn (same "started" row)
@@ -77,9 +87,9 @@ from helpers.background_agents import (
     PAUSED_TASK_STATUS,
     RESUMABLE_TASK_TYPES,
     RESUME_CONVERSATION_KEYS,
-    background_message_refusal,
     agent_notification_metadata,
     background_execution_metadata,
+    background_message_refusal,
     build_agent_notification_text,
     build_background_wake_goal,
     build_background_wake_result,
@@ -87,8 +97,9 @@ from helpers.background_agents import (
     is_background_started_metadata,
 )
 from helpers.generation_handoff import GenerationHandoffRequested
+from helpers.handle_tool_event import handle_tool_event
 from helpers.wait_condition_or_handoff import note_generation_handoff, wait_condition_or_generation_handoff
-from helpers.wait_wake import first_wake, record_wake, wait_baseline
+from helpers.wait_wake import MAX_WAKE_EVENTS, first_wake, record_wake, wait_baseline
 from loop.dag_executor import DagInterrupts
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
 from workflows.agent_control import child_result_status
@@ -108,6 +119,7 @@ MAX_WAKEABLE_FINISHED_TASKS = 10
 FINISHED_RECORD_KEYS = (
     "tool_call_id",
     "agent_type",
+    "foreground",
     "address",
     "goal",
     "status",
@@ -118,6 +130,7 @@ FINISHED_RECORD_KEYS = (
     "started_at",
     "finished_at",
     "wake_message_ids",
+    "code_provider",
 )
 MAX_SEEN_AGENT_MESSAGE_IDS = 200
 
@@ -175,7 +188,8 @@ class BackgroundAgentsMixin:
         self._background_settled: Set[str] = set()
         # receive_agent_message ids already accepted (a retried send re-signals).
         self._seen_agent_message_ids: List[str] = []
-        # Wake log for in-tool waits (helpers/wait_wake.py; this generation only).
+        # Bounded wake history and sequence travel together across continuation.
+        self._last_user_message_wake_seq: int = 0
         self._wait_wake_seq: int = 0
         self._wait_wake_events: List[Dict[str, Any]] = []
         # wake mark read before the last successful context poll (wait baseline).
@@ -190,11 +204,40 @@ class BackgroundAgentsMixin:
             "notified": sorted(self._background_notified),
             "retired_task_names": list(self._retired_task_names),
             "seen_agent_message_ids": list(self._seen_agent_message_ids),
+            "wait_wake": {
+                "seq": self._wait_wake_seq,
+                "user_message_seq": self._last_user_message_wake_seq,
+                "context_mark": self._context_wake_mark,
+                "events": [dict(event) for event in self._wait_wake_events],
+            },
         }
 
     def _restore_background_state(self, snapshot: Any) -> None:
         if not isinstance(snapshot, dict):
             return
+        wake = snapshot.get("wait_wake")
+        if isinstance(wake, dict):
+            seq = wake.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
+                self._wait_wake_seq = seq
+                for key, attribute in (
+                    ("user_message_seq", "_last_user_message_wake_seq"),
+                    ("context_mark", "_context_wake_mark"),
+                ):
+                    value = wake.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= seq:
+                        setattr(self, attribute, value)
+                events = wake.get("events")
+                if isinstance(events, list):
+                    self._wait_wake_events = [
+                        dict(event)
+                        for event in events
+                        if isinstance(event, dict)
+                        and isinstance(event.get("seq"), int)
+                        and not isinstance(event["seq"], bool)
+                        and 0 < event["seq"] <= seq
+                        and isinstance(event.get("kind"), str)
+                    ][-MAX_WAKE_EVENTS:]
         tasks = snapshot.get("tasks")
         if isinstance(tasks, dict):
             self._background_tasks = {str(key): dict(value) for key, value in tasks.items() if isinstance(value, dict)}
@@ -220,11 +263,12 @@ class BackgroundAgentsMixin:
         return [self._background_tasks[key]["address"] for key in self._pending_background_ids()]
 
     def _is_background_execution_id(self, tool_call_id: Any) -> bool:
-        """T (or a for_each child's T:<n>) of an own background spawn."""
+        """T (or a for_each child's T:<n>) of an own background spawn (never a foreground one)."""
         if not isinstance(tool_call_id, str) or not tool_call_id:
             return False
         base_id = tool_call_id.split(":", 1)[0]
-        return base_id in self._background_tasks or base_id in self._background_finished
+        record = self._background_tasks.get(base_id) or self._background_finished.get(base_id)
+        return record is not None and not record.get("foreground")
 
     def _background_row_metadata(
         self, tool_call_id: Any, metadata: Optional[Dict[str, Any]]
@@ -261,6 +305,15 @@ class BackgroundAgentsMixin:
                     summary["child_workflow"] = record.get("agent_type") in CHILD_WORKFLOW_AGENT_TYPES
                     return summary
         return None
+
+    def _note_background_code_provider(self, task_id: str, provider: Any) -> None:
+        """Record the CLI a code task runs on its spawn record (wait_for targetTypes); idempotent."""
+        if provider not in ("claude", "codex"):
+            return
+        for source in (self._background_tasks, self._background_finished):
+            record = source.get(task_id)
+            if record is not None and record.get("agent_type") == "code":
+                record["code_provider"] = provider
 
     def _wake_background_waiters(self) -> None:
         self._background_wake_seq += 1
@@ -478,6 +531,19 @@ class BackgroundAgentsMixin:
                     "backgroundAgentType": agent_type,
                     "backgroundPath": record.get("path"),
                     "backgroundGoal": str(record.get("goal") or "")[:200],
+                    # What a person's later resume of this browser re-runs with when its
+                    # owner cannot (backend agentMessageResume.ts, a supervised fresh run).
+                    **(
+                        {
+                            "backgroundSpawnArgs": {
+                                key: args[key]
+                                for key in ("goal", "start_url", "output_schema", "attachments")
+                                if args.get(key) not in (None, "", [], {})
+                            }
+                        }
+                        if agent_type == "browser"
+                        else {}
+                    ),
                 },
             ),
             tool_call_id,
@@ -491,6 +557,93 @@ class BackgroundAgentsMixin:
         # (no-op when unchanged, e.g. a retried start).
         await self._update_tree_state()
         return {"success": True, "message": text, "background_task_id": task_id, "address": address}
+
+    @staticmethod
+    def _tracks_foreground_spawn(tool_name: str, tool_args: Dict[str, Any]) -> bool:
+        """True for the calls that get a foreground record. Pure: decided before any state is read."""
+        return tool_name == "spawn_agent" and tool_args.get("type") in WAKEABLE_TASK_TYPES
+
+    async def _begin_foreground_spawn(
+        self, tool_name: str, tool_args: Dict[str, Any], tool_call_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Record a foreground explore/browser/code spawn under its task path.
+
+        Returns the tool's error result when its task_name is taken, else None.
+        A background spawn (or a background run's executor, or a foreground
+        spawn resumed after a handoff) already has its record and is skipped.
+        """
+        if getattr(self, "current_phase", None) == "PLAN":
+            return None  # no send_message_to_agent in PLAN: nothing could address it, and its name stays free
+        if getattr(self, "fast_mode_cache_enabled", False):
+            # DEMO-cache replay re-runs recorded foreground trajectories, some of which spawn one
+            # task_name twice (19 explore agents in test-mass-agent-run-0). Nothing in a replay
+            # addresses those agents, so keep no record: the replay must reproduce the recorded
+            # outcome, not fail the repeat on name bookkeeping.
+            return None
+        if self._spawn_runs_in_background(tool_name, tool_args):
+            return None
+        if tool_call_id in self._background_tasks or tool_call_id in self._background_finished:
+            return None
+        args = {key: value for key, value in tool_args.items() if key != "run_in_background"}
+        try:
+            validate_spawn_params({"tool": "spawn_agent", **args, "_phase": getattr(self, "current_phase", None)})
+        except ValueError:
+            return None  # the foreground path posts the validation error
+        task_name = args.get("task_name")
+        # Resolve before the uniqueness check: nothing may await between that
+        # check and the insertion (see _start_background_spawn).
+        path = child_task_path(await resolve_own_task_path(self), task_name)
+        # A name is taken by a running agent, by a background agent (running or finished: it can
+        # still be woken through its path) or by a retired background name. A FINISHED foreground
+        # agent never blocks its name: nothing can be woken through it, so the new spawn replaces it.
+        superseded = [
+            key
+            for key, finished in self._background_finished.items()
+            if finished.get("foreground") and finished.get("task_name") == task_name
+        ]
+        if task_name and (
+            task_name in self._retired_task_names
+            or task_name_in_use(self._background_tasks.values(), task_name)
+            or task_name_in_use(
+                (rec for key, rec in self._background_finished.items() if key not in superseded), task_name
+            )
+        ):
+            error = (
+                f"task_name '{task_name}' is already used by another agent you spawned; choose a different task_name."
+            )
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE, title="spawn_agent failed", message=error, status=MessageStatus.ERROR
+                ),
+                tool_call_id,
+                "spawn_agent",
+            )
+            return {"error": True, "message": error}
+        for key in superseded:
+            del self._background_finished[key]  # the path now resolves to the newest agent
+        self._background_tasks[tool_call_id] = {
+            "tool_call_id": tool_call_id,
+            "tool_args": args,
+            "agent_type": str(args.get("type")),
+            "foreground": True,
+            "address": path or tool_call_id,
+            "task_name": task_name,
+            "path": path,
+            "started_at": workflow.now().isoformat(),
+            "goal": str(args.get("goal") or "")[:BACKGROUND_GOAL_RECORD_LEN],
+            "status": "running",
+            "child_agent_ids": [],
+        }
+        return None
+
+    async def _end_foreground_spawn(self, tool_call_id: str, result: Any) -> None:
+        """Finish a foreground spawn's record; a parked one stays running for the next generation."""
+        record = self._background_tasks.get(tool_call_id)
+        if record is None or not record.get("foreground"):
+            return
+        if isinstance(result, dict) and result.get("pending_tool_resume"):
+            return
+        await self._finish_background_task(tool_call_id, result if isinstance(result, dict) else {"error": True})
 
     def _launch_background_task(self, task_id: str) -> None:
         if task_id in self._background_handles:
@@ -552,6 +705,8 @@ class BackgroundAgentsMixin:
             record = self._background_tasks[task_id]
             if record.get("agent_type") in CHILD_WORKFLOW_AGENT_TYPES:
                 continue  # durable children report through child_completed
+            if record.get("foreground"):
+                continue  # its parked tool call re-enters in the foreground
             workflow.logger.info(f"[background] relaunching {task_id} after continuation")
             self._launch_background_task(task_id)
 
@@ -582,6 +737,9 @@ class BackgroundAgentsMixin:
         session_id = metadata.get("session_id")
         if isinstance(session_id, str) and session_id:
             outcome["session_id"] = session_id
+        # A code run that ended with its session saved and paused (user pause,
+        # idle C11, usage limit C15): the executor's structured outcome.
+        outcome["session_paused"] = metadata.get("session_paused") is True
 
     # ----------------------------------------------------------- completion
 
@@ -623,13 +781,19 @@ class BackgroundAgentsMixin:
         # A user pause / cost limit cancels activity-backed work exactly like a
         # foreground spawn (helpers/tool_interrupts.py): it reports failed.
         status = "failed" if failed else "completed"
-        if failed and paused and not kill_reason:
+        # Paused = resumable: a user pause ended the run (browser: cancelled as
+        # failed), or the executor reported its session paused (code).
+        if (
+            not kill_reason
+            and record.get("agent_type") in RESUMABLE_TASK_TYPES
+            and ((failed and paused) or outcome.get("session_paused") is True)
+        ):
             status = PAUSED_TASK_STATUS
         record["status"] = status
         record["finished_at"] = workflow.now().isoformat()
         self._background_tasks.pop(task_id, None)
         finished = {key: record.get(key) for key in FINISHED_RECORD_KEYS}
-        if record.get("agent_type") in WAKEABLE_TASK_TYPES:
+        if record.get("agent_type") in WAKEABLE_TASK_TYPES and not record.get("foreground"):
             # What send_message_to_agent needs to wake this task for another run.
             finished["wake"] = {
                 "tool_args": dict(record.get("tool_args") or {}),
@@ -639,6 +803,11 @@ class BackgroundAgentsMixin:
         self._remember_finished_background_task(task_id, finished)
         if record.get("agent_type") not in CHILD_WORKFLOW_AGENT_TYPES:
             await self._update_tree_state()  # the persisted tree state lists it as finished
+        if record.get("foreground"):
+            # Its result is already the spawn call's result in the model's context.
+            self._background_finishing.discard(task_id)
+            self._background_settled.add(task_id)
+            return
 
         key = f"{self.agent_id}:{task_id}:notification" + (f":run{run}" if run > 1 else "")
         if key not in self._background_notified:
@@ -652,6 +821,8 @@ class BackgroundAgentsMixin:
                 structured_response=structured_response,
                 file_pointers=outcome.get("file_pointers"),
                 session_id=outcome.get("session_id"),
+                # FINAL_ANSWER / FAILED follow the run's outcome; "paused" is the task state.
+                failed=bool(failed),
             )
             try:
                 await self._post_message(
@@ -665,6 +836,7 @@ class BackgroundAgentsMixin:
                         idempotency_key=key,
                         run=run,
                         session_id=outcome.get("session_id"),
+                        failed=bool(failed),
                     ),
                 )
             except Exception as exc:
@@ -682,10 +854,12 @@ class BackgroundAgentsMixin:
         )
 
     def _evict_finished_overflow(self) -> None:
-        """Drop the oldest finished records past the bound, keeping their task_names reserved."""
+        """Drop the oldest finished records past the bound, keeping their background task_names reserved."""
         while len(self._background_finished) > MAX_FINISHED_BACKGROUND_TASKS:
             evicted = self._background_finished.pop(next(iter(self._background_finished)))
             name = evicted.get("task_name")
+            if evicted.get("foreground"):
+                continue  # a finished foreground agent never reserves its name
             if isinstance(name, str) and name and name not in self._retired_task_names:
                 self._retired_task_names.append(name)
                 del self._retired_task_names[:-MAX_RETIRED_TASK_NAMES]
@@ -719,6 +893,9 @@ class BackgroundAgentsMixin:
         message_id: Optional[str],
         sender: Optional[str],
         continue_conversation: Optional[bool] = None,
+        by_user: bool = False,
+        user_attachments: Optional[List[Dict[str, Any]]] = None,
+        user_cli_settings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """send_message_to_agent to a finished explore/browser/code task: start its next run.
 
@@ -737,7 +914,7 @@ class BackgroundAgentsMixin:
         if message_id and message_id in (record.get("wake_message_ids") or []):
             return {"woke": True, "already_running": True}
         wake = record.get("wake")
-        refusal = background_message_refusal(record, continue_conversation)
+        refusal = background_message_refusal(record, continue_conversation, by_user=by_user)
         if refusal is not None:
             return {"woke": False, "reason": refusal}
         if record.get("agent_type") not in WAKEABLE_TASK_TYPES or not isinstance(wake, dict):
@@ -759,6 +936,12 @@ class BackgroundAgentsMixin:
         elif continue_conversation is True:
             # Code: the CLI resumes its own conversation; the message is its next turn.
             args["goal"] = message
+            if by_user and user_attachments:
+                # The files the owner attached to that typed turn (handler appends them).
+                args["_user_attachments"] = list(user_attachments)
+            if by_user and user_cli_settings:
+                # Its model / effort / speed: the resumed CLI's first turn runs on them.
+                args["_resume_cli_settings"] = dict(user_cli_settings)
         else:
             args["goal"] = build_background_wake_goal(
                 message=message,
@@ -796,29 +979,77 @@ class BackgroundAgentsMixin:
         """receive_agent_message for a finished own task (sent by another agent through the backend)."""
         address = data.get("wake_task_id")
         message = data.get("message")
+        from_user = data.get("from_user") is True
         if not isinstance(address, str) or not isinstance(message, str) or not message.strip():
+            if from_user and isinstance(address, str):
+                await self._post_user_resume_refusal(address.split(".run")[0], "the message was empty")
             return
         message_id = data.get("message_id")
         if isinstance(message_id, str) and message_id and message_id in self._seen_agent_message_ids:
             return  # a retried send re-signals the same row
         record = self._background_task_for_address(address)
         if record is None or record.get("child_workflow"):
+            if from_user:
+                # The person's turn must never wait on a wake that will not happen.
+                await self._post_user_resume_refusal(
+                    address.split(".run")[0], "its Rose agent no longer tracks this code agent"
+                )
             return
         continue_conversation = data.get("continue_conversation")
+        sender = data.get("from_agent_path") if isinstance(data.get("from_agent_path"), str) else None
+        if sender is None and data.get("from_user") is True:
+            sender = "the user"
         result = await self._wake_background_task(
             record["background_task_id"],
             message,
             message_id=message_id if isinstance(message_id, str) else None,
-            sender=data.get("from_agent_path") if isinstance(data.get("from_agent_path"), str) else None,
+            sender=sender,
             continue_conversation=continue_conversation if isinstance(continue_conversation, bool) else None,
+            # The owner typed in the code agent's own view (backend directChatResume.ts).
+            by_user=data.get("from_user") is True,
+            user_attachments=data.get("attachments") if isinstance(data.get("attachments"), list) else None,
+            user_cli_settings=data.get("cli_settings") if isinstance(data.get("cli_settings"), dict) else None,
         )
         if not result.get("woke"):
             # Refused (paused / killed / cost limit): the id stays unseen so a retry after the owner recovers wakes it.
             workflow.logger.warning(f"[background] did not wake {address}: {result.get('reason')}")
+            if data.get("from_user") is True and not result.get("already_running"):
+                await self._post_user_resume_refusal(record["background_task_id"], str(result.get("reason") or ""))
         elif isinstance(message_id, str) and message_id:
             # _wake_background_task is itself idempotent per message id (it changes state before its only await).
             self._seen_agent_message_ids.append(message_id)
             del self._seen_agent_message_ids[:-MAX_SEEN_AGENT_MESSAGE_IDS]
+
+    async def _post_user_resume_refusal(self, task_id: str, reason: str) -> None:
+        """The owner typed to a stopped code / browser agent and this workflow cannot start its next run.
+
+        A UI-only row on the spawn (excluded from every model context), labelled by
+        the task's type: the typed turn reads "Couldn't resume: <reason>" instead of waiting.
+        """
+        record = self._background_finished.get(task_id) or self._background_tasks.get(task_id) or {}
+        agent_type = record.get("agent_type")
+        tool_name, title = {
+            "browser": ("spawn_browser_agent", "Browser could not resume"),
+            "code": ("spawn_claude_code_agent", "Code agent could not resume"),
+        }.get(str(agent_type), ("spawn_agent", "Agent could not resume"))
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=title,
+                message=reason or "its Rose agent could not start it",
+                status=MessageStatus.ERROR,
+                metadata={
+                    "toolName": tool_name,
+                    "excludeFromModel": True,
+                    "codeAgentResume": "refused",
+                },
+            ),
+            agent_id=self.agent_id,
+            tool_call_id=task_id,
+            tool_name=tool_name,
+            execute_activity=workflow.execute_activity,
+            user_id=getattr(self, "user_id", None),
+        )
 
     async def _notification_recipient(self) -> str:
         """ "Task name" of a notification this agent receives: its own task path."""

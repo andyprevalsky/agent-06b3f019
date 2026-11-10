@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -16,6 +17,7 @@ __all__ = [
     "redact_cdp_url",
     "redact_url_secrets",
     "steel_cdp_connection_url",
+    "tilion_live_view_session_id",
 ]
 
 
@@ -50,6 +52,36 @@ def is_tilion_cdp_url(cdp_url: str) -> bool:
     )
 
 
+def tilion_live_view_session_id(url: str) -> Optional[str]:
+    """Recover a native handle from Tilion's persisted live view, never its token.
+
+    The provider mints /v1/session/sess_<32 hex>/live-view URLs. Recording start,
+    save and deployment diagnostics retain that path even after token redaction
+    or rotation. Only the configured deployment and production authorities count.
+    """
+    if not isinstance(url, str) or any(char.isspace() or ord(char) < 32 for char in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+        configured = urlsplit((os.environ.get("TILION_BASE_URL") or "https://back.tilion.dev").strip())
+        port = parsed.port if parsed.port is not None else 443
+        configured_host = configured.hostname or ""
+        on_configured = bool(configured_host) and (
+            parsed.hostname == configured_host or (parsed.hostname or "").endswith("." + configured_host)
+        )
+        allowed_ports = {443}
+        if on_configured:
+            allowed_ports.add(configured.port if configured.port is not None else 443)
+        if (parsed.scheme != "https" or not is_tilion_host(parsed.hostname)
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment or port not in allowed_ports):
+            return None
+    except ValueError:
+        return None
+    match = re.fullmatch(r"/v1/session/(sess_[0-9a-f]{32})/live-view", parsed.path)
+    return match.group(1) if match else None
+
+
 async def open_browser_cdp_connection(
     cdp_url: str,
     *,
@@ -67,9 +99,18 @@ async def open_browser_cdp_connection(
     applied by the multiplexer to every page/iframe target before it runs.
     Other providers connect directly, as before.
     """
+    from domains.spawn_browser_agent_v3.service_activity_queue import get_browser_cleanup_owners
+
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        owners.ensure_acquisition_open()
     if not is_tilion_cdp_url(cdp_url):
         return steel_cdp_connection_url(cdp_url), None
     from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
 
     multiplexer = SingleCdpConnectionMultiplexer(cdp_url, label=label, refresh_url=refresh_url, emulation=emulation)
+    # Retain custody before start can await or fail, including setup that never
+    # returns a DOMService to its activity's outer finally.
+    if owners is not None:
+        owners.multiplexers[id(multiplexer)] = multiplexer
     return await multiplexer.start(), multiplexer

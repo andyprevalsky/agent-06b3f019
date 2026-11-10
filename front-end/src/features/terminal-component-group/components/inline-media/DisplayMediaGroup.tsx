@@ -7,10 +7,10 @@
  *   images / videos            → ONE InlineMediaGallery (single or strip)
  *   page/bundle/model/pdf or text/html with file_pointer.usercontent_url (cross-origin http(s)):
  *       [FRAME] sandbox="allow-scripts allow-pointer-lock allow-popups" on the usercontent origin
- *       [FRAME] --rose:resize--> height clamped 200..900px
- *       fill (an expanded inline display): the frame takes its container's full
- *       height (a page that never reports its height is not boxed at 480px); a
- *       reported height becomes its minimum (taller pages scroll)
+ *       [FRAME] --rose:resize--> height clamped 200..900px (collapsed preview box)
+ *       fullHeight (an expanded inline display): the frame is as tall as the page
+ *       reports (up to HTML_FRAME_FULL_MAX_HEIGHT), so the chat scrolls instead of
+ *       a scroll inside the frame; a page that never reports its height gets 80vh
  *   text/html without one (older rows) or a same-origin/invalid one → DisplayHtmlLink:
  *       [SIGNING] --signed URL--> [LINK] plain open/download link (never framed)
  *                 --failed-----> [UNAVAILABLE] filename notice
@@ -38,6 +38,9 @@ import { useInlineMediaUrls } from './useInlineMediaUrls';
 const HTML_FRAME_DEFAULT_HEIGHT = 480;
 const HTML_FRAME_MIN_HEIGHT = 200;
 const HTML_FRAME_MAX_HEIGHT = 900;
+/** Expanded displays render at their full reported height up to this very tall cap. */
+export const HTML_FRAME_FULL_MAX_HEIGHT = 10_000;
+const HTML_FRAME_FULL_FALLBACK_HEIGHT = '80vh';
 
 function clampHeight(height: number): number {
   return Math.min(HTML_FRAME_MAX_HEIGHT, Math.max(HTML_FRAME_MIN_HEIGHT, Math.round(height)));
@@ -79,25 +82,32 @@ function DisplayHtmlLink({ item, agentId }: { item: DisplayMediaItem; agentId?: 
 function DisplayHtmlFrame({
   item,
   agentId,
-  fill,
+  fullHeight,
 }: {
   item: DisplayMediaItem;
   agentId?: string;
-  fill?: boolean;
+  fullHeight?: boolean;
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
-  const [reported, setHeight] = useState<number | null>(null);
-  const height = reported ?? HTML_FRAME_DEFAULT_HEIGHT;
+  // The page's own reported height; each mode applies its own bounds at render.
+  const [reported, setReported] = useState<number | null>(null);
   const src = item.usercontent_url;
   const allowed = !!src && isAllowedUserContentUrl(src);
   useUserViewBridge({
     frameRef,
     src: allowed ? src : null,
-    onResize: (next) => setHeight(clampHeight(next)),
+    onResize: (next) => setReported(Math.max(HTML_FRAME_MIN_HEIGHT, Math.round(next))),
   });
   if (!allowed) {
     return <DisplayHtmlLink item={item} agentId={agentId} />;
   }
+  const height = fullHeight
+    ? reported === null
+      ? HTML_FRAME_FULL_FALLBACK_HEIGHT
+      : Math.min(HTML_FRAME_FULL_MAX_HEIGHT, reported)
+    : reported === null
+      ? HTML_FRAME_DEFAULT_HEIGHT
+      : clampHeight(reported);
   return (
     <iframe
       ref={frameRef}
@@ -108,12 +118,8 @@ function DisplayHtmlFrame({
       sandbox="allow-scripts allow-pointer-lock allow-popups"
       referrerPolicy="no-referrer"
       loading="lazy"
-      className={fill ? 'min-h-0 w-full flex-1 rounded-lg bg-white' : 'w-full rounded-lg bg-white'}
-      style={
-        fill
-          ? { minHeight: reported ?? HTML_FRAME_MIN_HEIGHT, border: 0, colorScheme: 'normal' }
-          : { height, border: 0, colorScheme: 'normal' }
-      }
+      className="w-full rounded-lg bg-white"
+      style={{ height, border: 0, colorScheme: 'normal' }}
     />
   );
 }
@@ -121,13 +127,13 @@ function DisplayHtmlFrame({
 export function DisplayMediaGroup({
   items,
   agentId,
-  fill,
+  fullHeight,
   hideCaption,
 }: {
   items: DisplayMediaItem[];
   agentId?: string;
-  /** Fill the parent's height (an expanded inline display) instead of a fixed frame box. */
-  fill?: boolean;
+  /** Frames take the page's full reported height (an expanded inline display). */
+  fullHeight?: boolean;
   /** The caller already shows the caption (the inline display's disclosure row). */
   hideCaption?: boolean;
 }) {
@@ -137,10 +143,7 @@ export function DisplayMediaGroup({
   const media = items.filter((item) => !isHtmlDisplayMedia(item) && inlineMediaKind(item.file));
   const requester = lead.requester;
   return (
-    <div
-      data-testid="display-media"
-      className={fill ? 'flex min-h-0 w-full flex-1 flex-col gap-2' : 'flex w-full flex-col gap-2'}
-    >
+    <div data-testid="display-media" className="flex w-full flex-col gap-2">
       {requester?.kind === 'code_agent' && (
         <CodeAgentAttribution requester={requester} via="display" />
       )}
@@ -151,7 +154,12 @@ export function DisplayMediaGroup({
         <InlineMediaGallery files={media.map((item) => item.file)} agentId={agentId} />
       )}
       {html.map((item) => (
-        <DisplayHtmlFrame key={item.file.id} item={item} agentId={agentId} fill={fill} />
+        <DisplayHtmlFrame
+          key={item.file.id}
+          item={item}
+          agentId={agentId}
+          fullHeight={fullHeight}
+        />
       ))}
     </div>
   );

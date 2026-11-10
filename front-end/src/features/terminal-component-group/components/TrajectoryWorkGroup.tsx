@@ -11,53 +11,60 @@
  *
  * RUNNING header: fixed-height live carousel: disclosure chevron (→ collapsed,
  *   ↓ expanded), then the latest activity icon + label and the live elapsed; no
- *   spinner. Thinking always shows the ↓ token counter: the live stream's
- *   indicator, or the persisted thought's own size until the next stream starts.
+ *   spinner. An inbound agent message is an ordinary activity ("Message from …",
+ *   mail icon); it never ends or re-keys the batch. Thinking is a stock activity
+ *   like any tool (lightbulb + "Thinking"), never an animated indicator; a
+ *   finished thought appends its recorded generation (duration · ↓ tokens ·
+ *   tok/s, thoughtGeneration). Nothing is estimated from text length.
  *   When the latest activity is a spawned agent, a smaller line beneath rotates
- *   through the tool(s) it is using now (SpawnedAgentToolLine).
+ *   through the tool(s) it is using now (SpawnedAgentToolLine). A wait on agents
+ *   reads "Waiting for <icon> Task Title" (WaitAgentTargets).
  * DONE header: chevron + "Worked for Xs" + activity count.
  * EXPANDED: the ordered history so far (completed and in-progress activities),
- *   paged 20 at a time; opening a running batch shows its latest page, and new
- *   activities append while it stays open. The live elapsed clock is a leaf
+ *   paged 50 at a time, anchored at the newest activity (the latest page holds
+ *   the 50 most recent); opening any batch (running or done) shows that page
+ *   first, and new activities append while it stays open. The live elapsed clock is a leaf
  *   (BatchElapsed), so its 100 ms tick never re-renders the history rows.
  */
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Lightbulb, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
-import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 import { useBatchElapsed } from './useBatchElapsed';
-import { StreamingMetric } from './StreamingMetric';
+import { useWorkHistoryPage, workHistoryPageSlice } from './useWorkHistoryPage';
+import { thoughtGeneration } from './thoughtGeneration';
+import { ThoughtGenerationMetric } from './ThoughtGenerationMetric';
 import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import type { ExploreStep } from '../types';
 import { SpawnedAgentToolLine } from './SpawnedAgentToolLine';
+import { WaitAgentTargets } from './WaitAgentTargets';
+import { waitAgentTargets } from './waitForPhrase';
 import { workLabel } from '../hooks/codeSessionTurns';
-const PAGE_SIZE = 20;
+import { AGENT_MESSAGE_TOOL_NAME, isInboundAgentMessage } from './message-bubble/agentToolData';
 /** Leaf clock: its tick re-renders only this text, never the open history rows. */
 function BatchElapsed({ startedAt }: { startedAt: number | null }) {
   return <span data-testid="trajectory-batch-elapsed">{useBatchElapsed(startedAt, true)}</span>;
 }
-/** A persisted thought between streams keeps the ↓ counter, sized by its own text. */
-function PersistedThinking({ message, label }: { message: Message; label: string }) {
-  const tokens = Math.round(message.text.length / 4);
+/** A thought with a recorded generation shows it beside the label; otherwise just the label. */
+function ThinkingLabel({ message, label }: { message: Message; label: string }) {
+  const generation = thoughtGeneration(message.metadata);
+  if (!generation) return <>{label}</>;
   return (
     <span className="flex items-center gap-2">
       {label}
-      <StreamingMetric
-        tokenCount={tokens}
-        animatedTokenCount={useAnimatedCounter(tokens, 0.3)}
-        className="text-xs"
-        iconClassName="h-3 w-3"
-        showZeroTokens
-      />
+      <ThoughtGenerationMetric generation={generation} />
     </span>
   );
 }
 /** The folded rows' kinds and tool identity, matching the stock row's data-* attributes. */
 function toolIdentity(group: Group) {
   const statuses = new Set<string>();
+  const kinds = new Set<string>();
+  let comms = 0;
   let startPhase: 'plan' | 'execute' | undefined;
-  for (const { message } of group.activities) {
+  for (const { message, kind } of group.activities) {
+    kinds.add(kind);
+    if (kind === 'comms') comms++;
     const tool = message.metadata?.toolName;
     if (typeof tool !== 'string') continue;
     const status = message.metadata?.toolStatus;
@@ -65,39 +72,44 @@ function toolIdentity(group: Group) {
     const phase = message.metadata?.startPhase;
     if (tool === 'cloud_agent' && (phase === 'plan' || phase === 'execute')) startPhase = phase;
   }
-  const kinds = [...new Set(group.activities.map((activity) => activity.kind))].join(' ');
-  return { statuses: [...statuses].join(' '), startPhase, kinds };
+  return { statuses: [...statuses].join(' '), startPhase, kinds: [...kinds].join(' '), comms };
 }
 export function TrajectoryWorkGroup({
   group,
   renderMessage,
-  indicator,
   exploreStepMap,
 }: {
   group: Group;
   renderMessage: (message: Message) => ReactNode;
-  indicator?: ReactNode;
   exploreStepMap?: ReadonlyMap<string, ExploreStep[]>;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [page, setPage] = useState(0);
+  const { activePage, lastPage, setPage, openAtLatest } = useWorkHistoryPage(
+    group.activities.length,
+  );
   const running = group.status === 'running';
   const historyId = useId();
   const latest = group.activities.at(-1)!;
-  const comms = group.activities.filter((activity) => activity.kind === 'comms').length;
-  const toolName = String(latest.message.metadata?.toolName ?? '');
+  const tools = useMemo(() => toolIdentity(group), [group]);
+  const comms = tools.comms;
+  const toolName = isInboundAgentMessage(latest.message)
+    ? AGENT_MESSAGE_TOOL_NAME
+    : String(latest.message.metadata?.toolName ?? '');
   const Icon =
     latest.kind === 'comms'
       ? MessagesSquare
       : latest.kind === 'thinking'
         ? Lightbulb
         : getToolIcon(toolName);
-  const lastPage = Math.max(0, Math.ceil(group.activities.length / PAGE_SIZE) - 1);
-  const activePage = Math.min(page, lastPage);
   const label = running ? latest.label : workLabel(group);
   const thinking = running && latest.kind === 'thinking';
-  const liveThinking = thinking && indicator;
-  const tools = toolIdentity(group);
+  // Only a live wait reads "Waiting for …"; its final "Wait ended" / "Wait timed out"
+  // row keeps the same targets but keeps its own label.
+  const waitsOnAgents =
+    running &&
+    toolName === 'wait_for' &&
+    latest.message.metadata?.toolStatus === 'IN_PROGRESS' &&
+    waitAgentTargets(latest.message.metadata) !== null;
   return (
     <div
       data-testid="trajectory-work-group"
@@ -113,7 +125,7 @@ export function TrajectoryWorkGroup({
         aria-expanded={expanded}
         aria-controls={expanded ? historyId : undefined}
         onClick={() => {
-          if (!expanded && running) setPage(lastPage);
+          if (!expanded) openAtLatest();
           setExpanded(!expanded);
         }}
         className="flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden text-left text-sm text-muted-foreground"
@@ -133,7 +145,7 @@ export function TrajectoryWorkGroup({
             className="shrink-0"
           />
         )}
-        {running && !liveThinking && (
+        {running && (
           <Icon data-testid="trajectory-activity-icon" size={14} aria-hidden className="shrink-0" />
         )}
         <span
@@ -145,10 +157,10 @@ export function TrajectoryWorkGroup({
             data-activity-key={latest.key}
             className={running ? 'trajectory-activity-enter block truncate' : 'block truncate'}
           >
-            {liveThinking ? (
-              indicator
-            ) : thinking ? (
-              <PersistedThinking message={latest.message} label={label} />
+            {thinking ? (
+              <ThinkingLabel message={latest.message} label={label} />
+            ) : waitsOnAgents ? (
+              <WaitAgentTargets metadata={latest.message.metadata} prefix="Waiting for" />
             ) : (
               label
             )}
@@ -178,13 +190,11 @@ export function TrajectoryWorkGroup({
           data-testid="trajectory-work-history"
           className="mt-2 max-h-80 space-y-3 overflow-y-auto overscroll-contain border-l border-border pl-3"
         >
-          {group.activities
-            .slice(activePage * PAGE_SIZE, (activePage + 1) * PAGE_SIZE)
-            .map(({ key, message }) => (
-              <div key={key} data-testid="trajectory-history-entry">
-                {renderMessage(message)}
-              </div>
-            ))}
+          {workHistoryPageSlice(group.activities, activePage).map(({ key, message }) => (
+            <div key={key} data-testid="trajectory-history-entry">
+              {renderMessage(message)}
+            </div>
+          ))}
           {lastPage > 0 && (
             <div className="flex gap-3 text-xs">
               <button

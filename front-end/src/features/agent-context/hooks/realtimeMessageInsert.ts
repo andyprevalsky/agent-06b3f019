@@ -1,6 +1,7 @@
 import type { InsertMessagePayload } from '@/lib/realtime';
 import type { Message } from '@/lib/api';
 import type { RealtimeSetters } from './realtimeHandlers';
+import { adoptServerUserMessage } from './optimisticUserMessages';
 
 export function handleInsertMessage(
   data: InsertMessagePayload,
@@ -85,8 +86,22 @@ export function handleInsertMessage(
   }
 
   setters.setMessages((prev) => {
-    if (prev.some((m) => m.message_id === message.message_id)) return prev;
-    return [...prev, message];
+    const index = prev.findIndex((m) => m.message_id === message.message_id);
+    if (index < 0) {
+      const adopted = message.role === 'USER' ? adoptServerUserMessage(prev, message) : null;
+      return adopted ?? [...prev, message];
+    }
+    const existing = prev[index];
+    const pause = message.metadata?.userPause;
+    if (
+      pause?.reason !== 'user' ||
+      pause.recordedAt <= (existing.metadata?.userPause?.recordedAt ?? '') ||
+      message.timestamp !== existing.timestamp ||
+      message.metadata?.toolCallId !== existing.metadata?.toolCallId ||
+      message.metadata?.workflowGeneration !== existing.metadata?.workflowGeneration
+    )
+      return prev;
+    return prev.map((row, i) => (i === index ? message : row));
   });
   setters.dispatchMessage(message);
 }

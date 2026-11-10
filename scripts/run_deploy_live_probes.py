@@ -11,12 +11,40 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
+
+
+def report_progress(probe: str, exit_code: int) -> None:
+    """Append one DEPLOY_GATE_PROGRESS row (scripts/deploy_gate_progress.py) per finished probe.
+
+    Probes write straight to this runner's stdout, so the row carries the exit
+    code, not an output tail. Advisory: without the variable nothing is imported
+    or written, and a missing helper or unwritable file changes nothing.
+    """
+    if not os.environ.get(PROGRESS_ENV):
+        return
+    scripts = str(Path(__file__).resolve().parent)
+    try:
+        sys.path.insert(0, scripts)
+        try:
+            import deploy_gate_progress
+        finally:
+            sys.path.remove(scripts)
+        deploy_gate_progress.report(
+            probe,
+            "PASS" if exit_code == 0 else "FAIL",
+            scope="suite",
+            detail="" if exit_code == 0 else f"live probe {probe}: exit={exit_code}",
+        )
+    except (ImportError, OSError, ValueError):
+        return
 
 
 def workspace_tsx() -> str:
@@ -93,6 +121,7 @@ def run_commands(commands: Sequence[Command]) -> dict[str, int]:
                     continue
                 results[name] = process.wait()
                 del processes[name]
+                report_progress(name, results[name])
                 launch_ready()
             if processes:
                 time.sleep(0.02)
@@ -153,6 +182,42 @@ def deploy_commands() -> tuple[Command, ...]:
             ),
             ROOT / "back-end",
             after="amplitude-live",
+        ),
+        # Real-internet provider cases kept out of the hermetic coverage gate.
+        # Same workspace test database as the stages above, so serialized.
+        Command(
+            "browser-provider-live",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "browser-provider-live",
+                "--",
+                "env",
+                "BROWSER_PROVIDER_LIVE=1",
+                "BLACKBOX_TEST_CONCURRENCY=1",
+                "bash",
+                "scripts/run-blackbox-tests.sh",
+                "browser-provider",
+            ),
+            ROOT / "back-end",
+            after="chat-router-failover-live",
+        ),
+        Command(
+            "report-bug-storage-live",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "report-bug-storage-live",
+                "--",
+                "env",
+                "REPORT_BUG_STORAGE_LIVE=1",
+                "BLACKBOX_TEST_CONCURRENCY=1",
+                "bash",
+                "scripts/run-blackbox-tests.sh",
+                "report-bug",
+            ),
+            ROOT / "back-end",
+            after="browser-provider-live",
         ),
         # Read-only: EXPLAINs and counts every migration production has not applied
         # yet against its data, which local and CI databases never contain.

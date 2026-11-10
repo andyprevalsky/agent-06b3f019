@@ -12,8 +12,8 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { Sandbox } from 'e2b';
 import { prisma } from '../../providers/database';
-import { markAwaitingParent } from '../../providers/codeSessions/spawn';
 import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
+import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../../providers/e2bCodeSessionSandbox';
 
 export interface CodeSessionListContext {
   userA: string;
@@ -68,29 +68,53 @@ export async function testResumableCloseListsPaused(ctx: CodeSessionListContext)
   const fake = ctx.fakeSandbox(home, sandboxId);
   ctx.patchConnect(async () => fake.sandbox);
   try {
+    let items: Map<unknown, Record<string, unknown>>;
     const asked = await newTask(0);
-    await markAwaitingParent(asked.id, {
-      message_id: 'q-list',
-      question: 'Which branch should I merge into?',
+    // A running task's container is awake while its keepalive is within E2B's idle window.
+    assert.equal((await list()).get(asked.id)?.container_state, 'awake');
+    // E2B pauses an idle sandbox itself without touching CodeSession.state: an ACTIVE
+    // session whose last keepalive is older than the idle timeout is stopped, not awake.
+    await prisma.codeSession.update({
+      where: { id: codeSession.id },
+      data: { lastActiveAt: new Date(Date.now() - CODE_SANDBOX_IDLE_TIMEOUT_MS - 60_000) },
     });
-    await closeClaudeCodeSession(asked.id, ctx.userA, root, [], { reason: 'awaiting_parent' });
+    assert.equal((await list()).get(asked.id)?.container_state, 'stopped');
+    await prisma.codeSession.update({
+      where: { id: codeSession.id },
+      data: { lastActiveAt: new Date() },
+    });
+    assert.equal((await list()).get(asked.id)?.container_state, 'awake');
+    await closeClaudeCodeSession(asked.id, ctx.userA, root, [], { reason: 'idle' });
     const askedRow = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: asked.id } });
     assert.equal(askedRow.status, 'CLOSED', 'the task row itself stays CLOSED for the chip');
-    assert.equal(askedRow.closeReason, 'awaiting_parent', 'the close records its reason');
+    assert.equal(askedRow.closeReason, 'idle', 'the close records its reason');
     const paused = (await list()).get(asked.id);
     assert.equal(paused?.status, 'PAUSED', JSON.stringify(paused));
     assert.equal(paused?.code_session_id, codeSession.id);
-    const question = paused?.awaiting_parent as Record<string, unknown> | null;
-    assert.deepEqual(Object.keys(question ?? {}).sort(), ['at', 'question']);
-    assert.equal(question?.question, 'Which branch should I merge into?');
-    assert.ok(!Number.isNaN(Date.parse(String(question?.at))), JSON.stringify(question));
+    assert.equal(paused?.awaiting_parent, null, 'code agents ask no questions');
+    // The close pauses the session's sandbox: stopped, resumable on the next message.
+    assert.equal(paused?.container_state, 'stopped', JSON.stringify(paused));
+    // A resume leases the session (ACTIVE, fresh keepalive) before its sandbox
+    // connects: the ended task's row stays stopped; only a running task reads awake.
+    await prisma.codeSession.update({
+      where: { id: codeSession.id },
+      data: { state: 'ACTIVE', lastActiveAt: new Date() },
+    });
+    assert.equal((await list()).get(asked.id)?.container_state, 'stopped');
+    // A later spawn attached to the same live sandbox (same code session, new task):
+    // the ended task's container is that running one, awake for both rows.
+    const attached = await newTask(500);
+    items = await list();
+    assert.equal(items.get(asked.id)?.container_state, 'awake', 'a sibling task runs in it');
+    assert.equal(items.get(attached.id)?.container_state, 'awake');
+    await prisma.claudeCodeSession.delete({ where: { id: attached.id } });
+    await prisma.codeSession.update({ where: { id: codeSession.id }, data: { state: 'PAUSED' } });
 
-    // The answer resumes the session as a new task; a finished task is not a pause.
+    // The next spawn resumes the session as a new task; a finished task is not a pause.
     const answered = await newTask(1000);
     await closeClaudeCodeSession(answered.id, ctx.userA, root, [], { reason: 'close' });
-    let items = await list();
+    items = await list();
     assert.equal(items.get(asked.id)?.status, 'CLOSED', 'a superseded pause lists as closed');
-    assert.equal(items.get(asked.id)?.awaiting_parent, null, 'its question was answered');
     assert.equal(items.get(answered.id)?.status, 'CLOSED', 'a normal close is not a pause');
 
     const failed = await newTask(2000);
@@ -118,6 +142,15 @@ export async function testResumableCloseListsPaused(ctx: CodeSessionListContext)
       'CLOSED',
       'a retired session is not resumable'
     );
+    // A retired session's sandbox is gone, for every task of it.
+    for (const item of (await list()).values()) {
+      assert.equal(item.container_state, 'destroyed', JSON.stringify(item));
+    }
+    // Without a persistent session (Mac and legacy runs) the container is unknown.
+    const legacy = await prisma.claudeCodeSession.create({
+      data: { agentId: root, sandboxId: `sb-${randomUUID()}`, goal: 'g', status: 'CLOSED' },
+    });
+    assert.equal((await list()).get(legacy.id)?.container_state, null);
   } finally {
     ctx.restoreConnect();
     await prisma.claudeCodeSession.deleteMany({ where: { agentId: root } });

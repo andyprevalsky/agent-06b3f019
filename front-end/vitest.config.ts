@@ -1,9 +1,12 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react-swc';
 import path from 'path';
+import { gateProgressVitestPlugin } from './src/tests/gate-progress/vitestReporter.ts';
 
 export default defineConfig({
-  plugins: [react()],
+  // The deploy gate's progress plugin appends a live FAIL-row reporter to the reporters
+  // Vitest resolves (defaults unchanged), only when the gate worker names a progress file.
+  plugins: [react(), ...(process.env.DEPLOY_GATE_PROGRESS ? [gateProgressVitestPlugin()] : [])],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -25,6 +28,9 @@ export default defineConfig({
     ],
     globals: true,
     css: false,
+    // Deploy gates only (the gate worker names a progress file): a failed test reruns once and a
+    // rerun pass is reported FLAKY (gate-progress/vitestReporter.ts). Local runs never retry.
+    retry: process.env.DEPLOY_GATE_PROGRESS ? 1 : 0,
     // /deploy verifies the front-end alongside backend, agents, and both Mac
     // suites. Four is the measured local optimum: lower widths leave a long
     // serial tail, while higher widths add contention without reducing wall time.

@@ -30,6 +30,7 @@ import {
   validateBrowserConnection,
 } from './sessionConnection';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import { fingerprintInjectionEnabled } from './fingerprintSwitch';
 import {
   newOwnedSteelSessionId,
   registerInFlightSteelSession,
@@ -85,7 +86,9 @@ async function proxyLocationForAgent(agentId: string | null): Promise<ProxyGeoLo
   };
 }
 
-async function fingerprintUserAgent(userId: string): Promise<string | undefined> {
+export async function fingerprintUserAgent(userId: string): Promise<string | undefined> {
+  // Same global switch as every other fingerprint consumer (rotation/fallback onto Steel).
+  if (!fingerprintInjectionEnabled()) return undefined;
   const fingerprint = await prisma.integration.findUnique({
     where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
   });

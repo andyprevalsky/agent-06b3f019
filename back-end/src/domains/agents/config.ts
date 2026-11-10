@@ -4,6 +4,11 @@
 
 import multer from 'multer';
 
+/** Account-wide repair-agent tools remain off until their explicit rollout. */
+export function accountAgentsEnabled(): boolean {
+  return process.env.ROSE_ACCOUNT_AGENTS_ENABLED === 'true';
+}
+
 /** Report Bug screenshots: one image per request, held in memory for upload. */
 export const MAX_BUG_REPORT_SCREENSHOT_BYTES = 10 * 1024 * 1024;
 
@@ -17,6 +22,18 @@ export const index01WebhookUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 },
 });
+
+/**
+ * Public origin of this API as the Index 01 app must call it (the app runs on a
+ * phone, so a request-derived localhost origin is useless there). Override with
+ * PUBLIC_API_BASE_URL for staging.
+ */
+export function getPublicApiBaseUrl(): string {
+  const configured = process.env.PUBLIC_API_BASE_URL;
+  return (
+    configured !== undefined && configured !== '' ? configured : 'https://api.roselabs.ai'
+  ).replace(/\/+$/, '');
+}
 
 /** Read a {{VAR_NAME}} prompt secret from its PROMPT_SECRET_* env var. */
 export function getPromptSecret(varName: string): string | undefined {

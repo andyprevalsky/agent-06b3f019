@@ -35,7 +35,8 @@ import integrationsRouter from './domains/integrations/routes';
 import authRouter from './domains/auth/routes';
 import authOptionsRouter from './domains/auth-options/routes';
 import authAssistanceRouter from './domains/auth-assistance/routes';
-import iphoneRouter from './domains/iphone/routes';
+import { createIPhoneRouter } from './domains/iphone/routes';
+import { launchSetupAgent } from './domains/agents/service.phoneConnection';
 import agentPhoneRouter from './domains/agent-phone/routes';
 import x402Router from './domains/x402/routes';
 import claudeCodeRouter from './domains/claude-code/routes';
@@ -82,7 +83,7 @@ import { releaseAllConnectSessions } from './domains/compute-grants/connectSessi
 import { releaseAllRecoveryProbeSessions } from './providers/browser/challengeRecoveryLaneSearch';
 import { createCloudMinter } from './domains/compute-grants/minter';
 import { computeGrantCdpProvider } from './domains/compute-grants/browserProvider';
-import { anthropicProxyRouter, codexProxyRouter } from './domains/demo-cache/routes.proxy';
+import { anthropicProxyRouter } from './domains/demo-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createDeepHealthHandler } from './providers/deepHealth';
 import { alertError } from './providers/errorAlert';
@@ -96,8 +97,9 @@ import {
 } from './providers/temporalBlackboxFake';
 import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
 import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
-import { grep as userDataGrep, getSummary as userDataSummary } from './domains/data/service';
-import { registerUserDataGrep, registerUserDataSummary } from './providers/userDataSearch';
+import { grep as userDataGrep } from './domains/data/service';
+import { executeGatelessGrepTool } from './domains/data/grepTool';
+import { registerUserDataGrep, registerUserDataGrepTool } from './providers/userDataSearch';
 import { registerCronJobs } from './serverCron';
 import { cleanupBenchmarkKernelProfiles } from './providers/browser/kernel';
 import { cleanupBenchmarkBrowserUseProfiles } from './providers/browser/browserUse';
@@ -115,10 +117,12 @@ if (!process.env.BACKEND_API_KEY) {
   log.info('BACKEND_API_KEY loaded');
 }
 
-// Wire the data domain's grep into the provider-side bridge so the SMS
-// supervisor can search user data without a provider→domain import.
+// Wire the data domain's grep and grep tool executor into the provider-side
+// bridge so the SMS supervisor and web chat search user data without a
+// provider→domain import.
 registerUserDataGrep(userDataGrep);
-registerUserDataSummary(userDataSummary);
+// SMS and chat have no connect gate: they report unconnected sources themselves.
+registerUserDataGrepTool(executeGatelessGrepTool);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -492,7 +496,7 @@ app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
 app.use('/api/auth-options', authOptionsRouter);
 app.use('/api/auth-assistance', authAssistanceRouter);
-app.use('/api/iphone', iphoneRouter);
+app.use('/api/iphone', createIPhoneRouter({ setupAgentLauncher: launchSetupAgent }));
 app.use('/api/credential-propagation', credentialPropagationRouter);
 app.use('/api/blueprints', authenticate, blueprintsRouter);
 app.use('/api/attention-requests', attentionRequestsRouter);
@@ -537,7 +541,6 @@ app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation ru
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.
 app.use('/anthropic-proxy', anthropicProxyRouter);
-app.use('/codex-proxy', codexProxyRouter);
 
 // Catch-all authenticated route (must be AFTER x402 routes)
 app.use('/api', authenticate, formatRouter);

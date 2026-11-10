@@ -1,11 +1,13 @@
 /**
- * Blackbox: the code-agent chip's way into the app view (UI ledger rows 10/39)
+ * Blackbox: a code agent's way into the app view (UI ledger rows 10/39)
  * through the real Terminal (Rose Desktop flag on).
  *
- *   metadata.code_agent.preview_url (dev cloud session) → the chip header shows a
- *   plain "Open app" button that opens the full-screen app view for that code
- *   session. The chip itself frames nothing (no live preview card, no handoff
- *   mint) even on screen (Andy 2026-10-26: no preview video in the root display).
+ *   metadata.code_agent.preview_url (dev cloud session) → the code-agent view's
+ *   devbox usage popover (CodeResourcesIndicator) holds one "Open app" link that
+ *   opens the full-screen app view for that code session. No floating "Open app"
+ *   anywhere (header chrome, removed with the Claude header). The
+ *   row and the view frame nothing (no live preview card, no handoff mint) even
+ *   on screen (Andy 2026-10-26: no preview video in the root display).
  *   No preview_url / same-origin URL: no button. Flag off: stock chip.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +21,9 @@ import {
   PREVIEW_URL,
   TASK_ID,
   openAgentWithChip,
+  openAppFromCodeAgentView,
+  openCodeAgentViewFromRow,
+  openUsagePopover,
   requests,
   serveAgentWithChip,
   serveHandoff,
@@ -74,8 +79,8 @@ afterEach(() => {
   localStorage.clear();
 });
 
-describe('code-agent chip app entry', () => {
-  it('on screen: no preview frame or card in the chip; "Open app" opens the app view', async () => {
+describe('code-agent app entry (the devbox usage popover\'s "Open app" link)', () => {
+  it('on screen: no preview frame or card in the row or view; the popover link opens the app view', async () => {
     onScreenEverywhere();
     serveAgentWithChip();
     const handoff = serveHandoff();
@@ -85,11 +90,28 @@ describe('code-agent chip app entry', () => {
     expect(within(chip).queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
     expect(within(chip).queryByTestId('code-agent-preview-frame')).not.toBeInTheDocument();
     expect(chip.querySelector('iframe, video')).toBeNull();
-    // The chip reads nothing for the app: no mint, no preview status.
+    // The root row carries no "Open app" (it moved to the code-agent view).
+    expect(screen.queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
+    // The row reads nothing for the app: no mint, no preview status.
     expect(handoff.calls()).toBe(0);
     expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(0);
 
-    fireEvent.click(within(chip).getByRole('button', { name: 'Open app' }));
+    const codeView = await openCodeAgentViewFromRow(chip);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(codeView).queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
+    expect(within(codeView).queryByTestId('code-agent-preview-frame')).not.toBeInTheDocument();
+    expect(codeView.querySelector('iframe, video')).toBeNull();
+    // The code-agent view reads nothing for the app either, until "Open app".
+    expect(handoff.calls()).toBe(0);
+    expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(0);
+    // No floating "Open app" in the view's header / top area: the devbox usage
+    // indicator sits in the query box's corner, and its popover (closed) holds the link.
+    expect(within(codeView).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
+    expect(codeView.textContent).not.toMatch(/Open app/);
+    expect(screen.queryByTestId('code-resources-popover')).not.toBeInTheDocument();
+    const popover = await openUsagePopover(codeView);
+    expect(within(popover).getAllByRole('button', { name: 'Open app' })).toHaveLength(1);
+    fireEvent.click(within(popover).getByRole('button', { name: 'Open app' }));
     const view = await screen.findByTestId('app-view-screen');
     expect(within(view).getByRole('heading', { name: 'Snake game' })).toBeInTheDocument();
     expect(await within(view).findByTestId('app-view-frame')).toHaveAttribute(
@@ -104,8 +126,7 @@ describe('code-agent chip app entry', () => {
     serveHandoff();
     servePreview('running');
     const chip = await openAgentWithChip();
-    fireEvent.click(await within(chip).findByRole('button', { name: 'Open app' }));
-    const view = await screen.findByTestId('app-view-screen');
+    const view = await openAppFromCodeAgentView(await openCodeAgentViewFromRow(chip));
     expect(within(view).getByRole('heading', { name: 'Preview' })).toBeInTheDocument();
     expect(
       within(screen.getByTestId('query-input-layer')).getByPlaceholderText(
@@ -114,10 +135,15 @@ describe('code-agent chip app entry', () => {
     ).toBeInTheDocument();
   });
 
-  it('no preview_url: no button', async () => {
+  it('no preview_url: no link on the row or in the code-agent view', async () => {
     serveAgentWithChip({ preview_url: undefined });
     const chip = await openAgentWithChip();
     expect(within(chip).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
+    const codeView = await openCodeAgentViewFromRow(chip);
+    // Nothing to open: no link anywhere; the usage bars sit only in the query box corner.
+    expect(within(codeView).queryByTestId('code-resources')).not.toBeInTheDocument();
+    expect(within(codeView).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
   });
 
   it('a preview_url on the app origin is never offered', async () => {
@@ -127,6 +153,11 @@ describe('code-agent chip app entry', () => {
     const chip = await openAgentWithChip();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(within(chip).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
+    const codeView = await openCodeAgentViewFromRow(chip);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(codeView).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
+    expect(within(codeView).queryByTestId('code-resources')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
     expect(handoff.calls()).toBe(0);
   });
 

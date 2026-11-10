@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
+STRUCTURAL_GATES="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
 MEASUREMENT="$ROOT_DIR/back-end/scripts/measure-seed-memory.sh"
 BUDGET="$ROOT_DIR/back-end/src/providers/seedMemoryBudget.ts"
 SEED="$ROOT_DIR/back-end/scripts/seed-local.ts"
@@ -19,12 +19,41 @@ require_text() {
     grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-require_text "$DEPLOY_COMMAND" \
-    'bash scripts/measure-seed-memory.sh 5 0 0 --enforce-budget' \
-    "/deploy must run five cold memory measurements with enforcement"
-require_text "$DEPLOY_COMMAND" \
-    'run-deploy-stage seed-memory-ratchet' \
-    "/deploy must record the seed memory gate"
+# The /deploy path runs this gate through the planner's standard template
+# (scripts/deploy_test_plan.py), not an inline script in deploy.md: five cold
+# measurements with budget enforcement from back-end/, selected for back-end,
+# agents and scripts changes and omitted (with a reason) for unrelated ones.
+python3 - "$ROOT_DIR" <<'PY' || fail "/deploy must run five cold memory measurements with enforcement"
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+import deploy_test_plan as plan
+
+template = plan.standard_template()
+gates = [gate for gate in template["gates"] if gate["name"] == "seed-memory-ratchet"]
+assert len(gates) == 1, gates
+gate = gates[0]
+assert gate["command"] == ["bash", "scripts/measure-seed-memory.sh", "5", "0", "0", "--enforce-budget"], gate["command"]
+assert gate["cwd"] == "back-end", gate["cwd"]
+# The staged runner records its result under this exact gate and check name.
+assert gate["checks"] == ["seed-memory-ratchet"], gate["checks"]
+assert (root / gate["cwd"] / gate["command"][1]).is_file(), "the gate command must exist relative to its cwd"
+
+result = {"all": False, "reasons": [], "lanes": {lane: [] for lanes in plan.GRAPH_LANES.values() for lane in lanes}}
+def selected(changed):
+    chosen = plan.select(template, changed, result, None)
+    return "seed-memory-ratchet" in {g["name"] for g in chosen["gates"]}, chosen["omitted"]
+for changed in (["back-end/src/server.ts"], ["agents/helpers/messages.py"], ["scripts/run.sh"]):
+    assert selected(changed)[0], changed
+picked, omitted = selected(["docs/api/agents.mdx"])
+assert not picked and any(row["gate"] == "seed-memory-ratchet" for row in omitted), omitted
+PY
+# The suite itself is a registered structural gate (it cannot be dropped silently).
+grep -Fq 'Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh"))' "$STRUCTURAL_GATES" ||
+    fail "run-deploy-structural-gates.py must register the seed-memory-ratchet suite"
 require_text "$MEASUREMENT" \
     'budget enforcement requires exactly five cold runs' \
     "measurement enforcement must reject a smaller favorable sample"

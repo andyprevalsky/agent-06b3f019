@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+REVIEW_PROVIDERS = {"coderabbit", "claude", "codex", "human"}
 VALID_EVENTS = {
     "deploy": {
         "approval-request": {
@@ -52,9 +55,15 @@ VALID_EVENTS = {
             "agentcard",
         },
         "outcome": {"completed", "blocked"},
+        # Review providers: request when the review is asked for, arrival when
+        # its verdict lands; their difference is review wait, not agent time.
+        "review-request": REVIEW_PROVIDERS,
+        "review-arrival": REVIEW_PROVIDERS,
     },
     "rca": {
         "stage": {"evidence-trace", "reproduce-diagnose", "verify-handoff"},
+        # One event per local repro run; detail repro_attempt=N counts them.
+        "repro-attempt": {"reproduced", "not-reproduced", "fix-verified", "fix-failed"},
         "outcome": {"fixed", "diagnosis-ready", "blocked"},
     },
     "descend": {
@@ -66,6 +75,14 @@ VALID_EVENTS = {
     },
 }
 DESCEND_STEP_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+ACTIVITY_EVENTS = {
+    "work-start": {"implementation", "diagnosis", "coordination", "reporting"},
+    "work-finish": {"implementation", "diagnosis", "coordination", "reporting"},
+    "wait-start": {"user", "credits", "provider", "queue", "dependency", "inactive"},
+    "wait-finish": {"user", "credits", "provider", "queue", "dependency", "inactive"},
+}
+for _events in VALID_EVENTS.values():
+    _events.update(ACTIVITY_EVENTS)
 
 
 def git_value(*args: str) -> str:
@@ -84,6 +101,34 @@ def default_event_log() -> Path:
     root = git_value("rev-parse", "--show-toplevel")
     base = Path(root) if root else Path.cwd()
     return base / ".context" / "factory-events.jsonl"
+
+
+def active_deploy_run_id() -> str | None:
+    """Use the timing lifecycle's identity even after Git changes branches."""
+    root = Path(git_value("rev-parse", "--show-toplevel") or Path.cwd())
+    run_root = Path(os.environ.get("DEPLOY_RUN_ROOT", str(root / ".context/deploy-runs")))
+    for pointer in ("factory-current", "current"):
+        try:
+            run_id = (run_root / pointer).read_text().splitlines()[0]
+            if run_id in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+                continue
+            run = json.loads((run_root / run_id / "metadata.json").read_text())
+            allowed = {"active", "finishing", "completed"} if pointer == "factory-current" else {"active", "finishing"}
+            if run.get("run_id") == run_id and run.get("status") in allowed:
+                return run_id
+        except (OSError, ValueError, IndexError, AttributeError):
+            continue
+    return None
+
+
+def finish_deploy_context(run_id: str) -> None:
+    root = Path(git_value("rev-parse", "--show-toplevel") or Path.cwd())
+    run_root = Path(os.environ.get("DEPLOY_RUN_ROOT", str(root / ".context/deploy-runs")))
+    with (run_root / ".lifecycle.lock").open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        pointer = run_root / "factory-current"
+        if pointer.exists() and pointer.read_text().strip() == run_id:
+            pointer.unlink()
 
 
 def append_event(path: Path, payload: dict[str, object]) -> None:
@@ -132,11 +177,17 @@ def factory_event_payload(
     *,
     recorded_epoch: float | None = None,
     metadata: dict[str, object] | None = None,
+    detail: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the canonical factory-event envelope with optional dimensions."""
     from factory_metadata import load_metadata, normalize_metadata
 
     validate_event(workflow, event, value)
+    if event in ACTIVITY_EVENTS and not all(
+        isinstance((detail or {}).get(key), str) and (detail or {})[key].strip()
+        for key in ("request_id", "reason")
+    ):
+        raise ValueError("activity events require detail request_id and reason")
     metadata = dict(metadata or {})
     metadata["telemetry"] = (
         normalize_metadata(metadata["telemetry"])
@@ -154,10 +205,14 @@ def factory_event_payload(
         "git_sha": git_value("rev-parse", "HEAD"),
         "branch": git_value("branch", "--show-current"),
     }
+    if workflow == "deploy" and (run_id := active_deploy_run_id()) is not None:
+        payload["run_id"] = run_id
     for key, metadata_value in (metadata or {}).items():
         if key in payload:
             raise ValueError(f"metadata cannot override canonical field {key!r}")
         payload[key] = metadata_value
+    if detail:
+        payload["detail"] = detail
     return payload
 
 
@@ -170,26 +225,76 @@ def parse_args() -> argparse.Namespace:
         "--metadata-file",
         help="Allowlisted evidence-backed JSON; defaults to FACTORY_METADATA_FILE",
     )
+    parser.add_argument(
+        "--detail",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Allowlisted outcome detail (see factory_detail.EVENT_DETAIL_FIELDS); repeatable",
+    )
     return parser.parse_args()
 
 
+def deploy_test_rows(event_log: Path) -> dict | None:
+    """Per-test rows (FAIL, FLAKY, QUARANTINED_*) and per-gate verdicts of the round this stage-finish closes.
+
+    Read from the deploy cycle's attempt progress files since the matching stage-start, failed
+    tests first within the bounded detail. Telemetry never blocks the stage: errors return None.
+    """
+    try:
+        import deploy_test_quarantine as quarantine
+
+        since = 0.0
+        for line in (event_log.read_text().splitlines() if event_log.is_file() else []):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if (isinstance(row, dict) and row.get("workflow") == "deploy" and row.get("event") == "stage-start"
+                    and row.get("value") == "runtime-blackbox"):
+                since = float(row.get("recorded_epoch") or since)
+        root = Path(git_value("rev-parse", "--show-toplevel") or Path.cwd())
+        attempts = quarantine.state_dir(root) / "attempts"
+        tests = quarantine.test_lines(quarantine.attempt_rows(attempts, since))
+        gates = quarantine.gate_rows(attempts, since)
+        detail = {}
+        if tests["lines"] or tests["omitted"]:
+            detail["tests"] = tests
+        if gates:
+            detail["gates"] = gates
+        return detail or None
+    except Exception as error:  # Telemetry must never change a gate result.
+        print(f"warning: could not collect deploy test rows: {type(error).__name__}", file=sys.stderr)
+        return None
+
+
 def main() -> int:
+    from factory_detail import DETAIL_SCHEMA_VERSION, parse_event_detail
     from factory_metadata import load_metadata
 
     args = parse_args()
+    event_log = Path(
+        os.environ.get("FACTORY_EVENT_LOG", str(default_event_log()))
+    ).expanduser()
     try:
+        detail = parse_event_detail(args.detail)
+        if (args.workflow, args.event, args.value) == ("deploy", "stage-finish", "runtime-blackbox"):
+            rows = deploy_test_rows(event_log)
+            if rows is not None:
+                detail = {"schema_version": DETAIL_SCHEMA_VERSION, **detail, **rows}
         payload = factory_event_payload(
             args.workflow,
             args.event,
             args.value,
             metadata={"telemetry": load_metadata(args.metadata_file)},
+            detail=detail,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    event_log = Path(
-        os.environ.get("FACTORY_EVENT_LOG", str(default_event_log()))
-    ).expanduser()
     append_event(event_log, payload)
+    if (args.workflow == "deploy" and args.event == "outcome" and args.value == "completed"
+            and payload.get("run_id")):
+        finish_deploy_context(str(payload["run_id"]))
     print("FACTORY_EVENT " + json.dumps(payload, separators=(",", ":")))
     return 0
 

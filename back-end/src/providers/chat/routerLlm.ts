@@ -208,19 +208,24 @@ export function buildRouterCompletionOptions(
       agent_id: params.agentId,
       call_site: ROUTER_STAGES[params.stage ?? 'initial'].callSite,
     },
-    provider_fast_mode: params.providerFastMode,
+    speed: params.speed,
     ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
   };
 }
 
+/** Static stage prompt (cached prefix), then the agent's project section (projectContext.ts). */
+export const buildRouterSystemMessage = (stage: RouterStage, projectContext = '', userProfileContext = '') =>
+  markCacheable(ROUTER_STAGES[stage].systemPrompt, [projectContext, userProfileContext].filter(Boolean).join('\n\n'));
+
 export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
-  userProfileContext?: string;
   model: string;
   providerRoute?: ChatProviderRoute;
   stage?: RouterStage;
+  userProfileContext?: string;
+  projectContext?: string; // `## Project` section; '' or omitted = Home
   onRouterStarted?: () => void;
   onActionDetected?: (action: ClosedRouterAction) => void;
 }): Promise<RouterResponse> {
@@ -235,7 +240,7 @@ export async function callRouterLlm(params: {
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [markCacheable(routerStage.systemPrompt, params.userProfileContext)];
+  }> = [buildRouterSystemMessage(stage, params.projectContext, params.userProfileContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
@@ -294,6 +299,8 @@ export async function callRouterLlm(params: {
   const fastMode = await agentFastMode(params.agentId);
   const fastModeRead = fastMode.enabled === true && fastMode.goal !== null;
   const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
+  // Legacy Fast Mode bit: part of the DEMO cache key namespace only. Provider
+  // speed is fastMode.speed and never changes which cache entry is read.
   const providerFastMode = fastMode.providerFastMode !== false;
   let fcKey: string | null = null;
   let fcCacheWon = false;
@@ -369,7 +376,7 @@ export async function callRouterLlm(params: {
               messages: openaiMessages,
               providerRoute: params.providerRoute,
               stage,
-              providerFastMode,
+              speed: fastMode.speed,
               abortSignal: abortSignal
                 ? AbortSignal.any([abortSignal, completionDeadline.signal])
                 : completionDeadline.signal,

@@ -6,7 +6,13 @@
 import { randomBytes, createHash } from '../../providers/crypto';
 import { createLogger } from '../../providers/logger';
 import type { EmailProviderSlug, TokenExchangeResult, OAuthResponse } from './types';
-import { EMAIL_PROVIDER_CONFIG, BACKEND_BASE_URL, ALLOWED_REDIRECT_PATTERNS } from './config';
+import {
+  EMAIL_PROVIDER_CONFIG,
+  BACKEND_BASE_URL,
+  ALLOWED_REDIRECT_PATTERNS,
+  webOriginEnvironment,
+} from './config';
+import { PRODUCTION_WEB_ORIGINS, resolveAllowedOrigins } from '../../providers/corsConfig';
 import * as repo from './repo';
 import { readGoogleToken } from '../../providers/googleCredentials';
 
@@ -192,6 +198,18 @@ export const exchangeProviderCode = async (
 // ---------------------------------------------------------------------------
 // OAuth result + redirect
 // ---------------------------------------------------------------------------
+
+/**
+ * Granola's OAuth code goes to whoever controls the redirect origin, so only an
+ * exact Rose web origin qualifies (never a pattern or `*.vercel.app`); local dev
+ * origins only outside production.
+ */
+export function isGranolaRedirectOrigin(origin: string): boolean {
+  const env = webOriginEnvironment();
+  if ((PRODUCTION_WEB_ORIGINS as readonly string[]).includes(origin)) return true;
+  if (resolveAllowedOrigins(env).includes(origin)) return true;
+  return env.NODE_ENV !== 'production' && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
+}
 
 export function isAllowedRedirectUrl(url: string): boolean {
   return ALLOWED_REDIRECT_PATTERNS.some((pattern) => pattern.test(url));

@@ -1,3 +1,4 @@
+import { assertHydrationRecovery } from './browser-session-hydration-recovery.fixture-support';
 import {
   populateLifecycleState,
   assertLifecycleState,
@@ -67,6 +68,7 @@ let checkpointFailure: 'write' | 'readback' | null = null;
 let afterCheckpoint: (() => Promise<void>) | undefined;
 let rejectCreate = false;
 let failHydration = false;
+let failNavigation = false;
 let failRelease = false;
 let onCreate: (() => Promise<void>) | undefined;
 const checkpointPopupRace = createLifecyclePopupRace();
@@ -109,18 +111,27 @@ function worker(taskId: string, origin: string, joined?: () => void) {
   childClosures.push(result.closed);
   return result;
 }
-const transport = (browser: Browser) => lifecycleTransport(browser, () => failHydration);
+const transport = (browser: Browser) =>
+  lifecycleTransport(
+    browser,
+    () => failHydration,
+    () => failNavigation
+  );
 const allocate = () => allocateLifecycleNative(natives, nativeEndpoints);
 async function closeNative(id: string, pause: boolean) {
   assert.equal(pause, false, 'logical pause must release the native resource');
-  if (failRelease) throw new Error('fixture native release outcome unknown');
-  await natives.get(id)?.close();
-  natives.delete(id);
-  released.push(id);
+  await releaseNativeCandidate(id);
   await prisma.browserSession.update({
     where: { sessionId: id },
     data: { status: 'CLOSED', closedAt: new Date() },
   });
+}
+/** Provider-level release of one exact native (no row bookkeeping), as sessionCleanup uses it. */
+async function releaseNativeCandidate(id: string) {
+  if (failRelease) throw new Error('fixture native release outcome unknown');
+  await natives.get(id)?.close();
+  natives.delete(id);
+  released.push(id);
 }
 async function resumeNative(taskId: string) {
   const { browserResumeScope, resumeNativeCreate } = local('../../providers/steel/lifecycleClaim');
@@ -194,6 +205,13 @@ Module._load = function (id, parent, isMain) {
     if (id === '../steel/session')
       return { closeSession: closeNative, resumeSession: resumeNative };
   }
+  if (owner.endsWith('/browser/sessionCleanup.ts')) {
+    if (id === './kernelSessionDelete')
+      return { releaseKernelRemoteSession: releaseNativeCandidate };
+    if (id === '../steel/session') return { releaseSteelRemoteSession: releaseNativeCandidate };
+    if (id === './browserUse') return { releaseBrowserUseRemoteSession: releaseNativeCandidate };
+    if (id === './tilion') return { releaseTilionRemoteSession: releaseNativeCandidate };
+  }
   if (owner.endsWith('/browser/checkpoint.ts') && id === '../steel/sessionConnection')
     return {
       connectValidatedBrowser: (id: string) =>
@@ -237,14 +255,8 @@ Module._load = function (id, parent, isMain) {
     }
     if (req.url?.startsWith('/health?')) {
       res.setHeader('Content-Type', 'application/json');
-      res.end(
-        JSON.stringify({
-          provider,
-          sessionId: new URL(req.url, 'http://localhost').searchParams.get('id'),
-          status: 'live',
-          ttlMs: 1800000,
-        })
-      );
+      const id = new URL(req.url, 'http://localhost').searchParams.get('id')!;
+      res.end(JSON.stringify(lifecycleNativeHealth(provider, id, false, true, 1800000)));
       return;
     }
     res.setHeader('Content-Type', 'text/html');
@@ -475,11 +487,11 @@ Module._load = function (id, parent, isMain) {
           enteredAllocation = resolve;
         });
         const firstWorker = worker(row.id, origin);
-        await within(entered);
+        await firstWorker.ready.then(() => within(entered));
         const countBeforeJoin = creates;
         const secondWorker = worker(row.id, origin, release);
-        const [firstId, secondId] = await within(
-          Promise.all([firstWorker.result, secondWorker.result])
+        const [firstId, secondId] = await secondWorker.ready.then(() =>
+          within(Promise.all([firstWorker.result, secondWorker.result]))
         );
         await Promise.all([firstWorker.closed, secondWorker.closed]);
         assert.equal(firstId, secondId, 'separate processes must join one native restoration');
@@ -548,27 +560,21 @@ Module._load = function (id, parent, isMain) {
           where: { id: row.id },
           data: { checkpointRef: beforeExpiry.checkpointRef },
         });
-        failHydration = true;
-        await assert.rejects(resumeBrowserSession(row.id), /fixture hydration failed/);
-        failHydration = false;
-        const pending = await prisma.toolSideEffect.findUniqueOrThrow({
-          where: { operationKey: `steel-browser-task-lifecycle:${row.id}` },
+        await assertHydrationRecovery({
+          taskId: row.id,
+          origin,
+          creates: () => creates,
+          resume: () => resumeBrowserSession(row.id),
+          pause: (id) => closeSession(id, true),
+          natives,
+          released,
+          setFaults: ({ navigation, storage, release }) => {
+            if (navigation !== undefined) failNavigation = navigation;
+            if (storage !== undefined) failHydration = storage;
+            if (release !== undefined) failRelease = release;
+          },
         });
-        assert.equal(pending.status, 'STARTED');
-        assert.equal(
-          (await prisma.browserSession.findUniqueOrThrow({ where: { id: row.id } })).status,
-          'PAUSED',
-          'partial hydration must never publish ACTIVE'
-        );
-        const request = pending.request as Record<string, unknown>;
-        await prisma.toolSideEffect.update({
-          where: { id: pending.id },
-          data: { request: { ...request, expiresAt: new Date(0).toISOString() } },
-        });
-        const countBeforeUnknown = creates;
-        await assert.rejects(resumeBrowserSession(row.id), /hydration outcome remains unknown/);
-        assert.equal(creates, countBeforeUnknown, 'unknown hydration must not be replaced');
-        console.log(`PASS shared logical pause/resume ${provider}`);
+        process.stdout.write(`PASS shared logical pause/resume ${provider}\n`);
       } finally {
         await stopWorkers();
         const current = await prisma.browserSession.findUnique({ where: { id: row.id } });
@@ -589,6 +595,7 @@ Module._load = function (id, parent, isMain) {
     checkpointFailure = null;
     afterCheckpoint = undefined;
     failHydration = false;
+    failNavigation = false;
     failRelease = false;
     await stopWorkers();
     for (const browser of natives.values()) await browser.close();
@@ -596,6 +603,6 @@ Module._load = function (id, parent, isMain) {
     await prisma.$disconnect();
   }
 })().catch((error) => {
-  console.error(error);
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   process.exitCode = 1;
 });

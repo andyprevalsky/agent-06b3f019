@@ -1,5 +1,6 @@
 /** Live Kernel→Steel|Tilion→Kernel: sign-in survives session close and a later browser-agent call. */
 import { createHash, randomUUID } from 'node:crypto';
+import { withBrowserProviderServer } from './browser-provider.fixture-server.support';
 import { chmod, mkdir, mkdtemp, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { chromium } from 'playwright';
@@ -64,6 +65,10 @@ function middlePreferredConfig(middle: AuthPersistMiddleProvider) {
 export async function runLiveKernelSteelAuthPersist(
   middle: AuthPersistMiddleProvider = 'steel'
 ): Promise<void> {
+  await withBrowserProviderServer('kernel', () => runConfiguredAuthPersist(middle));
+}
+
+async function runConfiguredAuthPersist(middle: AuthPersistMiddleProvider): Promise<void> {
   const base = process.env.TEST_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.BACKEND_API_KEY?.trim();
   const kernelApiKey = process.env.KERNEL_API_KEY?.trim();
@@ -162,8 +167,10 @@ export async function runLiveKernelSteelAuthPersist(
   };
   // Must succeed before any database setup or provider-capable request.
   await saveJournal('before-setup');
+  let initialized = 0;
   const post = async (path: string, body: unknown): Promise<Record<string, unknown>> => {
     if (path === '/api/browser-session/init') {
+      process.env.BROWSER_PROVIDER = initialized++ === 1 ? middle : 'kernel';
       initUnresolved = true;
       await saveJournal('before-init', await snapshot());
     }
@@ -216,7 +223,7 @@ export async function runLiveKernelSteelAuthPersist(
   try {
     await prisma.user.create({ data: { userId, name: 'Auth persist live' } });
     userCreated = true;
-    // Pin the first call to Kernel: the deployment default (Tilion) must not pick it.
+    // The owned route server selects Kernel for the first and last calls.
     const context = await prisma.browserContext.create({
       data: {
         userId,
@@ -339,7 +346,7 @@ export async function runLiveKernelSteelAuthPersist(
       `${switchedProvider} did not restore Kernel localStorage`
     );
     if (middle === 'tilion') {
-      // Tilion is pinned by preference with no fallback ladder: landing elsewhere is a defect.
+      // The owned route server explicitly selects Tilion for this middle call.
       assert(switchedProvider === 'tilion', `preferred Tilion landed on ${switchedProvider}`);
     } else if (switchedProvider !== 'steel') {
       console.warn(

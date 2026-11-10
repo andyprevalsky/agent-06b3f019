@@ -12,6 +12,7 @@ import {
   findAncestorsAcrossRuns,
   findTreeAcrossRuns,
 } from '../../providers/benchmarkHubStore';
+import { agentSpeedFromRow } from '../../providers/rose/speed';
 
 // ---------------------------------------------------------------------------
 // List agents
@@ -39,6 +40,7 @@ function toListItem(agent: ListedAgent) {
     taskProgressEstimates: agent.taskProgressEstimates ?? {},
     status: agent.status,
     status_message: agent.statusMessage,
+    user_control_revision: agent.userControlRevision,
     temporal_workflow_id: agent.temporalWorkflowId,
     token_count: agent.tokenCount,
     tokens_in: agent.tokensIn,
@@ -46,11 +48,14 @@ function toListItem(agent: ListedAgent) {
     context_size: agent.contextSize,
     message_count: agent.messageCount,
     fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+    speed: agentSpeedFromRow(agent),
     world_model_mode: agent.worldModelMode,
     memory_enabled: agent.memoryEnabled,
     project_id: agent.projectId,
+    folder_id: agent.folderId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
+    last_user_message_at: agent.lastUserMessageAt,
   };
 }
 
@@ -130,6 +135,7 @@ export async function getAgentTree(busId: string, allowBenchmarkArchive = false)
       tree_cost_cents: agent.treeCostCents,
       created_at: agent.createdAt,
       updated_at: agent.updatedAt,
+      last_user_message_at: agent.lastUserMessageAt,
     })),
   };
 }
@@ -243,13 +249,19 @@ async function noteWorkerPollConsumption(
   await noteAgentMessagesConsumed(agentId, messages, options.browserToolCallId ?? null);
 }
 
+/** Project summary workers render into the agent's prompts (agents/utils/prompts.py). */
+function projectSummary(
+  project: { name: string; repoUrl: string | null; defaultBranch: string } | null
+) {
+  if (project === null) return null;
+  return { name: project.name, repo_url: project.repoUrl, default_branch: project.defaultBranch };
+}
+
 export async function getAgentDetail(agentId: string, options: AgentDetailOptions = {}) {
   const rawAgent = await repo.findAgentWithRelations(agentId, options.userId);
   const agent = rawAgent === null ? null : (await hydrateProgressEstimates([rawAgent]))[0];
 
-  if (!agent) {
-    return getMissingAgentDetail(agentId, options);
-  }
+  if (!agent) return getMissingAgentDetail(agentId, options);
 
   const [messages, parentGoal, toolUsages, inspectionContext] = await Promise.all([
     repo.findMessages(agentId, options.since, options.browserToolCallId),
@@ -277,6 +289,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       taskProgressEstimates: agent.taskProgressEstimates ?? {},
       status: agent.status,
       status_message: agent.statusMessage,
+      user_control_revision: agent.userControlRevision,
       temporal_workflow_id: agent.temporalWorkflowId,
       token_count: agent.tokenCount,
       tokens_in: agent.tokensIn,
@@ -289,9 +302,12 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       price_limit_cents: agent.priceLimitCents,
       tree_cost_cents: agent.treeCostCents,
       fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+      speed: agentSpeedFromRow(agent),
       world_model_mode: agent.worldModelMode,
       memory_enabled: agent.memoryEnabled,
       project_id: agent.projectId,
+      project: projectSummary(agent.project),
+      folder_id: agent.folderId,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
       created_at: agent.createdAt,
@@ -299,11 +315,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       write_lock_enabled: agent.writeLockEnabled,
       structured_output: agent.structuredResponse,
       failure_context: detailFailureContext(agent),
-      verifier: agent.verifier
-        ? {
-            type: agent.verifier.type,
-          }
-        : null,
+      verifier: agent.verifier ? { type: agent.verifier.type } : null,
       tools: agent.tools.map((at) => ({
         id: at.tool.id,
         name: at.tool.name,

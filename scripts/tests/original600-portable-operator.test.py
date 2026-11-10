@@ -30,6 +30,9 @@ import unittest
 import types
 from unittest.mock import patch
 
+# CI's uv Python can lack pidfd; use the existing supported interpreter route.
+runpy.run_path(str(Path(__file__).with_name('pidfd_interpreter.py')))['require_pidfd_interpreter'](__file__)
+
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('operator_cli', Path(os.environ.get('PORTABLE_OPERATOR_SOURCE', ROOT/'scripts/run-original600-controller.py')))
 CLI = importlib.util.module_from_spec(SPEC)
@@ -61,7 +64,7 @@ MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
 CANONICAL_SEED_MEMBERS = ('back-end/prisma/schema.prisma', 'agents/benchmarks/seed_cache_path.py')
 # Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
 TIMEOUT_POLICY_MODULES = ('__init__', 'benchmark_tasks', 'fixtures', 'live_fixtures',
-                          'polar_catalog', 'timeout_history')
+                          'polar_catalog', 'timeout_history', 'history_ledger')
 
 
 def polar_names(count=70):
@@ -204,6 +207,29 @@ class Portable(unittest.TestCase):
                 if observer:observer(method,path,200,json.dumps(response).encode())
                 return response
         return API(),record
+
+    def test_default_e2e_keeps_a_full_window_grade_after_barrier_release(self):
+        # 2026-10-20 Polar batch 1 receipts (shard-01, fleet run 20261020-043621-26573):
+        # caller.json epoch, global-release released_at, and r003-j0054's benchmark rc after it
+        # used its whole 7200 s window. The bound e2e (epoch + 9300) TERMed the controller at
+        # 06:56:31 before it collected that grade, turning a genuine FAIL into INFRA_ERROR.
+        epoch, released, graded = 1792470090.9202385, 1792471441.4939306, 1792479345.0  # 06:55:45Z
+        evidence_release = 480  # Eval Suite target: evidence and full native release after the last execution
+        task, e2e = CLI.bound_timeouts(argparse.Namespace(task_timeout=7200), RUNNER)
+        self.assertEqual(task, 7200)
+        self.assertGreaterEqual(epoch + e2e, graded + evidence_release,
+                                'default e2e must keep a full-window copy graded, exported and released')
+        # The same budget holds for every accepted window: startup to barrier release (measured
+        # 1350.6 s) plus the window, the copy's post-window tail (measured 704 s) and release.
+        for window in (60, 480, 1200, 3300, 5400, 7200):
+            with self.subTest(window=window):
+                bound = CLI.bound_timeouts(argparse.Namespace(task_timeout=window), RUNNER)[1]
+                self.assertGreaterEqual(bound, (released - epoch) + window + (graded - released - 7200) + evidence_release)
+                self.assertGreaterEqual(bound, RUNNER['RUN_DEADLINE'])
+                # The host gate watchdog outlives the shard's TERM fence plus its cleanup.
+                self.assertGreater(RUNNER['gate_watchdog_seconds'](bound), bound)
+                with self.assertRaisesRegex(ValueError, 'e2e-timeout must cover'):
+                    RUNNER['campaign_timeouts'](window, window + RUNNER['POST_TASK_ALLOWANCE'])
 
     def test_fragment_request_retains_transport_margin(self):
         # The old receiver's unused CLI trailer made this request 6,202 bytes.
@@ -969,6 +995,7 @@ class Portable(unittest.TestCase):
             script = root / 'scripts/cloudbench-original600-supervisor.py'
             script.write_text("import json,os,sys\nfrom pathlib import Path\np=Path(os.environ['REVIEWED_OPERATOR_IDENTITY_PATH'])\n(p.parent/'handoff.json').write_text(json.dumps(dict(policy=os.environ['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP'],identity=json.loads(p.read_bytes()),argv=sys.argv[1:])))\n")
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            disable_auto_maintenance(root)
             subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'supervisor handoff fixture'], check=True)
             ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
@@ -1665,6 +1692,34 @@ class Portable(unittest.TestCase):
             self.assertEqual((terminal['status'],terminal['supervisor_state'],terminal['benchmark_success_inferred']),('FAILED_BEFORE_SUPERVISOR_RELEASED','NOT_PUBLISHED',False))
             self.assertEqual(terminal['release']['machine_id'],mid)
 
+    def test_new_attempt_refused_after_its_own_term_fence_before_any_output(self):
+        # PR #1599 review: the new-attempt clock accepted any attempt before epoch+MAX_RUN_DEADLINE
+        # (10020 s) although its TERM fence is epoch+RUN_DEADLINE (unsharded) or epoch plus the
+        # shard's bound e2e. Such an attempt allocated a controller only to TERM it at its first PROBE.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700)
+            tasks=json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text());tasks_path=private(base/'tasks.json',tasks)
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            names=[tasks[3],tasks[10],tasks[199]]
+            shard=dict(index=0,count=20,tasks=names,tasks_sha256=hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest(),task_indexes=[3,10,199],runs=3,
+                       group_run_id='campaign-group-fixture',group_total=600,task_timeout=3300,e2e_timeout=6120)
+            limits=dict(CLOUDBENCH_APP_MACHINE_CEILING='100',CLOUDBENCH_SHARED_CPU_GOVERNOR='10')
+            for label,bound,fence in (('unsharded',None,RUNNER['RUN_DEADLINE']),('sharded',shard,6120)):
+                self.assertLess(fence,RUNNER['MAX_RUN_DEADLINE'])
+                for late in (False,True):
+                    with self.subTest(label=label,late=late):
+                        epoch=time.time()-fence+(-60 if late else 600)
+                        value=dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(base),source_ref='a'*40,source_files={},
+                                   tasks_path=str(tasks_path),started_at_epoch=epoch,authority_template=str(template),remote_env=dict(limits),remote_files=[])
+                        if bound is not None:value['shard']=dict(bound,group_started_at=epoch)
+                        config=private(base/('config-%s-%s.json'%(label,late)),value);out=base/('run-%s-%s'%(label,late))
+                        with patch.dict(RUNNER['run'].__globals__,validate_source_members=lambda *unused:None,shard_placement_env=lambda *unused:(_ for _ in ()).throw(RuntimeError('admitted'))),\
+                             patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'):
+                            with self.assertRaisesRegex(ValueError if late else RuntimeError,'new attempt clock expired' if late else 'admitted'):
+                                RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+                        # A late attempt refuses before any output, authority or gate exists.
+                        self.assertEqual(out.exists(),not late)
+
     def _stopped_controller_run(self,native,recover=True):
         # descend-full69 shard-00: the gate joined with GATE_EXPORT_PENDING after a devbox
         # suspension lost the export download, then the controller stopped (restart 'no').
@@ -1980,6 +2035,7 @@ class Portable(unittest.TestCase):
                 (root/member).parent.mkdir(parents=True, exist_ok=True)
                 (root/member).write_bytes((ROOT/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            disable_auto_maintenance(root)
             # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
             common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
             (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
@@ -2018,6 +2074,42 @@ class Portable(unittest.TestCase):
             if limits is not None:
                 env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
             yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
+
+    def test_public_check_samples_one_catalog_for_all_shard_placements(self):
+        requests = []
+        with self.public_check(warm_fixture(time.time()), requests, limits=wide_provider_limits()) as fx:
+            # One validated catalog snapshot must serve every shard, including
+            # on fast hosts where duplicate reads happen to fit the deadline.
+            real_git = next(str(Path(directory)/'git') for directory in os.get_exec_path()
+                            if os.access(Path(directory)/'git', os.X_OK))
+            reads = fx.inputs/'catalog-reads'
+            wrapper = fx.fakebin/'git'
+            wrapper.write_text('#!/bin/sh\ncase "$*" in\n'
+                               '  *:agents/benchmarks/tasks.json|*:agents/benchmarks/polar_tasks.json)\n'
+                               '    printf "%s\\n" "$*" >> "$O600_CATALOG_READS"\n'
+                               '    ;;\nesac\nexec ' + shlex.quote(real_git) + ' "$@"\n')
+            wrapper.chmod(0o700)
+            env = dict(fx.env, O600_CATALOG_READS=str(reads))
+            result = subprocess.run(fx.args + ['--infra-early-stop', 'disabled'], cwd='/', env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertEqual((value['status'], value['copies'], value['controllers']),
+                             ('CHECKED_NOT_LAUNCHED', 600, 20))
+            self.assertEqual([line.rsplit('/', 1)[-1] for line in reads.read_text().splitlines()],
+                             ['tasks.json', 'polar_tasks.json'])
+            tasks = json.loads((fx.inputs/'tasks').read_text())
+            plan = runpy.run_path(str(ROOT/'scripts/cloudbench-shard-coordinator.py'))['plan_shards'](
+                tasks, 3, 'auto', None)
+            expected = []
+            for item in plan['shards']:
+                simulate = RUNNER['shard_simulate_tasks'](fx.root, item)
+                expected.append(dict(index=item['index'], simulate_tasks=simulate,
+                                     **({} if simulate else RUNNER['FRESH_ONLY_PLACEMENT'])))
+            self.assertEqual(value['shard_placement'], expected)
+            self.assertEqual([r[0] for r in requests], ['GET', 'GET'])
+            self.assertFalse(fx.marker.exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
 
     def test_public_check_is_path_independent_read_only_and_creates_no_state(self):
         now = time.time()
@@ -2118,7 +2210,8 @@ class Portable(unittest.TestCase):
                                                ('rootless', names[:3] + rootless, [], 'cloud-root'),
                                                ('rootless-ordinary', names[:3] + rootless, ['--catalog-eligibility', 'ordinary'], 'cloud-root'),
                                                ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
-                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
+                                               ('timeout-over-2h', names, ['--task-timeout', '7201'], 'ask the user to choose a lower execution timeout'),
+                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '1680'], 'e2e-timeout must cover'),
                                                ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
                 with self.subTest(label=label):
                     path = fx.inputs/('bad-'+label)
@@ -2617,6 +2710,43 @@ class Sharded(unittest.TestCase):
             for key in set(legacy) - {'started_at_epoch', 'authority_template', 'remote_env', 'shard'}:
                 self.assertEqual(value[key], legacy[key], key)
 
+    def test_sharded_admission_and_retry_prepare_honour_the_bound_startup_window(self):
+        # PR #1599 review: an explicit --e2e-timeout 7000 at --task-timeout 1200 binds a 5800 s
+        # startup window, but the sharded capacity/spawn/retry guards and prepare() still refused
+        # every deadline beyond the fixed 5400 s original600 bound, so admission aborted at once.
+        self.assertEqual(RUNNER['startup_deadline_epoch'](0, 1200, 7000), 5800)
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4, task_timeout=1200, e2e_timeout=7000)
+            plan = CLI.shard_selection(args, RUNNER)
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)
+            def snapshot(*unused, **kwargs):
+                raise RuntimeError('capacity read admitted')
+            with patch.object(CLI, 'capacity_snapshot', snapshot), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, 'capacity read admitted'):
+                CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
+            # A retry is bounded by the shard's own e2e, as the runner's new-attempt clock is; the
+            # unsharded original600 admission keeps its fixed 5400 s bound.
+            tasks = json.loads(args.tasks.read_text())[0::20]
+            shard = dict(index=0, count=20, tasks=tasks, task_indexes=list(range(0, 200, 20)), runs=3, group_run_id='g', group_total=600,
+                         group_started_at=1.0, tasks_sha256=CLI.digest(('\n'.join(tasks)+'\n').encode()), e2e_timeout=7000)
+            env = dict(CLOUDBENCH_APP_MACHINE_CEILING='962', CLOUDBENCH_SHARED_CPU_GOVERNOR='2428')
+            for label, age, bound, refused in (('shard', 5500, shard, False), ('shard', 7001, shard, True), ('legacy', 5401, None, True)):
+                with self.subTest(label=label, age=age):
+                    target = directory/('%s-%d' % (label, age)); target.mkdir(mode=0o700)
+                    prepare = lambda: CLI.prepare(args if bound else self.args(directory), ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, target,
+                                                  self.capacity(directory), started_at=time.time() - age, shard=bound,
+                                                  runtime_env=env if bound else None, scheduled_total=600)
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, 'original campaign clock expired during admission'):
+                            prepare()
+                    else:
+                        self.assertEqual(json.loads(prepare().read_bytes())['shard'], shard)
+
     def test_arbitrary_manifest_binds_its_hash_and_timeouts_into_every_shard_config(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -2790,7 +2920,7 @@ class Sharded(unittest.TestCase):
                     launched.append(self)
 
                 def status(self, barrier):
-                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier), infra=dict(infra_true=0))))
+                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier, ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
 
                 def poll(self):
                     self.polls += 1
@@ -2978,7 +3108,7 @@ class Sharded(unittest.TestCase):
                             info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
                         self.code = 0
                     elif self.polls == 1:
-                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready'), infra=dict(infra_true=0))))
+                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready', ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
                     return self.code
 
                 def wait(self):
@@ -3195,6 +3325,20 @@ class InputDiscovery(unittest.TestCase):
             CLI.warm_snapshot_preflight(DiscoveryFly(fresh, []), 'FlyV1 fixture', RUNNER, paths['warm_deps'].read_bytes(),
                                         paths['snapshot_inventory'].read_bytes(), facts['protected_machines'], now + 5400)
 
+    def test_discovery_proves_snapshot_retention_through_the_bound_e2e_deadline(self):
+        # PR #1599 review: a bound e2e (default 10020 s at --task-timeout 7200) moves the TERM
+        # fence past 5400 s; a snapshot expiring inside that window must be refreshed, not reused.
+        now = time.time()
+        fixture = warm_fixture(now, created_age=5*86400 - 8000)  # expires 8000 s from now
+        for task_timeout, action in ((1200, 'reuse'), (7200, 'refresh')):
+            with self.subTest(task_timeout=task_timeout), self.common(fixture['warm_deps'], RUN_REF + ' ' + FIXTURE_SNAPSHOT + '\n') as fx:
+                fx.args.task_timeout = task_timeout
+                report, paths = CLI.discover_inputs(fx.args, ROOT, RUNNER, 'FlyV1 fixture', False,
+                                                    fly=DiscoveryFly(fixture, bench_inventory(fixture)))
+                self.assertEqual((report['action'], paths), (action, None))
+                if action == 'refresh':
+                    self.assertTrue(any('before the run deadline' in r for r in report['reasons']), report['reasons'])
+
     def test_discovery_run_refuses_when_the_producer_does_not_prove_this_ref(self):
         now = time.time()
         fixture = warm_fixture(now)
@@ -3357,11 +3501,120 @@ class WideRunCatalogModes(unittest.TestCase):
         self.assertEqual(RUNNER['shard_placement_env'](ROOT, None), RUNNER['FRESH_ONLY_PLACEMENT'])
 
 
+HOST_GIT_SETTINGS = ('gc.auto', 'gc.autodetach', 'maintenance.auto', 'maintenance.strategy', 'core.fsmonitor',
+                     'core.hookspath', 'init.templatedir', 'feature.manyfiles', 'core.untrackedcache')
+
+
+def disable_auto_maintenance(root, env=None):
+    """Keep every Git write in a fixture repository inside the command that made it.
+
+    Auto-maintenance is Git's built-in default, not host configuration: from Git 2.47 a commit starts it detached
+    (setsid), and its geometric repack (about 2+ loose objects in .git/objects/17) outlives the waited command and
+    recreates .git/objects/info/packs while fixture cleanup removes the directory."""
+    for key, value in (('maintenance.auto', 'false'), ('gc.auto', '0')):
+        subprocess.run(['git', '-C', str(root), 'config', key, value], check=True, env=env)
+
+
+def hermetic_git_env():
+    """Host-independent Git whose automatic maintenance stays with its fixture owner."""
+    env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+                'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'):
+        env.pop(key, None)
+    count = int(env.get('GIT_CONFIG_COUNT', '0'))
+    for key in ('gc.autoDetach', 'maintenance.autoDetach'):
+        env[f'GIT_CONFIG_KEY_{count}'] = key
+        env[f'GIT_CONFIG_VALUE_{count}'] = 'false'
+        count += 1
+    env['GIT_CONFIG_COUNT'] = str(count)
+    return env
+
+
+def processes_naming(directory):
+    """Live processes whose cwd, open files or argv name `directory`: pid, ppid, state, argv (read-only /proc scan)."""
+    found = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry/'cmdline').read_bytes().decode('utf-8', 'replace').replace('\0', ' ').strip()
+            stat = (entry/'stat').read_text()
+        except OSError:
+            continue
+        links = []
+        try:
+            candidates = [entry/'cwd', *(entry/'fd').iterdir()]
+        except OSError:  # another user's process, or one that exited mid-scan: its cwd link is still tried
+            candidates = [entry/'cwd']
+        for link in candidates:
+            try:
+                links.append(os.readlink(link))
+            except OSError:
+                pass
+        if str(directory) in argv or any(str(directory) in link for link in links):
+            state, ppid = stat[stat.rindex(')') + 2:].split()[:2]
+            found.append(f'pid {entry.name} ppid {ppid} state {state} argv {argv[:200]!r}')
+    return found
+
+
+def cleanup_failure_report(directory, error):
+    """What a failed fixture removal leaves behind: the entries that blocked it, their writers, and the host's Git setup."""
+    now = time.time()
+    lines = [f'fixture cleanup of {directory} failed: {error!r}', 'remaining entries (age of mtime/ctime in seconds):']
+    seen = 0
+    for folder, names, files in os.walk(directory, onerror=lambda failure: lines.append(f'  walk error: {failure!r}')):
+        for name in sorted([*names, *files]):
+            seen += 1
+            if seen > 200:
+                break
+            path = os.path.join(folder, name)
+            try:
+                info = os.lstat(path)
+                lines.append(f'  {path} mode {info.st_mode:o} size {info.st_size} '
+                             f'mtime {now - info.st_mtime:.3f} ctime {now - info.st_ctime:.3f}')
+            except OSError as failure:
+                lines.append(f'  {path} vanished: {failure!r}')
+    lines.append('live processes naming the fixture: ' + ('; '.join(processes_naming(directory)) or 'none'))
+    # Keys and values can embed credentials (url.<token>@host.insteadOf): report origins, top-level sections and a fixed allowlist of settings only.
+    try:
+        listing = subprocess.run(['git', 'config', '--list', '--show-origin', '--name-only'], capture_output=True, text=True, timeout=10).stdout
+        sections = {}
+        for line in listing.splitlines():
+            origin, _, key = line.partition('\t')
+            sections.setdefault(origin, set()).add(key.split('.', 1)[0])
+        lines.append('host git: ' + subprocess.run(['git', '--version'], capture_output=True, text=True, timeout=10).stdout.strip())
+        lines.extend(f'  config {origin}: {", ".join(sorted(keys))}' for origin, keys in sorted(sections.items()))
+        for key in HOST_GIT_SETTINGS:
+            value = subprocess.run(['git', 'config', '--get-all', key], capture_output=True, text=True, timeout=10).stdout.split()
+            if value:
+                lines.append(f'  {key} = {" ".join(value)}')
+    except (OSError, subprocess.SubprocessError) as failure:
+        lines.append(f'host git configuration unavailable: {failure!r}')
+    return '\n'.join(lines)
+
+
+@contextmanager
+def fixture_directory():
+    """tempfile.TemporaryDirectory whose failed removal names the writer instead of only 'Directory not empty'."""
+    directory = tempfile.TemporaryDirectory()
+    try:
+        yield directory.name
+    finally:
+        try:
+            directory.cleanup()
+        except OSError as error:
+            try:
+                error.add_note(cleanup_failure_report(directory.name, error))
+            except Exception as failure:  # the evidence is best effort; the original removal error must still surface
+                error.add_note(f'cleanup failure report unavailable: {failure!r}')
+            raise
+
+
 class RunBenchShardedRouting(unittest.TestCase):
     """scripts/run-bench routes wide cloud runs to the sharded operator with the pushed HEAD."""
     @contextmanager
     def checkout(self):
-        with tempfile.TemporaryDirectory() as name:
+        with fixture_directory() as name:
             root = Path(name)/'repo'
             (root/'agents/benchmarks').mkdir(parents=True)
             (root/'.claude/shared').mkdir(parents=True)
@@ -3377,17 +3630,20 @@ class RunBenchShardedRouting(unittest.TestCase):
                            '.claude/shared/benchmark-report-format.txt'):
                 (root/member).write_bytes((ROOT/member).read_bytes())
             git = ['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
+            # The fixture repository is built and queried through the same host-independent Git view that run-bench sees.
+            git_env = hermetic_git_env()
             (root/'back-end').mkdir()
             for env_file in ('agents/.env', 'back-end/.env'):  # untracked, as in a real checkout
                 # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 20-browser pilot cap.
                 private(root/env_file, 'FIXTURE=1\nBROWSER_PROVIDER=kernel\n')
             (root/'.gitignore').write_text('.env\n.context/\n__pycache__/\n')
-            subprocess.run(git[:3] + ['init', '-q'], check=True)
-            subprocess.run(git + ['add', '-A'], check=True)
-            subprocess.run(git + ['commit', '-qm', 'fixture'], check=True)
-            head = subprocess.check_output(git + ['rev-parse', 'HEAD'], text=True).strip()
+            subprocess.run(git[:3] + ['init', '-q'], check=True, env=git_env)
+            disable_auto_maintenance(root, git_env)
+            subprocess.run(git + ['add', '-A'], check=True, env=git_env)
+            subprocess.run(git + ['commit', '-qm', 'fixture'], check=True, env=git_env)
+            head = subprocess.check_output(git + ['rev-parse', 'HEAD'], text=True, env=git_env).strip()
             # Pushed: reachable from origin/main, the CLI's offline fetchable fast path.
-            subprocess.run(git + ['update-ref', 'refs/remotes/origin/main', head], check=True)
+            subprocess.run(git + ['update-ref', 'refs/remotes/origin/main', head], check=True, env=git_env)
             calls, fleet = Path(name)/'operator-calls.jsonl', Path(name)/'fleet-calls.jsonl'
             operator = Path(name)/'fake-operator'
             operator.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
@@ -3399,9 +3655,8 @@ class RunBenchShardedRouting(unittest.TestCase):
             operator.chmod(0o700)
             fake_fleet = Path(name)/'fake-fleet'
             fake_fleet.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$FLEET_CALLS"\n')
-            env = dict(os.environ, RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST=str(operator), OPERATOR_CALLS=str(calls),
-                       RUN_BENCH_FLEET_BIN_UNDER_TEST=str(fake_fleet), FLEET_CALLS=str(fleet),
-                       GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+            env = dict(git_env, RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST=str(operator), OPERATOR_CALLS=str(calls),
+                       RUN_BENCH_FLEET_BIN_UNDER_TEST=str(fake_fleet), FLEET_CALLS=str(fleet))
             for key in ('RUN_BENCH_SHARDED_ROUTE', 'RUN_BENCH_SHARDED_STATE_DIR', 'RUN_BENCH_GOAL', 'RUN_BENCH_CATALOG_UNDER_TEST',
                         'RUN_BENCH_CATALOG_ELIGIBILITY'):
                 env.pop(key, None)
@@ -3413,7 +3668,7 @@ class RunBenchShardedRouting(unittest.TestCase):
                 for path in (calls, fleet):
                     path.unlink(missing_ok=True)
                 return result, ops, fleets
-            yield types.SimpleNamespace(root=root, head=head, run=run, git=git, env=env,
+            yield types.SimpleNamespace(root=root, head=head, run=run, git=git, git_env=git_env, env=env,
                                         manifest=Path(str(calls) + '.manifest'))
 
     def option(self, argv, flag):
@@ -3542,10 +3797,320 @@ class RunBenchShardedRouting(unittest.TestCase):
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))
             self.assertIn('tracked changes refused', result.stderr)
-            subprocess.run(fx.git + ['commit', '-qam', 'unpushed'], check=True)
+            subprocess.run(fx.git + ['commit', '-qam', 'unpushed'], check=True, env=fx.git_env)
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))
             self.assertIn('is not pushed to origin', result.stderr)
+
+    def test_fixture_git_lifetime_guard_preserves_inherited_config_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            foreign, repo = root/'foreign', root/'repo'
+            foreign.mkdir(); repo.mkdir()
+            (foreign/'keep').write_text('unchanged')
+            with patch.dict(os.environ, GIT_CONFIG_COUNT='2',
+                            GIT_CONFIG_KEY_0='fixture.inherited', GIT_CONFIG_VALUE_0='kept',
+                            GIT_CONFIG_KEY_1='gc.auto', GIT_CONFIG_VALUE_1='123',
+                            GIT_DIR=str(foreign/'git'), GIT_WORK_TREE=str(foreign),
+                            GIT_COMMON_DIR=str(foreign/'git'), GIT_INDEX_FILE=str(foreign/'index'),
+                            GIT_OBJECT_DIRECTORY=str(foreign/'objects'),
+                            GIT_ALTERNATE_OBJECT_DIRECTORIES=str(foreign/'alternates')):
+                env = hermetic_git_env()
+            subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True, env=env)
+            for key, expected in (('fixture.inherited', 'kept'), ('gc.auto', '123'),
+                                  ('gc.autoDetach', 'false'), ('maintenance.autoDetach', 'false')):
+                observed = subprocess.check_output(['git', '-C', str(repo), 'config', '--get', key],
+                                                   env=env, text=True).strip()
+                self.assertEqual(observed, expected)
+            self.assertEqual([p.name for p in foreign.iterdir()], ['keep'])
+            self.assertEqual((foreign/'keep').read_text(), 'unchanged')
+
+    def test_git_auto_maintenance_stays_owned_until_its_native_work_finishes(self):
+        # Force real native maintenance, hold it at a hook barrier, inspect its
+        # ancestry, then release and join exact owners even if a check fails.
+        import select
+        if not sys.platform.startswith('linux'):
+            self.skipTest('native Git ownership join uses Linux pidfds')
+        supported = subprocess.check_output(['git', 'help', '--config'], text=True)
+        self.assertIn('gc.recentObjectsHook', supported.splitlines())
+
+        def probe(control, detached_control, fault=None):
+            repo = control/'repo'; repo.mkdir()
+            ready, release = control/'ready', control/'release'
+            os.mkfifo(ready); os.mkfifo(release)
+            ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
+            release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+            record, released = control/'native-pid', control/'released'
+            hook = control/'hold-native-gc.py'
+            hook.write_text('import os, select, signal, sys\nfrom pathlib import Path\n'
+                            'signal.alarm(30)\n'
+                            'try: Path(sys.argv[1]).touch(exist_ok=False)\n'
+                            'except FileExistsError: raise SystemExit(0)\n'
+                            'Path(sys.argv[4]).write_text(str(os.getpid()))\n'
+                            'fd=os.open(sys.argv[2], os.O_RDWR); os.write(fd,b"R"); os.close(fd)\n'
+                            'fd=os.open(sys.argv[3], os.O_RDWR | os.O_NONBLOCK)\n'
+                            'while not Path(sys.argv[5]).exists():\n'
+                            ' if select.select([fd],[],[],0.05)[0]: os.read(fd,1); break\n'
+                            'os.close(fd)\n')
+            env = hermetic_git_env()
+            count = int(env.get('GIT_CONFIG_COUNT', '0'))
+            settings = [('gc.auto', '1'), ('gc.recentObjectsHook',
+                         'exec ' + shlex.join([sys.executable, str(hook), str(control/'hook-started'),
+                                              str(ready), str(release), str(record), str(released)]))]
+            if detached_control:
+                settings += [('gc.autoDetach', 'true'), ('maintenance.autoDetach', 'true')]
+            for key, value in settings:
+                env[f'GIT_CONFIG_KEY_{count}'] = key
+                env[f'GIT_CONFIG_VALUE_{count}'] = value
+                count += 1
+            env['GIT_CONFIG_COUNT'] = str(count)
+            git = ['git', '-C', str(repo), '-c', 'user.name=fixture',
+                   '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
+            owner, handles, verified, adopted = None, {}, False, False
+
+            def adopt_native():
+                # The hook writes its own PID before publishing readiness. Its
+                # held ancestry identifies prune, GC and any detached maintenance
+                # parent. No broad process scan or signalling is used.
+                pid = int(record.read_text())
+                if os.readlink(f'/proc/{pid}/cwd') != str(repo):
+                    raise ValueError('foreign native hook cwd')
+                chain = set()
+                while pid > 1 and pid not in chain:
+                    chain.add(pid)
+                    if os.readlink(f'/proc/{pid}/cwd') != str(repo):
+                        break
+                    if pid not in handles:
+                        handles[pid] = os.pidfd_open(pid)
+                    if pid == owner.pid:
+                        break
+                    stat = Path(f'/proc/{pid}/stat').read_text()
+                    pid = int(stat[stat.rindex(')') + 2:].split()[1])
+                return owner.pid in chain
+
+            try:
+                subprocess.run(git + ['init', '-q', '--object-format=sha1'], check=True, env=env, capture_output=True)
+                found, candidate = 0, 0
+                while found < 4:
+                    data = f'owned-native-gc-{candidate}'.encode(); candidate += 1
+                    if hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest().startswith('17'):
+                        oid = subprocess.check_output(git + ['hash-object', '-w', '--stdin'], input=data,
+                                                      env=env).decode().strip()
+                        os.utime(repo/'.git/objects'/oid[:2]/oid[2:], (1, 1))
+                        found += 1
+                (repo/'tracked').write_text('committed fixture\n')
+                subprocess.run(git + ['add', 'tracked'], check=True, env=env, capture_output=True)
+                with (control/'git-output').open('wb') as output:
+                    owner = subprocess.Popen(git + ['commit', '-qm', 'fixture'], cwd=repo, env=env,
+                                             stdout=output, stderr=output)
+                    try:
+                        handles[owner.pid] = os.pidfd_open(owner.pid)
+                    except ProcessLookupError:
+                        pass  # already terminal; Popen.wait still reaps the exact child
+                    ready_now = select.select([ready_fd], [], [], 10)[0]
+                    if fault == 'ready':
+                        raise RuntimeError('injected ready timeout')
+                    self.assertTrue(ready_now, 'native GC hook never reached barrier')
+                    self.assertEqual(os.read(ready_fd, 1), b'R')
+                    if fault == 'foreign_hook':
+                        actual = record.read_text()
+                        try:
+                            record.write_text(str(os.getpid()))
+                            adopt_native()
+                        finally:
+                            record.write_text(actual)
+                        self.fail('foreign native hook was accepted')
+                    owned = adopt_native()
+                    adopted = True
+                    if not owned:
+                        self.assertEqual(owner.wait(timeout=10), 0)
+                    else:
+                        self.assertIsNone(owner.poll())
+                    return owned
+            finally:
+                try:
+                    if owner is not None:
+                        # Capture native handles before releasing the barrier when
+                        # possible. Unknown ownership still drains known owners,
+                        # fails, and retains files; it never permits rmtree.
+                        errors, forced_stop = [], False
+                        if not adopted:
+                            if not record.exists():
+                                select.select([ready_fd], [], [], 10)
+                            if record.exists():
+                                try:
+                                    adopt_native()
+                                    adopted = True
+                                except (OSError, ValueError) as error:
+                                    errors.append(error)
+                            else:
+                                errors.append(RuntimeError('native ownership unknown'))
+                        released.touch()  # also releases a hook that starts after this error path
+                        os.write(release_fd, b'G')
+                        try:
+                            if fault == 'owner_wait':
+                                raise subprocess.TimeoutExpired('injected owner wait failure', 10)
+                            owner.wait(timeout=10)
+                        except Exception as error:
+                            errors.append(error)
+                        # A raced exit or one failed signal must not skip the
+                        # remaining exact handles. ESRCH still needs terminal proof.
+                        raced = False
+                        for pid, fd in handles.items():
+                            try:
+                                terminal = bool(select.select([fd], [], [], 10)[0])
+                                inject_race = fault == 'signal_race' and not raced
+                                if not terminal or inject_race:
+                                    try:
+                                        if inject_race:
+                                            self.assertTrue(terminal)
+                                            raced = True
+                                            raise ProcessLookupError(errno.ESRCH, 'injected raced exit')
+                                        signal.pidfd_send_signal(fd, signal.SIGTERM)
+                                        forced_stop = True
+                                    except ProcessLookupError:
+                                        pass
+                                    except Exception as error:
+                                        errors.append(error)
+                                    if not select.select([fd], [], [], 5)[0]:
+                                        try:
+                                            signal.pidfd_send_signal(fd, signal.SIGKILL)
+                                            forced_stop = True
+                                        except ProcessLookupError:
+                                            pass
+                                        except Exception as error:
+                                            errors.append(error)
+                                        if not select.select([fd], [], [], 5)[0]:
+                                            errors.append(RuntimeError(f'exact native owner {pid} did not exit'))
+                            except Exception as error:
+                                errors.append(error)
+                        if fault == 'signal_race' and not raced:
+                            errors.append(RuntimeError('signal race control did not execute'))
+                        if forced_stop:
+                            errors.append(RuntimeError('native owner required termination'))
+                        try:
+                            if owner.wait(timeout=10) != 0:
+                                errors.append(RuntimeError('native Git command failed'))
+                        except Exception as error:
+                            errors.append(error)
+                        verified = adopted and not forced_stop and all(
+                            select.select([fd], [], [], 0)[0] for fd in handles.values())
+                        if errors:
+                            raise RuntimeError('native drain failed: ' + str(errors[0])) from errors[0]
+                finally:
+                    if verified:
+                        drained[control] = {pid: bool(select.select([fd], [], [], 0)[0])
+                                            for pid, fd in handles.items()}
+                    else:
+                        released.touch()
+                        os.write(release_fd, b'G')
+                    for fd in handles.values():
+                        os.close(fd)
+                    os.close(ready_fd); os.close(release_fd)
+                    if owner is not None and not verified:
+                        unsafe.add(control)
+
+        # Never remove a control whose ownership could not be drained. Such an
+        # error still fails the test and names retained evidence; no rmtree error
+        # is caught, ignored, retried, or converted to success.
+        root = Path(tempfile.mkdtemp())
+        unsafe, drained = set(), {}
+        try:
+            for label, detached in (('detached', True), ('helper', False)):
+                control = root/label; control.mkdir()
+                self.assertEqual(probe(control, detached), not detached,
+                                 'fixture helper let native auto-maintenance outlive its commit')
+            race = root/'signal_race'; race.mkdir()
+            self.assertTrue(probe(race, False, 'signal_race'))
+            self.assertTrue(all(drained[race].values()))
+            foreign = root/'foreign_hook'; foreign.mkdir()
+            with self.assertRaisesRegex(ValueError, 'foreign native hook cwd'):
+                probe(foreign, True, 'foreign_hook')
+            self.assertTrue(all(drained[foreign].values()))
+            for fault in ('ready', 'owner_wait'):
+                control = root/fault; control.mkdir()
+                with self.assertRaisesRegex(RuntimeError, 'injected'):
+                    probe(control, True, fault)
+                self.assertTrue(drained[control])
+                self.assertTrue(all(drained[control].values()))  # all exact pidfds reached terminal readiness
+        finally:
+            if not unsafe:
+                shutil.rmtree(root)
+
+    def test_fixture_repository_is_built_independently_of_the_hosts_git_configuration(self):
+        # A host system/global configuration (hooks, filters, auto-maintenance, LFS) must not act inside the fixture
+        # repository: it varies by machine and can start work in .git that outlives the commands that triggered it.
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder/'hooks').mkdir()
+            marker = folder/'host-hook-ran'
+            hook = folder/'hooks/post-commit'
+            hook.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\n')
+            hook.chmod(0o755)
+            (folder/'gitconfig').write_text(f'[core]\n\thooksPath = {folder/"hooks"}\n')
+            events = folder/'trace2.jsonl'
+            with patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(folder/'gitconfig'), GIT_TRACE2_EVENT=str(events)):
+                with self.checkout() as fx:
+                    configured = subprocess.run(fx.git + ['config', '--get', 'core.hookspath'], capture_output=True, env=fx.git_env)
+                    self.assertEqual(configured.returncode, 1, configured.stdout)
+                    fx.root.joinpath('later.txt').write_text('later\n')
+                    subprocess.run(fx.git + ['add', 'later.txt'], check=True, env=fx.git_env)
+                    subprocess.run(fx.git + ['commit', '-qm', 'later'], check=True, env=fx.git_env)
+            self.assertFalse(marker.exists(), 'a host Git hook ran inside the fixture repository')
+            # Git's own auto-maintenance (detached since Git 2.47) is the writer that outlived the fixture's commands
+            # and recreated .git/objects/info/packs during cleanup; no fixture commit may start it on any Git version.
+            started = [json.loads(line) for line in events.read_text().splitlines()]
+            self.assertTrue(any(event.get('event') == 'cmd_name' and event.get('name') == 'commit' for event in started))
+            children = [event['argv'] for event in started if event.get('event') == 'child_start']
+            self.assertEqual([argv for argv in children if {'maintenance', 'gc'} & set(argv)], [])
+
+    def test_a_failed_fixture_removal_names_the_blocking_entry_and_its_writer(self):
+        # The reported failure was only "OSError: [Errno 39] Directory not empty: '.git'" from fixture cleanup, with
+        # nothing naming the entry or the process that created it. Removal still fails closed, with that evidence attached.
+        secret = 'SECRET-TOKEN-VALUE'
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder)/'gitconfig'
+            config.write_text(f'[url "https://x-access-token:{secret}@github.com/"]\n\tinsteadOf = https://github.com/\n'
+                              '[gc]\n\tauto = 1\n')
+            holder, name, abandoned = None, None, []
+            blocked = OSError(errno.ENOTEMPTY, 'Directory not empty', '.git')
+            real_cleanup = tempfile.TemporaryDirectory.cleanup
+
+            def blocked_removal(directory):
+                abandoned.append(directory)
+                raise blocked
+
+            try:
+                with patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(config)), \
+                        patch.object(tempfile.TemporaryDirectory, 'cleanup', autospec=True, side_effect=blocked_removal):
+                    with self.assertRaises(OSError) as raised:
+                        with fixture_directory() as name:
+                            git_dir = Path(name)/'repo/.git'
+                            git_dir.mkdir(parents=True)
+                            (git_dir/'late-entry').write_text('written after the removal pass listed .git\n')
+                            holder = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(120)'],
+                                                      cwd=git_dir, stdout=subprocess.PIPE, text=True)
+                            self.assertEqual(holder.stdout.readline().strip(), 'ready')  # exec finished: /proc argv is populated
+                self.assertIs(raised.exception, blocked)
+                report = '\n'.join(raised.exception.__notes__)
+                self.assertIn('Directory not empty', report)
+                self.assertIn(str(Path(name)/'repo/.git/late-entry'), report)
+                self.assertIn(f'pid {holder.pid} ppid {os.getpid()} state', report)
+                self.assertIn('time.sleep(120)', report)
+                self.assertIn('host git: git version', report)
+                self.assertIn('gc.auto = 1', report)  # allowlisted setting value
+                self.assertIn('url', report)  # section named, its credential-bearing key and value are not
+                self.assertNotIn(secret, report)
+            finally:
+                if holder is not None:
+                    holder.kill()
+                    holder.wait()
+                    holder.stdout.close()
+                for directory in abandoned:  # the injected failure left the directory in place; remove it for real
+                    real_cleanup(directory)
+        with fixture_directory() as name:
+            Path(name, 'kept.txt').write_text('x')
+        self.assertFalse(Path(name).exists())  # the unchanged success path still removes the directory
 
 
 class TaskRefPins(unittest.TestCase):

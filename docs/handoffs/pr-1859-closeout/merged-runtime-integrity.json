@@ -1,0 +1,13 @@
+{
+  "merged_sha": "4e28dab648a66e70f513979cb11b59e614866424",
+  "reviewed_head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+  "reviewed_runtime_sha256": {
+    "agents/domains/send_message_to_user/handler.py": "5a6938539532482b23c9a6421d516158ae11527013c0b95e4590fa1bd81d59dc",
+    "agents/helpers/wait_wake.py": "be6f48a8a4a61b764ac6dee0559ffae8c492cde1e92cf02b7ecbfeb421918d7c",
+    "agents/workflows/background_agents.py": "47ee884d125737fee504ba896918353cacb3fa914fdba2ec222e91685d965ea5"
+  },
+  "exact_pins_match": true,
+  "independent_main_changes_present": true,
+  "other_agents_paths_changed_by_main": [],
+  "full_tree_identity_claimed": false
+}

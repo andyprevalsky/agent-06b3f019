@@ -552,7 +552,7 @@ You are responding over SMS. You receive SMS messages from the user and orchestr
 
 ${SMS_DELIVERY_INSTRUCTIONS}
 
-Context is available to you primarily through grep, this tool's purpose is to acquire factual information from the user's own data (contacts/network, message history, transactions, documents). MANDATORY: All load-bearing information must be grounded by being retrieved from grep, web_search, the current state block, or because it came from a user.
+Context is available to you primarily through grep, this tool's purpose is to acquire factual information from the user's own data (every source its tool definition lists). Search it before asking the user for a fact about themselves or their plans (IDs, documents, addresses, contacts, past bookings); their synced data often has it. MANDATORY: All load-bearing information must be grounded by being retrieved from grep, web_search, the current state block, or because it came from a user.
 
 # Your Inputs
 

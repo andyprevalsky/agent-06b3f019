@@ -2,15 +2,17 @@
  * Persistent code-session lifecycle used by session create/close.
  *
  *   create ─► resolveCodeSession ─┬─ E2B paused sandbox ──connect──► resume (fs+memory)
- *                                 ├─ connect failed / none ──► new sandbox
+ *                                 ├─ sandbox not found / none ──► new sandbox
  *                                 │     └─ restoreLatestCheckpoint ──► `claude --resume`
+ *                                 ├─ other connect error ──► throw (spawn retries; never orphan)
  *                                 └─ local fallback: reuse HOME, else restore checkpoint
  *   close  ─► checkpointCodeSession ─► index code_event rows ─► pause (never kill)
  *   retire ─► explicit close or TTL: kill sandbox, delete checkpoints
  */
 import { existsSync, mkdirSync, rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
-import { Sandbox } from 'e2b';
+import { NotFoundError, Sandbox } from 'e2b';
+import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { checkpointKey, deleteCheckpointObject, getCheckpointObject } from './artifactStore';
 import {
@@ -25,7 +27,7 @@ import {
   type VerifiedCheckpoint,
 } from './checkpoint';
 import { indexCodeEvents } from './codeEvents';
-import { type CodeSessionFs, localSandboxFs } from './sandboxFs';
+import { type CodeSessionFs, e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
   allocateCheckpointSeq,
   commitCheckpoint,
@@ -39,7 +41,8 @@ const log = createLogger('CodeSessionLifecycle');
 /** How far back a resume walks when newer checkpoints fail verification. */
 const RESTORE_LOOKBACK = 5;
 
-export type ResumedFrom = 'paused_sandbox' | 'local_home' | 'checkpoint' | 'new';
+/** `live_cli`: the spawn attached to the CLI still running in the resumed sandbox. */
+export type ResumedFrom = 'live_cli' | 'paused_sandbox' | 'local_home' | 'checkpoint' | 'new';
 
 export interface RepoFacts {
   path: string;
@@ -108,8 +111,14 @@ export async function checkpointCodeSession(params: {
   fs: CodeSessionFs;
   reason: string;
   agentId: string;
+  /** Epoch ms the checkpoint must finish by; default: now + CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS (75 s). */
+  deadlineAt?: number;
 }): Promise<CheckpointResult | null> {
   const { session, fs, reason, agentId } = params;
+  // Every checkpoint is bounded well inside the worker's 180 s close call: an
+  // unbounded tarball download held the lease and lost the handoff (2026-11-08).
+  const budget = Number(process.env.CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS);
+  const deadlineAt = params.deadlineAt ?? Date.now() + (budget > 0 ? budget : 75_000);
   try {
     const seq = await allocateCheckpointSeq(session.id);
     const manifest = await createCheckpoint({
@@ -120,12 +129,26 @@ export async function checkpointCodeSession(params: {
       reason,
       codeProvider: session.codeProvider,
       diffBase: session.mergeTarget,
+      deadlineAt,
     });
     const repo = primaryRepoFacts(manifest);
     await commitCheckpoint(session.id, seq, {
       cliSessionId: manifest.cliSessionId,
       repoFacts: repo,
     });
+    // Restore never looks further back than RESTORE_LOOKBACK, so periodic saves
+    // keep a bounded window: drop the one checkpoint that just fell out of it.
+    if (seq > RESTORE_LOOKBACK) {
+      await deleteCheckpoint(session.userId, session.id, seq - RESTORE_LOOKBACK).catch(
+        (error: unknown) => {
+          log.warn('Pruning an old code session checkpoint failed', {
+            codeSessionId: session.id,
+            seq: String(seq - RESTORE_LOOKBACK),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      );
+    }
     let indexedCodeEvents = 0;
     if (manifest.artifacts[CLI_LOG_ARTIFACT] !== undefined) {
       const key = checkpointKey(session.userId, session.id, seq, CLI_LOG_ARTIFACT);
@@ -214,7 +237,12 @@ export async function restoreLatestCheckpoint(
   return { seq: verified.manifest.seq, cliSessionId: sameProvider ? cliSessionId : null };
 }
 
-/** Connect (and thereby resume) a paused E2B sandbox; null when it is gone. */
+/**
+ * Connect (and thereby resume) a paused E2B sandbox; null only when E2B says it
+ * no longer exists. Any other failure (429, 5xx, request timeout) rethrows so the
+ * spawn retries the same sandbox: replacing it from a possibly older checkpoint
+ * would orphan the paused sandbox and every change made since that checkpoint.
+ */
 export async function connectPausedSandbox(
   sandboxId: string,
   timeoutMs: number,
@@ -226,9 +254,10 @@ export async function connectPausedSandbox(
   try {
     return await connect(sandboxId, { apiKey: process.env.E2B_API_KEY, timeoutMs });
   } catch (error) {
-    log.warn('Paused sandbox could not be resumed; falling back to checkpoint', {
+    if (!(error instanceof NotFoundError)) throw error;
+    log.warn('Paused sandbox no longer exists; falling back to checkpoint', {
       sandboxId,
-      error: error instanceof Error ? error.message : String(error),
+      error: error.message,
     });
     return null;
   }
@@ -257,21 +286,33 @@ export async function prepareLocalCodeSessionHome(session: CodeSessionRow): Prom
   return { home, resumedFrom: 'new', cliSessionId: null };
 }
 
+/**
+ * Delete one checkpoint, manifest last. The manifest is the only index of the
+ * artifact keys, so a failed read or artifact delete throws and keeps it: the
+ * caller retries (pruning logs and moves on; retire stops before markRetired, so
+ * the next TTL sweep tries again). Only an unparseable manifest is dropped.
+ */
+async function deleteCheckpoint(userId: string, codeSessionId: string, seq: number): Promise<void> {
+  const manifestKey = checkpointKey(userId, codeSessionId, seq, MANIFEST_NAME);
+  const raw = await getCheckpointObject(manifestKey);
+  if (raw !== null) {
+    let names: string[] = [];
+    try {
+      const manifest = JSON.parse(raw.toString('utf8')) as CheckpointManifest;
+      names = Object.keys(manifest.artifacts ?? {});
+    } catch {
+      // an unparseable manifest names no artifacts; it still gets deleted below
+    }
+    for (const name of names) {
+      await deleteCheckpointObject(checkpointKey(userId, codeSessionId, seq, name));
+    }
+  }
+  await deleteCheckpointObject(manifestKey);
+}
+
 async function deleteCheckpoints(session: CodeSessionRow): Promise<void> {
   for (let seq = 1; seq <= session.nextCheckpointSeq; seq += 1) {
-    const manifestKey = checkpointKey(session.userId, session.id, seq, MANIFEST_NAME);
-    const raw = await getCheckpointObject(manifestKey).catch(() => null);
-    if (raw !== null) {
-      try {
-        const manifest = JSON.parse(raw.toString('utf8')) as CheckpointManifest;
-        for (const name of Object.keys(manifest.artifacts ?? {})) {
-          await deleteCheckpointObject(checkpointKey(session.userId, session.id, seq, name));
-        }
-      } catch {
-        // an unreadable manifest still gets deleted below
-      }
-    }
-    await deleteCheckpointObject(manifestKey).catch(() => undefined);
+    await deleteCheckpoint(session.userId, session.id, seq);
   }
 }
 
@@ -295,11 +336,36 @@ export async function retireCodeSession(session: CodeSessionRow): Promise<void> 
   log.info('Code session retired', { codeSessionId: session.id });
 }
 
-/** Opportunistic, bounded TTL sweep for one user (never blocks the caller). */
-export function sweepExpiredCodeSessions(userId: string): void {
-  void findExpiredCodeSessions(userId)
+/**
+ * Retire expired sessions one by one. A session whose checkpoints cannot be
+ * deleted yet stays unretired for the next sweep; it must not stop this sweep
+ * from retiring the others.
+ */
+async function retireExpired(expired: CodeSessionRow[]): Promise<number> {
+  let retired = 0;
+  for (const session of expired) {
+    try {
+      await retireCodeSession(session);
+      retired += 1;
+    } catch (error: unknown) {
+      log.warn('Retiring an expired code session failed; retried next sweep', {
+        codeSessionId: session.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return retired;
+}
+
+/**
+ * Opportunistic, bounded TTL sweep for one user. Never rejects; spawns start it
+ * without awaiting so it never blocks them. A user who never spawns again is
+ * never swept this way: sweepAllExpiredCodeSessions covers them.
+ */
+export function sweepExpiredCodeSessions(userId: string): Promise<void> {
+  return findExpiredCodeSessions(userId)
     .then(async (expired) => {
-      for (const session of expired) await retireCodeSession(session);
+      await retireExpired(expired);
     })
     .catch((error: unknown) => {
       log.warn('Code session TTL sweep failed', {
@@ -307,4 +373,156 @@ export function sweepExpiredCodeSessions(userId: string): void {
         error: error instanceof Error ? error.message : String(error),
       });
     });
+}
+
+/**
+ * Scheduled TTL sweep across all users, oldest first, at most `limit` sessions
+ * per call (a backlog drains over ticks). Returns how many were retired.
+ */
+export async function sweepAllExpiredCodeSessions(limit = 20): Promise<number> {
+  return retireExpired(await findExpiredCodeSessions(null, limit));
+}
+
+/**
+ * Periodic save of an attached session (multi-day runs), driven by the
+ * attached activity's keepalive:
+ *
+ *   keepalive ─► due? (interval since this backend's last save, jittered on first sight)
+ *                 └─► checkpoint ─► running ≥ cap − margin? ─► pause ─► resume (same sandbox)
+ *
+ * A sandbox that stays attached would otherwise only be checkpointed on close,
+ * so any sandbox loss rolled back to the previous close. E2B also caps one
+ * continuous run (24h Pro, 1h Hobby); pause + resume resets that clock and keeps
+ * memory and processes, so the cycle happens before the cap with a fresh save.
+ *
+ * 10k sessions: one map entry per attached session on the backend instance
+ * that serves its keepalives; at most MAINTENANCE_CONCURRENCY saves run at once
+ * per instance (a saturated tick is retried on the next keepalive), and first
+ * sight is jittered over one interval so a deploy restart does not save every
+ * session at once. Keepalives served by N instances save up to N× as often.
+ */
+export interface CodeSessionMaintenanceDeps {
+  now: () => number;
+  random: () => number;
+  schedule: (job: () => Promise<unknown>) => void;
+  sandboxInfo: (sandboxId: string) => Promise<{ startedAt: Date }>;
+  connect: (sandboxId: string) => Promise<Sandbox>;
+}
+
+const MAINTENANCE_CONCURRENCY = 4;
+const RUNTIME_CYCLE_MARGIN_MS = 60 * 60 * 1000;
+const lastSavedAt = new Map<string, number>();
+const maintaining = new Set<string>();
+
+function positiveEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function codeSessionCheckpointIntervalMs(): number {
+  return positiveEnv('CODE_SESSION_CHECKPOINT_INTERVAL_MINUTES', 30) * 60 * 1000;
+}
+
+/** E2B's maximum continuous runtime for this account (24h on Pro). */
+export function e2bMaxContinuousRuntimeMs(): number {
+  return positiveEnv('E2B_SANDBOX_MAX_RUNTIME_HOURS', 24) * 60 * 60 * 1000;
+}
+
+export const defaultCodeSessionMaintenanceDeps: CodeSessionMaintenanceDeps = {
+  now: () => Date.now(),
+  random: () => Math.random(),
+  schedule: (job) => {
+    void job();
+  },
+  sandboxInfo: (sandboxId) => Sandbox.getInfo(sandboxId, { apiKey: process.env.E2B_API_KEY }),
+  connect: (sandboxId) =>
+    Sandbox.connect(sandboxId, {
+      apiKey: process.env.E2B_API_KEY,
+      timeoutMs: 30 * 60 * 1000,
+    }),
+};
+
+/** Schedule a save (and, near E2B's cap, a pause/resume cycle) when one is due. */
+export function scheduleCodeSessionMaintenance(
+  task: { id: string; agentId: string; sandboxId: string; codeSessionId: string | null },
+  deps: CodeSessionMaintenanceDeps = defaultCodeSessionMaintenanceDeps
+): void {
+  const codeSessionId = task.codeSessionId;
+  if (codeSessionId === null) return;
+  const now = deps.now();
+  const interval = codeSessionCheckpointIntervalMs();
+  const last = lastSavedAt.get(codeSessionId);
+  if (last === undefined) {
+    lastSavedAt.set(codeSessionId, now - deps.random() * interval);
+    return;
+  }
+  if (now - last < interval || maintaining.has(codeSessionId)) return;
+  if (maintaining.size >= MAINTENANCE_CONCURRENCY) return;
+  maintaining.add(codeSessionId);
+  deps.schedule(() =>
+    maintainCodeSession(task, codeSessionId, deps)
+      .catch((error: unknown) => {
+        log.warn('Periodic code session save failed', {
+          codeSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        lastSavedAt.set(codeSessionId, deps.now());
+        maintaining.delete(codeSessionId);
+      })
+  );
+}
+
+/** No close has started on the task (close writes closeReason before it checkpoints and pauses). */
+async function taskStillAttached(taskId: string): Promise<boolean> {
+  const task = await prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: { status: true, closeReason: true },
+  });
+  return task?.status === 'ACTIVE' && task.closeReason === null;
+}
+
+/** The task closed: drop its maintenance clock (bounded map). */
+export function forgetCodeSessionMaintenance(codeSessionId: string | null): void {
+  if (codeSessionId !== null) lastSavedAt.delete(codeSessionId);
+}
+
+async function maintainCodeSession(
+  task: { id: string; agentId: string; sandboxId: string },
+  codeSessionId: string,
+  deps: CodeSessionMaintenanceDeps
+): Promise<void> {
+  const session = await prisma.codeSession.findUnique({ where: { id: codeSessionId } });
+  if (
+    session === null ||
+    session.state !== 'ACTIVE' ||
+    session.sandboxId !== task.sandboxId ||
+    !(await taskStillAttached(task.id))
+  ) {
+    lastSavedAt.delete(codeSessionId);
+    return;
+  }
+  const info = await deps.sandboxInfo(task.sandboxId);
+  const cycle =
+    deps.now() - info.startedAt.getTime() >= e2bMaxContinuousRuntimeMs() - RUNTIME_CYCLE_MARGIN_MS;
+  const sandbox = await deps.connect(task.sandboxId);
+  const checkpoint = await checkpointCodeSession({
+    session,
+    fs: e2bSandboxFs(sandbox),
+    reason: cycle ? 'runtime_cycle' : 'periodic',
+    agentId: task.agentId,
+  });
+  if (!cycle) return;
+  // A close sets closeReason first and pauses the sandbox itself: never pause
+  // under it, and never resume what it paused.
+  if (!(await taskStillAttached(task.id))) return;
+  await sandbox.pause();
+  if (!(await taskStillAttached(task.id))) return;
+  await deps.connect(task.sandboxId);
+  log.info('Cycled code session sandbox before the E2B runtime cap', {
+    codeSessionId,
+    sandboxId: task.sandboxId,
+    checkpointSeq: String(checkpoint?.seq ?? 'none'),
+  });
 }

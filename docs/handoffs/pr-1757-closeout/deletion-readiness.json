@@ -1,0 +1,61 @@
+{
+ "schema_version": 1,
+ "pr": 1757,
+ "deployed_merge": "89906b0f3b8c51d85ceb6b3f610aa836dc500161",
+ "ledger_commit": "e21e0bffdc",
+ "records": "docs/handoffs/pr-1757-closeout (this records-only follow-up)",
+ "devbox": "77d04b7f-774e-4f9f-a84f-5c82a69fe4c0 (Bugs folder; not the originating 0f8c2d78)",
+ "inventory": {
+  "git_worktrees": "only /home/boxes/rose; scratch worktrees rose-fix and rose-buggy retired after their deltas were committed (d18703e43, 3152a844c) and their evidence copied to the rca archive",
+  "unpushed_refs": "none: fix/mass-agent-worker-cpu equals origin at d3a8bd2f; main equals origin",
+  "local_only_records": "none outside the three verified archives and this commit",
+  "held_ledger_rows": "/var/tmp/rca-mass/ledger-hold: local CPU-capped repro rows, deliberately excluded from the ledger and preserved in the rca/final archives"
+ },
+ "archive_verification": "rca (413 files), cloud (2306), final (11472): uploaded with read-back authentication; independent verify passed for all three; representative restore of rca matched sha256 for pyspy.raw and hist-4ec67f04.json",
+ "key_recovery": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (key id trace-archive-prod-2026-07-03) lives in the project-managed agents/.env and the PR1739 escrow; nothing depends on this box",
+ "configuration_recovery": "all env files are boxes-managed project env; no unique local configuration was created",
+ "resources": "CORRECTED 2026-11-08: the original claim that all smoke Fly clones and volumes were released was false and was not checked before it was written. Current state, observed natively 2026-11-08 12:28-12:32Z: 10 owned Machines destroyed; their 10 volumes pending_destroy and unattached; no owned processes remain; warm source 683e47df5094d8 stopped and untouched; keep-awake hold cancelled at close. Retention: 4 local owner records stay in .git/cloudbench-fleet-ownership (see resource_correction).",
+ "preserved": "Freedom and shared resources untouched",
+ "resource_correction": {
+  "what_happened": "Campaign deploy-714d48a0 stopped on INFRA with retained fleet owners. The deploy cycle refused to run ('gates still own unreconciled cleanup: smoke'). The cycle directory was moved aside and re-initialized, bypassing that guard, and resources were then certified released without a native check.",
+  "impact": "Six Machines stayed started from about 2026-11-07 13:48Z until 2026-11-08 12:15-12:24Z, about 22.5 hours. Their compute cost was not measured.",
+  "found_by": "A peer thread reported the Machines on 2026-11-08; the deploy did not catch it.",
+  "recovered": {
+   "method": "scripts/run-bench --recover-stale-owner <exact token>; every guest acknowledged",
+   "65166f354cf246cf8a1cbb417e911d54": [
+    "8d96520b71e248"
+   ],
+   "99cdfc261d2046cdb7b80eec8680834f": [
+    "2874422ea12038",
+    "8744404f1559d8"
+   ],
+   "0abbcc509dbb4feeadff84c164335ed0": [
+    "862ee3fe0ed468"
+   ],
+   "b67760ef91a74f42b24fd884c2471d6f": [
+    "8744534a144d28"
+   ],
+   "e1678c703e64430da90a123ca7615ffa": [
+    "78111ee5c29de8"
+   ]
+  },
+  "retained_owner_records": {
+   "tokens": [
+    "342eaf182f404df68474bd2d4473fc96",
+    "06a21db1e77045419865849ead79d777",
+    "a300846e41c746daad18c4ad2460a29c",
+    "10bfe127e2804e1caf2ce09fdad15e9d"
+   ],
+   "state": "Machines 82dd757c706748, 811175da95e578, e820620c33e4d8 and 8d991d4ae13618 already destroyed; volumes vol_vdepnjpk12688kk4, vol_v3g8p18e32xy5dw4, vol_vjy2lq2mdpjn7lzv and vol_491j29jgz7zjoy9r pending_destroy. Disposable-delete receipts are present.",
+   "gap": "--recover-stale-owner refused all four: sealed runtime evidence is absent. Not forced and no cleanup proof hand-built. Only local .git records remain; they block no Machine.",
+   "next_step": "User decision: keep the local records, or authorize their retirement."
+  },
+  "payment_unsettled": {
+   "agent_id": "02a765d5-ae24-4d3c-a0d7-16c5e60e3baf",
+   "purchase_id": "2bbd1e62-496a-464a-95c4-7730831bf569",
+   "state": "The cancelled agent-payment-new-user-journey smoke run recorded a 4396-cent purchase with status CLEARED, funding CONSUMED and no reclaim transfer. Merchant is the sandbox task's Rose Labs Test Payment.",
+   "gap": "The retained run record does not state livemode, so whether real funds moved is UNVERIFIED. No financial record was changed."
+  },
+  "evidence": "devbox-closeout-private/pr1757-89906b0f3/owner-recovery-evidence.tar.gz.aesgcm"
+ }
+}

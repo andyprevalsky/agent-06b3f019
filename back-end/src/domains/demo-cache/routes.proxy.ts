@@ -5,34 +5,15 @@ import {
   requestSeq,
   resolveAnthropic,
 } from '../../providers/anthropicProxyCore';
-import {
-  isCacheableCodexRequest,
-  parseTraceParam as parseCodexTraceParam,
-  resolveCodex,
-} from '../../providers/codexProxyCore';
 import { verifyProxyTraceParam } from '../../providers/codeAgentFastModeEnv';
 import { createLogger } from '../../providers/logger';
 import { sharedTraceOrdinalReserver } from '../../providers/traceOrdinalShared';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { FAST_MODE_ANTHROPIC_UPSTREAM, FAST_MODE_CODEX_UPSTREAM } from './config';
+import { FAST_MODE_ANTHROPIC_UPSTREAM } from './config';
 import { verifyDemoCacheWriteCapability } from './accountPolicy';
 import { cacheGet, cacheSet } from './service';
 
 const anthropicLog = createLogger('AnthropicProxy');
-const codexLog = createLogger('CodexProxy');
-
-const HOP_BY_HOP_HEADERS = new Set([
-  'connection',
-  'content-length',
-  'host',
-  'keep-alive',
-  'proxy-authenticate',
-  'proxy-authorization',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-]);
 
 async function fetchAnthropicUpstream(
   body: unknown,
@@ -60,34 +41,6 @@ function anthropicHeaders(req: Request): Record<string, string> {
   return headers;
 }
 
-/**
- * Headers our own edge (Render behind Cloudflare) adds to every inbound request.
- * Forwarded to chatgpt.com, Cloudflare there rejects cf-connecting-ip/cf-visitor
- * with a 403 page, so every proxied Codex call failed once the proxy URL moved
- * from a dev tunnel to production (2026-10-28).
- */
-const EDGE_HEADER =
-  /^(cf-|x-forwarded-|forwarded$|true-client-ip$|x-real-ip$|cdn-loop$|via$|rndr-|render-|x-request-start$)/;
-
-function codexHeaders(req: Request): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [rawKey, rawValue] of Object.entries(req.headers)) {
-    const key = rawKey.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(key) || EDGE_HEADER.test(key)) continue;
-    if (rawValue === undefined) continue;
-    headers[rawKey] = Array.isArray(rawValue) ? rawValue.join(', ') : rawValue;
-  }
-  return headers;
-}
-
-function pathAfterProxyMount(req: Request, traceParam: string): string {
-  const marker = `/codex-proxy/${traceParam}`;
-  const idx = req.originalUrl.indexOf(marker);
-  if (idx < 0) return req.url || '/';
-  const tail = req.originalUrl.slice(idx + marker.length);
-  return tail === '' ? '/' : tail;
-}
-
 interface ProxyMode {
   readEnabled: boolean;
   writeEnabled: boolean;
@@ -110,37 +63,6 @@ function proxyMode(traceParam: string, segment: string | undefined): ProxyMode |
     anthropicLog.warn('Demo cache proxy write capability rejected', { mode: match[1] });
   }
   return { readEnabled, writeEnabled: signed };
-}
-
-function stripProxyMode(
-  traceParam: string,
-  pathAndQuery: string
-): ProxyMode & { pathAndQuery: string } {
-  const segment = /^\/([^/?]+)/.exec(pathAndQuery)?.[1];
-  const mode = proxyMode(traceParam, segment);
-  if (mode === null) return { pathAndQuery, ...READ_ONLY };
-  const rest = pathAndQuery.slice(1 + (segment ?? '').length);
-  return { pathAndQuery: rest === '' || rest.startsWith('?') ? `/${rest}` : rest, ...mode };
-}
-
-async function fetchCodexUpstream(
-  method: string,
-  pathAndQuery: string,
-  body: unknown,
-  headers: Record<string, string>
-): Promise<{ status: number; contentType: string; body: string }> {
-  const upperMethod = method.toUpperCase();
-  const upstream = await fetch(`${FAST_MODE_CODEX_UPSTREAM.replace(/\/$/, '')}${pathAndQuery}`, {
-    method: upperMethod,
-    headers,
-    body: upperMethod === 'GET' || upperMethod === 'HEAD' ? undefined : JSON.stringify(body),
-  });
-  const text = await upstream.text();
-  return {
-    status: upstream.status,
-    contentType: upstream.headers.get('content-type') ?? 'text/event-stream',
-    body: text,
-  };
 }
 
 /**
@@ -220,68 +142,5 @@ anthropicProxyRouter.post(
       return;
     }
     await handleAnthropic(req, res, mode);
-  })
-);
-
-export const codexProxyRouter = Router();
-
-codexProxyRouter.use(
-  '/:traceParam',
-  requireProxyCapability,
-  asyncHandler(async (req: Request, res: Response) => {
-    const traceParam = req.params.traceParam;
-    const traceSegment = verifiedTraceSegment(res);
-    const trace = parseCodexTraceParam(traceSegment);
-    const resolvedPath = stripProxyMode(traceSegment, pathAfterProxyMount(req, traceParam));
-    const pathAndQuery = resolvedPath.pathAndQuery;
-    const result = await resolveCodex(
-      trace.traceHash,
-      req.method,
-      pathAndQuery,
-      req.body,
-      codexHeaders(req),
-      {
-        cacheGet,
-        cacheSet,
-        fetchUpstream: fetchCodexUpstream,
-        reserveOrdinal: PROXY_ORDINAL_RESERVER,
-      },
-      resolvedPath.readEnabled,
-      { sessionId: trace.sessionId, writeEnabled: resolvedPath.writeEnabled }
-    );
-
-    const cacheable = isCacheableCodexRequest(req.method, pathAndQuery);
-    const cacheStatus = result.servedFromCache
-      ? result.cacheHitKind === 'terminal_fallback'
-        ? 'TERMINAL_FALLBACK'
-        : 'HIT_EXACT'
-      : !resolvedPath.readEnabled && cacheable
-        ? 'RECORD'
-        : cacheable
-          ? 'MISS'
-          : 'PASS';
-    codexLog.info(`Codex proxy ${cacheStatus}`, {
-      traceHash: trace.traceHash,
-      sessionId: trace.sessionId,
-      path: pathAndQuery.split('?', 1)[0],
-      cacheable: result.cacheable,
-      readEnabled: result.readEnabled,
-      ordinal: result.ordinal,
-      cacheKey: result.cacheKey,
-      cacheHitKind: result.cacheHitKind,
-      fallbackSourceOrdinal: result.fallbackSourceOrdinal,
-      fallbackSourceCacheKey: result.fallbackSourceCacheKey,
-      wrote: result.wrote,
-    });
-
-    res.status(result.status);
-    res.setHeader('content-type', result.contentType);
-    if (cacheable) {
-      res.setHeader(
-        'x-fast-mode-cache',
-        result.servedFromCache ? 'hit' : resolvedPath.readEnabled ? 'miss' : 'record-only'
-      );
-    }
-    res.end(result.body);
   })
 );

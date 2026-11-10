@@ -66,6 +66,8 @@ async def run_browser_activity_queue_case(*, cancel=False, timedout=False):
     tasks = []
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(run_id="queue-run")),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.uuid4", side_effect=(f"attempt-{i}" for i in range(20))),
         patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=start),
         patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", side_effect=wait_condition),
     ):
@@ -131,10 +133,10 @@ async def test_browser_activity_timeout_fence_survives_continuation():
 
     carrier = AgentWorkflow()
     carrier.max_iterations, carrier.context_gates = None, {}
-    state = carrier._continuation_resume_state([])
+    state = carrier._continuation_resume_state()
     assert "browser_activity_cleanup_unknown" not in state["runtime_state"]
     carrier._browser_activity_cleanup_unknown = True
-    state = carrier._continuation_resume_state([])
+    state = carrier._continuation_resume_state()
     restored = AgentWorkflow()
     restored._restore_deployment_state(state)
     assert restored._browser_activity_cleanup_unknown is True

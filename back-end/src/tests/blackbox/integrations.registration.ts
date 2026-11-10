@@ -4,16 +4,16 @@ import assert from 'node:assert/strict';
 // Frozen from the pre-split source: exact name/function pairs and phase order.
 const expected = {
   parallelTests: {
-    count: 231,
-    hash: 'bb160b5b525e80277a8009f80f575f0c2e0ab9a1ca9dc9856bbd83a298b665cd',
+    count: 232,
+    hash: '1bbf954ff06010bdd6a020ced56bc32347b141eaab7b312d6bab95211d953669',
   },
   sequentialTests: {
     count: 17,
-    hash: '8b1f3584d289c31a81def8b5ab119b80392865750697e8ee5d35a3b78d479384',
+    hash: '732acec1d29b7a134cc1c29e1fb658bb4c052979b68ecde4a03a81a9df727714',
   },
   pooledSequentialTests: {
     count: 34,
-    hash: '969d66efa40349cb9fbf62df916a0f5cd59322c00efe22c0f94c6333dcae6881',
+    hash: '04776ce085bb4c80590ac063625c7e36be4394dd68dbf8368b96857b62d11183',
   },
   boundarySequentialTests: {
     count: 7,

@@ -633,12 +633,14 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
 
     namespace = {
         "asyncio": asyncio,
+        "sys": bench.sys,
         "BenchmarkTask": bench.BenchmarkTask,
         "TaskResult": bench.TaskResult,
         "base_url": "http://fixture.invalid",
         "run_single_task": delegate,
         "_reads_base_trajectory_history": bench._reads_base_trajectory_history,
         "_prepare_base_trajectory_history": bench._prepare_base_trajectory_history,
+        "_refuse_queued_after_interrupt": bench._refuse_queued_after_interrupt,
         "batch_started_at": bench.datetime.now(bench.timezone.utc),
         "cloud_batch_cleanup": SimpleNamespace(contract=lambda: (tmp_path / "contract.json", "owned-token")),
         "_task_root_custody": bench._task_root_custody,
@@ -655,7 +657,6 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "tasks": [task],
         "run": run,
         "_run_with_sandbox_payment_lock": admitted_call,
-        "_report_ticker_task": SimpleNamespace(cancel=lambda: None),
         "stop_fly_log_collector": stop_collector,
         "realtime_started": False,
         "memory_gate_enabled": False,
@@ -671,13 +672,38 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
     }
     module = ast.fix_missing_locations(ast.Module(body=[wrapper, finalize_and_save, coordinator], type_ignores=[]))
     exec(compile(module, str(bench.__file__), "exec"), namespace)
+
+    async def run_coordinator():
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def report_ticker():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        ticker = asyncio.create_task(report_ticker())
+        namespace["_report_ticker_task"] = ticker
+        await started.wait()
+        try:
+            return await namespace["_owning_coordinator"]()
+        finally:
+            coordinator_retired_ticker = ticker.done()
+            if not coordinator_retired_ticker:
+                ticker.cancel()
+                await asyncio.gather(ticker, return_exceptions=True)
+            assert coordinator_retired_ticker, "coordinator returned before retiring its ticker"
+            assert ticker.cancelled() and stopped.is_set()
+
     if path in ("cancelled", "raised"):
         with pytest.raises(asyncio.CancelledError if path == "cancelled" else RuntimeError):
-            asyncio.run(namespace["_owning_coordinator"]())
+            asyncio.run(run_coordinator())
         assert events == ["batch-finalize", "batch-closed"] and not evaluated and not signatures
         assert not list(tmp_path.glob("*.pending.json"))
     else:
-        asyncio.run(namespace["_owning_coordinator"]())
+        asyncio.run(run_coordinator())
         assert run.task_results[0] is returned
         expected = ["evaluated-card", "publication-observed", "delegate-complete"]
         if path != "already-evaluated":
@@ -2525,30 +2551,49 @@ async def _cancelled_queue_owning_case(mode="allocated"):
             '_remember_live_agent':lambda name,aid:live.setdefault(name,[]).append(aid),
             '_emit_report':lambda **kwargs:None,'checkpoint_source_mode':False,'args':SimpleNamespace(parallel=True,keep_failed_agents=True,max_concurrency=5,prod=False),
             'tasks':tasks,'run':run,'max_concurrency':5,'base_url':'http://offline.invalid',
-            '_run_with_sandbox_payment_lock':bench._run_with_sandbox_payment_lock,'_report_ticker_task':SimpleNamespace(cancel=lambda:None),
+            '_run_with_sandbox_payment_lock':bench._run_with_sandbox_payment_lock,
             'stop_fly_log_collector':stop_collector,'realtime_started':False,'memory_gate_enabled':False,'owned_batch_cleanup':True,
             '_finalize_owned_cloud_batch':finalize,'_complete_interrupt_cleanup':lambda:None,'_live_task_agent_ids':live,'_wmh_evidence':SimpleNamespace(finalize=lambda:None),
             '_fetch_wmh_retrieval_audit':lambda:None,'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None)})
         code=ast.fix_missing_locations(ast.Module(body=[wrapper,coordinator],type_ignores=[]))
         exec(compile(code,str(bench.__file__),'exec'),namespace)
-        with ExitStack() as patches:
-            if mode=='never':patches.enter_context(patch.object(bench,'_sandbox_agentcard_payment_lock',blocked_lock))
-            for obj,name,value in [(socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
-                (bench,'pause_agent',AsyncMock(return_value=True)),(cleanup,'exact_root_sessions',query),
-                (bench,'_refresh_browser_archive_snapshot',query_snapshot),
-                (bench,'finalize_archive_and_score_world_model',AsyncMock(return_value=('archive-ref',{}))),
-                (bench,'delete_agent',AsyncMock()),(cleanup,'close_exact_root_sessions',release),
-                (bench,'_finalize_owned_root_payments',AsyncMock(return_value={})),
-                (bench,'fetch_local_worker_logs',lambda *args,**kwargs:[])]:patches.enter_context(patch.object(obj,name,value))
-            task=asyncio.create_task(namespace['_cancel_coordinator']())
-            ready=asyncio.create_task(entered.wait())
-            done,_=await asyncio.wait({task,ready},return_when=asyncio.FIRST_COMPLETED)
-            if task in done:
-                ready.cancel();await asyncio.gather(ready,return_exceptions=True);await task
-            await ready;await asyncio.sleep(0);task.cancel()
-            with pytest.raises(RuntimeError if mode=='unknown' else asyncio.CancelledError) as stopped:
-                await task
-            if mode=='unknown':assert 'unknown root creation outcome' in str(stopped.value)
+        ticker_started = asyncio.Event()
+        ticker_stopped = asyncio.Event()
+        async def report_ticker():
+            ticker_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                ticker_stopped.set()
+        ticker = asyncio.create_task(report_ticker())
+        namespace['_report_ticker_task'] = ticker
+        await ticker_started.wait()
+        try:
+            with ExitStack() as patches:
+                if mode=='never':patches.enter_context(patch.object(bench,'_sandbox_agentcard_payment_lock',blocked_lock))
+                for obj,name,value in [(socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
+                    (bench,'pause_agent',AsyncMock(return_value=True)),(cleanup,'exact_root_sessions',query),
+                    (bench,'_refresh_browser_archive_snapshot',query_snapshot),
+                    (bench,'finalize_archive_and_score_world_model',AsyncMock(return_value=('archive-ref',{}))),
+                    (bench,'delete_agent',AsyncMock()),(cleanup,'close_exact_root_sessions',release),
+                    (bench,'_finalize_owned_root_payments',AsyncMock(return_value={})),
+                    (bench,'fetch_local_worker_logs',lambda *args,**kwargs:[])]:patches.enter_context(patch.object(obj,name,value))
+                task=asyncio.create_task(namespace['_cancel_coordinator']())
+                ready=asyncio.create_task(entered.wait())
+                done,_=await asyncio.wait({task,ready},return_when=asyncio.FIRST_COMPLETED)
+                if task in done:
+                    ready.cancel();await asyncio.gather(ready,return_exceptions=True);await task
+                await ready;await asyncio.sleep(0);task.cancel()
+                with pytest.raises(RuntimeError if mode=='unknown' else asyncio.CancelledError) as stopped:
+                    await task
+                if mode=='unknown':assert 'unknown root creation outcome' in str(stopped.value)
+        finally:
+            coordinator_retired_ticker = ticker.done()
+            if not coordinator_retired_ticker:
+                ticker.cancel()
+                await asyncio.gather(ticker, return_exceptions=True)
+            assert coordinator_retired_ticker, 'coordinator returned before retiring its ticker'
+            assert ticker.cancelled() and ticker_stopped.is_set()
         assert saved==[True] and closed==([ROOT] if mode=='allocated' else []) and external==[]
 
 @async_case
@@ -2560,6 +2605,102 @@ async def test_cancelled_unknown_create_stays_fail_closed():
     row.graded_root_creation_outcome='not_started'
     with pytest.raises(RuntimeError,match='unknown root creation outcome'):
         await bench._finalize_owned_cloud_batch('http://offline.invalid',[row],{})
+
+
+async def _run_real_task_failing_before_graded_create(mode,task_name="rootless-setup-task"):
+    """Drive the actual task runner to an exception before (or during) root creation."""
+    from contextlib import ExitStack
+    task=bench.BenchmarkTask(name=task_name,title="Rootless setup",prompt="Buy it",timeout_seconds=10,is_chat_mode=False,expected_tools=[],tags=[],price_limit_cents=0,requires_browser_agent=False,requires_claude_code=False,attachment=None,approval_handling=None,start_phase="execute")
+    setup_429=('Failed to prepare-residual benchmark AgentCard setup: 429 {"error":"AgentCard Organization MCP rate limit exceeded",'
+               '"code":"agentcard_org_mcp_rate_limited","retryAfterSeconds":null}')
+    owned=[]
+    async def prepare(*args):
+        if mode=="setup":raise RuntimeError(setup_429)
+    async def apply(*args):
+        if mode!="first_run_create":return None
+        await bench._run_auth_test_site_first_run(task,"http://localhost:1",{"siteId":"owned-site"},"Create account")
+    async def create(*args):
+        # The POST was issued; its response (and any allocated root id) was lost.
+        raise RuntimeError("create response lost")
+    async def codex(*args,**kwargs):
+        raise RuntimeError("codex create response lost")
+    async def empty(*args,**kwargs):return []
+    targets=[
+        patch.object(bench,"_validate_task_target"),patch.object(bench,"_effective_harness",return_value="codex" if mode=="codex" else "rose"),
+        patch.object(bench,"_check_codex_harness_credentials",AsyncMock(return_value=True)),
+        patch("benchmarks.codex_runner.run_codex_task",codex),
+        patch.object(bench,"_run_user_id_override_for_task",return_value=None),
+        patch.object(bench,"_apply_live_fixtures",empty),patch.object(bench,"_apply_memory_fixtures",empty),
+        patch.object(bench,"prepare_sandbox_payment_residual",prepare),patch.object(bench,"_agentcard_setup_fixture_action",return_value=None),
+        patch.object(bench,"_apply_auth_test_site",apply),patch.object(bench,"_release_auth_test_site",AsyncMock()),
+        patch.object(bench,"_restore_live_fixture_scenarios_async",empty),
+        patch.object(bench,"create_agent",create),patch.object(bench,"_api_headers",AsyncMock(return_value={})),
+        patch.object(bench,"ensure_payment_lifecycle_cleanup",AsyncMock(return_value=None)),
+        patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",None))),
+    ]
+    with ExitStack() as stack:
+        for target in targets:stack.enter_context(target)
+        return await bench.run_single_task("http://localhost:1",task,on_agent_created=lambda name,aid:owned.append(aid)),owned
+
+
+@async_case
+async def test_rootless_setup_failure_keeps_its_task_verdict_instead_of_unknown_creation():
+    """2026-11-08 smoke: a prepare-residual 429 raised before any create_agent call.
+
+    The task never issued a root creation request, so its custody proves zero
+    allocation. Finalization must keep the ordinary ERROR verdict instead of
+    raising the unknown-creation infra failure that cancelled every smoke job.
+    """
+    row,owned=await _run_real_task_failing_before_graded_create("setup")
+    assert owned==[] and row.agent_id=="" and row.owned_roots==[]
+    assert row.graded_root_creation_outcome=="not_started" and row.root_creation_attempted is False
+    assert row.status==row.benchmark_status=="ERROR" and row.passed is False
+    assert "agentcard_org_mcp_rate_limited" in row.failure_reason
+    with patch.object(cleanup,"exact_root_sessions",side_effect=AssertionError("no root may be queried")):
+        await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{})
+    assert row.status==row.benchmark_status=="ERROR" and "prepare-residual" in row.failure_reason
+    # The proof is exact: any sign that a root might exist stays fail-closed.
+    for key,value in [("root_creation_attempted",None),("root_creation_attempted",True),
+                      ("graded_root_creation_outcome","unknown"),("passed",True),
+                      ("owned_roots",[{"root_agent_id":ROOT}])]:
+        changed=copy.deepcopy(row);setattr(changed,key,value)
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch("http://offline.invalid",[changed],{})
+    with pytest.raises(RuntimeError):
+        await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{row.name:[ROOT]})
+
+
+@async_case
+async def test_lost_create_response_before_graded_creation_stays_unknown():
+    """A first-run fixture or Codex create whose response was lost may own a root."""
+    for mode in ("first_run_create","codex"):
+        row,owned=await _run_real_task_failing_before_graded_create(mode)
+        assert owned==[] and row.agent_id=="" and row.status=="ERROR"
+        assert row.root_creation_attempted is True, mode
+        with pytest.raises(RuntimeError,match="unknown root creation outcome"):
+            await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{})
+
+
+@async_case
+async def test_composite_stage_with_lost_create_keeps_the_outer_task_unknown():
+    """A composite (minted-account) runner creates roots through nested run_single_task stages.
+
+    A stage whose create response was lost marks only its own nested custody unless the mark
+    reaches the enclosing task; the composite row would then look rootless and its possibly
+    allocated root would never be cleaned up.
+    """
+    async def composite(base_url,task,keep_failed_agents,on_agent_created=None):
+        inner=bench.BenchmarkTask(name="rootless-setup-task",title="Stage",prompt="Post",timeout_seconds=10,is_chat_mode=False,expected_tools=[],tags=[],price_limit_cents=0,requires_browser_agent=False,requires_claude_code=False,attachment=None,approval_handling=None,start_phase="execute")
+        stage=await bench.run_single_task(base_url,inner,on_agent_created=on_agent_created)
+        assert stage.agent_id=="" and stage.root_creation_attempted is True
+        return bench.TaskResult(name=task.name,passed=False,agent_id="",status="FAILED",benchmark_status="FAILED",
+                                progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,failure_reason=stage.failure_reason)
+    with patch.object(bench,"run_minted_agent_account_task",composite):
+        row,owned=await _run_real_task_failing_before_graded_create("first_create",task_name=bench.MINTED_AGENT_ACCOUNT_X_TASK_NAME)
+    assert owned==[] and row.agent_id=="" and row.owned_roots==[]
+    assert row.root_creation_attempted is True
+    with pytest.raises(RuntimeError,match="unknown root creation outcome"):
+        await bench._finalize_owned_cloud_batch("http://offline.invalid",[row],{})
 
 
 @async_case
@@ -2587,6 +2728,49 @@ async def test_nonadmission_proof_rejects_copies_and_forged_metadata():
         forged=copy.deepcopy(row);forged.stop_metadata[key]=value
         with pytest.raises(RuntimeError):
             await bench._finalize_owned_cloud_batch('http://offline.invalid',[forged],{},never_admitted_results=[forged])
+
+
+@async_case
+async def test_initial_claude_skip_requires_exact_preflight_nonadmission_custody():
+    task = bench.get_task_by_name('claude-code-agent')
+    row = bench._claude_code_credential_skip_result(task)
+    row.graded_root_creation_outcome = 'not_started'
+    row.stop_metadata = {'runner': 'benchmark_preflight', 'admission': 'not_started',
+                         'reason': 'claude_credential_unavailable'}
+    with patch.object(cleanup, 'exact_root_sessions', side_effect=RuntimeError('offline native control')):
+        await bench._finalize_owned_cloud_batch('http://offline.invalid', [row], {}, never_admitted_results=(row,))
+        # Execute the actual initial producer statements, before any dispatch can occur.
+        main = next(n for n in ast.parse(inspect.getsource(bench)).body
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == 'main_async')
+        nodes = [n for n in main.body if
+            isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'initial_credential_skips' for t in n.targets)
+            or isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == 'initial_credential_skips'
+            or isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
+                and n.value.func.attr == 'extend' and any(isinstance(a, ast.Name) and a.id == 'initial_credential_skips' for a in n.value.args)
+            or isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == '_never_admitted_results']
+        namespace = {**bench.__dict__, 'skipped_claude_tasks': [task], 'run': SimpleNamespace(task_results=[])}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(bench.__file__), 'exec'), namespace)
+        produced = namespace['run'].task_results[0]
+        assert namespace['initial_credential_skips'][0] is produced
+        await bench._finalize_owned_cloud_batch('http://offline.invalid', [produced], {},
+                                                never_admitted_results=tuple(namespace['_never_admitted_results']))
+        clone = copy.deepcopy(row)
+        for rows, proof in [([row], ()), ([clone], (row,)), ([row], (row, row)),
+                            ([row, clone], (row,)), ([row], (clone,))]:
+            with pytest.raises(RuntimeError):
+                await bench._finalize_owned_cloud_batch('http://offline.invalid', rows, {}, never_admitted_results=proof)
+        for key, value in [('graded_root_creation_outcome', 'unknown'), ('passed', True),
+                           ('failure_reason', 'other skip'), ('name', 'parallel-tool-calls'),
+                           ('logs', {'late': 'execution'}), ('owned_roots', [{'root_agent_id': ROOT}]),
+                           ('stop_metadata', {'runner': 'benchmark_preflight', 'admission': 'unknown'})]:
+            changed = copy.deepcopy(row); setattr(changed, key, value)
+            with pytest.raises(RuntimeError):
+                await bench._finalize_owned_cloud_batch('http://offline.invalid', [changed], {}, never_admitted_results=(changed,))
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid', [row], {row.name: [ROOT]}, never_admitted_results=(row,))
+        generic = bench._claude_code_credential_skip_result(task)  # dispatch skip has no initial custody
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid', [generic], {}, never_admitted_results=(generic,))
 
 
 @async_case
@@ -2654,3 +2838,76 @@ async def test_genuine_cleanup_failure_still_fails_the_task():
     assert (row.passed, row.benchmark_status) == (False, "ERROR")
     assert row.failure_reason == "Cloud cleanup failed: provider: provider session still live"
     assert getattr(row, "cleanup_failure", None) is None
+
+
+@async_case
+async def test_archive_retains_completed_snapshot_before_gather_resumes():
+    logs = {"messages": [{"text": "pre-pause snapshot"}]}
+    snapshot = {"messages": browser_rows(attached=False)}
+    owner = asyncio.current_task()
+
+    async def fetch(_url, aid):
+        assert aid == ROOT
+        owner.cancel()
+        return snapshot
+
+    with (
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}])),
+        patch.object(bench, "get_agent", fetch),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await bench._refresh_browser_archive_snapshot(
+                "http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01
+            )
+    observation = logs["browser_archive_observation"]
+    assert observation["completed_agent_ids"] == [ROOT]
+    assert observation["snapshots"] == {ROOT: snapshot}
+    assert observation["ready"] is False
+    assert logs["messages"] == [{"text": "pre-pause snapshot"}]
+    assert "tree" not in logs
+
+
+@async_case
+async def test_archive_timeout_retains_only_completed_snapshots():
+    snapshot = {"messages": browser_rows(attached=False)}
+    loop = asyncio.get_running_loop()
+    for return_root in (True, False):
+        logs = {"messages": [{"text": "pre-pause snapshot"}]}
+        pending_cancelled = set()
+        pending_started = set()
+        clock = loop.time()
+
+        def fixture_time():
+            return clock
+
+        async def fetch(_url, aid):
+            nonlocal clock
+            if return_root and aid == ROOT:
+                return snapshot
+            try:
+                pending_started.add(aid)
+                if pending_started == ({CHILD} if return_root else {ROOT, CHILD}):
+                    # Expire the unchanged deadline only after the scenario's
+                    # completed and pending fetches exist. Setup latency must
+                    # not turn this into a tree-fetch timeout instead.
+                    clock += 0.01
+                await asyncio.Event().wait()
+            finally:
+                pending_cancelled.add(aid)
+
+        with (
+            patch.object(loop, "time", fixture_time),
+            patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}, {"agent_id": CHILD}])),
+            patch.object(bench, "get_agent", fetch),
+        ):
+            with pytest.raises(TimeoutError):
+                await bench._refresh_browser_archive_snapshot(
+                    "http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01
+                )
+        observation = logs["browser_archive_observation"]
+        assert observation["snapshots"] == ({ROOT: snapshot} if return_root else {}), (return_root, observation)
+        assert set(observation["completed_agent_ids"]) == ({ROOT} if return_root else set())
+        assert pending_cancelled == ({CHILD} if return_root else {ROOT, CHILD})
+        assert observation["ready"] is False
+        assert logs["messages"] == [{"text": "pre-pause snapshot"}]
+        assert "tree" not in logs

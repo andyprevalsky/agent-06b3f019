@@ -48,8 +48,9 @@ The live host decides which operations are supported. An unsupported response
 is a capability limit; do not repeat it or assume back/current-app/tree exists.
 Queue/lease timeout is a tool outcome, not a request for user attention. Pending
 or UNKNOWN input must never be blindly retried: inspect the durable receipt and
-screen, and wait for confirmed cleanup when necessary. Private password refs
-require verified phone app/account binding, which is not available yet.
+screen, and wait for confirmed cleanup when necessary. Private password refs are not accepted from the worker. credentials.fill_saved
+performs its own server-side current form/account binding before using a secret;
+completed phone setup or a signed-in account is not a prerequisite for this operation.
 Use accessible Gmail push approvals and OTP flows autonomously. When a browser
 sign-in asks for device approval, inspect the corresponding account app on the
 owned cloud phone when available. Match the account and current sign-in challenge
@@ -113,10 +114,12 @@ configuration_unavailable, or observed_signed_out; these do not request attentio
 A signed-out screen normally means continue setup; block only when unable to
 proceed safely. Do not abandon the original task or claim setup succeeded.
 Setup includes the required device settings, not merely Apple Account identity.
-Follow setup in order: observe the current screen; if Apple Account sign-in is
-incomplete, finish that authentication flow before auditing later settings.
-Do not wait for configurationReady to sign in. If already signed in, verify
-that evidence without signing out, then check the remaining settings.
+Follow setup in order: observe the current screen. Once legitimate OS controls
+are reachable, configure Portrait Orientation Lock before other settings/apps.
+If an existing blocking private authentication flow prevents those controls,
+finish only that legitimate authentication first, then configure portrait lock.
+Do not wait for configurationReady to sign in or gain legitimate access. Inspect an already
+signed-in Apple Account without signing out after portrait lock is verified.
 Read actual interaction.setup.verification: requirementsVersion, each target's
 checks/status/current scope, configurationReady, and operationalStatus. A durable
 identityVerified record or a last-known confirmed check is not current proof of
@@ -124,7 +127,13 @@ all required settings. Inspect existing signed-in state without signing out or
 resetting it. Configure authorized required settings autonomously within this
 same original task, honoring user restrictions and protected authentication.
 After fresh observations, use mode=setup, action=verify with evidenceOperationIds
-containing 1..8 successful current broker observation IDs and verificationTarget:
+containing 1..8 successful current broker screen.text observation IDs and verificationTarget.
+After any navigation or mutation, obtain a fresh screen.text observation and normally
+submit only its latest operation ID with the current setup revision. If multiple
+IDs are needed, they must be consecutive screen.text operations ending at the
+current cursor, with no intervening tap, scroll, app launch, or other operation.
+Never combine an earlier screen with a later screen across an intervening action.
+Supported verification targets:
 apple_account (the default when omitted), icloud_messages, icloud_keychain,
 icloud_contacts,
 imessage, receive_address, portrait_lock, device_passcode, gmail, or runtime. Verify iCloud Messages sync and iCloud
@@ -134,10 +143,27 @@ iCloud Contacts sync and verify explicit enabled control state; populated
 contact names or counts do not prove the iCloud Contacts setting is on.
 For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
-receiving, not merely listed. For portrait_lock, use the observed Control Center
-UI to enable the OS Portrait Orientation Lock and verify explicit enabled control
-state or OS confirmation. A portrait frame alone, portrait dimensions, or a lock
-label without its enabled state is not proof. Keep ambiguous evidence unknown.
+receiving, not merely listed. For portrait_lock, open native Settings with
+apps.launch name Settings; use its observed Search to find AssistiveTouch and
+open the observed result. From its detail page return to the native Touch parent
+and read the explicit same-row AssistiveTouch On/Off value (only a trailing native
+chevron is ignorable). Preserve that original state; the detail label alone is
+not its switch state. If originally Off, open the row, enable it once and return
+to Touch to confirm the explicit value is now On, then reopen the detail page.
+Open the floating AssistiveTouch menu and tap the fresh observed Control Center
+label center. Keep this native route uninterrupted: no other apps/URLs, Home,
+unrelated input, private/user control or attention transitions. Submit setup.verify
+with fresh observations. The backend reports current portrait_lock status:
+confirmed is On, disabled is Off, and unknown is unproven. If the returned
+operation.portraitActionHint exists, use its existing input.tap arguments only
+at that current evidenceCursor, then observe and verify again. Never reuse a hint
+after any intervening action. Verification never taps for you. Close Control
+Center and restore the original AssistiveTouch state, confirming its explicit
+Touch-parent value again. Do not blindly toggle switches or use operator coordinates.
+Public screen media remains unavailable. A portrait frame alone, portrait dimensions, lock labels,
+static screenshots and unsupported or ambiguous layouts are not enabled-state proof.
+If the native route or original switch state cannot be established, keep readiness
+unconfirmed and report that precise blocker without abandoning the original task.
 Before Gmail setup, inspect the owned setup checks for the required device passcode.
 If absent, navigate the observed OS new-passcode creation flow; select Passcode Options
 and 4-Digit Numeric Code before calling credentials.fill_device_passcode with
@@ -264,6 +290,17 @@ def _identity(*parts: Any) -> str:
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+_SETUP_WINDOW_REJECTION = "Setup observations must be the current uninterrupted cursor window"
+_SETUP_WINDOW_FEEDBACK = {
+    "errorCode": "phone_setup_observation_window",
+    "error": (
+        "Setup evidence must be the current uninterrupted screen.text window. "
+        "After navigation, read screen.text again and normally verify only its latest "
+        "operation ID with the current setup revision. Do not replay a phone input."
+    ),
+}
+
+
 async def _request(client, config, user_id, method, path, payload=None):
     response = await client.request(
         method,
@@ -273,7 +310,15 @@ async def _request(client, config, user_id, method, path, payload=None):
         timeout=105.0 if path.endswith(("/operations", "/setup")) else 10.0,
     )
     if not response.is_success:
-        # Never include response text, URL, headers, input, or exception strings.
+        # Only this exact backend setup rejection maps to local constant feedback.
+        # Never reflect response text, URL, headers, input, or exception strings.
+        if response.status_code == 409 and path.endswith("/setup") and len(response.content) <= 4096:
+            try:
+                body = response.json()
+            except (ValueError, RecursionError):
+                body = None
+            if isinstance(body, dict) and body.get("error") == _SETUP_WINDOW_REJECTION:
+                return {"_httpStatus": 409, **_SETUP_WINDOW_FEEDBACK}
         return {"_httpStatus": response.status_code}
     data = response.json()
     return data if isinstance(data, dict) else {"_httpStatus": 502}
@@ -294,12 +339,30 @@ async def fetch_phone_capability(config, user_id: str, *, client=None) -> dict:
         return {"enabled": False, "configured": False, "setupState": None}
 
 
+async def fetch_phone_availability(config, user_id: str, task_id: str, *, client=None) -> dict:
+    """Server-owned task admission; account eligibility alone never grants access."""
+    denied = {"enabled": False, "source": None}
+    if not user_id or not task_id:
+        return denied
+    if client is None:
+        async with httpx.AsyncClient() as owned:
+            return await fetch_phone_availability(config, user_id, task_id, client=owned)
+    try:
+        data = await _request(client, config, user_id, "GET", f"availability/{quote(task_id, safe='')}")
+        source = data.get("source")
+        if data.get("enabled") is True and source in ("ready", "bootstrap", "continuation"):
+            return {"enabled": True, "source": source}
+    except Exception:
+        pass
+    return denied
+
+
 async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> dict:
     """A fresh owned observation before each decision; never use cached entitlement."""
     if client is None:
         async with httpx.AsyncClient() as owned:
             return await observe_phone(config, user_id, task_id, client=owned)
-    capability = await fetch_phone_capability(config, user_id, client=client)
+    capability = await fetch_phone_availability(config, user_id, task_id, client=client)
     if not capability["enabled"] or not task_id:
         return {"enabled": False}
     try:
@@ -317,6 +380,21 @@ async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> d
         return {"enabled": True, "interaction": view}
     except Exception:
         return {"enabled": False}
+
+
+def _busy_phone_error(acquired: dict) -> str:
+    """Tell the agent which agent currently holds the phone, using the backend's own queue view."""
+    holder = acquired.get("holder") if isinstance(acquired.get("holder"), dict) else {}
+    position = acquired.get("queuePosition")
+    agent = holder.get("agentId") if isinstance(holder.get("agentId"), str) else None
+    parts = ["Phone is in use"]
+    if agent:
+        parts.append(f" by agent {agent}")
+        if holder.get("controlOwner") == "user":
+            parts.append(" (the user has control)")
+    if isinstance(position, int) and not isinstance(position, bool) and position > 0:
+        parts.append(f"; this task is waiting at queue position {position}")
+    return "".join(parts)
 
 
 async def execute_phone(
@@ -345,8 +423,6 @@ async def execute_phone(
             )
     if not all((user_id, agent_id, task_id)) or not (snapshot or {}).get("enabled"):
         return {"success": False, "error": "Phone unavailable for this decision"}
-    if not (await fetch_phone_capability(config, user_id, client=client))["enabled"]:
-        return {"success": False, "error": "Phone capability unavailable or revoked"}
     from browser_tools.schemas import validate_browser_tool_args
 
     try:
@@ -359,6 +435,8 @@ async def execute_phone(
         command_args = params.get("args", {})
         if set(command_args) != {"queueId"} or not isinstance(command_args["queueId"], str) or not command_args["queueId"].strip():
             return {"success": False, "error": "Approved message operation requires only its queueId"}
+    if not (await fetch_phone_availability(config, user_id, task_id, client=client))["enabled"]:
+        return {"success": False, "error": "Phone capability unavailable or revoked"}
     view = (snapshot or {}).get("interaction") or {}
     path = f"interactions/{quote(task_id, safe='')}"
     if params["mode"] == "setup":
@@ -397,7 +475,7 @@ async def execute_phone(
         lease = acquired.get("lease") or {}
         lease_id = lease.get("id")
         if lease.get("status") != "ACTIVE" or not lease_id:
-            return {"success": False, "phone": acquired, "error": "Phone lease is not active"}
+            return {"success": False, "phone": acquired, "error": _busy_phone_error(acquired)}
         # A newly allocated lease starts at its own cursor. Reuse must keep the
         # decision's observed cursor to reject a concurrently superseded action.
         observed_lease = view.get("lease") or {}
@@ -622,7 +700,7 @@ async def request_native_phone_authentication(
         or critical_reason not in {"password", "verification_code", "device_passcode", "manual_verification"}
     ):
         return failure
-    if not (await fetch_phone_capability(config, user_id, client=client))["enabled"]:
+    if not (await fetch_phone_availability(config, user_id, task_id, client=client))["enabled"]:
         return failure
     intent = decision_id or _identity("auth-cursor", task_id, lease["id"], cursor)
     key = _identity("auth-assistance", task_id, lease["id"], intent)
@@ -674,3 +752,24 @@ async def request_native_phone_authentication(
     except Exception:
         return failure
 
+
+async def bind_approved_message(config, user_id: str, task_id: str, queue_id: str, *, client=None) -> None:
+    """Attach an existing approved queue intent after its owned browser task exists."""
+    if client is None:
+        async with httpx.AsyncClient() as owned:
+            return await bind_approved_message(config, user_id, task_id, queue_id, client=owned)
+    try:
+        response = await client.post(
+            f"{config.backend.api_url.rstrip('/')}/api/imessage/queue/{quote(queue_id, safe='')}/phone-bind",
+            headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
+            json={"user_id": user_id, "browser_task_id": task_id},
+            timeout=10.0,
+        )
+        value = response.json() if response.is_success else None
+        if (not isinstance(value, dict) or value.get("success") is not True
+                or value.get("provider") != "phone_harness" or value.get("queue_id") != queue_id
+                or value.get("browser_task_id") != task_id):
+            raise ValueError("Invalid binding receipt")
+    except Exception:
+        # No response body, opaque routing URL, credential or transport error escapes.
+        raise RuntimeError("Approved cloud message binding unavailable") from None

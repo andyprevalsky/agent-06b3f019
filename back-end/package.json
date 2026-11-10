@@ -26,8 +26,9 @@
     "test:blackbox:runner": "tsx src/tests/blackbox/run.ts",
     "test:blackbox:existing": "BLACKBOX_TEST_USE_EXISTING_BACKEND=1 bash scripts/run-blackbox-tests.sh",
     "test:endpoint-smoke": "tsx scripts/prod-endpoint-smoke.ts",
-    "test:structural": "tsx src/tests/structural/layer-deps.test.ts && tsx src/tests/structural/migration-drift.test.ts && tsx src/tests/structural/migration-concurrent-index.test.ts && tsx src/tests/structural/migration-schema-objects.test.ts && tsx src/tests/structural/integrations-config.test.ts && tsx src/tests/structural/browser-context-nullability.test.ts && tsx src/tests/structural/browser-provider-tilion-branch.test.ts && tsx src/tests/structural/prompt-personality-sync.test.ts && tsx src/tests/structural/sms-prompt-layering.test.ts && tsx src/tests/structural/sms-environment-tool.test.ts && tsx src/tests/structural/user-facing-writing-style.test.ts && tsx src/tests/structural/db-pool-invariant.test.ts && tsx src/tests/structural/hybrid-auth-user-sync.test.ts && tsx src/tests/structural/machine-upload-containment.test.ts && tsx src/tests/structural/json-raw-body-scope.test.ts && tsx src/tests/structural/internal-route-guard.test.ts && tsx src/tests/structural/credential-health-coverage.test.ts && tsx src/tests/structural/claude-code-ws-prompt-stdin.test.ts && tsx src/tests/structural/rca-archive.test.ts && tsx src/tests/structural/deploy-script-import-safety.test.ts && tsx src/tests/structural/blackbox-case-registration.test.ts && tsx src/tests/structural/careers-role-slug-sync.test.ts && tsx src/tests/structural/vapi-outbound-config.test.ts && tsx src/tests/structural/rose-desktop-flag-sync.test.ts && tsx src/tests/structural/rose-skills.test.ts && tsx src/tests/structural/sandbox-size-templates.test.ts && bash scripts/local-db-container.test.sh && bash scripts/prisma-local-push.test.sh",
+    "test:structural": "tsx src/tests/structural/layer-deps.test.ts && tsx src/tests/structural/migration-drift.test.ts && tsx src/tests/structural/migration-concurrent-index.test.ts && tsx src/tests/structural/migration-schema-objects.test.ts && tsx src/tests/structural/integrations-config.test.ts && tsx src/tests/structural/browser-context-nullability.test.ts && tsx src/tests/structural/browser-provider-tilion-branch.test.ts && tsx src/tests/structural/prompt-personality-sync.test.ts && tsx src/tests/structural/sms-prompt-layering.test.ts && tsx src/tests/structural/sms-environment-tool.test.ts && tsx src/tests/structural/grep-tool-single-definition.test.ts && tsx src/tests/structural/user-facing-writing-style.test.ts && tsx src/tests/structural/db-pool-invariant.test.ts && tsx src/tests/structural/hybrid-auth-user-sync.test.ts && tsx src/tests/structural/machine-upload-containment.test.ts && tsx src/tests/structural/json-raw-body-scope.test.ts && tsx src/tests/structural/internal-route-guard.test.ts && tsx src/tests/structural/credential-health-coverage.test.ts && tsx src/tests/structural/claude-code-ws-prompt-stdin.test.ts && tsx src/tests/structural/rca-archive.test.ts && tsx src/tests/structural/deploy-script-import-safety.test.ts && tsx src/tests/structural/blackbox-case-registration.test.ts && tsx src/tests/structural/careers-role-slug-sync.test.ts && tsx src/tests/structural/vapi-outbound-config.test.ts && tsx src/tests/structural/rose-desktop-flag-sync.test.ts && tsx src/tests/structural/rose-skills.test.ts && tsx src/tests/structural/sandbox-size-templates.test.ts && bash scripts/local-db-container.test.sh && bash scripts/prisma-local-push.test.sh && tsx src/tests/structural/claude-code-smoke-outcome.test.ts",
     "test:coverage": "bash scripts/run-coverage.sh && bash ../scripts/tests/blackbox-backend-teardown.test.sh",
+    "test:coverage:sharded": "bash scripts/run-coverage-sharded.sh 2 && bash ../scripts/tests/blackbox-backend-teardown.test.sh",
     "test:coverage:report": "bash scripts/run-coverage.sh --report-only",
     "test:unit": "tsx scripts/run-unit-tests.ts",
     "test:x402": "bash scripts/run-blackbox-tests.sh x402",
@@ -55,7 +56,7 @@
     "@onkernel/sdk": "^0.76.0",
     "@prisma/client": "^5.20.0",
     "@supabase/supabase-js": "^2.76.1",
-    "@temporalio/client": "^1.13.1",
+    "@temporalio/client": "1.20.2",
     "@types/adm-zip": "^0.5.7",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
@@ -64,6 +65,7 @@
     "@types/multer": "^2.0.0",
     "@types/node": "^22.7.4",
     "@types/node-cron": "^3.0.11",
+    "@types/pngjs": "6.0.5",
     "@types/ws": "^8.18.1",
     "@with-logic/fast-forward": "^0.1.13",
     "adm-zip": "^0.5.16",
@@ -83,6 +85,7 @@
     "p-limit": "^7.2.0",
     "plaid": "^42.2.0",
     "playwright": "^1.56.1",
+    "pngjs": "7.0.0",
     "prisma": "^5.20.0",
     "recheck": "^4.5.0",
     "steel-sdk": "^0.16.0",
@@ -101,12 +104,13 @@
     "c8": "^11.0.0",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
+    "jpeg-js": "0.4.4",
     "prettier": "^3.8.1",
     "tsx": "^4.19.1",
     "typescript-eslint": "^8.57.2",
     "x402": "^0.7.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "22.23.4"
   }
 }

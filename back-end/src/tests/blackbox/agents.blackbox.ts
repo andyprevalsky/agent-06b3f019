@@ -28,13 +28,16 @@ import {
 // Runner
 // ---------------------------------------------------------------------------
 async function runAll(): Promise<void> {
+  await import('./agents-account.cases');
   await import('./agents-list-create.cases');
+  await import('./agents-sidebar-speed.cases');
   await import('./agents-messages.cases');
   await import('./agents-message-storage.cases');
   await import('./agents-message-resume.cases');
   await import('./agents-status-bootstrap.cases');
   await import('./agents-lifecycle.cases');
   await import('./agents-sidebar-organization.cases');
+  await import('./agents-last-user-message.cases');
   await import('./agents-search.cases');
   await import('./agents-cost-resume.cases');
   await import('./agents-configuration.cases');
@@ -42,11 +45,15 @@ async function runAll(): Promise<void> {
   await import('./agents-batch.cases');
   await import('./agents-liveness-reconcile.cases');
   await import('./agents-stuck-bug-report.cases');
+  await import('./agents-self-bug-report.cases');
   await import('./agents-followup-cleanup-obligation.cases');
   await import('./agents-terminal-browser-release.cases');
+  await import('./agents-terminal-code-release.cases');
   await import('./agents-cutover-subagent-close.cases');
   await import('./agents-cutover-replace-not-failed.cases');
   await import('./agents-agent-messages.cases');
+  await import('./agents-agent-messages-code.cases');
+  await import('./agents-code-turns-undelivered.cases');
   await import('./agents-agent-message-guard.cases');
   await import('./agents-agent-tree.cases');
   await import('./agents-agent-address.cases');

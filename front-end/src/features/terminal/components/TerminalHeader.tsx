@@ -33,6 +33,12 @@
  *             with light text (overriding the inline drip colours); the
  *             whitish marble layer is hidden
  *
+ * CONNECTION (useOnlineStatus via ConnectionLostIcon, every layout):
+ * [ONLINE]  --> nothing extra
+ * [OFFLINE] --> bare red wifi-off icon just left of the bell (desktop pill and
+ *               Rose mobile bar) or of the hamburger (stock mobile bar); 20px
+ *               wide on the Rose mobile bar so the 320/360px rows still fit
+ *
  * Notifications live in the desktop AttentionInbox bell OR the mobile drawer's
  * Notifications tab — never both mount (viewport-branched), so a single
  * useAttentionRequests subscription is active.
@@ -57,6 +63,7 @@ import {
   RoseAppIcons,
 } from '@/features/terminal-component-group';
 import type { Agent } from '@/features/terminal-component-group';
+import { ConnectionLostIcon } from '@/components/ConnectionLostIcon';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useRoseTheme } from '@/features/rose-theme';
@@ -238,11 +245,14 @@ function DesktopHeaderPill(props: TerminalHeaderProps) {
         isDark={isDark}
       />
       <BrandButton onCreateNewAgent={onCreateNewAgent} />
-      <HeaderAuthAction
-        isSignedIn={isSignedIn}
-        onLoginClick={onLoginClick}
-        onSelectAgent={onSelectAgent}
-      />
+      <div className="flex items-center gap-2">
+        <ConnectionLostIcon />
+        <HeaderAuthAction
+          isSignedIn={isSignedIn}
+          onLoginClick={onLoginClick}
+          onSelectAgent={onSelectAgent}
+        />
+      </div>
     </header>
   );
 }
@@ -266,14 +276,15 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
     onRefreshAgents,
   } = props;
   return (
-    <header className="fixed inset-x-0 top-0 z-50 grid h-[var(--mobile-terminal-header-height)] grid-cols-3 items-center border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md">
+    <header className="fixed inset-x-0 top-0 z-50 grid h-[var(--mobile-terminal-header-height)] grid-cols-3 items-center border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md [@media(display-mode:standalone)]:bg-background [@media(display-mode:standalone)]:backdrop-blur-none">
       <div className="justify-self-start">
         <BrandButton onCreateNewAgent={onCreateNewAgent} />
       </div>
       <div className="justify-self-center">
         <SiteNavButtons clientSource={clientSource} isSignedIn={isSignedIn} />
       </div>
-      <div className="flex items-center justify-self-end">
+      <div className="flex items-center gap-2 justify-self-end">
+        <ConnectionLostIcon />
         <MobileAgentDrawer
           agents={agents}
           isLoadingAgents={isLoadingAgents}
@@ -347,6 +358,7 @@ function RoseMobileHeaderBar(props: TerminalHeaderProps) {
         />
       </div>
       <div className="flex min-w-0 flex-1 items-center justify-end">
+        <ConnectionLostIcon className="h-10 w-5" />
         <HeaderAuthAction
           isSignedIn={isSignedIn}
           onLoginClick={onLoginClick}

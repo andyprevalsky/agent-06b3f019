@@ -12,6 +12,7 @@
  *    followed by the new goals in order, then the stock goals minus four
  *  - #55 the Popular Goals row is exactly as wide as the query box
  */
+import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -21,8 +22,11 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
-import { expandBar, makeProject, mockProjectsApi } from './rose-sidebar.fixtures';
+import { expandBar, makeProject, mockProjectsApi, roseBar } from './rose-sidebar.fixtures';
 import Terminal from '@/pages/Terminal';
+import { RoseAppsProvider } from '@/features/terminal-component-group';
+import { QueryInputLayer } from '@/features/terminal-component-group/components/query-input/QueryInputLayer';
+import { useRoseApps } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { PopularGoalsCarousel } from '@/features/terminal/components/PopularGoalsCarousel';
 import {
   POPULAR_GOALS,
@@ -106,6 +110,23 @@ describe('mobile query box safe area (#11)', () => {
     expect(html).toMatch(/name="viewport"[\s\S]*?content="[^"]*viewport-fit=cover/);
   });
 
+  it('makes iOS give the installed PWA the full screen, not the status-bar-short viewport', () => {
+    // WebKit 301108: an installed iOS 26 PWA paints only to screen - top inset
+    // (894 of 956pt) until the document is taller than that short viewport.
+    const media = css.indexOf('@media (display-mode: standalone) {\n  html {');
+    expect(media).toBeGreaterThan(-1);
+    const rule = css.slice(media, css.indexOf('\n}\n', media));
+    expect(rule).toMatch(
+      /min-height:\s*min\(100lvh,\s*calc\(100% \+ env\(safe-area-inset-top, 0px\)\)\);/,
+    );
+    // The locked app shell sets height only; a min-height there would cap the growth.
+    const shellRule = css.slice(
+      css.indexOf('html.rose-app-shell,'),
+      css.indexOf('}', css.indexOf('html.rose-app-shell,')),
+    );
+    expect(shellRule).not.toMatch(/min-height|max-height/);
+  });
+
   it('defines the display corner and a gap equal to the mobile column side inset', () => {
     expect(css).toMatch(/--display-corner:\s*55px;/);
     // MainContent pads the chat column px-2 (0.5rem) on mobile; the bottom gap matches.
@@ -128,6 +149,17 @@ describe('mobile query box safe area (#11)', () => {
     expect(mobileRule()).toMatch(
       /padding-bottom:\s*calc\(\s*0\.75rem \+ max\(0px, var\(--safe-area-inset-bottom\) - var\(--mobile-querybox-gap\)\)\s*\)/,
     );
+  });
+
+  it('sizes and places the app shell from the iOS visible-viewport vars', async () => {
+    setViewport(430, 932);
+    await renderTerminal(true);
+    const shell = screen.getByTestId('terminal-app-shell');
+    // initViewportHeight writes these: full screen in the PWA, keyboard top while typing.
+    expect(shell.style.height).toBe('var(--app-height, 100dvh)');
+    expect(shell.style.top).toBe('var(--app-top, 0px)');
+    expect(shell).toHaveClass('fixed');
+    expect(screen.getByRole('main').style.height).toBe('var(--app-height, 100dvh)');
   });
 
   it('Rose Desktop: the input area opts in and leaves one gap under the box', async () => {
@@ -373,8 +405,10 @@ describe('Popular Goals (#15, #24, #55)', () => {
     await renderTerminal(true);
     expect(screen.queryByTestId('popular-goals-row')).not.toBeInTheDocument();
     const layer = screen.getByTestId('query-input-layer');
-    expect(layer.parentElement).toBe(document.body);
-    expect(layer).toHaveClass('z-[100]');
+    const frame = screen.getByTestId('query-input-frame');
+    expect(frame.parentElement).toBe(document.body);
+    expect(frame).toContainElement(layer);
+    expect(frame).toHaveClass('z-[100]');
     expect(within(layer).getByTestId('query-input-host')).toHaveClass('max-w-4xl', 'mx-auto');
     expect(within(layer).getByTestId('query-toolbar-nub')).toBeInTheDocument();
   });
@@ -422,6 +456,10 @@ function rootLayerZ(element: Element): number {
   return z;
 }
 
+function openPanelById(testId: string): HTMLElement | undefined {
+  return screen.getAllByTestId(testId).find((drawer) => drawer.dataset.state === 'open');
+}
+
 describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14)', () => {
   beforeEach(() => {
     setViewport(1280, 800);
@@ -437,6 +475,74 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     const composer = screen.getByTestId('query-input-layer');
     expect(rootLayerZ(composer)).toBe(100);
     expect(rootLayerZ(panel)).toBeGreaterThan(rootLayerZ(composer));
+  });
+
+  it('Settings opened from the account row stacks above the floating query box', async () => {
+    // Andy: "when i click the settings pane (it should be z-indexed above querybox)".
+    // Nothing insets the chat column for a right panel, so the 560px Settings
+    // drawer overlaps the centered composer; under it, the query box covered
+    // the bottom of the Settings forms.
+    const user = userEvent.setup({ delay: null });
+    await renderTerminal(true);
+    expandBar();
+    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
+    // A just-onboarded account has no profile name yet: the row reads "Account".
+    await user.click(await screen.findByRole('button', { name: 'Account' }));
+    const panel = screen
+      .getAllByTestId('rose-app-panel')
+      .find((drawer) => drawer.dataset.state === 'open');
+    expect(panel).toBeDefined();
+    if (panel === undefined) return;
+    expect(within(panel).getByTestId('rose-app-panel-settings')).toBeInTheDocument();
+    expect(panel.parentElement).toBe(document.body);
+    expect(rootLayerZ(panel)).toBeGreaterThan(composer);
+    // The top-right icon row that toggles it stays above its corner.
+    expect(rootLayerZ(screen.getByTestId('rose-app-icons'))).toBeGreaterThan(rootLayerZ(panel));
+  });
+
+  it('Feedback opened from the left bar stacks above the floating query box', async () => {
+    const user = userEvent.setup({ delay: null });
+    await renderTerminal(true);
+    expandBar();
+    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
+    await user.click(within(roseBar()).getByRole('button', { name: 'Feedback' }));
+    const panel = openPanelById('rose-app-panel');
+    expect(panel).toBeDefined();
+    if (panel === undefined) return;
+    expect(within(panel).getByTestId('rose-app-panel-feedback')).toBeInTheDocument();
+    expect(panel.parentElement).toBe(document.body);
+    expect(rootLayerZ(panel)).toBeGreaterThan(composer);
+    expect(rootLayerZ(screen.getByTestId('rose-app-icons'))).toBeGreaterThan(rootLayerZ(panel));
+  });
+
+  it('the Benchmarks panel stacks above the floating query box', async () => {
+    const user = userEvent.setup({ delay: null });
+    // Benchmarks has no Rose Desktop trigger: open it through the apps context.
+    function BenchmarksOpener() {
+      const apps = useRoseApps();
+      return (
+        <button type="button" onClick={() => apps?.toggleApp('benchmarks')}>
+          Open Benchmarks for test
+        </button>
+      );
+    }
+    renderWithProviders(
+      <RoseAppsProvider>
+        <BenchmarksOpener />
+        <QueryInputLayer enabled>
+          <textarea aria-label="Composer for test" />
+        </QueryInputLayer>
+      </RoseAppsProvider>,
+    );
+    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
+    expect(composer).toBe(100);
+    await user.click(screen.getByRole('button', { name: 'Open Benchmarks for test' }));
+    const panel = openPanelById('rose-app-panel');
+    expect(panel).toBeDefined();
+    if (panel === undefined) return;
+    expect(within(panel).getByTestId('rose-app-panel-benchmarks')).toBeInTheDocument();
+    expect(panel.parentElement).toBe(document.body);
+    expect(rootLayerZ(panel)).toBeGreaterThan(composer);
   });
 
   it('an app opened while project settings is open covers the drawer, not the reverse', async () => {
@@ -528,5 +634,35 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     releaseDetail();
     await waitFor(() => expect(screen.getByPlaceholderText('Type your message...')).toBe(input));
     expect(composer.isConnected).toBe(true);
+  });
+});
+
+// ─── Mobile trajectory text reads 2px larger ─────────────────────────────────
+
+describe('mobile trajectory text', () => {
+  const css = readFileSync(resolve(FRONT_END, 'src/index.css'), 'utf8');
+
+  it('bumps every message-list text size by 2px on phones only', () => {
+    const start = css.indexOf('@media (max-width: 767px) {\n  .rose-trajectory');
+    expect(start).toBeGreaterThan(-1);
+    const rule = css.slice(start, css.indexOf('\n}\n', start));
+    expect(rule).toMatch(/\.rose-trajectory \.text-xs \{\s*font-size: calc\(0\.75rem \+ 2px\)/);
+    expect(rule).toMatch(
+      /\.rose-trajectory \.text-sm,\s*\.rose-trajectory \.prose-sm \{\s*font-size: calc\(0\.875rem \+ 2px\)/,
+    );
+    // Every arbitrary px size used by trajectory components has a +2px override,
+    // so a newly introduced size cannot silently stay small on mobile.
+    const dir = resolve(FRONT_END, 'src/features/terminal-component-group/components');
+    const sources = execSync(
+      `grep -rhoE "text-\\[[0-9.]+px\\]" ${dir} --include=*.tsx --exclude-dir=rose-sidebar || true`,
+    )
+      .toString()
+      .split('\n')
+      .filter(Boolean);
+    for (const size of new Set(sources)) {
+      const px = Number(size.slice(6, -3));
+      const selector = `.rose-trajectory .${size.replace(/[[\].]/g, (c) => `\\${c}`)}`;
+      expect(rule, size).toContain(`${selector} {\n    font-size: ${px + 2}px;`);
+    }
   });
 });

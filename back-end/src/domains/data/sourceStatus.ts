@@ -9,7 +9,8 @@
 import { hasGoogleWorkspaceAccount } from '../../services/integrations/googleWorkspaceSync';
 import { SourceNotFoundError } from './errors';
 import * as repo from './repo';
-import { DATA_SOURCE_CONFIGS, isGoogleGrepSource, type ValidSource } from './types';
+import { DATA_SOURCE_CONFIGS, isGoogleGrepSource } from './types';
+import { isSourceName } from './validate.normalize';
 
 export interface SourceStatus {
   source: string;
@@ -23,21 +24,25 @@ const DOCUMENT_PROVIDER_CONNECTORS: Record<string, string> = {
   claude: 'claude',
   apple_notes: 'apple_notes',
   obsidian: 'obsidian',
+  granola: 'granola',
+  granola_note: 'granola',
+  granola_summary: 'granola',
+  granola_transcript: 'granola',
 };
 
 function connectorForSource(rawSource: string): string | null {
-  if (rawSource in DATA_SOURCE_CONFIGS) {
-    const source = rawSource as ValidSource;
-    return DATA_SOURCE_CONFIGS[source].connector;
+  if (isSourceName(rawSource)) {
+    return DATA_SOURCE_CONFIGS[rawSource].connector;
   }
-  if (rawSource in DOCUMENT_PROVIDER_CONNECTORS) {
+  // Own keys only: `toString` or `constructor` is not a document provider.
+  if (Object.prototype.hasOwnProperty.call(DOCUMENT_PROVIDER_CONNECTORS, rawSource)) {
     return DOCUMENT_PROVIDER_CONNECTORS[rawSource];
   }
   throw new SourceNotFoundError(rawSource);
 }
 
 function needsGoogleWorkspaceGrant(rawSource: string): boolean {
-  return rawSource in DATA_SOURCE_CONFIGS && isGoogleGrepSource(rawSource as ValidSource);
+  return isSourceName(rawSource) && isGoogleGrepSource(rawSource);
 }
 
 /**

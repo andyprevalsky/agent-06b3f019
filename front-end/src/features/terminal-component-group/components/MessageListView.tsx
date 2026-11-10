@@ -18,18 +18,17 @@
  *   Any task + web client --> preview banner --> open app | automatic download fallback
  *   Any task + Mac client ---------------------> no preview banner
  *   <=1 thinking stream --> one indicator; >1 streams --> one per stream
- *   Root view --> CodeAgentWaitStatus under the chips (Rose Desktop only; renders
- *     nothing when no code agent is live or asking)
  *
  * MOBILE ENTRY ANIMATION:
  * The container scope lets CSS disable only direct message root entry
  * animations on mobile while preserving nested chip/SVG/text animations and
  * non-message panel flashes.
  */
+import { useMemo } from 'react';
 import type { AgentDetail, Message, StreamingBubble, StreamingTool } from '../hooks';
 import { getClientSource } from '@/lib/clientSource';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
-import { withLiveTrajectory } from './trajectoryLiveMessages';
+import { useTrajectoryToolRows, withLiveTrajectory } from './trajectoryLiveMessages';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
 import {
   buildStreamingMetricsBySubAgentId,
@@ -37,7 +36,6 @@ import {
 } from './useMessageFiltering';
 import type { MessageAnimationState } from './useMessageList';
 import { ChatModeActions } from './ChatModeActions';
-import { CodeAgentWaitStatus } from './CodeAgentWaitStatus';
 import { MessageListItems } from './MessageListItems';
 import { StatusBanners, WebPreviewBanner } from './StatusBanners';
 import { ThinkingIndicator } from './ThinkingIndicator';
@@ -154,58 +152,56 @@ function TrajectoryItems({
     streaming,
     animation,
     selectedAgentId,
-    onSendMessage,
     compact,
-    onSubmitFeedback,
-    onNavigateToAgent,
     exploreStepMap,
     waitForCheckMap,
     thinkingVisible,
     subAgentId,
-    animatedTokenCount,
   } = props;
-  const streamingMetricsBySubAgentId = metrics;
+  const liveTools = useTrajectoryToolRows(
+    streaming.tools,
+    webSearchGrouping.foldedStreamingToolCallIds,
+  );
+  const liveMessages = useMemo(
+    () =>
+      compressWork
+        ? withLiveTrajectory(
+            filteredMessages,
+            liveTools,
+            thinkingVisible,
+            streaming.streamStartedAtMs,
+            agent?.status,
+          )
+        : filteredMessages,
+    [
+      compressWork,
+      filteredMessages,
+      liveTools,
+      thinkingVisible,
+      streaming.streamStartedAtMs,
+      agent?.status,
+    ],
+  );
   return (
     <MessageListItems
       groupAgentMessages={subAgentId === undefined}
       compressWork={compressWork}
       workStatus={agent?.status}
       workEndedAt={agent?.updated_at}
-      activityIndicator={
-        thinkingVisible && (
-          <ThinkingIndicators
-            visible={thinkingVisible}
-            compact
-            streaming={streaming}
-            streamingTokenCount={thinkingTokenCount(streamingMetricsBySubAgentId, subAgentId)}
-            animatedTokenCount={animatedTokenCount}
-          />
-        )
-      }
-      filteredMessages={
-        compressWork
-          ? withLiveTrajectory(
-              filteredMessages,
-              tailTools(streaming.tools, webSearchGrouping),
-              thinkingVisible,
-              streaming.streamStartedAtMs,
-              agent?.status,
-            )
-          : filteredMessages
-      }
+      filteredMessages={liveMessages}
       webSearchGrouping={webSearchGrouping}
       currentAnimatingId={animation.currentAnimatingId}
       onAnimationComplete={animation.handleAnimationComplete}
-      onNavigateToAgent={onNavigateToAgent}
+      onNavigateToAgent={props.onNavigateToAgent}
       selectedAgentId={selectedAgentId}
-      onSendMessage={onSendMessage}
+      onSendMessage={props.onSendMessage}
       compact={compact}
-      onSubmitFeedback={onSubmitFeedback}
+      onSubmitFeedback={props.onSubmitFeedback}
       exploreStepMap={exploreStepMap}
       waitForCheckMap={waitForCheckMap}
       streamingPlanCharCount={streaming.plan?.char_count}
       streamingPlanStartedAtMs={streaming.plan?.startedAtMs}
-      streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+      streamingMetricsBySubAgentId={metrics}
     />
   );
 }
@@ -237,19 +233,22 @@ export function MessageListView(props: MessageListViewProps) {
   const showMainBanners = showStatusBanners && subAgentId === undefined;
   const showAttention = shouldShowStreamingAttention(streaming.attention, subAgentId);
   const showWebPreview = showMainBanners && agent !== null && getClientSource() === 'WEB';
-  const streamingMetricsBySubAgentId = buildStreamingMetricsBySubAgentId(
-    streamingBubbles,
-    streamingTools,
+  const streamingMetricsBySubAgentId = useMemo(
+    () => buildStreamingMetricsBySubAgentId(streamingBubbles, streamingTools),
+    [streamingBubbles, streamingTools],
   );
 
   return (
-    <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
+    <div
+      ref={containerRef}
+      className={`${containerClassName} mobile-disable-message-entry-spawn rose-trajectory`}
+    >
       <TrajectoryItems
+        key={JSON.stringify([selectedAgentId, subAgentId])}
         props={props}
         metrics={streamingMetricsBySubAgentId}
         compressWork={compressWork}
       />
-      {subAgentId === undefined && <CodeAgentWaitStatus />}
       {chatActionsVisible && (
         <ChatModeActions filteredMessages={filteredMessages} selectedAgentId={selectedAgentId} />
       )}

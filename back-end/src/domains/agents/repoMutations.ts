@@ -5,8 +5,10 @@ import { createLogicalBrowserInTransaction } from '../../providers/browser/logic
 
 import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
+import type { AgentSpeed } from '../../providers/rose/speed';
 import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
 import { assertTaskPathsFree } from './repoTaskPath';
+import { optionalAgentCreateFields } from './repoAgentCreateFields';
 
 export {
   clearWorkflowForTerminalAgent,
@@ -28,65 +30,6 @@ export {
 // ---------------------------------------------------------------------------
 // Agent mutations
 // ---------------------------------------------------------------------------
-
-/**
- * Optional Agent columns that are only written when the caller supplied a value,
- * so DB-level defaults stand otherwise. Kept out of createAgentTransaction to keep
- * that function under the line budget.
- */
-function optionalAgentCreateFields(params: {
-  temporalWorkflowId?: string | null;
-  workflowMaxIterations?: number;
-  workflowContextGates?: Record<string, boolean>;
-  workflowStartPhase?: string;
-  workflowTaskQueue?: string;
-  priceLimitCents?: number;
-  writeLockEnabled?: boolean;
-  fastModeCacheEnabled?: boolean;
-  memoryEnabled?: boolean;
-  worldModelMode?: 'real' | 'simulate' | 'shadow';
-  isBenchmark?: boolean;
-  githubRepoUrl?: string;
-  originDeviceId?: string;
-  projectId?: string | null;
-  taskPath?: string | null;
-}): Partial<Prisma.AgentUncheckedCreateInput> {
-  return {
-    ...(params.projectId !== undefined && params.projectId !== null
-      ? { projectId: params.projectId }
-      : {}),
-    ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
-      ? { temporalWorkflowId: params.temporalWorkflowId }
-      : {}),
-    ...(params.workflowMaxIterations !== undefined
-      ? { workflowMaxIterations: params.workflowMaxIterations }
-      : {}),
-    ...(params.workflowContextGates !== undefined
-      ? { workflowContextGates: params.workflowContextGates }
-      : {}),
-    ...(params.workflowStartPhase !== undefined
-      ? { workflowStartPhase: params.workflowStartPhase }
-      : {}),
-    ...(params.workflowTaskQueue !== undefined
-      ? { workflowTaskQueue: params.workflowTaskQueue }
-      : {}),
-    ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
-      ? { priceLimitCents: params.priceLimitCents }
-      : {}),
-    ...(params.writeLockEnabled !== undefined ? { writeLockEnabled: params.writeLockEnabled } : {}),
-    ...(params.fastModeCacheEnabled !== undefined
-      ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
-      : {}),
-    ...(params.memoryEnabled !== undefined ? { memoryEnabled: params.memoryEnabled } : {}),
-    ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
-    ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
-    ...(params.githubRepoUrl !== undefined ? { githubRepoUrl: params.githubRepoUrl } : {}),
-    ...(params.originDeviceId !== undefined ? { originDeviceId: params.originDeviceId } : {}),
-    ...(params.taskPath !== undefined && params.taskPath !== null
-      ? { taskPath: params.taskPath }
-      : {}),
-  };
-}
 
 async function createAttachmentMessages(
   tx: Prisma.TransactionClient,
@@ -127,6 +70,7 @@ export interface CreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
@@ -142,6 +86,10 @@ export interface CreateAgentParams {
   /** Rose Mac app device that started this root agent (C14 local code agents). */
   originDeviceId?: string;
   projectId?: string | null;
+  folderId?: string | null;
+  title?: string;
+  graphSpawnHash?: string;
+  phoneSetupHash?: string;
   taskPath?: string | null;
 }
 
@@ -181,7 +129,10 @@ export async function createAgentTransaction(params: CreateAgentParams) {
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
-        temporalWorkflowStartPending: tracksDescendantStart,
+        temporalWorkflowStartPending:
+          tracksDescendantStart ||
+          params.graphSpawnHash !== undefined ||
+          params.phoneSetupHash !== undefined,
         ...optionalAgentCreateFields(params),
       },
     });
@@ -201,6 +152,18 @@ export async function createAgentTransaction(params: CreateAgentParams) {
         text: params.goal,
         role: 'USER',
         timestamp: new Date(),
+        ...(params.graphSpawnHash === undefined && params.phoneSetupHash === undefined
+          ? {}
+          : {
+              metadata: {
+                ...(params.graphSpawnHash === undefined
+                  ? {}
+                  : { graph_spawn_hash: params.graphSpawnHash }),
+                ...(params.phoneSetupHash === undefined
+                  ? {}
+                  : { iphone_setup_hash: params.phoneSetupHash }),
+              },
+            }),
       },
     });
 
@@ -213,6 +176,8 @@ export async function createAgentTransaction(params: CreateAgentParams) {
 }
 
 export interface BatchCreateAgentParams {
+  projectId?: string | null;
+  folderId?: string | null;
   agentId: string;
   userId: string;
   parentAgentId: string | null;
@@ -233,6 +198,7 @@ export interface BatchCreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  speed?: AgentSpeed;
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;

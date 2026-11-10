@@ -4,9 +4,11 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
  * Implements the fixed LLM call sequence based on Manus architecture:
  *
  * - direct_answer: Router → Generator (2 LLM calls)
- * - web_search: Router → parallel searches → Router → … → Generator or escalation
- *   (up to MAX_CHAT_SEARCH_ROUNDS search rounds; the Generator overlaps each
- *   after-search Router and is committed only when that Router answers)
+ * - web_search / grep: Router → search round → Router → … → Generator or escalation
+ *   (up to MAX_CHAT_SEARCH_ROUNDS search rounds shared by both kinds; the
+ *   Generator overlaps each after-search Router and is committed only when
+ *   that Router answers). A grep round runs the shared grep tool definition
+ *   on the user's own data (chatGrepRound.ts).
  * - agent_start_task: Router only → start Temporal (1 LLM call, exit)
  *
  * Both Router and Generator stream their reasoning as ASSISTANT_STREAM (thinking).
@@ -15,6 +17,8 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
  * System context / state flow:
  *
  *   startInitialChatContext ──┬─ messages ──> Router (GLM) ──> Cerebras
+ *   loadRouterProjectContext ─┤  (one read per turn: project section after the Router's and
+ *                             │   the Generator's cached prompts)
  *                             │                 │                 (fail closed)
  *                             │                 ├─ escalation ──> Temporal (router only)
  *                             │                 v
@@ -23,10 +27,11 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
  *                             ├─ direct_answer ──> reuse initial message snapshot
  *                             │    └─ Router-start Generator ──> buffered until commit
  *                             ├─ web_search ──> round: 1+ queries in parallel ──> reload
+ *                             ├─ grep ───────> round: one grep tool call ───────> reload
  *                             │    └─ closed action ──> abort/discard speculation
  *                             └─ round results ──> Router (after_search; the last
  *                                  │                round's route cannot search)
- *                                  ├─ web_search ──> next round
+ *                                  ├─ web_search | grep ──> next round
  *                                  ├─ direct_answer ──> commit overlapped Generator
  *                                  └─ escalation ──> discard Generator, Temporal
  *
@@ -45,7 +50,8 @@ import { acceptChatWorkflowExecution } from '../workflowGeneration';
 import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { MAX_CHAT_SEARCH_ROUNDS, type RouterStage } from './routerDecision';
-import { runChatWebSearchRound, type ChatSearchDecision } from './chatWebSearchRound';
+import { runChatWebSearchRound, type WebSearchDecision } from './chatWebSearchRound';
+import { runChatGrepRound, type GrepDecision } from './chatGrepRound';
 import { callGeneratorLlm, type GeneratorResponse } from './generatorLlm';
 import { selectChatPhaseModels, type ChatPhaseModels } from './phaseModels';
 import { startInitialChatContext, loadChatModelMessages, type ChatMessage } from './initialContext';
@@ -53,6 +59,7 @@ import { broadcastAgentModeStarted } from './supabaseBroadcast';
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
+import { loadRouterProjectContext } from './projectContext';
 import { followUpRunStateUpdate, shouldSnapshotPreviousGoal } from '../derivedRunState';
 import {
   createEarlyDirectGeneratorCoordinator,
@@ -89,8 +96,9 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     requestedModel: config.model,
   });
-  const [messages, userProfile] = await Promise.all([
+  const [messages, projectContext, userProfile] = await Promise.all([
     initialContext.messages,
+    loadRouterProjectContext(config.agentId),
     prisma.user.findUnique({ where: { userId: config.userId }, select: USER_PROFILE_SELECT }),
   ]);
   const userProfileContext = formatUserContext(userProfile);
@@ -103,11 +111,12 @@ export async function handleChatMessage(config: {
     return callGeneratorLlm({
       agentId: config.agentId,
       messages: generatorMessages,
-      userProfileContext,
       model: phaseModels.generator,
       providerRoute: phaseModels.generatorProviderRoute,
       abortSignal: speculative?.abortSignal,
       streamGate: speculative?.streamGate,
+      projectContext,
+      userProfileContext,
     });
   };
 
@@ -125,9 +134,10 @@ export async function handleChatMessage(config: {
     routerResponse = await callRouterLlm({
       agentId: config.agentId,
       messages,
-      userProfileContext,
       model: phaseModels.router,
       providerRoute: phaseModels.routerProviderRoute,
+      projectContext,
+      userProfileContext,
       onRouterStarted: shouldSpeculateDirectAnswer ? speculativeGenerator.start : undefined,
       onActionDetected: (action) => {
         if (action !== 'direct_answer') void speculativeGenerator.discard();
@@ -269,32 +279,42 @@ export async function handleChatMessage(config: {
   }
 
   // ============================================
-  // BRANCH: web_search → search, then route again with the results.
+  // BRANCH: web_search or grep → search, then route again with the results.
   // The Router owns escalation; the Generator can only reply. After each
-  // round the Router answers, searches again, or escalates; once the turn's
-  // rounds are spent it can only answer or escalate.
+  // round the Router answers, searches again (either kind), or escalates;
+  // once the turn's rounds are spent it can only answer or escalate.
   // ============================================
   let generatorMessages = messages;
   let earlyGeneratorResponse: GeneratorResponse | null;
   if (decision.action === 'web_search' || decision.action === 'grep') {
-    let search: ChatSearchDecision = decision;
+    let search: WebSearchDecision | GrepDecision = decision;
     let earlyToolCallId = webSearchToolCallId;
     let searchRouterStreamId = routerStreamId;
     for (let round = 1; ; round += 1) {
-      await runChatWebSearchRound({
-        agentId: config.agentId,
-        decision: search,
-        userId: config.userId,
-        earlyToolCallId,
-        routerStreamId: searchRouterStreamId,
-      });
+      if (search.action === 'web_search') {
+        await runChatWebSearchRound({
+          agentId: config.agentId,
+          decision: search,
+          earlyToolCallId,
+          routerStreamId: searchRouterStreamId,
+        });
+      } else {
+        await runChatGrepRound({
+          agentId: config.agentId,
+          userId: config.userId,
+          decision: search,
+          routerStreamId: searchRouterStreamId,
+        });
+      }
       generatorMessages = await loadChatModelMessages(chatContextConfig);
       const next = await routeAfterSearch({
         agentId: config.agentId,
         userId: config.userId,
         messages: generatorMessages,
-        userProfileContext,
         phaseModels,
+        projectContext,
+        userProfileContext,
+      userProfileContext,
         runGenerator,
         stage: round < MAX_CHAT_SEARCH_ROUNDS ? 'after_search' : 'search_budget_spent',
       });
@@ -316,7 +336,7 @@ export async function handleChatMessage(config: {
   // ============================================
   // Generator - Create response
   // Streams reasoning as thinking, returns response for true message
-  // (Called for direct_answer, and for web_search the Router answered)
+  // (Called for direct_answer, and for a search the Router answered)
   // ============================================
   log.info('[ChatHandler] Generating response', { agentId: config.agentId });
 
@@ -372,7 +392,7 @@ export async function handleChatMessage(config: {
 }
 
 // ============================================
-// Helper: Route again after a round of web searches
+// Helper: Route again after a search round (web searches or grep)
 // ============================================
 /**
  * Most searches answer the question, so the Generator overlaps this route
@@ -382,8 +402,9 @@ async function routeAfterSearch(params: {
   agentId: string;
   userId: string;
   messages: ChatMessage[];
-  userProfileContext: string;
   phaseModels: ChatPhaseModels;
+  projectContext: string;
+  userProfileContext: string;
   stage: Exclude<RouterStage, 'initial'>;
   runGenerator: (
     messages: ChatMessage[],
@@ -403,9 +424,10 @@ async function routeAfterSearch(params: {
     routerResponse = await callRouterLlm({
       agentId: params.agentId,
       messages: params.messages,
-      userProfileContext: params.userProfileContext,
       model: params.phaseModels.router,
       providerRoute: params.phaseModels.routerProviderRoute,
+      projectContext: params.projectContext,
+      userProfileContext: params.userProfileContext,
       stage: params.stage,
       onRouterStarted: speculativeGenerator.start,
       onActionDetected: (action) => {

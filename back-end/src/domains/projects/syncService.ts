@@ -208,6 +208,24 @@ async function planPush(project: repo.ProjectRecord, body: SyncPushBody) {
     repo.listEnvFiles(project.id),
     repo.findSyncSnapshot(project.id),
   ]);
+  const manifest = sanitizeManifest(body.manifest);
+  const canReuse = repo.syncSnapshotMatchesRepo(
+    manifest.git?.remoteUrl ?? null,
+    (snapshot?.manifest as unknown as ProjectSyncManifest | undefined) ?? null
+  );
+  if (
+    !canReuse &&
+    snapshot &&
+    ((body.gitBundle === undefined && snapshot.encryptedGitBundle !== null) ||
+      (body.uncommittedPatch === undefined && snapshot.encryptedUncommittedPatch !== null))
+  ) {
+    throw new ProjectError(
+      409,
+      'Repository changed; resend or explicitly clear sync artifacts',
+      'stale_fingerprint'
+    );
+  }
+  const reusableSnapshot = canReuse ? snapshot : null;
   const byPath = new Map(existingFiles.map((file) => [file.path, file]));
   const planned = body.files.map((file) =>
     planFile(project.syncSalt, file, byPath.get(normalizeProjectPath(file.path)!))
@@ -216,8 +234,8 @@ async function planPush(project: repo.ProjectRecord, body: SyncPushBody) {
     'git bundle',
     body.gitBundle,
     {
-      envelope: snapshot?.encryptedGitBundle ?? null,
-      fingerprint: snapshot?.gitBundleFingerprint ?? null,
+      envelope: reusableSnapshot?.encryptedGitBundle ?? null,
+      fingerprint: reusableSnapshot?.gitBundleFingerprint ?? null,
     },
     MAX_GIT_BUNDLE_ENVELOPE_CHARS
   );
@@ -225,8 +243,8 @@ async function planPush(project: repo.ProjectRecord, body: SyncPushBody) {
     'uncommitted patch',
     body.uncommittedPatch,
     {
-      envelope: snapshot?.encryptedUncommittedPatch ?? null,
-      fingerprint: snapshot?.patchFingerprint ?? null,
+      envelope: reusableSnapshot?.encryptedUncommittedPatch ?? null,
+      fingerprint: reusableSnapshot?.patchFingerprint ?? null,
     },
     MAX_PATCH_ENVELOPE_CHARS
   );
@@ -235,7 +253,7 @@ async function planPush(project: repo.ProjectRecord, body: SyncPushBody) {
     body.prune === false
       ? []
       : existingFiles.filter((f) => f.source === 'sync' && !pushed.has(f.path)).map((f) => f.path);
-  return { planned, bundle, patch, pruned, manifest: sanitizeManifest(body.manifest) };
+  return { planned, bundle, patch, pruned, manifest };
 }
 
 export async function applySyncPush(userId: string, projectId: string, body: SyncPushBody) {
@@ -256,10 +274,20 @@ export async function applySyncPush(userId: string, projectId: string, body: Syn
   }
   const { planned, bundle, patch, pruned, manifest } = await planPush(project, body);
   const remote = manifest.git?.remoteUrl ?? null;
-  const revision = await repo.claimSyncRevision(
+  const revision = await repo.commitSyncPush(
     project.id,
     body.baseRevision,
-    project.repoUrl === null && remote !== null ? { repoUrl: remote } : {}
+    project.repoUrl,
+    project.repoUrl === null && remote !== null ? { repoUrl: remote } : {},
+    planned.map((item) => item.write),
+    pruned,
+    {
+      manifest,
+      encryptedGitBundle: bundle.envelope,
+      gitBundleFingerprint: bundle.fingerprint,
+      encryptedUncommittedPatch: patch.envelope,
+      patchFingerprint: patch.fingerprint,
+    }
   );
   if (revision === null) {
     throw new ProjectError(
@@ -268,15 +296,6 @@ export async function applySyncPush(userId: string, projectId: string, body: Syn
       'revision_conflict'
     );
   }
-  for (const item of planned) await repo.upsertEnvFile(project.id, item.write);
-  await repo.deleteEnvFilesByPath(project.id, pruned);
-  await repo.writeSyncSnapshot(project.id, revision, {
-    manifest,
-    encryptedGitBundle: bundle.envelope,
-    gitBundleFingerprint: bundle.fingerprint,
-    encryptedUncommittedPatch: patch.envelope,
-    patchFingerprint: patch.fingerprint,
-  });
   const refreshed = await requireProject(userId, project.id);
   return {
     project: await projectDto(userId, refreshed),

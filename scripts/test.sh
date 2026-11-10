@@ -320,6 +320,7 @@ run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.p
 run_suite "Biz Review Card" python3 scripts/biz_review.py self-test
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
 run_suite "run.sh Process Tree Reaper" bash scripts/tests/run-sh-kill-tree.test.sh
+run_suite "Devbox Teardown" bash scripts/tests/devbox-teardown.test.sh
 run_suite "Fleet Post-Child Autoscaler Settle" bash scripts/tests/fleet-post-child-settle.test.sh
 run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelligence-category.test.sh
 run_suite "RCA Prompt-Edit Abstraction Contract" bash scripts/tests/rca-prompt-edit-abstraction.test.sh
@@ -364,6 +365,7 @@ run_suite "Cloud Benchmark Archived Reuse Stream Transport" python3 scripts/test
 run_suite "Cloud Benchmark Isolated Generation" python3 scripts/tests/cloudbench-isolated-generation.test.py
 run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench-archived-owner-stop.test.py
 run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
+run_suite "Cloud Benchmark Pre-Terminal Infra Release" python3 scripts/tests/cloudbench-preterminal-infra-release.test.py
 run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-operator-preflight.test.py
 run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
 run_suite "Cloud Benchmark Inventory Stdlib Startup" python3 scripts/tests/cloudbench-inventory-site-startup.test.py

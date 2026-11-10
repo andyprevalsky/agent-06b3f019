@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { hostname } from 'node:os';
 import { RateLimitError, Sandbox, ServiceBusyError } from 'e2b';
 import { alertError } from './errorAlert';
 import { v4 as uuidv4 } from 'uuid';
@@ -151,6 +153,51 @@ export class E2BSandboxCapacityError extends Error {
   }
 }
 
+/**
+ * Who created a sandbox, carried as E2B metadata so ownership is attributable:
+ * the deployment (`roseOrigin`: the Render service on Render, else this host) and the
+ * stack (`roseStack`: origin + workspace name + the database it records sandboxes in, or an
+ * explicit ROSE_SANDBOX_STACK_ID). Every sandbox of a stack is recorded in that
+ * stack's database, so its teardown and its orphan reaper can act on exactly
+ * its own sandboxes (codeSessions/sandboxReaper.ts). The database part is a
+ * hash of host/port/name only; no credentials are tagged.
+ */
+export function roseSandboxIdentity(): { roseOrigin: string; roseStack: string } {
+  const roseOrigin =
+    process.env.ROSE_SANDBOX_ORIGIN?.trim() ||
+    // Render sets RENDER=true on its instances; a laptop .env may carry the
+    // production RENDER_SERVICE_ID and must not claim the production origin.
+    (process.env.RENDER === 'true' && process.env.RENDER_SERVICE_ID
+      ? `render:${process.env.RENDER_SERVICE_ID}`
+      : '') ||
+    `host:${hostname()}`;
+  const explicit = process.env.ROSE_SANDBOX_STACK_ID?.trim();
+  // Every boxes devbox shares hostname `boxes` and the same local DB, so host+db
+  // cannot tell workspaces apart. The workspace name (run.sh and `.cloud-env` set
+  // it, clone-unique) does. Render keeps its format; sandboxes tagged before this
+  // part existed keep their old `host:..|db:..` stack id.
+  const workspace = process.env.CONDUCTOR_WORKSPACE_NAME?.trim();
+  const workspacePart = workspace && !roseOrigin.startsWith('render:') ? `|ws:${workspace}` : '';
+  return {
+    roseOrigin,
+    roseStack: explicit || `${roseOrigin}${workspacePart}|db:${databaseFingerprint()}`,
+  };
+}
+
+function databaseFingerprint(): string {
+  const raw = process.env.DATABASE_URL;
+  if (raw === undefined || raw === '') return 'none';
+  try {
+    const url = new URL(raw);
+    return createHash('sha256')
+      .update(`${url.hostname}:${url.port}${url.pathname}`)
+      .digest('hex')
+      .slice(0, 16);
+  } catch {
+    return 'unparsed';
+  }
+}
+
 export async function createSandboxWithRetry(
   templateId: string,
   options: Parameters<typeof Sandbox.create>[1],
@@ -187,7 +234,7 @@ async function createSandboxAttempts(
     // give the control plane enough room, and still classify abort as transient.
     retries: SANDBOX_CREATE_SDK_RETRIES,
     requestTimeoutMs: Math.max(callerRequestTimeoutMs ?? 0, SANDBOX_CREATE_REQUEST_TIMEOUT_MS),
-    metadata: { ...(options?.metadata ?? {}), createRequestId },
+    metadata: { ...(options?.metadata ?? {}), ...roseSandboxIdentity(), createRequestId },
   } as Parameters<typeof Sandbox.create>[1];
 
   let attempt = 0;

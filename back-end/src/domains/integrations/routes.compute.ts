@@ -8,6 +8,7 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { InvalidFoundryCooldownRequest } from '../../providers/foundryDeploymentCooldown';
 import { computeTokenAuthority } from '../../providers/computeTokenAuthority';
+import { isFeedbackCredential } from '../../providers/codeLoginRejection';
 import * as service from './service';
 
 const router = Router({ mergeParams: true });
@@ -136,7 +137,10 @@ router.get(
   })
 );
 
-/** POST /api/integrations/compute-code/token/lineage-heartbeat */
+/** POST /api/integrations/compute-code/token/lineage-heartbeat
+ *  Optional `integrationId` + `usage` ({ observedAt, fiveHour?, sevenDay? }, each
+ *  window `{ usedPct, resetsAt }`): the subscription usage the worker last saw
+ *  for this token, recorded on that Integration row. */
 router.post(
   '/compute-code/token/lineage-heartbeat',
   authenticate,
@@ -146,7 +150,12 @@ router.post(
     }
     const body = (req.body as Record<string, unknown> | undefined) ?? {};
     const lineageKey = typeof body.lineageKey === 'string' ? body.lineageKey : '';
-    return res.json(await service.heartbeatComputeTokenLineage(lineageKey));
+    return res.json(
+      await service.heartbeatComputeTokenLineage(
+        lineageKey,
+        service.parseSubscriptionUsageReport(body)
+      )
+    );
   })
 );
 
@@ -266,6 +275,9 @@ router.post(
 
     const body = (req.body as Record<string, unknown> | undefined) ?? {};
     const userIdFromHeader = req.headers['x-user-id'] as string | undefined;
+    if (!isFeedbackCredential(body.credential)) {
+      return res.status(400).json({ error: 'credential must be a token fingerprint' });
+    }
     try {
       const result = await service.markComputeTokenRateLimited(
         (body.type as string | undefined) ?? '',
@@ -276,6 +288,8 @@ router.post(
           rateLimitedUntil: body.rateLimitedUntil as string | undefined,
           failureReason: body.failureReason as string | undefined,
           credentialId: body.credentialId as string | undefined,
+          integrationId: typeof body.integrationId === 'string' ? body.integrationId : undefined,
+          credential: body.credential as string | undefined,
           model: body.model as string | undefined,
           region: typeof body.region === 'string' ? body.region : undefined,
           deployment: typeof body.deployment === 'string' ? body.deployment : undefined,

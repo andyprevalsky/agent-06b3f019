@@ -1,16 +1,42 @@
 /**
  * Glue between the code-session HTTP surface (claude-code / codex-code
  * domains) and the persistent CodeSession lifecycle.
+ *
+ * One spawn tool call starts one task. The agents activity is at-least-once
+ * and retries a create that outlives its read (a fresh repo sandbox restores
+ * its project for minutes) while the first request keeps running here, all
+ * under the call's lease owner `tool:<agent>:<call>`:
+ *
+ *   create(tool:…) ─▶ per-lease-owner lock ─┬─ stored task still ACTIVE ─▶ that task (replay)
+ *                                           └─ otherwise ─▶ resolve + lease ─▶ create() ─▶ store
+ *
+ * A replay never reaches create(), so it never restarts the CLI the first
+ * request started (RCA 2026-11-06-code-spawn-create-retry-duplicated-sessions).
+ * Resize and usage-limit switches close the task before they create again
+ * under the same owner, so they create. Owners other than `tool:` (agent-level
+ * spawns) name distinct spawns and are never replayed.
  */
+import type { Prisma } from '@prisma/client';
 import { Sandbox } from 'e2b';
 import { rootPreviewPath } from '../codePreview/rootPath';
 import { prisma } from '../database';
 import { E2BSandboxCapacityError } from '../e2bSandboxCreate';
+import { GithubRateLimitedError } from '../githubRateLimit';
 import { createLogger } from '../logger';
+import { getEphemeral, putEphemeral, withSerializedLock } from '../sharedState';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
-import { checkpointCodeSession, retireCodeSession, sweepExpiredCodeSessions } from './lifecycle';
+import { drainStartupTurns } from './startupTurns';
+import {
+  checkpointCodeSession,
+  defaultCodeSessionMaintenanceDeps,
+  forgetCodeSessionMaintenance,
+  retireCodeSession,
+  scheduleCodeSessionMaintenance,
+  sweepExpiredCodeSessions,
+  type CodeSessionMaintenanceDeps,
+} from './lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
   CodeSessionBusyError,
@@ -18,14 +44,20 @@ import {
   extendLease,
   findOwnedCodeSession,
   markPaused,
+  releaseLease,
   resolveCodeSession,
   type CodeSessionRow,
 } from './store';
 import {
   CODE_SANDBOX_IDLE_TIMEOUT_MS,
+  CodeSessionHeldError,
   CodeSessionPauseUnconfirmedError,
 } from '../e2bCodeSessionSandbox';
-import { switchCodeSessionProvider } from './usageLimit';
+import {
+  revertCodeSessionProvider,
+  switchCodeSessionProvider,
+  type SpawnCodeSession,
+} from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
 import {
@@ -41,7 +73,7 @@ export { CodeSessionBusyError, CodeSessionNotFoundError } from './store';
 /** HTTP status + body for a code-session error, or null when it is not one. */
 export function codeSessionHttpError(
   error: unknown
-): { status: number; body: { error: string; code: string } } | null {
+): { status: number; body: { error: string; code: string } & Record<string, unknown> } | null {
   if (error instanceof CodeSessionNotFoundError) {
     return {
       status: 404,
@@ -51,8 +83,23 @@ export function codeSessionHttpError(
   if (error instanceof CodeSessionBusyError) {
     return { status: 409, body: { error: error.message, code: 'CODE_SESSION_BUSY' } };
   }
+  if (error instanceof CodeSessionHeldError) {
+    // Retryable: the spawn attaches once the user hands the live CLI back.
+    return { status: 409, body: { error: error.message, code: 'CODE_SESSION_HELD' } };
+  }
   if (error instanceof E2BSandboxCapacityError) {
     return { status: error.statusCode, body: { error: error.message, code: error.code } };
+  }
+  if (error instanceof GithubRateLimitedError) {
+    return {
+      status: 429,
+      body: {
+        error: error.message,
+        code: error.code,
+        reset_at: error.resetAt,
+        retry_after_seconds: error.retryAfterSeconds(),
+      },
+    };
   }
   return null;
 }
@@ -82,7 +129,7 @@ export async function resolveSpawnCodeSession(
     agent?.busId !== undefined && agent.busId !== null && agent.busId !== ''
       ? agent.busId
       : params.agentId;
-  sweepExpiredCodeSessions(userId);
+  void sweepExpiredCodeSessions(userId);
   // "New agent in this branch" works in the shared agent's session; every
   // other agent owns its own worktree and branch (plan §1b).
   const ownerAgentId = await effectiveOwnerAgentId(userId, params.agentId);
@@ -116,38 +163,189 @@ export async function resolveSpawnCodeSession(
   return session;
 }
 
+type SpawnCreateResult = {
+  taskId: string;
+  resumedFrom?: string;
+  cliSessionId?: string | null;
+  sandboxSize?: SandboxSize | null;
+  historyEvents?: number;
+  startup?: { wsReadyMs: number; cloneMs: number | null };
+};
+
+const SPAWN_CREATE_NAMESPACE = 'code-spawn-create';
+/**
+ * How long a retried create waits for its spawn's first request: that one may
+ * wait for the shared E2B create slot (up to 15 minutes, e2bCreateSlot.ts) and
+ * then start the sandbox.
+ */
+const SPAWN_CREATE_WAIT_MS = 30 * 60_000;
+/** Replay window: activity retries of one spawn arrive within it. One row per spawn. */
+const SPAWN_CREATE_RECORD_TTL_MS = 6 * 60 * 60_000;
+
+/** The replay key: only a spawn tool call's lease owner identifies one spawn. */
+function spawnCreateKey(leaseOwner: string | undefined): string | null {
+  return leaseOwner !== undefined && leaseOwner.startsWith('tool:') ? leaseOwner : null;
+}
+
+/** The spawn's stored create when its task is still running on the requested provider. */
+async function replayedSpawnCreate<T extends SpawnCreateResult>(
+  key: string,
+  codeProvider: string
+): Promise<{ session: T; fields: CodeSessionSpawnFields } | null> {
+  const stored = await getEphemeral<{ session: T; fields: CodeSessionSpawnFields }>(
+    SPAWN_CREATE_NAMESPACE,
+    key
+  );
+  if (stored === undefined || stored.fields?.code_provider !== codeProvider) return null;
+  // A record that cannot name its task (an older shape, or a create that returned none) has nothing to replay;
+  // a unique lookup on an undefined id is a Prisma validation error, not an absent task.
+  const taskId: unknown = stored.session?.taskId;
+  if (typeof taskId !== 'string' || taskId === '') return null;
+  const task = await prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: { status: true },
+  });
+  if (task?.status !== 'ACTIVE') return null;
+  log.info('Replaying a retried spawn create: its task is still running', {
+    taskId: stored.session.taskId,
+    codeSessionId: stored.fields.code_session_id ?? undefined,
+    leaseOwner: key,
+  });
+  return stored;
+}
+
+/**
+ * Resolve the spawn's code session and run the sandbox create once per spawn:
+ * a retried create of the same tool call gets the task its first request
+ * started (see the header).
+ */
+export async function createWithCodeSession<T extends SpawnCreateResult>(
+  params: ResolveSpawnParams,
+  create: (codeSession: SpawnCodeSession | null, handoff: string | null) => Promise<T>
+): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
+  const key = spawnCreateKey(params.leaseOwner);
+  if (key === null) return createSpawnTask(params, create);
+  return withSerializedLock(
+    `${SPAWN_CREATE_NAMESPACE}:${key}`,
+    async () => {
+      const replayed = await replayedSpawnCreate<T>(key, params.codeProvider);
+      if (replayed !== null) {
+        await deliverStartupTurns(key, replayed.session.taskId);
+        return replayed;
+      }
+      const created = await createSpawnTask(params, create);
+      await putEphemeral(
+        SPAWN_CREATE_NAMESPACE,
+        key,
+        created as unknown as Prisma.InputJsonValue,
+        SPAWN_CREATE_RECORD_TTL_MS
+      ).catch((error: unknown) => {
+        // The task exists and this response carries it; only a later retry loses its replay.
+        log.error('Storing the spawn create for retries failed', {
+          taskId: created.session.taskId,
+          leaseOwner: key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      await deliverStartupTurns(key, created.session.taskId);
+      return created;
+    },
+    { waitMs: SPAWN_CREATE_WAIT_MS }
+  );
+}
+
+/**
+ * Messages sent to this spawn before its session existed go to it now (see
+ * startupTurns.ts). The task is running, so a failure here is logged and the
+ * create still succeeds; a replayed create runs the drain again.
+ */
+async function deliverStartupTurns(key: string, taskId: string): Promise<void> {
+  await drainStartupTurns(key, taskId).catch((error: unknown) => {
+    log.error('Delivering the messages queued during startup failed', {
+      taskId,
+      leaseOwner: key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
 /**
  * Resolve the spawn's code session, run the sandbox create, and release the
  * lease when the create fails so a retry (or the next spawn) can resume.
  */
-export async function createWithCodeSession<
-  T extends {
-    resumedFrom?: string;
-    cliSessionId?: string | null;
-    sandboxSize?: SandboxSize | null;
-  },
->(
+async function createSpawnTask<T extends SpawnCreateResult>(
   params: ResolveSpawnParams,
-  create: (codeSession: CodeSessionRow | null, handoff: string | null) => Promise<T>
+  create: (codeSession: SpawnCodeSession | null, handoff: string | null) => Promise<T>
 ): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
-  let codeSession = await resolveSpawnCodeSession(params);
+  let codeSession: SpawnCodeSession | null = await resolveSpawnCodeSession(params);
   // C15: a retry after a usage limit may run on the other provider. It keeps
-  // the session (branch, commits, files via the checkpoint) and gets a
-  // handoff summary instead of the other CLI's conversation.
+  // the session (branch, commits, files via the checkpoint) and gets a handoff
+  // prompt instead of the other CLI's conversation; the previous CLI's session
+  // log rides on the session handle, and the sandbox acquire writes it into
+  // the new sandbox at the path the prompt names.
   let handoff: string | null = null;
+  let switchedFrom: string | null = null;
   if (codeSession !== null && codeSession.codeProvider !== params.codeProvider) {
+    switchedFrom = codeSession.codeProvider;
+    // A concurrent duplicate loses with CodeSessionBusyError and keeps the
+    // winner's lease (same owner), so exactly one spawn rotates the session.
     const switched = await switchCodeSessionProvider(codeSession, params.codeProvider, (id) =>
       Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
     );
-    codeSession = switched.session;
+    codeSession = {
+      ...switched.session,
+      handoffTrajectory: switched.trajectory,
+      retainFailedStartLease: true,
+    };
     handoff = switched.handoff;
   }
   let session: T;
   try {
     session = await create(codeSession, handoff);
   } catch (error) {
-    if (codeSession !== null && !(error instanceof CodeSessionPauseUnconfirmedError)) {
-      await markPaused(codeSession.id);
+    // A start that failed after the switch hands the session back, so the
+    // retry switches again and gets the handoff and trajectory once more.
+    if (
+      codeSession !== null &&
+      switchedFrom !== null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
+      await revertCodeSessionProvider(
+        codeSession.id,
+        params.codeProvider,
+        switchedFrom,
+        codeSession.leaseOwner,
+        (id) => Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
+      ).catch((cleanupError: unknown) => {
+        log.error('Provider switch rollback failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
+    }
+    // Refused because the user holds the live CLI in direct chat: the session is
+    // live, so only this spawn's lease is dropped (marking it PAUSED would read as
+    // stopped and let another spawn take the lease and stop that ws-server).
+    if (codeSession !== null && error instanceof CodeSessionHeldError) {
+      await releaseLease(codeSession.id, codeSession.leaseOwner).catch((cleanupError: unknown) => {
+        log.error('Held-session lease release failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
+    } else if (
+      codeSession !== null &&
+      switchedFrom === null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
+      await markPaused(codeSession.id).catch((cleanupError: unknown) => {
+        log.error('Failed-start pause failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
     }
     throw error;
   }
@@ -168,6 +366,11 @@ export async function createWithCodeSession<
       sandbox_size:
         session.sandboxSize !== undefined && session.sandboxSize !== null
           ? sizeView(session.sandboxSize)
+          : null,
+      history_events: session.historyEvents ?? 0,
+      startup:
+        session.startup !== undefined
+          ? { ws_ready_ms: session.startup.wsReadyMs, clone_ms: session.startup.cloneMs }
           : null,
     },
   };
@@ -194,6 +397,13 @@ export interface CodeSessionSpawnFields {
   provider_handoff: boolean;
   /** vCPUs / memory of the E2B sandbox (C16); null for a local session. */
   sandbox_size: SizeView | null;
+  /**
+   * resumed_from=live_cli: the ws-server's events before this spawn's goal turn
+   * (the earlier turns of the live CLI); the monitor treats them as history.
+   */
+  history_events: number;
+  /** Startup phases of the ws-server this spawn started (null: it attached to a live one). */
+  startup: { ws_ready_ms: number; clone_ms: number | null } | null;
 }
 
 export interface CodeSessionView {
@@ -267,18 +477,22 @@ async function sampleAndPublish(
 
 /**
  * Keepalive from the attached code-agent activity (liveness is heartbeat-only;
- * there is no runtime limit): extend the E2B sandbox's idle window and the
- * session lease. Once keepalives stop, the sandbox pauses after the window.
+ * there is no runtime limit): extend the session lease and the E2B sandbox's
+ * idle window, and save the session periodically (cycling the sandbox before
+ * E2B's continuous-runtime cap; lifecycle.ts). Once keepalives stop, the
+ * sandbox pauses after the window. The lease is extended first: a failed E2B
+ * call must not let it lapse, or another spawn could take the session from
+ * under the running CLI.
  */
 export async function keepAliveCodeTask(
   taskId: string,
   setTimeoutFn: (sandboxId: string, timeoutMs: number) => Promise<void> = (sandboxId, timeoutMs) =>
     Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey: process.env.E2B_API_KEY }),
-  resources: CodeResourceDeps = codeResourceDeps
+  resources: CodeResourceDeps = codeResourceDeps,
+  maintenance: CodeSessionMaintenanceDeps = defaultCodeSessionMaintenanceDeps
 ): Promise<{
   alive: boolean;
   code_session_id: string | null;
-  awaiting_parent: AwaitingParentQuestion | null;
   /** A pending resize the attached activity applies (C16); present only when there is one. */
   resize_requested?: { request_id: string; from: SizeView; to: SizeView };
   /** Latest CPU / memory / disk sample of the sandbox (item 29); present only when sampled. */
@@ -286,7 +500,8 @@ export async function keepAliveCodeTask(
 }> {
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
   if (task === null || task.status === 'CLOSED') {
-    return { alive: false, code_session_id: task?.codeSessionId ?? null, awaiting_parent: null };
+    forgetCodeSessionMaintenance(task?.codeSessionId ?? null);
+    return { alive: false, code_session_id: task?.codeSessionId ?? null };
   }
   // Only an E2B sandbox has an idle window; a Mac session (C14) lives while its
   // CLI runs and the Rose Mac app is connected.
@@ -295,46 +510,21 @@ export async function keepAliveCodeTask(
   // and resize reads so its bounded E2B read never delays them.
   const e2b =
     !isLocalClaudeCodeSandboxId(task.sandboxId) && !isLocalDeviceSandboxId(task.sandboxId);
-  if (e2b) await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+  if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
+  if (e2b) {
+    await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+    scheduleCodeSessionMaintenance(task, maintenance);
+  }
   const [sample, resize] = await Promise.all([
     e2b ? sampleAndPublish(task, resources) : Promise.resolve(null),
-    (async () => {
-      if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
-      return pendingResizeForTask(task.codeSessionId);
-    })(),
+    pendingResizeForTask(task.codeSessionId),
   ]);
   return {
     alive: true,
     code_session_id: task.codeSessionId,
-    awaiting_parent: (task.awaitingParent ?? null) as AwaitingParentQuestion | null,
     ...(resize !== null ? { resize_requested: resize } : {}),
     ...(sample !== null ? { resources: sample } : {}),
   };
-}
-
-/** A question a code agent asked the Rose agent whose spawn it is running in. */
-export interface AwaitingParentQuestion {
-  message_id: string;
-  question: string;
-  at: string;
-}
-
-/**
- * The code agent asked its spawning (non-root) Rose agent a question. That
- * agent is blocked inside this very spawn, so the attached activity sees the
- * mark on its next keepalive, pauses the session (resumable, never failed) and
- * returns the question; the answer resumes the session as a new task.
- */
-export async function markAwaitingParent(
-  taskId: string,
-  question: { message_id: string; question: string }
-): Promise<void> {
-  await prisma.claudeCodeSession.updateMany({
-    where: { id: taskId, status: { not: 'CLOSED' } },
-    data: {
-      awaitingParent: { ...question, at: new Date().toISOString() },
-    },
-  });
 }
 
 /**

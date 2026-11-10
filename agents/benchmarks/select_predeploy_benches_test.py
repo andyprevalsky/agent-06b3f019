@@ -17,6 +17,8 @@ from .select_predeploy_benches import (
     KNOWN_DEPLOY_CATEGORIES,
     has_pass_streak,
     load_attempt_passes,
+    format_report,
+    main,
     select_predeploy_benches,
 )
 
@@ -65,9 +67,13 @@ def test_predeploy_excludes_production_only_even_with_pass_streak(tmp_path: Path
     catalog = tmp_path / "tasks.json"
     attempts = tmp_path / "attempts.jsonl"
     tasks = [
-        {"name": "normal-smoke", "tags": ["smoke"]},
+        {"name": "normal-smoke", "tags": ["smoke"], "requires_claude_code": True},
         {"name": "production-smoke", "tags": ["smoke"], "production_only": True},
-        {"name": "normal-payment", "tags": ["payment"], "deploy_canary": True, "timeout_seconds": 20},
+        {
+            "name": "normal-payment", "tags": ["payment", "agentcard-lifecycle-sandbox"],
+            "expected_payment_lifecycle": {"orgTransfer": {"livemode": False}},
+            "deploy_canary": True, "timeout_seconds": 20,
+        },
         {
             "name": "production-payment",
             "tags": ["payment"],
@@ -94,6 +100,60 @@ def test_predeploy_excludes_production_only_even_with_pass_streak(tmp_path: Path
     assert selection.path_extras == ["normal-depth"]
     assert selection.cap == 20 and selection.pass_streak_required == 3
     assert not selection.cap_hit and not selection.dropped and not selection.skipped_history
+    # This test is also called by benchmark.blackbox.py's registered selector
+    # case: selection-time eligibility must be visible before a native run.
+    report = format_report(selection)
+    assert "Standing skip eligibility" in report
+    assert "normal-payment" in report and "_agentcard_release_skip_lifecycle" in report
+    assert "HELD" in report and "RECLAIMING" in report and "releasedCents=0" in report
+    assert "livemode=false" in report and "stripeRefund" in report
+    assert "_check_claude_code_credentials" in report and "native credential sync" in report
+    assert "no synced Claude credentials and no pool token" in report
+    assert "All other assertions and owned-resource cleanup remain required" in report
+    assert "not a SKIP verdict" in report
+    assert set(selection.skip_eligibility) == {"normal-smoke", "normal-payment"}
+
+
+def test_skip_display_uses_literal_catalog_contract_and_preserves_cli(tmp_path: Path, capsys) -> None:
+    catalog, attempts = tmp_path / "tasks.json", tmp_path / "attempts.jsonl"
+    tasks = [
+        {"name": "unrelated-smoke", "tags": ["smoke"]},
+        {"name": "payment-eligible", "tags": ["smoke", "agentcard-lifecycle-sandbox"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": False}}},
+        {"name": "claude-eligible", "tags": ["smoke"], "requires_claude_code": True},
+        {"name": "boolean-zero-is-not-false", "tags": ["smoke", "agentcard-lifecycle-sandbox"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": 0}}},
+        {"name": "cross-mode", "tags": ["smoke", "agentcard-lifecycle-sandbox"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": True}}},
+        {"name": "tag-without-contract", "tags": ["smoke", "agentcard-lifecycle-sandbox"]},
+        {"name": "contract-without-tag", "tags": ["smoke"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": False}}},
+        {"name": "tagged-claude-without-requirement", "tags": ["smoke", "claude-code"]},
+        {"name": "production-excluded", "tags": ["smoke", "agentcard-lifecycle-production"],
+         "production_only": True, "expected_payment_lifecycle": {"orgTransfer": {"livemode": True}}},
+    ]
+    catalog.write_text(json.dumps(tasks))
+    attempts.write_text("")
+    args = ["--catalog", str(catalog), "--attempts-file", str(attempts),
+            "--changed-file", "README.md", "--repo-root", str(ROOT)]
+    expected = [task["name"] for task in tasks if not task.get("production_only")]
+    assert main([*args, "--format", "names"]) == 0
+    names = capsys.readouterr()
+    assert names.out.splitlines() == expected
+    assert "Standing skip eligibility" in names.err
+    assert "payment-eligible" in names.err and "claude-eligible" in names.err
+    assert main([*args, "--format", "json"]) == 0
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert output.err == ""
+    assert payload["selected"] == expected and payload["total"] == len(expected)
+    assert set(payload["skip_eligibility"]) == {"payment-eligible", "claude-eligible"}
+    assert payload["cap"] == DEFAULT_CAP and not payload["cap_hit"]
+    assert not payload["dropped"] and not payload["skipped_history"]
+    assert main([*args, "--format", "names-and-report"]) == 0
+    combined = capsys.readouterr().out
+    assert combined.split("---PREDEPLOY_BENCH_NAMES---\n")[1].split("---END_PREDEPLOY_BENCH_NAMES---")[0].splitlines() == expected
+    assert combined.index("Standing skip eligibility") < combined.index("---PREDEPLOY_BENCH_NAMES---")
 
 
 def test_smoke_always_selected_canaries_need_last_three_passes() -> None:
@@ -913,9 +973,9 @@ def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    combined = result.stdout + result.stderr
-    assert "HARD CAP HIT" in combined or "HARD CAP" in combined
-    assert "DROPPED" in combined
+    for stream in (result.stdout, result.stderr):
+        assert "HARD CAP HIT" in stream or "HARD CAP" in stream
+        assert "DROPPED" in stream
 
 
 def test_cli_cap_clamps_above_default(tmp_path: Path) -> None:
@@ -968,3 +1028,112 @@ def test_cli_cap_clamps_above_default(tmp_path: Path) -> None:
     names = [line for line in result.stdout.splitlines() if line.strip()]
     assert len(names) <= DEFAULT_CAP
     assert "clamping" in result.stderr.lower() or "ceiling" in result.stderr.lower()
+
+
+AGENTCARD_SANDBOX_LIFECYCLE = (
+    "agent-payment-test-shop",
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+)
+
+
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+def test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(
+    tmp_path: Path, surface: str
+) -> None:
+    """The retired AgentCard deploy lane's four tasks run in smoke on every deploy.
+
+    They are smoke-tagged, so failed attempts never evict them (no history gate),
+    they fit the hard cap with path extras, and the release-stall guidance rides
+    along. Their mutable payment fixture is isolated per task on both surfaces:
+    cloud seeds it on each task's own guest, and the local runner at the
+    predeploy concurrency gives each task an independent world.
+    """
+    attempts = tmp_path / "attempts.jsonl"
+    _write_attempts(attempts, [(name, False) for name in AGENTCARD_SANDBOX_LIFECYCLE for _ in range(3)])
+    catalog = {task["name"]: task for task in json.loads(CATALOG.read_text())}
+    for changed in (["README.md"], ["back-end/src/domains/agentcard/service.ts", "agents/loop/run_agent.py"]):
+        selection = select_predeploy_benches(
+            catalog=CATALOG,
+            changed_files=changed,
+            surface=surface,
+            cap=DEFAULT_CAP,
+            repo_root=ROOT,
+            attempts_file=attempts,
+            pass_streak=DEFAULT_PASS_STREAK,
+        )
+        assert not selection.cap_hit and selection.total <= DEFAULT_CAP, selection.selected
+        for name in AGENTCARD_SANDBOX_LIFECYCLE:
+            task = catalog[name]
+            assert "smoke" in task["tags"] and task["group"] == "pre-deploy", name
+            assert name in selection.floor and "floor:smoke" in selection.reasons[name], name
+            assert name not in selection.skipped_history, name
+            assert any("release-stall standing warning" in rule for rule in selection.skip_eligibility[name]), name
+    if surface == "local":
+        from benchmarks.local_worlds import needs_independent_worlds
+
+        local_concurrency = 2  # scripts/run-predeploy-local PREDEPLOY_LOCAL_CONCURRENCY default
+        assert needs_independent_worlds(selection.selected, local_concurrency)
+    else:
+        driver = (ROOT / "scripts" / "cloudbench-run.sh").read_text()
+        case = driver.index(
+            "agent-payment-test-shop|agent-payment-idempotent-abandonment|"
+            "agent-payment-abandonment|agent-payment-setup-resume)"
+        )
+        assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver[case : driver.index(";;", case)]
+
+
+@pytest.mark.parametrize("output_format", ["names", "json"])
+@pytest.mark.parametrize("drop_extra", [False, True])
+def test_cli_machine_formats_keep_cap_warning_on_stderr(
+    tmp_path: Path, output_format: str, drop_extra: bool,
+) -> None:
+    """A full selection remains machine-readable, with the complete warning on stderr."""
+    catalog, attempts = tmp_path / "tasks.json", tmp_path / "attempts.jsonl"
+    tasks = [
+        {"name": "smoke", "tags": ["smoke"]},
+        {"name": "payment", "tags": ["payment"], "deploy_canary": True},
+    ]
+    if drop_extra:
+        tasks.append({"name": "payment-extra", "tags": ["payment"]})
+    catalog.write_text(json.dumps(tasks))
+    _write_attempts(attempts, [(task["name"], True) for task in tasks for _ in range(3)])
+    result = subprocess.run(
+        [sys.executable, str(SELECTOR), "--catalog", str(catalog),
+         "--attempts-file", str(attempts), "--surface", "cloud", "--cap", "2",
+         "--changed-file", "back-end/src/domains/agentcard/service.ts",
+         "--repo-root", str(ROOT), "--format", output_format],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    if output_format == "names":
+        assert result.stdout.splitlines() == ["smoke", "payment"]
+    else:
+        payload = json.loads(result.stdout)
+        assert payload["selected"] == ["smoke", "payment"]
+        assert payload["cap"] == 2 and payload["total"] == 2
+        assert payload["cap_hit"] is drop_extra
+        assert payload["dropped"] == (["payment-extra"] if drop_extra else [])
+    warning = "PREDEPLOY BENCH HARD CAP HIT" if drop_extra else "PREDEPLOY BENCH COUNT AT HARD CAP"
+    assert warning in result.stderr
+    if drop_extra:
+        assert "payment-extra" in result.stderr and "DROPPED" in result.stderr
+
+
+@pytest.mark.parametrize("output_format", ["names", "json"])
+def test_machine_readable_cap_output_keeps_warnings_on_stderr(tmp_path: Path, output_format: str) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    tasks = [{"name": f"smoke-{i}", "tags": ["smoke"], "timeout_seconds": 60,
+              "deploy_category": "harness"} for i in range(DEFAULT_CAP)]
+    catalog.write_text(json.dumps(tasks))
+    attempts.write_text("")
+    result = subprocess.run([sys.executable, str(SELECTOR), "--catalog", str(catalog),
+        "--attempts-file", str(attempts), "--format", output_format, "--cap", str(DEFAULT_CAP),
+        "--repo-root", str(tmp_path)], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    selected = json.loads(result.stdout)["selected"] if output_format == "json" else result.stdout.splitlines()
+    assert set(selected) == {task["name"] for task in tasks}
+    assert len(selected) == DEFAULT_CAP
+    assert "HARD CAP" in result.stderr

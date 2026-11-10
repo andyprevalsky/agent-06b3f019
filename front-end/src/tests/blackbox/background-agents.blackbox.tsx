@@ -9,7 +9,8 @@
  *    (SubAgentTree / explore bubble); live rows survive later parent thoughts.
  *  - Dock: counts running descendants + in-activity tasks, expands to the
  *    SubAgentTree hierarchy, navigates on agent rows, sits flush on the input,
- *    and shows output schemas (per agent, and a results table per for_each).
+ *    folds finished agents into one collapsed drawer per group, and shows
+ *    output schemas (per agent, and a results table per for_each).
  */
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -380,6 +381,45 @@ describe('running-agents dock', () => {
     );
   });
 
+  it('folds finished agents into one collapsed drawer that expands inline at the same level', async () => {
+    const onNavigate = vi.fn();
+    const agent = (agentId: string, goal: string, status: TreeNode['status']) =>
+      tree.nodes.set(
+        agentId,
+        makeAgentTreeNode({ agentId, parentAgentId: 'root-1', goal, status }),
+      );
+    agent('child-1', 'Draft budget', 'ACTIVE');
+    agent('done-ok', 'Book hotel', 'COMPLETED');
+    agent('done-x1', 'Cancel order', 'FAILED');
+    agent('done-x2', 'Refund order', 'FAILED');
+    renderDock(gp(), onNavigate);
+    await userEvent.click(screen.getByRole('button', { name: /Running 1 agent/ }));
+    const panel = screen.getByTestId('background-agents-panel');
+    const rowPrefix = (goal: string) =>
+      within(panel).getByText(goal).closest('.cursor-pointer')?.firstElementChild?.textContent;
+
+    const drawer = within(panel).getByTestId('agent-panel-completed-toggle');
+    expect(drawer).toHaveAttribute('aria-expanded', 'false');
+    expect(drawer).toHaveTextContent('└─▸3 completed agents, 1 succeeded, 2 failed');
+    expect(rowPrefix('Draft budget')).toBe('├─');
+    for (const goal of ['Book hotel', 'Cancel order', 'Refund order']) {
+      expect(within(panel).queryByText(goal)).toBeNull();
+    }
+
+    await userEvent.click(drawer);
+    expect(drawer).toHaveAttribute('aria-expanded', 'true');
+    expect(drawer).toHaveTextContent('├─▾3 completed agents');
+    // Same level as the running row: top-level branches, no extra indentation.
+    expect(rowPrefix('Book hotel')).toBe('├─');
+    expect(rowPrefix('Cancel order')).toBe('├─');
+    expect(rowPrefix('Refund order')).toBe('└─');
+    await userEvent.click(within(panel).getByText('Cancel order'));
+    expect(onNavigate).toHaveBeenCalledWith('done-x1');
+
+    await userEvent.click(drawer);
+    expect(within(panel).queryByText('Book hotel')).toBeNull();
+  });
+
   it('opens and closes by animating the same mounted slot (no mount at full height, no remount)', async () => {
     tree.nodes.set('child-1', makeAgentTreeNode({ agentId: 'child-1', parentAgentId: 'root-1' }));
     renderDock([...gp(), ...explore()]);
@@ -444,6 +484,7 @@ describe('running-agents dock', () => {
     );
     renderDock([...gp(), ...explore()]);
     await userEvent.click(screen.getByRole('button', { name: /Running 1 agent/ }));
+    await userEvent.click(screen.getByTestId('agent-panel-completed-toggle'));
     const toggle = screen.getByTestId('dock-schema-toggle');
     expect(toggle).toHaveTextContent('output schema · 2 fields · result');
     expect(screen.queryByText('5518')).not.toBeInTheDocument();
@@ -490,32 +531,7 @@ describe('running-agents dock', () => {
     expect(table).toHaveTextContent('string · required');
   });
 
-  it('expands an explore or browser task row into its trajectory from loaded rows, without fetching', async () => {
-    const browserRows = [
-      started('call_br', 'browser', '/root/order_breakfast', 'Order breakfast'),
-      row({
-        toolCallId: 'call_br',
-        toolName: 'spawn_browser_agent',
-        toolStatus: 'IN_PROGRESS',
-        excludeFromModel: true,
-        task_id: 't-br',
-        action_type: 'browser',
-        browser_url: 'https://live.example/br',
-        title: 'Browser Agent In Progress',
-      }),
-      row(
-        {
-          toolCallId: 'br-step-1',
-          toolName: 'spawn_browser_agent',
-          toolStatus: 'FINISHED',
-          task_id: 't-br',
-          subAgentId: 't-br',
-          action_type: 'goto',
-          title: 'Navigated → https://www.instacart.com/',
-        },
-        'Navigated → https://www.instacart.com/',
-      ),
-    ];
+  it('expands an explore task row into its trajectory from loaded rows, without fetching', async () => {
     const exploreStep = row(
       {
         toolCallId: 'ex-step-1',
@@ -526,11 +542,10 @@ describe('running-agents dock', () => {
       },
       'Searched the web for hotel prices',
     );
-    const messages = [...explore(), exploreStep, ...browserRows];
     const onNavigate = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    renderDock(messages, onNavigate);
-    await userEvent.click(screen.getByRole('button', { name: /Running 2 agents/ }));
+    renderDock([...explore(), exploreStep], onNavigate);
+    await userEvent.click(screen.getByRole('button', { name: /Running 1 agent/ }));
     const panel = screen.getByTestId('background-agents-panel');
     expect(within(panel).queryByTestId('agent-panel-trajectory')).toBeNull();
     const fetchesBeforeExpand = fetchSpy.mock.calls.length;
@@ -541,26 +556,13 @@ describe('running-agents dock', () => {
     expect(
       exploreTrajectory.querySelector(`[data-message-id="${exploreStep.message_id}"]`),
     ).not.toBeNull();
-
-    await userEvent.click(within(panel).getByText('browser · order_breakfast'));
-    const trajectories = within(panel).getAllByTestId('agent-panel-trajectory');
-    const browserTrajectory = trajectories.find((el) => el.dataset.taskId === 't-br');
-    expect(browserTrajectory).toBeDefined();
-    expect(
-      browserTrajectory!.querySelector(`[data-message-id="${browserRows[2].message_id}"]`),
-    ).not.toBeNull();
-
     // Built from rows the client already holds: no request and no navigation.
     expect(fetchSpy.mock.calls.length).toBe(fetchesBeforeExpand);
     expect(onNavigate).not.toHaveBeenCalled();
 
     // Clicking the row again folds its trajectory away.
     await userEvent.click(within(panel).getByText('explore · hotel_price'));
-    expect(
-      within(panel)
-        .getAllByTestId('agent-panel-trajectory')
-        .map((el) => el.dataset.taskId),
-    ).toEqual(['t-br']);
+    expect(within(panel).queryByTestId('agent-panel-trajectory')).toBeNull();
     fetchSpy.mockRestore();
   });
 

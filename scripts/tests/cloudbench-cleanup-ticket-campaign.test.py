@@ -46,8 +46,12 @@ class CampaignTickets(unittest.TestCase):
                 "cloudbench-provider-capacity.py",
                 "cloudbench-provider-limits.json",
             ):
-                shutil.copyfile(ROOT / "scripts" / name, scripts / name)
-            if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
+                shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
+            if mode in ("external-member-retry", "external-member-exhausted"):
+                campaign=scripts/"run-bench-campaign.py"
+                injection = "\ndef released_attempt(workspace, job):\n    return dict(resources_released=True, lifecycle_verified=True, terminal_task=job['controller_exit_code']==0, infra_failure=job['controller_exit_code']==17)\n\n"
+                campaign.write_text(campaign.read_text().replace('if __name__ == "__main__":', injection+'if __name__ == "__main__":'))
+            if mode in ("ticket-prepare-fail", "ticket-assign-fail", "ordinary-prepare-fail", "ordinary-assign-fail"):
                 # Fail only the campaign parent's in-process call, as a raced
                 # child exit or a ticket refusal would, keeping child CLIs real.
                 action = mode.split("-")[1]
@@ -57,12 +61,20 @@ class CampaignTickets(unittest.TestCase):
                                  "    if __name__ == 'cleanup_parent_identity':\n"
                                  "        raise ValueError('fixture cleanup ticket " + action + " refusal')\n"
                                  "    return _fixture_original_" + action + "(args)\n")
+            if mode.startswith('ordinary-prepare-diagnostic-'):
+                faults={
+                    'ordinary-prepare-diagnostic-value': "ValueError('x'*500+'\\nsecret-file-contents')",
+                    'ordinary-prepare-diagnostic-os': "OSError(28,'secret-file-contents','/secret-filename')",
+                    'ordinary-prepare-diagnostic-subprocess': "subprocess.CalledProcessError(19,['secret-argv'],output='secret-file-contents',stderr='secret-stderr')",
+                }
+                with (scripts/'cloudbench-cleanup-tickets.py').open('a') as helper:
+                    helper.write("\ndef prepare(args):\n    raise "+faults[mode]+"\n")
             if "external" in mode:
                 # External modes join the actual per-fleet barrier helper.
                 shutil.copyfile(ROOT / "scripts/cloudbench-campaign-barrier.py", scripts / "cloudbench-campaign-barrier.py")
             if mode.startswith(("mutation", "relay")):
                 for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "cloudbench-port-lease.py", "cloudbench-cohort-reconcile.py", "cloudbench-machine-readiness.py", "cloudbench-campaign-machines.py"):
-                    shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                    shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
                 (scripts / "lib").mkdir()
                 for name in ("cloudbench-env.sh", "cloudbench-inventory.sh"):
                     shutil.copyfile(ROOT / "scripts/lib" / name, scripts / "lib" / name)
@@ -83,7 +95,7 @@ while not(p/'stop').exists():time.sleep(.01)
 """)
                 if mode.startswith("relay"):
                     for name in ("cloudbench-shared-relay.py", "run-bench-cloud", "run-bench-fleet"):
-                        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                        shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
                     if old_relay:
                         (scripts / "run-bench-campaign.py").write_bytes(subprocess.check_output(
                             ["git", "show", "ffe622243b8d704692fd3b69ab1d08eb1bb54040:scripts/run-bench-campaign.py"], cwd=ROOT))
@@ -204,7 +216,7 @@ if [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = 1 ]; then
  trap 'printf "CANARY_JOINED\n" >> "$FIXTURE_ROOT/events"; exit 143' TERM INT
  case "$FIXTURE_CANARY_MODE" in
   fail) exit 17 ;;
-  cancel|relay-cancel|external-abort-canary) while :; do sleep .05; done ;;
+  cancel|relay-cancel|external-abort-canary|startup-canary) while :; do sleep .05; done ;;
  esac
  printf 'CANARY_DONE\n' >> "$FIXTURE_ROOT/events"
  exit 0
@@ -213,6 +225,13 @@ printf 'TASK_START\n' >> "$FIXTURE_ROOT/events"
 [ -n "${CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT:-}" ] || exit 92
 if [ "$FIXTURE_CANARY_MODE" = tamper ]; then CLOUDBENCH_COHORT_PREFLIGHT_SHA256=0000000000000000000000000000000000000000000000000000000000000000; fi
 CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="$FIXTURE_COLD" CLOUDBENCH_INFRA_CANARY_REF="$FIXTURE_BENCH_REF" python3 -S "$FIXTURE_ROOT/scripts/cloudbench-infra-canary-preflight.py" --stamp "$FIXTURE_ROOT/.context/fleet-infra-canary.last-pass" --lock "$FIXTURE_ROOT/.context/fleet-infra-canary-preflight.transaction.lock" --ttl-seconds 3600 --width 2 --canary "$FIXTURE_ROOT/scripts/run-fleet-infra-canary" --nested-controller-lock cloudbench-controller-infra-canary-preflight.lock
+if [[ "$FIXTURE_CANARY_MODE" == external-member-* && "$RUN_BENCH_CAMPAIGN_JOB_ID" = r001-j0008 ]]; then
+ if [ "$FIXTURE_CANARY_MODE" = external-member-exhausted ] || [ "${RUN_BENCH_CAMPAIGN_ATTEMPT:-1}" = 1 ]; then
+  printf 'MEMBER_FAILED\n' >> "$FIXTURE_ROOT/events"
+  exit 17
+ fi
+ printf 'MEMBER_RETRY_READY\n' >> "$FIXTURE_ROOT/events"
+fi
 if [ -n "${FIXTURE_BARRIER_SECONDS:-}" ]; then
  printf 'ENV|%s|%s|%s|%s|%s\n' "$RUN_BENCH_CAMPAIGN_JOB_ID" "$RUN_BENCH_CAMPAIGN_TOTAL_JOBS" "$RUN_BENCH_CAMPAIGN_STARTED_AT" "$BENCHMARK_HUB_GROUP_RUN_ID" "${RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER:-}${RUN_BENCH_CAMPAIGN_TASK_INDEXES:-}${RUN_BENCH_CAMPAIGN_GROUP_TOTAL:-}${RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT:-}" >> "$FIXTURE_ROOT/events"
  if python3 "$FIXTURE_ROOT/scripts/cloudbench-campaign-barrier.py" --deadline "$(python3 -c 'import sys,time;print(time.time()+float(sys.argv[1]))' "$FIXTURE_BARRIER_SECONDS")" --controller-pid "$$"; then
@@ -234,6 +253,42 @@ while not(cohort/'release.json').exists():
 READY
 """
             )
+            if mode.startswith("ordinary"):
+                child = scripts / "run-bench"
+                old = child.read_text()
+                start = old.index("reserve_cleanup_disk_space\nif [ ")
+                old = old[:start] + """
+[ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] || exit 97
+mkdir -p "$FIXTURE_ROOT/admitted" "$FIXTURE_ROOT/attempted"
+job_index="${RUN_BENCH_CAMPAIGN_JOB_ID##*-j}"
+if [ "$job_index" -gt 10 ]; then
+ python3 - "$FIXTURE_ROOT/admitted" <<'LATE'
+from pathlib import Path
+import sys,time
+end=time.monotonic()+10
+while len(list(Path(sys.argv[1]).glob('*')))<10:
+ if time.monotonic()>end:raise TimeoutError('first ten did not admit')
+ time.sleep(.01)
+LATE
+fi
+status=0
+reserve_cleanup_disk_space || status=$?
+printf 'RESERVE_ATTEMPTED %s\\n' "$RUN_BENCH_CAMPAIGN_JOB_ID" >> "$FIXTURE_ROOT/events"
+touch "$FIXTURE_ROOT/attempted/$RUN_BENCH_CAMPAIGN_JOB_ID"
+[ "$status" = 0 ] || exit "$status"
+printf 'TASK_START %s\\n' "$RUN_BENCH_CAMPAIGN_JOB_ID" >> "$FIXTURE_ROOT/events"
+touch "$FIXTURE_ROOT/admitted/$RUN_BENCH_CAMPAIGN_JOB_ID"
+python3 - "$FIXTURE_ROOT/attempted" <<'ALL'
+from pathlib import Path
+import sys,time
+end=time.monotonic()+10
+while len(list(Path(sys.argv[1]).glob('*')))<14:
+ if time.monotonic()>end:raise TimeoutError('all fourteen did not attempt')
+ time.sleep(.01)
+ALL
+exit 0
+"""
+                child.write_text(old)
             if mode.startswith(("mutation", "relay")):
                 start = source.index("FLY() {")
                 end = source.index("\nis_sim_on()", start)
@@ -296,6 +351,46 @@ def wrapper(original):
  return observed
 os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
 """)
+            if mode.startswith("ordinary"):
+                (root / "bounded-storage.json").write_text(json.dumps({"capacity_mb": 8000, "allocations": {}}))
+                with (transport / "sitecustomize.py").open("a") as stream:
+                    stream.write("""
+import json,fcntl
+from pathlib import Path
+storage=Path(os.environ['FIXTURE_ROOT'])/'bounded-storage.json'
+real_fstat=os.fstat
+real_lstat=os.lstat
+def allocation(fd,offset,size):
+ path=os.readlink('/proc/self/fd/'+str(fd))
+ with (storage.parent/'storage.lock').open('a+') as lock:
+  fcntl.flock(lock,fcntl.LOCK_EX)
+  value=json.loads(storage.read_text());value['allocations']={p:n for p,n in value['allocations'].items() if Path(p).exists()}
+  if sum(value['allocations'].values())+size>value['capacity_mb']*1048576:raise OSError(28,'bounded volume exhausted')
+  os.ftruncate(fd,size);value['allocations'][path]=size;storage.write_text(json.dumps(value))
+def file_blocks(path,*args,**kw):
+ value=real_lstat(path,*args,**kw)
+ if str(path).endswith('/cleanup-disk-reserve'):
+  with (storage.parent/'storage.lock').open('a+') as lock:
+   fcntl.flock(lock,fcntl.LOCK_SH);amount=json.loads(storage.read_text())['allocations'].get(str(path))
+  if amount is not None:return os.stat_result(tuple(value),{'st_blocks':amount//512})
+ return value
+def fd_blocks(fd):
+ value=real_fstat(fd)
+ if os.readlink('/proc/self/fd/'+str(fd)).endswith('/cleanup-disk-reserve'):
+  return os.stat_result(tuple(value),{'st_blocks':value.st_size//512})
+ return value
+os.posix_fallocate=allocation;os.fstat=fd_blocks;os.lstat=file_blocks
+""")
+                (transport / "df").write_text("""#!/usr/bin/env python3
+import os,json,fcntl
+from pathlib import Path
+p=Path(os.environ['FIXTURE_ROOT'])/'bounded-storage.json'
+with (p.parent/'storage.lock').open('a+') as lock:
+ fcntl.flock(lock,fcntl.LOCK_SH);v=json.loads(p.read_text());used=sum(n for path,n in v['allocations'].items() if Path(path).exists());free=v['capacity_mb']*1048576-used
+print('Filesystem 1024-blocks Used Available Capacity Mounted on')
+print('bounded 99999999 0',free//1024,'0% /bounded')
+""")
+                (transport / "df").chmod(0o700)
             env = dict(
                 os.environ,
                 PYTHONPATH=str(transport),
@@ -379,6 +474,15 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 "fixture-c",
                 "--forward-arg=--strict-barrier",
             ]
+            if mode.startswith("ordinary"):
+                argv = [sys.executable, str(scripts / "run-bench-campaign.py"), "--root", str(root), "--runs", "1", "--concurrency", "14"]
+                for number in range(14):argv.extend(["--task", "fixture-"+str(number)])
+                env.update(PATH=str(transport)+os.pathsep+env['PATH'], CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="512", CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="32", CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="256")
+            if mode.startswith("startup-"):
+                epoch=time.time()-(901 if mode=="startup-expired" else 898)
+                env["RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH"]=str(epoch+9300-7200-1200)
+                argv.extend(["--e2e-started-at",str(epoch),"--e2e-timeout","9300",
+                             "--forward-arg=--timeout","--forward-arg=7200"])
             if mode == "explicit":
                 argv.extend(
                     [
@@ -399,7 +503,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 )
                 try:
                     deadline = time.monotonic() + 15
-                    while not (root / "events").exists():
+                    while not (root / "events").exists() or "CANARY_ENTER" not in (root / "events").read_text():
                         if child.poll() is not None or time.monotonic() > deadline:
                             raise AssertionError("parent canary did not enter")
                         time.sleep(0.02)
@@ -428,6 +532,62 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 if (root / "events").exists()
                 else []
             )
+            if mode.startswith("ordinary"):
+                self.assertEqual(len(summaries), 1)
+                summary=json.loads(summaries[0].read_text())
+                if mode != "ordinary-pass":
+                    self.assertNotEqual(result.returncode,0,result.stdout+result.stderr+details)
+                    self.assertEqual(summary['status'],'failed')
+                    self.assertNotIn('TASK_START', '\n'.join(events))
+                    self.assertEqual(summary['cleanup_ticket_failure'],mode.split('-')[1])
+                    if mode.startswith('ordinary-prepare-diagnostic-'):
+                        diagnostic=summary['cleanup_ticket_error']
+                        self.assertEqual(set(diagnostic),{'type','message'})
+                        expected={'ordinary-prepare-diagnostic-value':'ValueError','ordinary-prepare-diagnostic-os':'OSError','ordinary-prepare-diagnostic-subprocess':'CalledProcessError'}
+                        self.assertEqual(diagnostic['type'],expected[mode])
+                        self.assertTrue(diagnostic['message'])
+                        self.assertLessEqual(len(diagnostic['message']),400)
+                        self.assertNotIn('\n',diagnostic['message'])
+                        self.assertNotIn('secret',json.dumps(diagnostic))
+                        self.assertNotIn('Traceback',json.dumps(diagnostic))
+                        if mode.endswith('-value'):self.assertEqual(diagnostic['message'],'x'*400)
+
+                    budgets=list(summaries[0].parent.glob('cleanup-cohorts/*/cleanup-budget/budget.json'))
+                    if mode == 'ordinary-assign-fail':
+                        self.assertEqual(len(budgets),1)
+                        self.assertTrue((budgets[0].parent/'retired.json').is_file())
+                    else:
+                        self.assertEqual(budgets,[])
+                    self.assertFalse(list((root/'.git/cloudbench-fleet-ownership').glob('*/cleanup-disk-reserve')))
+                    self.assertFalse(list((Path('/tmp')/('rose-cloudbench-cleanup-admission-'+str(os.getuid()))/str(device)/'ticket-grants').glob('*.json')))
+                    return
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr+details)
+                self.assertEqual(summary['status'],'passed')
+                self.assertNotIn('startup_cohorts',summary)
+                self.assertEqual(summary['peak_concurrency'],14)
+                self.assertEqual(len([line for line in events if line.startswith('TASK_START ')]),14)
+                attempts=[i for i,line in enumerate(events) if line.startswith('RESERVE_ATTEMPTED ')]
+                starts=[i for i,line in enumerate(events) if line.startswith('TASK_START ')]
+                self.assertEqual(len(attempts),14)
+                self.assertLess(min(starts),max(attempts),events)
+                budget_file=next(summaries[0].parent.glob('cleanup-cohorts/*/cleanup-budget/budget.json'))
+                budget=json.loads(budget_file.read_text())
+                self.assertEqual((budget['preferred'],budget['minimum'],budget['headroom']),(512,32,256))
+                self.assertEqual(budget['job_count'],14)
+                self.assertGreaterEqual(budget['amount'],32);self.assertLess(budget['amount'],512)
+                self.assertTrue((budget_file.parent/'retired.json').is_file())
+                self.assertFalse(list((root/'.git/cloudbench-fleet-ownership').glob('*/cleanup-disk-reserve')))
+                return
+            if mode.startswith("startup-"):
+                self.assertNotEqual(result.returncode,0,result.stdout+result.stderr+details)
+                self.assertNotIn("TASK_START",events)
+                self.assertFalse(list((root/".context/benchmarks/campaigns").glob("*/startup-cohorts/*/release.json")))
+                self.assertEqual(len(summaries),1)
+                self.assertTrue(json.loads(summaries[0].read_text())["startup_timeout_exceeded"])
+                if mode=="startup-canary":
+                    self.assertIn("CANARY_ENTER",events)
+                    self.assertIn("CANARY_JOINED",events)
+                return
             if mode.startswith("relay"):
                 if old_relay or mode in ("relay-foreign", "relay-source", "relay-cancel"):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + details)
@@ -464,7 +624,11 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 self.assertEqual(events.count("PROVIDER_BOUNDARY:0"), 6)
                 self.assertLess(events.index("PROVIDER_BOUNDARY:1"), events.index("TASK_START"))
                 return
-            if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
+            if mode in ("external-member-retry", "external-member-exhausted"):
+                campaign=scripts/"run-bench-campaign.py"
+                injection = "\ndef released_attempt(workspace, job):\n    return dict(resources_released=True, lifecycle_verified=True, terminal_task=job['controller_exit_code']==0, infra_failure=job['controller_exit_code']==17)\n\n"
+                campaign.write_text(campaign.read_text().replace('if __name__ == "__main__":', injection+'if __name__ == "__main__":'))
+            if mode in ("ticket-prepare-fail", "ticket-assign-fail", "ordinary-prepare-fail", "ordinary-assign-fail"):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr + details)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual(len(summaries), 1)
@@ -543,6 +707,8 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
 
     def external_barrier_run(self, root, argv, env, mode):
         """Act as the sharded coordinator against one real strict campaign."""
+        if mode in ("external-member-retry", "external-member-exhausted"):
+            argv.extend(["--retry-infra","1"])
         barrier = Path(env["RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER"])
         events_path = root / "events"
         release_id = "a1" * 16
@@ -567,7 +733,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                         raise AssertionError(label + " was not reached: " + str(events()) + "".join(child.communicate()))
                     time.sleep(0.02)
 
-            if mode in ("external-release", "external-abort"):
+            if mode in ("external-release", "external-abort", "external-member-retry"):
                 wait_until(lambda: status() == "ready", "external readiness")
                 cohort = next((root / ".context/benchmarks/campaigns").glob("*/startup-cohorts/c001"))
                 self.assertEqual(len(list((cohort / "ready").glob("*.json"))), 6)
@@ -576,7 +742,10 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 self.assertEqual(status(), "ready")
                 self.assertFalse((cohort / "release.json").exists())
                 self.assertNotIn("BARRIER_RELEASED", events())
-                if mode == "external-release":
+                if mode == "external-member-retry":
+                    self.assertEqual(events().count("MEMBER_FAILED"),1)
+                    self.assertIn("MEMBER_RETRY_READY",events())
+                if mode in ("external-release", "external-member-retry"):
                     write_exclusive(barrier / "release.json", {
                         "schema": "campaign-external-barrier-release-v1",
                         "release_id": release_id, "released_at": "2026-10-18T00:00:00+00:00"})
@@ -609,7 +778,16 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
         self.assertEqual(ready["status"], history[-1], output)
         self.assertEqual(len(summary["startup_cohorts"]), 1)
         self.assertEqual(list(barrier.glob(".*")), [], "atomic replace leaves no temporary file")
-        if mode == "external-release":
+        if mode == "external-member-exhausted":
+            self.assertNotEqual(child.returncode,0,output)
+            self.assertEqual(observed.count("MEMBER_FAILED"),2)
+            self.assertNotIn("BARRIER_RELEASED",observed)
+            self.assertFalse((cohort/"release.json").exists())
+            self.assertEqual(summary["startup_cohorts"][0]["status"],"aborted")
+            self.assertEqual(sum(bool(j.get("infra_failure")) for j in summary["jobs"]),1)
+            self.assertEqual(sum(j["status"]=="cancelled" for j in summary["jobs"]),5)
+            return
+        if mode in ("external-release", "external-member-retry"):
             self.assertEqual(child.returncode, 0, output)
             self.assertEqual(history, ["waiting", "ready", "released"])
             self.assertEqual((ready["ready_count"], ready["failed_count"], ready["survivor_count"]), (6, 0, 6))
@@ -643,9 +821,12 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
             self.assertIn("ready", history)
             self.assertEqual(history[-1], "failed")
             self.assertEqual(observed.count("BARRIER_FAILED"), 6)
-            self.assertEqual((ready["failed_count"], ready["survivor_count"]), (6, 0))
-            self.assertEqual(summary["startup_cohorts"][0]["status"], "failed")
-            self.assertEqual({job["status"] for job in summary["jobs"]}, {"failed"})
+            failed=sum(bool(job.get("startup_failed_before_release")) for job in summary["jobs"])
+            self.assertGreaterEqual(failed,1)
+            self.assertEqual((ready["failed_count"], ready["survivor_count"]), (failed,6-failed))
+            self.assertEqual(summary["startup_cohorts"][0]["status"], "aborted")
+            self.assertTrue({job["status"] for job in summary["jobs"]} <= {"failed","cancelled"})
+            self.assertEqual(sum(job["status"]=="failed" for job in summary["jobs"]),failed)
             self.assertIsNone(summary["external_barrier"]["abort"])
             return
         self.assertEqual(history[-1], "aborted")
@@ -667,6 +848,18 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
             else:
                 self.assertIn("SEED_JOINED", observed)
                 self.assertNotIn("CANARY_ENTER", observed)
+
+    def test_explicit_startup_deadline_admits_no_late_task(self):
+        self.campaign_fixture(mode="startup-expired")
+
+    def test_explicit_startup_deadline_joins_active_canary(self):
+        self.campaign_fixture(mode="startup-canary")
+
+    def test_strict_member_retry_rejoins_full_cohort_then_releases(self):
+        self.campaign_fixture(mode="external-member-retry")
+
+    def test_strict_member_retry_exhaustion_aborts_without_partial_release(self):
+        self.campaign_fixture(mode="external-member-exhausted")
 
     def test_external_barrier_holds_release_until_coordinator_release(self):
         self.campaign_fixture(mode="external-release")
@@ -786,6 +979,19 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
         self,
     ):
         self.campaign_fixture()
+
+    def test_ordinary_fullwidth_budget_predeclares_all_fourteen_without_task_barrier(self):
+        self.campaign_fixture(mode="ordinary-pass")
+
+    def test_ordinary_prepare_diagnostic_retains_type_and_sanitized_bounded_message(self):
+        for suffix in ('value','os','subprocess'):
+            with self.subTest(suffix=suffix):self.campaign_fixture('ordinary-prepare-diagnostic-'+suffix)
+
+    def test_ordinary_fullwidth_prepare_failure_dispatches_no_tasks(self):
+        self.campaign_fixture(mode="ordinary-prepare-fail")
+
+    def test_ordinary_fullwidth_assignment_failure_joins_child(self):
+        self.campaign_fixture(mode="ordinary-assign-fail")
 
     def test_old_campaign_forks_workers_before_shared_preflight(self):
         self.campaign_fixture(old=True)

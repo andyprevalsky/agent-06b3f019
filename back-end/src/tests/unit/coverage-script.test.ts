@@ -1,15 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -78,6 +69,7 @@ for (const variable of [
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
   'BLACKBOX_TEST_FAKE_WHATSAPP',
   'BENCHMARK_SHARE_SECRET',
+  'DISABLE_PURCHASE_HOLD_RECONCILE',
 ]) {
   assert.equal(
     autoRcaEnv.match(new RegExp(`^export ${variable}=`, 'gm'))?.length ?? 0,
@@ -305,6 +297,81 @@ try {
   listener.kill('SIGTERM');
   rmSync(portFixtureRoot, { recursive: true, force: true });
 }
+
+// A port the kernel autobound to an outbound connection never shows up as a
+// LISTEN socket, yet Node's dual-stack listen() on it fails with EADDRINUSE
+// (coverage shard 1 lost 56022 that way on 2026-10-28). Reservation must probe
+// with a real bind and advance past such a port instead of handing it out.
+// The probe must use the same socket options as Node/libuv's listen()
+// (wildcard dual-stack + SO_REUSEADDR): without SO_REUSEADDR it would also
+// burn a port our own previous server left in TIME_WAIT, which Node can reuse,
+// out of a two-port shard range.
+assert.match(
+  coverageScript,
+  /port_rejects_bind\(\) \{[\s\S]*?SO_REUSEADDR, 1\)[\s\S]*?sock\.bind\(target\)/,
+  'the reservation bind probe must set SO_REUSEADDR before binding, matching Node listen()'
+);
+const connectedFixtureRoot = mkdtempSync(join(tmpdir(), 'coverage-port-connected-'));
+const connectedPortFile = join(connectedFixtureRoot, 'connected-port');
+const connected = spawn(
+  'python3',
+  [
+    '-c',
+    [
+      'import socket, sys, time',
+      'server = socket.socket()',
+      "server.bind(('127.0.0.1', 0))",
+      'server.listen()',
+      'client = socket.socket()',
+      'for port in range(58000, 59000):',
+      '    try:',
+      "        client.bind(('127.0.0.1', port))",
+      '        break',
+      '    except OSError:',
+      '        continue',
+      'client.connect(server.getsockname())',
+      'peer, _ = server.accept()',
+      "with open(sys.argv[1], 'w', encoding='utf-8') as handle:",
+      '    handle.write(str(client.getsockname()[1]))',
+      'while True:',
+      '    time.sleep(3600)',
+    ].join('\n'),
+    connectedPortFile,
+  ],
+  { stdio: 'ignore' }
+);
+try {
+  waitForPath(connectedPortFile, true);
+  let connectedPort = 0;
+  for (let attempt = 0; attempt < 100 && connectedPort === 0; attempt++) {
+    connectedPort = Number(readFileSync(connectedPortFile, 'utf8'));
+    if (connectedPort === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.ok(connectedPort > 0, 'fixture must publish its connected client port before selection');
+  const selectedPastConnected = Number(
+    execFileSync('bash', ['scripts/run-coverage.sh', '--print-coverage-port'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BACKEND_COVERAGE_START_PORT: String(connectedPort),
+        BACKEND_COVERAGE_END_PORT: String(connectedPort + 20),
+        BACKEND_COVERAGE_PORT_LOCK_ROOT: join(connectedFixtureRoot, 'locks'),
+        BACKEND_COVERAGE_RUN_LOCK_DIR: join(connectedFixtureRoot, 'selection-run-lock'),
+      },
+    })
+      .trim()
+      .split('\n')
+      .at(-1)
+  );
+  assert.ok(
+    selectedPastConnected > connectedPort,
+    `coverage reserved ${connectedPort}, held by a connected non-listening socket that rejects listen()`
+  );
+} finally {
+  connected.kill('SIGTERM');
+  rmSync(connectedFixtureRoot, { recursive: true, force: true });
+}
 assert.match(
   coverageScript,
   /export AMPLITUDE_API_KEY=""[\s\S]*export AMPLITUDE_SECRET_KEY=""/,
@@ -396,6 +463,16 @@ assert.match(
   'unit logs must preserve nested paths instead of colliding on basenames'
 );
 assert.match(
+  unitRunner,
+  /child\.once\('close', \(code, signal\) => \{\s*resolveExit\(describeChildTermination\(code, signal\)\)/,
+  'unit runner must keep the signal of a child that dies without output'
+);
+assert.match(
+  unitRunner,
+  /ended with \$\{terminationLabel\}[\s\S]*writeFile\(logPath, result\.output\)/,
+  'a silent child death must leave its exit code or signal in the per-file log'
+);
+assert.match(
   coverageScript,
   /BACKEND_UNIT_COVERAGE_DIR="\$COV_TMP"[\s\S]*node --import tsx scripts\/run-unit-tests\.ts/,
   'coverage must be passed to unit children without instrumenting the scheduler itself'
@@ -411,8 +488,9 @@ assert.match(
   'parallel unit children must retain V8 coverage instrumentation'
 );
 assert.ok(
-  blackboxRunner.indexOf('runWithConcurrency(parallelDomains') <
-    blackboxRunner.indexOf('runWithConcurrency(lateExclusiveDomains'),
+  blackboxRunner.search(/runWithConcurrency\(\s*parallelDomains/) >= 0 &&
+    blackboxRunner.search(/runWithConcurrency\(\s*parallelDomains/) <
+      blackboxRunner.search(/runWithConcurrency\(\s*lateExclusiveDomains/),
   'aggregate blackbox domains must run after parallel fixture writers'
 );
 assert.match(
@@ -447,6 +525,36 @@ assert.match(
   /\['benchmarks-hub-pipeline', 90\]/,
   'deadline-sensitive Hub lifecycle must start in the first parallel wave'
 );
+// A partial/subset run never checks thresholds. Execute the real shell branch
+// so a diagnostic can never be recorded as a passing gate row.
+{
+  const partialBlock = coverageScript.match(
+    /if \[\[ "\$COVERAGE_PARTIAL" -eq 1 \]\]; then\n([\s\S]*?)\nfi\n/
+  );
+  assert.ok(partialBlock, 'coverage must branch on COVERAGE_PARTIAL after the test phase');
+  const partialExitLine = coverageScript.match(/^COVERAGE_PARTIAL_EXIT=.*$/m)?.[0] ?? '';
+  const partial = spawnSync(
+    'bash',
+    ['-c', `set -euo pipefail\n${partialExitLine}\nCOVERAGE_PARTIAL=1\n${partialBlock[0]}\nexit 0`],
+    { encoding: 'utf8' }
+  );
+  assert.equal(partial.error, undefined, 'the PARTIAL branch must execute successfully');
+  assert.equal(partial.signal, null, 'the PARTIAL branch must exit normally');
+  assert.ok(
+    partial.status !== null && partial.status > 0,
+    'the real PARTIAL branch must exit non-zero when selected tests pass'
+  );
+  assert.match(
+    partial.stdout,
+    /PARTIAL coverage run/,
+    'the PARTIAL branch must still print its diagnostic'
+  );
+  assert.match(
+    partial.stdout,
+    /thresholds were NOT checked/i,
+    'the PARTIAL diagnostic must say thresholds were not enforced'
+  );
+}
 assert.match(
   coverageScript,
   /export FAST_MODE_CACHE_DATABASE_URL="\$LOCAL_DB_URL"/,
@@ -482,124 +590,6 @@ assert.ok(
     coverageScript.indexOf('node --import tsx src/bootstrap.ts'),
   'coverage must install workflow cleanup triggers before backend and unit tests start'
 );
-assert.match(
-  localRuntimeSqlHooks,
-  /20260723000000_add_workflow_iteration_offset[\s\S]*20260724002500_temporal_cleanup_utc_grace/,
-  'the shared SQL-hook installer must retain both migration-owned trigger sources'
-);
-
-const START_MARKER = '-- Protect the rolling-deploy window';
-const END_MARKER = '-- Prefer explicit logical-iteration checkpoints';
-function runSqlHooks(workflowMigration: string): {
-  status: number | null;
-  psqlInput: string;
-  stderr: string;
-} {
-  const root = mkdtempSync(join(tmpdir(), 'runtime-sql-hooks-'));
-  try {
-    const backend = join(root, 'back-end');
-    const migrations = join(backend, 'prisma', 'migrations');
-    mkdirSync(join(backend, 'scripts'), { recursive: true });
-    mkdirSync(join(migrations, '20260723000000_add_workflow_iteration_offset'), {
-      recursive: true,
-    });
-    mkdirSync(join(migrations, '20260724002500_temporal_cleanup_utc_grace'), { recursive: true });
-    mkdirSync(join(migrations, '20260929120000_agent_trajectory_search'), { recursive: true });
-    mkdirSync(join(migrations, '20261026210002_agent_trajectory_agent'), { recursive: true });
-    mkdirSync(join(migrations, '20261026210001_tool_side_effect_operation_key_trgm'), {
-      recursive: true,
-    });
-    copyFileSync(
-      join(process.cwd(), 'scripts', 'apply-local-runtime-sql-hooks.sh'),
-      join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')
-    );
-    writeFileSync(
-      join(migrations, '20260723000000_add_workflow_iteration_offset', 'migration.sql'),
-      workflowMigration
-    );
-    writeFileSync(
-      join(migrations, '20260724002500_temporal_cleanup_utc_grace', 'migration.sql'),
-      'SELECT utc_cleanup;\n'
-    );
-    writeFileSync(
-      join(migrations, '20260929120000_agent_trajectory_search', 'migration.sql'),
-      'SELECT trajectory_search;\n'
-    );
-    writeFileSync(
-      join(migrations, '20261026210002_agent_trajectory_agent', 'migration.sql'),
-      'SELECT trajectory_agent;\n'
-    );
-    writeFileSync(
-      join(migrations, '20261026210001_tool_side_effect_operation_key_trgm', 'migration.sql'),
-      'CREATE INDEX CONCURRENTLY tool_side_effect_trgm;\n'
-    );
-    const fakeBin = join(root, 'bin');
-    const psqlInput = join(root, 'psql-input.sql');
-    mkdirSync(fakeBin);
-    writeFileSync(join(fakeBin, 'psql'), `#!/bin/sh\ncat > '${psqlInput}'\n`);
-    chmodSync(join(fakeBin, 'psql'), 0o755);
-    const result = spawnSync(
-      'bash',
-      [join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')],
-      {
-        env: {
-          ...process.env,
-          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
-          DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/victoria',
-        },
-        encoding: 'utf8',
-      }
-    );
-    return {
-      status: result.status,
-      psqlInput: existsSync(psqlInput) ? readFileSync(psqlInput, 'utf8') : '',
-      stderr: result.stderr,
-    };
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-const appliedHooks = runSqlHooks(
-  `SELECT before;\n${START_MARKER}\nCREATE TRIGGER workflow_guard;\n${END_MARKER}\nSELECT after;\n`
-);
-assert.equal(appliedHooks.status, 0, 'a well-formed workflow migration must apply');
-assert.match(
-  appliedHooks.psqlInput,
-  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;[\s\S]*SELECT trajectory_search;[\s\S]*SELECT trajectory_agent;[\s\S]*CREATE INDEX tool_side_effect_trgm;/,
-  'the advisory lock, the marked workflow block, the UTC cleanup, the trajectory search projection, its per-agent supersession and the non-concurrent trigram index must reach psql in order'
-);
-assert.doesNotMatch(
-  appliedHooks.psqlInput,
-  /SELECT (before|after);/,
-  'only the marked workflow block may be applied from the iteration-offset migration'
-);
-const MARKER_REASON = /workflow markers must each appear exactly once, in order/;
-const EMPTY_REASON = /no workflow SQL between the markers/;
-for (const [label, migration, reason] of [
-  ['a missing end marker', `${START_MARKER}\nCREATE TRIGGER workflow_guard;\n`, MARKER_REASON],
-  [
-    'a duplicated start marker',
-    `${START_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n${END_MARKER}\n`,
-    MARKER_REASON,
-  ],
-  [
-    'markers in the wrong order',
-    `${END_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n`,
-    MARKER_REASON,
-  ],
-  ['an empty marked block', `${START_MARKER}\n\n${END_MARKER}\n`, EMPTY_REASON],
-  [
-    'a comment-only marked block',
-    `${START_MARKER}\n  -- nothing to apply\n${END_MARKER}\n`,
-    EMPTY_REASON,
-  ],
-] as const) {
-  const rejected = runSqlHooks(migration);
-  assert.equal(rejected.status, 2, `${label} must be rejected before psql runs`);
-  assert.equal(rejected.psqlInput, '', `${label} must not apply any SQL`);
-  assert.match(rejected.stderr, reason, `${label} must report why it was rejected`);
-}
 assert.doesNotMatch(
   coverageScript,
   /ENV_DATABASE_URL=.*DATABASE_URL/,

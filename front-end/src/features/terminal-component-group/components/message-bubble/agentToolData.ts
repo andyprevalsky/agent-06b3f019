@@ -11,16 +11,17 @@
  *   list_agents (explore agents)          → "Listed agent tree · N agents" [tree]
  *   send_message_to_agent                 → "Messaged /root/x"             [message]
  *   kill_agent                            → "Killed /root/x"               [result]
- *   wait_for (agents mode)                → "Waiting for /root/x, /root/y" → "Waited for … · woken by <what>"
+ *   wait_for (agents mode)                → "Waiting for Task X, Task Y" → "Waited for … · woken by <what>"
+ *                                           (task titles, each with its agent's icon: WaitAgentTargets)
  *                                           [result]; timestamp/condition waits keep main's WaitForChip
  *
  * Keyed off metadata (agentMessage / messageType / toolName / waitForMode),
  * never off message text.
  */
-import { isAgentMessageMetadata } from '@/lib/realtime-types';
+import { isAgentMessageMetadata, isAgentNotificationMetadata } from '@/lib/realtime-types';
 import type { Message } from '../../hooks';
 import { codexPayload } from '../../hooks/codexMessage';
-import { waitTarget } from '../waitForPhrase';
+import { waitAgentTargets, waitAgentTitles, waitTarget } from '../waitForPhrase';
 import type { ToolMessageData } from './types';
 
 export const AGENT_MESSAGE_TOOL_NAME = 'agent_message';
@@ -42,6 +43,15 @@ export function isAgentToolRow(message: Message): boolean {
   }
   if (message.role !== 'TOOL') return false;
   return AGENT_TOOLS.has(String(metadata.toolName ?? '')) || isAgentWait(metadata);
+}
+
+/**
+ * USER/ASSISTANT row carrying another agent's message (never a child completion).
+ * Renders as InboundAgentRow and folds into work history like a tool call.
+ */
+export function isInboundAgentMessage(message: Message): boolean {
+  if (message.role !== 'USER' && message.role !== 'ASSISTANT') return false;
+  return !isAgentNotificationMetadata(message.metadata) && isAgentMessageMetadata(message.metadata);
 }
 
 /** wait_for in agents mode (wait on other agents rather than time/condition). */
@@ -72,20 +82,24 @@ function listAgentsTitle(metadata: Metadata, title: string | null): string {
  * main's WaitForChip): "Waiting for /root/x, /root/y" while running, then
  * "Waited for /root/x, /root/y · woken by <what>" from the result's first line.
  */
-function agentWaitTitle(message: Message, metadata: Metadata): string {
-  const targets = waitTargets(metadata);
-  if (metadata.toolStatus === 'IN_PROGRESS') return `Waiting for ${targets}`;
+function agentWaitParts(message: Message, metadata: Metadata): { prefix: string; suffix: string } {
+  if (metadata.toolStatus === 'IN_PROGRESS') return { prefix: 'Waiting for', suffix: '' };
   const first = str(message.text.split('\n')[0])?.replace(/\.$/, '');
-  if (!first) return `Waited for ${targets}`;
-  return `Waited for ${targets} · ${first.charAt(0).toLowerCase()}${first.slice(1)}`;
+  const suffix = first ? ` · ${first.charAt(0).toLowerCase()}${first.slice(1)}` : '';
+  return { prefix: 'Waited for', suffix };
+}
+
+function agentWaitTitle(message: Message, metadata: Metadata): string {
+  const { prefix, suffix } = agentWaitParts(message, metadata);
+  return `${prefix} ${waitTargets(metadata)}${suffix}`;
 }
 
 function waitTargets(metadata: Metadata): string {
   const agents = metadata.agents;
   if (agents === 'any') return 'any agent';
-  // The waited-on agents' task names (wait_for agents mode), as on the work row.
-  const names = metadata.targetNames;
-  if (Array.isArray(names) && names.length > 0) return names.map(String).join(', ');
+  // The waited-on agents' task titles (wait_for agents mode), as on the work row.
+  const targets = waitAgentTargets(metadata);
+  if (targets) return waitAgentTitles(targets);
   if (Array.isArray(agents) && agents.length > 0) return agents.map(String).join(', ');
   const description = str(metadata.description);
   return description ? waitTarget(description) : 'other agents';
@@ -135,6 +149,10 @@ export function buildAgentToolData(message: Message): ToolMessageData | null {
     };
   }
   const failed = metadata.toolStatus === 'ERROR';
+  const waitAgents =
+    !failed && isAgentWait(metadata) && waitAgentTargets(metadata)
+      ? { metadata, ...agentWaitParts(message, metadata) }
+      : undefined;
   return {
     toolCallId,
     toolName: String(metadata.toolName ?? ''),
@@ -142,5 +160,6 @@ export function buildAgentToolData(message: Message): ToolMessageData | null {
     status: metadata.toolStatus === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'FINISHED',
     message: toolBody(message, metadata),
     error: failed,
+    ...(waitAgents ? { waitAgents } : {}),
   };
 }

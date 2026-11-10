@@ -1,0 +1,27 @@
+{
+ "name": "pr1715-d0ad9defe/20261109-core",
+ "key_prefix": "devbox-closeout-private/pr1715-d0ad9defe/20261109-core/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "d634018db297a293bd0f88d6076bfa12ca8b865301d37cb7f4b9176e4ca92743",
+ "archive_size_bytes": 1716158113,
+ "parts": 26,
+ "chunk_size": 67108864,
+ "members": [
+  "/home/boxes/rose/.context/deploy-pipeline",
+  "/home/boxes/rose/.context/deploy-pipeline-f8",
+  "/home/boxes/rose/.context/deploy-pipeline-f8dbbb",
+  "/home/boxes/rose/.context/deploy-pipeline-f8-refused",
+  "/home/boxes/rose/.context/deploy-pipeline-f8-focusrefused",
+  "/home/boxes/rose/.context/deploy-pipeline-f8-pathmismatch",
+  "/home/boxes/rose/.context/deploy-pipeline-f8-envmismatch",
+  "/home/boxes/rose/.context/deploy-pipeline-765-depmismatch",
+  "/home/boxes/rose/.context/deploy-cloud/4c7475931f0a22478da203922667cc68b5e5d5d2bb44d778c3c397404c0bab41",
+  "/home/boxes/rose/.context/deploy-cloud/882e2173f925e0a6f9d6133f29579b0f1d9fb962c680b7fe14795744844e25aa",
+  "/var/tmp/deploy-1715"
+ ],
+ "files": 62477,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}

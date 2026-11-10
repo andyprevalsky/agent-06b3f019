@@ -77,16 +77,88 @@ apply_local_semantic_db_urls() {
 # RCA 2026-10-02-semantic-renderer-stall-consumed-chip-poll-budget: at load ~56
 # on 14 cores, four Chromium workers left one renderer frozen for 34s.
 # Prints "cpus|load1|mem_free_pct"; a field is empty when it cannot be read.
+# cpus is the smaller of the affinity mask (cpusets and taskset hide cores that
+# os.cpu_count() still reports) and the CFS bandwidth quota (cgroup v2 cpu.max
+# or v1 cpu.cfs_quota_us/cpu.cfs_period_us on this cgroup or an ancestor; a quota
+# does not hide cores, it caps CPU time, so it is rounded up to whole CPUs).
+# load1 is empty when that count is narrower than the host's CPU count: the
+# host-wide load then mostly measures work outside this mask, and subtracting it
+# would starve the allowed CPUs' worker count. SEMANTIC_CGROUP_ROOT and
+# SEMANTIC_PROC_CGROUP exist for the deploy gate's fake-cgroup regression.
 probe_semantic_host_capacity() {
   python3 - <<'PY'
+import math
 import os
 import subprocess
 
-cpus = os.cpu_count() or ""
+CGROUP_ROOT = os.environ.get("SEMANTIC_CGROUP_ROOT", "/sys/fs/cgroup")
+PROC_CGROUP = os.environ.get("SEMANTIC_PROC_CGROUP", "/proc/self/cgroup")
+
+
+def read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def own_cgroup_paths():
+    """(v2 path, v1 cpu-controller path) of this process; None when absent."""
+    v2 = v1 = None
+    for line in (read_text(PROC_CGROUP) or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hierarchy, controllers, path = parts
+        if hierarchy == "0" and controllers == "":
+            v2 = path
+        elif "cpu" in controllers.split(","):
+            v1 = path
+    return v2, v1
+
+
+def ancestors(path):
+    parts = [part for part in (path or "").split("/") if part]
+    for depth in range(len(parts), -1, -1):
+        yield os.path.join(*parts[:depth]) if depth else ""
+
+
+def quota_limits():
+    """CFS bandwidth limits (quota / period, in CPUs) on this cgroup and its ancestors."""
+    v2, v1 = own_cgroup_paths()
+    for rel in ancestors(v2):  # the root cpu.max is checked even without a v2 line
+        text = read_text(os.path.join(CGROUP_ROOT, rel, "cpu.max"))
+        if text:
+            quota, _, period = text.partition(" ")
+            if quota != "max" and quota.isdigit() and period.isdigit() and int(period) > 0:
+                yield int(quota) / int(period)
+    if v1 is not None:
+        for mount in ("cpu", "cpu,cpuacct"):
+            for rel in ancestors(v1):
+                base = os.path.join(CGROUP_ROOT, mount, rel)
+                quota = read_text(os.path.join(base, "cpu.cfs_quota_us"))
+                period = read_text(os.path.join(base, "cpu.cfs_period_us"))
+                if quota and period and quota.lstrip("-").isdigit() and period.isdigit():
+                    if int(quota) > 0 and int(period) > 0:
+                        yield int(quota) / int(period)
+
+
 try:
-    load = f"{os.getloadavg()[0]:.2f}"
-except OSError:
-    load = ""
+    affinity = len(os.sched_getaffinity(0)) or 0
+except (AttributeError, OSError):
+    affinity = os.cpu_count() or 0
+cpus = affinity
+for limit in quota_limits():
+    cpus = min(cpus, max(1, math.ceil(limit)))
+host_cpus = os.cpu_count() or 0
+restricted = bool(cpus) and host_cpus > cpus
+load = ""
+if not restricted:
+    try:
+        load = f"{os.getloadavg()[0]:.2f}"
+    except OSError:
+        load = ""
 mem = ""
 try:
     out = subprocess.run(["sysctl", "-n", "kern.memorystatus_level"],
@@ -101,20 +173,25 @@ if not mem:
         mem = str(info["MemAvailable"] * 100 // info["MemTotal"])
     except (OSError, KeyError, ValueError, ZeroDivisionError):
         pass
-print(f"{cpus}|{load}|{mem}")
+print(f"{cpus or ''}|{load}|{mem}")
 PY
 }
 
 # Prints the Playwright worker count for the measured capacity: never above the
-# request, one worker per whole idle core, one worker when free memory is below
-# SEMANTIC_MIN_MEM_FREE_PCT, and never below one. Unknown inputs never cap.
+# request, one worker per whole idle core (the CPU count minus the 1-minute
+# load when a load is given, the CPU count alone when it is not), one worker
+# when free memory is below SEMANTIC_MIN_MEM_FREE_PCT, and never below one.
+# Unknown inputs never cap.
 # Args: requested cpus load1 mem_free_pct
 semantic_workers_for_capacity() {
-  awk -v req="$1" -v cpus="$2" -v load="$3" -v mem="$4" \
+  # "load" is a reserved builtin name in gawk >= 5.3 (the ubuntu-latest runner):
+  # `awk -v load=` is fatal there, so the variable is load1 (RCA 2026-10-31
+  # production semantic gate exit 2 on every job after prod-mode sizing landed).
+  awk -v req="$1" -v cpus="$2" -v load1="$3" -v mem="$4" \
     -v min_mem="${SEMANTIC_MIN_MEM_FREE_PCT:-20}" 'BEGIN {
     n = req + 0
-    if (cpus != "" && load != "") {
-      slots = int(cpus - load)
+    if (cpus != "") {
+      slots = int(cpus - (load1 != "" ? load1 : 0))
       if (slots < n) n = slots
     }
     if (mem != "" && mem + 0 < min_mem + 0) n = 1
@@ -232,7 +309,17 @@ else
   # the 5s ratchet. Wait before generating the session so it cannot expire.
   if [[ "${1:-}" == "chat-lifecycle-latency" ]]; then
     . "$REPO_DIR/scripts/lib/isolated-benchmarks.sh"
-    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}" 30
+    # Both waits stay inside the semantic gate's 30 min deadline (scripts/deploy_gates.py
+    # GATE_DEADLINES): an hour-long wait held PR1784's round for 70+ min (2026-11-08).
+    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-900}" 30
+    # That wait sees only this checkout. Production and every other devbox's
+    # deploys spend the same Cerebras org quota, which only the provider's own
+    # rate-limit headers report: wait while a per-minute window is short. The wait
+    # is advisory: a quota still short or unreadable after it is measured anyway,
+    # so the ratchet reports its real result instead of failing on the wait.
+    python3 "$REPO_DIR/scripts/cloudbench_provider_headroom.py" cerebras-wait \
+      --timeout-seconds "${SEMANTIC_CEREBRAS_WAIT_S:-300}" \
+      || echo "⚠️  Cerebras shared quota still short or unmeasured after ${SEMANTIC_CEREBRAS_WAIT_S:-300}s; measuring the latency ratchet anyway" >&2
   fi
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
@@ -288,14 +375,29 @@ if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-# Shared-host sizing is local-only: the production gate runs on a dedicated CI
-# runner whose worker counts chat-lifecycle-ratchet.yml pins explicitly.
-if [[ "$PROD_MODE" -eq 0 ]]; then
-  IFS='|' read -r HOST_CPUS HOST_LOAD1 HOST_MEM_FREE_PCT <<< "$(probe_semantic_host_capacity || true)"
-  REQUESTED_SEMANTIC_WORKERS="$SEMANTIC_WORKERS"
-  SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS" "${HOST_CPUS:-}" "${HOST_LOAD1:-}" "${HOST_MEM_FREE_PCT:-}")
-  echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS (cpus=${HOST_CPUS:-unknown} load1=${HOST_LOAD1:-unknown} mem_free_pct=${HOST_MEM_FREE_PCT:-unknown} min_mem_free_pct=${SEMANTIC_MIN_MEM_FREE_PCT:-20})"
+# Every Playwright worker drives one Chromium plus its trace/video encoders,
+# which are CPU-bound while a page renders, so workers beyond the host's CPUs
+# add latency, not throughput: every test's wall time grows with the
+# oversubscription ratio and the longest test is the first to exhaust its fixed
+# deadline. Size workers in both modes. Local runs share the host with other
+# workspaces, so they also subtract the measured 1-minute load. The production
+# gate's GitHub-hosted runner is dedicated to this job but small (two vCPUs for
+# a private repository), so it caps on CPU count and free memory only; the load
+# left by dependency and browser installation is transient and must not
+# serialize the gate. chat-lifecycle-ratchet.yml's SEMANTIC_WORKERS is the
+# ceiling, not a promise. RCA 2026-10-31-production-semantic-gate-oversubscribed-
+# two-vcpu-runner: four workers on two vCPUs scaled every UI case 1.5-1.9x
+# between runs of identical source and pushed the 59-78s folder-controls
+# desktop case past its 90s deadline.
+IFS='|' read -r HOST_CPUS HOST_LOAD1 HOST_MEM_FREE_PCT <<< "$(probe_semantic_host_capacity || true)"
+REQUESTED_SEMANTIC_WORKERS="$SEMANTIC_WORKERS"
+if [[ "$PROD_MODE" -eq 1 ]]; then
+  SIZING_LOAD1=""
+else
+  SIZING_LOAD1="${HOST_LOAD1:-}"
 fi
+SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS" "${HOST_CPUS:-}" "$SIZING_LOAD1" "${HOST_MEM_FREE_PCT:-}")
+echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS (mode=$([[ "$PROD_MODE" -eq 1 ]] && echo prod || echo local) cpus=${HOST_CPUS:-unknown} load1=${HOST_LOAD1:-unknown} sizing_load1=${SIZING_LOAD1:-ignored} mem_free_pct=${HOST_MEM_FREE_PCT:-unknown} min_mem_free_pct=${SEMANTIC_MIN_MEM_FREE_PCT:-20})"
 
 # Resolve the test runner from this package explicitly. In the root npm
 # workspace, `npx playwright` can select the backend's Playwright CLI while the
@@ -338,8 +440,24 @@ run_playwright() {
   exec node "$PLAYWRIGHT_CLI" "$@"
 }
 
+# Optional native evidence output; the ordinary command and test policy stay intact.
+SEMANTIC_REPORTERS=list
+# Enable live progress before appending optional native evidence reporters.
+if [[ -n "${DEPLOY_GATE_PROGRESS:-}" ]]; then
+  SEMANTIC_REPORTERS="list,./src/tests/gate-progress/playwrightReporter.ts"
+fi
+SEMANTIC_OUTPUT_ARGS=()
+if [[ -n "${SEMANTIC_NATIVE_REPORT_PREFIX:-}" ]]; then
+  [[ "$SEMANTIC_NATIVE_REPORT_PREFIX" = /* ]] || { echo "Native report prefix must be absolute" >&2; exit 2; }
+  export PLAYWRIGHT_JSON_OUTPUT_FILE="${SEMANTIC_NATIVE_REPORT_PREFIX}.json"
+  export DEPLOY_SEMANTIC_LIFECYCLE="${SEMANTIC_NATIVE_REPORT_PREFIX}.jsonl"
+  [[ ! -e "$PLAYWRIGHT_JSON_OUTPUT_FILE" && ! -e "$DEPLOY_SEMANTIC_LIFECYCLE" && ! -e "${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts" ]] || { echo "Native report already exists" >&2; exit 2; }
+  SEMANTIC_REPORTERS="$SEMANTIC_REPORTERS,json,$REPO_DIR/scripts/deploy-semantic-reporter.cjs"
+  SEMANTIC_OUTPUT_ARGS=("--output=${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts")
+fi
+
 if [[ $# -eq 0 ]]; then
-  PLAYWRIGHT_ARGS=(--reporter=list --workers="$SEMANTIC_WORKERS")
+  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"})
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
     PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
   fi
@@ -358,4 +476,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-run_playwright test "$TEST_FILE" --reporter=list --workers="$SEMANTIC_WORKERS"
+run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"}

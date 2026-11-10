@@ -13,9 +13,10 @@
  *                    arrow keys resize it (clamped >= 420px; transitions
  *                    paused while dragging).
  *   variant 'full':  Browser and Biz health — full height from the left bar
- *                    (64px) to the right edge; not resizable.
+ *                    (left = --rose-bar-offset: the pinned bar's width, else
+ *                    64px) to the right edge; not resizable.
  * Layer: aboveQuerybox → ROSE_LAYER.coverPanel (covers the floating query box),
- * otherwise ROSE_LAYER.appPanel (beside it); see lib/roseLayers.ts.
+ * otherwise ROSE_LAYER.appPanel (the query box floats over it); see lib/roseLayers.ts.
  * Mobile (< md): full screen (edge to edge, below the status-bar safe area),
  * sliding up. It covers the mobile header and its app icons, so the sheet
  * keeps its own close X (top-right).
@@ -33,6 +34,7 @@ import {
   DRAWER_EASE,
   LEFT_BAR_WIDTH,
   drawerWidthFromPointer,
+  readLeftBarOffset,
 } from './roseAppsLayout';
 
 const RESIZE_STEP = 24;
@@ -47,7 +49,9 @@ function DrawerResizeHandle({ label }: { label: string }) {
       event.preventDefault();
       apps.setIsResizing(true);
       const onMove = (e: PointerEvent) =>
-        apps.setDrawerWidth(drawerWidthFromPointer(e.clientX, window.innerWidth));
+        apps.setDrawerWidth(
+          drawerWidthFromPointer(e.clientX, window.innerWidth, readLeftBarOffset()),
+        );
       const stop = () => {
         apps.setIsResizing(false);
         window.removeEventListener('pointermove', onMove);
@@ -91,7 +95,9 @@ type DrawerVariant = 'panel' | 'full';
 
 function desktopGeometry(variant: DrawerVariant, width: number): React.CSSProperties {
   const base = { top: APP_PANEL_TOP, bottom: 0, right: 0 };
-  return variant === 'full' ? { ...base, left: LEFT_BAR_WIDTH } : { ...base, width };
+  return variant === 'full'
+    ? { ...base, left: `var(--rose-bar-offset, ${LEFT_BAR_WIDTH}px)` }
+    : { ...base, width };
 }
 
 export function AppDrawerShell({

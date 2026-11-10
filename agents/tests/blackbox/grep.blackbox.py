@@ -192,55 +192,21 @@ async def test_grep_agent_metadata_only():
 
 
 async def test_fetch_local_data_summary():
-    """fetch_local_data_summary returns formatted summary string."""
-    _setup()
-    with patch("temporalio.activity.heartbeat"):
-        from tools.grep import fetch_local_data_summary, _data_summary_cache
-
-        # Clear cache to force fresh fetch
-        _data_summary_cache.clear()
-
-        result = await fetch_local_data_summary("user-42")
-
-    assert "5 threads" in result
-    assert "120" in result
-    assert "Alice" in result
-    assert "Latest exact text" in result
-    assert "2026-04-01T12:34:56Z" in result
-
-
-async def test_local_data_summary_lists_calendar_and_drive_as_their_own_sources():
-    """A connected Google account shows up as calendar/ and drive/, even with nothing else stored."""
-    setup_mock({
-        "/api/data/summary": {
-            "status": 200,
-            "json": {
-                "sources": {
-                    "messages": {"total_threads": 0, "total_messages": 0, "channels": {}, "threads": []},
-                    "calendar": {"accounts": ["a@example.com"], "total_events": 1605},
-                    "drive": {"accounts": ["a@example.com", "b@example.com"], "total_files": 0},
-                }
-            },
-        },
-    })
+    """The explore agent's inventory is the backend's grep `summary` rendering, cached per user."""
+    rendered = "LOCAL DATA SOURCES:\n\nmessages/ 5 threads, 120 messages\n    Alice  50 msgs"
+    setup_mock({"/api/data/grep": {"status": 200, "json": {"sources": ["summary"], "message": rendered}}})
     with patch("temporalio.activity.heartbeat"):
         from tools.grep import _data_summary_cache, fetch_local_data_summary
 
         _data_summary_cache.clear()
-        result = await fetch_local_data_summary("user-google-only")
+        result = await fetch_local_data_summary("user-42")
+        cached = await fetch_local_data_summary("user-42")
         _data_summary_cache.clear()
 
-    assert result != "No local data available."
-    lines = result.splitlines()
-    calendar = next(index for index, line in enumerate(lines) if line.startswith("calendar/"))
-    assert "1,605 events" in lines[calendar]
-    assert lines[calendar + 1] == "  Accounts: a@example.com"
-    assert lines[calendar + 2] == '  Search with grep source="calendar".'
-    drive = next(index for index, line in enumerate(lines) if line.startswith("drive/"))
-    # Nothing stored yet is not the same as an empty Drive: the first search fills it.
-    assert "0 files" not in lines[drive]
-    assert lines[drive + 1] == "  Accounts: a@example.com, b@example.com"
-    assert lines[drive + 2] == '  Search with grep source="drive".'
+    assert result == rendered and cached == rendered
+    call = assert_captured_call(url_contains="/api/data/grep", method="POST", header_present="X-API-Key")
+    assert json.loads(call["requestBody"]) == {"sources": ["summary"], "user_id": "user-42"}
+    assert len([c for c in get_captured_requests() if "/api/data/grep" in c["url"]]) == 1
 
 
 async def test_grep_empty_pattern():
@@ -263,62 +229,60 @@ async def test_grep_empty_pattern():
     assert body["pattern"] == ""
 
 
-async def test_grep_summary_source_returns_compact_inventory():
-    """summary is a local grep source for aggregate counts and top threads."""
-    _setup()
+async def test_grep_summary_source_is_answered_by_the_backend_executor():
+    """summary goes to the shared backend grep tool executor like any other source."""
+    setup_mock({
+        "/api/data/grep": {
+            "status": 200,
+            "json": {"matches": [], "total_matches": 1, "sources": ["summary"], "message": "LOCAL DATA SOURCES:"},
+        }
+    })
     with patch("temporalio.activity.heartbeat"):
-        from tools.grep import _data_summary_cache, grep_activity
+        from tools.grep import grep_activity
 
-        _data_summary_cache.clear()
-        result = await grep_activity(
-            {"pattern": "message totals", "sources": ["summary"], "source": "summary"},
-            user_id="user-42",
-        )
+        result = await grep_activity({"pattern": "message totals", "sources": ["summary"]}, user_id="user-42")
 
-    assert result["total_matches"] == 1
-    assert result["sources"] == ["summary"]
-    assert "120" in result["message"]
-    assert "Alice" in result["message"]
+    call = assert_captured_call(url_contains="/api/data/grep", method="POST")
+    assert json.loads(call["requestBody"])["sources"] == ["summary"]
+    assert result["message"] == "LOCAL DATA SOURCES:"
 
 
-async def test_grep_invalid_regex_retries_as_literal():
-    """A phone-like literal beginning with '+' must not fail the grep tool."""
+async def test_grep_backend_error_is_not_retried_by_the_agent():
+    """The literal retry of an invalid regex lives in the backend executor; the agent
+    forwards the backend's answer, including its literal_fallback fields, from one request."""
     from unittest.mock import AsyncMock, MagicMock
 
     from tools.grep import grep_activity
 
-    invalid_response = MagicMock()
-    invalid_response.status_code = 400
-    invalid_response.json.return_value = {
-        "error": "Invalid regular expression '+15551234567': Nothing to repeat"
-    }
-    success_response = MagicMock()
-    success_response.status_code = 200
-    success_response.json.return_value = {
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
         "matches": [{"content": "+15551234567"}],
         "total_matches": 1,
         "truncated": False,
+        "literal_fallback": True,
+        "original_pattern": "+15551234567",
+        "effective_pattern": r"\+15551234567",
     }
-    client = SimpleNamespace(post=AsyncMock(side_effect=[invalid_response, success_response]))
+    rejected = MagicMock()
+    rejected.status_code = 400
+    rejected.json.return_value = {"error": "INVALID_GREP_PARAM", "message": "Unsupported grep parameter: 'x'."}
+    client = SimpleNamespace(post=AsyncMock(side_effect=[response, rejected]))
 
     with (
         patch("temporalio.activity.heartbeat"),
         patch("domains.grep.repo.get_http_client", return_value=client),
     ):
-        result = await grep_activity(
-            {"pattern": "+15551234567", "source": "network"},
-            user_id="user-42",
-        )
+        result = await grep_activity({"pattern": "+15551234567", "source": "network"}, user_id="user-42")
+        try:
+            await grep_activity({"pattern": "x", "x": 1}, user_id="user-42")
+            raise AssertionError("a backend 400 must raise")
+        except ValueError as error:
+            assert "Unsupported grep parameter" in str(error)
 
     assert client.post.await_count == 2
-    first_payload = client.post.await_args_list[0].kwargs["json"]
-    second_payload = client.post.await_args_list[1].kwargs["json"]
-    assert first_payload["pattern"] == "+15551234567"
-    assert second_payload["pattern"] == r"\+15551234567"
+    assert client.post.await_args_list[0].kwargs["json"]["pattern"] == "+15551234567"
     assert result["literal_fallback"] is True
-    assert result["original_pattern"] == "+15551234567"
-    assert result["effective_pattern"] == r"\+15551234567"
-    assert result["total_matches"] == 1
 
 
 async def test_grep_network_source_forwarded():
@@ -644,7 +608,6 @@ def test_printed_google_path_names_its_source():
     assert _extract_sources({"filters": {"path": "calendar/a@example.com/2026-10-06"}}) == ["calendar"]
     # An explicit choice wins, and other paths keep the default local sources.
     assert _extract_sources({"sources": ["messages"], "filters": {"path": "drive/a@example.com"}}) == ["messages"]
-    assert _extract_sources({"filters": {"path": "messages/Alice.thread"}}) == []
 
 
 def test_grep_titles_name_the_requested_sources():
@@ -737,6 +700,254 @@ async def test_execute_grep_documents_provider_opportunistic_does_not_gate():
     assert out["unavailable_sources"] == []
 
 
+def test_filters_name_their_sources_like_the_backend():
+    """A nested filter block or a printed path selects its source, as the backend resolves it."""
+    from domains.grep.service import _extract_sources
+
+    assert _extract_sources({"filters": {"drive": {"path": "drive/a@example.com/My Drive"}}}) == ["drive"]
+    assert _extract_sources({"filters": {"documents": {"document_source": "apple_notes"}}}) == ["documents"]
+    assert _extract_sources({"filters": {"path": "transactions/Chase/Checking"}}) == ["transactions"]
+    assert _extract_sources({"filters": {"path": "messages/Alice.thread"}}) == ["messages"]
+    # Flat filter keys are not sources, and an explicit choice still wins.
+    assert _extract_sources({"filters": {"since": "7d"}}) == []
+    assert _extract_sources({"sources": ["email"], "filters": {"drive": {"since": "7d"}}}) == ["email"]
+
+
+async def test_execute_grep_nested_filter_block_gates_its_source():
+    """filters={"drive": {...}} with no sources still checks the Google connection first."""
+    from domains.grep.service import execute_grep
+
+    calls = []
+    status_args = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append(name)
+        if name == "source_status_activity":
+            status_args.extend(args[1])
+            return [{"source": "drive", "connector": "gmail", "connected": False, "connectUrl": "https://x"}]
+        return {"matches": [], "total_matches": 0}
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": "lease", "filters": {"drive": {"path": "drive/a@example.com/My Drive"}}},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert status_args == ["drive"]
+    assert out["unavailable_sources"][0]["source"] == "drive"
+    assert "grep_activity" not in calls
+
+
+async def test_execute_grep_nested_documents_provider_gate():
+    """filters={"documents": {"document_source": ...}} gates on that provider like the flat form."""
+    from domains.grep.service import execute_grep
+
+    status_args = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "source_status_activity":
+            status_args.extend(args[1])
+            return [{"source": "apple_notes", "connector": "apple_notes", "connected": True, "connectUrl": None}]
+        return {"matches": [], "total_matches": 0}
+
+    await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "renewal clause",
+            "source": "documents",
+            "filters": {"documents": {"document_source": "Apple Notes"}, "tag": "lease"},
+            "require_source_access": True,
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert status_args == ["apple_notes"]
+
+
+async def test_execute_grep_partial_gate_drops_nested_block_of_skipped_source():
+    """Skipping an unconnected source also drops its nested filter block, which the
+    backend rejects for a source that is no longer selected."""
+    from domains.grep.service import execute_grep
+
+    grep_called_with = {}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "source_status_activity":
+            return [
+                {"source": "email", "connector": "gmail", "connected": False, "connectUrl": "https://x"},
+                {"source": "transactions", "connector": "plaid", "connected": True, "connectUrl": None},
+            ]
+        if name == "grep_activity":
+            grep_called_with.update(args[0])
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "x",
+            "sources": ["email", "transactions"],
+            "filters": {"messages": {"since": "7d"}, "transactions": {"min_amount": 5}},
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert grep_called_with.get("sources") == ["transactions"]
+    assert grep_called_with.get("filters") == {"transactions": {"min_amount": 5}}
+
+
+def test_grep_schema_filter_keys_match_backend_validator():
+    """The GrepTool filters description lists exactly the keys the backend validator
+    accepts per source (back-end DATA_SOURCE_CONFIGS), so the advertised contract
+    and the executor cannot drift apart."""
+    import re
+    from pathlib import Path
+
+    from utils.tool_schemas import GrepTool
+
+    types_ts = (Path(__file__).resolve().parents[3] / "back-end/src/domains/data/types.ts").read_text()
+    configs = types_ts.split("export const DATA_SOURCE_CONFIGS", 1)[1].split("} as const;", 1)[0]
+    backend = {
+        source: [key.strip().strip("'") for key in keys.replace("\n", " ").split(",") if key.strip()]
+        for source, keys in re.findall(r"^  (\w+): \{.*?filters: \[(.*?)\]", configs, re.S | re.M)
+    }
+    advertised = {}
+    for line in GrepTool.model_fields["filters"].description.splitlines():
+        match = re.match(r"^  ([\w ,()]+?): (.+)$", line)
+        if not match:
+            continue
+        names = re.findall(r"\w+", match.group(1).replace("and ", ""))
+        keys = [key.strip() for key in re.sub(r" \([^)]*\)", "", match.group(2)).split(",")]
+        for name in names:
+            advertised[name] = keys
+    assert set(advertised) == set(backend), (sorted(advertised), sorted(backend))
+    for source, keys in backend.items():
+        assert sorted(advertised[source]) == sorted(keys), (source, advertised[source], keys)
+
+
+
+async def test_execute_grep_partial_gate_drops_keys_only_skipped_sources_accept():
+    """After skipping unconnected transactions, a flat key and a top-level shorthand only
+    transactions/calendar accepted are dropped; keys the kept source accepts stay."""
+    from domains.grep.service import execute_grep
+
+    grep_called_with = {}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "source_status_activity":
+            return [{"source": "transactions", "connector": "plaid", "connected": False, "connectUrl": "https://x"}]
+        if name == "grep_activity":
+            grep_called_with.update(args[0])
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "x",
+            "sources": ["messages", "transactions"],
+            "filters": {"min_amount": 5, "since": "7d"},
+            "until": "2026-11-01",
+            "person": "Ann",
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert grep_called_with.get("sources") == ["messages"]
+    assert grep_called_with.get("filters") == {"since": "7d"}
+    assert "until" not in grep_called_with
+    assert grep_called_with.get("person") == "Ann"
+
+
+def test_grep_source_filter_keys_match_backend_validator():
+    """agents SOURCE_FILTER_KEYS (used to narrow partially gated calls) equals back-end DATA_SOURCE_CONFIGS."""
+    import re
+    from pathlib import Path
+
+    from domains.grep.config import SOURCE_FILTER_KEYS
+
+    types_ts = (Path(__file__).resolve().parents[3] / "back-end/src/domains/data/types.ts").read_text()
+    configs = types_ts.split("export const DATA_SOURCE_CONFIGS", 1)[1].split("} as const;", 1)[0]
+    backend = {
+        source: sorted(key.strip().strip("'") for key in keys.split(",") if key.strip())
+        for source, keys in re.findall(r"^  (\w+): \{.*?filters: \[(.*?)\]", configs, re.S | re.M)
+    }
+    assert {source: sorted(keys) for source, keys in SOURCE_FILTER_KEYS.items()} == backend
+
+
+def test_grep_tool_definition_json_is_generated_from_the_explore_tool():
+    """The JSON the SMS supervisor and web chat load is byte-identical to a fresh build
+    of the explore agent's native grep tool. Regenerate with
+    `python scripts/grep_tool_definition.py --write` after changing the contract."""
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "grep_tool_definition.py"
+    spec = importlib.util.spec_from_file_location("grep_tool_definition", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    checked_in = module.DEFINITION_PATH.read_text(encoding="utf-8")
+    assert checked_in == module.render_grep_tool_definition(), (
+        "back-end/src/providers/grepTool/grepToolDefinition.json drifted from the explore agent's grep tool; "
+        "run `python scripts/grep_tool_definition.py --write` from agents/."
+    )
+
+
+def test_grep_native_tool_and_planner_share_the_contract_description():
+    """The explore agent's native tool, the planner's tool reference and the generated
+    definition all carry the one contract description."""
+    import inspect
+
+    from providers.rose.schema import build_anthropic_tools_from_response_model
+    from tools.prompts import tool_prompts_for
+    from utils.grep_tool_contract import GREP_TOOL_PROMPT
+    from utils.tool_schemas import GrepTool, create_agent_action_model
+
+    (native,) = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["grep"], tool_registry={"grep": GrepTool})
+    )
+    assert native["description"] == GREP_TOOL_PROMPT
+    assert inspect.cleandoc(GrepTool.__doc__) == GREP_TOOL_PROMPT
+    assert tool_prompts_for()["grep"] == GREP_TOOL_PROMPT
+    assert tool_prompts_for(rose_desktop=True)["grep"] == GREP_TOOL_PROMPT
+
+
+def test_grep_filters_are_a_closed_object_with_every_source_block():
+    """filters is typed, not an open map, so strict surfaces can send it unchanged:
+    each source's block takes exactly that source's keys, flat keys are their union,
+    unknown keys are rejected, and unset keys never reach the backend."""
+    import pytest
+    from pydantic import ValidationError
+
+    from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS
+    from utils.tool_schemas import GrepFilters, GrepTool
+
+    flat = {key for keys in GREP_SOURCE_FILTER_KEYS.values() for key in keys}
+    assert set(GrepFilters.model_fields) == flat | set(GREP_SOURCE_FILTER_KEYS)
+    for source, keys in GREP_SOURCE_FILTER_KEYS.items():
+        block = GrepFilters.model_fields[source].annotation.__args__[0]
+        assert set(block.model_fields) == set(keys), source
+    schema = GrepTool.model_json_schema()
+    filters_ref = next(b for b in schema["properties"]["filters"]["anyOf"] if "$ref" in b)["$ref"]
+    assert schema["$defs"][filters_ref.rsplit("/", 1)[-1]]["additionalProperties"] is False
+    call = GrepTool.model_validate(
+        {"tool": "grep", "filters": {"since": "7d", "calendar": {"until": "2026-11-02"}, "drive": None}}
+    )
+    assert call.model_dump()["filters"] == {"since": "7d", "calendar": {"until": "2026-11-02"}}
+    with pytest.raises(ValidationError):
+        GrepTool.model_validate({"tool": "grep", "filters": {"bogus": 1}})
+    with pytest.raises(ValidationError):
+        GrepTool.model_validate({"tool": "grep", "filters": {"network": {"since": "7d"}}})
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
@@ -745,13 +956,9 @@ async def run_all_tests():
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
     await r.record_async("agent_metadata_only", test_grep_agent_metadata_only)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
-    await r.record_async(
-        "local_data_summary_lists_calendar_and_drive_as_their_own_sources",
-        test_local_data_summary_lists_calendar_and_drive_as_their_own_sources,
-    )
     await r.record_async("empty_pattern", test_grep_empty_pattern)
-    await r.record_async("summary_source", test_grep_summary_source_returns_compact_inventory)
-    await r.record_async("invalid_regex_literal_fallback", test_grep_invalid_regex_retries_as_literal)
+    await r.record_async("summary_source", test_grep_summary_source_is_answered_by_the_backend_executor)
+    await r.record_async("backend_error_not_retried", test_grep_backend_error_is_not_retried_by_the_agent)
     await r.record_async("network_source_forwarded", test_grep_network_source_forwarded)
     r.record("truncate_pattern_short", test_truncate_pattern_short)
     r.record("truncate_pattern_long", test_truncate_pattern_long)
@@ -775,6 +982,26 @@ async def run_all_tests():
         "execute_grep_documents_provider_opportunistic_does_not_gate",
         test_execute_grep_documents_provider_opportunistic_does_not_gate,
     )
+    r.record("filters_name_their_sources_like_the_backend", test_filters_name_their_sources_like_the_backend)
+    await r.record_async(
+        "execute_grep_nested_filter_block_gates_its_source", test_execute_grep_nested_filter_block_gates_its_source
+    )
+    await r.record_async(
+        "execute_grep_nested_documents_provider_gate", test_execute_grep_nested_documents_provider_gate
+    )
+    await r.record_async(
+        "execute_grep_partial_gate_drops_nested_block_of_skipped_source",
+        test_execute_grep_partial_gate_drops_nested_block_of_skipped_source,
+    )
+    r.record("grep_schema_filter_keys_match_backend_validator", test_grep_schema_filter_keys_match_backend_validator)
+    r.record("grep_source_filter_keys_match_backend_validator", test_grep_source_filter_keys_match_backend_validator)
+    await r.record_async(
+        "execute_grep_partial_gate_drops_keys_only_skipped_sources_accept",
+        test_execute_grep_partial_gate_drops_keys_only_skipped_sources_accept,
+    )
+    r.record("tool_definition_json_is_generated", test_grep_tool_definition_json_is_generated_from_the_explore_tool)
+    r.record("native_tool_and_planner_share_description", test_grep_native_tool_and_planner_share_the_contract_description)
+    r.record("filters_closed_object_every_source_block", test_grep_filters_are_a_closed_object_with_every_source_block)
     teardown_mock()
     return r.all_passed
 

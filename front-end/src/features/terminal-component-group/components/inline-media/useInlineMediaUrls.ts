@@ -19,8 +19,12 @@ import { SIGNED_URL_TTL_SECONDS } from '../documentPreview.load';
 
 export type InlineMediaUrlState = Record<string, string | null>;
 
-async function signMediaUrl(file: FilePointer, agentId: string | undefined): Promise<string> {
-  if (agentId) return getAttachmentUrl(agentId, file.id, file.storage_path);
+async function signMediaUrl(
+  file: FilePointer,
+  agentId: string | undefined,
+  signal: AbortSignal,
+): Promise<string> {
+  if (agentId) return getAttachmentUrl(agentId, file.id, file.storage_path, { signal });
   const { data, error } = await supabase.storage
     .from('attachments')
     .createSignedUrl(file.storage_path, SIGNED_URL_TTL_SECONDS);
@@ -41,24 +45,24 @@ export function useInlineMediaUrls(
   const key = files.map((f) => `${f.id}:${f.storage_path}`).join('|');
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setUrls({});
     for (const file of filesRef.current) {
       if (!file.storage_path) {
         setUrls((prev) => ({ ...prev, [file.id]: null }));
         continue;
       }
-      signMediaUrl(file, agentId).then(
+      signMediaUrl(file, agentId, controller.signal).then(
         (url) => {
-          if (!cancelled) setUrls((prev) => ({ ...prev, [file.id]: url }));
+          if (!controller.signal.aborted) setUrls((prev) => ({ ...prev, [file.id]: url }));
         },
         () => {
-          if (!cancelled) setUrls((prev) => ({ ...prev, [file.id]: null }));
+          if (!controller.signal.aborted) setUrls((prev) => ({ ...prev, [file.id]: null }));
         },
       );
     }
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [key, agentId]);
 

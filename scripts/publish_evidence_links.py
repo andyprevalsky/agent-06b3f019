@@ -472,11 +472,34 @@ def _recording_episode_identity(meta: dict) -> tuple | None:
     native = meta.get("browser_session_metadata")
     native = native if isinstance(native, dict) else {}
     provider = native.get("provider") or meta.get("provider")
+    if any(value is not None and value != provider
+           for value in (native.get("provider"), meta.get("provider"))):
+        return None
     if not all(isinstance(value, str) and value for value in (task, generation, provider)):
+        return None
+    if provider not in {"tilion", "kernel", "steel", "browser-use"}:
         return None
     session = next((native.get(key) or meta.get(key) for key in
                     ("session_id", "browser_session_id", "kernel_session_id")
                     if native.get(key) or meta.get(key)), None)
+    if provider == "tilion":
+        if str(REPO_ROOT / "agents") not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT / "agents"))
+        from domains.spawn_browser_agent_v3.cdp_urls import tilion_live_view_session_id
+
+        # One native identity across explicit handles and persisted live views.
+        # The local recording path is reused on resume and cannot identify it.
+        handles = [source[key] for source in (native, meta)
+                   for key in ("session_id", "browser_session_id", "kernel_session_id")
+                   if key in source and source[key] is not None]
+        if any(not isinstance(handle, str) or not handle or handle != session for handle in handles):
+            return None
+        url = meta.get("browser_url")
+        if url is not None and url != "":
+            url_session = tilion_live_view_session_id(url)
+            if url_session is None or (session and session != url_session):
+                return None
+            session = url_session
     if isinstance(session, str) and session:
         return task, generation, provider, "session", session
     # Kernel's native live URL identifies the browser; a visited page or profile
@@ -495,11 +518,14 @@ def _terminal_matches_recording_episode(meta: dict, identity: tuple) -> bool:
     """A task-only completion may close its current episode, never a foreign handle."""
     native = meta.get("browser_session_metadata")
     native = native if isinstance(native, dict) else {}
-    provider = native.get("provider") or meta.get("provider")
-    if provider and provider != identity[2]:
+    declared_providers = (native.get("provider"), meta.get("provider"))
+    if any(provider is not None and provider != identity[2] for provider in declared_providers):
         return False
+    provider = native.get("provider") or meta.get("provider")
     handles = ("session_id", "browser_session_id", "kernel_session_id")
-    if meta.get("browser_url") or any(native.get(key) or meta.get(key) for key in handles):
+    url = meta.get("browser_url")
+    if ((url is not None and url != "")
+            or any(source.get(key) is not None for source in (native, meta) for key in handles)):
         return _recording_episode_identity({**meta, "provider": provider or identity[2]}) == identity
     return True
 
@@ -533,8 +559,18 @@ def _recorded_episode_diagnostics(messages: list) -> tuple[set[int], set[str]]:
                        and meta.get("toolStatus") in {"FINISHED", "ERROR"}
                        and _terminal_matches_recording_episode(meta, identity)
                        for i, meta in rows)
-        if not saved or not terminal:
+        logical_terminal = any(i > index and meta.get("action_type") == "task_complete"
+                               and meta.get("task_id") == identity[0]
+                               and meta.get("workflowGeneration") == identity[1]
+                               and meta.get("toolStatus") in {"FINISHED", "ERROR"}
+                               for i, meta in rows)
+        if not saved or not logical_terminal:
             missing.add(identity[0])
+            continue
+        # A pause/resume episode may save media without ending the logical task.
+        # Its later task terminal is checked by the caller. Only suppress a
+        # fenced diagnostic when this exact episode also has its own terminal.
+        if not terminal:
             continue
         for i, meta in rows:
             if (i > saved[-1][0] and meta.get("action_type") == "recording"
@@ -853,6 +889,9 @@ def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
     out_dir = ARTIFACTS_ROOT / agent_id
     out_dir.mkdir(parents=True, exist_ok=True)
     out_html = out_dir / "last_llm_call.html"
+    # Render separately, then publish the self-contained copy into this agent's
+    # owned directory. The renderer's default shared root is not ours to write.
+    render_html = out_dir / "rendered" / "last_llm_call.html"
     # The R2 HTTPS upload needs boto3, which lives in agents/venv rather than
     # the system python3 this script is documented to run under.
     python = AGENTS_VENV_PYTHON if AGENTS_VENV_PYTHON.is_file() else Path(sys.executable)

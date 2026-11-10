@@ -1,0 +1,84 @@
+{
+  "C3": {
+    "native_result": "FAIL",
+    "attribution": "UNKNOWN",
+    "worker_FPS": "30/20 against thresholds 55/30",
+    "waiver": false,
+    "original_perf_JSON": "not retained; historical cause unproven",
+    "later_6_of_6_diagnostic": "PASS only for that diagnostic; no replacement credit",
+    "evidence": {
+      "member_path": "rose/.context/pause-rca/closeout-draft/C3-fps-rca-final-result.json",
+      "sha256": "f67f9fc18e60abdc8e011345e7eab239da45154be5ddbd000ebf34bc1b043a3a",
+      "bytes": 961
+    }
+  },
+  "C4": {
+    "source": "08f519dbfb1b782d403fa4d329a2cf8094606ea0",
+    "native_full_backend_exit": 0,
+    "passive_capture": {
+      "member_path": "rose/.context/pause-rca/C4-passive-fps-capture/capture-b1b4719fee37e2b8eaa4379e9257d80a759957adfaad8d693c5f23548dcce7b9.json",
+      "sha256": "b1b4719fee37e2b8eaa4379e9257d80a759957adfaad8d693c5f23548dcce7b9",
+      "bytes": 11969
+    },
+    "native_JSON_pass": true,
+    "worker_examples": [
+      {
+        "example": "particles-worker",
+        "worker_fps": [
+          {
+            "frames": 118,
+            "p50": 60,
+            "p5": 60,
+            "mean": 58.5,
+            "worstFrameMs": 33.4,
+            "refreshMs": 16.67
+          }
+        ],
+        "verdict": {
+          "pass": true,
+          "violations": [],
+          "warnings": []
+        }
+      }
+    ],
+    "observer_completion_evidence": {
+      "member_path": "rose/.context/pause-rca/C4-passive-fps-capture/completion.json",
+      "sha256": "a2c5465cb963cd4eb9722bd78c71cd498f597e2c8a52a7d8cd6e4ccc49271062",
+      "bytes": 5993
+    },
+    "qualification": "Observed later actual full backend pass, not proof of C3 cause or historical PASS."
+  },
+  "original_preagent": {
+    "native_result": "UNVERIFIED",
+    "cleanup_complete": false,
+    "qualification": "Current closure cannot retroactively invent process-join, publisher identity or execution credit."
+  },
+  "treasury": {
+    "native_status": "SKIPPED with warning under standing treasury policy",
+    "unresolved_sandbox_obligations": 3,
+    "settlement_refund_reclaim_claim": false,
+    "qualification": "No monetary action performed; original failed provider observations remain preserved."
+  },
+  "agentcard": {
+    "local": "SKIPPED operator election",
+    "production": "SKIPPED operator election",
+    "settlement_claim": false
+  },
+  "review": {
+    "native_status": "SKIPPED usage cap; no substantive final-head CodeRabbit review claimed",
+    "historical_review_source": "1c0a5e56c2ddeddf20802f337aaa8bf183a86e3f",
+    "alert": "\ud83d\udea8\ud83d\udea8 EXTERNAL PROVIDER FAILURE \u2014 CodeRabbit: usage spending cap exhausted \u2014 NEEDS FIXING",
+    "evidence": {
+      "member_path": "rose/.context/pause-rca/nov7-review-quota-disposition.log",
+      "sha256": "6c9d09ea80d7c891cec267167f31244e3d58296a9b29fc00f036dc4a36039225",
+      "bytes": 1798
+    },
+    "final_head_disposition": {
+      "source": "08f519dbfb1b782d403fa4d329a2cf8094606ea0",
+      "status": "Qualified inherited cap disposition, not substantive review PASS",
+      "evidence": "Original source-bound review lifecycle returned require-mergeable0 before originating merge; native readback repeated by parent.",
+      "new_records_review": "Resolved by this records PR actual immutable-head review/disposition, separately recorded in GitHub."
+    }
+  },
+  "no_failure_converted_to_pass": true
+}

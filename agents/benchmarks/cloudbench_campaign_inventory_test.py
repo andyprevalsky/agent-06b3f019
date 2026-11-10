@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+import runpy
 
 from benchmarks.cloudbench_campaign_workspace_test import copy_timeout_policy
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
@@ -22,6 +23,20 @@ ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__
 # control in cloudbench-cleanup-ticket-campaign.test.py, which disables it the
 # same way for inventory-only cases. Applied after each environment scrub.
 OFFLINE_WITHOUT_SHARED_RELAY = {"CLOUDBENCH_CAMPAIGN_SHARED_RELAY": "0"}
+
+
+
+def _campaign_cleanup_fixture(root):
+    """Real Git/helper identity and private accounting, never a producer success mock."""
+    fixture = runpy.run_path(str(ROOT / "scripts/tests/fixtures/campaign_cleanup_fixture.py"))
+    return fixture["CampaignCleanupFixture"](root, ROOT)
+
+
+def _campaign_cleanup_environment(cleanup, environment):
+    # Keep the test's fake native transport precedence; prepend only its private df.
+    return {**environment,
+            "PYTHONPATH": cleanup.env["PYTHONPATH"],
+            "PATH": str(cleanup.private / "bin") + os.pathsep + environment.get("PATH", "")}
 
 
 def assert_publication_process_retired(pid):
@@ -75,6 +90,7 @@ def test_campaign_inventory_retries_only_released_infra_without_restarting_peers
     """Exercise the real scheduler with owned child processes and terminal artifacts."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    cleanup = _campaign_cleanup_fixture(tmp_path)
     cli = scripts / "run-bench"
     cli.write_text(f"#!/bin/bash\nexec {shlex.quote(sys.executable)} {shlex.quote(str(tmp_path / 'child.py'))} \"$@\"\n")
     child = r'''
@@ -179,7 +195,11 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
     if failure == "infra-parent-owned":
         # A Hub-dispatched campaign (run-bench-hub-poller) leaves group publication to its parent.
         env["BENCHMARK_HUB_PARENT_RUN_ID"] = "fixture-parent"
-    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    env = _campaign_cleanup_environment(cleanup, env)
+    try:
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    finally:
+        cleanup.close()
     summaries = list((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json"))
     assert summaries, result.stdout + result.stderr
     summary = json.loads(summaries[0].read_text())
@@ -238,6 +258,7 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
             assert broken['status'] != 'passed' and summary['status'] != 'passed'
             assert broken['attempts'][0]['resources_released'] is True
             assert broken['attempts'][0]['lifecycle_verified'] is False
+
 
 
 @pytest.mark.parametrize('explicit_concurrency', (False, True))
@@ -347,9 +368,10 @@ def producer_source(root):
     return block
 
 
-def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False, native_read_delay=0):
+def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False, native_read_delay=0, controlled_async_refresh=False):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    cleanup = _campaign_cleanup_fixture(tmp_path)
     (scripts / "lib").mkdir()
     if production_only:
         (scripts / "cloudbench-production-only-tasks.py").write_text("import sys; sys.exit(0)\n")
@@ -442,6 +464,18 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
         "trap finish EXIT\ntrap 'exit 143' TERM\n"
         + boundary
+        # Admission may already have issued this job's native reads. Join the
+        # snapshot loop's own reads relative to that baseline, not a total.
+        + "fixture_job_machine_reads() { python3 -c 'import json,os;p=os.environ[\"FIXTURE_CALLS\"];print(sum(row[\"kind\"]==\"machines\" and row.get(\"job_id\")==os.environ[\"RUN_BENCH_CAMPAIGN_JOB_ID\"] for row in map(json.loads,open(p))) if os.path.exists(p) else 0)'; }\n"
+        'fixture_reads_before_loop=0\n'
+        '[ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || fixture_reads_before_loop="$(fixture_job_machine_reads)"\n'
+        + ('eval "$(declare -f machines_snapshot_loop | sed 1s/machines_snapshot_loop/fixture_original_snapshot_loop/)"\n'
+           'machines_snapshot_loop() { touch "$FLEET_DIR/async-waiting"; '
+           'while [ ! -e "$FLEET_DIR/async-release" ]; do command sleep 0.01; done; '
+           'fixture_original_snapshot_loop; }\n'
+           'sleep() { if [ "$1" = 0.1 ] && [ -e "$FLEET_DIR/join-started" ]; then '
+           'touch "$FLEET_DIR/async-release"; fi; command sleep "$@"; }\n'
+           if controlled_async_refresh else '')
         + "start_machines_snapshot_loop\n"
         'if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then\n'
         ' python3 -c \'import json,os;from pathlib import Path;a=json.loads(os.environ["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"]);d=Path(os.environ["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"]);assert a["directory"]==str(d.resolve());assert a["owner"]==dict(line.split("=",1) for line in (d/"owner").read_text().splitlines());Path(os.environ["FIXTURE_ROOT"],os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"],"authority.json").write_text(json.dumps(a))\'\n'
@@ -450,7 +484,8 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         # the first asynchronous refresh before ending the scenario whose
         # assertion counts that refresh; startup only joins the initial read.
         'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
-        ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
+        + (' touch "$FLEET_DIR/join-started"\n' if controlled_async_refresh else '')
+        + ' while [ "$(fixture_job_machine_reads)" -lt "$((fixture_reads_before_loop + 2))" ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
         'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
@@ -507,29 +542,34 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         env["FLY_BENCH_API_TOKEN"] = "offline-bench-token-selected-123456789"
         env["FLY_API_TOKEN"] = "offline-injected-token-unselected"
         env["FIXTURE_EXPECT_AUTH"] = env["FLY_BENCH_API_TOKEN"]
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
-            "--root",
-            str(tmp_path),
-            "--runs",
-            "1",
-            "--concurrency",
-            "2",
-            "--task",
-            "first",
-            "--task",
-            "second",
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=FIXTURE_HOST_GUARD_SECONDS,
-    )
+    env = _campaign_cleanup_environment(cleanup, env)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
+                "--root",
+                str(tmp_path),
+                "--runs",
+                "1",
+                "--concurrency",
+                "2",
+                "--task",
+                "first",
+                "--task",
+                "second",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=FIXTURE_HOST_GUARD_SECONDS,
+        )
+    finally:
+        cleanup.close()
     records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
     return result, records, summary, machines.stat().st_size
+
 
 
 def test_campaign_inventory_two_consumers_share_one_native_feed_and_leave_parent_owner_alive(tmp_path):
@@ -602,6 +642,35 @@ def test_campaign_inventory_keeps_existing_production_only_mode_free_of_shared_f
 
 # The owning campaign uses the actual seed client against a loopback object store.
 # No paid provider, Hub upload, credentials, or guest restore is used by these controls.
+def _seed_private_cleanup_ledger(root, monkeypatch):
+    """Isolate only the offline workspace's device-keyed native ledger."""
+    device = (1 << 56) | int.from_bytes(os.urandom(7), "big")
+    transport = root.parent / "seed-cleanup-ledger-python"
+    transport.mkdir()
+    (transport / "sitecustomize.py").write_text(f"""import os, stat
+from pathlib import Path
+scope = Path({str(root)!r})
+device = {device}
+real_lstat, real_stat = Path.lstat, Path.stat
+
+def scoped(value, path):
+    if path.absolute().is_relative_to(scope) and stat.S_ISDIR(value.st_mode):
+        fields = list(value); fields[2] = device
+        return os.stat_result(fields)
+    return value
+
+def observed_lstat(self, *args, **kwargs):
+    return scoped(real_lstat(self, *args, **kwargs), self)
+
+def observed_stat(self, *args, **kwargs):
+    return scoped(real_stat(self, *args, **kwargs), self)
+
+Path.lstat, Path.stat = observed_lstat, observed_stat
+""")
+    monkeypatch.setenv("PYTHONPATH", str(transport) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    return device
+
+
 def seed_fixture(tmp_path, monkeypatch):
     import importlib.util
     import threading
@@ -610,6 +679,7 @@ def seed_fixture(tmp_path, monkeypatch):
     candidate = Path(os.environ.get("CLOUDBENCH_SEED_CANDIDATE_ROOT_UNDER_TEST", ROOT))
     root = tmp_path / "workspace"
     root.mkdir()
+    _seed_private_cleanup_ledger(root, monkeypatch)
     for relative in (
         "scripts/run-bench-campaign.py",
         # The campaign's fixed-total infra stop runs its sibling coordinator (K11).
@@ -1221,6 +1291,75 @@ printf '[]\n'
         thread.join()
 
 
+def test_campaign_inventory_seed_preflight_private_ledger_preserves_foreign_debt_and_native_floor(tmp_path, monkeypatch):
+    """Foreign ledger debt cannot suppress seed GET; private debt still refuses."""
+    import hashlib
+
+    def fingerprint(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+    def debt(ledger, path):
+        # Keep the actual native df and 1/1/0 policy; fill only our test ledger
+        # with declared legacy headroom greater than the physical device total.
+        capacity = int(subprocess.check_output(["df", "-Pk", str(path)], text=True).splitlines()[-1].split()[1]) * 1024
+        pending_mb = capacity // 1048576 + 64
+        groups = {}
+        while pending_mb:
+            headroom = min(16384, pending_mb)
+            groups[str(len(groups))] = {"directory": None, "members": ["r001-j0001"],
+                                       "consumed": {}, "minimum": 1, "headroom": headroom}
+            pending_mb -= headroom
+        ledger.mkdir(mode=0o700, parents=True, exist_ok=False)
+        (ledger / "state.json").write_text(json.dumps({"version": 2, "groups": groups, "inflight": {}}))
+
+    global_parent = Path("/tmp") / ("rose-cloudbench-cleanup-admission-" + str(os.getuid()))
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    with monkeypatch.context() as patch:
+        device = _seed_private_cleanup_ledger(foreign, patch)
+        ledger = global_parent / str(device)
+        debt(ledger, foreign)
+        original = fingerprint(ledger / "state.json")
+        try:
+            # The original owning command and every original assertion run here.
+            test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller(foreign, patch)
+            assert fingerprint(ledger / "state.json") == original
+            budget = json.loads((foreign / "workspace/campaigns/local-proof-write-failure/startup-cohorts/c001/cleanup-budget/budget.json").read_text())
+            assert budget["device"] not in (device, tmp_path.stat().st_dev)
+            assert (budget["preferred"], budget["minimum"], budget["headroom"], budget["amount"]) == (1, 1, 0, 1)
+            assert budget["job_count"] == 50
+        finally:
+            shutil.rmtree(ledger)
+
+    low = tmp_path / "private-low-capacity"
+    low.mkdir()
+    original_seed = seed_fixture
+    captured = {}
+    with monkeypatch.context() as patch:
+        def constrained(*args, **kwargs):
+            values = original_seed(*args, **kwargs)
+            root = values[0]
+            device = int(subprocess.check_output([sys.executable, "-c", "from pathlib import Path; import sys; print(Path(sys.argv[1]).stat().st_dev)", str(root)], text=True))
+            assert device != root.stat().st_dev
+            ledger = global_parent / str(device)
+            debt(ledger, root)
+            captured.update(root=root, ledger=ledger, calls=values[4], before=fingerprint(ledger / "state.json"))
+            return values
+        patch.setitem(globals(), "seed_fixture", constrained)
+        try:
+            with pytest.raises(AssertionError) as rejected:
+                test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller(low, patch)
+            assert rejected.traceback[-1].name == "test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller"
+            assert str(rejected.traceback[-1].statement).strip().startswith("assert len(calls) == 1")
+            summary = json.loads((captured["root"] / "campaigns/local-proof-write-failure/summary.json").read_text())
+            assert summary["cleanup_ticket_failure"] == "prepare" and summary["peak_concurrency"] == 0
+            assert captured["calls"] == [] and not (captured["root"] / "unexpected-child").exists()
+            assert fingerprint(captured["ledger"] / "state.json") == captured["before"]
+        finally:
+            if "ledger" in captured:
+                shutil.rmtree(captured["ledger"])
+
+
 def test_campaign_inventory_seed_preflight_native_linux_owner_tick_and_legacy_formats(tmp_path):
     if not Path("/proc/self/stat").exists():
         import pytest
@@ -1394,12 +1533,117 @@ def _assert_publication_process_retired(pid, birth):
     except ProcessLookupError:
         return {"pid": pid, "birth": birth, "state": "absent"}
     observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,ppid=,pgid="], capture_output=True, text=True)
+    if observed.returncode != 0 or not observed.stdout.strip():
+        # Native probes are separate observations: the owned process may have
+        # been reaped since kill(0). Only confirmed absence permits retirement.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"pid": pid, "birth": birth, "state": "absent"}
     assert observed.returncode == 0 and observed.stdout.strip(), f"unknown publication state for {pid}"
     identity = subprocess.run([sys.executable, str(ROOT / "scripts/process-identity.py"), str(pid)], capture_output=True, text=True)
+    if identity.returncode != 0 or not identity.stdout.strip():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"pid": pid, "birth": birth, "state": "absent"}
     assert identity.returncode == 0 and identity.stdout.strip() == birth, f"publication birth changed or unreadable for {pid}"
     assert observed.stdout.strip().startswith("Z"), f"owned publication process {pid} remains executing: {observed.stdout.strip()}"
     state, ppid, pgid = observed.stdout.split()
     return {"pid": pid, "birth": birth, "state": state, "ppid": int(ppid), "pgid": int(pgid)}
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rechecks_reaped_process(monkeypatch, boundary):
+    """A real child can disappear between separate native observations."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run = subprocess.run
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        reached = []
+        def reap_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target and not reached:
+                reached.append(boundary)
+                child.stdin.close()
+                child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+            return native_run(command, *args, **kwargs)
+        monkeypatch.setattr(subprocess, "run", reap_at_boundary)
+        result = _assert_publication_process_retired(child.pid, birth)
+        assert reached == [boundary]
+        assert result == {"pid": child.pid, "birth": birth, "state": "absent"}
+    finally:
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rejects_unreadable_live_process(monkeypatch, boundary):
+    """Observer failure must never turn a live owned process into retirement."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run = subprocess.run
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        def unreadable_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target:
+                return subprocess.CompletedProcess(command, 1, "", "")
+            return native_run(command, *args, **kwargs)
+        monkeypatch.setattr(subprocess, "run", unreadable_at_boundary)
+        message = "unknown publication state" if boundary == "ps" else "birth changed or unreadable"
+        with pytest.raises(AssertionError, match=message):
+            _assert_publication_process_retired(child.pid, birth)
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+def test_campaign_inventory_publication_retirement_rejects_changed_live_birth():
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    try:
+        identity = ROOT / "scripts/process-identity.py"
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        with pytest.raises(AssertionError, match="birth changed or unreadable"):
+            _assert_publication_process_retired(child.pid, birth + "-foreign")
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rejects_permission_denied_recheck(monkeypatch, boundary):
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run, native_kill = subprocess.run, os.kill
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        observed = []
+        def unreadable_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target:
+                observed.append(boundary)
+                return subprocess.CompletedProcess(command, 1, "", "")
+            return native_run(command, *args, **kwargs)
+        def denied_recheck(pid, sig):
+            if pid == child.pid and sig == 0 and observed:
+                raise PermissionError("controlled unreadable owner")
+            return native_kill(pid, sig)
+        monkeypatch.setattr(subprocess, "run", unreadable_at_boundary)
+        monkeypatch.setattr(os, "kill", denied_recheck)
+        # Both an explicit unknown observation (old helper) and permission
+        # denial (recheck) are failures; neither may report retirement.
+        with pytest.raises((AssertionError, PermissionError)):
+            _assert_publication_process_retired(child.pid, birth)
+        assert observed == [boundary]
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
 
 
 def test_campaign_inventory_publication_retirement_distinguishes_owned_zombie():
@@ -1436,6 +1680,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
     fixture = tmp_path / phase
     scripts = fixture / "scripts"
     scripts.mkdir(parents=True)
+    cleanup = _campaign_cleanup_fixture(fixture)
     uploader = fixture / "agents/benchmarks/hub_upload.py"
     uploader.parent.mkdir(parents=True)
     marker = fixture / "publication-owner.json"
@@ -1466,6 +1711,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
         FIXTURE_RELEASE=str(release),
         FIXTURE_ADMITTED=str(admitted),
     )
+    environment = _campaign_cleanup_environment(cleanup, environment)
     command = [
         sys.executable,
         str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
@@ -1517,6 +1763,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
                 process.wait()
             foreign.terminate()
             foreign.wait()
+            cleanup.close()
 
 
 @pytest.mark.parametrize(
@@ -1533,6 +1780,7 @@ def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publis
 
     fixture = tmp_path / phase
     (fixture / "scripts").mkdir(parents=True)
+    cleanup = _campaign_cleanup_fixture(fixture)
     uploader = fixture / "agents/benchmarks/hub_upload.py"
     uploader.parent.mkdir(parents=True)
     owner_path, cancelled_path = fixture / "owner.json", fixture / "cancel-observed"
@@ -1603,6 +1851,7 @@ def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publis
         FIXTURE_CANCELLED=str(cancelled_path),
         FIXTURE_ADMITTED=str(admitted),
     )
+    environment = _campaign_cleanup_environment(cleanup, environment)
     campaign = ROOT / "scripts/run-bench-campaign.py"
     completed_phase = phase not in ("starting", "final")
     if completed_phase:
@@ -1686,6 +1935,8 @@ def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publis
             server.shutdown()
             server.server_close()
             thread.join()
+            cleanup.close()
+
 
 
 @pytest.mark.parametrize("shared", (True, False))
@@ -1785,6 +2036,18 @@ def test_campaign_inventory_post_canary_admission_wait_keeps_feed_and_standalone
     assert result.returncode == 0, result.stdout + result.stderr
     assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
     assert len([call for call in calls if call["kind"] == "machines"]) == (2 if shared else 8)
+
+
+def test_campaign_inventory_standalone_join_waits_for_first_async_refresh_after_admission(tmp_path):
+    result, calls, summary, _ = run_consumers(
+        tmp_path, shared=False, post_canary=True, admission_wait=True,
+        controlled_async_refresh=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
+    per_job = {job["job_id"]: sum(call["kind"] == "machines" and call.get("job_id") == job["job_id"]
+                                for call in calls) for job in summary["jobs"]}
+    assert per_job == {"r001-j0001": 4, "r001-j0002": 4}, per_job
+    assert len([call for call in calls if call["kind"] == "machines"]) == 8
 
 
 @pytest.mark.parametrize("fault", ("missing-health", "expired-health"))
@@ -2456,8 +2719,8 @@ def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withho
     assert result['admission'] == 'local-defaults-derived-native-guards-required'
 
     env = module.stress_default_environment(result, {})
-    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '160'
-    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '56'
+    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '1000'
+    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '300'
     assert env['CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION'] == '1'
     assert module.stress_default_environment(result, {'CLOUDBENCH_APP_MACHINE_CEILING': '1'})['CLOUDBENCH_APP_MACHINE_CEILING'] == '1'
     with pytest.raises(ValueError, match='unknown native baseline'):
@@ -3063,6 +3326,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
     if not hasattr(os, 'getpriority') or os.getpriority(os.PRIO_PROCESS, 0) != 0:
         pytest.skip('actual nice0 parent required for the scheduling contract')
     scripts = tmp_path/'scripts';scripts.mkdir()
+    cleanup = _campaign_cleanup_fixture(tmp_path)
     child = tmp_path/'child.py'
     child.write_text('import os,json,time,signal,sys\nfrom pathlib import Path\nr=Path(os.environ["PRIORITY_FIXTURE"])\npid=os.getpid()\nbirth=None\ntry:\n s=Path("/proc",str(pid),"stat").read_text();birth=s[s.rfind(")")+2:].split()[19]\nexcept OSError:pass\n(r/"child.json").write_text(json.dumps({"pid":pid,"parent":os.getppid(),"nice":os.getpriority(os.PRIO_PROCESS,0),"parent_nice":os.getpriority(os.PRIO_PROCESS,os.getppid()),"birth":birth,"sid":os.getsid(0),"parent_sid":os.getsid(os.getppid()),"pgid":os.getpgrp(),"tty":os.isatty(0),"autogroup":Path("/proc/self/autogroup").read_text().split()[0] if Path("/proc/self/autogroup").is_file() else None,"parent_autogroup":Path("/proc",str(os.getppid()),"autogroup").read_text().split()[0] if Path("/proc",str(os.getppid()),"autogroup").is_file() else None,"argv":sys.argv[1:]}))\ndef stop(*args):\n (r/"child-term").write_text(str(pid));sys.exit(0)\nsignal.signal(signal.SIGTERM,stop)\nif os.environ.get("PRIORITY_CANCEL")=="1":\n while True:time.sleep(.02)\n')
     (scripts/'run-bench').write_text('#!/bin/bash\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(child))+' "$@"\n')
@@ -3070,6 +3334,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
     env.update(PRIORITY_FIXTURE=str(tmp_path), CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY='0', CLOUDBENCH_CHILD_TERM_SECONDS='1')
     if setting is not None:env['CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE']='10' if setting in ('missing','unsupported','no-process-group','cancel10') else setting
     if setting=='cancel10':env['PRIORITY_CANCEL']='1'
+    env = _campaign_cleanup_environment(cleanup, env)
     launcher=tmp_path/'launcher.py'
     patch=''
     if setting=='missing':patch='shutil.which=lambda name:None\n'
@@ -3092,6 +3357,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
             process.wait(timeout=15)
         finally:
             if process.poll() is None:process.terminate();process.wait(timeout=5)
+            cleanup.close()
     if setting in ('invalid','','5','10.0','true','-1','missing','unsupported','no-process-group'):
         assert process.returncode!=0
         assert not (tmp_path/'child.json').exists()
@@ -3110,6 +3376,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
         assert job['controller_pid']==actual['pid']
         if sys.platform.startswith('linux'):assert actual['birth'] is not None
         if setting=='cancel10':assert (tmp_path/'child-term').read_text()==str(actual['pid'])
+
 
 
 
@@ -3380,8 +3647,9 @@ def test_campaign_inventory_full_http_auth_deadline_and_owned_join(tmp_path, can
     env=dict(os.environ, PATH=str(tmp_path)+':'+os.environ['PATH'],FLY_API_TOKEN='fm2_fixture',FLY_FLAPS_BASE_URL='http://127.0.0.1:9')
     process=subprocess.Popen([sys.executable,str(ROOT/'scripts/cloudbench-campaign-machines.py'),'fixture','1'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     until=time.monotonic()+2
-    while not pidfile.exists() and process.poll() is None and time.monotonic()<until:time.sleep(.01)
-    assert pidfile.exists()
+    # The child creates the file, then writes the pid: wait for the content, not just the name.
+    while not (pidfile.exists() and pidfile.read_text().strip()) and process.poll() is None and time.monotonic()<until:time.sleep(.01)
+    assert pidfile.exists() and pidfile.read_text().strip()
     pid=int(pidfile.read_text());birth=Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split()[19]
     if cancel: process.terminate()
     stdout,stderr=process.communicate(timeout=4)
@@ -4024,3 +4292,32 @@ def test_campaign_scheduled_stop_refuses_linked_scope_parent_before_parent(tmp_p
             namespace['main']()
     popen.assert_not_called()
     assert not list(protected.iterdir())
+
+
+def test_worker_slot_admission_uses_the_startup_machine_ceiling_default(tmp_path):
+    """RCA 2026-11-07: startup admitted a fleet under the 300-Machine default while
+    reserve_worker_machine_slot still defaulted to 56, so a 13-task deploy smoke on an
+    app with 60 Machines refused test-mass-agent-run-0's mandatory autoscaler worker
+    ("60 app Machines + 0 reserved + 1 requested > ceiling 56")."""
+    fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
+    defaults = {line.split('CLOUDBENCH_APP_MACHINE_CEILING:-', 1)[1].split('}', 1)[0]
+                for line in fleet.splitlines() if 'CLOUDBENCH_APP_MACHINE_CEILING:-' in line}
+    assert defaults == {'300'}, defaults
+
+    def function(name):
+        start = fleet.index(name + '() {')
+        return fleet[start:fleet.index('\n}\n', start) + 3]
+
+    inventory = json.dumps([{'id': f'm{i}'} for i in range(60)])
+    script = tmp_path / 'worker-slot.sh'
+    script.write_text('\n'.join([
+        'set -u', 'unset CLOUDBENCH_APP_MACHINE_CEILING CLOUDBENCH_CAMPAIGN_INVENTORY_DIR SNAPSHOT_LOOP_PID',
+        f'FLY() {{ printf %s {shlex.quote(inventory)}; }}',
+        function('capacity_reserve_slots'), function('reserve_worker_machine_slot'),
+        f'CAPACITY_RESERVATION_ROOT={shlex.quote(str(tmp_path / "capacity"))}',
+        'APP=fixture-app', 'FLEET_OWNER_HOST="$(hostname)"', 'RUN_ID=fixture-run',
+        'FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed \'s/^[[:space:]]*//; s/[[:space:]]*$//\')"',
+        'reserve_worker_machine_slot aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-worker-1', '']))
+    result = subprocess.run(['bash', str(script)], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -112,14 +112,59 @@ function scanCompleteJsonStringArray(
 }
 
 /**
- * Read only complete top-level string and string-array fields from an
- * in-progress JSON object. Values embedded inside another string can never
- * masquerade as route fields.
+ * A complete JSON object, array or literal (null, true, false, number)
+ * starting at `startIndex`. Brackets inside strings are skipped, so a value is
+ * returned only once it has closed.
  */
-export function extractCompleteTopLevelFields(
-  json: string
-): Record<string, string | string[]> | null {
-  const fields: Record<string, string | string[]> = {};
+function scanCompleteJsonValue(
+  json: string,
+  startIndex: number
+): { value: unknown; nextIndex: number } | null {
+  const opener = json[startIndex];
+  if (opener !== '{' && opener !== '[') {
+    const literal = /^(?:null|true|false|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=\s*[,}])/.exec(
+      json.slice(startIndex)
+    );
+    return literal
+      ? { value: JSON.parse(literal[0]) as unknown, nextIndex: startIndex + literal[0].length }
+      : null;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = startIndex; index < json.length; index++) {
+    const char = json[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{' || char === '[') depth += 1;
+    else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return {
+            value: JSON.parse(json.slice(startIndex, index + 1)) as unknown,
+            nextIndex: index + 1,
+          };
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Read only complete top-level fields from an in-progress JSON object. Values
+ * embedded inside another string can never masquerade as route fields.
+ */
+export function extractCompleteTopLevelFields(json: string): Record<string, unknown> | null {
+  const fields: Record<string, unknown> = {};
   let index = 0;
   const skipWhitespace = (): void => {
     while (/\s/.test(json[index] ?? '')) index++;
@@ -145,7 +190,10 @@ export function extractCompleteTopLevelFields(
     index++;
     skipWhitespace();
 
-    const value = scanCompleteJsonString(json, index) ?? scanCompleteJsonStringArray(json, index);
+    const value =
+      scanCompleteJsonString(json, index) ??
+      scanCompleteJsonStringArray(json, index) ??
+      scanCompleteJsonValue(json, index);
     if (!value) return fields;
     fields[key.value] = value.value;
     index = value.nextIndex;

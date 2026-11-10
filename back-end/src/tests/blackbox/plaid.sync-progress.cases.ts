@@ -97,9 +97,6 @@ async function waitForPlaidHistory(ctx: PlaidSuiteContext, accessToken: string):
   );
 }
 
-const savedTransactions = (plaidItemId: string) =>
-  prisma.plaidTransaction.count({ where: { plaidItemId, removedAt: null } });
-
 async function sandboxProgress(ctx: PlaidSuiteContext): Promise<void> {
   const { accessToken, userId } = await ctx.createAnonSession();
   const item = await exchangeSandboxItem(ctx, accessToken);
@@ -108,7 +105,6 @@ async function sandboxProgress(ctx: PlaidSuiteContext): Promise<void> {
   const key = { userId_provider_accountId: { userId, provider: 'plaid', accountId: '' } };
   const itemRow = await prisma.plaidItem.findUniqueOrThrow({ where: { id: item.id } });
   await waitForPlaidHistory(ctx, decryptPlaidAccessTokenOrThrow(itemRow.encryptedAccessToken));
-  const savedBefore = await savedTransactions(item.id);
   const before = await prisma.integrationSyncProgress.findUniqueOrThrow({ where: key });
   await handlePlaidWebhook({
     webhook_type: 'TRANSACTIONS',
@@ -127,14 +123,17 @@ async function sandboxProgress(ctx: PlaidSuiteContext): Promise<void> {
   );
   assert(rerun !== null && rerun.runId !== before.runId, 'the webhook started a new sync run');
   assert(rerun.retiredRunIds.includes(before.runId), 'the previous run is retired');
-  const newlySaved = (await savedTransactions(item.id)) - savedBefore;
-  assert(newlySaved > 0, `the sandbox Item delivered real transactions, got ${newlySaved}`);
   // The run counts every transaction it applied. When the exchange-time run
   // already saved part of the history, Plaid re-sends those rows as
   // modifications alongside the new additions, so count rows the run touched.
   const expected = await prisma.plaidTransaction.count({
     where: { plaidItemId: item.id, updatedAt: { gte: rerun.startedAt } },
   });
+  // The exchange-time run may already hold the full history (it races Plaid's
+  // history preparation), leaving the webhook run nothing to apply; either way
+  // the Item's history is stored and the bar counts exactly what this run did.
+  const stored = await prisma.plaidTransaction.count({ where: { plaidItemId: item.id } });
+  assert(stored > 0, `the Item's sandbox history is stored, got ${stored}`);
   const rows = await prisma.integrationSyncProgress.count({ where: { userId, provider: 'plaid' } });
   assert(rows === 1, `one progress row for the plaid row, got ${rows}`);
   const after = await plaidBar(ctx, accessToken);

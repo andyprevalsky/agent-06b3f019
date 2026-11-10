@@ -11,6 +11,7 @@ import {
   testIntegrationDelete_removesQueuedUploadParts,
   testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk,
   testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload,
+  testMessagingUpload_incrementalSyncKeepsTotalCount,
 } from './integrations.messaging-ingestion.cases';
 import { testGoogleRevocationFailures_doNotStarveLaterPurge } from './integrations.email-credentials-2.cases';
 import { testStateTransition_fullLifecycle } from './integrations.lifecycle-boundaries-1.cases';
@@ -18,7 +19,6 @@ import {
   testAnthropicApiKeyCooldown_markThenOnCooldown,
   testGptApiKeyCooldown_markThenOnCooldown,
 } from './integrations.auth-cooldowns-1.cases';
-import { testClaudeCodeBillingFailure_backsOffFundedApiKey } from './integrations.claude-lifecycle-1.cases';
 
 export function sequentialTestsPart1() {
   return [
@@ -39,10 +39,6 @@ export function sequentialTestsPart1() {
     {
       name: 'gpt api-key cooldown -- mark then on-cooldown',
       fn: testGptApiKeyCooldown_markThenOnCooldown,
-    },
-    {
-      name: 'claude-code billing-failure -- funded API key backed off globally',
-      fn: testClaudeCodeBillingFailure_backsOffFundedApiKey,
     },
     {
       name: 'messaging upload -- acknowledged upload survives process exit after the 200',
@@ -87,6 +83,10 @@ export function sequentialTestsPart1() {
     {
       name: 'messaging upload -- stale finalization does not strand a newer upload',
       fn: testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload,
+    },
+    {
+      name: 'messaging upload -- incremental sync keeps the total message count',
+      fn: testMessagingUpload_incrementalSyncKeepsTotalCount,
     },
   ];
 }

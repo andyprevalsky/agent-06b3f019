@@ -8,9 +8,11 @@
  *          ◄──────            {type:"user_turn_ack", id, status, reason?}
  *
  * The ws-server dedupes by `id` for the life of the session, so retries never
- * write a second turn. `rejected` reasons: `relay_paused` (an agent turn while
- * the user holds the session), `session_ended`, `provider_unsupported`
- * (Codex), `unauthorized`, `invalid_text`, `invalid_id`. The control socket
+ * write a second turn. An agent turn while the user holds the session is
+ * `queued` and delivered after the hand back. `rejected` reasons: `relay_paused`
+ * (a spawn attaching while the user holds the session), `relay_queue_full`,
+ * `session_ended`, `provider_unsupported`
+ * (Codex), `unauthorized`, `invalid_text`, `invalid_id`, `startup_queue_full`. The control socket
  * connects with `?replay=0` so the ack never queues behind the history replay. `token` is an HMAC of the task id under
  * BACKEND_API_KEY, injected into the sandbox as CODE_SESSION_TURN_TOKEN at
  * creation: the stream URL the browser reads stays read-only.
@@ -24,7 +26,12 @@ const log = createLogger('CodeSessionTurns');
 const TURN_TOKEN_CONTEXT = 'rose-code-session-turn:v1:';
 const DEFAULT_TIMEOUT_MS = 10_000;
 
-export type TurnAckStatus = 'delivered' | 'duplicate' | 'rejected' | 'unreachable';
+/**
+ * `queued`: the CLI has not started yet (project startup, launch), so the ws-server
+ * holds the turn and writes it right after the task prompt; it never reaches the CLI
+ * as a refusal. Later retries of the same id answer `duplicate` once it is written.
+ */
+export type TurnAckStatus = 'delivered' | 'duplicate' | 'queued' | 'rejected' | 'unreachable';
 
 export interface CodeTurnSettings {
   model?: string;
@@ -44,6 +51,14 @@ export interface TurnDelivery {
   effective_settings?: CodeTurnSettings;
   delivery_mode?: 'steer' | 'start';
   turn_id?: string;
+  /** The ws-server confirmed a resumed spawn's `attach` (see deliverUserTurnToCodeSession). */
+  attached?: boolean;
+  /** Start-time env keys of the spawn the running CLI kept its own values for. */
+  ignored_config?: string[];
+  /** Events the ws-server held before this turn (earlier turns' history). */
+  history_events?: number;
+  /** 1-based place in the ws-server's startup queue (status `queued`). */
+  queue_position?: number;
 }
 
 /** Per-session write token; must match `code_session_turn_token` in agents. */
@@ -122,6 +137,16 @@ export async function deliverUserTurnToCodeSession(params: {
   sender?: 'user' | 'agent';
   attachments?: CodeTurnAttachment[];
   settings?: CodeTurnSettings;
+  /**
+   * A resumed spawn attaching to this live CLI (e2bCodeSessionSandbox
+   * attachLiveCodeCli): the ws-server refuses the turn (`credential_changed`)
+   * unless it holds this credential, and on delivery adopts `token`.
+   */
+  attach?: {
+    token: string;
+    credential: { keys: string[]; digest: string };
+    config?: Record<string, string>;
+  };
   timeoutMs?: number;
   attempts?: number;
 }): Promise<TurnDelivery> {
@@ -135,6 +160,7 @@ export async function deliverUserTurnToCodeSession(params: {
     sender: params.sender ?? 'user',
     attachments: params.attachments,
     settings: params.settings,
+    ...(params.attach !== undefined ? { attach: params.attach } : {}),
   };
   let lastError = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -146,7 +172,9 @@ export async function deliverUserTurnToCodeSession(params: {
         params.timeoutMs ?? DEFAULT_TIMEOUT_MS
       );
       const status: TurnAckStatus =
-        ack.status === 'delivered' || ack.status === 'duplicate' ? ack.status : 'rejected';
+        ack.status === 'delivered' || ack.status === 'duplicate' || ack.status === 'queued'
+          ? ack.status
+          : 'rejected';
       log.info('Code session turn acknowledged', {
         taskId,
         turnId,
@@ -160,6 +188,10 @@ export async function deliverUserTurnToCodeSession(params: {
         ...(ack.effective_settings ? { effective_settings: ack.effective_settings } : {}),
         ...(ack.delivery_mode ? { delivery_mode: ack.delivery_mode } : {}),
         ...(ack.turn_id ? { turn_id: ack.turn_id } : {}),
+        ...(ack.attached === true ? { attached: true } : {}),
+        ...(Array.isArray(ack.ignored_config) ? { ignored_config: ack.ignored_config } : {}),
+        ...(Number.isInteger(ack.history_events) ? { history_events: ack.history_events } : {}),
+        ...(Number.isInteger(ack.queue_position) ? { queue_position: ack.queue_position } : {}),
       };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);

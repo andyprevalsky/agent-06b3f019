@@ -4,7 +4,8 @@
  *   resolveCodeSession(user, owner agent, repo, id?, leaseOwner)
  *     ├─ id given ──► must belong to user (else CodeSessionNotFoundError → 404)
  *     ├─ no id ─────► the owner's primary live session for (user, owner, repoKey)
- *     │                (expired by TTL → retired, then a new one on a planned branch)
+ *     │                (idle past the TTL → skipped; the TTL sweep retires it, then
+ *     │                 a new one on a planned branch)
  *     └─ lease ─────► conditional update; a lease held by another spawn means
  *                     a parallel spawn: explicit id / shared → CodeSessionBusyError,
  *                     default → an idle parallel session, else a new one whose
@@ -50,8 +51,17 @@ export class CodeSessionBusyError extends Error {
   }
 }
 
+/**
+ * One key per repository: `owner/repo`, `owner/repo/` and `owner/repo.git` name
+ * the same remote, so they must resolve the same session (and its branch).
+ */
 export function repoKeyFor(repoUrl: string | null | undefined): string {
-  return repoUrl !== undefined && repoUrl !== null ? repoUrl.trim() : '';
+  if (repoUrl === undefined || repoUrl === null) return '';
+  return repoUrl
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '');
 }
 
 /** Branch a new session works on (see branch.ts). Null fields for repo-less sessions. */
@@ -95,15 +105,12 @@ export interface ResolvedCodeSession {
 /** Owner sessions inspected per resolve: the primary plus a few parallel ones. */
 const OWNER_SESSION_SCAN = 10;
 
-function isExpired(session: { lastActiveAt: Date }, now: Date): boolean {
-  return now.getTime() - session.lastActiveAt.getTime() > codeSessionTtlMs();
-}
-
 async function tryLease(id: string, leaseOwner: string, now: Date): Promise<boolean> {
   const result = await prisma.codeSession.updateMany({
     where: {
       id,
       state: { not: CODE_SESSION_STATES.RETIRED },
+      closingTaskId: null,
       OR: [{ leaseOwner: null }, { leaseOwner }, { leaseExpiresAt: { lt: now } }],
     },
     data: {
@@ -141,11 +148,16 @@ async function createSession(
   });
 }
 
-/** Live sessions of one owner for one repo, primary (oldest) first. */
+/**
+ * Live sessions of one owner for one repo, primary (oldest) first. Sessions idle
+ * past the TTL are not live; only the retire path (lifecycle.ts: kill sandbox,
+ * delete checkpoints) may mark them RETIRED.
+ */
 export async function ownerCodeSessions(
   userId: string,
   ownerAgentId: string,
-  repoUrl: string | null
+  repoUrl: string | null,
+  now = new Date()
 ): Promise<CodeSessionRow[]> {
   return prisma.codeSession.findMany({
     where: {
@@ -153,6 +165,7 @@ export async function ownerCodeSessions(
       ownerAgentId,
       repoKey: repoKeyFor(repoUrl),
       state: { not: CODE_SESSION_STATES.RETIRED },
+      lastActiveAt: { gte: new Date(now.getTime() - codeSessionTtlMs()) },
     },
     orderBy: { createdAt: 'asc' },
     take: OWNER_SESSION_SCAN,
@@ -188,15 +201,7 @@ export async function resolveCodeSession(
   // The owner's primary session first; when another spawn holds it, an idle
   // parallel session of the same owner, else a new parallel one branched from
   // the primary so two CLIs never share one worktree.
-  const live: CodeSessionRow[] = [];
-  for (const candidate of await ownerCodeSessions(
-    params.userId,
-    params.ownerAgentId,
-    params.repoUrl
-  )) {
-    if (isExpired(candidate, now)) await markRetired(candidate.id, now);
-    else live.push(candidate);
-  }
+  const live = await ownerCodeSessions(params.userId, params.ownerAgentId, params.repoUrl, now);
   for (const candidate of live) {
     if (await tryLease(candidate.id, params.leaseOwner, now)) {
       const leased = await prisma.codeSession.findUniqueOrThrow({ where: { id: candidate.id } });
@@ -301,6 +306,21 @@ export async function markPaused(codeSessionId: string): Promise<void> {
   });
 }
 
+/**
+ * Drop one spawn's lease without touching the session's state: a spawn refused
+ * because the user holds the live CLI in direct chat must leave that session
+ * ACTIVE (it is live) and let its own retry, or another spawn, lease it again.
+ */
+export async function releaseLease(
+  codeSessionId: string,
+  leaseOwner: string | null
+): Promise<void> {
+  await prisma.codeSession.updateMany({
+    where: { id: codeSessionId, leaseOwner },
+    data: { leaseOwner: null, leaseExpiresAt: null },
+  });
+}
+
 export async function markRetired(codeSessionId: string, now = new Date()): Promise<void> {
   await prisma.codeSession.updateMany({
     where: { id: codeSessionId },
@@ -313,17 +333,25 @@ export async function markRetired(codeSessionId: string, now = new Date()): Prom
   });
 }
 
-/** Bounded per-user sweep of sessions idle past the TTL. */
+/**
+ * Bounded sweep of sessions idle past the TTL: one user's (the opportunistic
+ * sweep a spawn starts) or, with no user, everyone's (the scheduled sweep).
+ * A live lease means an attached spawn is using the session: its keepalive
+ * refreshes lastActiveAt only every ~2 minutes, so with a short
+ * CODE_SESSION_TTL_DAYS a running task would otherwise be swept between two
+ * keepalives. Its sandbox is retired once the lease lapses (spawn gone).
+ */
 export async function findExpiredCodeSessions(
-  userId: string,
+  userId: string | null,
   limit = 5,
   now = new Date()
 ): Promise<CodeSessionRow[]> {
   return prisma.codeSession.findMany({
     where: {
-      userId,
+      ...(userId === null ? {} : { userId }),
       state: { in: [CODE_SESSION_STATES.PAUSED, CODE_SESSION_STATES.ACTIVE] },
       lastActiveAt: { lt: new Date(now.getTime() - codeSessionTtlMs()) },
+      OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
     },
     orderBy: { lastActiveAt: 'asc' },
     take: limit,

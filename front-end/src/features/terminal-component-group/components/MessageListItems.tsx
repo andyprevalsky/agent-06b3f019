@@ -26,9 +26,8 @@
  *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
  *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
-import { useEffect, type ReactNode } from 'react';
+import { Fragment, useEffect } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
-import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
@@ -63,7 +62,6 @@ interface MessageListItemsProps {
   compressWork?: boolean;
   workStatus?: string;
   workEndedAt?: string;
-  activityIndicator?: ReactNode;
   agentExchangeProjection?: ReturnType<typeof useAgentExchangeGroups> & { viewerId?: string };
   filteredMessages: Message[];
   streamingMessageIds?: ReadonlySet<string>;
@@ -114,6 +112,9 @@ function resolvePlanCharCount(
 }
 
 function getMessageRenderKey(message: Message): string {
+  // An optimistic send keeps one bubble while its server row swaps in.
+  const clientMessageId = message.metadata?.clientMessageId;
+  if (typeof clientMessageId === 'string' && clientMessageId) return clientMessageId;
   const toolName = message.metadata?.toolName;
   const toolCallId = message.metadata?.toolCallId;
   if (toolName === 'spawn_claude_code_agent' && typeof toolCallId === 'string' && toolCallId) {
@@ -269,32 +270,29 @@ export function MessageListItems({
   agentExchangeProjection,
   ...itemProps
 }: MessageListItemsProps) {
-  const roseDesktop = useRoseDesktop();
-  const { visibleMessages, displayGrouping, localExchanges, workGroups } = useMessageListProjection(
-    {
+  const { renderedMessages, displayGrouping, localExchanges, workGroups } =
+    useMessageListProjection({
       ...itemProps,
       filteredMessages,
+      agentExchangeGroups: agentExchangeProjection?.groups,
+      webSearchGrouping,
       groupAgentMessages: itemProps.groupAgentMessages ?? false,
       compressWork: itemProps.compressWork ?? false,
-    },
-  );
+    });
   const { groups: exchangeGroups, now } = agentExchangeProjection ?? localExchanges;
-  return visibleMessages.map((message) => {
-    if (roseDesktop && isHiddenTrajectoryRow(message)) return null;
+  const items = renderedMessages.map((message) => {
     const workGroup = workGroups.groupsByLeadId.get(message.message_id);
     if (workGroup)
       return (
         <TrajectoryWorkGroup
           key={workGroup.key}
           group={workGroup}
-          indicator={itemProps.activityIndicator}
           exploreStepMap={itemProps.exploreStepMap}
           renderMessage={(row) => (
             <MessageListItem message={row} {...itemProps} currentAnimatingId={null} />
           )}
         />
       );
-    if (workGroups.foldedIds.has(message.message_id)) return null;
     const exchangeGroup = exchangeGroups.groupsByLeadId.get(message.message_id);
     if (exchangeGroup)
       return (
@@ -305,9 +303,6 @@ export function MessageListItems({
           now={now}
         />
       );
-    if (exchangeGroups.foldedIds.has(message.message_id)) return null;
-    if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
-    if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
     const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);
     if (displayItems) {
       return (
@@ -336,4 +331,5 @@ export function MessageListItems({
     }
     return <MessageListItem key={getMessageRenderKey(message)} message={message} {...itemProps} />;
   });
+  return <Fragment key={itemProps.selectedAgentId}>{items}</Fragment>;
 }

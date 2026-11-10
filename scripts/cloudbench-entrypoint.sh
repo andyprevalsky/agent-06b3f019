@@ -111,7 +111,7 @@ cloudbench_verify_env_file "$APP_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" ba
 cloudbench_require_agentcard_org_oauth "$APP_DIR/back-end/.env" || exit 1
 cloudbench_validate_browser_provider_contract \
     "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env" \
-    "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || exit 1
+    "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_WORKER_BROWSER_PROVIDER:-}" || exit 1
 
 # ── 2. Pin a stable single-tenant workspace + base port for this box ───────
 # One machine == one worktree, so a fixed workspace id / base port is fine and

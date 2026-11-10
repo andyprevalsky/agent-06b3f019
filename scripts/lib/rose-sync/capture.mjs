@@ -139,7 +139,12 @@ function readSmallFile(abs, warnings, label) {
   return readFileSync(abs);
 }
 
-function captureLinkedOrPlain(root, rel, kind, out) {
+/**
+ * Capture one named path. `followInternal` (--files-only) stores an INTERNAL
+ * symlink's content under the selected path itself: neither the link record nor
+ * its target is synced, so exactly the named files are written.
+ */
+function captureLinkedOrPlain(root, rel, kind, out, followInternal = false) {
   const abs = join(root, rel);
   let lst;
   try {
@@ -163,6 +168,12 @@ function captureLinkedOrPlain(root, rel, kind, out) {
     return;
   }
   if (isInside(root, real)) {
+    if (followInternal) {
+      const content = readSmallFile(real, out.warnings, rel);
+      if (content)
+        out.files.set(rel, { path: rel, kind, content, linkTarget: null });
+      return;
+    }
     out.symlinks.set(rel, { path: rel, target, kind: "internal" });
     const realRel = relative(root, real).split(sep).join("/");
     if (kind === "env" && !out.files.has(realRel)) {
@@ -192,7 +203,21 @@ function captureLinkedOrPlain(root, rel, kind, out) {
   });
 }
 
-function captureFiles(root, include, out) {
+function captureFiles(root, include, out, filesOnly = false) {
+  // --files-only pushes exactly the named files: no dotenv auto-discovery and no
+  // untracked-symlink sweep (a stray .env.npm or lockfile must never be uploaded).
+  if (filesOnly) {
+    for (const rel of new Set(include)) {
+      captureLinkedOrPlain(
+        root,
+        rel,
+        isDotenvPath(rel) ? "env" : "config",
+        out,
+        true,
+      );
+    }
+    return;
+  }
   const untracked = listZ(
     tryGit(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
   );
@@ -425,7 +450,8 @@ export function checkoutRoot(dir) {
 
 /**
  * Capture `dir`'s checkout. Options: include (extra repo-relative paths),
- * setup (explicit setup commands), client (source label).
+ * setup (explicit setup commands), client (source label), filesOnly (skip the
+ * git bundle and uncommitted patch).
  */
 export function captureCheckout(dir, options = {}) {
   const include = (options.include ?? []).map((p) => p.replace(/^\.\/+/, ""));
@@ -438,10 +464,15 @@ export function captureCheckout(dir, options = {}) {
   const headSha =
     tryGit(root, ["rev-parse", "--verify", "-q", "HEAD"])?.trim() || null;
   const out = { files: new Map(), symlinks: new Map(), warnings: [] };
-  captureFiles(root, include, out);
-  const bundle = captureBundle(root, remoteUrl, headSha, out.warnings);
+  captureFiles(root, include, out, options.filesOnly === true);
+  // filesOnly: no branch bundle and no uncommitted patch (neither is read).
+  const bundle = options.filesOnly
+    ? { bundle: null, kind: null, branches: [], unpushed: 0 }
+    : captureBundle(root, remoteUrl, headSha, out.warnings);
   const excluded = new Set([...out.files.keys(), ...out.symlinks.keys()]);
-  const patch = capturePatch(root, headSha, excluded, out.warnings);
+  const patch = options.filesOnly
+    ? null
+    : capturePatch(root, headSha, excluded, out.warnings);
   const dirty = dirtyPaths(root).filter((p) => !excluded.has(p));
   const dirs = projectDirs(root);
   const manifest = {
@@ -475,5 +506,6 @@ export function captureCheckout(dir, options = {}) {
     files: [...out.files.values()].sort((a, b) => a.path.localeCompare(b.path)),
     gitBundle: bundle.bundle,
     uncommittedPatch: patch,
+    filesOnly: options.filesOnly === true,
   };
 }

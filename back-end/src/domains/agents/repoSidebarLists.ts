@@ -22,6 +22,7 @@ const AGENT_LIST_SELECT = {
   progressEstimate: true,
   progressEstimateGeneration: true,
   status: true,
+  userControlRevision: true,
   statusMessage: true,
   temporalWorkflowId: true,
   tokenCount: true,
@@ -30,11 +31,14 @@ const AGENT_LIST_SELECT = {
   contextSize: true,
   messageCount: true,
   fastModeCacheEnabled: true,
+  speed: true,
   worldModelMode: true,
   memoryEnabled: true,
   projectId: true,
+  folderId: true,
   createdAt: true,
   updatedAt: true,
+  lastUserMessageAt: true,
   deletedAt: true,
 } as const;
 

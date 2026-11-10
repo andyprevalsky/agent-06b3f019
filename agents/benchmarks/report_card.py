@@ -159,7 +159,7 @@ class Infra:
 
 
 def clean_source_sha(repo: Union[str, Path]) -> Optional[str]:
-    """HEAD of `repo` when its tracked files are clean; None otherwise or on any error.
+    """HEAD when tracked source is clean (native output history excluded); None on errors.
 
     A dirty checkout did not run HEAD's bytes, so the card records no source
     rather than a misleading one.
@@ -167,11 +167,14 @@ def clean_source_sha(repo: Union[str, Path]) -> Optional[str]:
     try:
         git = ["git", "-C", str(repo)]
         sha = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
-        dirty = subprocess.run([*git, "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, timeout=30, check=True).stdout.strip()
+        dirty = subprocess.run([*git, "diff", "--no-renames", "--name-only", "-z", "HEAD"],
+                               capture_output=True, timeout=30, check=True).stdout.split(b"\0")
+        unmerged = subprocess.run([*git, "ls-files", "--unmerged", "-z"],
+                                  capture_output=True, timeout=30, check=True).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) and not dirty else None
+    return sha if (re.fullmatch(r"[0-9a-f]{40}", sha) and not unmerged
+                   and all(not path or path.startswith(b"agents/benchmarks/history/") for path in dirty)) else None
 
 
 def _is_running(status: str) -> bool:

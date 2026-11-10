@@ -2,11 +2,10 @@
  * Agent lifecycle service — create and delete agents.
  */
 
-import { resolveAgentProjectId } from './agentProject';
+import { resolveCreateAgentPlacement } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
-import { startAgentWorkflowExecution } from '../../providers/temporal';
-import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
-import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
+import { handleChatMessage } from '../../providers/chat';
+import { startDirectWorkflow } from './agentDirectStartService';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { assertCodeSessionShareTarget, recordCodeSessionShare } from './agentCodeSessionShare';
@@ -25,9 +24,12 @@ import {
   applyFastModeInheritance,
   applyMemoryDefault,
   applyMemoryInheritance,
+  applySpeedDefault,
+  applySpeedInheritance,
   applyWorldModelModeInheritance,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
+  resolvedSpeed,
 } from './agentExecutionMode';
 import {
   resumeExistingSubAgent,
@@ -73,40 +75,6 @@ function runPostCreateSideEffects(
 }
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
-/** Start root agent directly in plan/execute (bypass chat). */
-async function startDirectWorkflow(
-  body: CreateAgentBody,
-  agentDbId: string,
-  userId: string,
-  verifier: { type: string },
-  priceLimitCents: number
-): Promise<string> {
-  const execution = await startAgentWorkflowExecution({
-    agentId: agentDbId,
-    userId,
-    goal: body.goal,
-    model: body.model,
-    reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type },
-    ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
-    startPhase: body.start_phase!,
-    ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
-    priceLimitCents,
-    ...(body.fast_mode_cache_enabled !== undefined
-      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
-      : {}),
-    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
-    ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
-    ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
-  });
-  // temporalWorkflowId was set during createAgentTransaction (see comment on
-  // startSubAgentWorkflow above); bind the run so cleanup can tell this
-  // generation from a later follow-up that reuses the same Workflow ID.
-  await bindStartedRunIdentity(agentDbId, execution);
-  await broadcastAgentModeStarted(agentDbId);
-  return execution.workflowId;
-}
-
 /** Start root agent in chat mode (fire-and-forget). */
 async function startChatMode(
   body: CreateAgentBody,
@@ -141,10 +109,12 @@ async function resolveSubAgentBenchmarkFlag(
   const parent = await repo.findAgent(body.parent_agent_id, userId);
   if (
     body.fast_mode_cache_enabled === undefined ||
+    body.speed === undefined ||
     body.world_model_mode === undefined ||
     body.memory_enabled === undefined
   ) {
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+    applySpeedInheritance(body, parent);
     applyWorldModelModeInheritance(body, parent?.worldModelMode);
     applyMemoryInheritance(body, parent?.memoryEnabled);
   }
@@ -153,6 +123,10 @@ async function resolveSubAgentBenchmarkFlag(
 
 /** Server-side create options that are not part of the public request body. */
 export interface CreateAgentOptions {
+  /** Internal independent spawn: recorded atomically before its workflow starts. */
+  graphSpawn?: { title: string; folderId: string; requestHash: string };
+  /** Trusted normal iPhone connection root; never accepted from public create bodies. */
+  phoneSetupHash?: string;
   /** Root repository for code sessions, persisted in the create transaction. */
   githubRepoUrl?: string;
   /**
@@ -160,6 +134,16 @@ export interface CreateAgentOptions {
    * only for a MAC_APP root agent and only when the caller owns that device.
    */
   originDeviceHeader?: string;
+}
+
+function graphSpawnFields(options: CreateAgentOptions) {
+  return options.graphSpawn === undefined
+    ? {}
+    : {
+        title: options.graphSpawn.title,
+        folderId: options.graphSpawn.folderId,
+        graphSpawnHash: options.graphSpawn.requestHash,
+      };
 }
 
 /** Server-side create fields: the root repository and the Mac that started it. */
@@ -198,13 +182,15 @@ export async function createAgent(
   if (isInternal) body.goal = resolvePromptSecrets(body.goal);
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const isSubAgent = body.parent_agent_id !== undefined;
+  // Speed reads the raw legacy flag, so it resolves before the Fast Mode default.
+  applySpeedDefault(body);
   applyFastModeDefault(body, userId);
 
   const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
   await applyCreateBodyRules(body, userId, benchmarkFlag);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
-  const projectId = await resolveAgentProjectId(body, userId);
+  const { projectId, folderId } = await resolveCreateAgentPlacement(body, userId);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -236,6 +222,7 @@ export async function createAgent(
     priceLimitCents: resolvePriceLimitCents(body.price_limit_cents),
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
+    speed: resolvedSpeed(body),
     memoryEnabled: body.memory_enabled,
     worldModelMode: body.world_model_mode,
     verifierType: verifier.type,
@@ -248,12 +235,25 @@ export async function createAgent(
     workflowTaskQueue: body.task_queue,
     ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,
+    folderId,
+    ...graphSpawnFields(options),
+    ...(options.phoneSetupHash === undefined ? {} : { phoneSetupHash: options.phoneSetupHash }),
     taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
   await recordCodeSessionShare(body, userId, agent.agent.id);
 
-  const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
+  const workflowId = await launchAgentWorkflow(
+    body,
+    agent,
+    userId,
+    isSubAgent,
+    agentId,
+    verifier,
+    options.graphSpawn !== undefined || options.phoneSetupHash !== undefined
+  );
+  if (options.graphSpawn !== undefined || options.phoneSetupHash !== undefined)
+    await repo.updateAgent(agentId, { temporalWorkflowStartPending: false });
 
   runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
 
@@ -267,7 +267,8 @@ async function launchAgentWorkflow(
   userId: string,
   isSubAgent: boolean,
   agentId: string,
-  verifier: { type: 'FLOAT_LLM_JUDGE' }
+  verifier: { type: 'FLOAT_LLM_JUDGE' },
+  independent = false
 ): Promise<string | null> {
   if (isSubAgent) {
     try {
@@ -294,7 +295,14 @@ async function launchAgentWorkflow(
     }
   }
   if (body.start_phase !== undefined) {
-    return startDirectWorkflow(body, agent.agent.id, userId, verifier, agent.agent.priceLimitCents);
+    return startDirectWorkflow(
+      body,
+      agent.agent.id,
+      userId,
+      verifier,
+      agent.agent.priceLimitCents,
+      independent
+    );
   }
   await repo.updateAgent(agent.agent.id, { status: 'ACTIVE' });
   void startChatMode(body, agent.agent.id, userId);
@@ -308,7 +316,9 @@ async function launchAgentWorkflow(
 
 /** Soft-delete an agent tree via the canonical kill path (UI Archive / SMS /clear). */
 export async function deleteAgentRecursive(agentId: string): Promise<void> {
-  await killAgentRecursive(agentId, { terminateReason: 'Agent deleted by user' });
+  await killAgentRecursive(agentId, {
+    terminateReason: 'Agent deleted by user',
+  });
 }
 
 /** Delete an agent after verifying ownership. Returns true if found. */

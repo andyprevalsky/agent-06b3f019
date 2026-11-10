@@ -4,9 +4,13 @@ import type { Browser, CDPSession, Frame, Page } from 'playwright';
 import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets';
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
+import { createLogger } from '../logger';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
+import type { HydrationTarget } from './resumeLifecycle';
 import type { SteelLifecycleMutation } from '../steel/lifecycleClaim';
 import { captureFrameIndexedDB, restoreFrameIndexedDB } from './checkpointIndexedDB';
+
+const log = createLogger('BrowserCheckpoint');
 
 type Storage = Awaited<ReturnType<ReturnType<Browser['contexts']>[number]['storageState']>>;
 type FrameStorage = {
@@ -160,7 +164,7 @@ export async function checkpointLogicalBrowser(
           const frames = new Map<string, FrameStorage>();
           const origin = new URL(page.url()).origin;
           for (const frame of page.frames()) {
-            const captured = await readFrameStorage(frame, origin);
+            const captured = await readFrameStorage(frame, origin, knownOrigins);
             if (captured && captured.origin !== origin) frames.set(captured.origin, captured);
           }
           const missing = [...knownOrigins].filter(
@@ -261,32 +265,126 @@ export async function checkpointLogicalBrowser(
 /** First materialization restores a frozen Home baseline, never a mutable profile. */
 export async function restoreLogicalBrowserCheckpoint(
   taskId: string,
-  browser: Browser
+  browser: Browser,
+  recovery?: {
+    targets?: HydrationTarget[];
+    assertOwned?: () => Promise<void>;
+    prepared?: (targets: HydrationTarget[]) => Promise<void>;
+  }
 ): Promise<void> {
   const { row, checkpoint } = await loadLogicalBrowserCheckpoint(taskId);
+  const assertRestoreBinding = async () => {
+    await assertLogicalBinding(taskId, row);
+    await recovery?.assertOwned?.();
+  };
   const context = browser.contexts()[0];
   if (!context) throw new Error('Browser checkpoint restore context missing');
-  await assertLogicalBinding(taskId, row);
-  await context.setStorageState(checkpoint.storage);
+  await assertRestoreBinding();
+  if (!recovery?.targets) {
+    log.info('Browser checkpoint restore phase', {
+      task_id: taskId,
+      phase: 'storage_started',
+      cookies: checkpoint.storage.cookies.length,
+      origins: checkpoint.storage.origins.length,
+      tabs: checkpoint.tabs.length,
+    });
+    await context.setStorageState(checkpoint.storage);
+    log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'storage_completed' });
+  }
   const targets = checkpoint.tabs.length
     ? checkpoint.tabs
     : [row.currentUrl ?? row.startUrl]
         .filter((value): value is string => value !== null)
         .map((url) => ({ url, sessionStorage: [] }));
-  await assertLogicalBinding(taskId, row);
-  const blank = context.pages().find((page) => page.url() === 'about:blank');
-  const prepared: Array<{ page: Page; url: string }> = [];
-  for (let index = 0; index < targets.length; index++) {
-    await assertLogicalBinding(taskId, row);
-    const target = targets[index]!;
-    const page = index === 0 && blank ? blank : await context.newPage();
-    await seedTabSessionStorage(page, target);
-    prepared.push({ page, url: target.url });
+  await assertRestoreBinding();
+  const targetId = async (page: Page) => {
+    const cdp = await context.newCDPSession(page);
+    try {
+      return (await cdp.send('Target.getTargetInfo')).targetInfo.targetId;
+    } finally {
+      await cdp.detach();
+    }
+  };
+  const existing = new Map<string, Page>();
+  if (recovery?.targets) {
+    if (
+      new Set(recovery.targets.map((target) => target.targetId)).size !== recovery.targets.length ||
+      recovery.targets.length !== targets.length ||
+      recovery.targets.some((target, index) => target.urlHash !== digest(targets[index]?.url ?? ''))
+    )
+      throw new Error('Acknowledged browser hydration checkpoint targets changed');
+    for (const page of context.pages()) existing.set(await targetId(page), page);
+    if (
+      existing.size !== recovery.targets.length ||
+      recovery.targets.some((target) => !existing.has(target.targetId))
+    )
+      throw new Error('Acknowledged browser hydration pages changed');
+    if (
+      recovery.targets.some((target, index) => {
+        const url = existing.get(target.targetId)!.url();
+        if (url === 'about:blank' || digest(url) === target.urlHash) return false;
+        try {
+          return (
+            !target.seedUrlHash ||
+            digest(url) !== target.seedUrlHash ||
+            new URL(url).origin !== new URL(targets[index]!.url).origin
+          );
+        } catch {
+          return true;
+        }
+      })
+    )
+      throw new Error('Acknowledged browser hydration page navigation changed');
   }
+  if (recovery?.targets) {
+    await assertRestoreBinding();
+    await context.setStorageState(checkpoint.storage);
+  }
+  const blank = context.pages().find((page) => page.url() === 'about:blank');
+  const prepared: Array<{ page: Page; url: string; seedUrlHash?: string }> = [];
+  log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'seeding_started' });
+  for (let index = 0; index < targets.length; index++) {
+    await assertRestoreBinding();
+    const target = targets[index]!;
+    const page = recovery?.targets
+      ? existing.get(recovery.targets[index]!.targetId)!
+      : index === 0 && blank
+        ? blank
+        : await context.newPage();
+    const seedUrl = await seedTabSessionStorage(page, target);
+    prepared.push({
+      page,
+      url: target.url,
+      ...(seedUrl && page.url() === seedUrl ? { seedUrlHash: digest(seedUrl) } : {}),
+    });
+  }
+  if (recovery?.prepared) {
+    // Tracking failure never changes first-hydration semantics; it disables acknowledgement.
+    try {
+      const pages = context.pages();
+      if (
+        pages.length === prepared.length &&
+        pages.every((page) => prepared.some((p) => p.page === page))
+      ) {
+        const owned = await Promise.all(
+          prepared.map(async ({ page, url, seedUrlHash }) => ({
+            targetId: await targetId(page),
+            urlHash: digest(url),
+            ...(seedUrlHash ? { seedUrlHash } : {}),
+          }))
+        );
+        await recovery.prepared(owned);
+      }
+    } catch {
+      /* The caller retains unknown custody if provenance cannot be recorded. */
+    }
+  }
+  log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'navigation_started' });
   for (const { page, url } of prepared) {
-    await assertLogicalBinding(taskId, row);
+    await assertRestoreBinding();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   }
+  log.info('Logical browser tabs restored', { taskId, tabs: prepared.length });
 }
 
 /** Seed each origin in the destination tab's storage namespace, including late-created frames. */
@@ -318,6 +416,7 @@ async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs
     )
   )
     return;
+  const seedUrl = `${origin}/.rose-session-restore-${randomUUID()}`;
   const cdp = await page.context().newCDPSession(page);
   const fulfill = (route: import('playwright').Route) => route.fulfill({ body: '<!doctype html>' });
   try {
@@ -325,7 +424,7 @@ async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs
     await cdp.send('Network.enable');
     await cdp.send('Network.setBypassServiceWorker', { bypass: true });
     await page.route('**/*', fulfill);
-    await page.goto(`${new URL(target.url).origin}/.rose-session-restore-${randomUUID()}`, {
+    await page.goto(seedUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
     });
@@ -341,6 +440,7 @@ async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs
         if (saved.indexedDB) await restoreFrameIndexedDB(frame, saved.indexedDB);
       });
     }
+    return seedUrl;
   } finally {
     try {
       await page.unroute('**/*', fulfill);
@@ -413,15 +513,44 @@ async function detachedTabStorage(page: Page, origins: string[]) {
 }
 
 /** Read through the initialized frame, not its still-empty CDP URL projection. */
-async function readFrameStorage(frame: Frame, topOrigin: string): Promise<FrameStorage | null> {
-  const state = await frame.evaluate<FrameStorage | null>(`(() => {
+async function readFrameStorage(
+  frame: Frame,
+  topOrigin: string,
+  observedOrigins?: Set<string>
+): Promise<FrameStorage | null> {
+  let originConfirmed = false;
+  try {
+    // Confirm the initialized security origin before a storage getter can
+    // lose the frame. URL alone is unsafe for sandboxed/opaque documents.
+    const origin = await frame.evaluate<string | null>(`(() => {
+      if (globalThis.origin === 'null' || !/^https?:$/.test(location.protocol)
+          || location.origin === ${JSON.stringify(topOrigin)}) return null;
+      return location.origin;
+    })()`);
+    if (!origin) return null;
+    observedOrigins?.add(origin);
+    originConfirmed = true;
+    const state = await frame.evaluate<FrameStorage | null>(`(() => {
     if (globalThis.origin === 'null') return null;
     if (!/^https?:$/.test(location.protocol) || location.origin === ${JSON.stringify(topOrigin)}) return null;
     const entries = storage => Object.entries(storage).map(([name,value]) => ({name,value}));
     return { origin: location.origin, sessionStorage: entries(sessionStorage), localStorage: entries(localStorage) };
   })()`);
-  if (state) state.indexedDB = await captureFrameIndexedDB(frame);
-  return state;
+    if (state) {
+      // Retain successful origin discovery before the next await: if this
+      // frame leaves during IndexedDB capture, the existing popup fallback
+      // must still recover its complete namespace, including sessionStorage.
+      observedOrigins?.add(state.origin);
+      state.indexedDB = await captureFrameIndexedDB(frame);
+    }
+    return state;
+  } catch (error) {
+    // A detached document's session namespace can outlive its frame. Only
+    // omit this read after its initialized origin reached the popup fallback.
+    // Unknown origins must retain the source and the previous checkpoint.
+    if (frame.isDetached() && originConfirmed) return null;
+    throw error;
+  }
 }
 
 /** Local route fulfillment on the caller-owned page keeps the top-level storage partition. */

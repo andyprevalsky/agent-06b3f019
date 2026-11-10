@@ -18,10 +18,7 @@ import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
-import {
-  buildFastModeAnthropicEnv,
-  buildFastModeCodexEnv,
-} from '../../providers/codeAgentFastModeEnv';
+import { buildFastModeAnthropicEnv } from '../../providers/codeAgentFastModeEnv';
 import { prisma } from '../../providers/database';
 
 config();
@@ -210,10 +207,6 @@ async function runTests(): Promise<boolean> {
           buildFastModeAnthropicEnv(goal, true, 'https://proxy.invalid/anthropic-proxy', false)
             .ANTHROPIC_BASE_URL
         );
-        const codex = proxied(
-          buildFastModeCodexEnv(goal, true, 'https://proxy.invalid/codex-proxy', false)
-            .CODEX_FAST_MODE_PROXY_URL
-        );
         const bare = (path: string) => path.replace(/,[0-9a-f]+(?=\/|$)/, '');
         const forged = (path: string) => path.replace(/,[0-9a-f]+(?=\/|$)/, ',' + '0'.repeat(32));
         const refused = (res: { status: number; data: unknown }) =>
@@ -229,10 +222,6 @@ async function runTests(): Promise<boolean> {
             const res = await request(`${BASE_URL}${path}${tail}`, { method: 'POST', body: msg });
             if (!refused(res)) failures.push(`POST ${path}${tail} -> ${res.status}`);
           }
-        }
-        for (const path of [bare(codex), forged(codex)]) {
-          const res = await request(`${BASE_URL}${path}/responses`, { method: 'POST', body: '{}' });
-          if (!refused(res)) failures.push(`POST ${path}/responses -> ${res.status}`);
         }
         assert.deepStrictEqual(failures, [], 'proxy served a trace without its capability');
         assert.notStrictEqual(bare(anthropic), anthropic, 'minted proxy URL carries a capability');

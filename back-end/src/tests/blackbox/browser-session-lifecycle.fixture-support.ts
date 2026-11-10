@@ -38,6 +38,30 @@ export function spawnLifecycleWorker(
   child.stderr?.on('data', (b) => {
     output += b;
   });
+  let started = false;
+  let startup: NodeJS.Timeout;
+  // Resolves once the worker has loaded its import graph and connected, so a
+  // caller's fixed window measures the lifecycle, not process startup under
+  // host load. Startup keeps its own bound so a hung worker still fails.
+  const ready = new Promise<void>((resolve, reject) => {
+    startup = setTimeout(
+      () => reject(new Error(`lifecycle worker not ready within 120s: ${output}`)),
+      120_000
+    );
+    child.on('message', (message: { type?: string; error?: string }) => {
+      // A pre-ready failure reports its cause only on the result message.
+      if (message.type === 'result' && !started)
+        reject(new Error(`worker failed before ready: ${message.error}`));
+      if (message.type !== 'ready') return;
+      started = true;
+      resolve();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (!started) reject(new Error(`worker exit ${code} before ready: ${output}`));
+    });
+  }).finally(() => clearTimeout(startup!));
+  void ready.catch(() => {});
   const result = new Promise<string>((resolve, reject) => {
     let done = false;
     child.on(
@@ -58,7 +82,7 @@ export function spawnLifecycleWorker(
   });
   void result.catch(() => {});
   const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
-  return { result, closed, child };
+  return { ready, result, closed, child };
 }
 export async function registerLifecycleServiceWorker(page: Page): Promise<void> {
   await page.evaluate(async () => {
@@ -153,23 +177,51 @@ export async function launchLifecycleNative() {
   }
 }
 
-export const lifecycleTransport = (browser: Browser, failHydration: () => boolean) => ({
-  contexts: () =>
-    browser.contexts().map(
-      (context) =>
-        new Proxy(context, {
-          get(target, key) {
-            if (key === 'setStorageState' && failHydration())
-              return async () => {
-                throw new Error('fixture hydration failed');
-              };
-            const value = Reflect.get(target, key);
-            return typeof value === 'function' ? value.bind(target) : value;
-          },
-        })
-    ),
-  close: async () => {},
-});
+/**
+ * Validation transport whose restore can fail early (storage state, before any
+ * state reached the candidate) or late (the saved tab's navigation, after the
+ * checkpoint storage was already written into the candidate — the 2026-10-28
+ * agent-payment-setup-resume shape: `page.goto: Timeout 30000ms exceeded`).
+ */
+export const lifecycleTransport = (
+  browser: Browser,
+  failHydration: () => boolean,
+  failNavigation: () => boolean = () => false
+) => {
+  const failingNavigation = (page: Page) =>
+    new Proxy(page, {
+      get(target, key) {
+        if (key === 'goto')
+          return async (...args: Parameters<Page['goto']>) => {
+            if (failNavigation() && !args[0].includes('/.rose-session-restore-'))
+              throw new Error('fixture navigation failed: page.goto: Timeout 30000ms exceeded');
+            return target.goto(...args);
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  return {
+    contexts: () =>
+      browser.contexts().map(
+        (context) =>
+          new Proxy(context, {
+            get(target, key) {
+              if (key === 'setStorageState' && failHydration())
+                return async () => {
+                  throw new Error('fixture hydration failed');
+                };
+              if (key === 'pages')
+                return () => target.pages().map((page) => failingNavigation(page));
+              if (key === 'newPage') return async () => failingNavigation(await target.newPage());
+              const value = Reflect.get(target, key);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          })
+      ),
+    close: async () => {},
+  };
+};
 
 export async function allocateLifecycleNative(
   natives: Map<string, Browser>,

@@ -35,18 +35,43 @@ def _sandbox_session_id(checkout_url: str, stripe_key: str) -> str:
 
 async def _fill_checkout_field(page, selectors: tuple[str, ...], value: str, label: str) -> None:
     deadline = time.monotonic() + 30
+    observations = [dict(probes=0, matched_probes=0, visible_probes=0,
+                         fill_attempts=0, last_exception_type=None) for _ in selectors]
     while time.monotonic() < deadline:
         for frame in page.frames:
-            for selector in selectors:
+            for index, selector in enumerate(selectors):
                 locator = frame.locator(selector).first
+                observed = observations[index]
+                observed["probes"] += 1
                 try:
-                    if await locator.count() and await locator.is_visible():
-                        await locator.fill(value, timeout=5000)
-                        return
-                except Exception:
+                    if await locator.count():
+                        observed["matched_probes"] += 1
+                        if await locator.is_visible():
+                            observed["visible_probes"] += 1
+                            observed["fill_attempts"] += 1
+                            await locator.fill(value, timeout=5000)
+                            return
+                except Exception as error:
+                    observed["last_exception_type"] = type(error).__name__
                     continue
         await asyncio.sleep(0.5)
-    raise RuntimeError(f"Stripe Checkout {label} field was not available")
+    raise RuntimeError(f"Stripe Checkout {label} field was not available; "
+                       f"selector_diagnostics={json.dumps(observations, separators=(',', ':'))}")
+
+
+async def _select_billing_country(page, country: str) -> None:
+    """Pin the billing country that the US test card and ZIP belong to.
+
+    Hosted Checkout preselects the country from Stripe's visitor IP geolocation.
+    A fleet guest geolocated to the eurozone gets a country whose form has no
+    postal-code input, so the ZIP field never renders.
+    """
+    for frame in page.frames:
+        select = frame.locator('select[name="billingCountry"]').first
+        if await select.count():
+            if await select.input_value() != country:
+                await select.select_option(country, timeout=5000)
+            return
 
 
 async def _stripe_session(session_id: str, stripe_key: str) -> dict:
@@ -107,6 +132,7 @@ async def complete_test_subscription_checkout(
                                        "123", "CVC")
             await _fill_checkout_field(page, ('input[name="billingName"]', 'input[autocomplete="cc-name"]'),
                                        "Benchmark User", "billing name")
+            await _select_billing_country(page, "US")
             await _fill_checkout_field(page, ('input[name="billingPostalCode"]', 'input[autocomplete="postal-code"]'),
                                        "94105", "ZIP")
             submit = page.locator('button[type="submit"]').last

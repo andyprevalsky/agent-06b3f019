@@ -1,0 +1,28 @@
+{
+  "observed_at": "2026-11-04T21:54:37.579590+00:00",
+  "configuration": "Explicit managed R2config files plus independentlydelivered managed .context/pr1634-archive-recovery.env; adapter overwrites legacy key input with escrow material",
+  "receipt_authenticated": true,
+  "sidecar_key": "devbox-closeout-private/pr1634-172328eb/20261104T091142Z-c3ea4d331487.tar.gz.aesgcm.receipt.aesgcm",
+  "archive_key": "devbox-closeout-private/pr1634-172328eb/20261104T091142Z-c3ea4d331487.tar.gz.aesgcm",
+  "files_restored": 9,
+  "empty_destination_required": true,
+  "full_frame_and_manifest_member_hashes_verified_by_unchanged_legacy_restore": true,
+  "receipt_recovery_exit": 0,
+  "restore_exit": 0,
+  "adapter_sha256": "0c469e18e5b391bedc53669781e2633145d564156476955097be51ec554afe32",
+  "legacy_helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+  "legacy_git_blob": "592c092502cae2f08015858f98cdd1b5d436310b",
+  "key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "raw_secret_included": false,
+  "offline_negative_cases": {
+    "wrong_key_fingerprint_rejected": true,
+    "tampered_receipt_rejected": true,
+    "nonempty_restore_destination_rejected": true
+  },
+  "managed_key_reference": {
+    "file": ".context/pr1634-archive-recovery.env",
+    "name": "PR1634_ARCHIVE_RECOVERY_KEY_B64",
+    "project_managed": true,
+    "secret_value_committed": false
+  }
+}

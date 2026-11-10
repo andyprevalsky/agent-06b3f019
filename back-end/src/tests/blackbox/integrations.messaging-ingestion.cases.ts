@@ -148,10 +148,17 @@ export async function testMessagingUpload_largeLegacyBodyIngestsInBoundedParts()
     });
     assertStatus(res.status, 200, res.data);
     const { jobId } = res.data as { jobId: string };
-    const stored = await drainUntilStored(session.userId, 12_500);
+    const { stored, parts } = await drainUntil(
+      async () => ({
+        stored: await storedMessages(session.userId),
+        parts: await prisma.messagingUploadJob.findMany({ where: { uploadId: jobId } }),
+      }),
+      ({ stored, parts }) =>
+        stored >= 12_500 &&
+        parts.length >= 3 &&
+        parts.every((part) => part.processedAt !== null && part.payload === null)
+    );
     assert(stored === 12_500, `every message stored exactly once (stored ${stored}/12500)`);
-
-    const parts = await prisma.messagingUploadJob.findMany({ where: { uploadId: jobId } });
     assert(parts.length >= 3, `large body split into bounded parts (got ${parts.length})`);
     assert(
       parts.every((part) => part.processedAt !== null && part.payload === null),
@@ -495,6 +502,65 @@ export async function testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk() 
     assert(
       cursorOf(done) === syncStart && done?.status === 'CONNECTED',
       `final chunk finalized after an interleaved drain (status ${done?.status}, cursor ${String(cursorOf(done))})`
+    );
+  } finally {
+    await cleanupUser(userId);
+    await prisma.integration.deleteMany({ where: { userId } });
+  }
+}
+
+/** Finalize one upload and return its integration row. */
+async function syncAndFinalize(userId: string, contacts: SyntheticContact[], accessedAt: string) {
+  const { jobId } = await processIMessageUpload(userId, contacts as never, accessedAt);
+  return drainUntil(
+    () => imessageIntegration(userId),
+    (row) =>
+      row?.status === 'CONNECTED' &&
+      (row.config as Record<string, unknown> | null)?.lastJobId === jobId
+  );
+}
+
+function countsOf(integration: { config: unknown } | null) {
+  const config = (integration?.config as Record<string, unknown> | null) ?? {};
+  return { messages: config.messages, contacts: config.contacts };
+}
+
+/**
+ * The connector's message count is the user's stored history, not the size of
+ * the latest upload: a small incremental sync after the full history (or a
+ * re-sent message) must not replace or inflate it.
+ */
+export async function testMessagingUpload_incrementalSyncKeepsTotalCount() {
+  const { userId } = await createAnonSession();
+  const history = syntheticContacts('5564', [30, 20]);
+  const incremental: SyntheticContact[] = [
+    {
+      ...history[0],
+      messages: [
+        { id: 1_000, text: 'one new message', date: 800_000_000_000_000_000, is_from_me: false },
+      ],
+    },
+  ];
+  try {
+    const full = await syncAndFinalize(userId, history, '2026-07-01T00:00:00.000Z');
+    const afterFull = countsOf(full);
+    assert(
+      afterFull.messages === 50 && afterFull.contacts === 2,
+      `full sync reports the stored history (got ${JSON.stringify(afterFull)})`
+    );
+
+    const delta = await syncAndFinalize(userId, incremental, '2026-07-02T00:00:00.000Z');
+    const afterDelta = countsOf(delta);
+    assert(
+      afterDelta.messages === 51 && afterDelta.contacts === 2,
+      `incremental sync keeps the total (expected 51 messages/2 contacts, got ${JSON.stringify(afterDelta)})`
+    );
+
+    const resent = await syncAndFinalize(userId, incremental, '2026-07-03T00:00:00.000Z');
+    const afterResend = countsOf(resent);
+    assert(
+      afterResend.messages === 51 && afterResend.contacts === 2,
+      `re-sent message is not counted twice (got ${JSON.stringify(afterResend)})`
     );
   } finally {
     await cleanupUser(userId);

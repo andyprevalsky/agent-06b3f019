@@ -76,3 +76,135 @@ def test_shutdown_handler_stops_runner_before_services() -> None:
     source = inspect.getsource(local.main)
     handler = source[source.index("def handle_shutdown") :]
     assert handler.index("stop_active_child_processes()") < handler.index("stop_services(")
+
+
+# The 2026-11-05 deploy measurement TERMed local.py, which SIGINTed this runner.
+# asyncio.run cancelled the coordinator while the exclusive
+# agent-payment-setup-resume task ran; run_single_task returned its CANCELLED
+# row instead of re-raising, and the coordinator admitted the three queued paid
+# AgentCard tasks for ~24 more minutes. The actual coordinator statements run
+# below with only the task executor and external edges replaced.
+def _coordinator_case(parallel: bool):
+    import ast
+    import asyncio
+    from types import SimpleNamespace
+
+    from benchmarks import run_benchmark as bench
+
+    tree = ast.parse(inspect.getsource(bench))
+    wrapper = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run_reported_task")
+    execution = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Try)
+        and n.body
+        and isinstance(n.body[0], ast.If)
+        and isinstance(n.body[0].test, ast.Name)
+        and n.body[0].test.id == "checkpoint_source_mode"
+    )
+    coordinator = ast.AsyncFunctionDef(
+        name="_coordinator",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[execution],
+        decorator_list=[],
+    )
+    names = [
+        "agent-payment-setup-resume",
+        "agent-payment-test-shop",
+        "agent-payment-idempotent-abandonment",
+        "agent-payment-abandonment",
+    ]
+    tasks = [bench.get_task_by_name(name) for name in names]
+    if parallel:
+        assert [t.name for t in bench._parallel_task_phases(tasks)[0][1]] == names[:1]
+    entered: list[str] = []
+    first_entered = asyncio.Event()
+    finalized: dict = {}
+
+    def row(name: str, status: str) -> object:
+        return bench.TaskResult(
+            name=name, passed=status == "COMPLETED", agent_id="", status=status,
+            benchmark_status="PASSED" if status == "COMPLETED" else status, progress_score=0,
+            duration_seconds=0, cost_cents=0, message_count=0,
+        )
+
+    async def run_single_task(url, task, *, on_agent_created, on_task_evaluated, **kwargs):
+        entered.append(task.name)
+        if len(entered) > 1:
+            return row(task.name, "COMPLETED")  # A queued paid task that was admitted.
+        first_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # The real executor's contract: collect evidence, return a row.
+            return row(task.name, "CANCELLED")
+        raise AssertionError("unreachable")
+
+    async def passthrough_lock(task, runner):
+        return await runner()
+
+    async def stop_collector():
+        return 0
+
+    async def finalize(url, run, live_ids, **kwargs):
+        finalized.update(kwargs, rows=list(run.task_results))
+
+    run = SimpleNamespace(task_results=[])
+    namespace = dict(bench.__dict__)
+    namespace.update({
+        "run_single_task": run_single_task, "_run_with_sandbox_payment_lock": passthrough_lock,
+        "_entered_task_futures": set(), "_never_admitted_results": [], "_admitted_tasks": {},
+        "_admitted_agent_ids": {}, "_evaluated_task_results": {}, "_outcome_signatures": {},
+        "_remember_live_agent": lambda name, aid: None, "_live_task_agent_ids": {},
+        "_emit_report": lambda **kwargs: None, "checkpoint_source_mode": False,
+        "args": SimpleNamespace(parallel=parallel, keep_failed_agents=True, max_concurrency=1, prod=False),
+        "tasks": tasks, "run": run, "base_url": "http://offline.invalid",
+        "batch_started_at": None,
+        "stop_fly_log_collector": stop_collector, "realtime_started": False, "memory_gate_enabled": False,
+        "owned_batch_cleanup": False, "_finalize_owned_batch_and_save_run": finalize,
+        "_wmh_evidence": SimpleNamespace(finalize=lambda: None),
+        "cloud_batch_cleanup": SimpleNamespace(contract=lambda: None),
+    })
+    module = ast.fix_missing_locations(ast.Module(body=[wrapper, coordinator], type_ignores=[]))
+    exec(compile(module, str(bench.__file__), "exec"), namespace)
+
+    async def scenario():
+        namespace["_report_ticker_task"] = asyncio.create_task(asyncio.Event().wait())
+        main = asyncio.create_task(namespace["_coordinator"]())
+        await asyncio.wait_for(first_entered.wait(), 10)
+        main.cancel()  # asyncio.run's handling of the owner's SIGINT.
+        try:
+            await asyncio.wait_for(main, 10)
+        except asyncio.CancelledError:
+            assert namespace["_report_ticker_task"].cancelled()
+            return "interrupted"
+        return "completed"
+
+    outcome = asyncio.run(scenario())
+    return outcome, entered, finalized, names, bench
+
+
+def _assert_interrupt_admits_nothing_queued(parallel: bool) -> None:
+    outcome, entered, finalized, names, bench = _coordinator_case(parallel)
+    assert entered == names[:1], f"queued tasks were admitted after the interrupt: {entered}"
+    assert outcome == "interrupted"
+    rows = finalized["rows"]
+    assert [r.name for r in rows] == names and all(r.status == "CANCELLED" and not r.passed for r in rows)
+    proofs = finalized["never_admitted_results"]
+    # Exactly the queued occurrences carry the coordinator's nonadmission proof.
+    assert len(proofs) == 3 and all(any(p is r for r in rows[1:]) for p in proofs)
+    assert sorted(p.stop_metadata["occurrence_index"] for p in proofs) == [1, 2, 3]
+    assert all(
+        p.graded_root_creation_outcome == "not_started"
+        and p.stop_metadata == {"runner": "benchmark_coordinator", "admission": "not_started",
+                                "occurrence_index": p.stop_metadata["occurrence_index"]}
+        for p in proofs
+    )
+
+
+def test_interrupt_of_exclusive_serial_task_admits_no_queued_task() -> None:
+    _assert_interrupt_admits_nothing_queued(parallel=True)
+
+
+def test_interrupt_of_sequential_task_admits_no_queued_task() -> None:
+    _assert_interrupt_admits_nothing_queued(parallel=False)

@@ -1,7 +1,8 @@
-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { subscribeToBus } from '@/lib/realtime';
+import { noteTreeUserMessage } from '@/hooks/useAgentTree';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
 import { expandBar, mockProjectsApi, signedInUser, roseBar } from './rose-sidebar.fixtures';
@@ -103,6 +104,97 @@ function setup(activeChildren = true) {
   return onSelectAgent;
 }
 describe('sidebar agent hierarchy', () => {
+  it('folds completed and paused children into a drawer and returns resumed children to the list', async () => {
+    const select = setup(false);
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    const children = within(screen.getByTestId('rose-agent-children-root'));
+    expect(screen.queryByTestId('rose-agent-row-worker')).toBeNull();
+    expect(screen.queryByTestId('rose-agent-row-done')).toBeNull();
+    const drawer = children.getByRole('button', { name: 'Finished agents (2)' });
+    expect(drawer).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(drawer);
+    expect(screen.getByTestId('rose-agent-row-worker')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('rose-agent-row-done'));
+    expect(select).toHaveBeenCalledWith('done');
+    fireEvent.click(drawer);
+
+    const handlers = vi
+      .mocked(subscribeToBus)
+      .mock.calls.filter(([id]) => id === 'root')
+      .at(-1)![1];
+    const update = (status: 'ACTIVE' | 'PAUSED' | 'COMPLETED') =>
+      act(() =>
+        handlers.onAgentStateChanged?.({
+          agentId: 'worker',
+          parentAgentId: 'root',
+          goal: 'Research',
+          status,
+          progress: 0,
+          toolsInUse: [],
+          messageCount: 1,
+          costCents: 0,
+        }),
+      );
+    update('ACTIVE');
+    expect(screen.getByTestId('rose-agent-row-worker')).toBeInTheDocument();
+    expect(children.getByRole('button', { name: 'Finished agents (1)' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    update('PAUSED');
+    expect(screen.queryByTestId('rose-agent-row-worker')).toBeNull();
+    expect(children.getByRole('button', { name: 'Finished agents (2)' })).toBeInTheDocument();
+    update('COMPLETED');
+    fireEvent.click(children.getByRole('button', { name: 'Finished agents (2)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Research' }));
+    const nested = within(screen.getByTestId('rose-agent-children-worker'));
+    expect(screen.queryByTestId('rose-code-agent-row-code')).toBeNull();
+    fireEvent.click(nested.getByRole('button', { name: 'Finished agents (2)' }));
+    expect(screen.getByTestId('rose-code-agent-row-code')).toBeInTheDocument();
+    expect(screen.getByTestId('rose-agent-row-leaf')).toBeInTheDocument();
+  });
+
+  it('includes finished browser and explore tasks in the same drawer without extra subscriptions', async () => {
+    const select = setup();
+    await screen.findByTestId('rose-agent-count-root');
+    const handlers = vi
+      .mocked(subscribeToBus)
+      .mock.calls.filter(([id]) => id === 'root')
+      .at(-1)![1];
+    const subscriptions = vi.mocked(subscribeToBus).mock.calls.length;
+    act(() =>
+      handlers.onAgentStateChanged?.({
+        agentId: 'root',
+        parentAgentId: null,
+        goal: 'Launch report',
+        status: 'ACTIVE',
+        progress: 0,
+        toolsInUse: [],
+        messageCount: 1,
+        costCents: 0,
+        backgroundTasks: [
+          {
+            address: '/root/browser',
+            type: 'browser',
+            goal: 'Check the booking',
+            status: 'completed',
+          },
+          { address: '/root/explore', type: 'explore', goal: 'Find sources', status: 'completed' },
+        ],
+      }),
+    );
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    expect(screen.queryByTestId('rose-task-agent-row-task:/root/browser')).toBeNull();
+    const drawer = screen.getByRole('button', { name: 'Finished agents (3)' });
+    fireEvent.click(drawer);
+    fireEvent.click(screen.getByTestId('rose-task-agent-row-task:/root/browser'));
+    expect(select).toHaveBeenCalledWith('root');
+    expect(screen.getByTestId('rose-task-agent-row-task:/root/explore')).toBeInTheDocument();
+    expect(vi.mocked(subscribeToBus).mock.calls).toHaveLength(subscriptions);
+  });
+
   it('updates the root ring directly from the shared tree bus', async () => {
     setup();
     await screen.findByTestId('rose-agent-count-root');
@@ -146,6 +238,172 @@ describe('sidebar agent hierarchy', () => {
       'aria-expanded',
       'false',
     );
+  });
+  it('orders sub-agents and code agents running first, then by the most recent user message', async () => {
+    mockSession();
+    mockProjectsApi([]);
+    const child = (agent_id: string, status: string, created_at: string, last?: string) => ({
+      agent_id,
+      parent_agent_id: 'root',
+      goal: agent_id,
+      status,
+      progress: 0,
+      tools_in_use: [],
+      message_count: 1,
+      tree_cost_cents: 0,
+      created_at,
+      ...(last ? { last_user_message_at: last } : {}),
+    });
+    server.use(
+      http.get(`${API}/agents/tree`, () =>
+        HttpResponse.json({
+          agents: [
+            {
+              ...child('root', 'ACTIVE', '2026-10-21T00:00:00Z'),
+              parent_agent_id: null,
+              goal: 'Launch report',
+              temporal_workflow_id: 'root-wf',
+            },
+            child('done-messaged', 'COMPLETED', '2026-10-21T00:01:00Z', '2026-10-21T00:09:00Z'),
+            child('run-old', 'ACTIVE', '2026-10-21T00:02:00Z'),
+            child('run-messaged', 'ACTIVE', '2026-10-21T00:01:30Z', '2026-10-21T00:08:00Z'),
+            child('paused', 'PAUSED', '2026-10-21T00:07:00Z'),
+          ],
+        }),
+      ),
+      http.get(`${API}/agents/code-agents`, () =>
+        HttpResponse.json({
+          code_agents: [
+            {
+              code_agent_id: 'code-done',
+              owner_agent_id: 'root',
+              root_agent_id: 'root',
+              provider: 'codex',
+              title: 'Old charts',
+              status: 'COMPLETED',
+              created_at: '2026-10-21T00:06:00Z',
+            },
+            {
+              code_agent_id: 'code-run',
+              owner_agent_id: 'root',
+              root_agent_id: 'root',
+              provider: 'claude',
+              title: 'Build charts',
+              status: 'ACTIVE',
+              created_at: '2026-10-21T00:03:00Z',
+            },
+          ],
+        }),
+      ),
+    );
+    renderWithProviders(
+      <AppSidebar
+        {...defaultProps({
+          agents: [
+            makeAgent({
+              agent_id: 'root',
+              goal: 'Launch report',
+              status: 'ACTIVE',
+              temporal_workflow_id: 'root-wf',
+            }),
+          ],
+          user: signedInUser(),
+          selectedAgentId: 'root',
+        })}
+      />,
+    );
+    await screen.findByTestId('rose-agent-count-root');
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    await screen.findByTestId('rose-code-agent-row-code-run');
+    fireEvent.click(screen.getByRole('button', { name: 'Finished agents (3)' }));
+    const rows = screen
+      .getByTestId('rose-agent-children-root')
+      .querySelectorAll<HTMLElement>(
+        '[data-testid^="rose-agent-row-"], [data-testid^="rose-code-agent-row-"]',
+      );
+    expect(
+      [...rows].map((el) => el.dataset.testid!.replace(/^rose-(code-)?agent-row-/, '')),
+    ).toEqual(['run-messaged', 'code-run', 'run-old', 'paused', 'done-messaged', 'code-done']);
+  });
+  it('reorders siblings live: a messaged sub-agent and a realtime-spawned child', async () => {
+    mockSession();
+    mockProjectsApi([]);
+    const node = (agent_id: string, parent_agent_id: string | null, created_at: string) => ({
+      agent_id,
+      parent_agent_id,
+      goal: agent_id,
+      status: 'ACTIVE',
+      temporal_workflow_id: parent_agent_id ? null : 'root-wf',
+      progress: 0,
+      tools_in_use: [],
+      message_count: 1,
+      tree_cost_cents: 0,
+      created_at,
+    });
+    server.use(
+      http.get(`${API}/agents/tree`, () =>
+        HttpResponse.json({
+          agents: [
+            { ...node('root', null, '2026-10-21T00:00:00Z'), goal: 'Launch report' },
+            node('old-run', 'root', '2026-10-21T00:01:00Z'),
+            node('new-run', 'root', '2026-10-21T00:02:00Z'),
+          ],
+        }),
+      ),
+      http.get(`${API}/agents/code-agents`, () => HttpResponse.json({ code_agents: [] })),
+    );
+    renderWithProviders(
+      <AppSidebar
+        {...defaultProps({
+          agents: [
+            makeAgent({
+              agent_id: 'root',
+              goal: 'Launch report',
+              status: 'ACTIVE',
+              temporal_workflow_id: 'root-wf',
+            }),
+          ],
+          user: signedInUser(),
+          selectedAgentId: 'root',
+        })}
+      />,
+    );
+    await screen.findByTestId('rose-agent-count-root');
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    const order = () =>
+      [
+        ...screen
+          .getByTestId('rose-agent-children-root')
+          .querySelectorAll<HTMLElement>('[data-testid^="rose-agent-row-"]'),
+      ].map((el) => el.dataset.testid!.replace('rose-agent-row-', ''));
+    await waitFor(() => expect(order()).toEqual(['new-run', 'old-run']));
+
+    // The person messages the older sub-agent: it moves up without a refetch.
+    act(() => noteTreeUserMessage('old-run', '2026-10-21T00:10:00Z'));
+    expect(order()).toEqual(['old-run', 'new-run']);
+
+    // A child spawned over realtime has no REST creation time; its event time
+    // makes it the newest running row, not the oldest.
+    const handlers = vi
+      .mocked(subscribeToBus)
+      .mock.calls.filter(([id]) => id === 'root')
+      .at(-1)![1];
+    act(() =>
+      handlers.onAgentStateChanged?.({
+        agentId: 'spawned',
+        parentAgentId: 'root',
+        goal: 'spawned',
+        status: 'ACTIVE',
+        progress: 0,
+        toolsInUse: [],
+        messageCount: 1,
+        costCents: 0,
+        updatedAt: '2026-10-21T00:20:00Z',
+      }),
+    );
+    expect(order()).toEqual(['spawned', 'old-run', 'new-run']);
   });
   it('minimized: shows the actual active subtree count >1 on the robot, hiding child rows', async () => {
     setup();

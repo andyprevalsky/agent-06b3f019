@@ -1,0 +1,130 @@
+{
+  "agent_cutover": {
+    "required": false,
+    "runtime_files": [],
+    "workflow_changed": false
+  },
+  "changed_files": 15,
+  "cutover_verify": null,
+  "finished_at": "2026-11-06T11:38:37Z",
+  "fly": {
+    "reason": "no agent runtime or deploy-agents.yml change in the merge",
+    "required": false
+  },
+  "github_waits": [
+    {
+      "head": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+      "kind": "run-start",
+      "outcome": "found",
+      "polls": 2,
+      "run_id": "42211766440",
+      "waited_s": 12.1,
+      "workflow": "chat-lifecycle-ratchet.yml"
+    },
+    {
+      "attempt": 1,
+      "conclusion": "success",
+      "kind": "run-complete",
+      "outcome": "completed",
+      "polls": 11,
+      "run_id": "42211766440",
+      "status": "completed",
+      "waited_s": 311.0,
+      "workflow": "chat-lifecycle-ratchet.yml"
+    }
+  ],
+  "merged_sha": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+  "render": {
+    "backend_diff": [],
+    "deploy_id": "dep-dbmrkmnf3r2c73aocfcg",
+    "deploy_status": "live",
+    "equivalence": null,
+    "finished_at": "2026-11-06T11:38:25Z",
+    "live_commit": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+    "merged_sha": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+    "observed_live_commit": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+    "observed_live_deploy_id": "dep-dbmrkmnf3r2c73aocfcg",
+    "polls": 45,
+    "provider": "render",
+    "service_paths": [
+      "back-end/",
+      "render.yaml",
+      "package.json",
+      "package-lock.json"
+    ],
+    "started_at": "2026-11-06T11:30:59Z",
+    "status": "live",
+    "then": null,
+    "waited_s": 445.2,
+    "wall_s": 445.2
+  },
+  "schema_version": 1,
+  "semantic": {
+    "attempt": 1,
+    "completed_at": "2026-11-06T11:44:00Z",
+    "conclusion": "success",
+    "created_at": "2026-11-06T11:38:38Z",
+    "dispatch": {
+      "at": "2026-11-06T11:38:37Z",
+      "inputs": {
+        "backend_url": "https://navi-j9a9.onrender.com",
+        "frontend_url": "https://www.roselabs.ai",
+        "source_sha": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046"
+      },
+      "ref": "main"
+    },
+    "display_title": "Production semantic gate source_sha=d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+    "finished_at": "2026-11-06T11:44:02Z",
+    "head_sha": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (web_search)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42211766440/job/127871866930"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_execute)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42211766440/job/127871867177"
+      },
+      {
+        "conclusion": "success",
+        "name": "Semantic frontend flows",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42211766440/job/127871867185"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (direct_answer)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42211766440/job/127871867273"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_plan)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42211766440/job/127871867403"
+      }
+    ],
+    "merged_sha": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+    "outcome": "passed",
+    "retry": null,
+    "run_id": "42211766440",
+    "source_sha": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+    "started_at": "2026-11-06T11:38:37Z",
+    "status": "completed",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42211766440",
+    "wall_s": 324.6,
+    "workflow": "chat-lifecycle-ratchet.yml"
+  },
+  "semantic_dispatch": {
+    "command": null,
+    "gate": "open"
+  },
+  "started_at": "2026-11-06T11:38:37Z",
+  "started_epoch": 1793965117.4612732,
+  "status": "passed",
+  "wall_s": 0.0
+}

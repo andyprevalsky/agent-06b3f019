@@ -1,6 +1,7 @@
 """WHM opt-in reliability contracts; all provider and activity calls are offline."""
 
 import asyncio
+import time as _real_time
 from copy import deepcopy
 from datetime import timedelta
 from unittest.mock import AsyncMock
@@ -299,7 +300,7 @@ def test_actual_provider_retry_metadata_reaches_whm_owner_and_is_inactive_elsewh
     captured = []
     network_requests = []
     provider_clock = {"now": foundry.time.monotonic()}
-    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: provider_clock["now"]))
+    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: provider_clock["now"], time=_real_time.time))
 
     def respond(request):
         network_requests.append(request)
@@ -316,6 +317,7 @@ def test_actual_provider_retry_metadata_reaches_whm_owner_and_is_inactive_elsewh
     monkeypatch.setattr(foundry, "_region_deployments", lambda *_: ["offline-deployment"])
     monkeypatch.setattr(foundry, "_cooldown_until", {})
     monkeypatch.setattr(foundry, "_auth_cooldown_until", {})
+    monkeypatch.setattr(foundry, "_shared_scope", lambda: None)
     monkeypatch.setattr(cerebras, "_cooldown_scope", lambda *_: (("", "offline", "offline"), ""))
     monkeypatch.setattr(cerebras, "_cerebras_on_cooldown", AsyncMock(return_value=False))
     monkeypatch.setattr(cerebras, "_mark_cerebras_cooldown", AsyncMock())
@@ -338,7 +340,7 @@ def test_actual_provider_retry_metadata_reaches_whm_owner_and_is_inactive_elsewh
                 tool_choice=None,
                 temperature=None,
                 effort=None,
-                provider_fast_mode=True,
+                speed="fast",
                 request_id="offline",
                 route_key=None,
                 agent_id=None,
@@ -415,10 +417,11 @@ def test_actual_rose_failure_retains_foundry_retry_floor_on_terminal_waterfall(m
     monkeypatch.setattr(
         foundry.httpx, "AsyncClient", lambda **kw: original(**kw, transport=httpx.MockTransport(respond))
     )
-    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: clock["now"], time=_real_time.time))
     monkeypatch.setattr(foundry, "_region_deployments", lambda *_: ["offline-deployment"])
     monkeypatch.setattr(foundry, "_cooldown_until", {})
     monkeypatch.setattr(foundry, "_auth_cooldown_until", {})
+    monkeypatch.setattr(foundry, "_shared_scope", lambda: None)
     for name in foundry.FOUNDRY_REGION_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://offline.invalid")
@@ -640,7 +643,7 @@ def test_flash_routes_and_discards_abandoned_partial_reply(monkeypatch, prefer_a
 
         return stream
 
-    monkeypatch.setattr(module, "foundry_complete", route("foundry", "gpt-5.6-luna-foundry"))
+    monkeypatch.setattr(module, "foundry_complete", route("foundry", "gpt-6-luna-foundry"))
     monkeypatch.setattr(module, "cerebras_complete", route("cerebras", "qwen-3.8-27b"))
     response = asyncio.run(
         RoseClient(openrouter_key="offline").collect(
@@ -759,6 +762,7 @@ def test_flash_json_mode_reaches_foundry_body_and_default_stays_plain(monkeypatc
     from _test_utils import set_mock_handler, teardown_mock
 
     from providers.demo_cache import client as cache
+    from providers.rose import foundry
 
     body = []
 
@@ -771,6 +775,7 @@ def test_flash_json_mode_reaches_foundry_body_and_default_stays_plain(monkeypatc
         return httpx.Response(200, text=text, headers={"Content-Type": "text/event-stream"})
 
     monkeypatch.setattr(cache, "ensure_context", AsyncMock(return_value=None))
+    monkeypatch.setattr(foundry, "_shared_scope", lambda: None)
     monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://offline.azure.com")
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "offline-key")
     monkeypatch.setenv("CEREBRAS_API_KEY", "")

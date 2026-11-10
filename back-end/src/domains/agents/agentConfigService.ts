@@ -7,6 +7,7 @@ import { broadcastAgentUpdate } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
 import type { Prisma, UpdateAgentBody } from './types';
 import * as repo from './repo';
+import { resolveAgentPlacement } from './agentProject';
 
 const log = createLogger('Agents');
 
@@ -97,6 +98,8 @@ function formatAgentResponse(
   return {
     agent: {
       agent_id: agent.id,
+      project_id: agent.projectId,
+      folder_id: agent.folderId,
       goal: agent.goal,
       title: agent.title,
       pinned_at: agent.pinnedAt,
@@ -136,6 +139,15 @@ function formatAgentResponse(
 // Update agent config
 // ---------------------------------------------------------------------------
 
+async function applyPlacementUpdate(
+  body: UpdateAgentBody,
+  agent: { userId: string; projectId: string | null; folderId: string | null },
+  data: Record<string, unknown>
+): Promise<void> {
+  if (body.project_id === undefined && body.folder_id === undefined) return;
+  Object.assign(data, await resolveAgentPlacement(body, agent.userId, agent));
+}
+
 export async function updateAgentConfig(
   agentId: string,
   body: UpdateAgentBody,
@@ -145,11 +157,10 @@ export async function updateAgentConfig(
 ) {
   const agent = await repo.findAgentWithVerifier(agentId, userId);
 
-  if (!agent) {
-    return { error: 'Agent not found', status: 404 };
-  }
+  if (!agent) return { error: 'Agent not found', status: 404 };
 
   const agentUpdateData = buildAgentUpdateData(body);
+  await applyPlacementUpdate(body, agent, agentUpdateData);
 
   const priceLimitError = await handlePriceLimitUpdate(agentId, body, agent, agentUpdateData);
   if (priceLimitError !== null) {
@@ -175,7 +186,8 @@ export async function updateAgentConfig(
   if (accepted && updatedAgent !== null) {
     const realtimeUpdate: Parameters<typeof broadcastAgentUpdate>[1] = {};
     if (body.tree_cost_cents !== undefined) {
-      realtimeUpdate.treeCostCents = body.tree_cost_cents;
+      // The stored value: the write adds the resume spend under this agent.
+      realtimeUpdate.treeCostCents = updatedAgent.treeCostCents;
     }
     if (body.generated_title !== undefined && updatedAgent.parentAgentId === null) {
       // Broadcast the stored value, not the candidate, so a concurrent human

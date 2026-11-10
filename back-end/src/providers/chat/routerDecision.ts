@@ -1,7 +1,6 @@
 import { z } from 'zod';
 
-import { ChatGrepParamsSchema } from './chatGrepSchema';
-
+import { grepArgumentsSchema } from '../grepTool';
 import { ChatLlmTransientMissError } from './chatStructuredRetry';
 import { extractCompleteTopLevelFields, extractPartialStringField } from './routerJsonStream';
 
@@ -19,7 +18,8 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('grep'),
     reasoning: z.string(),
-    grep: ChatGrepParamsSchema,
+    /** One call of the shared grep tool definition, run on the user's own data. */
+    grep: grepArgumentsSchema,
   }),
   z.object({
     action: z.literal('start_superintelligence'),
@@ -32,9 +32,10 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
 export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
 
 /**
- * Chat routes each turn, then routes it again after every round of web
- * searches with their results in context: answer, search again, or escalate.
- * After MAX_CHAT_SEARCH_ROUNDS rounds the Router can only answer or escalate.
+ * Chat routes each turn, then routes it again after every search round (a
+ * batch of web searches or one grep) with its results in context: answer,
+ * search again, or escalate. After MAX_CHAT_SEARCH_ROUNDS rounds the Router
+ * can only answer or escalate.
  */
 export type RouterStage = 'initial' | 'after_search' | 'search_budget_spent';
 
@@ -111,8 +112,10 @@ export function parseRouterDecisionJson(json: string): RouterDecision {
 export function parsePartialRouterDecisionJson(json: string): RouterDecision | null {
   const fields = extractCompleteTopLevelFields(json);
   if (!fields) return null;
-  const text = (name: string): string | undefined =>
-    typeof fields[name] === 'string' ? fields[name] : undefined;
+  const text = (name: string): string | undefined => {
+    const value = fields[name];
+    return typeof value === 'string' ? value : undefined;
+  };
   const action = text('action');
   const reasoning =
     text('reasoning') ?? extractPartialStringField(json, 'reasoning') ?? DEADLINE_REASONING;
@@ -136,6 +139,17 @@ export function parsePartialRouterDecisionJson(json: string): RouterDecision | n
         reasoning,
         ...(queries ? { queries } : { query }),
       });
+    } catch {
+      return null;
+    }
+  }
+
+  if (action === 'grep') {
+    // Only a closed grep object is actionable; never run a cut-off argument set.
+    const grep = fields.grep;
+    if (typeof grep !== 'object' || grep === null || Array.isArray(grep)) return null;
+    try {
+      return parseRouterDecisionObject({ action, reasoning, grep });
     } catch {
       return null;
     }
@@ -231,7 +245,7 @@ export function requireRouterDecision(params: {
     params.stage === 'search_budget_spent' &&
     (decision.action === 'web_search' || decision.action === 'grep')
   ) {
-    // The spent-budget schema has no web_search action; a provider that ignores it missed.
+    // The spent-budget schema has no search action; a provider that ignores it missed.
     throw new ChatLlmTransientMissError(
       'parse',
       `Router chose ${decision.action} after the search budget`

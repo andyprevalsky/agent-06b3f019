@@ -15,6 +15,7 @@
  * GET  /api/claude-code-session/:sandboxId/health - Health check sandbox
  */
 
+import { isFeedbackCredential } from '../../providers/codeLoginRejection';
 import { type Response, Router } from 'express';
 import { ZodError } from 'zod';
 import { type AuthRequest, authenticate, authenticateInternal } from '../../providers/auth';
@@ -63,6 +64,9 @@ async function createSessionForTarget(body: unknown) {
     project_id,
     target,
     device_id,
+    task_name,
+    cli_settings,
+    resume_config,
   } = createSessionSchema.parse(body);
   if (target === 'local') {
     const local = await createLocalCodeSessionResponse({
@@ -71,6 +75,10 @@ async function createSessionForTarget(body: unknown) {
       provider: 'claude',
       expectedUserId: user_id,
       deviceId: device_id,
+      taskName: task_name ?? null,
+      cliSettings: cli_settings,
+      resumeConfig: resume_config,
+      leaseOwner: lease_owner,
     });
     return { ...local, project: null };
   }
@@ -85,6 +93,9 @@ async function createSessionForTarget(body: unknown) {
     lease_owner,
     base_branch,
     project_id,
+    task_name,
+    cli_settings,
+    resume_config,
   });
 }
 
@@ -265,14 +276,39 @@ router.post(
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { taskId } = req.params;
-      const { output } = req.body as { output: unknown };
+      const { output, credential_feedback: rawCredentialFeedback } = req.body as {
+        output: unknown;
+        credential_feedback?: unknown;
+      };
 
       if (output === undefined || output === null || typeof output !== 'string' || output === '') {
         res.status(400).json({ error: 'output field required' });
         return;
       }
+      // Structured credential failures (agents build_credential_feedback); absent = none observed.
+      const credentialFeedback = rawCredentialFeedback ?? [];
+      const validFeedback =
+        Array.isArray(credentialFeedback) &&
+        credentialFeedback.length <= 3 &&
+        credentialFeedback.every((item: unknown) => {
+          if (typeof item !== 'object' || item === null) return false;
+          const candidate = item as Record<string, unknown>;
+          return (
+            candidate.source === 'initial' &&
+            candidate.reason === 'authentication_failed' &&
+            isFeedbackCredential(candidate.credential)
+          );
+        });
+      if (!validFeedback) {
+        res.status(400).json({ error: 'credential_feedback event is invalid' });
+        return;
+      }
 
-      await service.persistOutput(taskId, output);
+      await service.persistOutput(
+        taskId,
+        output,
+        credentialFeedback as service.ClaudeCredentialFeedback[]
+      );
 
       res.json({ success: true });
     } catch (error) {

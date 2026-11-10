@@ -26,6 +26,8 @@ import {
   testSourceStatus,
   testSnapshotEndpoint,
 } from './data-grep-sources.cases';
+import { testGrepParameterContract } from './data-grep-contract.cases';
+import { testConcurrentUnclassifiedGrepsKeepBackendResponsive } from './data-grep-responsiveness.cases';
 
 async function testSchemaAndRemovedParams(userId: string): Promise<void> {
   for (const param of [
@@ -252,12 +254,74 @@ async function testFlags(userId: string): Promise<void> {
   }
 }
 
-async function testInvalidRegex(userId: string): Promise<void> {
-  const res = await requestGrep(userId, { pattern: '[' });
-  assertStatus(res.status, 400, res.data);
-  if ((res.data as { error?: string }).error !== 'INVALID_PATTERN') {
-    throw new Error(`Expected INVALID_PATTERN, got ${JSON.stringify(res.data)}`);
+// The grep tool executor retries a pattern that is not a valid regex as the
+// literal text, for every surface (explore agent, SMS, chat) at once.
+async function testInvalidRegexRetriesAsLiteral(userId: string): Promise<void> {
+  const res = await requestGrep(userId, { pattern: 'phase-17 approved (', source: 'messages' });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as {
+    literal_fallback?: boolean;
+    original_pattern?: string;
+    effective_pattern?: string;
+    total_matches: number;
+  };
+  if (
+    body.literal_fallback !== true ||
+    body.original_pattern !== 'phase-17 approved (' ||
+    body.effective_pattern !== 'phase-17 approved \\(' ||
+    body.total_matches !== 0
+  ) {
+    throw new Error(`Expected a literal retry, got ${JSON.stringify(res.data)}`);
   }
+  const literal = await requestGrep(userId, { pattern: 'Aurora budget: phase-17 approved[' });
+  assertStatus(literal.status, 200, literal.data);
+  if ((literal.data as { literal_fallback?: boolean }).literal_fallback !== true) {
+    throw new Error(`Expected a literal retry for '[', got ${JSON.stringify(literal.data)}`);
+  }
+}
+
+// `sources: ["summary"]` answers with the local data inventory the explore
+// agent's prompt also shows: one rendering, served by the grep tool executor.
+async function testSummarySource(userId: string): Promise<void> {
+  const res = await requestGrep(userId, { pattern: 'totals', sources: ['summary'] });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as {
+    sources: string[];
+    message: string;
+    matches: Array<{ source: string; path: string; content: string }>;
+  };
+  if (
+    body.sources.join(',') !== 'summary' ||
+    !body.message.startsWith('LOCAL DATA SOURCES:') ||
+    !body.message.includes('messages/') ||
+    body.matches[0]?.source !== 'summary' ||
+    body.matches[0]?.content !== body.message
+  ) {
+    throw new Error(`Expected the inventory, got ${JSON.stringify(res.data)}`);
+  }
+}
+
+// A caller with no agent tree (the SMS supervisor) searches the documented
+// defaults; its current agent tree is empty, said in a notice. Naming
+// agent_network explicitly without an agent still fails.
+async function testDefaultsWithoutAgentTree(userId: string): Promise<void> {
+  const res = await requestGrep(userId, { pattern: 'Aurora' });
+  assertStatus(res.status, 200, res.data);
+  const body = assertBody(res.data);
+  if (body.sources.join(',') !== 'messages,network,agent_network') {
+    throw new Error(`Expected the documented defaults, got ${body.sources.join(',')}`);
+  }
+  requireContent(body, 'Aurora');
+  if (
+    body.matches.some((match) => match.source === 'agent_network') ||
+    !String((res.data as { message?: string }).message).includes('no current agent tree')
+  ) {
+    throw new Error(
+      `Expected an empty agent tree with its notice, got ${JSON.stringify(res.data)}`
+    );
+  }
+  const explicit = await requestGrep(userId, { pattern: 'Aurora', source: 'agent_network' });
+  assertStatus(explicit.status, 400, explicit.data);
 }
 
 // Catastrophic-backtracking patterns must be rejected (fast 400) before they
@@ -550,8 +614,17 @@ async function runAll(): Promise<void> {
     ['omitted source searches all buckets', () => testAllSources(userId, agentId)],
     ['regex and explicit sources work', () => testRegexAndSources(userId, agentId)],
     ['grep flags work', () => testFlags(userId)],
-    ['invalid regex returns 400', () => testInvalidRegex(userId)],
+    ['invalid regex is retried as literal text', () => testInvalidRegexRetriesAsLiteral(userId)],
+    ['summary source returns the inventory', () => testSummarySource(userId)],
+    [
+      'defaults skip agent_network without an agent tree',
+      () => testDefaultsWithoutAgentTree(userId),
+    ],
     ['ReDoS-catastrophic patterns rejected with 400', () => testRedosGuardRejects(userId)],
+    [
+      'concurrent ReDoS analyses keep the backend answering',
+      () => testConcurrentUnclassifiedGrepsKeepBackendResponsive(userId),
+    ],
     ['dialect patterns normalized and succeed', () => testDialectNormalization(userId)],
     [
       'word boundaries preserve ASCII JS semantics beside Unicode',
@@ -568,6 +641,10 @@ async function runAll(): Promise<void> {
     ['summary includes transactions', () => testTransactionSummary(userId)],
     ['summary includes documents', () => testDocumentSummary(userId)],
     ['multi-source grep with channel routing', () => testMultiSourceGrep(userId)],
+    [
+      'every prod-observed parameter shape is accepted or named with guidance',
+      () => testGrepParameterContract(userId, agentId),
+    ],
     ['per-source connectivity status', () => testSourceStatus(userId)],
     [
       'snapshot endpoint returns distilled snapshot + revisions',

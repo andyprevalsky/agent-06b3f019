@@ -82,3 +82,33 @@ None recorded.
 ## Reusable lesson
 
 When a transport is replaced, port its recovery contracts with it, and keep a real-process regression for each runtime fallback.
+
+## October28 local native fixture recurrence — cause OPEN
+
+Batch12's fake-Codex fallback case failed after8153ms with no received events and no server Client-connected log. Its fake OAuth error and fake key login did occur. The connection loop discards its errors, then the later completion assertion reports an empty event list; original socket errors and the deleted fake journal are unavailable. Do not infer a funded-key/provider failure or change credentials, retry counts or deadlines.
+
+One unchanged isolated native case passes483ms with private pre-cleanup capture: five ECONNREFUSED attempts precede OPEN, then the OAuth error, same-thread/same-input key retry and successful terminal event. All6 observed processes and the exact listener/temp directory are absent afterwards. This does not reproduce or repair the original socket failure. A private opt-in observer retains the connection boundary on the next original owning run without changing its waits/assertions. Exact report: plan:.context/deploy-fresh-20261027/rca-codex-direct-chat/REPORT.md.
+
+## October 29 renewed investigation — U3 transport diagnosis only
+
+Two real local controls reproduce the original empty-event signature: delayed
+server startup and an HTTP 503 WebSocket Upgrade rejection. The original
+per-attempt errors are absent, so neither control establishes its cause. This
+open recurrence remains separate from the fixed OAuth fallback described above.
+
+The investigation also reproduced distinct evidence and cleanup defects: the
+server logs Listening before its native listening event, and the fixture can
+subscribe to child close after that child has already exited. A private
+proposal latches close immediately after spawn, reports the last transport
+error before evaluating semantic events, and logs actual listening. It retains
+all 90 old assertions, all 15 old test names, 100 connection attempts at 20 ms
+and 500 event polls at 10 ms.
+
+The full native owner with the same final tests changes from 15 PASS / 1 FAIL
+against the original server to 16 PASS against the proposal; four additional
+candidate owner runs also pass. An occupied-port control retains its failure
+and completes cleanup. Independent review accepts exact patch
+`68fb014f3d426733ed16d08b4b2aba210d9d1c8ba57bdffd357fca48aa17fd0c`
+for diagnostic correction only. It is not applied to canonical source. The
+historical U3 cause and deploy attribution remain OPEN. Evidence:
+plan:.context/unresolved-six-20261029/workflow-chat/u3/REPORT.md.

@@ -1,0 +1,19 @@
+Causal regressions from PR #1703, run 2026-11-06 ~11:13Z on devbox 42e8c626 (Bugs folder).
+Harness: each test function imported from agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
+(the #1703 version, overlaid onto a scratch main checkout) and invoked directly.
+
+main db5b15de93 (without fix):
+FAIL test_humanized_drag_approaches_start_before_pressing AssertionError Expected drag_between to have been awaited once. Awaited 0 times.
+FAIL test_execute_action_hover_moves_pointer_without_pressing AssertionError {'success': False, 'error': 'Unknown action: hover'}
+
+PR #1703 head 052ac6ce76 (fix):
+PASS test_humanized_drag_approaches_start_before_pressing
+PASS test_execute_action_hover_moves_pointer_without_pressing
+
+These cases are registered in the deploy-run agents blackbox suite by PR #1703 (merged fa676edc7).
+
+Local control (exact unchanged task), main checkout HEAD db5b15de93 at launch:
+  scripts/run-bench --local browser-biometrics-webdecoy
+  agent 97aa455f-1fe8-407b-9fa5-f8bad701fc71, PASS 167.8 s, 0 drag actions, FCaptcha score 0.057
+  local run record agents/benchmarks/runs/20261106_111943_82ae3704-bc5a-420c-8775-86e9bb1215ac_browser-biometrics-webdecoy.json
+  (local evidence; its attempt/duration rows are in ledger-rows-pending-main.jsonl)

@@ -35,6 +35,7 @@ import {
   expectStatus,
   type Session,
 } from './projects-harness';
+import './projects-folders.cases';
 import { randomBytes } from 'crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -44,11 +45,14 @@ import { deleteEnvFile, listEnvFiles } from '../../domains/projects/envFileServi
 import {
   applyRoseProjectSetup,
   planRoseProjectSetup,
+  ROSE_PROJECT_STARTUP_TIMEOUT_S,
   type RoseSetupDeps,
 } from '../../domains/projects/roseProject';
 import { listProjects, updateProject } from '../../domains/projects/service';
 import { decryptCredentialEnvelope } from '../../providers/claudeCredentials';
+import { loadRouterProjectContext } from '../../providers/chat/projectContext';
 import { prisma } from '../../providers/database';
+import { registerRoseStartupUpgradeCases } from './projects-rose-startup-upgrade.cases';
 
 const SECRET = `pj-secret-${randomBytes(12).toString('hex')}`;
 const SECRET2 = `pj-rotated-${randomBytes(12).toString('hex')}`;
@@ -402,6 +406,39 @@ test('agents: project_id on create, inherited by sub-agents, listed, cleared on 
   });
   assert(explicitRow.projectId === null, 'explicit null keeps the sub-agent in Home');
 
+  // V2 (RCA 2026-11-06): the detail read carries the project summary workers render.
+  const configured = await call(`/api/projects/${project.id}`, {
+    method: 'PUT',
+    auth: s.token,
+    body: { defaultBranch: 'develop', repoUrl: 'https://github.com/acme/app' },
+  });
+  expectStatus(configured, 200, 'configure project repo');
+  const summary = {
+    name: 'Agents',
+    repo_url: 'https://github.com/acme/app',
+    default_branch: 'develop',
+  };
+  for (const [agentId, expected, label] of [
+    [rootId, summary, 'placed root'],
+    [child.data.agent_id as string, summary, 'inheriting sub-agent'],
+    [home.data.agent_id as string, null, 'Home agent'],
+    [explicitHome.data.agent_id as string, null, 'explicit Home sub-agent'],
+  ] as const) {
+    const detail = await call(`/api/agents/${agentId}`, { headers: apiKeyHeaders(s.userId) });
+    expectStatus(detail, 200, `detail ${label}`);
+    const got = (detail.data.agent as { project: unknown }).project;
+    assert(
+      JSON.stringify(got) === JSON.stringify(expected),
+      `${label} project ${JSON.stringify(got)}`
+    );
+  }
+  const routerContext = await loadRouterProjectContext(rootId);
+  assert(
+    routerContext.includes('"Agents" (GitHub repo acme/app, default branch develop)'),
+    `router project context ${routerContext}`
+  );
+  assert((await loadRouterProjectContext(home.data.agent_id as string)) === '', 'Home router');
+
   const list = await call('/api/agents', { headers: apiKeyHeaders(s.userId) });
   expectStatus(list, 200, 'list agents');
   const rows = list.data.agents as Array<{ agent_id: string; project_id: string | null }>;
@@ -499,7 +536,10 @@ test('Rose out of the box: a name-only Rose project is configured on the next li
     assert(rose.repoUrl === ROSE_REPO, `repo ${rose.repoUrl}`);
     assert(rose.defaultBranch === 'main', `branch ${rose.defaultBranch}`);
     assert(rose.startupScript === ROSE_STARTUP, 'startup script = PJ4 fixture');
-    assert(rose.startupTimeoutS === 120, `timeout ${rose.startupTimeoutS}`);
+    assert(
+      rose.startupTimeoutS === ROSE_PROJECT_STARTUP_TIMEOUT_S,
+      `timeout ${rose.startupTimeoutS}`
+    );
     assert(rose.githubConnected === true, 'GitHub connected via a repo grant');
     assert(rose.envFileCount === 6, `env files ${rose.envFileCount}`);
     assert(owner.githubReads.length === 1, `one GitHub read, got ${owner.githubReads.length}`);
@@ -536,6 +576,8 @@ test('Rose out of the box: a name-only Rose project is configured on the next li
     await owner.cleanup();
   }
 });
+
+registerRoseStartupUpgradeCases({ roseOwner, roseRepo: ROSE_REPO, roseStartup: ROSE_STARTUP });
 
 test('Rose out of the box: a stale pristine plan never fills a project that gained an env file or a sync', async () => {
   // The planner read a pristine "Rose"; before the setup write, the user added

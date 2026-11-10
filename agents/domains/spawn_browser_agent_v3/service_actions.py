@@ -25,6 +25,7 @@ import httpx
 import structlog
 from PIL import Image
 
+from browser_tools.result_projection import prepare_browser_result
 from browser_tools.schemas import (
     MAX_BROWSER_WAIT_MS,
     RequestPaymentCardBrowserTool,
@@ -49,6 +50,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
 )
 from utils.error_utils import extract_error_message
 from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
+from helpers.tool_output import read_tool_output
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -730,6 +732,8 @@ class _ActionContext:
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
     prefetched_browser_state: Optional[Dict[str, Any]] = None
     model_params: Optional[Dict[str, Any]] = None
+    # The session's own browser provider; None only for adapters that do not know it.
+    provider: Optional[str] = None
 
 
 async def _refuse_navigation(
@@ -842,10 +846,12 @@ _INTERACTION_ACTIONS = {
     "select_dropdown",
     "upload_file",
     "drag",
+    "hover",
 }
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
 _INSPECTION_ACTIONS = {
     "read_browser_state",
+    "read_tool_output",
     "read_logs",
     "read_network_requests",
     "evaluate",
@@ -1233,7 +1239,10 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             context.dom_service,
             context.action_history,
             context.params,
+            humanizer=context.humanizer,
         )
+    if context.action_name == "hover":
+        return await _execute_hover(context)
     if context.action_name == "scroll":
         direction = context.params.get("direction", "down")
         amount = context.params.get("amount", 300)
@@ -1331,6 +1340,8 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             current_auth_realm=context.current_auth_realm,
             prepare_credentials_for_url=context.prepare_credentials_for_url,
             browser_network_recorder=context.browser_network_recorder,
+            provider=context.provider,
+            user_id=context.user_id,
         )
     if context.action_name == "navback":
         guard = _navigation_guard_error(context, action="navback")
@@ -1545,6 +1556,13 @@ async def classify_evaluate_cdp_stall(
 
 
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "read_tool_output":
+        from helpers.tracing import current_agent_id
+        page = await read_tool_output(user_id=context.user_id, agent_id=current_agent_id() or "", session_id=context.session_id or "", **context.params)
+        result = {"success": True, **page}
+        await context.action_history.record_action(dom_service=context.dom_service, action="read_tool_output",
+            thinking=context.thinking, params=context.params, result=result)
+        return result
     if context.action_name == "read_browser_state":
         return await _execute_read_browser_state(context)
     if context.action_name == "read_logs":
@@ -1649,7 +1667,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             params={"code": code, "timeout": timeout_s},
             result={"success": True, "value": value},
         )
-        return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
+        return {"success": True, "message": "Executed JS.", "value": value}
     if context.action_name == "extract":
         return {"success": False, "error": "extract is disabled. Use evaluate to read DOM/page content directly."}
     if context.action_name == "screenshot":
@@ -1724,6 +1742,7 @@ async def execute_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
     successful_secret_refs: Optional[set[str]] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve private values and report successful use privately to the caller."""
     if successful_secret_refs is not None:
@@ -1818,7 +1837,11 @@ async def execute_action(
         result = {"success": False, "error": error_text}
     if result.get("success") and successful_secret_refs is not None:
         successful_secret_refs.update(used)
-    safe_result = visible(result)
+    with secret_logging_context(refs):
+        safe_result = visible(result)
+    if action_name == "read_tool_output":
+        from browser_tools.result_projection import preserve_output_protocol
+        safe_result = preserve_output_protocol(result, safe_result, action_name, visible)
     completed_action_step = action_history.last_action_step() if action_execution_started else None
     attach_observation = action_name == "read_browser_state" or (
         auth_context_for_url is not None and not result.get("status")
@@ -1832,7 +1855,13 @@ async def execute_action(
         # rather than page data. Preserve its exact routing identity even if
         # a short secret happens to occur in the credential's public ID.
         safe_result["credential_ref"] = dict(used_credential)
-    return safe_result
+    from helpers.tracing import current_agent_id
+    try:
+        with secret_logging_context(refs):
+            return await prepare_browser_result(action_name, safe_result, user_id=user_id,
+                                                agent_id=current_agent_id() or "", session_id=session_id or "")
+    except Exception as error:
+        return {"success": False, "error": visible(f"Action result retention failed; action may have executed: {error}")}
 
 
 class _PrivateActionHistory:
@@ -1881,6 +1910,7 @@ async def _execute_resolved_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     model_params: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1948,6 +1978,7 @@ async def _execute_resolved_action(
             prepare_credentials_for_url=prepare_credentials_for_url,
             prefetched_browser_state=prefetched_browser_state,
             model_params=model_params,
+            provider=provider,
         )
         if action_name in _INTERACTION_ACTIONS:
             result = await _execute_interaction_action(context)
@@ -3653,6 +3684,42 @@ async def _execute_click(
         return {"success": False, "error": "Click requires either element index or coordinates"}
 
 
+async def _execute_hover(context: _ActionContext) -> Dict[str, Any]:
+    """Move the humanized pointer to an element or viewport point without pressing."""
+    index = context.index if context.index is not None else context.params.get("index")
+    target: Any = None
+    if index is not None:
+        target = await _maybe_await(context.dom_service.get_element_coordinates(index))
+        if target is None:
+            target = await _refresh_element_coordinates(context.dom_service, index)
+        if target is None:
+            return {"success": False, "error": f"Cannot hover element index {index}: no coordinates available"}
+    elif context.params.get("x") is not None and context.params.get("y") is not None:
+        target = (int(context.params["x"]), int(context.params["y"]))
+    else:
+        return {"success": False, "error": "hover requires index or both x and y"}
+    x, y = int(target[0]), int(target[1])
+    if context.humanizer:
+        await context.humanizer.hover(x, y)
+    else:
+        # Same fallback as an unhumanized click: one CDP pointer move, no press.
+        logger.warning("\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using a CDP pointer move")
+        cdp_session = await context.session.get_or_create_cdp_session()
+        await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+            params={"type": "mouseMoved", "x": x, "y": y},
+            session_id=cdp_session.session_id,
+        )
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="hover",
+        thinking=context.thinking,
+        index=index,
+        coordinates={"x": x, "y": y},
+        result={"success": True},
+    )
+    return {"success": True, "message": f"Pointer moved to ({x}, {y})"}
+
+
 def _input_success_result(display_text: str, credential_ref: Optional[Dict[str, str]]) -> Dict[str, Any]:
     result: Dict[str, Any] = {"success": True, "message": "", "typed_text": display_text}
     if credential_ref:
@@ -4062,8 +4129,15 @@ async def _execute_goto(
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
     browser_network_recorder: Optional[Any] = None,
+    provider: Optional[str] = None,
+    user_id: str = "",
 ) -> Dict[str, Any]:
-    """Prepare a target realm's credentials, then execute navigation."""
+    """Prepare a target realm's credentials, then execute navigation.
+
+    ``provider`` and ``user_id`` select the download's persistence path: the
+    session's own provider (never the ambient BROWSER_PROVIDER default) decides
+    between the session files API and Tilion's durable attachment copy.
+    """
     from browser_use.browser.events import NavigateToUrlEvent
 
     original_url = params.get("url", "")
@@ -4132,6 +4206,8 @@ async def _execute_goto(
                     url=url,
                     session_id=session_id,
                     config=config,
+                    provider=provider,
+                    **({"user_id": user_id} if user_id else {}),
                 )
             except Exception as persist_error:
                 logger.warning(

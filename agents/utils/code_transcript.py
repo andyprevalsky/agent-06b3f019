@@ -158,6 +158,16 @@ def _tool_title(name: str, tool_input: dict[str, Any]) -> tuple[str, Optional[st
     return name, path, None
 
 
+# Task / Agent tool results that only launch a background sub-agent.
+_BACKGROUND_LAUNCHED = ("async_launched", "remote_launched")
+
+# Usage sample fields a metrics record carries: turn totals (output / input /
+# cached input) plus the latest model call's prompt size (``context_tokens``) and
+# the model's window (``context_window``), which the code-agent view's context
+# meter reads.
+_USAGE_FIELDS = ("output_tokens", "input_tokens", "cached_input_tokens", "context_tokens", "context_window")
+
+
 class CodeTranscriptBuilder:
     """Folds normalized sandbox events into transcript record upserts.
 
@@ -257,12 +267,21 @@ class CodeTranscriptBuilder:
         ]
 
     def _on_usage(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
-        fields = {key: event[key] for key in ("output_tokens", "input_tokens", "cached_input_tokens")
+        fields = {key: event[key] for key in _USAGE_FIELDS
                   if isinstance(event.get(key), (int, float)) and not isinstance(event.get(key), bool) and event[key] >= 0}
         if not fields:
             return []
         return [self._upsert(f"metrics:{event.get('turn_id') or 'session'}:{index}", index, event.get("timestamp"),
                             kind="metrics", text="", usage_scope=event.get("usage_scope"), **fields)]
+
+    def _on_session(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        # The CLI's own init names the model it runs (and the speed/effort it was
+        # started with): the code-agent view's query box shows them after the run.
+        fields = {key: event[key] for key in ("model", "speed", "effort")
+                  if isinstance(event.get(key), str) and event[key].strip()}
+        if not fields:
+            return []
+        return [self._upsert("session", index, event.get("timestamp"), kind="session", text="", **fields)]
 
     def _on_turn_started(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
         turn_id = event.get("turn_id")
@@ -294,7 +313,23 @@ class CodeTranscriptBuilder:
             )
         ]
 
+    def _superseded_snapshot(self, event: dict[str, Any], index: int, kind: str) -> list[Optional[TranscriptRecord]]:
+        """A replayed partial whose text a later snapshot superseded (the sandbox keeps only its delta).
+
+        It still counts a revision, so a replay reaches the revision already
+        persisted live; its text is the stored one until the next snapshot.
+        """
+        key = f"item:{event['item_id']}"
+        text = {} if key in self._records else {"text": ""}
+        return [self._upsert(key, index, event.get("timestamp"), kind=kind, partial=True, **text)]
+
+    @staticmethod
+    def _is_superseded_snapshot(event: dict[str, Any]) -> bool:
+        return event.get("partial") is True and isinstance(event.get("item_id"), str) and "text" not in event
+
     def _on_thinking(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        if self._is_superseded_snapshot(event):
+            return self._superseded_snapshot(event, index, "thinking")
         text = event.get("text") if isinstance(event.get("text"), str) else ""
         key = f"item:{event['item_id']}" if isinstance(event.get("item_id"), str) else f"thinking:{index}"
         tokens, self._thinking_tokens = self._thinking_tokens, None
@@ -321,9 +356,24 @@ class CodeTranscriptBuilder:
             estimated = message.get("estimated_tokens")
             if isinstance(estimated, int):
                 self._thinking_tokens = estimated
+        if (
+            isinstance(message, dict)
+            and message.get("type") == "system"
+            and message.get("subtype") == "task_notification"
+            and isinstance(message.get("tool_use_id"), str)
+        ):
+            # A background sub-agent (Task / Agent run_in_background) finished: its
+            # tool row, left running at launch, takes the notification's outcome.
+            key = f"tool:{message['tool_use_id']}"
+            record = self._records.get(key)
+            if record is not None and record.get("status") == "running":
+                status = "ok" if message.get("status") == "completed" else "error"
+                return [self._upsert(key, record["seq"], event.get("timestamp"), status=status)]
         return []
 
     def _on_agent_message(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        if self._is_superseded_snapshot(event):
+            return self._superseded_snapshot(event, index, "assistant")
         text = event.get("text")
         if not isinstance(text, str) or not text.strip():
             return []
@@ -389,6 +439,10 @@ class CodeTranscriptBuilder:
         record = self._records[key]
         result = event.get("tool_use_result")
         is_error = event.get("is_error") is True or (isinstance(result, str) and result.startswith("Error"))
+        if not is_error and isinstance(result, dict) and result.get("status") in _BACKGROUND_LAUNCHED:
+            # A sub-agent launched in the background is still running; its
+            # task_notification (see _on_cli_message) carries the outcome.
+            return []
         fields: dict[str, Any] = {"status": "error" if is_error else "ok"}
         name = record.get("name", "")
         category = record.get("category")
@@ -613,7 +667,12 @@ def to_ui_record(record: TranscriptRecord) -> dict[str, Any]:
         out.update(type="tool", text=record.get("title") or "", tool=tool)
     elif kind == "metrics":
         out.update(type="metrics", usage_scope=record.get("usage_scope"))
-        for key in ("output_tokens", "input_tokens", "cached_input_tokens"):
+        for key in _USAGE_FIELDS:
+            if key in record:
+                out[key] = record[key]
+    elif kind == "session":
+        out.update(type="session", text="")
+        for key in ("model", "speed", "effort"):
             if key in record:
                 out[key] = record[key]
     elif kind == "turn":

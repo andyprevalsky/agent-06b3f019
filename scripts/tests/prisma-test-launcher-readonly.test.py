@@ -54,6 +54,7 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
                 launcher,
                 "local-db-container.sh",
                 "coverage-failure-evidence.sh",
+                "coverage-report-heap.sh",
                 "coverage-process-lock.py",
                 "test-db-run-lock.sh",
                 "coverage_process_registry.py",

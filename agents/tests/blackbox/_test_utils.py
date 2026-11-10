@@ -56,7 +56,6 @@ def live_funded_azure():
                 os.environ[name] = value
 
 
-
 import httpx
 from helpers.httpx_capture import (
     clear_captures,
@@ -181,6 +180,69 @@ def assert_captured_call(
     return call
 
 
+def _start_case() -> None:
+    """Each recorded case starts with no captures and no global mock handler.
+
+    A handler a previous case left set overrides every later client's own
+    MockTransport (httpx_capture routes through the global handler first), so a
+    case could silently talk to another test's fake server.
+    """
+    clear_captures()
+    clear_mock_handler()
+
+
+# Case filter for the new-test stability check (scripts/select_affected_tests.py --stability):
+# a comma list of test function __name__s. Unset (the normal gate) runs every case. When set,
+# every other registered case is OMITTED — never run and never counted as a pass — and each
+# selected case that ran appends its function name to CASE_RECEIPT_ENV so the caller can
+# prove the cases it asked for actually executed.
+CASE_FILTER_ENV = "BLACKBOX_CASE_FUNCTIONS"
+CASE_RECEIPT_ENV = "BLACKBOX_CASE_RECEIPT"
+
+
+def case_filter() -> frozenset[str] | None:
+    raw = os.environ.get(CASE_FILTER_ENV)
+    if raw is None:
+        return None
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
+
+def case_selected(fn: Callable) -> bool:
+    names = case_filter()
+    return names is None or getattr(fn, "__name__", "") in names
+
+
+def _record_case_receipt(fn: Callable) -> None:
+    _EXECUTED_CASES.append(getattr(fn, "__name__", ""))
+    path = os.environ.get(CASE_RECEIPT_ENV)
+    if path and case_filter() is not None:
+        with open(path, "a") as handle:
+            handle.write(getattr(fn, "__name__", "") + "\n")
+
+
+# Every case failure recorded in this interpreter since the runner last reset it.
+# A domain whose run_all_tests() returns only a bool (result.all_passed) would
+# otherwise reach results.json with an empty message: the runner reads this to
+# name the failing cases and their first error.
+_RECORDED_FAILURES: list[str] = []
+# Every selected case record()/record_async() actually started since the last reset:
+# the runner's independent proof that a case-filtered domain ran something.
+_EXECUTED_CASES: list[str] = []
+
+
+def reset_recorded_failures() -> None:
+    _RECORDED_FAILURES.clear()
+    _EXECUTED_CASES.clear()
+
+
+def executed_case_count() -> int:
+    return len(_EXECUTED_CASES)
+
+
+def recorded_failures() -> list[str]:
+    return list(_RECORDED_FAILURES)
+
+
 class BlackboxResult:
     """Accumulates pass/fail results for the test runner."""
 
@@ -188,6 +250,21 @@ class BlackboxResult:
         self.passed = 0
         self.failed = 0
         self.errors: list[str] = []
+        self.omitted: list[str] = []
+
+    def omit(self, name: str) -> None:
+        """A case the case filter excluded: not run, not a pass."""
+        self.omitted.append(name)
+
+    def select(self, cases: list[tuple[str, Callable]]) -> list[tuple[str, Callable]]:
+        """The (name, fn) cases the case filter keeps; the rest are recorded as omitted."""
+        kept = []
+        for name, fn in cases:
+            if case_selected(fn):
+                kept.append((name, fn))
+            else:
+                self.omit(name)
+        return kept
 
     def record(self, name: str, fn: Callable) -> None:
         """Run a sync test function, record the result.
@@ -196,7 +273,11 @@ class BlackboxResult:
         builds a coroutine, never runs a single assertion, and raises nothing —
         so a completely dead test reported ✅. Detect that and fail loudly.
         """
-        clear_captures()
+        if not case_selected(fn):
+            self.omit(name)
+            return
+        _record_case_receipt(fn)
+        _start_case()
         try:
             returned = fn()
             if inspect.iscoroutine(returned):
@@ -205,33 +286,48 @@ class BlackboxResult:
                     f"async test '{name}' was registered with record(); its assertions "
                     f"never ran. Use `await r.record_async(...)` instead."
                 )
-            self.passed += 1
-            print(f"  ✅ {name}")
+            self.record_result(name)
         except Exception as e:
-            self.failed += 1
-            self.errors.append(f"{name}: {e}")
-            print(f"  ❌ {name}: {e}")
-            traceback.print_exc()
+            self.record_result(name, e)
 
     async def record_async(self, name: str, fn: Callable) -> None:
         """Run an async test function, record the result."""
-        clear_captures()
+        if not case_selected(fn):
+            self.omit(name)
+            return
+        _record_case_receipt(fn)
+        _start_case()
         try:
             await fn()
+            self.record_result(name)
+        except Exception as e:
+            self.record_result(name, e)
+
+    def record_result(self, name: str, error: BaseException | None = None) -> None:
+        """Record an immediate or deferred outcome without losing its traceback."""
+        if error is None:
             self.passed += 1
             print(f"  ✅ {name}")
-        except Exception as e:
-            self.failed += 1
-            self.errors.append(f"{name}: {e}")
-            print(f"  ❌ {name}: {e}")
-            traceback.print_exc()
+            return
+        self.failed += 1
+        detail = type(error).__name__
+        if str(error):
+            detail += f": {error}"
+        self.errors.append(f"{name}: {str(error) or type(error).__name__}")
+        _RECORDED_FAILURES.append(f"{name}: {detail}")
+        print(f"  ❌ {name}: {detail}")
+        traceback.print_exception(type(error), error, error.__traceback__)
 
     def summary(self) -> dict[str, Any]:
-        return {
+        summary: dict[str, Any] = {
             "passed": self.passed,
             "failed": self.failed,
             "total": self.passed + self.failed,
         }
+        if self.omitted:
+            # A filtered run is partial: the omitted cases are reported, never folded into a pass.
+            summary["omitted"] = len(self.omitted)
+        return summary
 
     @property
     def all_passed(self) -> bool:
@@ -261,3 +357,30 @@ async def native_browser_start_source(timestamp: str, *, tool_call_id: str = "to
         "metadata": args[3],
         "timestamp": timestamp,
     }
+
+
+@contextlib.contextmanager
+def retained_tool_output_fixture():
+    """Exercise the real shared retention helper without network or credentials."""
+    import uuid
+    from collections import OrderedDict
+    from unittest.mock import patch
+
+    stored = {}
+
+    async def upload(user_id, body, filename, mime_type, *, idempotency_key):
+        path = f"{user_id}/{uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key)}_{filename}"
+        stored[path] = body
+        return {"storage_path": path}
+
+    async def download(path):
+        if path not in stored:
+            raise ValueError("No retained output in this scope")
+        return stored[path]
+
+    with (patch("helpers.tool_output._persisted_outputs", OrderedDict()),
+          patch("helpers.tool_output._pending_outputs", {}),
+          patch("helpers.attachments.upload_to_storage", side_effect=upload),
+          patch("helpers.attachments.download_from_storage", side_effect=download),
+          patch("httpx.AsyncClient.send", side_effect=AssertionError("Unexpected provider/network request"))):
+        yield stored

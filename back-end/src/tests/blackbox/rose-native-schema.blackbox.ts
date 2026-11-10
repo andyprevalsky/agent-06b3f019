@@ -13,7 +13,7 @@ import {
 import type { CompletionOptions } from '../../providers/rose/types';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { dispatchToolCall, type PendingOp } from '../../providers/smsSupervisor/supervisorTools';
-import { registerUserDataGrep, type UserDataGrepParams } from '../../providers/userDataSearch';
+import { registerUserDataGrepTool } from '../../providers/userDataSearch';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
 import { buildOpenAiResponseFormat, responseModel } from '../../providers/rose/schema';
 import {
@@ -147,9 +147,14 @@ function verifyNestedArgumentsWithSibling(): void {
 async function verifyResponsesWire(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const keys = [
-    'AZURE_FOUNDRY_ENDPOINT',
-    'AZURE_FOUNDRY_API_KEY',
-    'AZURE_FOUNDRY_DEPLOYMENTS',
+    // Isolate all regions so inherited deployments cannot select another wire fixture.
+    ...Array.from({ length: 9 }, (_, index) => (index === 0 ? '' : `_${index + 1}`)).flatMap(
+      (suffix) => [
+        `AZURE_FOUNDRY_ENDPOINT${suffix}`,
+        `AZURE_FOUNDRY_API_KEY${suffix}`,
+        `AZURE_FOUNDRY_DEPLOYMENTS${suffix}`,
+      ]
+    ),
     'GPT_API_KEY',
     'ANTHROPIC_API_KEY',
     'OPENROUTER_API_KEY',
@@ -159,7 +164,7 @@ async function verifyResponsesWire(): Promise<void> {
   for (const key of keys) delete process.env[key];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
   let requests = 0;
   globalThis.fetch = async (input, init) => {
     const body = record(JSON.parse(String(init?.body)));
@@ -183,6 +188,7 @@ async function verifyResponsesWire(): Promise<void> {
       );
     }
     assert.equal(String(input), 'https://a-4989-resource.openai.azure.com/openai/v1/responses');
+    assert.equal(body.model, 'gpt-6.1-sol', 'Ultra must retain its actual GPT-6.1 wire model');
     verifySchemas(body.tools, true);
     assert.equal(Object.hasOwn(body, 'anthropic_tools'), false);
     assert.equal(body.tool_choice, 'required');
@@ -302,15 +308,15 @@ async function verifyCerebrasDerivedProjection(): Promise<void> {
   const raw = { ...options, response_model: undefined };
   assert.equal(withNativeToolContract(raw), raw);
 
-  const captures: UserDataGrepParams[] = [];
-  registerUserDataGrep(async (_userId, params) => {
+  const captures: Array<Record<string, unknown>> = [];
+  registerUserDataGrepTool(async (_userId, params) => {
     captures.push(params);
     return {
       matches: [],
       total_matches: 0,
       truncated: false,
-      pattern: params.pattern ?? '',
-      sources: [params.source ?? ''],
+      pattern: String(params.pattern ?? ''),
+      sources: [String(params.source ?? '')],
       applied_limit: 20,
       applied_offset: 0,
       returned: 0,
@@ -334,7 +340,8 @@ async function verifyCerebrasDerivedProjection(): Promise<void> {
   );
   assert.equal(captures[0]['-i'], false);
   assert.equal(captures[0].offset, 0);
-  assert.equal(captures[0].filters, undefined);
+  // The shared executor receives the strict call as sent; the data domain drops its nulls.
+  assert.deepEqual(captures[0].filters, { since: null });
   const omittedBudget = { goal: 'Offline', start_phase: 'plan' };
   assert.equal(
     (

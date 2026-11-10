@@ -1,0 +1,31 @@
+{
+ "failures": [
+  {
+   "id": "7075887716ce416f91971c59461325b3",
+   "check": "smoke/parallel-tool-calls",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "digest": "7342924de1a9e74d0a1c36cd26ff468d04f41a077a39ea9e01851d6dea7722b6"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/parallel-tool-calls FAILED in the final smoke sweep: the live Lisbon research task was still ACTIVE when its 549s task timeout expired (553s); its log shows repeated 'Web fetch failed for https://www.visitlisboa.com/en/regions'. Agent f6899445-88bc-4b28-890a-75aed858d46c.",
+   "evidence": "PR #1725 changes no file under agents/ or scripts/ (15 files: front-end display/trajectory UI + tests, back-end display route + tests). The same task passed 9/9-smoke twice on equivalent source in this deploy: in the initial sweep of this cycle (head 2731bfe53f, smoke parallel-tool-calls PASS, 924.8s... ) and in the preceding cycle (.context/deploy-pipeline.round5-08b8054ea, smoke PASS 9/9). It is a live web+LLM task whose wall time varies with third-party fetch failures and provider latency; the failure is a 4-second overrun, not an assertion about this PR's surfaces. Timeout is not changed (CLAUDE.md rule 25). Native result: /home/boxes/rose/.context/deploy-pipeline/attempts/6/final/smoke/output.log",
+   "post_merge": {
+    "test": "smoke/parallel-tool-calls",
+    "command": [
+     "/usr/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "parallel-tool-calls smoke task: root agent must finish its live research fan-out within the task timeout; do NOT raise the timeout (rule 25) - diagnose latency/fetch retries (agent_latency.py) and fix the stall",
+    "error": "Timeout after 553s (task timeout=549s) | Investigate: python agents/benchmarks/agent_latency.py f6899445-88bc-4b28-890a-75aed858d46c | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+    "source": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/6/final/smoke/output.log"
+   }
+  }
+ ]
+}

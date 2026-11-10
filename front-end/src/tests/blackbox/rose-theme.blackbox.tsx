@@ -9,9 +9,13 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { flushSync } from 'react-dom';
 
+// Resolve the real lazy-renderer module with the fixture dependencies.
+// The bounded assertion still waits for its mount and passive canvas sizing.
+import '@/features/terminal-component-group/components/SmallTileAnimationCanvasRenderer';
+
 import AgentStatusIndicator from '@/features/terminal-component-group/components/AgentStatusIndicator';
 import type { AgentRunStatus } from '@/features/terminal-component-group/components/agentRunState';
-import { MobileGridEnergyPillsCanvas } from '@/features/terminal/components/GridEnergyPills';
+import { MobileGridEnergyPills } from '@/features/terminal/components/GridEnergyPills';
 import { roseThemeStorageKey } from '@/features/rose-theme';
 import Terminal from '@/pages/Terminal';
 
@@ -36,9 +40,29 @@ const OTHER_USER = '8283e892-b0a4-4298-9ef7-b95bcc67e46b';
 const SILVER = '#d6d6d2';
 /** SmallTileAnimationCanvas dot colours (renderTiles resolveDotColor). */
 const LIGHT_DOT = 'rgba(229, 231, 235, 0.8)';
-/** Mobile energy canvas core gradient stop: html.dark → 1, light → 0.95. */
-const DARK_CORE_STOP = 'rgba(255, 255, 255, 1)';
-const LIGHT_CORE_STOP = 'rgba(255, 255, 255, 0.95)';
+/** Mobile energy pill gradient stops (CSS variables keyed on html.dark), soft/core/tail. */
+const DARK_PILL_STOPS = ['0.42', '1', '0.34'];
+const LIGHT_PILL_STOPS = ['0.34', '0.95', '0.28'];
+
+function mobileEnergyPills() {
+  return Array.from(document.querySelectorAll<HTMLElement>('.rose-mobile-energy-pill'));
+}
+
+/** The resolved soft/core/tail stops and opacity of every mobile pill. */
+function mobilePillPaint() {
+  return new Set(
+    mobileEnergyPills().map((pill) => {
+      const style = getComputedStyle(pill);
+      const stops = ['soft', 'core', 'tail'].map((stop) =>
+        style.getPropertyValue(`--energy-pill-${stop}-stop`).trim(),
+      );
+      return JSON.stringify({ stops, opacity: pill.style.opacity });
+    }),
+  );
+}
+
+const pillPaint = (stops: string[], opacity: string) =>
+  new Set([JSON.stringify({ stops, opacity })]);
 
 /** 2D context fake that records globalAlpha + fillStyle at each fill; rAF only runs when asked. */
 function installFakeCanvas() {
@@ -334,29 +358,25 @@ describe('dark background', () => {
     expect(flow).toHaveAttribute('mask', 'url(#terminal-energy-large-tile-mask)');
   });
 
-  it('dims the mobile canvas energy pills only when an opacity is given', () => {
+  it('dims the mobile energy pills only when an opacity is given', () => {
     setViewport(MOBILE_VIEWPORT.width, MOBILE_VIEWPORT.height);
-    const canvas = installFakeCanvas();
 
     const stock = render(
-      <MobileGridEnergyPillsCanvas patternOffset={{ x: 0, y: 0 }} selectedAgentId={null} />,
+      <MobileGridEnergyPills patternOffset={{ x: 0, y: 0 }} selectedAgentId={null} />,
     );
-    act(() => canvas.runFrame(1000));
-    expect(canvas.alphaWrites()).toBe(0);
-    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([1]));
+    expect(mobileEnergyPills()).toHaveLength(8);
+    expect(mobilePillPaint()).toEqual(pillPaint(LIGHT_PILL_STOPS, ''));
     stock.unmount();
 
-    canvas.alphaAtFill.length = 0;
     render(
-      <MobileGridEnergyPillsCanvas
+      <MobileGridEnergyPills
         patternOffset={{ x: 0, y: 0 }}
         selectedAgentId={null}
         opacity={0.14}
       />,
     );
-    act(() => canvas.runFrame(1000));
-    expect(canvas.alphaAtFill.length).toBeGreaterThan(0);
-    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([0.14]));
+    expect(mobileEnergyPills()).toHaveLength(8);
+    expect(mobilePillPaint()).toEqual(pillPaint(LIGHT_PILL_STOPS, '0.14'));
   });
 
   it('turns the desktop header pill dark with light text and hides the marble layer', () => {
@@ -553,26 +573,21 @@ describe('instant theme switch (row 72)', () => {
     expect(new Set(canvas.fillStyleAtFill)).toEqual(new Set([LIGHT_DOT]));
   });
 
-  it('the mobile energy canvas repaints synchronously, not on its next animation frame', () => {
+  it('the mobile energy pills restyle in the commit that flips html.dark, with no animation frame', () => {
     setViewport(MOBILE_VIEWPORT.width, MOBILE_VIEWPORT.height);
-    const canvas = installFakeCanvas();
+    const animationFrame = vi.spyOn(window, 'requestAnimationFrame');
     renderWithProviders(themed(backgroundElement()));
-    expect(canvas.alphaAtFill).toHaveLength(0);
+    expect(mobilePillPaint()).toEqual(pillPaint(LIGHT_PILL_STOPS, ''));
 
     toggleThemeInOneCommit();
-    expect(canvas.framesRun()).toBe(0);
-    expect(canvas.alphaAtFill.length).toBeGreaterThan(0);
-    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([0.14]));
-    // Painted after html.dark flipped: the dark gradient stops are used.
-    expect(canvas.gradient.addColorStop).toHaveBeenCalledWith(0.52, DARK_CORE_STOP);
-    expect(canvas.gradient.addColorStop).not.toHaveBeenCalledWith(0.52, LIGHT_CORE_STOP);
+    expect(htmlIsDark()).toBe(true);
+    // Dimmed and switched to the dark gradient stops by the commit itself.
+    expect(mobilePillPaint()).toEqual(pillPaint(DARK_PILL_STOPS, '0.14'));
 
-    canvas.alphaAtFill.length = 0;
-    canvas.gradient.addColorStop.mockClear();
     toggleThemeInOneCommit();
-    expect(canvas.framesRun()).toBe(0);
-    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([1]));
-    expect(canvas.gradient.addColorStop).toHaveBeenCalledWith(0.52, LIGHT_CORE_STOP);
+    expect(htmlIsDark()).toBe(false);
+    expect(mobilePillPaint()).toEqual(pillPaint(LIGHT_PILL_STOPS, ''));
+    expect(animationFrame).not.toHaveBeenCalled();
   });
 });
 

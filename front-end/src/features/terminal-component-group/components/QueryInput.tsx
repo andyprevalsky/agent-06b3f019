@@ -16,8 +16,10 @@
  *   - useTopBarProps     : account/viewport gating shared by TopBar + NubToolbar
  *
  * DIRECT CHANNEL (directChannel, the Rose Desktop code-agent view): the same
- *   shell, attachments and send button with native session controls; no Rose nub tab
- *   or pinned tools. Draft attachments clear only after confirmed delivery.
+ *   shell, attachments, model chip, speed toggle (speedControl) and send button;
+ *   the nub tab carries the caller's working settings (props.nub) instead of the
+ *   Rose toolbar; no pinned tools; props.cornerStatus sits at the box's top-right
+ *   corner. Draft attachments clear only after confirmed delivery.
  *
  * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
@@ -40,7 +42,10 @@
  *                      [NORMAL] -> [FAST] -> [ULTRA (default)] -> [NORMAL]
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
- * SUBMISSION:          canSubmit prop decides send-vs-stop button
+ * SUBMISSION:          Send when canSubmit OR the box has a draft (text or files);
+ *                      Stop only for a running agent with an empty box. A draft sent
+ *                      mid-run is read at the agent's next step.
+ *   [STOP] --type/attach--> [SEND] --send/clear--> [STOP]
  * SURFACE:             the translucent drip surface (data-surface="translucent";
  *                      the mobile hug rule in index.css targets it)
  *   Rose dark (useRoseTheme().isDark, Rose Desktop accounts only):
@@ -111,9 +116,9 @@ export default function QueryInput(props: QueryInputProps) {
             roseDesktop && !browser && 'relative mt-[14px]',
           )}
         >
-          {roseDesktop && !directChannel && !browser && (
+          {roseDesktop && !browser && (!directChannel || props.nub) && (
             <NubTab reveal={reveal}>
-              <NubToolbar {...topBarProps} />
+              {directChannel ? props.nub : <NubToolbar {...topBarProps} />}
             </NubTab>
           )}
           {!browser && props.topAttachment}
@@ -219,10 +224,16 @@ function QueryInputBody(props: QueryInputBodyProps) {
     browser,
   } = props;
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
-  const speed =
-    roseDesktop && !directChannel && !browser && topBarProps.showFastMode
-      ? { fastMode: topBarProps.fastMode ?? false, onFastModeChange: topBarProps.onFastModeChange }
-      : undefined;
+  const hasDraft = value.trim() !== '' || attachments.attachments.length > 0;
+  const speed = browser
+    ? undefined
+    : (props.speedControl ??
+      (roseDesktop && !directChannel && topBarProps.showFastMode
+        ? {
+            fastMode: topBarProps.fastMode ?? false,
+            onFastModeChange: topBarProps.onFastModeChange,
+          }
+        : undefined));
   const toolbar = roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />;
 
   return (
@@ -238,7 +249,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         onSubmit={handleSubmit}
         onFilesPicked={(files) => void attachments.processFiles(files)}
         agentCompleted={agentCompleted}
-        canSubmit={browser || canSubmit}
+        canSubmit={browser || canSubmit || hasDraft}
         onPause={browser ? undefined : onPause}
         isPausing={isPausing}
         hasUploadingAttachments={attachments.hasUploading}
@@ -246,7 +257,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         onModelChange={onModelChange}
         availableModels={availableModels}
         showModelSelector={showModelSelector}
-        hideModelSelector={directChannel || browser}
+        hideModelSelector={browser || (directChannel && !availableModels.length)}
         readOnlyModelLabel={props.browserModelLabel}
         textareaRef={textareaRef}
         roseDesktop={roseDesktop}
@@ -254,6 +265,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         speed={speed}
         attachable
         sessionControls={browser ? undefined : props.sessionControls}
+        cornerStatus={browser || !directChannel ? undefined : props.cornerStatus}
       />
     </>
   );

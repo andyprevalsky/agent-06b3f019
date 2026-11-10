@@ -1,8 +1,9 @@
 /**
  * Blackbox: the full-screen app view through the real Terminal (Rose Desktop
- * flag on, UI ledger rows 10/39), opened from a code-agent chip's live preview.
+ * flag on, UI ledger rows 10/39), opened from a code-agent session: the root
+ * transcript's code-agent row → its code-agent view → the devbox usage popover's "Open app" link.
  *
- *   card click → the chat column is replaced by that code session's preview:
+ *   Open app → the chat column is replaced by that code session's preview:
  *     GET /claude-code-session/:taskId/preview (open view only) →
  *     POST …/preview/handoff → <iframe src=preview_url#rose_preview_handoff=code>
  *   thin header (title · Publish; no tabs), the normal query box over the app
@@ -23,7 +24,10 @@ import {
   API_BASE,
   PREVIEW_URL,
   TASK_ID,
+  findCodeAgentRow,
+  openAppFromCodeAgentView,
   openAppView,
+  openCodeAgentViewFromRow,
   pressEscape,
   requests,
   serveAgentWithChip,
@@ -213,26 +217,30 @@ describe('app view', () => {
     expect(screen.queryByText('notes.txt')).not.toBeInTheDocument();
   });
 
-  it('Escape returns to the chat; an agent row and the mobile close icon do too', async () => {
+  it('Escape returns to the code-agent view, then the chat; an agent row and the mobile close icon do too', async () => {
     servePreview('running');
     serveHandoff();
     await openAppView();
     pressEscape();
     await waitFor(() => expect(screen.queryByTestId('app-view-screen')).not.toBeInTheDocument());
-    const chip = await screen.findByTestId('code-agent-chip');
+    // The app was opened from the code-agent view: Escape lands back there.
+    const codeView = await screen.findByTestId('code-agent-view');
+    // A second Escape closes that view too: back to the owner's chat and its row.
+    pressEscape();
+    await waitFor(() => expect(screen.queryByTestId('code-agent-view')).not.toBeInTheDocument());
+    expect(codeView).not.toBeInTheDocument();
+    const row = await findCodeAgentRow();
 
-    fireEvent.click(within(chip).getByRole('button', { name: 'Open app' }));
-    await screen.findByTestId('app-view-screen');
+    await openAppFromCodeAgentView(await openCodeAgentViewFromRow(row));
     fireEvent.click(screen.getByTestId('rose-agent-row-agent-001'));
     await waitFor(() => expect(screen.queryByTestId('app-view-screen')).not.toBeInTheDocument());
+    // The agent row returns to the owner's chat (not the code-agent view).
+    await waitFor(() => expect(screen.queryByTestId('code-agent-view')).not.toBeInTheDocument());
 
     // Below md (no left bar, no keyboard) the header's bare close icon returns too.
-    fireEvent.click(
-      within(await screen.findByTestId('code-agent-chip')).getByRole('button', {
-        name: 'Open app',
-      }),
+    const view = await openAppFromCodeAgentView(
+      await openCodeAgentViewFromRow(await findCodeAgentRow()),
     );
-    const view = await screen.findByTestId('app-view-screen');
     const close = within(view).getByRole('button', { name: 'Close Snake game' });
     expect(close.className).toContain('md:hidden');
     fireEvent.click(close);

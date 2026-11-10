@@ -165,6 +165,8 @@ fi
 git -C "$TMP_ROOT/origin.git" config uploadpack.allowFilter true
 mkdir -p "$TMP_ROOT/source/agents/benchmarks/history"
 printf '{"span":"ledger"}\n' > "$TMP_ROOT/source/agents/benchmarks/history/span_durations.jsonl"
+printf '{"span":"shard"}\n' > "$TMP_ROOT/source/agents/benchmarks/history/span_durations.20261106.jsonl"
+printf '{"task":"attempt"}\n' > "$TMP_ROOT/source/agents/benchmarks/history/task_attempts.jsonl"
 : > "$TMP_ROOT/source/agents/benchmarks/history/.gitkeep"
 printf 'print("worker")\n' > "$TMP_ROOT/source/agents/worker.py"
 git -C "$TMP_ROOT/source" add agents
@@ -214,19 +216,66 @@ offline_git diff --no-ext-diff --quiet "$ledger_target" -- \
 [ "$(git -C "$worker_checkout" config --get remote.origin.url)" = https://github.com/Rose-Ai-Labs/rose.git ] \
   || fail "worker checkout persisted a rewritten or authenticated origin"
 assert_lock_released "$worker_checkout/.git/cloudbench-fetch.lock"
-# The primary's benchmark runner reads and appends these ledgers: its fresh
-# bootstrap keeps the complete requested tree.
+# The primary's benchmark runner reads the task_* ledgers and only appends span
+# ledgers (their readers are the agent_latency CLI and tests). A disposable fresh
+# primary therefore skips the span shards, ~86% of the real tree: a full depth-1
+# fetch took 271-389 s per guest on the 2026-11-06 /deploy smoke.
 primary_checkout="$TMP_ROOT/primary-checkout"
 GIT_CONFIG_COUNT=1 \
 GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/origin.git.insteadOf" \
 GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git \
 CLOUDBENCH_GITHUB_TOKEN_B64="$(printf local-fixture-only | base64)" \
 CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
-  bash "$FETCH_SCRIPT" "$primary_checkout" "$ledger_target" >/dev/null 2>&1 \
+  bash "$FETCH_SCRIPT" "$primary_checkout" "$ledger_target" > "$TMP_ROOT/primary.log" 2>&1 \
   || fail "fresh primary volume did not bootstrap its exact checkout"
+[ "$(git -C "$primary_checkout" rev-parse HEAD)" = "$ledger_target" ] \
+  || fail "fresh primary checkout did not verify the requested commit"
+for path in payload.txt agents/worker.py agents/benchmarks/history/.gitkeep \
+    agents/benchmarks/history/task_attempts.jsonl; do
+  cmp "$TMP_ROOT/source/$path" "$primary_checkout/$path" \
+    || fail "fresh primary checkout changed runner source or task ledgers: $path"
+done
+for path in span_durations.jsonl span_durations.20261106.jsonl; do
+  [ ! -e "$primary_checkout/agents/benchmarks/history/$path" ] \
+    || fail "fresh primary checkout wrote an append-only span ledger: $path"
+done
+git -C "$primary_checkout" rev-list --objects --missing=print "$ledger_target" \
+  | grep -Fxq "?$ledger_blob" \
+  || fail "fresh primary checkout transferred an append-only span ledger"
+unexpected_sparse="$(git -C "$primary_checkout" ls-files -t \
+  | grep '^S ' | grep -Ev '^S agents/benchmarks/history/span_durations[^/]*\.jsonl$' || true)"
+[ -z "$unexpected_sparse" ] \
+  || fail "fresh primary checkout omitted runner source or task ledgers: $unexpected_sparse"
+grep -Fq 'complete checkout omits agents/benchmarks/history/span_durations*.jsonl' "$TMP_ROOT/primary.log" \
+  || fail "fresh primary checkout did not report its declared omission"
+# The driver's pre-run git_sync repeats the fetch helper ("already-at"); that pass,
+# its tracked-path restore and the worktree clean must not need the omitted objects.
+# (No git operation runs on the disposable primary after the benchmark appends.)
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/no-such-origin.git.insteadOf" \
+  GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git GIT_TERMINAL_PROMPT=0 \
+  CLOUDBENCH_GIT_MIN_FREE_KB=1 bash "$FETCH_SCRIPT" "$primary_checkout" "$ledger_target" > "$TMP_ROOT/primary-again.log" 2>&1 \
+  && grep -Fq "already-at $ledger_target" "$TMP_ROOT/primary-again.log" \
+  || fail "fresh primary git_sync pass needed omitted ledger objects"
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/no-such-origin.git.insteadOf" \
+  GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git GIT_TERMINAL_PROMPT=0 \
+  git -C "$primary_checkout" clean -ffd >/dev/null \
+  && [ -z "$(git -C "$primary_checkout" status --porcelain)" ] \
+  || fail "fresh primary checkout did not verify clean offline"
+# A retained volume generation (not a disposable physical volume) keeps the
+# complete tree, including the span ledgers.
+retained_checkout="$TMP_ROOT/retained-checkout"
+git clone -q "$TMP_ROOT/origin.git" "$retained_checkout"
+git -C "$retained_checkout" checkout -q --detach "$next_target"
+GIT_CONFIG_COUNT=1 \
+GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/origin.git.insteadOf" \
+GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git \
+CLOUDBENCH_GITHUB_TOKEN_B64="$(printf local-fixture-only | base64)" \
+CLOUDBENCH_GIT_MIN_FREE_KB=1 \
+  bash "$FETCH_SCRIPT" "$retained_checkout" "$ledger_target" >/dev/null 2>&1 \
+  || fail "retained primary volume did not fetch its exact checkout"
 cmp "$TMP_ROOT/source/agents/benchmarks/history/span_durations.jsonl" \
-  "$primary_checkout/agents/benchmarks/history/span_durations.jsonl" \
-  || fail "fresh primary checkout lost its benchmark history ledger"
+  "$retained_checkout/agents/benchmarks/history/span_durations.jsonl" \
+  || fail "retained primary checkout lost its benchmark history ledger"
 if CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_SOURCE_SCOPE=everything CLOUDBENCH_GIT_MIN_FREE_KB=1 \
   bash "$FETCH_SCRIPT" "$TMP_ROOT/unknown-scope" "$ledger_target" >/dev/null 2>&1; then
   fail "unknown source scope must fail closed"

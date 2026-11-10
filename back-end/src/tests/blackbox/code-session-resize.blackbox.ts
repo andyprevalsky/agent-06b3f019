@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { Sandbox } from 'e2b';
+import { Sandbox, SandboxNotFoundError } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
@@ -39,6 +39,7 @@ import {
   DEFAULT_SANDBOX_GRID,
   resolveSpawnSandbox,
   sandboxGrid,
+  sizedTemplateName,
 } from '../../providers/codeSessions/sandboxSize';
 import { keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import {
@@ -58,7 +59,7 @@ const agentId = randomUUID();
 const cliSessionId = randomUUID();
 const roseCli = join(__dirname, '../../assets/rose-tools/rose.cjs');
 const TEMPLATES = {
-  claude: { '2x4': 'tpl-c2-m4', '2x16': 'tpl-c2-m16', '8x4': 'tpl-c8-m4', '8x16': 'tpl-c8-m16' },
+  claude: { '2x4': 'tpl-c2-m4', '2x8': 'tpl-c2-m8', '8x4': 'tpl-c8-m4', '8x8': 'tpl-c8-m8' },
 };
 const ENV_KEYS = [
   'CODE_SESSION_STORAGE_BACKEND',
@@ -299,7 +300,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     async (id) => {
       if (id === sandboxId) return held.sandbox;
       if (id === next.sandbox.sandboxId) return next.sandbox;
-      throw new Error(`sandbox ${id} not found`);
+      throw new SandboxNotFoundError(`Paused sandbox ${id} not found`);
     },
     async (templateId) => {
       clock.create = performance.now();
@@ -312,11 +313,11 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
       userId,
       agentId,
       taskId: task.id,
-      memoryGb: 16,
+      memoryGb: 8,
       reason: 'jest workers OOM-killed 3 times at 4 GB',
     });
     assert.equal(requested.httpStatus, 202);
-    assert.deepEqual(requested.body.to, { cpu: 2, memory_gb: 16 }, 'cpu unchanged, memory raised');
+    assert.deepEqual(requested.body.to, { cpu: 2, memory_gb: 8 }, 'cpu unchanged, memory raised');
     const requestId = requested.body.request_id;
     const alive = await keepAliveCodeTask(task.id, async () => undefined, NO_CODE_RESOURCES);
     assert.equal(
@@ -372,7 +373,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     );
 
     assert.equal(result.resized, true);
-    assert.deepEqual(templates, ['tpl-c2-m16'], 'the new size’s template is used');
+    assert.deepEqual(templates, ['tpl-c2-m8'], 'the new size’s template is used');
     assert.ok(
       held.calls.commands.some((cmd) => cmd.includes('pgrep -f')),
       'the old CLI is stopped first'
@@ -381,7 +382,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     const session1 = result.session as { cli_session_id?: string; resumed_from?: string };
     assert.equal(session1.resumed_from, 'checkpoint');
     assert.equal(session1.cli_session_id, cliSessionId, 'the CLI conversation resumes');
-    assert.match(goals[0] ?? '', /resized from 2 vCPU, 4 GB RAM to 2 vCPU, 16 GB RAM/);
+    assert.match(goals[0] ?? '', /resized from 2 vCPU, 4 GB RAM to 2 vCPU, 8 GB RAM/);
     assert.match(goals[0] ?? '', /jest workers OOM-killed/);
 
     const workspace = join(homeB, 'workspace');
@@ -400,7 +401,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
 
     const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
     assert.equal(row.sandboxId, next.sandbox.sandboxId);
-    assert.deepEqual([row.sandboxCpu, row.sandboxMemoryGb], [2, 16]);
+    assert.deepEqual([row.sandboxCpu, row.sandboxMemoryGb], [2, 8]);
     assert.ok(row.latestCheckpointSeq >= 1, 'the move went through a checkpoint');
     const oldTask = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: task.id } });
     assert.equal(oldTask.status, 'CLOSED');
@@ -429,46 +430,81 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
 });
 
 test('guards: reason 400, per-dimension cap 403, in flight / cooldown / reverse 409, unchanged 200', async () => {
-  process.env.CODE_SANDBOX_GRID = JSON.stringify({ cpu: [2, 4, 8], memoryGb: [4, 8, 16] });
+  process.env.CODE_SANDBOX_GRID = JSON.stringify({ cpu: [2, 4, 8], memoryGb: [4, 6, 8] });
   process.env.E2B_SANDBOX_TEMPLATES = 'grid';
   try {
     const { session, task } = await sessionWithTask();
     const ask = (size: { cpu?: number; memoryGb?: number }, reason = 'builds are OOM-killed') =>
       requestSandboxResize({ userId, agentId, taskId: task.id, ...size, reason });
 
-    await expectResizeError(ask({ memoryGb: 16 }, '  '), 400, 'REASON_REQUIRED');
+    await expectResizeError(ask({ memoryGb: 8 }, '  '), 400, 'REASON_REQUIRED');
     await expectResizeError(ask({}), 400, 'SIZE_REQUIRED');
     await expectResizeError(ask({ cpu: 32 }), 409, 'SIZE_UNAVAILABLE');
     const unchanged = await ask({ cpu: 2 });
     assert.equal(unchanged.httpStatus, 200);
     assert.equal(unchanged.body.status, 'unchanged');
 
-    await prisma.user.update({ where: { userId }, data: { codeSandboxMaxMemoryGb: 8 } });
-    const capped = await expectResizeError(ask({ memoryGb: 16 }), 403, 'SIZE_ABOVE_CAP');
+    await prisma.user.update({ where: { userId }, data: { codeSandboxMaxMemoryGb: 6 } });
+    const capped = await expectResizeError(ask({ memoryGb: 8 }), 403, 'SIZE_ABOVE_CAP');
     assert.deepEqual(capped.details.dimensions, ['memoryGb']);
-    const closest = await ask({ memoryGb: 6 });
-    assert.deepEqual(closest.body.to, { cpu: 2, memory_gb: 8 }, 'closest size that satisfies');
+    const closest = await ask({ memoryGb: 5 });
+    assert.deepEqual(closest.body.to, { cpu: 2, memory_gb: 6 }, 'closest size that satisfies');
     await prisma.user.update({ where: { userId }, data: { codeSandboxMaxMemoryGb: null } });
 
-    const again = await ask({ memoryGb: 7 });
+    const again = await ask({ memoryGb: 6 });
     assert.equal(again.body.request_id, closest.body.request_id, 'same pending request (retry)');
     await expectResizeError(ask({ cpu: 8 }), 409, 'RESIZE_IN_PROGRESS');
 
-    await completeResize(closest.body.request_id, session.id); // now 2 vCPU / 8 GB
-    await expectResizeError(ask({ memoryGb: 16 }), 409, 'RATE_LIMITED');
+    await completeResize(closest.body.request_id, session.id); // now 2 vCPU / 6 GB
+    await expectResizeError(ask({ memoryGb: 8 }), 409, 'RATE_LIMITED');
     const reverse = await expectResizeError(ask({ memoryGb: 4 }), 409, 'REVERSE_RESIZE');
     assert.equal(reverse.details.dimension, 'memoryGb');
     const cpu = await ask({ cpu: 8 }, 'tsc + vitest CPU-bound for 6 min');
     assert.equal(cpu.httpStatus, 202, 'the other dimension is independent');
-    await completeResize(cpu.body.request_id, session.id); // now 8 vCPU / 8 GB
+    await completeResize(cpu.body.request_id, session.id); // now 8 vCPU / 6 GB
     const cpuBack = await expectResizeError(ask({ cpu: 2 }), 409, 'REVERSE_RESIZE');
     assert.equal(cpuBack.details.dimension, 'cpu');
     await expectResizeError(ask({ cpu: 4 }), 409, 'RATE_LIMITED');
 
-    process.env.CODE_SANDBOX_GRID = JSON.stringify({ cpu: [1, 2, 4, 8], memoryGb: [2, 4, 8, 16] });
+    process.env.CODE_SANDBOX_GRID = JSON.stringify({ cpu: [1, 2, 4, 8], memoryGb: [1, 2, 4, 8] });
     assert.deepEqual(sandboxGrid(), DEFAULT_SANDBOX_GRID, 'a grid over 9 sizes is refused');
   } finally {
     delete process.env.CODE_SANDBOX_GRID;
+    process.env.E2B_SANDBOX_TEMPLATES = JSON.stringify(TEMPLATES);
+  }
+});
+
+test('the default grid offers 4 and 8 GB and refuses 16 GB (E2B team cap of 8192 MiB)', async () => {
+  process.env.E2B_SANDBOX_TEMPLATES = 'grid';
+  try {
+    assert.deepEqual(DEFAULT_SANDBOX_GRID, { cpu: [2, 8], memoryGb: [4, 8] });
+    assert.deepEqual(sandboxGrid(), DEFAULT_SANDBOX_GRID);
+    const { task } = await sessionWithTask();
+    const refused = await expectResizeError(
+      requestSandboxResize({
+        userId,
+        agentId,
+        taskId: task.id,
+        memoryGb: 16,
+        reason: 'jest workers OOM-killed 3 times at 8 GB',
+      }),
+      409,
+      'SIZE_UNAVAILABLE'
+    );
+    assert.deepEqual(refused.details.available, [
+      { cpu: 2, memory_gb: 4 },
+      { cpu: 2, memory_gb: 8 },
+      { cpu: 8, memory_gb: 4 },
+      { cpu: 8, memory_gb: 8 },
+    ]);
+    const fresh = await prisma.codeSession.create({
+      data: { userId, rootAgentId: agentId, ownerAgentId: agentId, repoKey: `g-${randomUUID()}` },
+    });
+    assert.deepEqual(await resolveSpawnSandbox(fresh, 'codex', null), {
+      size: { cpu: 2, memoryGb: 4 },
+      templateId: sizedTemplateName('codex', { cpu: 2, memoryGb: 4 }),
+    });
+  } finally {
     process.env.E2B_SANDBOX_TEMPLATES = JSON.stringify(TEMPLATES);
   }
 });
@@ -480,12 +516,12 @@ test('HTTP: no reason 400, local target not applicable, status lists the top con
 
   const noReason = await http('POST', `${base}/environment/size`, {
     token,
-    body: { memory_gb: 16 },
+    body: { memory_gb: 8 },
   });
   assert.equal(noReason.status, 400, JSON.stringify(noReason.data));
   assert.equal(noReason.data.code, 'REASON_REQUIRED');
   const internal = await http('POST', `${base}/environment/size`, {
-    body: { memory_gb: 16, reason: 'x' },
+    body: { memory_gb: 8, reason: 'x' },
   });
   assert.equal(internal.status, 403, 'only a code-agent session token can resize');
 
@@ -548,7 +584,7 @@ test('HTTP: no reason 400, local target not applicable, status lists the top con
   assert.match(text, /Environment: 2 vCPU, 4 GB RAM/);
   assert.match(text, /Top 5 processes by memory \(RSS\):/);
   assert.match(text, /Top 5 processes by CPU/);
-  const cli = spawnSync(process.execPath, [roseCli, 'env', 'size', '--memory-gb', '16'], {
+  const cli = spawnSync(process.execPath, [roseCli, 'env', 'size', '--memory-gb', '8'], {
     env,
     encoding: 'utf8',
   });
@@ -564,11 +600,11 @@ test('HTTP: no reason 400, local target not applicable, status lists the top con
 
 test('project sandboxSize is the default size of a new session', async () => {
   const created = await http('POST', '/api/projects', {
-    body: { name: `resize-${randomUUID().slice(0, 8)}`, sandboxSize: { memoryGb: 16 } },
+    body: { name: `resize-${randomUUID().slice(0, 8)}`, sandboxSize: { memoryGb: 8 } },
   });
   assert.equal(created.status, 201, JSON.stringify(created.data));
   const project = (created.data.project ?? created.data) as { id: string; sandboxSize: unknown };
-  assert.deepEqual(project.sandboxSize, { memoryGb: 16 });
+  assert.deepEqual(project.sandboxSize, { memoryGb: 8 });
   const invalid = await http('PUT', `/api/projects/${project.id}`, {
     body: { sandboxSize: {} },
   });
@@ -579,7 +615,7 @@ test('project sandboxSize is the default size of a new session', async () => {
     data: { userId, rootAgentId: agentId, ownerAgentId: agentId, repoKey: `p-${randomUUID()}` },
   });
   const sized = await resolveSpawnSandbox(fresh, 'claude', stored.sandboxSize);
-  assert.deepEqual(sized, { size: { cpu: 2, memoryGb: 16 }, templateId: 'tpl-c2-m16' });
+  assert.deepEqual(sized, { size: { cpu: 2, memoryGb: 8 }, templateId: 'tpl-c2-m8' });
   const { session } = await sessionWithTask();
   const existing = await resolveSpawnSandbox(session, 'claude', stored.sandboxSize);
   assert.deepEqual(existing.size, { cpu: 2, memoryGb: 4 }, 'an existing session keeps its size');

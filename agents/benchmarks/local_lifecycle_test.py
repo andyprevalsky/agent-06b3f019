@@ -160,6 +160,7 @@ def load_local():
 
 def test_local_launchers_preserve_inherited_proxy_configuration():
     from unittest.mock import patch
+    from tests.env_defaults import apply_test_env_defaults
 
     local = load_local()
     keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy")
@@ -171,7 +172,8 @@ def test_local_launchers_preserve_inherited_proxy_configuration():
         )
         for configured in (False, True):
             inherited = {key: "fixture-proxy-setting" for key in keys} if configured else {}
-            base = {"PATH": os.environ["PATH"], "BENCHMARK_SEED_DUMP": str(folder / "fixture.dump"), **inherited}
+            base = {"PATH": os.environ["PATH"], "BENCHMARK_SEED_DUMP": str(folder / "fixture.dump"),
+                    "BACKEND_API_KEY": "fixture-backend-api-key", **inherited}
             expected = {key: base[key] for key in keys if key in base}
             assert {key: value for key, value in local.benchmark_runner_env(base).items() if key in keys} == expected
 
@@ -186,7 +188,9 @@ def test_local_launchers_preserve_inherited_proxy_configuration():
                     patch.dict(os.environ, base, clear=True),
                     patch.object(local.subprocess, "Popen", capture),
                     patch.object(local, "_release_port_range"),
+                    patch.object(local, "_dotenv_values", return_value={}),
                 ):
+                    apply_test_env_defaults()
                     try:
                         if launch == "streamed":
                             local.run_streamed_command(["fixture-command"], cwd=folder)
@@ -959,7 +963,7 @@ from pathlib import Path
 name=Path(sys.argv[0]).name
 state=Path(os.environ['BOOTSTRAP_DB_STATE'])
 with open(os.environ['BOOTSTRAP_EXTERNAL_LOG'],'a') as log:log.write(name+' '+' '.join(sys.argv[1:])+'\n')
-if name in ('docker','lsof'):sys.exit(1)
+if name in ('docker','lsof','pgrep'):sys.exit(1)
 if name=='pg_isready':sys.exit(0)
 if name=='pg_dump':print('pg_dump (PostgreSQL) 16.4');sys.exit(0)
 if name=='createdb':state.write_text('owned');sys.exit(0)
@@ -980,7 +984,7 @@ if name=='npx':
  if 'scripts/seed-dump-cache.ts' in sys.argv and 'get' in sys.argv:sys.exit(1)
 sys.exit(99)
 """
-    for name in ("docker", "lsof", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"):
+    for name in ("docker", "lsof", "pgrep", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"):
         path = binary / name
         path.write_text(fake)
         path.chmod(0o700)
@@ -1021,7 +1025,7 @@ def _run_native_seed_bootstrap(folder, *, drop_fail=False, lock_fail=False, read
     assert not stack.manifest_path.exists(), "no services may start after failed seed admission"
     assert (folder/"seed.dump.publish.lock").is_symlink() == (lock_fail or read_fail), "seed lock cleanup did not match the external outcome"
     calls = (folder/"external.log").read_text().splitlines()
-    assert all(line.split()[0] in {"docker", "lsof", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"} for line in calls)
+    assert all(line.split()[0] in {"docker", "lsof", "pgrep", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"} for line in calls)
     assert all("npx" != line.split()[0] or "ensure-fast-mode-cache-schema.ts" in line or "seed-dump-cache.ts get" in line for line in calls)
     return local, stack
 
@@ -1468,3 +1472,102 @@ def test_local_stack_reconcile_resolves_pending_receipt_only_when_nothing_is_lef
 
     stack, _, _, pending, _ = fixture()
     assert_stays_pending(stack, pending, "database absence unverifiable", db=unreachable)
+
+
+def test_seed_bootstrap_fixture_does_not_enumerate_ambient_worker_processes():
+    """The pre-service seed proof must not scan a sibling host's worker inventory."""
+    from unittest.mock import patch
+    import shlex
+
+    with tempfile.TemporaryDirectory(prefix="native-seed-inventory-") as directory:
+        folder = Path(directory)
+        ambient = folder / "ambient"
+        ambient.mkdir()
+        observed = folder / "ambient-pgrep.log"
+        probe = ambient / "pgrep"
+        # A large unrelated inventory must never reach the copied bootstrap.
+        # Values exceed the native PID ceiling, so no actual process is targeted.
+        probe.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> {shlex.quote(str(observed))}\n'
+            'case "$*" in *worker*) seq 4294967296 4294968295; exit 0;; esac\n'
+            "exit 1\n"
+        )
+        probe.chmod(0o700)
+        with patch.dict(os.environ, {"PATH": f"{ambient}:{os.environ['PATH']}",
+                                    "AMBIENT_PGREP_LOG": str(observed)}):
+            local, stack = _run_native_seed_bootstrap(folder)
+        assert not observed.exists(), "seed fixture consulted ambient process discovery"
+        assert not (folder / "database.state").exists(), "owned fixture database leaked"
+        local.stop_services(None, stack=stack)
+
+
+def test_kept_stack_does_not_arm_owner_watch():
+    """A stack the controller is asked to keep must outlive the controller.
+
+    run.sh shuts its stack down once RUN_SH_OWNER_PID is gone. Arming that watch
+    for --keep-services (or a paused checkpoint whose FE link must stay valid)
+    killed the kept stack the moment local.py exited (backend.log: "SIGTERM
+    received" right after "All requested benchmarks passed").
+    """
+    from unittest.mock import patch
+
+    local = load_local()
+    artifact_root = REPO / ".context/test-runs"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix="local-keep-", dir=artifact_root))
+    stack = local.ServiceStack(
+        "fixture",
+        folder,
+        folder / "services.json",
+        folder / "services.log",
+        True,
+        workspace_name="fixture",
+        base_port=22011,
+    )
+
+    class LaunchCaptured(Exception):
+        pass
+
+    launched_envs = []
+    real_popen = subprocess.Popen
+
+    def launch(command, **kwargs):
+        if command != ["bash", "scripts/run.sh", "--benchmark"]:
+            return real_popen(command, **kwargs)
+        launched_envs.append(dict(kwargs["env"]))
+        raise LaunchCaptured()
+
+    def args_for(*, keep_services, checkpoint=None, checkpoint_no_start=False):
+        return SimpleNamespace(
+            keep_services=keep_services,
+            use_existing=False,
+            checkpoint=checkpoint,
+            checkpoint_start_agent_id=None,
+            checkpoint_no_start=checkpoint_no_start,
+        )
+
+    cases = [
+        (args_for(keep_services=False), True),
+        (args_for(keep_services=True), False),
+        (args_for(keep_services=False, checkpoint="iter-3", checkpoint_no_start=True), False),
+    ]
+    with (
+        patch.object(local.subprocess, "Popen", launch),
+        patch.dict(os.environ, {"BENCHMARK_SEED_DUMP": str(folder / "fixture.dump")}),
+    ):
+        for args, _expect_watch in cases:
+            try:
+                local.start_services(
+                    stack,
+                    clean_first=False,
+                    outlive_controller=local.stack_outlives_controller(args),
+                )
+            except LaunchCaptured:
+                pass
+            else:
+                raise AssertionError("fixture launch did not run")
+    assert len(launched_envs) == len(cases), launched_envs
+    for (args, expect_watch), env in zip(cases, launched_envs):
+        assert ("RUN_SH_OWNER_PID" in env) is expect_watch, (vars(args), sorted(k for k in env if k.startswith("RUN_SH")))
+        assert ("RUN_SH_OWNER_START" in env) is expect_watch, vars(args)

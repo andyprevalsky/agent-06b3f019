@@ -1,8 +1,25 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert';
+import { retryWithBackoff } from '../../providers/retry';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * The dedupe slot is DB-backed (SharedEphemeralState), so under coverage load
+ * an expected alert can land after a fixed 30 ms sleep. Wait (bounded) for it.
+ */
+const waitForCalls = (calls: unknown[], expected: number): Promise<void> =>
+  retryWithBackoff(
+    async () => {
+      if (calls.length < expected) throw new Error(`waiting for ${expected} alert(s)`);
+    },
+    {
+      maxRetries: 40,
+      getBackoffDelayMs: () => 50,
+      isRetryable: () => true,
+      component: 'ErrorAlertTest',
+    }
+  ).catch(() => undefined);
 
 interface Captured {
   url: string;
@@ -24,9 +41,11 @@ async function run(): Promise<void> {
 
   const calls: Captured[] = [];
   let failNext = false;
+  let rejections = 0;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     if (failNext) {
       failNext = false;
+      rejections += 1;
       throw new Error('simulated network failure');
     }
     const url = String(input);
@@ -64,6 +83,7 @@ async function run(): Promise<void> {
       context: { reason: 'pool exhausted', attempts: 3 },
     });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'should post exactly one Slack alert');
     assert.strictEqual(calls[0].url, 'https://hooks.slack.test/xxx', 'posts to the webhook url');
     const payload = calls[0].body as { text: string; blocks: unknown[] };
@@ -98,6 +118,7 @@ async function run(): Promise<void> {
     calls.length = 0;
     alertError({ source: 'sms', message: 'totally different failure', userId: 'u1' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'distinct signature should alert');
 
     // --- 4. No webhook configured → no fetch, no throw ---
@@ -110,6 +131,7 @@ async function run(): Promise<void> {
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
     alertError({ source: 'chat', message: 'no webhook here', agentId: 'a' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'a missing sink must not spend the throttle slot');
 
     // --- 5. Never throws even when fetch rejects ---
@@ -119,9 +141,16 @@ async function run(): Promise<void> {
     failNext = true;
     alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
     await sleep(30); // if this throws unhandled, the process crashes → test fails
-    alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
-    await sleep(30);
-    assert.strictEqual(calls.length, 1, 'a rejected transport remains immediately retryable');
+    // The slot is released when the rejection settles, which is DB-backed and lands after a fixed
+    // sleep under coverage load; an identical alert sent before that is throttled by design. Send it
+    // until it lands: a rejection that spent the slot for good never lets one through.
+    assert.strictEqual(rejections, 1, 'the first alert reached the rejecting transport');
+    for (let attempt = 0; attempt < 40 && calls.length < 1; attempt++) {
+      alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
+      await sleep(50);
+    }
+    await waitForCalls(calls, 1);
+    assert.strictEqual(calls.length, 1, 'a rejected transport remains retryable');
 
     // --- 6. AUTO_RCA_ENABLED=1 never dispatches to GitHub: RCA runs on Rose,
     //         driven by the Slack card this alert posts. ---
@@ -131,6 +160,7 @@ async function run(): Promise<void> {
     calls.length = 0;
     alertError({ source: 'agent_workflow', message: 'rca please', agentId: 'agent-rca' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'Auto RCA still posts exactly one Slack card');
     assert.strictEqual(calls[0].url, 'https://hooks.slack.test/xxx', 'card goes to Slack');
     assert.ok(
@@ -227,6 +257,7 @@ async function run(): Promise<void> {
     calls.length = 0;
     alertError({ source: 'chat', message: 'webhook fallback still works', agentId: 'w' });
     await sleep(30);
+    await waitForCalls(calls, 1);
     assert.strictEqual(calls.length, 1, 'webhook fallback posts one alert');
     assert.strictEqual(
       calls[0].url,

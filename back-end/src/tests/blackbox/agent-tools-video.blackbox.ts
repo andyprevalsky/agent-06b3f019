@@ -99,10 +99,22 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
-    // The devbox port forwarder probes every new listener with `HEAD /`; it is not a provider call.
-    if (req.method === 'HEAD' && req.url === '/') {
-      res.statusCode = 200;
+    // Other local non-API probes never reach a Gemini scenario handler.
+    if (!(req.url ?? '').split('?')[0].startsWith('/v1beta/')) {
+      res.statusCode = 404;
       res.end();
+      return;
+    }
+    // Ignore method-only host probes before invoking any scenario handler.
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    // Other blackbox domains may also probe ephemeral ports while this server is bound.
+    // Keep those requests out of the provider-call count and the per-test handler.
+    if (req.headers['x-goog-api-key'] !== 'blackbox-gemini-key') {
+      res.writeHead(404).end();
       return;
     }
     void readJson(req).then((body) => {
@@ -113,6 +125,10 @@ before(async () => {
         body,
       };
       calls.push(recorded);
+      if (typeof handler !== 'function') {
+        res.writeHead(503).end();
+        return;
+      }
       handler(recorded, (status, payload, raw) => {
         res.statusCode = status;
         if (raw) {
@@ -167,6 +183,16 @@ const body = (extra: Record<string, unknown> = {}) =>
   });
 const usageRows = (operationKey: string) =>
   prisma.toolUsage.findMany({ where: { operationKey: `${operationKey}:usage` } });
+
+test('non-video probes do not invoke or count as scenario requests', async () => {
+  calls = [];
+  handler = (_req, respond) => respond(500, { error: 'unexpected scenario dispatch' });
+  const head = await fetch(`${process.env.GEMINI_API_BASE_URL}/`, { method: 'HEAD' });
+  assert.equal(head.status, 404);
+  const response = await fetch(`${process.env.GEMINI_API_BASE_URL}/`);
+  assert.equal(response.status, 404);
+  assert.equal(calls.length, 0);
+});
 
 test('real response shape: store true, seed, prompt-level controls, usage-token cost, usage row', async () => {
   calls = [];

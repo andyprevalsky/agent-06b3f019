@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "4ece7f47515e4bdc9f1374c9f7230a19",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment ended natively SKIPPED: the standing AgentCard sandbox release stall (closed card, balance 0, org transfer consumed, releasedCents=0); the other 13 smoke tasks passed",
+   "evidence": "The native row matches AGENTCARD_RELEASE_STALL_REASON and agentcard_release_stall_task (purchase HELD, walletFunding RECLAIMING, card CLOSED balance 0, org transfer consumed, releasedCents 0, livemode false). This PR changes no AgentCard release-path code; the same stall occurred in every smoke round of this deploy and in docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md.",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "f88c536bc4dc098045e4ad32f313f277ceeeb75278e67f81cb939097dde2599b",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_62458b788e9eb302ddaaa050\", \"cardId\": \"card_da4366ce4e3d0914567ebd29\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 240bca30-b6bc-4c6b-9c10-efd7879467f5 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "evidence": "Native SKIPPED row bound by sha256; the lifecycle fields in receipt_reason are the release-stall predicate.",
+    "confirmed_at": 1794081930.263977
+   }
+  }
+ ]
+}

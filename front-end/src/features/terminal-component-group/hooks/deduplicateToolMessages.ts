@@ -117,10 +117,9 @@ function dedupByToolCallId(messages: Message[]): {
     }
   });
 
-  const toolMessages = Array.from(toolMessageMap.values()).map(({ message, firstTimestamp }) => ({
-    ...message,
-    timestamp: firstTimestamp,
-  }));
+  const toolMessages = Array.from(toolMessageMap.values()).map(({ message, firstTimestamp }) =>
+    message.timestamp === firstTimestamp ? message : { ...message, timestamp: firstTimestamp },
+  );
 
   return { toolMessages, nonToolMessages };
 }
@@ -338,10 +337,15 @@ export function deduplicateToolMessages(
 
   const waitForCheckMap = new Map<string, WaitForCheck[]>();
   const waitForChildIds = new Set<string>();
+  const firstByToolCallId = new Map<unknown, Message>();
+  for (const message of withExploreGrouped) {
+    const id = message.metadata?.toolCallId;
+    if (!firstByToolCallId.has(id)) firstByToolCallId.set(id, message);
+  }
 
   for (const [toolCallId, rawMsgs] of rawWaitForByToolCallId) {
     if (rawMsgs.length <= 1) continue;
-    const representative = withExploreGrouped.find((m) => m.metadata?.toolCallId === toolCallId);
+    const representative = firstByToolCallId.get(toolCallId);
     if (!representative) continue;
 
     const checks = buildWaitForChecks(rawMsgs, explore.dataByTaskId, waitForChildIds);

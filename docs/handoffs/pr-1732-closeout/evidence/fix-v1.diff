@@ -1,0 +1,249 @@
+diff --git a/agents/domains/web_fetch/config.py b/agents/domains/web_fetch/config.py
+index b3bbed28d..e81f9aaeb 100644
+--- a/agents/domains/web_fetch/config.py
++++ b/agents/domains/web_fetch/config.py
+@@ -16,12 +16,21 @@ MAX_MARKDOWN_LENGTH = 40_000
+ # Stored in cents for parity with other service-cost entries.
+ FIRECRAWL_COST_CENTS = 0.083
+ 
+-FIRECRAWL_SCRAPE_TIMEOUT_SECONDS = 120.0
++# The scrape activity's Temporal start-to-close budget. The provider chain below
++# (Firecrawl, then the Parallel Extract fallback) must finish inside it so a hung
++# page yields a typed tool error instead of an activity timeout plus a full retry.
++WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS = 180
++
++FIRECRAWL_SCRAPE_TIMEOUT_SECONDS = 90.0
+ 
+ # ── Parallel Extract fallback ──
+ 
+ PARALLEL_EXTRACT_API_URL = "https://api.parallel.ai/v1/extract"
+-PARALLEL_EXTRACT_TIMEOUT_SECONDS = 120.0
++PARALLEL_EXTRACT_TIMEOUT_SECONDS = 60.0
++
++# Hard cap on one scrape_url call (both providers). Kept below the activity
++# timeout; asserted by the web_fetch blackbox.
++WEB_FETCH_SCRAPE_BUDGET_SECONDS = FIRECRAWL_SCRAPE_TIMEOUT_SECONDS + PARALLEL_EXTRACT_TIMEOUT_SECONDS
+ 
+ # Parallel Extract pricing is $1 / 1k URLs. Stored in cents.
+ PARALLEL_EXTRACT_COST_CENTS = 0.1
+diff --git a/agents/domains/web_fetch/handler.py b/agents/domains/web_fetch/handler.py
+index 4b7a3c260..124d4caa2 100644
+--- a/agents/domains/web_fetch/handler.py
++++ b/agents/domains/web_fetch/handler.py
+@@ -28,7 +28,12 @@ from temporalio import activity
+ from temporalio.common import RetryPolicy
+ from temporalio.exceptions import ApplicationError
+ 
+-from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH, PARALLEL_EXTRACT_COST_CENTS
++from domains.web_fetch.config import (
++    FIRECRAWL_COST_CENTS,
++    MAX_MARKDOWN_LENGTH,
++    PARALLEL_EXTRACT_COST_CENTS,
++    WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS,
++)
+ from domains.web_fetch.service import (
+     WebFetchProvidersFailed,
+     assert_fetchable_url,
+@@ -170,7 +175,7 @@ class WebFetchManager(ToolManager):
+             scrape_result = await execute_activity(
+                 web_fetch_activity,
+                 args=scrape_args,
+-                start_to_close_timeout=timedelta(seconds=180),
++                start_to_close_timeout=timedelta(seconds=WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS),
+                 retry_policy=RetryPolicy(
+                     maximum_attempts=2,
+                     backoff_coefficient=2.0,
+diff --git a/agents/domains/web_fetch/service.py b/agents/domains/web_fetch/service.py
+index bce956542..af59b3c5f 100644
+--- a/agents/domains/web_fetch/service.py
++++ b/agents/domains/web_fetch/service.py
+@@ -10,14 +10,17 @@ This module owns the two side-effecting steps that don't need LLM tokens:
+   2. Batch file download + Supabase upload after Haiku picks the file URLs.
+ """
+ 
++import asyncio
+ import hashlib
+-from typing import Any, Dict, List, Optional
++from typing import Any, Awaitable, Callable, Dict, List, Optional
+ from urllib.parse import unquote, urlparse
+ 
++import httpx
+ import structlog
+ from temporalio import activity
+ from temporalio.exceptions import ApplicationError
+ 
++from domains.web_fetch import config as web_fetch_config
+ from domains.web_fetch.repo import (
+     download_files_batch,
+     fetch_firecrawl_scrape,
+@@ -107,19 +110,50 @@ def get_filename_from_url(url: str) -> str:
+     return name
+ 
+ 
++class ProviderHung(TimeoutError):
++    """A scrape provider did not answer inside its share of the scrape budget."""
++
++
++def _is_hang(error: BaseException) -> bool:
++    return isinstance(error, (ProviderHung, httpx.TimeoutException))
++
++
++async def _within(
++    provider: str, call: Callable[[], Awaitable[Dict[str, Any]]], cap: float, deadline: float
++) -> Dict[str, Any]:
++    """Await one provider call, bounded by ``cap`` and the shared scrape deadline."""
++    remaining = deadline - asyncio.get_running_loop().time()
++    timeout = min(cap, remaining)
++    if timeout <= 0:
++        raise ProviderHung(f"{provider} had no scrape budget left")
++    try:
++        return await asyncio.wait_for(call(), timeout=timeout)
++    except asyncio.TimeoutError as e:
++        raise ProviderHung(f"{provider} did not answer within {timeout:.0f}s") from e
++
++
+ async def scrape_url(url: str) -> Dict[str, Any]:
+     """Fetch a URL and return ``{markdown, links, metadata}``.
+ 
+     Firecrawl is primary. Parallel Extract is the public-page fallback when
+-    Firecrawl rejects a site, times out, or otherwise fails.
++    Firecrawl rejects a site, times out, or otherwise fails. The whole chain is
++    bounded by ``WEB_FETCH_SCRAPE_BUDGET_SECONDS`` (below the activity timeout),
++    and a page that hangs both providers is reported non-retryable: retrying the
++    same hung page only repeats the full budget.
+     """
+     # Guard the provider boundary: a non-fetchable string must never cost a
+     # Firecrawl + Parallel Extract round trip.
+     assert_fetchable_url(url)
+ 
++    deadline = asyncio.get_running_loop().time() + web_fetch_config.WEB_FETCH_SCRAPE_BUDGET_SECONDS
+     activity.heartbeat(f"Firecrawl scrape: {url[:80]}")
+     try:
+-        return await fetch_firecrawl_scrape(url)
++        return await _within(
++            "Firecrawl",
++            lambda: fetch_firecrawl_scrape(url),
++            web_fetch_config.FIRECRAWL_SCRAPE_TIMEOUT_SECONDS,
++            deadline,
++        )
+     except Exception as firecrawl_error:
+         logger.warning(
+             "[web_fetch] Firecrawl scrape failed; falling back to Parallel Extract",
+@@ -129,10 +163,16 @@ async def scrape_url(url: str) -> Dict[str, Any]:
+ 
+         activity.heartbeat(f"Parallel Extract fallback: {url[:80]}")
+         try:
+-            return await fetch_parallel_extract(url)
++            return await _within(
++                "Parallel Extract",
++                lambda: fetch_parallel_extract(url),
++                web_fetch_config.PARALLEL_EXTRACT_TIMEOUT_SECONDS,
++                deadline,
++            )
+         except Exception as parallel_error:
+-            retryable = is_retryable_provider_error("Firecrawl", firecrawl_error) or is_retryable_provider_error(
+-                "Parallel Extract", parallel_error
++            retryable = any(
++                not _is_hang(error) and is_retryable_provider_error(provider, error)
++                for provider, error in (("Firecrawl", firecrawl_error), ("Parallel Extract", parallel_error))
+             )
+             raise WebFetchProvidersFailed(
+                 "web_fetch failed with Firecrawl and Parallel Extract. "
+diff --git a/agents/tests/blackbox/web_fetch.blackbox.py b/agents/tests/blackbox/web_fetch.blackbox.py
+index 1d286d3d6..bbf6fe883 100644
+--- a/agents/tests/blackbox/web_fetch.blackbox.py
++++ b/agents/tests/blackbox/web_fetch.blackbox.py
+@@ -314,6 +314,78 @@ async def test_retryable_provider_failure_remains_retryable():
+     assert error.retryable is True
+ 
+ 
++async def test_hung_providers_fail_within_the_scrape_budget_and_are_not_retried():
++    """Two hung providers fail as one typed, non-retryable error inside the scrape budget.
++
++    Regression for parallel-tool-calls (agent f6899445): a page both providers hang on
++    ran Firecrawl 120s + Parallel Extract 120s, so the 180s activity timed out and
++    Temporal retried it, holding one explore agent (and the root) for 393s.
++    """
++    os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
++    os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
++
++    async def hang(_url: str):
++        await asyncio.sleep(30)
++
++    with (
++        patch("temporalio.activity.heartbeat"),
++        patch("domains.web_fetch.config.FIRECRAWL_SCRAPE_TIMEOUT_SECONDS", 0.4, create=True),
++        patch("domains.web_fetch.config.PARALLEL_EXTRACT_TIMEOUT_SECONDS", 0.2, create=True),
++        patch("domains.web_fetch.config.WEB_FETCH_SCRAPE_BUDGET_SECONDS", 0.6, create=True),
++        patch("domains.web_fetch.service.fetch_firecrawl_scrape", hang),
++        patch("domains.web_fetch.service.fetch_parallel_extract", hang),
++    ):
++        from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
++
++        started = asyncio.get_running_loop().time()
++        try:
++            await asyncio.wait_for(scrape_url("https://example.com/hung"), timeout=3.0)
++            error = None
++        except WebFetchProvidersFailed as e:
++            error = e
++        except asyncio.TimeoutError:
++            error = None
++        elapsed = asyncio.get_running_loop().time() - started
++
++    assert error is not None, "scrape_url never returned a typed error for hung providers"
++    assert elapsed < 1.5, f"hung providers held the scrape for {elapsed:.2f}s (budget 0.6s)"
++    assert "Firecrawl" in str(error) and "Parallel Extract" in str(error)
++    assert error.retryable is False, "a page both providers hang on must not be retried"
++
++
++async def test_scrape_provider_timeouts_fit_inside_the_activity_timeout():
++    """The Firecrawl + Parallel Extract chain must finish before the scrape activity times out."""
++    from domains.web_fetch import config as wf_config
++    from domains.web_fetch.handler import WebFetchManager
++
++    chain = wf_config.FIRECRAWL_SCRAPE_TIMEOUT_SECONDS + wf_config.PARALLEL_EXTRACT_TIMEOUT_SECONDS
++    assert wf_config.WEB_FETCH_SCRAPE_BUDGET_SECONDS >= chain
++    assert chain < wf_config.WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS, (
++        f"provider chain {chain}s must fit the {wf_config.WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS}s activity"
++    )
++
++    calls = []
++
++    async def fake_execute_activity(fn, args=None, **kwargs):
++        calls.append((getattr(fn, "__name__", ""), kwargs))
++        if getattr(fn, "__name__", "") == "web_fetch_activity":
++            raise RuntimeError("stop after scheduling the scrape")
++        return None
++
++    try:
++        await WebFetchManager().execute_tool(
++            execute_activity=fake_execute_activity,
++            tool_call={"url": "https://example.com/a", "objective": "x"},
++            tool_call_id="tc-budget",
++            agent_id="a-1",
++            user_id="u-1",
++        )
++    except Exception:
++        pass
++    scrape = next(kw for name, kw in calls if name == "web_fetch_activity")
++    assert scrape["start_to_close_timeout"] == timedelta(seconds=wf_config.WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS)
++
++
+ async def test_web_fetch_activity_marks_deterministic_provider_failures_non_retryable():
+     """The activity converts deterministic two-provider failures into a non-retryable Temporal error."""
+     from temporalio.exceptions import ApplicationError
+@@ -1391,6 +1463,14 @@ async def run_all_tests() -> bool:
+         "handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds
+     )
+     await r.record_async("handler_demo_cache_scrape_no_cost", test_handler_demo_cache_scrape_hit_has_no_service_cost)
++    await r.record_async(
++        "hung_providers_fail_within_scrape_budget_and_are_not_retried",
++        test_hung_providers_fail_within_the_scrape_budget_and_are_not_retried,
++    )
++    await r.record_async(
++        "scrape_provider_timeouts_fit_inside_activity_timeout",
++        test_scrape_provider_timeouts_fit_inside_the_activity_timeout,
++    )
+     await r.record_async(
+         "activity_demo_cache_ignores_unavailable",
+         test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_enabled,

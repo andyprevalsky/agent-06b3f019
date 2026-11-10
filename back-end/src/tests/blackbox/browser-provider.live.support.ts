@@ -3,6 +3,7 @@
 /** Live Kernel/Steel/Browser Use provider parity + rotate_ip ladder (split for max-lines). */
 
 import { randomUUID } from 'node:crypto';
+import { withBrowserProviderServer } from './browser-provider.fixture-server.support';
 import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
@@ -31,7 +32,6 @@ import {
   deleteKernelProfile,
   runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
-import { assertResumeReprovisionsDeletedProxy } from './browser-provider-stale-proxy.support';
 
 const AGENT_LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
 
@@ -53,6 +53,10 @@ async function steelDefaultSessionBoots(): Promise<boolean> {
 }
 
 export async function runLiveProviderParity(): Promise<void> {
+  await withBrowserProviderServer('kernel', runConfiguredProviderParity);
+}
+
+async function runConfiguredProviderParity(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
   if (!baseUrl) return;
   const apiKey = process.env.BACKEND_API_KEY?.trim();
@@ -105,8 +109,7 @@ export async function runLiveProviderParity(): Promise<void> {
     });
 
   await prisma.user.create({ data: { userId, name: 'Kernel Provider Blackbox' } });
-  // Pin Kernel through the persisted preference so this parity still runs on
-  // Kernel when the deployment default is Tilion (BROWSER_PROVIDER=tilion).
+  // The owned route server selects Kernel explicitly; its preference supplies proxy options.
   await prisma.browserContext.create({
     data: {
       userId,
@@ -506,15 +509,9 @@ export async function runLiveProviderParity(): Promise<void> {
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
     assert(secondRemote.proxy_id === mobileProxyId, 'resume did not reuse the rotated proxy ID');
 
-    const resumedAfterDeletion = await assertResumeReprovisionsDeletedProxy({
-      kernel,
-      taskId: String(init.task_id),
-      sessionId: liveSessionId,
-      proxySource: mobileMetadata.proxy_source,
-      proxyLocation: mobileMetadata.proxy_location,
-      post: postWithKernelConnectionRetry,
-    });
-    liveSessionId = resumedAfterDeletion;
+    // Live parity exercises reuse of the shared proxy configuration. Deleting
+    // and re-provisioning proxies belongs in the isolated stale-cache tests.
+    console.log('[proxy reuse] resume retained the existing Kernel mobile proxy ID');
 
     // A Steel infra outage returns null (skips the Steel legs) while Kernel is
     // healthy; real rotation defects still throw. See the wrapper's doc comment.

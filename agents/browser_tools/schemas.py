@@ -19,6 +19,7 @@ from utils.purchase_approval import (
     validate_product_url_for_page,
     validate_product_url_for_pages,
 )
+from utils.tool_output_schema import ReadToolOutputTool
 
 MAX_BROWSER_WAIT_MS = 60_000
 
@@ -282,6 +283,32 @@ class DragTool(BaseModel):
             raise ValueError("drag start_x and start_y must be provided together")
         if (self.end_x is None) ^ (self.end_y is None):
             raise ValueError("drag end_x and end_y must be provided together")
+        return self
+
+
+class HoverTool(BaseModel):
+    """Move the mouse pointer to an element or viewport point without clicking."""
+
+    tool: Literal["hover"]
+    index: Optional[int] = Field(
+        default=None,
+        description="DOM index of the element to move the pointer to",
+    )
+    x: Optional[int] = Field(
+        default=None,
+        description="Viewport X to move the pointer to (pixels from left; matches screenshot)",
+    )
+    y: Optional[int] = Field(
+        default=None,
+        description="Viewport Y to move the pointer to (pixels from top; matches screenshot)",
+    )
+
+    @model_validator(mode="after")
+    def require_target(self) -> "HoverTool":
+        if (self.x is None) ^ (self.y is None):
+            raise ValueError("hover x and y must be provided together")
+        if self.index is None and self.x is None:
+            raise ValueError("hover requires index or both x and y")
         return self
 
 
@@ -955,6 +982,7 @@ BROWSER_TOOL_MODELS = {
     "phone": PhoneBrowserTool,
     # Observation
     "read_browser_state": ReadBrowserStateTool,
+    "read_tool_output": ReadToolOutputTool,
     "screenshot": ScreenshotTool,
     "read_logs": ReadLogsBrowserTool,
     "read_network_requests": ReadNetworkRequestsBrowserTool,
@@ -965,6 +993,7 @@ BROWSER_TOOL_MODELS = {
     # Coordinate-based fallback (for vision models)
     "click_coordinates": ClickAtCoordinatesTool,
     "drag": DragTool,
+    "hover": HoverTool,
     # Dropdown handling
     "dropdown_options": DropdownOptionsTool,
     "select_dropdown": SelectDropdownTool,

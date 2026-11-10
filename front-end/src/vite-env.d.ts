@@ -4,6 +4,8 @@ interface ImportMetaEnv {
   readonly VITE_ENABLE_REACT_GRAB?: 'true' | 'false';
   readonly VITE_REALTIME_PRIVATE?: 'true' | 'false';
   readonly VITE_BACKEND_SAME_ORIGIN?: 'true' | 'false';
+  /** Production build id (vite.config.ts); also published as /version.json. */
+  readonly VITE_ROSE_BUILD_ID?: string;
 }
 
 interface ElectronAuthBridge {
@@ -19,6 +21,7 @@ interface ElectronLocalCodeBridge {
 
 interface ElectronApiBridge {
   isElectron?: boolean;
+  openExternal?: (url: string) => Promise<unknown>;
   auth?: ElectronAuthBridge;
   localCode?: ElectronLocalCodeBridge;
 }

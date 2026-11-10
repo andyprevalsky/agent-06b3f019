@@ -283,3 +283,237 @@ for this operational correction. Archive searches used the literal
 is related capacity context, not the diagnosed mechanism of this refusal.
 
 No additional human feedback was recorded for this operational incident.
+
+
+## November 4 PR1662: multi-workstream fake provider inherited the host disk ledger
+
+Frozen8c63501f0afa0e3f4c5aafd3e29e01a119eb5f2a, round43 native
+multi-workstream failed scenario1 for both ws-a and ws-b with
+`cleanup reserve admission failed: [Errno 28] insufficient physical cleanup
+floors for pending controllers`. Neither reached the expected measured
+new-Machine refusal. The original result remains failed/UNVERIFIED; its
+supervisor adopted children and recorded quiescence with every child reaped.
+
+Two bounded archive searches used the exact insufficient-physical-floors
+message/private disk ledger fixture and cleanup-reserve fixture/device ledger.
+They lead to this owning case, including its earlier physical-allocation
+fixture namespace repair. That correction held for its callers but missed the
+multi-workstream fake provider. The latter pinned private TMPDIR for script
+snapshots while production reserve accounting deliberately selected
+`/tmp/rose-cloudbench-cleanup-admission-UID/<parent.st_dev>` and actual df.
+It therefore consulted the same physical device ledger as unrelated host
+controllers. The saved device65024 ledger has14 standalone groups with256MiB
+headroom each, zero inflight entries, and a modification time before both
+08:50 native fixture refusals. A later2879MiB free-space observation is not the
+original atomic df result. No contamination by stress200 is inferred: its
+storage transport already uses an independent virtual device.
+
+The permanent existing volume-contract owner now exercises the actual
+run_controller environment stanza and unchanged native reserve function using
+one controlled foreign live reserve on a500MiB simulated host. On the original
+launcher the identical command fails with the same native ENOSPC. The candidate
+passes: all fake workstreams share one finite18000MiB private disk/ledger
+namespace with sparse files, and the foreign native ledger bytes remain exact.
+A deliberately insufficient200MiB private disk still triggers the original
+native256MiB floor refusal. No guard is replaced by a successful stub. The
+complete existing fake-volume-contract owner also passes, retaining every
+original main statement/assertion and its malformed-provider-volume negatives.
+This low-load control starts no provider, task, fleet or200-owner stress run.
+
+The fixture-only repair supplies scoped lstat/fstat/posix_fallocate and df
+transport at the fake-provider launcher. Allocation accounting subtracts live
+private reserve bytes under a fixture-owned lock. Actual native allocator,
+cohort/debit/floor, process-birth and identity checks remain unchanged. After
+its own fixture processes are absent, cleanup retires only its exact synthetic
+namespace. Production run-bench-fleet is byte-identical; no real host ledger,
+physical cleanup reserve blocks, timeout, test assertion or concurrency changes.
+Independent review of full patch
+ecb08595703b3276e193e6b5cba8d1857077d7f59723f32a539364ef5a80c118 is CLEAR.
+
+Exact commands, from the candidate source root, are:
+
+```bash
+python3 scripts/tests/cloudbench-fake-volume-contract.test.py --assert-private-cleanup-storage
+python3 scripts/tests/cloudbench-fake-volume-contract.test.py
+```
+
+The first is the identical causal RED/GREEN invocation. The second is the
+existing low-load owning command, invoked by the ordinary multi-workstream
+fixture; default main now includes this regression. Private candidate root is
+`/var/tmp/pr1662-8c635-controller-rca/candidate`; source preimages and full patch
+bindings are in `multi-report.json` beside it. This is causal fixture proof,
+not an unchanged full multi-workstream/controller PASS. Parent owns source
+integration and the actual full validation.
+
+Two separate original failures remain UNKNOWN: selected-pytest's live uncaptured
+root test took11.711610210011713s against its8s elapsed assertion, and structural
+stress200's sealed driver exceeded120s. The former's only surviving input is
+child.pid; no helper/parse/startup/kill-wait phase timing or stdout/stderr was
+captured. Its12s outer,5s helper,20s sleep and8s assertion stay unchanged.
+The latter retains only an empty storage.lock after its timeout and directory
+removal race; it has its separate open evidence-loss case. Neither unknown
+failure is attributed to this disk fixture or relabeled by these passing
+controls. All original outcomes, source bindings and cleanup obligations remain.
+
+
+## November 4 PR1662: seed inventory fixture shared the host cleanup ledger
+
+Round49 on `0af9bc091328f30cd505fea9c132ba48f7d9c7da` failed
+`test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller`
+at the expected single GET: the recorded call list was empty. The rescued
+original summary records `cleanup_ticket_failure=prepare`, an aborted cohort,
+zero admitted children and no seed-preflight output or prepared budget. Native
+FAIL/UNVERIFIED and the original orphan/cleanup facts remain unchanged.
+
+The fixture already reduced its own policy to1MiB preferred/minimum and zero
+headroom, but still keyed native ticket admission by the real host device.
+The host's separate legacy ledger contained14 groups and3758096384 bytes of
+liability. Its immutable-state hash was `d91711e0...`; a later3146440704-byte
+free-space observation was not the original round49 `df`. The original exact
+prepare error/free-space input remains unavailable, so that historical capacity
+cause stays UNKNOWN. No old ledger entry was removed or reclassified.
+
+The unchanged owning function reproduced the same prepare/zero-GET assertion
+failure in1.833s. Isolating only this fake workspace's directory device in its
+native Python transport made the same function and assertions pass in2.694s:
+one complete loopback GET ran, then the intentionally failed atomic proof
+publication still returned native campaign exit1 with no admitted child. This
+is fixture-boundary proof, not a campaign/task PASS or a production allocator
+repair. The shared host ledger remained byte-identical in these observations.
+
+The one-file candidate scopes `Path.lstat` and `Path.stat` directory identities
+only below this fixture workspace, using an unpredictable invocation-specific
+namespace. File identities, real native `df`, physical allocation,1/1/0 policy,
+30-second subprocess ceiling and all101 existing test function ASTs are
+unchanged. Native campaign, seed and cleanup-ticket helpers are byte-identical.
+The earlier private-device fixes covered reserve/multi-workstream fixtures;
+this separate seed fixture had not adopted that isolation.
+
+A registered same-command control fails with only the isolation call absent
+(2.957s), then passes restored (4.545s). It preserves a self-owned foreign
+ledger byte-for-byte while the original GET/publication assertions pass. The
+same finite debt inside the fixture's own private ledger still causes native
+prepare refusal, zero GETs and zero admitted children. Its pressure derives
+from real device capacity; neither `df` nor native floor checks are replaced.
+It does not assert an unrelated live host ledger stays immutable while
+legitimate sibling producers run.
+
+Exact patch `1f609135...`, logs, source bindings and report `3ac28eaf...` are
+retained under `/var/tmp/pr1662-49-seed-ledger-isolation`. No live provider,
+production accounting cleanup, canonical state/source edit or full structural
+sweep was performed by this reduction. The parent-owned combined-source full
+gate is still required; prior round48 stop timing remains a separate UNKNOWN.
+
+## November 7 Google400: ordinary full-width campaigns omitted pending owners
+
+The ordinary 14-controller campaign `75588b14a9ecaa2a3efeb1caac10b589c1c79e3d1904977c21611f498acf3d87`
+on source `3c1f4603563862c70cb5e3eb5adbd4e21288f2c3` failed before task execution.
+Two jobs failed with `cleanup reserve admission failed: [Errno 28] insufficient
+physical cleanup floors for pending controllers`; two cancelled siblings also
+exited1 at the same floor guard or `cleanup reserve consumed controller operating
+headroom`. Other siblings exited through owned cancellation. A prior observation
+had7,758,327,808 free bytes. Fourteen preferred512MiB allocations plus256MiB
+working headroom do not fit that disk, while all32MiB minimum reserves plus the
+same working headroom do. These are unchanged policy values, not requested limits.
+
+The first bad boundary is ordinary campaign dispatch. `run-bench-campaign.py`
+prepared cleanup cohort tickets only when `strict_start` was enabled. This
+ordinary campaign had no `startup-cohorts` or cold ticket grant; its controllers
+registered as separate standalone groups. An early owner could consume its
+preferred reserve before a later owner's minimum and operating headroom became
+visible. The late failure is not evidence of cold-ticket double debit: this
+campaign never created those tickets. Physical floor checks correctly refused
+the overcommitted local disk.
+
+The owning regression uses the real campaign dispatcher, extracted native fleet
+reserve/release functions and existing cleanup-ticket helper against a finite
+8000MiB storage transport. Fourteen concurrent real child processes preserve
+512/32/256 policy, with ten allowed to admit before the last four register. The
+original dispatcher fails with the same physical-floor ENOSPC. The candidate
+passes all14, and a task-start event occurs before the final reserve attempt,
+proving this repair adds no task barrier. Sparse fixture files and bounded
+block-reporting transport model physical allocation without writing GiBs; this
+is accounting proof, not a real cloud task result.
+
+The scoped repair predeclares all known owner liabilities for ordinary schedules
+whose total job count is at most their requested concurrency. It reuses the
+existing strict-cohort budget preparation, owner assignment, claim, release and
+retirement protocol under a separate `cleanup-cohorts` directory. The strict
+startup canary, synchronization, scheduling loop, child argv and cleanup floors
+are unchanged. Rolling ordinary schedules with more jobs than concurrent slots
+retain their previous path and are explicitly outside this repair's claim.
+
+The identical final regression fails on the original producer and passes on the
+candidate. Eight campaign controls pass, including no-barrier ordering,
+preparation failure with no task dispatch, assignment failure with joined child
+and retired grant, and unchanged strict startup/failure controls. All11 existing
+cleanup-ticket tests also pass, including nested-canary ancestry and the single
+released nested slot. Original logs, exact patch hashes and commands are recorded
+in `.context/rca-google400/ordinary-cleanup-candidate/handoff.json`.
+
+The native75588 failed outcomes remain immutable. Supported normal preallocation
+reconciliation retains14 sealed zero-resource audits and two retired custody
+records with no acceptance credit. The original proof remains `still_bound`
+before and after candidate validation; no validator exception or producer proof
+rewrite was added. Fresh full-source gates and an actual14-task cloud smoke after
+integration remain pending. This recurrence therefore preserves this case's
+`mitigated` status and does not claim the deployment or Google/phone acceptance
+has completed.
+
+The user required keeping Freedom and all evidence, preserving concurrency and
+cleanup floors, and avoiding limit changes, resets or benchmark substitution.
+The accepted scope fixes cohort accounting before launch instead of deleting
+tracked history or introducing a synchronization barrier.
+
+## November 7 Google400: retired standalone headroom remained in ticket admission
+
+After the full-width accounting repair, campaign `b12b2d7c...` committed and
+released all14 cleanup claims and retired its budget. It failed later because
+the current schema's canonical PG15 seed was not published; it earned no task
+credit. After both schema-current seed publications, campaign `46904a5e...`
+failed before any controller launched with `cleanup_ticket_failure=prepare`.
+Only `prepare.lock` existed; no budget, grant or per-member claim had been
+written. The original exception and atomic free-space observation were not
+captured, so that historical error remains UNKNOWN.
+
+Readonly accounting nevertheless exposed a concrete admission defect. The
+filesystem's legacy ledger still retained ten consumed standalone owners from
+75588, all with absent native PIDs. Its bytes were unchanged. The ticket helper's
+`legacy_liability` charged2560MiB of working headroom indefinitely, while the
+legacy allocator's own budget uses live consumers. At the later observation,
+6,919,761,920 free bytes were below the7,214,202,880 bytes demanded by those
+retired floors plus15 slots (14owners and one nested canary) at unchanged
+32MiB cleanup minimum and256MiB working headroom. No dangling cold grant existed.
+This recalculation is current evidence, not a replacement for the missing
+original atomic sample or proof that a parallel PG16 publication caused it.
+
+The owning regression gives the real ticket CLI a private6500MiB volume,
+14members and ten spawned-then-joined standalone owner records. Original source
+fails the physical-floor check; the candidate admits the cohort with unchanged
+512/32/256 policy and exact historical ledger bytes. Only strictly valid
+standalone consumed owners with positively absent processes and no associated
+inflight allocation can stop contributing working headroom. Live or reused PIDs,
+permission/observation failures, pending members, cohorts and allocator debts
+retain liability; malformed records fail closed. No process, reserve file,
+provider resource or historical ledger record is removed.
+
+Fifteen helper tests pass, including all11 original tests, both stored birth
+formats, unknown/live/reused/debit controls and exact no-process `ps` semantics.
+All28 campaign tests pass. A separate causal fault-injection regression requires
+ordinary preparation failures to retain the actual exception class and a bounded
+message, omitting subprocess argv, OS filenames, tracebacks and injected bodies.
+The original producer lacks that field; the candidate passes all three injected
+exception classes. Strict startup behavior and its original tests are unchanged.
+Candidate patch and logs are recorded in
+`.context/rca-google400/stale-dead-candidate/handoff.json`.
+
+The candidate's readonly calculation over the actual ledger removes only the
+retired working-headroom charge; its SHA256 remains
+`f4c13463773c3d041e1e7422104aac1f80d3b1c4064f284b02b9dd4dd0bb6baf`.
+The normal typed zero-controller cleanup reconciliation subsequently completed
+with no acceptance credit; the original native outcome remains unchanged.
+Combined cycle tests passed 228/228 and all12 worker Prisma clients were prepared
+through the normal dependency command after the last owned worker retired.
+Final combined-source gates and a fresh real cloud smoke remain pending. This
+recurrence does not establish the uncaptured historical exception or claim
+production Google/phone acceptance.

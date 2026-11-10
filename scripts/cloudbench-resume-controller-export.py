@@ -5,6 +5,7 @@ import argparse
 import base64
 import fcntl
 import gzip
+import hashlib
 import json
 import math
 import os
@@ -60,6 +61,7 @@ def readonly_hubs(scope,source,repo,directory):
  guard=next(n for n in function.body if isinstance(n,ast.Try))
  boundary=next(i for i,n in enumerate(guard.body)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=='end'for t in n.targets))
  guard.body=guard.body[:boundary]+[ast.parse("return [{'pid':pid,'birth':owner['pid_start'],'owner_sha256':hashlib.sha256(raw).hexdigest()} for pid,fd,owner,raw,path in selected]").body[0]]
+ assert not any(isinstance(n,ast.Call)and isinstance(n.func,ast.Name)and n.func.id=='pidfd_send_signal'for n in ast.walk(function))
  assert not any(isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr in ('pidfd_send_signal','kill','killpg','unlink','write_bytes','write_text')for n in ast.walk(function))
  module=ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[]));namespace=dict(scope);exec(compile(module,'<readonly-old-Hub-validator>','exec'),namespace)
  return namespace['readonly_hubs'](repo,directory)or[]
@@ -198,8 +200,28 @@ def obj(path):
 
 
 def file_sha(path):
-    scope = runpy.run_path(str(HERE / "cloudbench-controller-export.py"))
-    return scope["sealed_bytes"](Path(path))[0]
+    # Hash payload bytes directly without re-executing mutable collector code.
+    path = Path(path).absolute()
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        resolved = None
+    need(resolved == path, "continuation source path is redirected")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        before = os.fstat(source.fileno())
+        need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1, "unsafe continuation source")
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1048576), b""):
+            digest.update(chunk)
+        after = os.fstat(source.fileno())
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    need(
+        identity(before) == identity(after) == identity(path.lstat()),
+        "continuation source changed",
+    )
+    return digest.hexdigest()
 
 
 def relay_intent_path(original, pins):
@@ -355,9 +377,17 @@ CLEANUP_HOLD_DEADLINE = 1792286550.425
 CLEANUP_ORIGINAL_EPOCH = 1792279176.5459259
 
 
-def normal_clock(epoch, deadline, cleanup_deadline_epoch=None):
+def bound_run_seconds(cfg, runner):
+    """The run's own operator deadline offset: a shard's bound e2e timeout, else the original 5400 s.
+
+    The runner records caller deadline = epoch + this value (RUN_DEADLINE when unbound)."""
+    shard = cfg.get("shard")
+    return 5400 if shard is None else runner["shard_timeouts"](shard)[1]
+
+
+def normal_clock(epoch, deadline, cleanup_deadline_epoch=None, run_seconds=5400):
     need(
-        type(epoch) in (int, float) and math.isfinite(epoch) and deadline == epoch + 5400 and 0 < epoch <= time.time(),
+        type(epoch) in (int, float) and math.isfinite(epoch) and deadline == epoch + run_seconds and 0 < epoch <= time.time(),
         "normal original clock changed",
     )
     if cleanup_deadline_epoch is None:
@@ -595,6 +625,7 @@ def normal_tail(
     dead_owner=False,
 ):
     shard = [cfg["shard"]] if "shard" in cfg else []
+    run_seconds = bound_run_seconds(cfg, runner)
     caller = obj(out / "caller.json")
     identity = obj(out / "controller.identity.json")
     authority_path = out / "authority.private.json"
@@ -609,7 +640,7 @@ def normal_tail(
         and type(caller["epoch"]) in (int, float)
         and 0 < caller["epoch"] <= time.time()
         and caller["task_ref"] == runner["shard_task_ref"](cfg.get("shard"))
-        and caller["deadline"] == caller["epoch"] + 5400
+        and caller["deadline"] == caller["epoch"] + run_seconds
         and caller["authority_sha256"] == identity["authority_sha256"] == authority_sha
         and authority["cleanup_owner_pid"] == caller["pid"]
         and authority["cleanup_owner_birth"] == caller["birth"]
@@ -618,14 +649,14 @@ def normal_tail(
     )
     need(not dead_owner or cleanup_window is not None, "dead-owner recovery requires an explicit cleanup window")
     if cleanup_window is None:
-        normal_clock(caller["epoch"], caller["deadline"], cleanup_deadline_epoch)
+        normal_clock(caller["epoch"], caller["deadline"], cleanup_deadline_epoch, run_seconds)
     else:
         need(cleanup_deadline_epoch is None, "one cleanup authority only")
         window, window_sha = cleanup_window_proof(cleanup_window, out, dead_owner=dead_owner)
         need(
             window["machine_id"] == identity["machine"]
             and window["original_epoch"] == caller["epoch"]
-            and caller["deadline"] == caller["epoch"] + 5400,
+            and caller["deadline"] == caller["epoch"] + run_seconds,
             "cleanup window binds another controller or clock",
         )
     template_path = Path(cfg["authority_template"])
@@ -819,7 +850,12 @@ def validate_normal(state):
             "normal cleanup authority differs",
         )
     else:
-        normal_clock(state["epoch"], state["deadline"], state.get("cleanup_deadline_epoch"))
+        raw = read(Path(state["config"]))
+        need(sha(raw) == state["config_sha256"], "normal export input changed")
+        cfg = json.loads(raw)
+        runner = {} if cfg.get("shard") is None else runpy.run_path(
+            str(Path(state["source_root"]) / "scripts/cloudbench-original600-runner.py"))
+        normal_clock(state["epoch"], state["deadline"], state.get("cleanup_deadline_epoch"), bound_run_seconds(cfg, runner))
     if "cleanup_deadline_epoch" in state and "cleanup_window" not in state:
         need(
             state.get("cleanup_hold_id") == CLEANUP_HOLD_ID and state.get("cleanup_only") is True,
@@ -1109,32 +1145,36 @@ def remote(fly, value, journal, action, *, allow_pending=False):
     return result
 
 
-def read_source(path):
-    """Read a checked-in source file, which keeps its normal checkout mode.
-
-    The private-input reader (owner-only mode, single link) is for private
-    receipts; a collector checked out under umask 022 is 0644 and is instead
-    bound by the physical path and the launch record's collector SHA-256.
-    Group- or world-writable files are refused: another writer could swap the
-    bytes between the hash check and use. Callers execute the returned bytes,
-    never the path.
-    """
+def read_collector_source(path):
+    # Pinned code may be readable by others; private records still use read().
     path = Path(path).absolute()
     need(path.resolve(strict=True) == path, "physical collector source required")
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
-        info = os.fstat(handle.fileno())
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        before = os.fstat(stream.fileno())
         need(
-            stat.S_ISREG(info.st_mode)
-            and info.st_uid == os.geteuid()
-            and not info.st_mode & 0o022
-            and info.st_size < 16 * 1024 * 1024,
+            stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid()
+            and before.st_nlink == 1 and not before.st_mode & 0o022
+            and 0 < before.st_size < 16 * 1024 * 1024,
             "regular current-owner collector source required",
         )
-        return handle.read(info.st_size + 1)
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        raw = stream.read(before.st_size + 1)
+        need(
+            len(raw) == before.st_size and identity(os.fstat(stream.fileno())) == identity(before)
+            and path.resolve(strict=True) == path and identity(path.lstat()) == identity(before),
+            "collector source changed while reading",
+        )
+    return raw
+
+
+# Keep the checked-in-source API with the stronger single-link/stable-read policy.
+read_source = read_collector_source
 
 
 def verify_stage(value, stage):
-    raw = read_source(value["collector_path"])
+    raw = read_collector_source(value["collector_path"])
     namespace = {
         "__name__": "original_export_verify",
         "__file__": value["collector_path"],
@@ -1145,9 +1185,9 @@ def verify_stage(value, stage):
         sha(raw) == value["record"]["collector_sha256"],
         "original verify collector differs",
     )
-    exec(compile(raw, value["collector_path"], "exec"), namespace)  # the hashed bytes, never a re-read
+    exec(compile(raw, value["collector_path"], "exec"), namespace)
     need(
-        read_source(value["collector_path"]) == raw,
+        read_collector_source(value["collector_path"]) == raw,
         "collector changed during verification setup",
     )
     expected = {name: file_sha(stage / name) for name in ("launch.json", "manifest.json", "originals.tar.gz")}

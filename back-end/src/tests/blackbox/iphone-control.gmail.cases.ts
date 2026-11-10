@@ -4,6 +4,7 @@ import { prisma } from '../../providers/database';
 import { openPhoneValue } from '../../providers/phoneHarnessCredentials';
 import {
   freshSetup,
+  authorizeSyntheticSetup,
   observe,
   setupPost,
   proveSettings,
@@ -50,6 +51,7 @@ export const gmailCases: Case[] = [
         },
       });
       assert.equal(configured.status, 200);
+      await authorizeSyntheticSetup(f);
       f.setup = (await h.request(f.userId, `/interactions/${f.taskId}`)).data.setup as SetupDto;
       assert.equal(
         (f.setup as SetupDto & { expectedGoogleAccountIdentifier: string })

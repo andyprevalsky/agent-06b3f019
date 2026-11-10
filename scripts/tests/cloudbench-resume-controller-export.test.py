@@ -699,7 +699,8 @@ class ExportResume(unittest.TestCase):
             remote["bounded_export"]({"export": lambda _a: (_ for _ in ()).throw(ValueError("controller originals changed during export"))}, args, attempts=3, sync=lambda: None, sleep=lambda _s: None)
 
     def runner_fixture(self, owner_pid=123, owner_birth="runner-owner", gate_pid=987654321, with_pending=True,
-                       log=None, owner_live=True, task_ref=None, caller_task_ref=None):
+                       log=None, owner_live=True, task_ref=None, caller_task_ref=None, shard_extra=None,
+                       caller_deadline_seconds=None):
         """One sharded original600 run directory whose own runner is the bound cleanup owner.
 
         ``task_ref`` binds the shard's own pushed task source; ``caller_task_ref`` overrides
@@ -738,6 +739,8 @@ class ExportResume(unittest.TestCase):
                      group_started_at=epoch)
         if task_ref is not None:
             shard["task_ref"] = task_ref
+        shard.update(shard_extra or {})
+        caller["deadline"] = epoch + (caller_deadline_seconds or 5400)
         caller["task_ref"] = runner["shard_task_ref"](shard) if caller_task_ref is None else caller_task_ref
         write(self.out / "caller.json", caller)
         sources = {name: M["sha"]((ROOT / "scripts" / name).read_bytes())
@@ -928,6 +931,36 @@ class ExportResume(unittest.TestCase):
             (self.out / "gate.private.log").write_text("GATE_EXPORT_VERIFIED machine=" + self.mid + "\n")
             with self.assertRaisesRegex(ValueError, "already verified"):
                 M["check"](*args, cleanup_window=window, dead_owner=True)
+
+    def test_dead_owner_accepts_the_shards_bound_e2e_deadline_only(self):
+        # 2026-10-20 Polar batch 1 (0a2470cc6): --timeout 7200 binds e2e_timeout 9300, so the
+        # runner recorded caller deadline = epoch + 9300; recovery required epoch + 5400 and
+        # refused the dead-owner cleanup route for every shard of the run. That run's own
+        # pinned runner validates its 9300; this source binds the widened 10020 default.
+        bound = dict(task_timeout=7200, e2e_timeout=10020)
+        for seconds, accepted in ((10020, True), (5400, False), (10021, False)):
+            with self.subTest(caller_deadline=seconds):
+                self.setUp()
+                f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", with_pending=False,
+                                        log="GATE_START fixture\n", owner_live=False, shard_extra=bound,
+                                        caller_deadline_seconds=seconds)
+                args = (f.config, f.digest, self.out, "f" * 40)
+                with self.runner_patches(f):
+                    if accepted:
+                        value = M["check"](*args, cleanup_window=self.dead_window(f), dead_owner=True)
+                        self.assertEqual(value["binding"]["capture_kind"], "dead-runner-owner")
+                        self.assertEqual(value["state"]["deadline"], f.epoch + 10020)
+                        M["unchanged"](value)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "normal authority/caller differs"):
+                            M["check"](*args, cleanup_window=self.dead_window(f), dead_owner=True)
+        # The unbound default keeps the historical epoch + 5400 and refuses a bound-looking clock.
+        self.setUp()
+        f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", with_pending=False,
+                                log="GATE_START fixture\n", owner_live=False, caller_deadline_seconds=9300)
+        with self.runner_patches(f):
+            with self.assertRaisesRegex(ValueError, "normal authority/caller differs"):
+                M["check"](f.config, f.digest, self.out, "f" * 40, cleanup_window=self.dead_window(f), dead_owner=True)
 
     def test_live_or_reused_runner_birth_never_borrows_a_live_owner(self):
         me = os.getpid()
@@ -1347,6 +1380,153 @@ class ExportResume(unittest.TestCase):
         with self.assertRaises(ValueError):
             M["verify_stage"](self.value, stage)
 
+    def _collector_stage(self):
+        collector = self.root / "collector.py"
+        collector.write_bytes(self.collector.read_bytes())
+        collector.chmod(0o644)
+        self.value["collector_path"] = str(collector)
+        stage = self.root / "source-policy-stage"
+        stage.mkdir(mode=0o700)
+        for name, raw in self.payloads.items():
+            (stage / name).write_bytes(raw)
+            (stage / name).chmod(0o600)
+        return collector, stage
+
+    def test_collector_source_policy_preserves_private_record_guards(self):
+        collector, stage = self._collector_stage()
+        for mode in (0o644, 0o444, 0o600):
+            collector.chmod(mode)
+            M["verify_stage"](self.value, stage)
+        collector.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "private current-owner file required"):
+            M["read"](collector)
+        for mode in (0o664, 0o646, 0o666):
+            with self.subTest(mode=oct(mode)):
+                collector.chmod(mode)
+                with self.assertRaises(ValueError):
+                    M["verify_stage"](self.value, stage)
+        collector.chmod(0o600)
+        alias = self.root / "collector-alias.py"
+        os.link(collector, alias)
+        with self.assertRaises(ValueError):
+            M["verify_stage"](self.value, stage)
+        alias.unlink()
+        alias.symlink_to(collector)
+        self.value["collector_path"] = str(alias)
+        with self.assertRaises(ValueError):
+            M["verify_stage"](self.value, stage)
+        self.value["collector_path"] = str(collector)
+        with mock.patch.object(M["os"], "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaises(ValueError):
+                M["verify_stage"](self.value, stage)
+        original = collector.read_bytes()
+        collector.write_bytes(original + b'\nraise AssertionError("untrusted collector executed")\n')
+        with self.assertRaisesRegex(ValueError, "original verify collector differs"):
+            M["verify_stage"](self.value, stage)
+        for size in (0, 16 * 1024 * 1024):
+            with self.subTest(size=size):
+                os.truncate(collector, size)
+                with self.assertRaises(ValueError):
+                    M["verify_stage"](self.value, stage)
+
+    def test_collector_path_replacement_during_read_is_refused(self):
+        collector, stage = self._collector_stage()
+        collector.chmod(0o600)
+        original_fdopen = os.fdopen
+        @contextlib.contextmanager
+        def replacing_fdopen(*args, **kwargs):
+            with original_fdopen(*args, **kwargs) as stream:
+                original_read = stream.read
+                def replacing_read(size):
+                    raw = original_read(size)
+                    replacement = self.root / "replacement.py"
+                    replacement.write_bytes(raw)
+                    replacement.chmod(0o600)
+                    os.replace(replacement, collector)
+                    return raw
+                with mock.patch.object(stream, "read", side_effect=replacing_read):
+                    yield stream
+        with mock.patch.object(M["os"], "fdopen", side_effect=replacing_fdopen):
+            with self.assertRaisesRegex(ValueError, "collector source changed while reading"):
+                M["verify_stage"](self.value, stage)
+
+    def test_late_collector_replacement_never_executes_during_data_hashing(self):
+        collector, stage = self._collector_stage()
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        source = scripts / "cloudbench-controller-export.py"
+        collector.rename(source)
+        self.value["collector_path"] = str(source)
+        self.value["state"]["source_root"] = str(self.root)
+        original = source.read_bytes()
+        marker = self.root / "untrusted-collector-executed"
+        replacement_bytes = original + f'\nPath({str(marker)!r}).write_text("untrusted replacement executed")\n'.encode()
+        scope = M["verify_stage"].__globals__
+        reader = scope["read_collector_source"]
+        calls = []
+
+        def swap_after_checked_read(path):
+            raw = reader(path)
+            calls.append(path)
+            if len(calls) == 2:
+                replacement = scripts / "replacement.py"
+                replacement.write_bytes(replacement_bytes)
+                replacement.chmod(0o644)
+                replacement.replace(source)
+            return raw
+
+        with mock.patch.dict(scope, HERE=scripts, read_collector_source=swap_after_checked_read):
+            hashes = M["verify_stage"](self.value, stage)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(source.read_bytes(), replacement_bytes)
+        self.assertEqual(hashes["launch.json"], self.binding["launch_sha256"])
+        self.assertFalse(marker.exists(), "data hashing executed a replaced collector pathname")
+
+    def test_data_hash_accepts_relative_regular_path_and_controls_missing_target(self):
+        target = self.root / "relative-payload"
+        target.write_bytes(b"owned export payload")
+        with contextlib.chdir(self.root):
+            self.assertEqual(M["file_sha"](Path("relative-payload")), M["sha"](target.read_bytes()))
+        alias = self.root / "missing-payload-link"
+        alias.symlink_to(self.root / "missing-payload")
+        with self.assertRaisesRegex(ValueError, "continuation source path is redirected"):
+            M["file_sha"](alias)
+
+    def test_data_hash_preserves_physical_single_link_and_stable_read_guards(self):
+        target = self.root / "data"
+        target.write_bytes(b"original export payload")
+        self.assertEqual(M["file_sha"](target), M["sha"](target.read_bytes()))
+        alias = self.root / "data-alias"
+        alias.symlink_to(target)
+        with self.assertRaises(ValueError):
+            M["file_sha"](alias)
+        alias.unlink()
+        os.link(target, alias)
+        with self.assertRaises(ValueError):
+            M["file_sha"](target)
+        alias.unlink()
+        original_fdopen = os.fdopen
+
+        @contextlib.contextmanager
+        def replacing_fdopen(*args, **kwargs):
+            with original_fdopen(*args, **kwargs) as stream:
+                original_read = stream.read
+                replaced = False
+                def replacing_read(size):
+                    nonlocal replaced
+                    raw = original_read(size)
+                    if not replaced:
+                        replacement = self.root / "replacement-data"
+                        replacement.write_bytes(b"changed export payload")
+                        replacement.replace(target)
+                        replaced = True
+                    return raw
+                with mock.patch.object(stream, "read", side_effect=replacing_read):
+                    yield stream
+        with mock.patch.object(M["os"], "fdopen", side_effect=replacing_fdopen):
+            with self.assertRaisesRegex(ValueError, "continuation source changed"):
+                M["file_sha"](target)
+
     def test_checkout_mode_collector_is_accepted_but_world_writable_or_linked_is_refused(self):
         stage = self.root / "stage"
         stage.mkdir(mode=0o700)
@@ -1365,6 +1545,7 @@ class ExportResume(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "physical collector source required"):
             M["read_source"](alias)
 
+
     def test_verify_executes_the_hashed_collector_bytes_not_the_path(self):
         stage = self.root / "stage"
         stage.mkdir(mode=0o700)
@@ -1382,6 +1563,7 @@ class ExportResume(unittest.TestCase):
         with mock.patch.object(M["runpy"], "run_path", side_effect=run_path):
             hashes = M["verify_stage"](self.value, stage)
         self.assertEqual(hashes["launch.json"], self.binding["launch_sha256"])
+
 
     def test_all_remote_children_join_before_canonical_marker_and_no_replay(self):
         api = self.api()
@@ -1659,6 +1841,18 @@ class ExportResume(unittest.TestCase):
 class WriterScanPermission(unittest.TestCase):
     """A transiently unreadable /proc entry is re-observed; a persistently unreadable live one fails closed."""
 
+    def test_exited_thread_during_maps_scan_is_not_a_writer(self):
+        collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"))
+        process_paths = collector["process_paths"]
+        with tempfile.TemporaryDirectory() as name:
+            process = Path(name) / "8888"
+            task = process / "task" / "8888"
+            (task / "fd").mkdir(parents=True)
+            (task / "cwd").symlink_to(Path(name) / "repo")
+            (task / "maps").write_text("")
+            with mock.patch.object(Path, "read_text", side_effect=ProcessLookupError(3, "No such process")):
+                self.assertEqual(process_paths(process), [])
+
     def scan(self, denials, *, alive=True):
         collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"))
         writers = collector["writers"]
@@ -1736,4 +1930,6 @@ class CleanupClock(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    with tempfile.TemporaryDirectory(prefix="export-resume-tests-") as suite_tmp:
+        with mock.patch.dict(os.environ, {"TMPDIR": suite_tmp}), mock.patch.object(tempfile, "tempdir", suite_tmp):
+            unittest.main()

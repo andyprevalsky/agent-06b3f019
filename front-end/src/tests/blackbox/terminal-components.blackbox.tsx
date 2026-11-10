@@ -26,6 +26,7 @@ import QueryInput from '@/features/terminal-component-group/components/QueryInpu
 import AsciiLoader from '@/features/terminal-component-group/components/AsciiLoader';
 import { OpeningMessageDisplay } from '@/features/terminal/components/OpeningMessageDisplay';
 import { ChatScrollArea } from '@/features/terminal/components/ChatScrollArea';
+import { createOpeningAnimationStore } from '@/features/terminal/hooks/useOpeningAnimation';
 import { OPENING_MESSAGES } from '@/features/terminal/config';
 import AttentionInbox from '@/features/terminal-component-group/components/AttentionInbox';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
@@ -147,6 +148,7 @@ function makeMockAgentContext(messages: Message[] = []): AgentContextValue {
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => false),
+    stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
   };
 }
 
@@ -2657,11 +2659,7 @@ describe('ChatScrollArea Join Waitlist auth-gating (blackbox)', () => {
     blur: 0,
   } as unknown as Parameters<typeof ChatScrollArea>[0]['drip'];
 
-  const opening = {
-    currentMessageIndex: 0,
-    animationPhase: 'revealing',
-    revealProgress: 100,
-  } as unknown as Parameters<typeof ChatScrollArea>[0]['opening'];
+  const opening = createOpeningAnimationStore();
 
   function renderChat(auth: { isAuthenticated: boolean; isAnonymous: boolean }) {
     return renderWithProviders(

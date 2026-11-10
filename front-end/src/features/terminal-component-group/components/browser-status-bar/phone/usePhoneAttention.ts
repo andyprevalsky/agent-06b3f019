@@ -28,7 +28,13 @@ export function usePhoneAttention(
   readOnly: boolean,
   observe = true,
 ) {
-  const id = phoneAttentionCandidate(taskId, agentId, messages);
+  const [completed, setCompleted] = useState<PhoneAttention | null>(null);
+  const receipt =
+    completed?.agentId === agentId && completed.target.browserTaskId === taskId ? completed : null;
+  const id = phoneAttentionCandidate(taskId, agentId, messages, receipt?.id);
+  useEffect(() => {
+    setCompleted(null);
+  }, [agentId, taskId]);
   const key = `${agentId ?? ''}:${taskId}:${id}:${readOnly}`;
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
   const enabled = !!id;
@@ -78,6 +84,19 @@ export function usePhoneAttention(
           completing: owned.completing && !request?.completedAt,
           notice: owned.notice,
         });
+        if (valid && request.completedAt !== null) {
+          const query = getQueryParams();
+          if (
+            query.get('agent-id') === agentId &&
+            query.get('browser-id') === taskId &&
+            query.get('attention-request-id') === id
+          ) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('attention-request-id');
+            window.history.replaceState({}, '', url.toString());
+          }
+          setCompleted(request);
+        }
         if (observe && valid && request.completedAt === null)
           timer = setTimeout(() => void read(), 2000);
       } catch (error) {
@@ -143,7 +162,7 @@ export function usePhoneAttention(
   }, [id, key, readOnly, state]);
   return {
     id,
-    request: state.key === key ? state.request : null,
+    request: id ? (state.key === key ? state.request : null) : receipt,
     error:
       !id && getQueryParams().has('attention-request-id')
         ? 'Phone authentication link does not match this agent or task.'

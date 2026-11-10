@@ -32,6 +32,12 @@ export type TerminalView =
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
 
+/** The agent provider's optimistic USER row (agent-context StagedUserMessage). */
+export interface StagedUserMessage {
+  confirm: (server: Message) => void;
+  drop: () => void;
+}
+
 export interface PendingAgentCreationInput {
   agentId: string;
   goal: string;
@@ -93,7 +99,7 @@ export interface TerminalAgentActions {
   handleLoginClick: () => void;
   handleCreateNewAgent: () => void;
   /** Rose Desktop project "+": the next goal creates the agent in that project. */
-  handleCreateNewAgentInProject: (project: { id: string }) => void;
+  handleCreateNewAgentInProject: (project: { id: string }, folderId?: string | null) => void;
   handleSubmitFeedback: (feedback: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (agentId: string) => Promise<void>;
   cleanupAgentState: () => void;
@@ -131,6 +137,8 @@ export interface TerminalUIState {
 // ── AgentChatArea slices ──────────────────────────────────────────────────
 
 export interface AgentSlice {
+  newAgentProjectId?: string | null;
+  newAgentFolderId?: string | null;
   isAuthenticated: boolean;
   isAnonymous: boolean;
   handleJoinWaitlist: () => void;

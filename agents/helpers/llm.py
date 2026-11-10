@@ -7,8 +7,10 @@ import hashlib
 import json
 import random
 import re
+import sys
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
+from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar
@@ -45,6 +47,7 @@ from helpers.context_pointers import annotate_with_pointer, resolve_pointers_in_
 from helpers.context_scope import is_internal_subagent_message
 from helpers.environment_context import is_environment_context_row
 from helpers.environment_tail import append_environment_tail, build_environment_tail_text
+from helpers.http_client import get_http_client
 from helpers.messages import (
     CoalescingStreamBroadcaster,
     stream_assistant_chunk,
@@ -86,6 +89,7 @@ from providers.rose import (
     pool_for_model,
 )
 from providers.rose.errors import RoseAllFailed
+from providers.rose.flash_agent import is_flash_agent_call
 from providers.rose.inter_agent_context import inter_agent_message, is_inter_agent_message
 from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
 from providers.rose.schema import (
@@ -93,8 +97,11 @@ from providers.rose.schema import (
     build_openai_response_format,
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.subscription_usage import take as take_subscription_usage
+from providers.rose.subscription_usage import token_fingerprint
 from providers.rose.transforms import reconstruct_agent_response
 from providers.rose.truncation import model_key
+from providers.rose.waterfall import SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED
 from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.response_schema_constraints import (
     bounds_from_entries,
@@ -116,7 +123,28 @@ CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 
 
 class LLMStructuredOutputError(ValueError):
-    """The provider completed, but its structured output violated our contract."""
+    """The provider completed, but its structured output violated our contract.
+
+    ``excluded_models`` names the candidates the bounded in-call re-generation
+    already excluded after two invalid replies (``model_key`` form). The agent
+    loop carries them into its next attempt's ``_skip_models`` so the outer retry
+    does not hand the same context back to a model that just failed it twice.
+    """
+
+    def __init__(self, message: str, *, excluded_models: frozenset[str] = frozenset()) -> None:
+        super().__init__(message)
+        self.excluded_models = frozenset(excluded_models)
+
+
+class StructuredReplyShapeError(ValueError):
+    """The provider completed, but its reply held no JSON object to validate.
+
+    Reasoning-only replies (no content, no tool call) and non-object JSON (an
+    array or scalar) are structured-output failures of the model that produced
+    them, exactly like a schema-invalid object: the bounded re-generation must
+    count them toward excluding that candidate, or two such replies leave the
+    model eligible and the next attempt selects it again.
+    """
 
 
 # A malformed / schema-invalid structured output is non-deterministic (the model
@@ -550,6 +578,7 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
@@ -574,9 +603,11 @@ def _build_claude_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
+            integration_id=integration_id if ctx.source == "user" else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
+            credential=credential_fingerprint(ctx.token),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -599,7 +630,11 @@ def _build_claude_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(ctx.lineage_key or "")
+        await heartbeat_compute_token_lineage_activity(
+            ctx.lineage_key or "",
+            integration_id=integration_id,
+            usage=take_subscription_usage(ctx.token),
+        )
 
     return ClaudeAuthContext(
         token=claude_token,
@@ -621,6 +656,7 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
@@ -645,9 +681,11 @@ def _build_gpt_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
+            integration_id=integration_id if ctx.source == "user" else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
+            credential=credential_fingerprint(ctx.token),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -670,7 +708,11 @@ def _build_gpt_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(ctx.lineage_key or "")
+        await heartbeat_compute_token_lineage_activity(
+            ctx.lineage_key or "",
+            integration_id=integration_id,
+            usage=take_subscription_usage(ctx.token),
+        )
 
     return GptAuthContext(
         token=gpt_token,
@@ -706,6 +748,7 @@ def _build_compute_auth_context(
             source=result.get("source"),
             user_id=user_id,
             pool_token_id=result.get("poolTokenId"),
+            integration_id=result.get("integrationId"),
             lineage_key=result.get("lineageKey"),
             agent_id=agent_id,
             root_agent_id=root_agent_id,
@@ -718,12 +761,67 @@ def _build_compute_auth_context(
         source=result.get("source"),
         user_id=user_id,
         pool_token_id=result.get("poolTokenId"),
+        integration_id=result.get("integrationId"),
         lineage_key=result.get("lineageKey"),
         agent_id=agent_id,
         root_agent_id=root_agent_id,
         demo_cache_affinity_key=demo_cache_affinity_key or result.get("fastCacheAffinityKey"),
         max_rotations=max_rotations,
     )
+
+
+async def _flash_agent_auth_contexts(
+    claude: Optional[ClaudeAuthContext],
+    gpt: Optional[GptAuthContext],
+    *,
+    user_id: Optional[str],
+    lineage_key: Optional[str],
+    agent_id: Optional[str],
+    demo_cache_affinity_key: Optional[str],
+    exclude_anthropic_family: bool = False,
+) -> Tuple[Optional[ClaudeAuthContext], Optional[GptAuthContext]]:
+    """Reuse a lease; otherwise try Terra then Opus, with broker-owned cooldowns."""
+    exclude_anthropic_family = anthropic_family_excluded(exclude_anthropic_family)
+    seen_tokens = {context.token for context in (gpt, claude) if context is not None}
+
+    async def fetch_next(
+        fetch_user_id: str, current: Optional[ComputeAuthContext] = None,
+    ) -> Optional[ComputeAuthContext]:
+        # Once on Claude, never cycle back to GPT within this call.
+        kinds = (("gpt",) if exclude_anthropic_family else
+                 ("claude",) if isinstance(current, ClaudeAuthContext) else ("gpt", "claude"))
+        for kind in kinds:
+            result = await fetch_compute_token_activity(
+                fetch_user_id, lineage_key=lineage_key, agent_id=agent_id,
+                root_agent_id=agent_id, demo_cache_affinity_key=demo_cache_affinity_key,
+                token_type=kind,
+            )
+            if not result or result.get("type") != kind:
+                continue
+            context = _build_compute_auth_context(
+                result, fetch_user_id, agent_id=agent_id, root_agent_id=agent_id,
+                demo_cache_affinity_key=demo_cache_affinity_key,
+            )
+            if context is None or context.token in seen_tokens:
+                continue
+            seen_tokens.add(context.token)
+            bind_rotation(context)
+            return context
+        return None
+
+    def bind_rotation(context: ComputeAuthContext) -> None:
+        async def refresh(fetch_user_id: str):
+            return await fetch_next(fetch_user_id, context)
+        context.fetch_fresh = refresh if context.user_id and context.max_rotations > 0 else None
+
+    current = gpt or (None if exclude_anthropic_family else claude)
+    if current is not None:
+        bind_rotation(current)
+    elif user_id:
+        current = await fetch_next(user_id)
+    if isinstance(current, ClaudeAuthContext):
+        return current, None
+    return None, current if isinstance(current, GptAuthContext) else None
 
 
 def _build_compute_auth_context_from_payload(
@@ -1159,11 +1257,16 @@ def build_verifier_context_messages(
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
             dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
-            if str(call_site or "") == "benchmark_declared_evaluator":
+            if str(call_site or "") == "benchmark_declared_evaluator" or (
+                metadata.get("benchmark_final_evidence") is True
+                and call_site == "semantic_output_field_recovery_judge"
+            ):
                 # Declared-evaluator evidence carries the runtime per-tool-result
                 # cap, and the caller sends any prompt that would overflow the
                 # model to the agentic judge. A second, grader-only cut here
                 # would drift from the runtime (grep-agent-trajectories-cross-surface).
+                # Final benchmark evidence for output-field recovery is likewise
+                # normalized/budgeted by its owner; do not re-truncate the card.
                 tool_text, truncated = dumped, False
             else:
                 tool_text, truncated = _budget_verifier_tool_result_text(
@@ -1859,6 +1962,35 @@ async def resolve_context_attachments(
     return resolved
 
 
+def llm_generation_metadata(usage: Any) -> Optional[Dict[str, Any]]:
+    """A persisted thought's recorded generation, or None.
+
+    ``{"output_tokens", "started_at", "ended_at"}``: the call's provider-reported
+    output tokens over its measured first-token → last-token window, so the UI's
+    tok/s is never estimated and never includes queueing, failover legs or parsing.
+    Only measured usage qualifies: estimated usage has no window, and a Fast Mode
+    replay's window times the replay, not the model. A window of any positive length
+    is recorded, a burst included: the UI reader (thoughtGeneration) is the one judge of
+    whether the implied rate is a streaming speed, so the producer carries no bound of its own.
+    UI-only: no message builder reads ``metadata.generation``.
+    """
+    if not isinstance(usage, dict) or usage.get("from_fast_cache"):
+        return None
+    tokens = usage.get("completion_tokens")
+    started = usage.get("generation_started_at_ms")
+    ended = usage.get("generation_ended_at_ms")
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in (tokens, started, ended)):
+        return None
+    if tokens <= 0 or ended <= started:
+        return None
+
+    def _iso(ms: int) -> str:
+        moment = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    return {"output_tokens": tokens, "started_at": _iso(started), "ended_at": _iso(ended)}
+
+
 def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
@@ -2190,6 +2322,8 @@ async def build_llm_messages(
     pre_resolved_ids: Optional[set] = None,
     llm_only_user_preamble: str = "",
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    session_id: str = "",
     *,
     max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
     request_overhead: Any = None,
@@ -2199,6 +2333,7 @@ async def build_llm_messages(
         return await _render_llm_messages(
             context, system_prompt, pre_resolved_ids,
             llm_only_user_preamble, user_id, render_text, require_inline_attachments,
+            agent_id=agent_id, session_id=session_id,
         )
 
     return await admit_text_attachments(
@@ -2215,6 +2350,8 @@ async def _render_llm_messages(
     user_id: Optional[str] = None,
     render_text: Callable[[PreparedTextAttachment], str] = lambda item: item.inline,
     require_inline_attachments: bool = False,
+    agent_id: Optional[str] = None,
+    session_id: str = "",
 ) -> List[Dict]:
     """Build messages list for LLM from context, with attachment support.
 
@@ -2240,6 +2377,27 @@ async def _render_llm_messages(
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
+    from helpers.tool_output import DEFAULT_INLINE_CHARS, RetentionError, preview_tool_text, stated_cut
+
+    async def bounded_tool_text(value: str, attachment_labels: List[str]) -> str:
+        suffix = "\n\n" + "\n\n".join(attachment_labels) if attachment_labels else ""
+        # Retained previews need the originating agent's identity for scoped
+        # readback. Callers without it (DAG reasoning) have no read_tool_output
+        # tool, so they keep the complete redacted result.
+        retain = bool(user_id and agent_id)
+        limit = DEFAULT_INLINE_CHARS - len(suffix) if retain else sys.maxsize
+        try:
+            preview = await preview_tool_text(
+                value, user_id=user_id or "", agent_id=agent_id or "", session_id=session_id, limit=limit,
+            )
+        except RetentionError as error:
+            # A storage failure must not fail the model request; state the cut.
+            logger.warning("[LLM] Tool output retention failed; sending a stated cut", agent_id=agent_id, error=str(error))
+            preview = stated_cut(value, limit=limit, reason="retained readback unavailable after a storage failure")
+        if suffix and any(label not in preview for label in attachment_labels):
+            preview += suffix
+        return preview
+
     # Pointer annotations are an LLM-boundary representation, not canonical DB
     # state. Initial workflow context already carries them, but a cross-worker
     # activity rebuilds from unannotated DB rows. Normalize a copy here so worker
@@ -2305,11 +2463,18 @@ async def _render_llm_messages(
         # Skip before downloads and admission so they consume no file budget.
         if role == "ASSISTANT" and not text.strip() and not metadata.get("tool_calls") and attachments_data:
             continue
-
         # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
         content, metadata_texts = await resolve_message_attachments(
             msg, pre_resolved_ids, render_text=render_text, require_inline=require_inline_attachments
         )
+        attachment_labels = []
+        for att_data in attachments_data:
+            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+            if fp and not fp.is_text():
+                inline_label = build_attachment_metadata_text(fp, inlined=True)
+                attachment_labels.append(
+                    inline_label if inline_label in metadata_texts else build_attachment_metadata_text(fp)
+                )
 
         # Determine LLM role and base text
         ts_prefix = _ts_header(msg)
@@ -2459,7 +2624,8 @@ async def _render_llm_messages(
                                 sections.append(build_file_pointer_label(fname))
                     tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                     label = tool_name or "tool"
-                    messages.append({"role": "user", "content": f"{ts_prefix}[{label} result]: {tool_content}"})
+                    tool_content = await bounded_tool_text(f"{ts_prefix}[{label} result]: {tool_content}", attachment_labels)
+                    messages.append({"role": "user", "content": tool_content})
                     continue
 
                 tool_content = ts_prefix + text
@@ -2479,6 +2645,7 @@ async def _render_llm_messages(
                             sections.append(build_file_pointer_label(fname))
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
 
+                tool_content = await bounded_tool_text(tool_content, attachment_labels)
                 tool_msg: Dict[str, Any] = {
                     "role": "tool",
                     "content": tool_content,
@@ -2492,6 +2659,7 @@ async def _render_llm_messages(
             full_text = f"{ts_prefix}[TOOL]: {text}"
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+            full_text = await bounded_tool_text(full_text, attachment_labels)
             if content:
                 content.insert(0, {"type": "text", "text": full_text})
                 messages.append({"role": "user", "content": content})
@@ -2638,6 +2806,10 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
     # fake placeholder).
     emitted_results: set[str] = set()
     pulled_forward: set[int] = set()
+    result_positions: Dict[str, List[int]] = {}
+    for position, message in enumerate(messages):
+        if message.get("role") == "tool" and message.get("tool_call_id"):
+            result_positions.setdefault(message["tool_call_id"], []).append(position)
     result: List[Dict[str, Any]] = []
     declared_at_or_before: set[str] = set()
     i = 0
@@ -2693,16 +2865,9 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             for tc_id in tc_ids:
                 if tc_id in emitted_results:
                     continue
-                straggler = next(
-                    (
-                        later
-                        for later in messages[j:]
-                        if later.get("role") == "tool"
-                        and later.get("tool_call_id") == tc_id
-                        and id(later) not in pulled_forward
-                    ),
-                    None,
-                )
+                positions = result_positions.get(tc_id, [])
+                candidate = bisect_left(positions, j)
+                straggler = messages[positions[candidate]] if candidate < len(positions) else None
                 if straggler is not None:
                     repaired = True
                     emitted_results.add(tc_id)
@@ -2968,6 +3133,10 @@ async def call_llm_structured_streaming(
         _safe_heartbeat("Starting Rose LLM stream...")
         request_start_time = _safe_time()
         ttft_logged = False
+        # First/last token-bearing chunk: the generation window behind a thought's tok/s
+        # (excludes queueing, failover legs and the final parse).
+        first_token_time: Optional[float] = None
+        last_token_time: Optional[float] = None
 
         rose_client = RoseClient()
         claude_auth_context = _build_claude_auth_context(
@@ -2992,6 +3161,16 @@ async def call_llm_structured_streaming(
             demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
         )
 
+        if is_flash_agent_call(pool, call_site):
+            claude_auth_context, gpt_auth_context = await _flash_agent_auth_contexts(
+                claude_auth_context, gpt_auth_context,
+                user_id=gpt_token_user_id or claude_token_user_id,
+                lineage_key=compute_token_lineage_key,
+                agent_id=agent_id,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+                exclude_anthropic_family=_exclude_anthropic_family,
+            )
+
         def _native_visible_text() -> str:
             reasoning = accumulated_reasoning.strip()
             if reasoning and text_buffer:
@@ -3012,6 +3191,9 @@ async def call_llm_structured_streaming(
         rose_kwargs: Dict[str, Any] = {}
         if _skip_models:
             rose_kwargs["_skip_models"] = _skip_models
+            # Every model this path skips was excluded for invalid structured
+            # output, never for an output-limit cut-off; label the skip so.
+            rose_kwargs["_skip_reasons"] = {model: SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED for model in _skip_models}
         if deadline_s is not None:
             rose_kwargs["deadline_s"] = deadline_s
         if ttft_timeout_s is not None:
@@ -3125,6 +3307,12 @@ async def call_llm_structured_streaming(
                     ttft_logged = True
 
                 kind = chunk.kind
+
+                if kind in ("content", "reasoning", "tool_call", "codex_reasoning_item"):
+                    _token_time = _safe_time()
+                    if first_token_time is None:
+                        first_token_time = _token_time
+                    last_token_time = _token_time
 
                 if kind == "metadata":
                     if chunk.data.get("actual_model"):
@@ -3384,7 +3572,8 @@ async def call_llm_structured_streaming(
                 # Validation excluded the remaining candidate. Preserve the typed
                 # output failure without retrying or changing pool eligibility.
                 raise LLMStructuredOutputError(
-                    f"No eligible Rose candidate remains after invalid {response_model.__name__} output"
+                    f"No eligible Rose candidate remains after invalid {response_model.__name__} output",
+                    excluded_models=_skip_models,
                 ) from exc
             raise ValueError(f"Rose streaming failed: {exc}") from exc
         finally:
@@ -3584,7 +3773,9 @@ async def call_llm_structured_streaming(
                     actual_model=actual_model,
                     pool_name=pool_name,
                 )
-                raise ValueError(f"No JSON content received in response (chunks={chunk_count}, model={actual_model})")
+                raise StructuredReplyShapeError(
+                    f"No JSON content received in response (chunks={chunk_count}, model={actual_model})"
+                )
 
             # Extract JSON from markdown code block if present
             # Look for ```json ... ``` pattern, or just raw JSON
@@ -3633,6 +3824,11 @@ async def call_llm_structured_streaming(
                         logger.info(f"📦 Extracted raw JSON, explanation={len(explanation_text)} chars")
 
             parsed_content = json.loads(json_content)
+            if not isinstance(parsed_content, dict):
+                raise StructuredReplyShapeError(
+                    f"Structured reply must be a JSON object, got {type(parsed_content).__name__} "
+                    f"(model={actual_model})"
+                )
 
             # Defensive recovery path: malformed upstream streams can sometimes wrap
             # another agent JSON payload inside response text. If outer tool_calls are
@@ -3718,6 +3914,19 @@ async def call_llm_structured_streaming(
             # retry above (recursive, capped, time-guarded so we keep deadline
             # headroom for another streaming call).
             parse_elapsed = (_safe_time() - request_start_time) if request_start_time else 0
+            failed_model = (
+                model_key(actual_model)
+                if isinstance(e, (json.JSONDecodeError, ValidationError, StructuredReplyShapeError))
+                and actual_model
+                and actual_model
+                not in {"unknown", "fast-cache", "fast-mode-soft-complete", "fast-mode-scrape-passthrough"}
+                and not (stream_usage or {}).get("from_fast_cache")
+                else None
+            )
+            failed_count = _parse_failed_count + 1 if failed_model and failed_model == _parse_failed_model else 1
+            retry_exclusions = _skip_models
+            if failed_model and failed_count >= 2:
+                retry_exclusions = _skip_models | {failed_model}
             if _parse_retry_attempt < MAX_STRUCTURED_PARSE_RETRIES and parse_elapsed < 180:
                 logger.warning(
                     f"⚠️ [{call_site}] Failed to parse Rose response as "
@@ -3725,19 +3934,7 @@ async def call_llm_structured_streaming(
                     f"{_parse_retry_attempt + 1}/{MAX_STRUCTURED_PARSE_RETRIES + 1}); "
                     f"re-generating. error={error_message}",
                 )
-                failed_model = (
-                    model_key(actual_model)
-                    if isinstance(e, (json.JSONDecodeError, ValidationError))
-                    and actual_model
-                    and actual_model
-                    not in {"unknown", "fast-cache", "fast-mode-soft-complete", "fast-mode-scrape-passthrough"}
-                    and not (stream_usage or {}).get("from_fast_cache")
-                    else None
-                )
-                failed_count = _parse_failed_count + 1 if failed_model and failed_model == _parse_failed_model else 1
-                retry_exclusions = _skip_models
                 if failed_model and failed_count >= 2:
-                    retry_exclusions = _skip_models | {failed_model}
                     logger.warning(
                         "llm.structured_candidate_excluded",
                         actual_model=actual_model,
@@ -3801,7 +3998,8 @@ async def call_llm_structured_streaming(
                 error=error_message,
             )
             raise LLMStructuredOutputError(
-                f"Failed to parse streaming Rose response as {response_model.__name__}: {error_message}"
+                f"Failed to parse streaming Rose response as {response_model.__name__}: {error_message}",
+                excluded_models=retry_exclusions,
             ) from e
 
         # Use captured stream usage if available, otherwise fall back to estimates
@@ -3810,6 +4008,11 @@ async def call_llm_structured_streaming(
                 "prompt_tokens": stream_usage.get("prompt_tokens", 0),
                 "completion_tokens": stream_usage.get("completion_tokens", 0),
                 "total_tokens": stream_usage.get("total_tokens", 0),
+                # The measured generation window (first → last token chunk) for the
+                # persisted thought's tok/s (llm_generation_metadata). Estimates
+                # below carry no window, so they never produce a rate.
+                "generation_started_at_ms": int(first_token_time * 1000) if first_token_time else None,
+                "generation_ended_at_ms": int(last_token_time * 1000) if last_token_time else None,
                 "actual_model": actual_model,
                 "pool_name": pool_name,
                 "pool_size": pool_size,
@@ -4270,6 +4473,15 @@ async def call_llm(
                 root_agent_id=agent_id,
                 demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
+            if is_flash_agent_call(pool, call_site):
+                claude_auth_context, gpt_auth_context = await _flash_agent_auth_contexts(
+                    claude_auth_context, gpt_auth_context,
+                    user_id=gpt_token_user_id or claude_token_user_id,
+                    lineage_key=compute_token_lineage_key,
+                    agent_id=agent_id,
+                    demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+                    exclude_anthropic_family=anthropic_family_excluded(),
+                )
             try:
                 rose_response = await rose_client.collect(
                     pool=pool,
@@ -6485,6 +6697,7 @@ async def call_llm_activity(
     max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
     require_inline_attachments: bool = False,
     user_tools: Optional[List[Dict[str, Any]]] = None,
+    skip_models: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6597,6 +6810,7 @@ async def call_llm_activity(
                     pre_resolved_ids=pre_resolved_ids,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=pending_user_id or user_id,
+                    agent_id=_context_key,
                     max_context_tokens=max_context_tokens,
                     request_overhead=attachment_overhead,
                     require_inline_attachments=require_inline_attachments,
@@ -6619,6 +6833,7 @@ async def call_llm_activity(
                     pre_resolved_ids=None,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=user_id,
+                    agent_id=_context_key,
                     max_context_tokens=max_context_tokens,
                     request_overhead=attachment_overhead,
                     require_inline_attachments=require_inline_attachments,
@@ -6796,6 +7011,9 @@ async def call_llm_activity(
                 # every retry goes back to the model that just refused, so one refusal becomes a
                 # guaranteed 3-strikes kill instead of a provider switch.
                 _exclude_anthropic_family=exclude_anthropic_family,
+                # Same boundary for structured-output exclusions: a model that gave two
+                # invalid replies in the previous attempt stays excluded for this one.
+                _skip_models=frozenset(skip_models or ()),
             )
         finally:
             # Guarantee the background drainer never leaks if streaming raises.
@@ -6866,6 +7084,7 @@ async def call_llm_activity(
             # model again, but Temporal must not multiply that semantic retry.
             raise ApplicationError(
                 str(e),
+                {"excluded_models": sorted(e.excluded_models)},
                 type="LLMStructuredOutputError",
                 non_retryable=True,
             ) from e
@@ -7266,63 +7485,64 @@ async def fetch_compute_token_activity(
         return None
 
     try:
-        async with httpx.AsyncClient() as client:
-            params: Dict[str, str] = {}
-            if lineage_key:
-                params["lineageKey"] = lineage_key
-            if agent_id:
-                params["agentId"] = agent_id
-            if root_agent_id:
-                params["rootAgentId"] = root_agent_id
-            if demo_cache_affinity_key:
-                params["fastCacheAffinityKey"] = demo_cache_affinity_key
-            if pinned_benchmark_type:
-                # Pin wins over callers (including _rotate_compute_token).
-                params["tokenType"] = pinned_benchmark_type
-            elif token_type in ("claude", "gpt"):
-                params["tokenType"] = token_type
-            elif anthropic_family_excluded():
-                params["tokenType"] = "gpt"
-            response = await client.get(
-                f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
-                headers={
-                    "X-API-Key": config.backend.api_key or "",
-                    "X-User-Id": user_id,
-                },
-                params=params,
-                timeout=15.0,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                token = data.get("accessToken")
-                provider_type = data.get("type")
-                if token and provider_type in ("claude", "gpt"):
-                    if pinned_benchmark_type and provider_type != pinned_benchmark_type:
-                        logger.warning(
-                            "Rejecting compute token type=%s under BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
-                            provider_type,
-                            pinned_benchmark_type,
-                        )
-                        return None
-                    logger.info(
-                        "✅ Compute token fetched",
-                        user_id=user_id,
-                        type=provider_type,
-                        source=data.get("source", "user"),
+        client = get_http_client()
+        params: Dict[str, str] = {}
+        if lineage_key:
+            params["lineageKey"] = lineage_key
+        if agent_id:
+            params["agentId"] = agent_id
+        if root_agent_id:
+            params["rootAgentId"] = root_agent_id
+        if demo_cache_affinity_key:
+            params["fastCacheAffinityKey"] = demo_cache_affinity_key
+        if pinned_benchmark_type:
+            # Pin wins over callers (including _rotate_compute_token).
+            params["tokenType"] = pinned_benchmark_type
+        elif token_type in ("claude", "gpt"):
+            params["tokenType"] = token_type
+        elif anthropic_family_excluded():
+            params["tokenType"] = "gpt"
+        response = await client.get(
+            f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            params=params,
+            timeout=15.0,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get("accessToken")
+            provider_type = data.get("type")
+            if token and provider_type in ("claude", "gpt"):
+                if pinned_benchmark_type and provider_type != pinned_benchmark_type:
+                    logger.warning(
+                        "Rejecting compute token type=%s under BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
+                        provider_type,
+                        pinned_benchmark_type,
                     )
-                    return {
-                        "type": provider_type,
-                        "accessToken": token,
-                        "accountId": data.get("accountId"),
-                        "source": data.get("source", "user"),
-                        "poolTokenId": data.get("poolTokenId"),
-                        "lineageKey": data.get("lineageKey"),
-                        "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
-                    }
-            elif response.status_code == 404:
-                logger.info(f"Compute credentials not found for user {user_id}")
-            else:
-                logger.warning(f"Compute token fetch failed: {response.status_code}")
+                    return None
+                logger.info(
+                    "✅ Compute token fetched",
+                    user_id=user_id,
+                    type=provider_type,
+                    source=data.get("source", "user"),
+                )
+                return {
+                    "type": provider_type,
+                    "accessToken": token,
+                    "accountId": data.get("accountId"),
+                    "source": data.get("source", "user"),
+                    "poolTokenId": data.get("poolTokenId"),
+                    "integrationId": data.get("integrationId"),
+                    "lineageKey": data.get("lineageKey"),
+                    "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
+                }
+        elif response.status_code == 404:
+            logger.info(f"Compute credentials not found for user {user_id}")
+        else:
+            logger.warning(f"Compute token fetch failed: {response.status_code}")
     except Exception as e:
         logger.warning(f"Failed to fetch compute token: {e}")
 
@@ -7330,23 +7550,37 @@ async def fetch_compute_token_activity(
 
 
 @activity.defn
-async def heartbeat_compute_token_lineage_activity(lineage_key: str) -> bool:
-    """Refresh a compute-token lineage lease. Best-effort; callers should not block on it."""
+async def heartbeat_compute_token_lineage_activity(
+    lineage_key: str,
+    integration_id: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Refresh a compute-token lineage lease. Best-effort; callers should not block on it.
+
+    Also carries the token's latest provider usage-window snapshot (see
+    `providers.rose.subscription_usage`) and the Integration row that served it,
+    so per-account usage reaches the backend without a separate request.
+    """
     if not lineage_key:
         return False
     config = load_config()
+    body: Dict[str, Any] = {"lineageKey": lineage_key}
+    if integration_id:
+        body["integrationId"] = integration_id
+    if usage:
+        body["usage"] = usage
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{config.backend.api_url}/api/integrations/compute-code/token/lineage-heartbeat",
-                headers={
-                    "X-API-Key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                },
-                json={"lineageKey": lineage_key},
-                timeout=5.0,
-            )
-            return response.status_code == 200
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/integrations/compute-code/token/lineage-heartbeat",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=5.0,
+        )
+        return response.status_code == 200
     except Exception as e:
         logger.warning(f"Compute token lineage heartbeat failed: {e}")
         return False
@@ -7433,17 +7667,32 @@ async def mark_claude_token_rate_limited_activity(
     return False
 
 
+def credential_fingerprint(access_token: Optional[str]) -> Optional[str]:
+    """The digest a failure report carries for the token it held, never the token
+    itself (backend codeLoginRejection.ts ``credentialFingerprint``)."""
+    if not access_token:
+        return None
+    return token_fingerprint(access_token)
+
+
 @activity.defn
 async def mark_compute_token_rate_limited_activity(
     token_type: str,
     source: str,
     user_id: str,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
+    credential: Optional[str] = None,
 ) -> bool:
-    """Mark the selected provider-typed compute token rate-limited in backend."""
+    """Mark the selected provider-typed compute token rate-limited in backend.
+
+    ``integration_id`` and ``credential`` (the held token's fingerprint) name the
+    exact leased login: the backend disables a login only when the report names
+    it and the stored token is still the live one held (T7).
+    """
     config = load_config()
     effective_rate_limited_until = rate_limited_until or (
         datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
@@ -7460,6 +7709,12 @@ async def mark_compute_token_rate_limited_activity(
         body["poolTokenId"] = pool_token_id
     if source == "user":
         body["userId"] = user_id
+        # Name the exact leased row: an auth_error must never expire the
+        # user's other subscriptions (S33).
+        if integration_id:
+            body["integrationId"] = integration_id
+    if credential:
+        body["credential"] = credential
 
     try:
         async with httpx.AsyncClient() as client:

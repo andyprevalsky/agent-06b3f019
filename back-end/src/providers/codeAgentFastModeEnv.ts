@@ -202,32 +202,3 @@ export function buildFastModeAnthropicEnv(
     ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
   };
 }
-
-function defaultCodexProxyUrl(): string | undefined {
-  const explicit = process.env.FAST_MODE_CODEX_PROXY_URL;
-  if (explicit !== undefined && explicit !== '') return explicit;
-
-  const anthropic = process.env.FAST_MODE_ANTHROPIC_PROXY_URL;
-  if (anthropic === undefined || anthropic === '') return undefined;
-  if (anthropic.endsWith('/anthropic-proxy')) {
-    return `${anthropic.slice(0, -'/anthropic-proxy'.length)}/codex-proxy`;
-  }
-  return undefined;
-}
-
-export function buildFastModeCodexEnv(
-  goal: string,
-  fastModeCacheEnabled: boolean,
-  proxyBaseUrl: string | undefined = defaultCodexProxyUrl(),
-  demoCacheWriteEnabled: boolean = fastModeCacheEnabled,
-  traceOptions?: CodeAgentTraceOptions
-): Record<string, string> {
-  if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
-  if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
-  // No signing secret, no capability: skip the proxy rather than mint an unsigned URL.
-  if (!fastModeProxySigningAvailable()) return {};
-  if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
-  return {
-    CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
-  };
-}

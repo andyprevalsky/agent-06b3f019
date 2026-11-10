@@ -1,0 +1,41 @@
+{
+ "source_file": "native cloudbench-run.json (47 MB, retained on originating devbox only)",
+ "sha256": "b898ff4002485cd14fdbb902f2ed3dad51fed7758942e1148a3f017f06ebf927",
+ "fields": {
+  "total_cost_cents": [
+   "71.0"
+  ],
+  "agent_id": [
+   "3c057de1-d449-49b9-b76c-a5c72ca3d140"
+  ],
+  "cost_cents": [
+   "11.1002",
+   "71.0"
+  ],
+  "duration_seconds": [
+   "361.8"
+  ],
+  "failure_reason": [
+   "FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (lower = more human; this gate only ratchets down, never up) [FCaptcha engine v1.46.2; a version change here means the third-party detector was recalibrated \u2014 compare against the version on the last passing run before treating this as an anti-detection regression] [detections: vision_ai: Click injected with no pointer trajectory (3 teleport clicks); datacenter: Request from known datacenter IP range; headless: Very few speech voices available (3); bot: Windows UA but Segoe UI font not detected; browser tilion/tilion_direct_country]"
+  ],
+  "status": [
+   "204",
+   "COMPLETED",
+   "disabled"
+  ],
+  "name": [
+   "agent_init",
+   "browser-biometrics-webdecoy",
+   "checkbox_mode_passed",
+   "cloud_agent",
+   "fcaptcha_risk_score",
+   "invisible_form_submitted",
+   "spawn_browser_agent",
+   "verdict_text"
+  ],
+  "actual_model": [
+   "moonshotai/kimi-k3",
+   "qwen/qwen3.8-27b"
+  ]
+ }
+}

@@ -317,12 +317,121 @@ class Scorecard(unittest.TestCase):
         (admission / "shard-02/run/global-abort.json").unlink()
         self.assertIsNone(render(admission, self.f)["experiment"]["progress"], "undelivered abort is not proof")
 
-    def test_experiments_per_day_warms_until_one_day_of_goal_history(self):
+    def test_unresolved_infra_never_renders_a_green_zero(self):
+        admission = self.f.sharded(live=True)
+        status = admission / "shard-01/run/shard-status.json"
+        value = json.loads(status.read_text())
+        value["infra"]["progress"]["combos"] = [["failed", None, None, 2]]
+        write(status, value)
+        data = render(admission, self.f)
+        self.assertIn("INFRA FAILURE UNRECONCILED", CARD["render_text"](data))
+        self.assertIn('class="warn">■ INFRA FAILURE UNRECONCILED', self.valid(data))
+
+    def test_recovered_results_bind_all_sixty_jobs_and_preserve_accepted_grades(self):
+        import csv
+        import copy
+        import hashlib
+        recovery = runpy.run_path(str(ROOT / "scripts/cloudbench-recovered-results.py"))
+        run = self.tmp / "recovered-run"
+        group_id, source = "original-group", "a" * 40
+        tasks = ["task-" + str(i) for i in range(20)]
+        members, results, jobs, hubs = [], [], [], []
+        accepted = {t: {"benchmark": t} for t in tasks}
+        for k in range(1, 4):
+            for i, task in enumerate(tasks):
+                n = (k - 1) * 20 + i
+                jid = f"r{k:03d}-j{n+1:04d}"
+                verdict = "PASS" if n < 10 else "FAIL" if n < 57 else "INFRA"
+                fleet = f"20261020-043621-{1000+n}"
+                hub = fleet + "-m123456789012"
+                agent = "agent-" + str(n) if verdict != "INFRA" else ""
+                members.append(dict(name=task, run_number=k, member_id=jid))
+                results.append(dict(task=task, K=k, job_id=jid, verdict=verdict, controller="c"+str(i%2),
+                                    fleet_run=fleet, hub_run_id=hub, agent_id=agent, failure_reason="recorded infra" if verdict=="INFRA" else "",
+                                    cost_usd="0.1" if agent else "", duration_s="1" if agent else ""))
+                jobs.append(dict(task=task, run=k, job=jid, machine="c"+str(i%2), run_id=fleet,
+                                 task_status="PASSED" if verdict=="PASS" else "FAILED" if verdict=="FAIL" else None,
+                                 status="passed" if verdict=="PASS" else "failed", attempts=1, wall=2, released=bool(agent)))
+                hubs.append(dict(run_id=hub, name=task, agent_id=agent or None,
+                                 status="passed" if verdict=="PASS" else "failed" if verdict=="FAIL" else "INFRA_ERROR",
+                                 passed=None if verdict=="INFRA" else verdict=="PASS"))
+                accepted[task]["K"+str(k)] = verdict if verdict!="INFRA" else "UNGRADED"
+        write(run/'coordination.json', dict(controllers=2, scheduled_total=60, finished_at=T0+2000,
+              shards={str(i): dict(out=str(run/f"shard-{i:02d}/run")) for i in range(2)}))
+        write(run/'hub-group/hub-group.json', dict(run_id=group_id, run_group=dict(members=members)))
+        write(run/'shards.private.json', {})
+        for i in range(2):
+            write(run/f'shard-{i:02d}/attempt-start.safe.json', dict(source_ref=source))
+            write(run/f'shard-{i:02d}/config.private.json', dict(source_ref=source, shard=dict(group_run_id=group_id,tasks=tasks[i::2])))
+            write(run/f'shard-{i:02d}/run/export/launch.json', dict(source_ref=source,machine_id='c'+str(i)))
+        def csvfile(name, data):
+            path=self.tmp/name
+            with path.open('w',newline='') as f:
+                writer=csv.DictWriter(f,fieldnames=list(data[0]));writer.writeheader();writer.writerows(data)
+            return path
+        result_path=csvfile('results.csv',results)
+        grades_path=csvfile('accepted.csv',list(accepted.values()))
+        jobs_path=write(self.tmp/'jobs.jsonl','\n'.join(json.dumps(j) for j in jobs))
+        hub_path=write(self.tmp/'hub.json',hubs)
+        sidecar=recovery['prepare'](run,result_path,grades_path,jobs_path,hub_path)
+        path=write(self.tmp/'recovered.json',sidecar)
+        sha=hashlib.sha256(path.read_bytes()).hexdigest()
+        data=CARD['build'](run,ledger=self.f.ledger,deep=False,recovered_results=path,recovered_sha256=sha)
+        exp=data['experiment']
+        self.assertEqual([exp['outcomes'][c] for c in ('PASS','AGENT FAIL','INFRA')],[10,47,3])
+        self.assertEqual(exp['ended_at'],T0+2000)
+        self.assertEqual(len(exp['recovered_provenance']['observations']),60)
+        self.assertFalse((run/'result.json').exists())
+        self.assertIn('INFRA FAILURE 3',CARD['render_text'](data))
+        threshold_issue = CARD['_issues'](exp)[0]
+        self.assertIn('threshold reached at termination', threshold_issue['text'])
+        self.assertNotIn('stop the exact owned run', threshold_issue['action'])
+        self.assertIn('trigger and attempt evidence', threshold_issue['action'])
+        self.assertIn('exact-owner release', threshold_issue['action'])
+        # A timestamp alone, incomplete membership or active jobs must never
+        # suppress the immediate stop instruction for an active cohort.
+        for changes in ({'ended_at': None}, {'end_evidence': None}, {'progress': dict(exp['progress'], queued=1)},
+                        {'progress': dict(exp['progress'], in_progress=1)},
+                        {'progress': dict(exp['progress'], completed=59)},
+                        {'progress': dict(exp['progress'], unobserved=1)}):
+            active = dict(exp, **changes)
+            self.assertIn('stop the exact owned run', CARD['_issues'](active)[0]['action'])
+        self.assertIn('Recovery SHA256',self.valid(data))
+        with self.assertRaisesRegex(ValueError,'sidecar hash'):
+            CARD['build'](run,recovered_results=path,recovered_sha256='0'*64)
+        bad=copy.deepcopy(sidecar);bad['run_id']='wrong'
+        with self.assertRaisesRegex(ValueError,'wrong run'):recovery['rows'](bad,run)
+        csvfile('results.csv',results+[results[0]])
+        with self.assertRaisesRegex(ValueError,'source hash'):recovery['rows'](sidecar,run)
+        bad=copy.deepcopy(sidecar);bad['inputs']['results']=recovery['descriptor'](result_path)
+        with self.assertRaisesRegex(ValueError,'duplicate'):recovery['rows'](bad,run)
+        csvfile('results.csv',results)
+        accepted[tasks[19]]['K3']='FAIL';csvfile('accepted.csv',list(accepted.values()))
+        bad=copy.deepcopy(sidecar);bad['inputs']['accepted']=recovery['descriptor'](grades_path)
+        with self.assertRaisesRegex(ValueError,'accepted grade conflict'):recovery['rows'](bad,run)
+
+    def test_headline_progress_precedes_exact_failure_counts(self):
+        data = render(self.f.campaign(), self.f)
+        document = self.valid(data)
+        kpis = document.split('data-section="kpis"', 1)[1].split('</section>', 1)[0]
+        labels = re.findall(r'<div class="k">([^<]+)</div>', kpis)
+        self.assertEqual(labels[:3], ["QUEUED", "IN_PROGRESS", "COMPLETED"])
+        self.assertNotIn("%", kpis)
+        outcomes = document.split('data-section="outcomes"', 1)[1].split('</section>', 1)[0]
+        self.assertLess(outcomes.index("PASS"), outcomes.index("HARNESS FAILURE"))
+        self.assertLess(outcomes.index("HARNESS FAILURE"), outcomes.index("INFRA FAILURE"))
+        self.assertIn("INFRA FAILURE 1", outcomes)
+        self.assertLess(outcomes.index("INFRA FAILURE"), outcomes.index("AGENT FAILURE"))
+        text = CARD["render_text"](data)
+        self.assertIn("PASS 1 · HARNESS FAILURE 0 · INFRA FAILURE 1", text)
+        self.assertEqual(data["experiment"]["progress"], {"queued": 1, "in_progress": 1, "completed": 3, "unobserved": 0})
+
+    def test_experiments_per_day_remains_numeric_while_warming(self):
         admission = self.f.barrier_abort()
         text = CARD["render_text"](render(admission, self.f))
-        self.assertIn("experiments/day warming 1h00m · 1 launch (rate after 1 d)", text)
-        self.assertNotIn("24.0 experiments/day", text)
-        self.assertIn("experiments/day warming 1h00m", self.valid(render(admission, self.f)))
+        self.assertIn("24.0 experiments/day · 1 launch / 0.04 d · warming 1h00m", text)
+        self.assertNotIn("rate after 1 d", text)
+        self.assertIn("24.0 experiments/day", self.valid(render(admission, self.f)))
         later = CARD["build"](admission, ledger=self.f.ledger, now=T0 + 2 * 86400)
         self.assertIn("0.5 experiments/day · 1 launch / 2.00 d", CARD["render_text"](later))
 
@@ -392,6 +501,21 @@ class Scorecard(unittest.TestCase):
                     if verdict is None:
                         self.assertIn("No recorded task result: " + labels, output)
                 self.assertEqual(exp["outcomes"]["UNKNOWN" if verdict is None else "PASS"], 4)
+
+    def test_finished_shards_without_result_keep_terminal_clock_and_unknown_counts(self):
+        admission = self.f.sharded(result=False)
+        before = {str(p): p.read_bytes() for p in admission.rglob("*.json")}
+        exp = CARD["load_sharded"](admission, deep=False)
+        self.assertEqual(exp["state"], "INCOMPLETE")
+        self.assertEqual(exp["ended_at"], T0 + 2000)
+        self.assertEqual(exp["end_evidence"], "coordination.finished_at")
+        self.assertEqual(exp["rows_source"], "live shard-status counters")
+        self.assertEqual(exp["progress"]["in_progress"], 2)
+        self.assertEqual(exp["outcomes"]["INFRA"], 0)
+        self.assertIn("final result.json absent", exp["state_reason"])
+        exports = next(i for i in exp["lifecycle"] if i["label"] == "Evidence exports verified")
+        self.assertEqual(exports["state"], "ok")
+        self.assertEqual(before, {str(p): p.read_bytes() for p in admission.rglob("*.json")})
 
     def test_missing_data_renders_explicit_states(self):
         empty = self.tmp / "empty"
@@ -481,6 +605,40 @@ class Scorecard(unittest.TestCase):
         html = CARD["render_html"](data)
         self.assertIn(url, html)
         self.valid(data)
+
+    def test_local_active_card_uses_native_status_without_lifecycle_stage(self):
+        # The local producer writes status directly, unlike fleet lifecycle stages.
+        for stage_fields in ({}, {"lifecycle_stage": None}):
+            with self.subTest(stage_fields=stage_fields):
+                run = self.tmp / "1793039377-local-active"
+                agent = "d2113af0-ed93-4048-ad9f-6cd1b6c74fe1"
+                write(run / "report-card.json", {
+                    "run_id": "local-active", "started_at": T0,
+                    "tasks": {"total": 3, "running": 1, "completed": 1, "queued": 1},
+                    "per_task": [
+                        {"name": "active", "status": "running", "agent_id": agent, **stage_fields},
+                        {"name": "done", "status": "passed", **stage_fields},
+                        # An agent identifier alone must not promote queued work.
+                        {"name": "waiting", "status": "queued", "agent_id": agent, **stage_fields}],
+                })
+                data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+                exp = data["experiment"]
+                self.assertEqual(exp["progress"], {"queued": 1, "in_progress": 1,
+                                                   "completed": 1, "unobserved": 0})
+                self.assertEqual([(t["task"], t["outcome"]) for t in exp["task_links"]],
+                                 [("active", "RUNNING"), ("done", "PASS"), ("waiting", "QUEUED")])
+                self.assertEqual(exp["state"], "RUNNING")
+                self.assertIn("RUNNING active", CARD["render_text"](data))
+                self.valid(data)
+
+    def test_fleet_explicit_lifecycle_stage_keeps_precedence_over_status(self):
+        run = self.tmp / "fleet-stage-control"
+        write(run / "_batch/report-card.json", card(run.name, [
+            task("waiting", "running", stage="queued"),
+            task("active", "queued", stage="running")]))
+        exp = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual(exp["progress"], {"queued": 1, "in_progress": 1,
+                                           "completed": 0, "unobserved": 0})
 
     def test_assembled_local_card_needs_every_lane_stack_receipt(self):
         # run_captcha_probe.py --assemble: one run context from several lanes' stacks, each
@@ -787,8 +945,17 @@ class LaunchInstructions(unittest.TestCase):
         text = printed.getvalue()
         for needle in ("scripts/run-bench scorecard /runs/abc --html /runs/abc/scorecard.html",
                        "dvb-onbox visuals publish --file /runs/abc/scorecard.html",
-                       "hand-written cards are non-compliant", "every 15 minutes", "state change", "completion"):
+                       "hand-written cards are non-compliant", "every 10 minutes", "state change", "completion"):
             self.assertIn(needle, text)
+        self.assertNotIn("every 15 minutes", text)
+
+    def test_report_cadence_does_not_change_token_rate_window(self):
+        result = subprocess.run([str(ROOT / "scripts/run-bench"), "report-format"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("every fixed 10-minute checkpoint", result.stdout)
+        self.assertNotIn("every fixed 15-minute checkpoint", result.stdout)
+        self.assertIn("rolling 15-minute tokens/min", result.stdout)
+        self.assertIn("15-minute tokens/min", result.stdout)
 
     def test_every_launch_path_prints_the_scorecard_command(self):
         fleet = (ROOT / "scripts/run-bench-fleet").read_text()
@@ -862,6 +1029,11 @@ class ExperimentsLedger(unittest.TestCase):
             self.assertEqual(g1[0]["end"]["ended_at"], T0 + 5)
             rate = LEDGER["launch_rate"](g1, T0 + 43200)
             self.assertEqual((rate["launches"], round(rate["days"], 2), round(rate["per_day"], 1)), (2, 0.5, 4.0))
+            early = LEDGER["launch_rate"](g1, T0 + 30)
+            self.assertEqual(early["per_day"], 5760.0, "use the actual 30 seconds, not a synthetic minute")
+            zero = LEDGER["launch_rate"](g1[:1], T0)
+            self.assertIsNone(zero["per_day"], "no rate can be inferred at zero elapsed time")
+            self.assertIn("no elapsed goal time", CARD["_rate_text"]({"rate": zero, "generated_at": T0}))
 
     def test_oversized_entry_drops_optional_fields_and_never_writes_partial_line(self):
         with tempfile.TemporaryDirectory() as name:

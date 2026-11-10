@@ -8,7 +8,7 @@ import { BACKGROUND_TASKS_MAX, backgroundTaskEntrySchema } from './typesAgentTre
 export * from './typesAgentTree';
 export * from './typesAgentMessages';
 export * from './typesAgentControl';
-export type { Prisma } from '@prisma/client';
+export type { Prisma, AgentStatus } from '@prisma/client';
 
 // FilePointer schema for validation - all files stored in Supabase Storage
 export const filePointerSchema = z.object({
@@ -173,12 +173,17 @@ const createAgentBaseSchema = z.object({
   // DEMO cache: record/replay third-party responses for clean demos.
   // Own first-class flag — NOT a context gate. Default off (no read, no write).
   fast_mode_cache_enabled: z.boolean().optional(),
+  // Provider speed forwarded to every LLM leg (providers/rose/speed.ts).
+  // Absent: the legacy fast_mode_cache_enabled=true means fast; otherwise a
+  // sub-agent inherits its parent's speed and a root runs standard.
+  speed: z.enum(['standard', 'fast', 'ultrafast']).optional(),
   // Planner memory: retrieve compressed past trajectories for similar goals and
   // fork a get_memories tool call into the planner context. Own first-class
   // flag (not a context gate). Default off; sub-agents inherit their parent's.
   memory_enabled: z.boolean().optional(),
   /** Owning Project (left-bar grouping); sub-agents inherit the parent's when omitted. */
   project_id: z.string().uuid().nullable().optional(),
+  folder_id: z.string().uuid().nullable().optional(),
   // Provider/environment execution mode. Defaults to real at the DB and
   // workflow boundaries; sub-agents inherit their parent's persisted mode.
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),
@@ -265,6 +270,8 @@ export const updateStatusSchema = z.object({
 });
 
 export const updateAgentSchema = z.object({
+  project_id: z.string().uuid().nullable().optional(),
+  folder_id: z.string().uuid().nullable().optional(),
   // Sidebar rename. `null` clears the override and falls back to the goal.
   title: z.string().trim().min(1).max(80).nullable().optional(),
   // Internal schema-generator candidate. Applied only to an untitled root agent,

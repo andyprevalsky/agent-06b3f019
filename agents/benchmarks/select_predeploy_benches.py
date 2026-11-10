@@ -30,6 +30,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+try:
+    from benchmarks import history_ledger
+except ImportError:  # loaded by file path: run as a script, or through importlib by a tool
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "benchmark_history_ledger", Path(__file__).resolve().with_name("history_ledger.py")
+    )
+    assert _spec and _spec.loader
+    history_ledger = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(history_ledger)
+
 DEFAULT_CAP = 20
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "tasks.json"
 DEFAULT_ATTEMPTS = Path(__file__).resolve().parent / "history" / "task_attempts.jsonl"
@@ -124,6 +136,13 @@ PATH_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         r"|(^|/)back-end/src/providers/agentTools/display|(^|/)agents/benchmarks/display_check",
         ("display",),
     ),
+    (
+        r"(^|/)back-end/src/providers/(codeSessions/|e2b[A-Za-z]*\.ts)"
+        r"|(^|/)back-end/src/domains/(code-sessions|projects)/"
+        r"|(^|/)e2b-templates/(claude|codex)-code/"
+        r"|(^|/)agents/benchmarks/code_agent",
+        ("claude-code",),
+    ),
     (r"claude.?code|claude_code", ("claude-code",)),
     (r"(^|/)agents/(loop|workflows|helpers|activities)/", ("harness",)),
     (r"(^|/)agents/tools/", ("harness",)),
@@ -196,6 +215,8 @@ class Selection:
     # Floor categories with no history-qualified canary.
     uncovered_categories: list[str] = field(default_factory=list)
     pass_streak_required: int = DEFAULT_PASS_STREAK
+    # Catalog eligibility/instructions only; runtime evidence owns every verdict.
+    skip_eligibility: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -238,6 +259,65 @@ def load_tasks(catalog: Path) -> list[TaskRef]:
             )
         )
     return tasks
+
+
+def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str]) -> dict[str, list[str]]:
+    """Describe existing runtime exceptions without deciding or changing a task outcome."""
+    by_name = {task.name: task for task in tasks}
+    eligibility: dict[str, list[str]] = {}
+    for name in selected:
+        task = by_name.get(name)
+        if task is None:
+            continue
+        rules: list[str] = []
+        lifecycle = task.raw.get("expected_payment_lifecycle")
+        transfer = lifecycle.get("orgTransfer") if isinstance(lifecycle, dict) else None
+        # Same literal catalog/mode predicate as run_benchmark._agentcard_release_skip_task.
+        if isinstance(transfer, dict) and (
+            (not task.production_only and "agentcard-lifecycle-sandbox" in task.tags
+             and transfer.get("livemode") is False)
+            or (task.production_only and "agentcard-lifecycle-production" in task.tags
+                and transfer.get("livemode") is True)
+        ):
+            rules.append(
+                "AgentCard release-stall standing warning: runtime "
+                "run_benchmark.py::_agentcard_release_skip_lifecycle / "
+                "_agentcard_release_stalled requires purchase HELD, walletFunding RECLAIMING, "
+                "same nonempty card/transfer IDs, card CLOSED with numeric balanceCents=0, "
+                "orgTransfer consumed with numeric releasedCents=0, "
+                f"livemode={'true' if task.production_only else 'false'}, and stripeRefund=None. "
+                "All independent catalog assertions must still pass; only the exact settlement "
+                "stall qualifies. Default enabled; BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0 "
+                "restores strict diagnostics. Record loud warning SKIP, unreleased amount and "
+                "pending refund; never PASS or financial/native cleanup credit. "
+                "See .claude/commands/deploy.md (Skippable tests: AgentCard) and "
+                "docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md."
+            )
+        if task.raw.get("requires_claude_code"):
+            rules.append(
+                "Claude Code credential-unavailable standing exception: after successful native "
+                "credential sync, preflight must prove no synced Claude credentials and no pool "
+                "token (native token route 404); auth/sync/transport errors do not prove absence. "
+                "Runtime run_benchmark.py::_check_claude_code_credentials / "
+                "_is_permitted_claude_code_skip controls the recorded outcome; requires "
+                "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 on the permitted deploy path, "
+                "never silently enabled here. Shared ANTHROPIC_API_KEY fallback is not qualifying "
+                "user/pool evidence. Task correctness remains hard-gated. "
+                "See .claude/commands/deploy.md (Skippable tests: Claude Code smoke)."
+            )
+        if rules:
+            eligibility[name] = rules
+    return eligibility
+
+
+def format_skip_eligibility(eligibility: dict[str, list[str]]) -> str:
+    if not eligibility:
+        return ""
+    lines = ["Standing skip eligibility (instructions only, not a SKIP verdict):"]
+    for name, rules in eligibility.items():
+        lines.extend(f"  {name}: {rule}" for rule in rules)
+    lines.append("All other assertions and owned-resource cleanup remain required; preserve native outcomes.")
+    return "\n".join(lines)
 
 
 def categories_for_task(task: TaskRef) -> set[str]:
@@ -347,32 +427,30 @@ def counts_for_deploy_eligibility(entry: dict[str, Any]) -> bool:
 def load_attempt_passes(attempts_file: Path) -> dict[str, list[bool]]:
     """Return chronological pass/fail lists keyed by task name.
 
-    Reads `history/task_attempts.jsonl` (append-only). Entries are ordered by
-    file order, then by timestamp when present so out-of-order appends still
-    yield a stable recent window. Rows that do not count for deploy eligibility
-    (predeploy / active-worktree) are omitted.
+    Reads `history/task_attempts.jsonl` plus its per-writer shards (append-only,
+    see history_ledger.py). Entries are ordered by reader order, then by
+    timestamp when present so out-of-order appends still yield a stable recent
+    window. Rows that do not count for deploy eligibility (predeploy /
+    active-worktree) are omitted.
     """
-    if not attempts_file.exists():
-        return {}
     rows: list[tuple[str, bool, str]] = []
-    with attempts_file.open() as handle:
-        for index, raw_line in enumerate(handle):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not counts_for_deploy_eligibility(entry):
-                continue
-            task = entry.get("task")
-            if not isinstance(task, str) or not task:
-                continue
-            passed = bool(entry.get("passed"))
-            timestamp = str(entry.get("timestamp") or "")
-            # Stable tie-break on file order when timestamps collide/missing.
-            rows.append((task, passed, f"{timestamp}:{index:08d}"))
+    for index, raw_line in enumerate(history_ledger.read_lines(attempts_file)):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not counts_for_deploy_eligibility(entry):
+            continue
+        task = entry.get("task")
+        if not isinstance(task, str) or not task:
+            continue
+        passed = bool(entry.get("passed"))
+        timestamp = str(entry.get("timestamp") or "")
+        # Stable tie-break on reader order when timestamps collide/missing.
+        rows.append((task, passed, f"{timestamp}:{index:08d}"))
     rows.sort(key=lambda row: (row[0], row[2]))
     passes: dict[str, list[bool]] = {}
     for task, passed, _timestamp in rows:
@@ -570,6 +648,9 @@ def select_predeploy_benches(
             deduped_dropped.append(name)
 
     cap_hit = len(selected) >= cap and len(deduped_dropped) > 0
+    # A category scan also visits tasks the smoke floor already selected; those are
+    # selected, not history-skipped.
+    skipped_history = [name for name in skipped_history if name not in selected_set]
     return Selection(
         selected=selected,
         floor=floor,
@@ -585,6 +666,7 @@ def select_predeploy_benches(
         skipped_history=skipped_history,
         uncovered_categories=uncovered_categories,
         pass_streak_required=pass_streak,
+        skip_eligibility=standing_skip_eligibility(tasks, selected),
     )
 
 
@@ -628,17 +710,20 @@ def format_report(selection: Selection) -> str:
         lines.append(f"*** AT HARD CAP ({selection.cap}/{selection.cap}) — no room for further extras ***")
     if selection.dropped and not selection.cap_hit:
         lines.append(f"Dropped: {', '.join(selection.dropped)}")
+    if guidance := format_skip_eligibility(selection.skip_eligibility):
+        lines.append(guidance)
     lines.append("==============================================")
     return "\n".join(lines)
 
 
-def scream_if_cap_hit(selection: Selection, stream=None) -> None:
+def scream_if_cap_hit(selection: Selection, stream=None, *, machine_readable: bool = False) -> None:
     stream = stream or sys.stderr
     if not selection.cap_hit:
         if selection.total == selection.cap:
             msg = f"*** PREDEPLOY BENCH COUNT AT HARD CAP: {selection.total}/{selection.cap} ***"
             print(msg, file=stream)
-            print(msg, file=sys.stdout)
+            if not machine_readable:
+                print(msg, file=sys.stdout)
         return
     text = CAP_SCREAM.format(
         selected=selection.total,
@@ -647,7 +732,8 @@ def scream_if_cap_hit(selection: Selection, stream=None) -> None:
         dropped=", ".join(selection.dropped) or "(none)",
     )
     print(text, file=stream)
-    print(text, file=sys.stdout)
+    if not machine_readable:
+        print(text, file=sys.stdout)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -726,7 +812,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.format == "names":
         print("\n".join(selection.selected))
-        scream_if_cap_hit(selection)
+        if guidance := format_skip_eligibility(selection.skip_eligibility):
+            print(guidance, file=sys.stderr)
+        scream_if_cap_hit(selection, machine_readable=True)
     elif args.format == "report":
         print(format_report(selection))
         scream_if_cap_hit(selection)
@@ -749,12 +837,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "pass_streak_required": selection.pass_streak_required,
                     "reasons": selection.reasons,
                     "surface": selection.surface,
+                    "skip_eligibility": selection.skip_eligibility,
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
-        scream_if_cap_hit(selection)
+        scream_if_cap_hit(selection, machine_readable=True)
     else:
         print(format_report(selection))
         scream_if_cap_hit(selection)

@@ -3,6 +3,11 @@
  * and an "enter Autonomous Execution" affordance while the agent is waiting.
  *
  * STATE MACHINE:
+ *   [STREAMING]  <-- isStreaming: the text so far as static markdown (tables, code)
+ *                    every path keeps the reply's single line breaks (breaks)
+ *      |
+ *      | (stream ends)
+ *      v
  *   [RENDERING]  <-- mount, MarkdownText animates in if shouldType && !hasAnimated
  *      |
  *      | (animation finishes)
@@ -17,7 +22,6 @@ import { Check, Loader2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { MarkdownText } from '../MarkdownText';
-import { StreamingText } from './StreamingText';
 import { AutonomousExecutionIcon } from './AutonomousExecutionIcon';
 
 interface AttentionMessageProps {
@@ -200,15 +204,12 @@ export const AttentionMessage = memo(function AttentionMessage({
     <div className="flex gap-3 animate-in fade-in duration-300">
       <div className="flex-1 min-w-0 space-y-3">
         <div className="text-sm">
-          {isStreaming ? (
-            <StreamingText text={attentionMessage} />
-          ) : (
-            <MarkdownText
-              text={attentionMessage}
-              shouldAnimate={isWaiting && !hasAnimated}
-              onComplete={handleAnimationComplete}
-            />
-          )}
+          <MarkdownText
+            text={attentionMessage}
+            breaks
+            shouldAnimate={!isStreaming && isWaiting && !hasAnimated}
+            onComplete={handleAnimationComplete}
+          />
         </div>
 
         {isWaiting && !isStreaming && (

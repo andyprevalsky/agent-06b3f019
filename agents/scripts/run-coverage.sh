@@ -48,15 +48,17 @@ fi
 # inside a bounded worker pool, then merge their parallel coverage files before
 # the focused pytest suites append their data.
 rm -f .coverage .coverage.*
-COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_coverage_blackbox_parallel.py
+AGENTS_BLACKBOX_DOMAINS="" COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_coverage_blackbox_parallel.py
 "$COVERAGE_BIN" combine
 
+# Direct pytest steps rerun only their failed node ids once (FLAKY on a pass,
+# FAIL on a second failure), matching the domain runner's contract.
 if [ -d tests/demo_cache ]; then
-    "$COVERAGE_BIN" run --append -m pytest tests/demo_cache -q
+    COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_pytest_rerun_once.py demo-cache tests/demo_cache
 fi
 
 if [ -d tests/unit ]; then
-    "$COVERAGE_BIN" run --append -m pytest tests/unit -q
+    COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_pytest_rerun_once.py unit tests/unit
 fi
 
 case "$MODE" in

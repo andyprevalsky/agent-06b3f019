@@ -1,0 +1,16 @@
+{
+ "name": "pr1744-3e3e0ce58e-core",
+ "key_prefix": "devbox-closeout-private/pr1744-3e3e0ce58e-core/",
+ "manifest_object": "devbox-closeout-private/pr1744-3e3e0ce58e-core/manifest.json",
+ "manifest_object_sha256": "054d68d6ed37ac46ccf79156f47912e3d1baa0193512be665e047c8355c1c9a1",
+ "archive_sha256": "a92df5c15278ed2c679bd6be2fbefecf3ffe15b70afa3e5c33a29a3214ee79a0",
+ "archive_size_bytes": 909977677,
+ "parts": 14,
+ "chunk_size": 67108864,
+ "files": 100258,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (Render/Fly/back-end env; same key as the trace archive)",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "verified": "remote manifest equals the local manifest; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches (closeout_archive.py verify, 2026-11-07 ~22:50Z)",
+ "restore": "closeout_archive.py restore <out-dir> <dest> (decrypt each part with aad=key, concatenate, untar)"
+}

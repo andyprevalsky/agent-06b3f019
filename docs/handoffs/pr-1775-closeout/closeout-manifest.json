@@ -1,0 +1,63 @@
+{
+ "schema_version": 1,
+ "pr": 1775,
+ "title": "fix(cloudbench): autoscaler capacity failure keeps verified cleanup evidence",
+ "assignment": "Assigned repair from the PR #1760 deploy: deploy smoke gate entirely UNVERIFIED when test-mass-agent-run-0's mandatory autoscaler was denied Fly Machine-count capacity while other deploys shared navi-whisper-lux-bench (failed source ddfe9f2881ce, originating merge cdb8ce580, originating devbox aa460e55).",
+ "merge_commit": "79a43f600a3162ff9a8aeb7783e1e1fa82c6671e",
+ "gated_source": "3bf66999e1a34cf975b7f822188ac62c544c0f5e",
+ "deploy_devbox": "3acb6d3e-5cc8-44e0-8c1f-387a7469c8b2",
+ "assigned_fix": {
+  "capacity_accounting": "stale 56-Machine worker reservation default already fixed on main (54a651e43); live 2026-11-08: machines_per_org_limit=1000; bench app observed at 31 (00:05Z) and 51 (00:37Z) Machines vs ceiling 300; no ceiling or concurrency change",
+  "evidence": "fleet lifecycle seals cleanup_verified + autoscaler_failed_benches; deploy_test_cloud turns an attributed mandatory-autoscaler failure with verified teardown into one verified FAIL",
+  "proof": "scripts/tests/deploy-test-worker.test.py CloudCampaign (red on old source, 5/5 green); cloudbench-multi-workstream full suite on Linux incl. scenarios 2h/2h2 (evidence/cloudbench-multi-workstream-runs.txt); test-mass-agent-run-0 PASS with its worker clone created and joined in 7 of 8 smoke campaigns of this deploy (the 8th, b2dd6533 on cc3642ae2034, was cancelled by the 04:49Z 1/13 infra stop and is UNVERIFIED)"
+ },
+ "harness_fix": "structured AgentCard org-MCP 429 retry in the setup fixture; provably rootless pre-creation failures keep their task verdict instead of tripping the 1/13 infra stop; nested composite stages mark the enclosing task (review finding)",
+ "rca_cases": [
+  "2026-11-07-autoscaler-capacity-failure-sealed-verified-cleanup-as-failed",
+  "2026-11-08-rootless-setup-throttle-tripped-smoke-infra-stop"
+ ],
+ "review": "CodeRabbit merged unreviewed: organization usage spending cap; deploy_review_cycle.py skip --reason usage-cap recorded on 6 heads, cc3642ae2034 closed as unavailable (superseded before any review), merged head 3bf66999e sync-inherited from 7da6480dc; fresh adversarial sub-agent reviews ran instead; blocking findings fixed (composite-stage fail-open) or reverted (CHILDFAIL mapping)",
+ "repair_goals": [
+  {
+   "packet": "smoke gate UNVERIFIED after a post-pass cache-ratchet CHILDFAIL (open follow-up of the primary RCA)",
+   "failed_source": "1c24c23379a7",
+   "thread": "https://boxes.dev/thread/thr_f3859fb409e9420785112c8b7e33f665"
+  },
+  {
+   "packet": "smoke/agent-payment-idempotent-abandonment: AgentCard card read throttled then auth-rejected on the reuse path",
+   "failed_source": "fde378f8bfac",
+   "thread": "https://boxes.dev/thread/thr_7085efa548de441c90b435f1397efd48"
+  },
+  {
+   "packet": "backend-coverage-blackbox/units: silent process death of workflow-queue-admission-postgres.test.ts",
+   "failed_source": "cc3642ae2034",
+   "thread": "https://boxes.dev/thread/thr_70d03aa0dc164322a94cb4cae4f08661"
+  },
+  {
+   "packet": "backend-coverage-blackbox/blackbox:browser-provider: live Kernel rotate-proxy ERR_TUNNEL_CONNECTION_FAILED",
+   "failed_source": "3bf66999e1a3",
+   "thread": "https://boxes.dev/thread/thr_384c95fc67be4b6381ae138b26f296fc"
+  }
+ ],
+ "production": {
+  "semantic": "PASS (Actions run 42462705568 on the merge SHA)",
+  "agentcard": "FAIL: payment_lifecycle.stripeHold.livemode must be true (production payer fixture is Stripe test mode; a KYC-passed live AgentCard cardholder is a credential/billing change only the user can make)"
+ },
+ "ledger": {
+  "source": "BenchmarkRun._record_history over the final merged-code smoke campaign deploy-beaefeae (head 3bf66999e, parent of merge 79a43f600); SKIPPED stall row excluded by design; plus the production AgentCard attempt row",
+  "task_attempts_rows": 13,
+  "task_durations_rows": 3,
+  "span_file": "agents/benchmarks/history/span_durations.20261108.records-pr1775-closeout.jsonl"
+ },
+ "followups": [
+  "retained fleet owners with no live resources (sealed runtime evidence never written after the 04:49Z infra-stop cancellation): 0c6d3e727ddb4d39859cbe71b33d7357, 37e5e3b609bf4a14877d77f9054a59a8, 8cfc57a168584f1f8071a8fd7b5876c1, ee12f6098e7a498bbc1dc17848302784",
+  "unreleased AgentCard funds: production transfer owt_c2b13f07dbdf80924a592e78 (100 cents transferred, 0 released) and the sandbox abandonment release stall on every smoke round",
+  "dvb-onbox threads start fails with agent_start_failed for prompts over ~4 KiB (reported via report-bug)"
+ ],
+ "evidence": {
+  "handoff_archive": "evidence/archive-receipt-handoff.json",
+  "core_archive": "evidence/archive-receipt-core.json",
+  "restore": "closeout_archive.py --env back-end/.env restore --receipt <receipt> --destination <dir>",
+  "fake_fleet_runs": "evidence/cloudbench-multi-workstream-runs.txt"
+ }
+}

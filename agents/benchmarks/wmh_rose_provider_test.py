@@ -975,7 +975,7 @@ def test_reviewed_distribution_policy_has_exact_identity_and_pinned_runner():
     # Azure credit serves the same GPT-6.1 deployment ahead of OpenRouter (user-directed 2026-10-11).
     assert pool.foundry_enabled and foundry_model(pool) == "gpt-6.1-sol"
     assert _cost_usd_for_call("openai/gpt-6.1-sol", 1000, 1000) == pytest.approx(0.012)
-    assert get_pool("rose-1-ultra").waterfall[0] == "openai/gpt-6-sol"
+    assert get_pool("rose-1-ultra").waterfall[0] == "openai/gpt-6.1-sol"
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setitem(policies._POLICIES, policy.name, replace(policy, text=policy.text + " changed"))
         with pytest.raises(ValueError, match="without a new version"):
@@ -1338,7 +1338,15 @@ def test_wmh_pool_identity_excludes_billing_routes_for_the_same_model():
         "31497e147da1d8aa72f949a59120fb4dac636621dbe7e239039701e52b3e1f47"
     )
     original = pools.get_pool
+    try:
+        pools.get_pool = lambda name: replace(spec, subscription_auth_enabled=False)
+        assert experiential_bridge.pool_sha256("rose-wmh-gpt61") == (
+            "31497e147da1d8aa72f949a59120fb4dac636621dbe7e239039701e52b3e1f47"
+        ), "an explicit inherited subscription setting preserves artifact identity"
+    finally:
+        pools.get_pool = original
     for changed in (
+        replace(spec, subscription_auth_enabled=True),
         replace(spec, waterfall=("openai/gpt-6-sol",)),
         replace(spec, gpt_auth_model="gpt-6-sol"),
         replace(spec, waterfall_reasoning_effort="high"),
@@ -1630,13 +1638,18 @@ def test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch):
             self.lock = threading.Lock()
             self.active = 0
             self.peak_active = 0
+            self.both_active = asyncio.Event()
 
         async def collect(self, **kwargs):
             with self.lock:
                 self.active += 1
                 self.peak_active = max(self.peak_active, self.active)
+                if self.active == 2:
+                    self.both_active.set()
             try:
-                await asyncio.sleep(0.05)
+                # Observe overlap causally, independent of caller scheduling.
+                # A serialized bridge cannot reach this two-call rendezvous.
+                await asyncio.wait_for(self.both_active.wait(), timeout=5)
                 return _canned_response(content='{"output":"ok"}', prompt=1, completion=1, token_used=None)
             finally:
                 with self.lock:
@@ -1653,6 +1666,19 @@ def test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch):
         results = [future.result(timeout=5) for future in futures]
     assert client.peak_active == 2
     assert [result.text for result in results] == ['{"output":"ok"}'] * 2
+
+
+def test_overlap_gate_rejects_serialized_llm_calls(monkeypatch):
+    original = RoseWMHProvider._complete_async
+    serial_lock = asyncio.Lock()
+
+    async def serialized(self, *args, **kwargs):
+        async with serial_lock:
+            return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RoseWMHProvider, "_complete_async", serialized)
+    with pytest.raises(TimeoutError):
+        test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch)
 
 
 def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):

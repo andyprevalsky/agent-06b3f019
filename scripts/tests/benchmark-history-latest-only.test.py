@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmark-history-latest-only.py"
@@ -18,6 +18,10 @@ sys.modules[spec.name] = tool
 spec.loader.exec_module(tool)
 
 HISTORY = Path("agents/benchmarks/history")
+LEDGER_SPEC = importlib.util.spec_from_file_location(
+    "history_ledger_for_latest_only_test", SCRIPT.parents[1] / "agents/benchmarks/history_ledger.py")
+history_ledger = importlib.util.module_from_spec(LEDGER_SPEC)
+LEDGER_SPEC.loader.exec_module(history_ledger)
 
 
 def attempt(task, passed, end, duration, agent):
@@ -32,7 +36,7 @@ def span(benchmark, agent, stamp):
             "span_name": "n", "status": "ok", "timestamp": stamp}
 
 
-class LatestOnlyTests(unittest.TestCase):
+class LedgerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name)
@@ -64,8 +68,21 @@ class LatestOnlyTests(unittest.TestCase):
                 handle.write(json.dumps(row) + "\n")
 
     def read(self, name):
+        """A ledger as every reader sees it: for attempts/durations, the base file plus shards."""
         path = self.repo / HISTORY / name
+        if history_ledger.is_sharded(path):
+            return history_ledger.read_rows(path)
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else None
+
+    def shards(self, name):
+        return [Path(p) for p in history_ledger.shard_files(self.repo / HISTORY / name)]
+
+    def assert_base_files_untouched(self):
+        """The shared base files hold exactly their base-ref rows: a PR never edits them."""
+        for name in ("task_attempts.jsonl", "task_durations.jsonl"):
+            shown = subprocess.run(("git", "-C", str(self.repo), "show", f"base:{HISTORY}/{name}"),
+                                   capture_output=True, check=True).stdout
+            self.assertEqual((self.repo / HISTORY / name).read_bytes(), shown, name)
 
     def run_tool(self, *args):
         with redirect_stdout(io.StringIO()) as out:
@@ -100,6 +117,8 @@ class LatestOnlyTests(unittest.TestCase):
             span("smoke-a", "br-a2", "2026-10-21T11:01:00+00:00"),
         ])
 
+
+class LatestOnlyTests(LedgerCase):
     def test_write_keeps_only_latest_branch_run_and_all_base_rows(self):
         self.branch_iteration()
         code, out = self.run_tool("--write")
@@ -114,6 +133,8 @@ class LatestOnlyTests(unittest.TestCase):
                          ["main-2", "child-of-a3", "br-a3"])
         # A new branch span file holding only a superseded run disappears entirely.
         self.assertIsNone(self.read("span_durations.20261021.my-branch.jsonl"))
+        self.assert_base_files_untouched()
+        self.assertEqual(len(self.shards("task_attempts.jsonl")), 1)
         self.assertEqual(self.run_tool("--check")[0], 0)
 
     def test_check_fails_until_written_and_report_mode_changes_nothing(self):
@@ -142,10 +163,268 @@ class LatestOnlyTests(unittest.TestCase):
         self.run_tool("--write")
         self.assertEqual(self.run_tool("--check")[0], 0)
 
+    def test_branch_rows_in_a_shared_base_file_move_to_the_branch_shard(self):
+        # An older writer (or an in-flight branch) appended to the shared base files. GitHub
+        # ignores merge=union, so publishing those rows there would conflict with main.
+        self.write("task_durations.jsonl", [{"task": "smoke-b", "duration_seconds": 100,
+                                             "timestamp": "2026-10-21T11:06:00+00:00", "agent_id": "dur-only"}],
+                   append=True)
+        code, out = self.run_tool("--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("move 1 branch row(s)", out)
+        self.run_tool("--write")
+        self.assert_base_files_untouched()
+        (shard,) = self.shards("task_durations.jsonl")
+        self.assertEqual([json.loads(line)["agent_id"] for line in shard.read_text().splitlines()], ["dur-only"])
+        self.assertEqual([r["agent_id"] for r in self.read("task_durations.jsonl")], ["main-2", "dur-only"])
+        self.assertEqual(self.run_tool("--check")[0], 0)
+
     def test_no_branch_rows_is_a_clean_noop(self):
         code, out = self.run_tool("--check")
         self.assertEqual(code, 0)
         self.assertIn("no branch rows", out)
+
+    # Follow-up z (2026-10-30): a deploy's local smoke lane parks its rows under
+    # .context/deploy-ledger-park (run-predeploy-local, BENCHMARK_HISTORY_PARK_DIR)
+    # so the tracked ledgers stay unchanged while the other gates fingerprint the
+    # worktree; the publish step replays them before the latest-only filter.
+    LEDGERS = ("task_attempts.jsonl", "task_durations.jsonl", "span_durations.jsonl")
+
+    def park(self, name, rows, park=None):
+        park = park or self.repo / ".context" / "deploy-ledger-park"
+        park.mkdir(parents=True, exist_ok=True)
+        with (park / name).open("a") as handle:
+            for row in rows:
+                # The span writer serialises with sorted keys; attempts/durations as-is.
+                handle.write(json.dumps(row, sort_keys=name.startswith("span_durations")) + "\n")
+        return park
+
+    def tracked_bytes(self):
+        return {name: (self.repo / HISTORY / name).read_bytes() for name in self.LEDGERS}
+
+    def test_apply_parked_appends_the_parked_rows_byte_for_byte(self):
+        pass_row = attempt("smoke-b", True, "2026-10-21T11:06:00+00:00", 100, "park-b1")
+        duration = {"task": "smoke-b", "duration_seconds": 100, "timestamp": "2026-10-21T11:06:00+00:00",
+                    "agent_id": "park-b1"}
+        park = self.park("task_attempts.jsonl", [pass_row])
+        self.park("task_durations.jsonl", [duration])
+        self.park("span_durations.jsonl", [span("smoke-b", "park-b1", "2026-10-21T11:05:30+00:00")])
+        parked = {name: (park / name).read_bytes() for name in self.LEDGERS}
+        before = self.tracked_bytes()
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        for name in self.LEDGERS:
+            self.assertFalse((park / name).exists(), f"{name} must be marked applied")
+        self.assertIn(f"{HISTORY}/span_durations.jsonl: applied 1 parked row(s)", out)
+        self.assertEqual((self.repo / HISTORY / "span_durations.jsonl").read_bytes(),
+                         before["span_durations.jsonl"] + parked["span_durations.jsonl"])
+        for name in ("task_attempts.jsonl", "task_durations.jsonl"):
+            # Attempts/durations land byte-for-byte in this branch's own shard; the shared base is untouched.
+            (shard,) = self.shards(name)
+            self.assertIn(f"{shard.relative_to(self.repo)}: applied 1 parked row(s)", out)
+            self.assertEqual(shard.read_bytes(), parked[name], name)
+            self.assertEqual((self.repo / HISTORY / name).read_bytes(), before[name], name)
+        applied = sorted(path.name for path in park.iterdir())
+        self.assertEqual(len(applied), 3, applied)
+        self.assertTrue(all(".applied-" in name for name in applied), applied)
+        self.assertEqual(self.run_tool("--check")[0], 0)
+        # A second publish finds nothing parked and changes nothing.
+        after = self.tracked_bytes()
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        self.assertIn("no parked ledger rows", out)
+        self.assertEqual(self.tracked_bytes(), after)
+
+    def test_apply_parked_then_latest_only_drops_the_superseded_parked_attempt(self):
+        # The smoke lane ran twice inside one deploy: a failed attempt, then the
+        # passing rerun after the fix. Only the rerun describes the merged code.
+        self.park("task_attempts.jsonl", [
+            attempt("smoke-a", False, "2026-10-21T10:05:00+00:00", 300, "park-a1"),
+            attempt("smoke-a", True, "2026-10-21T12:05:00+00:00", 300, "park-a2"),
+        ])
+        self.park("task_durations.jsonl", [{"task": "smoke-a", "duration_seconds": 300,
+                                            "timestamp": "2026-10-21T12:05:00+00:00", "agent_id": "park-a2"}])
+        self.park("span_durations.jsonl", [span("smoke-a", "park-a1", "2026-10-21T10:01:00+00:00"),
+                                           span("smoke-a", "park-a2", "2026-10-21T12:01:00+00:00")])
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        self.assertIn("applied 2 parked row(s)", out)
+        attempts = self.read("task_attempts.jsonl")
+        self.assertEqual(attempts[:2], self.base_attempts)
+        self.assertEqual([r["agent_id"] for r in attempts[2:]], ["park-a2"])
+        self.assertEqual([r["agent_id"] for r in self.read("task_durations.jsonl")], ["main-2", "park-a2"])
+        self.assertEqual([r["agent_id"] for r in self.read("span_durations.jsonl")], ["main-2", "park-a2"])
+        self.assertEqual(self.run_tool("--check")[0], 0)
+
+    def test_apply_parked_requires_write_and_honours_an_explicit_directory(self):
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        self.park("task_attempts.jsonl", [attempt("smoke-b", True, "2026-10-21T11:06:00+00:00", 100, "park-b1")],
+                  park=elsewhere)
+        before = self.tracked_bytes()
+        with self.assertRaises(SystemExit) as refused:
+            self.run_tool("--apply-parked", str(elsewhere))
+        self.assertEqual(refused.exception.code, 2)
+        self.assertEqual(self.tracked_bytes(), before, "a refused publish must not touch the ledgers")
+        self.assertTrue((elsewhere / "task_attempts.jsonl").exists())
+        code, out = self.run_tool("--apply-parked", str(elsewhere), "--write")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([r["agent_id"] for r in self.read("task_attempts.jsonl")[2:]], ["park-b1"])
+        self.assertFalse((elsewhere / "task_attempts.jsonl").exists())
+
+    def test_apply_parked_rejects_an_unparseable_parked_row_before_touching_any_ledger(self):
+        # The smoke lane died mid-write and left a truncated span row. Skipping it
+        # would mark the park applied while the tracked ledger lacks the row, so
+        # the publish must fail before any ledger is appended or any file renamed.
+        park = self.park("task_attempts.jsonl",
+                         [attempt("smoke-b", True, "2026-10-21T11:06:00+00:00", 100, "park-b1")])
+        self.park("span_durations.jsonl", [span("smoke-b", "park-b1", "2026-10-21T11:05:30+00:00")])
+        with (park / "span_durations.jsonl").open("a") as handle:
+            handle.write('{"agent_id": "park-b1", "benchmark": "smoke-b", "dur')  # cut mid-row, no newline
+        before = self.tracked_bytes()
+        with self.assertRaises(RuntimeError) as refused:
+            self.run_tool("--apply-parked", "--write")
+        self.assertIn("span_durations.jsonl:2", str(refused.exception))
+        self.assertEqual(self.tracked_bytes(), before, "a refused publish must not touch any tracked ledger")
+        self.assertEqual(sorted(path.name for path in park.iterdir()), ["span_durations.jsonl", "task_attempts.jsonl"],
+                         "nothing may be marked applied")
+
+    def test_apply_parked_replay_after_an_interrupted_publish_is_a_noop(self):
+        # The publish appended every parked row but died (SIGKILL, power loss)
+        # before renaming the parked files applied. The next publish must not
+        # append the same rows again: identical overlapping attempts survive the
+        # latest-only filter, so the duplicates would land on main.
+        park = self.park("task_attempts.jsonl",
+                         [attempt("smoke-b", True, "2026-10-21T11:06:00+00:00", 100, "park-b1")])
+        self.park("task_durations.jsonl", [{"task": "smoke-b", "duration_seconds": 100,
+                                            "timestamp": "2026-10-21T11:06:00+00:00", "agent_id": "park-b1"}])
+        self.park("span_durations.jsonl", [span("smoke-b", "park-b1", "2026-10-21T11:05:30+00:00")])
+        parked = {name: (park / name).read_bytes() for name in self.LEDGERS}
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        once = self.tracked_bytes()
+        # Undo only the rename: the parked files are back exactly as the interrupted publish left them.
+        for path in list(park.iterdir()):
+            path.rename(park / path.name.split(".applied-")[0])
+        self.assertEqual({name: (park / name).read_bytes() for name in self.LEDGERS}, parked)
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.tracked_bytes(), once, "a replay must not duplicate rows an interrupted publish applied")
+        for name in self.LEDGERS:
+            self.assertIn(": applied 0 parked row(s)", out)
+            self.assertFalse((park / name).exists(), f"{name} must be marked applied again")
+        self.assertIn("1 already applied", out)
+        self.assertEqual(self.run_tool("--check")[0], 0)
+        # Interrupted after only some files were appended: the untouched ledger still receives its rows.
+        self.park("task_attempts.jsonl", [attempt("smoke-c", True, "2026-10-21T13:06:00+00:00", 100, "park-c1")])
+        self.park("task_durations.jsonl", [{"task": "smoke-c", "duration_seconds": 100,
+                                            "timestamp": "2026-10-21T13:06:00+00:00", "agent_id": "park-c1"}])
+        with self.shards("task_attempts.jsonl")[0].open("ab") as handle:
+            handle.write((park / "task_attempts.jsonl").read_bytes())  # attempts landed, durations did not
+        code, out = self.run_tool("--apply-parked", "--write")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([r["agent_id"] for r in self.read("task_attempts.jsonl")[2:]], ["park-b1", "park-c1"])
+        self.assertEqual([r["agent_id"] for r in self.read("task_durations.jsonl")], ["main-2", "park-b1", "park-c1"])
+
+
+class QualificationTests(LedgerCase):
+    """--qualify TASK=N: a committed streak of N passes survives; iterations still do not."""
+
+    TASK = "code-agent-rose-repo"
+
+    def qualified(self, task, passed, end, agent, counts=True):
+        row = attempt(task, passed, end, 300, agent)
+        return {**row, "counts_for_deploy_eligibility": counts, "suite": "local"}
+
+    def streak(self, outcomes=(True,) * 5, counts=True):
+        hours = ["10", "11", "12", "13", "14"]
+        # A failed attempt before the streak is a fix-and-rerun iteration; smoke-a is another task.
+        rows = [self.qualified(self.TASK, False, "2026-10-21T08:05:00+00:00", "iter-0")]
+        rows += [self.qualified(self.TASK, ok, f"2026-10-21T{h}:05:00+00:00", f"q-{i}", counts)
+                 for i, (h, ok) in enumerate(zip(hours, outcomes), 1)]
+        rows += [attempt("smoke-a", False, "2026-10-21T09:05:00+00:00", 300, "a-1"),
+                 attempt("smoke-a", True, "2026-10-21T14:30:00+00:00", 300, "a-2")]
+        self.write("task_attempts.jsonl", rows, append=True)
+        self.write("task_durations.jsonl", [
+            {"task": self.TASK, "duration_seconds": 300, "timestamp": f"2026-10-21T{h}:05:00+00:00", "agent_id": f"q-{i}"}
+            for i, h in enumerate(hours, 1)] + [
+            {"task": self.TASK, "duration_seconds": 300, "timestamp": "2026-10-21T08:05:00+00:00", "agent_id": "iter-0"}],
+            append=True)
+        self.write("span_durations.jsonl", [span(self.TASK, "iter-0", "2026-10-21T08:01:00+00:00")]
+                   + [span(self.TASK, f"q-{i}", f"2026-10-21T{h}:01:00+00:00") for i, h in enumerate(hours, 1)],
+                   append=True)
+
+    def test_without_the_flag_only_the_latest_run_of_the_streak_survives(self):
+        self.streak()
+        code, out = self.run_tool("--write")
+        self.assertEqual(code, 0, out)
+        kept = [r["agent_id"] for r in self.read("task_attempts.jsonl")[2:] if r["task"] == self.TASK]
+        self.assertEqual(kept, ["q-5"])
+
+    def test_qualify_keeps_the_streak_and_still_drops_iterations_and_other_tasks(self):
+        self.streak()
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+        self.assertEqual(code, 0, out)
+        attempts = self.read("task_attempts.jsonl")
+        self.assertEqual(attempts[:2], self.base_attempts)
+        self.assertEqual([r["agent_id"] for r in attempts[2:] if r["task"] == self.TASK],
+                         ["q-1", "q-2", "q-3", "q-4", "q-5"])
+        self.assertEqual([r["agent_id"] for r in attempts[2:] if r["task"] == "smoke-a"], ["a-2"])
+        durations = [r["agent_id"] for r in self.read("task_durations.jsonl") if r["task"] == self.TASK]
+        self.assertEqual(durations, ["q-1", "q-2", "q-3", "q-4", "q-5"])
+        spans = [r["agent_id"] for r in self.read("span_durations.jsonl") if r["benchmark"] == self.TASK]
+        self.assertEqual(spans, ["q-1", "q-2", "q-3", "q-4", "q-5"])
+        self.assertEqual(self.run_tool("--check", "--qualify", f"{self.TASK}=5")[0], 0)
+
+    def test_unmet_qualification_exits_one_and_rewrites_nothing(self):
+        for outcomes, counts in (((True, True, False, True, True), True), ((True,) * 5, False)):
+            self.git("checkout", "--", HISTORY.as_posix())
+            self.streak(outcomes, counts)
+            before = {n: (self.repo / HISTORY / n).read_bytes() for n in ("task_attempts.jsonl", "task_durations.jsonl")}
+            code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+            self.assertEqual(code, 1, out)
+            self.assertIn("qualification not met", out)
+            self.assertEqual(before, {n: (self.repo / HISTORY / n).read_bytes() for n in before})
+        self.git("checkout", "--", HISTORY.as_posix())
+        self.streak()
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=6")
+        self.assertEqual(code, 1, out)
+        self.assertIn("did not pass", out)  # the 6th-latest is the failed iteration
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=7")
+        self.assertEqual(code, 1, out)
+        self.assertIn("6 deploy-eligible branch attempt(s), qualification needs 7", out)
+
+    def test_a_later_predeploy_attempt_does_not_displace_the_streak(self):
+        self.streak()
+        deploy_run = {**self.qualified(self.TASK, True, "2026-10-21T16:05:00+00:00", "deploy-1", counts=False),
+                      "suite": "predeploy"}
+        self.write("task_attempts.jsonl", [deploy_run], append=True)
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+        self.assertEqual(code, 0, out)
+        kept = [r["agent_id"] for r in self.read("task_attempts.jsonl")[2:] if r["task"] == self.TASK]
+        self.assertEqual(kept, ["q-1", "q-2", "q-3", "q-4", "q-5", "deploy-1"])
+        self.assertEqual(self.run_tool("--check", "--qualify", f"{self.TASK}=5")[0], 0)
+
+    def test_qualify_counts_a_streak_split_across_the_base_file_and_a_shard(self):
+        # The streak's first runs sit in a per-writer shard, the rest in the shared base file
+        # (an older writer): the attempts ledger is one sequence, and the base file is restored.
+        self.streak()
+        base = self.repo / HISTORY / "task_attempts.jsonl"
+        lines = base.read_bytes().splitlines(keepends=True)
+        Path(history_ledger.shard_path(base, writer="earlier-run")).write_bytes(b"".join(lines[2:5]))
+        base.write_bytes(b"".join(lines[:2] + lines[5:]))
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+        self.assertEqual(code, 0, out)
+        kept = [r["agent_id"] for r in self.read("task_attempts.jsonl")[2:] if r["task"] == self.TASK]
+        self.assertEqual(kept, ["q-1", "q-2", "q-3", "q-4", "q-5"])
+        self.assert_base_files_untouched()
+        self.assertEqual(self.run_tool("--check", "--qualify", f"{self.TASK}=5")[0], 0)
+
+    def test_qualify_rejects_a_malformed_or_duplicate_task_spec(self):
+        for spec in ("code-agent-rose-repo", "code-agent-rose-repo=0", "=3", "code-agent-rose-repo=x"):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                self.run_tool("--qualify", spec)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.run_tool("--qualify", "t=1", "--qualify", "t=2")
 
 
 if __name__ == "__main__":

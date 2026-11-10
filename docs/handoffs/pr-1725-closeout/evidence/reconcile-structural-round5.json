@@ -1,0 +1,11 @@
+{
+ "kind": "local-supervisor-cleanup-v1",
+ "files": {
+  "request.json": "f4ede5c5d40d33d25895d25562bd3ebc2e4e268aea3dfe6a744646d4bf28e40e",
+  "result.json": "57fe9be7ba6e1bde4714d2ceea312da172be39989239c25d1d3504f5b8d6ea93",
+  "receipt.json": "1f5fe444fb48936165dad90f1bde3c740dd231bab5bd0d8bd9ab082fe43915d9",
+  "output.log.process.json": "69da3262c6623df7d3b429beaa4c5861a2d05345dc58478572b7c3205a559ad0"
+ },
+ "confirmed_at": 1793958001.2880144,
+ "observed_by": "deploy owner (Claude Opus/Sonnet 5.5 agent) read output.log.process.json: quiescent=true, remaining=[], kill_sent=[], all 6 term_sent/reaped descendants have wait records; no process references /home/boxes/deploy-workers/structural at confirmation time"
+}

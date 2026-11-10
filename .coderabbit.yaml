@@ -48,11 +48,11 @@ reviews:
     # Free-tier 150-file cap: anything below is covered by /deploy's local
     # gates (lint/tsc/structural/blackbox/smoke/semantic) and rarely contains
     # logic regressions worth a remote review pass.
-    # 1) Tests — already gated locally
-    - "!**/tests/**"
+    # 1) Tests — already gated locally; retain review of the raw Chromium launcher fixture
+    - "!**/tests/**/!(browser_tilion.blackbox.py)"
     - "!**/*.blackbox.ts"
     - "!**/*.blackbox.tsx"
-    - "!**/*.blackbox.py"
+    - "!**/!(browser_tilion).blackbox.py"
     - "!**/*.test.ts"
     - "!**/*.test.tsx"
     - "!**/*.test.py"
@@ -64,8 +64,11 @@ reviews:
     # 3) Prompt strings (no logic)
     - "!agents/tools/prompts/**"
     # 4) Docs, markdown, harness config
-    - "!docs/**"
-    - "!**/*.md"
+    # Keep this recovery utility and its records in review scope.
+    - "!docs/!(handoffs)/**"
+    - "!docs/handoffs/!(pr-1831-closeout|pr-1857-closeout|pr-1859-closeout|pr-1885-closeout|pr-1837-closeout)/**"
+    - "!*.md"
+    - "!**/!(pr-1831-closeout|pr-1857-closeout|pr-1859-closeout|pr-1885-closeout|pr-1837-closeout)/*.md"
     - "!.claude/**"
     - "!.coderabbit.yaml"
     - "!.gitignore"

@@ -44,6 +44,7 @@ export async function prepareAgentGraphWorkspace(
     ownerAgentId: input.ownerAgentId,
     sessionId: input.sessionId,
     provider: input.provider,
+    accountAccess: true,
   });
   return {
     files: [

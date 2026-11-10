@@ -20,11 +20,14 @@ unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
   CONDUCTOR_WORKSPACE_PATH \
   CONDUCTOR_PORT \
   BENCHMARK_ISOLATED_RUN \
+  ROSE_STABILITY_UNIT_IDENTITY \
   ROSE_DEPLOY_WORKTREE \
   ROSE_DEPLOY_WORKTREE_PATH \
   ROSE_DEPLOY_SOURCE_WORKSPACE \
   ROSE_USE_SYSTEM_PG \
-  TEMPORAL_TASK_QUEUE 2>/dev/null || true
+  TEMPORAL_TASK_QUEUE \
+  BOXES_DEVBOX \
+  CLOUD_ENV_BOXES_DEVBOX_ID 2>/dev/null || true
 # The host's real agent store would otherwise pin every default-path identity.
 export CLOUD_ENV_AGENT_STORE_DIR="$TMP_ROOT/no-agent-store"
 
@@ -101,6 +104,24 @@ isolated_benchmark_name=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '1p')
 isolated_benchmark_port=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '2p')
 expect_eq "$isolated_benchmark_name" "deploy-child-bench-run-123" "isolated benchmark preserves its child identity"
 expect_eq "$isolated_benchmark_port" "56220" "isolated benchmark preserves its reserved port range"
+
+stability_unit_name="$(
+  cd "$deploy_child"
+  ROSE_STABILITY_UNIT_IDENTITY=1 \
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=stab-123-0-abcdef \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$stability_unit_name" "stab-123-0-abcdef" "a stability unit keeps its own identity inside a deploy worktree"
+deploy_shell_name="$(
+  cd "$deploy_child"
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=stab-123-0-abcdef \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$deploy_shell_name" "deploy-child" "without the stability flag a deploy worktree still rehydrates its identity"
 
 cloud_workspace="$TMP_ROOT/cloud-checkout"
 mkdir -p "$cloud_workspace"
@@ -266,6 +287,62 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id
   expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a stale store id without its daemon is ignored"
   printf 'pid=%s\n' "$$" >"$fake_store/ready"
   expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a reused pid that is not the store daemon is ignored"
+)
+
+# boxes.dev: a snapshot clone shares the snapshot's boot id, so the devbox id is the
+# agent id there (BOXES_DEVBOX=1); Cursor's store daemon id keeps precedence.
+(
+  fixture="$TMP_ROOT/boxes-identity"
+  mkdir -p "$fixture/bin"
+  printf '#!/bin/sh\necho "{\\"schemaVersion\\":1,\\"ok\\":true,\\"email\\":\\"x@example.com\\",\\"devboxId\\":\\"${STUB_DEVBOX:-}\\"}"\n' >"$fixture/bin/dvb-onbox"
+  chmod +x "$fixture/bin/dvb-onbox"
+  agent_id() { env "$@" bash -c ". '$HELPER_SRC'; cloud_env_agent_id"; }
+  expect_eq "$(agent_id CLOUD_ENV_BOXES_DEVBOX_ID=dvb-test)" "dvb-test" "the boxes devbox id is the agent id (override)"
+  expect_eq "$(agent_id BOXES_DEVBOX=1 STUB_DEVBOX=dvb-real PATH="$fixture/bin:$PATH")" "dvb-real" "dvb-onbox whoami supplies the devbox id on boxes"
+  expect_eq "$(agent_id STUB_DEVBOX=dvb-real PATH="$fixture/bin:$PATH")" "" "without BOXES_DEVBOX=1 no devbox id is read"
+  expect_eq "$(agent_id BOXES_DEVBOX=1 PATH="$fixture/bin:$PATH")" "" "an empty devbox id is no id"
+  # clone vs original: the stamp written under one id re-keys under another, keeps its name under the same one.
+  ws="$fixture/ws"; mkdir -p "$ws"
+  boot=same-boot-id
+  CLOUD_ENV_BOXES_DEVBOX_ID=dvb-template bash -c ". '$HELPER_SRC'; write_cloud_env '$ws/.cloud-env' 3001 cloud-template '$ws' $boot dvb-template; echo 'export ROSE_USE_SYSTEM_PG=true' >>'$ws/.cloud-env'"
+  rekey() { CLOUD_ENV_BOXES_DEVBOX_ID="$1" bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$ws/.cloud-env' \"\$(cloud_env_agent_id)\" $boot" 2>/dev/null; sed -n 's/^export CONDUCTOR_WORKSPACE_NAME=//p' "$ws/.cloud-env"; }
+  expect_eq "$(rekey dvb-template)" "cloud-template" "the same devbox keeps its workspace name across reboot/resume"
+  clone_name="$(rekey dvb-clone)"
+  case "$clone_name" in cloud-template | "") echo "FAIL: a clone with another devbox id must re-key (got '$clone_name')" >&2; exit 1 ;; esac
+  echo "PASS: a clone with a different devbox id re-keys"
+  expect_eq "$(grep -c '^export ROSE_USE_SYSTEM_PG=true$' "$ws/.cloud-env")" "1" "re-keying keeps the system-Postgres selection"
+  expect_eq "$(rekey dvb-clone)" "$clone_name" "the re-keyed clone keeps its new name"
+  # no id (neither store nor devbox): the same boot keeps the name, as before.
+  expect_eq "$(CLOUD_ENV_BOXES_DEVBOX_ID= bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$ws/.cloud-env' '' $boot" 2>/dev/null; sed -n 's/^export CONDUCTOR_WORKSPACE_NAME=//p' "$ws/.cloud-env")" "$clone_name" "no id keeps the same-boot behaviour"
+)
+
+# The system-Postgres selection must be part of the re-keyed file the instant it replaces
+# the old one: any other reader (run.sh, startup scripts) sources .cloud-env unlocked, and a
+# second append step would let it pick Docker Postgres in between. Capture the file right
+# after the atomic mv, before anything else in refresh_cloud_env_identity can touch it.
+(
+  fixture="$TMP_ROOT/atomic-system-pg"
+  mkdir -p "$fixture"
+  seen_after_mv="$fixture/seen-after-mv"
+  rekey_snapshot() {
+    rm -f "$seen_after_mv"
+    bash -c ". '$HELPER_SRC'; mv() { command mv \"\$@\" && cp \"\${@: -1}\" '$seen_after_mv'; }; refresh_cloud_env_identity '$1' other-agent boot-atomic" 2>/dev/null
+  }
+  with_pg="$fixture/with-pg.cloud-env"
+  bash -c ". '$HELPER_SRC'; write_cloud_env '$with_pg' 3001 cloud-atomic '$fixture' boot-atomic first-agent; echo 'export ROSE_USE_SYSTEM_PG=true' >>'$with_pg'"
+  rekey_snapshot "$with_pg"
+  expect_eq "$(grep -c '^export ROSE_USE_SYSTEM_PG=true$' "$seen_after_mv")" "1" "the re-keyed file carries the system-Postgres selection from its first visible byte"
+  rekeyed_name="$(sed -n 's/^export CONDUCTOR_WORKSPACE_NAME=//p' "$with_pg")"
+  case "$rekeyed_name" in cloud-atomic | "") echo "FAIL: the atomic re-key test must actually re-key (got '$rekeyed_name')" >&2; exit 1 ;; esac
+  without_pg="$fixture/without-pg.cloud-env"
+  bash -c ". '$HELPER_SRC'; write_cloud_env '$without_pg' 3001 cloud-atomic '$fixture' boot-atomic first-agent"
+  rekey_snapshot "$without_pg"
+  expect_eq "$(grep -c ROSE_USE_SYSTEM_PG "$seen_after_mv")" "0" "re-keying never adds a system-Postgres selection the file did not have"
+  expect_eq "$(grep -c ROSE_USE_SYSTEM_PG "$without_pg")" "0" "a re-keyed file without the selection stays without it"
+  with_extra="$fixture/with-extra.cloud-env"
+  bash -c ". '$HELPER_SRC'; write_cloud_env '$with_extra' 3001 cloud-atomic '$fixture' boot-atomic first-agent 'export ROSE_USE_SYSTEM_PG=true'"
+  expect_eq "$(tail -n 1 "$with_extra")" "export ROSE_USE_SYSTEM_PG=true" "write_cloud_env writes an optional extra line with the identity"
+  expect_eq "$(sed -n 's/^export CONDUCTOR_PORT=//p' "$with_extra")" "3001" "the identity lines stay intact beside the extra line"
 )
 
 explicit_queue="$(

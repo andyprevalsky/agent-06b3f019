@@ -14,9 +14,12 @@
  */
 import { createElement } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 
+import { AppViewProvider } from '@/features/terminal-component-group/components/app-view/AppViewProvider';
+import { useAppView } from '@/features/terminal-component-group/components/app-view/appViewState';
 import { CodeAgentConversationView } from '@/features/terminal-component-group/components/code-agent-view/CodeAgentConversationView';
+import { CodeResourcesIndicator } from '@/features/terminal-component-group/components/CodeResourcesIndicator';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 import { clearCodeResources, publishCodeResources } from '@/lib/codeResources';
 import { supabase } from '@/lib/supabase';
@@ -182,7 +185,7 @@ describe('code-agent sandbox resources', () => {
     }
   });
 
-  it('code-agent view header: the same bars and popover lines', () => {
+  it('code-agent view query box corner: the same bars and popover lines', () => {
     deliver(sample());
     renderWithProviders(
       createElement(
@@ -196,17 +199,98 @@ describe('code-agent sandbox resources', () => {
             title: '3-state speed button',
             status: 'ACTIVE',
           },
-          readOnlyMessage: 'read only',
+          readOnlyMessage: null,
         }),
       ),
       { roseDesktop: true },
     );
-    const header = screen.getByTestId('code-agent-view-header');
+    // The devbox usage sits at the query box's top-right corner, not over the transcript.
+    expect(
+      within(screen.getByTestId('code-agent-view')).queryByTestId('code-resources'),
+    ).toBeNull();
+    const header = screen.getByTestId('query-input-corner-status');
     expect(bars(header)).toEqual([
       ['cpu', '36', 'false'],
       ['memory', '69', 'false'],
       ['disk', '91', 'true'],
     ]);
     expectReferenceLines(openPopover(header));
+  });
+
+  describe('the dev-preview link lives in this popover (no floating "Open app")', () => {
+    const PREVIEW = {
+      previewUrl: 'https://5173-abc.e2b.app/',
+      title: 'Snake game',
+      provider: 'claude' as const,
+    };
+
+    function OpenedTarget() {
+      return <span data-testid="opened-app">{useAppView()?.target?.taskId ?? ''}</span>;
+    }
+
+    function renderIndicator(running: boolean, preview?: typeof PREVIEW) {
+      return renderWithProviders(
+        <AppViewProvider userId="u1">
+          <CodeResourcesIndicator taskId="task-1" running={running} preview={preview} />
+          <OpenedTarget />
+        </AppViewProvider>,
+        { roseDesktop: true },
+      );
+    }
+
+    it('live with a sample: the same bars and lines plus ONE "Open app" link that opens this task', () => {
+      deliver(sample());
+      renderIndicator(true, PREVIEW);
+      const popover = openPopover(document.body);
+      expectReferenceLines(popover);
+      expect(within(popover).getAllByRole('button', { name: 'Open app' })).toHaveLength(1);
+      expect(screen.getByTestId('opened-app')).toHaveTextContent('');
+      fireEvent.click(within(popover).getByRole('button', { name: 'Open app' }));
+      expect(screen.getByTestId('opened-app')).toHaveTextContent('task-1');
+    });
+
+    it('the popover surface is opaque, like the nub info popover: nothing behind it bleeds through', () => {
+      deliver(sample());
+      renderIndicator(true, PREVIEW);
+      const classes = openPopover(document.body).className.split(/\s+/);
+      // The base popover's translucent glass (bg-[…]/80) is overridden by the opaque surface.
+      expect(classes).toContain('bg-background');
+      expect(classes).toContain('dark:bg-navi-black');
+      expect(classes.filter((name) => /^(dark:)?bg-\[.*\]\/\d+$/.test(name))).toEqual([]);
+    });
+
+    it('sandbox asleep (not running): the indicator stays for the link, with no measured values', () => {
+      deliver(sample());
+      renderIndicator(false, PREVIEW);
+      expect(bars(document.body)).toEqual([
+        ['cpu', '', 'false'],
+        ['memory', '', 'false'],
+        ['disk', '', 'false'],
+      ]);
+      const popover = openPopover(document.body);
+      expect(within(popover).queryByTestId('code-resources-cpu-value')).toBeNull();
+      expect(within(popover).queryByTestId('code-resources-updated')).toBeNull();
+      expect(within(popover).getAllByRole('button', { name: 'Open app' })).toHaveLength(1);
+    });
+
+    it('running before its first sample: only the link', () => {
+      renderIndicator(true, PREVIEW);
+      const popover = openPopover(document.body);
+      expect(within(popover).queryByTestId('code-resources-cpu-value')).toBeNull();
+      expect(within(popover).getAllByRole('button', { name: 'Open app' })).toHaveLength(1);
+    });
+
+    it('no preview, or a preview on the app origin: no link, and no indicator without a sample', () => {
+      renderIndicator(false);
+      expect(screen.queryByTestId('code-resources')).toBeNull();
+      cleanup();
+      renderIndicator(false, { ...PREVIEW, previewUrl: `${window.location.origin}/` });
+      expect(screen.queryByTestId('code-resources')).toBeNull();
+      cleanup();
+      deliver(sample());
+      renderIndicator(true);
+      const popover = openPopover(document.body);
+      expect(within(popover).queryByRole('button', { name: 'Open app' })).toBeNull();
+    });
   });
 });

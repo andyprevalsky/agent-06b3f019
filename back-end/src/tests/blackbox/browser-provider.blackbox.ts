@@ -1,8 +1,12 @@
 #!/usr/bin/env tsx
+import { runSteelAwareParity } from './browser-provider.steel-persistence-outage.support';
+import { steelPersistenceOutageCases } from './browser-provider.steel-persistence-outage.cases';
 
 import nodeAssert from 'node:assert/strict';
+import { tilionContractCases } from './browser-provider.tilion-contract.support';
+import { assertBrowserUseMissingHealth } from './browser-provider.browser-use-health.support';
 import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
-import { assertKernelProxyHealthFallback } from './browser-provider.kernel-health.support';
+import { kernelCoordinationCases } from './browser-provider.kernel-coordination.cases';
 import { createSessionWithContextUsingDependencies } from '../../providers/browser';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
@@ -33,11 +37,18 @@ import {
 } from './browser-provider-rotation.support';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
-import { runLiveCrossProviderCases } from './browser-provider.tilion-live-cases.support';
+import {
+  gateOverridden,
+  KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
+  logOverriddenLiveCase,
+  runLiveCrossProviderCases,
+} from './browser-provider.tilion-live-cases.support';
 import { runLiveTilionHarvest } from './browser-provider.tilion-harvest.live';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
+import { assertStaleProxyCreateFailureIsLabeled } from './browser-provider-proxy-error-label.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
+import { tilionDnsWorkerCases } from './browser-provider.tilion-dns-worker.support';
 import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
   createBrowserUseRecoverySession,
@@ -49,14 +60,19 @@ import {
 } from '../../providers/browser/browserUse';
 
 const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
+// Real-internet Kernel/Steel/Tilion cases: deploy live-probe stage browser-provider-live only.
+const LIVE_PROVIDERS = process.env.BROWSER_PROVIDER_LIVE === '1';
 const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  ...steelPersistenceOutageCases,
+  ...tilionContractCases,
   [
-    'Kernel proxy health errors preserve bounded geo fallback and cache custody',
-    assertKernelProxyHealthFallback,
+    'Browser Use missing health is terminal, while other failures remain errors',
+    assertBrowserUseMissingHealth,
   ],
+  ...kernelCoordinationCases,
   [
     'Steel first-profile replacement preserves its full binding and the source on failure',
     assertSteelProfileReplacementLifecycle,
@@ -413,6 +429,11 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   ],
   ['Kernel SDK request timeouts trigger location fallback', assertKernelTimeoutFallback],
   [
+    'stale-proxy leg labels a rejected throwaway Kernel proxy create with the call, tier and config',
+    assertStaleProxyCreateFailureIsLabeled,
+  ],
+  ...tilionDnsWorkerCases,
+  [
     'Kernel navigation retries only transient proxy failures',
     () => {
       assert(
@@ -437,6 +458,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
 
 async function main(): Promise<void> {
   let failed = 0;
+  let steelPersistenceSkipped = false;
   for (const [name, test] of tests) {
     try {
       await test();
@@ -568,21 +590,25 @@ async function main(): Promise<void> {
   if (browserUseFlagBeforeContractTests === undefined)
     delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
   else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = browserUseFlagBeforeContractTests;
-  try {
-    await runLiveProviderParity();
-    if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');
-  } catch (error) {
+  if (LIVE_PROVIDERS && !process.env.TEST_BASE_URL) {
     failed++;
-    console.error(
-      `FAIL live Kernel provider parity: ${error instanceof Error ? error.message : String(error)}`
+    console.error('FAIL live provider cases: BROWSER_PROVIDER_LIVE=1 requires TEST_BASE_URL');
+  } else if (LIVE_PROVIDERS && gateOverridden(KERNEL_RESIDENTIAL_LIVE_OVERRIDE)) {
+    logOverriddenLiveCase(
+      'live Kernel provider parity',
+      KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
+      'Kernel residential proxy unavailable'
     );
-  }
-
-  failed += await runLiveCrossProviderCases();
+  } else if (LIVE_PROVIDERS) {
+    const parity = await runSteelAwareParity(runLiveProviderParity, true);
+    failed += parity.failed;
+    steelPersistenceSkipped = parity.skipped;
+  } else console.log('Live provider cases run in the browser-provider-live deploy probe.');
+  if (LIVE_PROVIDERS) failed += await runLiveCrossProviderCases();
 
   if (failed > 0) process.exit(1);
   console.log(
-    `\nPassed ${tests.length + (process.env.TEST_BASE_URL ? 1 : 0)} browser provider test(s).`
+    `\nPassed ${tests.length + (LIVE_PROVIDERS && !steelPersistenceSkipped ? 1 : 0)} browser provider test(s).${steelPersistenceSkipped ? ' Steel profile-persistence live operation SKIPPED; parity is incomplete.' : ''}`
   );
 }
 

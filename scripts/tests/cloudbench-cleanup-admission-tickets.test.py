@@ -233,6 +233,72 @@ class CohortTickets(unittest.TestCase):
     def assert_ok(self,result):
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
+    def stale_standalone_fixture(self, mode='dead'):
+        import hashlib
+        fixture=TicketFixture(self,14)
+        (fixture.root/'free-kib').write_text(str(6500*1024))
+        legacy=Path('/tmp')/('rose-cloudbench-cleanup-admission-'+str(os.getuid()))/str(fixture.device)
+        legacy.mkdir(parents=True,mode=0o700)
+        groups={}
+        guard_pids=[]
+        for index in range(10):
+            owner=fixture.owner();stamp=birth(owner.pid)
+            if mode not in ('live','reused'):
+                owner.stdin.close();owner.wait(timeout=3)
+            if mode=='reused':stamp='proc-start:00000000-0000-0000-0000-000000000000:1'
+            if mode=='malformed-pid':pid=True
+            else:pid=owner.pid
+            if mode=='malformed-birth':stamp='unverifiable birth'
+            if mode=='legacy-date':stamp='Sat Nov 7 18:33:07 2026'
+            key=hashlib.sha256(('standalone-'+str(index)).encode()).hexdigest();member='standalone-'+key
+            groups[key]=dict(directory=None,parent_lock_identity=None,members=[member],consumed={member:dict(pid=pid,birth=stamp)},preferred=512,minimum=32,headroom=256)
+            if mode=='pending':groups[key]['consumed']={}
+            if mode=='cohort':groups[key]['directory']=str(fixture.root/'prior-cohort')
+            if mode=='malformed-member':groups[key]['members']=['unknown-member']
+            if mode=='malformed-group':groups[key]['unknown']='unsupported'
+            if mode in ('permission','birth-error'):guard_pids.append(owner.pid)
+        if guard_pids:
+            with (fixture.transport/'sitecustomize.py').open('a') as stream:
+                stream.write("\nfrom pathlib import Path\n_old_read=Path.read_text\n_guard_paths="+repr({'/proc/'+str(pid)+'/stat' for pid in guard_pids})+"\ndef read_guard(self,*args,**kwargs):\n if str(self) in _guard_paths:raise "+('PermissionError' if mode=='permission' else 'OSError')+"('fixture unknown owner')\n return _old_read(self,*args,**kwargs)\nPath.read_text=read_guard\n")
+        state=dict(version=2,groups=groups,inflight={},failures={})
+        if mode=='inflight':
+            key=next(iter(groups));record=next(iter(groups[key]['consumed'].values()))
+            state['inflight']['opaque-debit']=dict(group=key,job=groups[key]['members'][0],pid=record['pid'],birth=record['birth'],allocator_pid=record['pid'],allocator_birth=record['birth'],path=str(fixture.root/'unconfirmed-reserve'),identity=[1,1],amount=4096)
+        path=legacy/'state.json';path.write_text(json.dumps(state,sort_keys=True));before=path.read_bytes()
+        result=fixture.prepare(['--preferred',512,'--minimum',32,'--headroom',256])
+        self.assertEqual(path.read_bytes(),before,'capacity observation mutated historical ledger')
+        if mode in ('dead','legacy-date'):
+            self.assert_ok(result)
+            budget=json.loads((fixture.cohort/'cleanup-budget/budget.json').read_text())
+            self.assertEqual((budget['preferred'],budget['minimum'],budget['headroom'],budget['job_count']),(512,32,256,14))
+            self.assertGreaterEqual(budget['amount'],32)
+        else:
+            self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertFalse((fixture.cohort/'cleanup-budget/budget.json').exists())
+            if mode.startswith('malformed'):self.assertIn('invalid legacy',result.stderr)
+
+    def test_retired_standalone_headroom_does_not_block_fourteen_floors(self):
+        self.stale_standalone_fixture()
+
+    def test_native_ps_unknown_or_failed_absence_never_releases_headroom(self):
+        import runpy
+        from unittest import mock
+        function=runpy.run_path(str(MODULE))['legacy_owner_absent']
+        owner=dict(pid=os.getpid(),birth=birth(os.getpid()))
+        with mock.patch.dict(function.__globals__,birth=lambda _pid:''),mock.patch.object(Path,'exists',return_value=False):
+            for code,stdout,stderr,expected in ((1,'','',True),(0,'','',False),(1,'warning','',False),(1,'','warning',False),(2,'','',False)):
+                with self.subTest(code=code,stdout=stdout,stderr=stderr),mock.patch.object(subprocess,'run',return_value=subprocess.CompletedProcess(['ps'],code,stdout,stderr)):
+                    self.assertEqual(function(owner),expected)
+            with mock.patch.object(subprocess,'run',side_effect=OSError('fixture unavailable process observation')):
+                self.assertFalse(function(owner))
+
+    def test_retired_legacy_date_birth_also_releases_only_headroom(self):
+        self.stale_standalone_fixture('legacy-date')
+
+    def test_live_reused_unknown_pending_cohort_and_inflight_liability_is_preserved(self):
+        for mode in ('live','reused','permission','birth-error','pending','cohort','inflight','malformed-pid','malformed-birth','malformed-member','malformed-group'):
+            with self.subTest(mode=mode):self.stale_standalone_fixture(mode)
+
     def test_selected_job_access_is_bounded_at_ten_thousand_members(self):
         counts=[]
         for width in (8,10000):

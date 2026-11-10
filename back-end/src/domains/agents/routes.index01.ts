@@ -5,9 +5,11 @@
  * Accepts JSON or multipart; audio files are archived to the user's storage
  * (index01-recording_*) for later reprocessing. Payloads without a transcript (test events, recording-only) are acknowledged
  * and their key/type outline is logged so the schema stays observable.
+ * POST /api/index01/credentials returns the values the in-app setup guide shows.
  */
 
 import { Router, type Request } from 'express';
+import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { getClientIP } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -21,9 +23,12 @@ import {
   spawnIndex01Agent,
 } from './agentMcpService';
 import { index01WebhookUpload } from './config';
+import { getOrCreateIndex01Credentials } from './index01CredentialsService';
+import * as routeGuards from './routes.guards';
 
 const log = createLogger('Index01Webhook');
 const router = Router();
+const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 
 function roseApiKeyFrom(req: Request): string | undefined {
   const header = req.headers.authorization;
@@ -31,6 +36,21 @@ function roseApiKeyFrom(req: Request): string | undefined {
   const apiKey = req.headers['x-api-key'];
   return typeof apiKey === 'string' && apiKey !== '' ? apiKey : undefined;
 }
+
+// Setup guide: the signed-in user's webhook URL + Authorization header for the Index app.
+router.post(
+  '/credentials',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    if (routeGuards.rejectAnonymousCreate(req, res, 'Login required to connect Index 01')) return;
+    if (await routeGuards.rejectGatedCreate(req, res)) return;
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    res.json(await getOrCreateIndex01Credentials(req.userId));
+  })
+);
 
 router.post(
   '/webhook',

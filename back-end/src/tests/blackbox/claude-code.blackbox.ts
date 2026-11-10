@@ -57,8 +57,24 @@
  *   npx tsx src/tests/blackbox/claude-code.blackbox.ts
  */
 
+import {
+  assertSmokeSettings,
+  deleteSmokeParent,
+  liveSessionSettings,
+  type SmokeParent,
+  smokeParentAgent,
+} from './code-agent-settings-smoke.support';
 import { config } from 'dotenv';
 import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
+import {
+  ClaudeSmokeUserActionSkip,
+  SANDBOX_PROOF,
+  SMOKE_SKIP_BANNER,
+  type TestResult,
+  resultLine,
+  runTest,
+  summarizeResults,
+} from './claude-code-smoke-outcome.support';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
@@ -129,13 +145,6 @@ interface CapturedCall {
 
 // ==================== TEST INFRASTRUCTURE ====================
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
-
 interface TestContext {
   captureAvailable: boolean;
 }
@@ -170,21 +179,6 @@ function apiKeyHeaders(userId?: string): Record<string, string> {
   const h: Record<string, string> = { 'X-API-Key': API_KEY };
   if (userId) h['X-User-Id'] = userId;
   return h;
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }
 
 function assertStatus(actual: number, expected: number, data: unknown): void {
@@ -854,6 +848,25 @@ async function testCreate_githubWithoutUserId() {
   assert(body.code === 'MISSING_USER_ID', `Expected code MISSING_USER_ID, got ${body.code}`);
 }
 
+/**
+ * The GitHub access check reads the shared GitHub core quota. When another run has drained it, the endpoint answers
+ * with its typed 429 (not a denial) and stops before E2B; that is the contract's rate-limit answer, and the dedicated
+ * github-rate-limit blackbox pins its body against real GitHub responses. Accept it only in this exact typed shape.
+ */
+function isTypedGithubRateLimit(res: { status: number; data: unknown }): boolean {
+  const body = (res.data ?? {}) as {
+    code?: unknown;
+    reset_at?: unknown;
+    retry_after_seconds?: unknown;
+  };
+  return (
+    res.status === 429 &&
+    body.code === 'GITHUB_RATE_LIMITED' &&
+    typeof body.reset_at === 'string' &&
+    typeof body.retry_after_seconds === 'number'
+  );
+}
+
 async function testCreate_githubAccessDenied() {
   const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
     method: 'POST',
@@ -865,6 +878,12 @@ async function testCreate_githubAccessDenied() {
       user_id: FAKE_UUID,
     }),
   });
+  if (isTypedGithubRateLimit(res)) {
+    console.log(
+      '    [info] GitHub core quota drained: access check answered with the typed 429, not a denial'
+    );
+    return;
+  }
   // No GithubRepoAccess record → 403
   assertStatus(res.status, 403, res.data);
   const body = res.data as { error: string; code?: string };
@@ -1275,8 +1294,8 @@ async function testBoundary_githubAccessCheckDeniesMissingRepo() {
   await new Promise((r) => setTimeout(r, 200));
   const calls = await readCapturesForToken(captureToken);
   assert(
-    res.status === 403,
-    `Expected 403 GITHUB_ACCESS_DENIED for missing repo, got ${res.status}: ${JSON.stringify(res.data).substring(0, 200)}`
+    res.status === 403 || isTypedGithubRateLimit(res),
+    `Expected 403 GITHUB_ACCESS_DENIED (or the typed GitHub rate limit) for missing repo, got ${res.status}: ${JSON.stringify(res.data).substring(0, 200)}`
   );
   const e2bCalls = filterInfraCalls(calls).filter((c) => c.url.includes('e2b.app'));
   assert(
@@ -1415,7 +1434,16 @@ async function testSmokeCredentialFailureClassifier() {
 
 async function testSmoke_claudeCodeAnswersQuestion() {
   await ensureSmokeUserClaudeCredentials();
+  // The parent's tier and Fast Mode button decide the CLI model, effort and speed.
+  const parent = await smokeParentAgent(DEV_USER_ID);
+  try {
+    await claudeSmokeFromParent(parent);
+  } finally {
+    await deleteSmokeParent(parent);
+  }
+}
 
+async function claudeSmokeFromParent(parent: SmokeParent) {
   // 1. Create a real session with a simple math question.
   // Pass user_id so the backend resolves per-user Claude Code credentials
   // (ANTHROPIC_API_KEY fallback uses a stale key that won't authenticate).
@@ -1423,7 +1451,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
-      agent_id: crypto.randomUUID(),
+      agent_id: parent.agentId,
       goal: handoffSmokeGoal(
         'Create /home/user/output/claude-smoke.txt containing exactly CLAUDE_E2B_OK. Then reply with exactly CLAUDE_E2B_DONE.'
       ),
@@ -1437,17 +1465,18 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         : typeof res.data === 'string'
           ? res.data
           : JSON.stringify(res.data ?? {});
+    // Only the user can fix these: a loud SKIP with its evidence, never a PASS.
     if (error.includes(CODE_AGENT_CREDENTIALS_UNAVAILABLE)) {
-      console.log(
-        '    [skip] Claude E2B smoke could not start: code-agent credentials unavailable (credits/cooldown/auth)'
+      throw new ClaudeSmokeUserActionSkip(
+        'credential',
+        `session create ${res.status}: code-agent credentials unavailable (credits/cooldown/auth): ${error.slice(0, 200)}`
       );
-      return;
     }
     if (isClaudeSmokeFundingFailure(error)) {
-      console.log(
-        `    [skip] Claude E2B smoke could not start: external funding/billing block (${res.status}); signal: ${error.slice(0, 200)}`
+      throw new ClaudeSmokeUserActionSkip(
+        'billing',
+        `session create ${res.status}: external funding/billing block: ${error.slice(0, 200)}`
       );
-      return;
     }
   }
   assertStatus(res.status, 200, res.data);
@@ -1466,11 +1495,14 @@ async function testSmoke_claudeCodeAnswersQuestion() {
   let wsConnected = false;
   let wsError: string | null = null;
 
-  // eslint-disable-next-line no-control-regex
-  const ANSI_CURSOR_FWD = /\x1b\[\d*C/g;
-  const ANSI_OTHER =
-    // eslint-disable-next-line no-control-regex
-    /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[?]?[0-9;]*[hl]/g;
+  // ANSI escape (ESC) and terminator (BEL) built from char codes, so no regex literal holds a control char.
+  const ESC = String.fromCharCode(0x1b);
+  const BEL = String.fromCharCode(0x07);
+  const ANSI_CURSOR_FWD = new RegExp(`${ESC}\\[\\d*C`, 'g');
+  const ANSI_OTHER = new RegExp(
+    `${ESC}\\[[0-9;]*[a-zA-Z]|${ESC}\\][^${BEL}]*${BEL}|${ESC}[()][A-Z0-9]|${ESC}\\[[?]?[0-9;]*[hl]`,
+    'g'
+  );
 
   const ws = new (await import('ws')).default(body.ws_url);
 
@@ -1506,8 +1538,14 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         }
         // Strip ANSI codes to get clean text
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
+        // A CLI that already exited (live 2026-10-28: "Claude Code 2.1.138 does
+        // not support this model") answers now instead of after the 240s timeout.
+        // The sentinel counts only in the CLI's final result line: every task
+        // starts as `/goal <task>`, and the CLI echoes that condition (which
+        // names the sentinel) before it has done any work.
         if (
-          clean.includes('CLAUDE_E2B_DONE') ||
+          msg.type === 'exit' ||
+          /\[Claude result\][^\n]*CLAUDE_E2B_DONE/.test(clean) ||
           isClaudeSmokeCredentialFailure(clean) ||
           isClaudeSmokeFundingFailure(clean)
         ) {
@@ -1534,25 +1572,31 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
     if (isClaudeSmokeCredentialFailure(finalOutput)) {
-      console.log(
-        '    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)'
+      throw new ClaudeSmokeUserActionSkip(
+        'credential',
+        `sandbox ${body.sandbox_id} reached the SDK server, but the configured Claude credential is invalid (401): ${finalOutput.slice(-200)}`
       );
-      return;
     }
-    // Same credential-health class as Anthropic WARN: exhausted API / OpenRouter
-    // credits are not a harness regression. Subscription/OAuth tokens are preferred;
-    // when only a depleted funded path is available, skip rather than fail /deploy
-    // (and do not burn the 240s timeout on a known 402).
+    // Exhausted API / OpenRouter credits are a billing block only the user can fix:
+    // a loud SKIP that never counts as a pass (and does not burn the 240s timeout on a known 402).
     if (isClaudeSmokeFundingFailure(finalOutput)) {
-      console.log(
-        '    [skip] Claude E2B smoke reached the SDK server, but Claude/OpenRouter credits are exhausted'
+      throw new ClaudeSmokeUserActionSkip(
+        'billing',
+        `sandbox ${body.sandbox_id} reached the SDK server, but Claude/OpenRouter credits are exhausted: ${finalOutput.slice(-200)}`
       );
-      return;
     }
     assert(
       finalOutput.includes('CLAUDE_E2B_DONE'),
       `Claude Code output does not contain CLAUDE_E2B_DONE: ${finalOutput.slice(-300)}`
     );
+    console.log(`    ↳ ${SANDBOX_PROOF} ${body.sandbox_id}`);
+    // What the run really served: the session's own effective settings.
+    const proof = assertSmokeSettings(
+      'claude',
+      parent,
+      await liveSessionSettings(body.ws_url, taskId)
+    );
+    console.log(`    ↳ claude smoke ${proof}`);
     assert(
       wsEvents.some((event) => {
         const typed = event as { provider?: string; type?: string };
@@ -1612,7 +1656,8 @@ async function testCreate_withGithubRepoAndUserId() {
       github_repo_url: 'https://github.com/nonexistent/repo',
     }),
   });
-  // Should get 400 (validation), 403 (no GitHub access), or 500 (E2B failure)
+  // Should get 400 (validation), 403 (no GitHub access), or 500 (E2B failure); a drained GitHub quota answers 429
+  if (isTypedGithubRateLimit(res)) return;
   if (res.status !== 400 && res.status !== 403 && res.status !== 500) {
     throw new Error(`Expected 400/403/500 for github access check, got ${res.status}`);
   }
@@ -1835,8 +1880,7 @@ async function runAll() {
   const parallelResults = await runPool(parallelTests, CASE_CONCURRENCY);
 
   for (const r of parallelResults) {
-    const icon = r.passed ? '  PASS' : '  FAIL';
-    console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
+    console.log(resultLine(r));
   }
 
   // Phase 3: Sequential boundary capture tests
@@ -1878,10 +1922,7 @@ async function runAll() {
   for (const test of sequentialTests) {
     const result = await runTest(test.name, test.fn);
     sequentialResults.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
+    console.log(resultLine(result));
   }
 
   // Phase 4: Smoke tests (real E2B sandbox)
@@ -1897,10 +1938,7 @@ async function runAll() {
     for (const test of smokeTests) {
       const result = await runTest(test.name, test.fn);
       smokeResults.push(result);
-      const icon = result.passed ? '  PASS' : '  FAIL';
-      console.log(
-        `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-      );
+      console.log(resultLine(result));
     }
   } else {
     console.log('\nSkipping Claude Code smoke tests (BLACKBOX_SMOKE!=1)');
@@ -1908,20 +1946,30 @@ async function runAll() {
 
   // Summary
   const allResults = [...parallelResults, ...sequentialResults, ...smokeResults];
-  const passed = allResults.filter((r) => r.passed).length;
-  const failed = allResults.filter((r) => !r.passed).length;
+  const summary = summarizeResults(allResults);
 
   console.log('\n' + '='.repeat(50));
-  console.log(`\nResults: ${passed} passed, ${failed} failed, ${allResults.length} total`);
+  console.log(
+    `\nResults: ${summary.passed} passed, ${summary.failed} failed, ${summary.skipped} skipped, ${allResults.length} total`
+  );
 
-  if (failed > 0) {
+  if (summary.failed > 0) {
     console.log('\nFAILURES:');
-    allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
-    process.exit(1);
+    allResults
+      .filter((r) => !r.passed && r.skipped === undefined)
+      .forEach((r) => console.log(`   ${r.name}: ${r.error}`));
   }
-
-  console.log('\nALL CLAUDE-CODE BLACK-BOX TESTS PASSED\n');
-  process.exit(0);
+  // A credential/billing block only the user can fix is a loud SKIP, never a pass.
+  if (summary.skipped > 0) {
+    console.log(`\n${SMOKE_SKIP_BANNER}`);
+    allResults
+      .filter((r) => r.skipped !== undefined)
+      .forEach((r) => console.log(`   ${r.name}: ${r.skipped?.kind}: ${r.skipped?.evidence}`));
+  }
+  if (summary.exitCode === 0) {
+    console.log('\nALL CLAUDE-CODE BLACK-BOX TESTS PASSED\n');
+  }
+  process.exit(summary.exitCode);
 }
 
 runAll().catch((error) => {

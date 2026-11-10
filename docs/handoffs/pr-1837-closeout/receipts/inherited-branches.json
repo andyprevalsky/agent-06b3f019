@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1770/local-branches-main-base-v2.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "17e50a1d117ff88d57e1ffad7cb4016743b5ae663cfb7502db2c82f3f4c8268e",
+  "gzip_sha256": "34191d67c94475fdad3bd84caa011d0d5f753f903f2d01f5f60f28ae301ba24b",
+  "stored_bytes": 3239535,
+  "frames": 1,
+  "files": 4,
+  "original_bytes": 3347207,
+  "manifest_sha256": "973009c1eb561ff31607aa4395fdfdc0fbb3c3e079ca2d1e36fc44ae4cee5a98",
+  "full_readback_verified": true
+}

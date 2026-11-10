@@ -1,11 +1,91 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
-import { checkSync } from 'recheck';
+import { check } from 'recheck';
 
 import { checkPatternSafety, translateWordBoundaries } from '../../domains/data/regexSafety';
 
-function run(): void {
+async function testFiniteLiteralAlternations(): Promise<void> {
+  for (const flags of ['', 'i', 'm', 's', 'ims']) {
+    for (const pattern of [
+      'Project Sync|Lease',
+      'alpha|beta|gamma',
+      'a|aa|aaa',
+      'é|日本語|😀',
+      String.raw`a\|b|c`,
+      String.raw`a\\b|c`,
+      String.raw`a\.b|c\+d`,
+    ]) {
+      assert.equal(
+        (await checkPatternSafety(pattern, flags, 0)).ok,
+        true,
+        `finite literal alternation must not depend on analyzer scheduling: ${pattern} /${flags}`
+      );
+    }
+  }
+  for (const pattern of [
+    'a|b+',
+    'a+|b',
+    'a|b+|c',
+    'a|(b+)+',
+    '(a+)+|b',
+    'a|.*',
+    '.*|a',
+    'a|[b]',
+    'a|(b)',
+    'a|^b',
+    'a|b$',
+    'a|(?=b)',
+    String.raw`a|\1`,
+    String.raw`a|\w`,
+    String.raw`a|\x61`,
+    String.raw`a|\u0061`,
+    String.raw`a|\k<name>`,
+    'a|b\\',
+    '|a',
+    'a|',
+    'a||b',
+    String.raw`a\|b|c+`,
+    String.raw`a\q|b`,
+  ]) {
+    assert.equal(
+      (await checkPatternSafety(pattern, '', 0)).ok,
+      false,
+      `an unproved alternative must remain analyzer-owned: ${pattern}`
+    );
+  }
+  assert.equal(
+    (await checkPatternSafety(String.raw`a\|b`, '', 0)).ok,
+    true,
+    'escaped pipe remains a literal under the existing linear proof'
+  );
+  assert.equal(
+    (await checkPatternSafety('a|b', 'u', 0)).ok,
+    false,
+    'unproved flags remain analyzer-owned'
+  );
+  assert.equal(
+    (await checkPatternSafety('a'.repeat(1000) + '|b', '', 0)).ok,
+    false,
+    'the existing length cap precedes local proof'
+  );
+  let calls = 0;
+  assert.equal(
+    (
+      await checkPatternSafety('a|b', '', () => {
+        calls += 1;
+        return Promise.resolve({ status: 'unknown' }) as ReturnType<typeof check>;
+      })
+    ).ok,
+    false,
+    'explicit analyzer seam still overrides every local proof'
+  );
+  assert.equal(calls, 3, 'explicit analyzer seam retains existing retry count');
+  process.stdout.write('PASS finite literal alternation safety proof\n');
+}
+
+async function run(): Promise<void> {
+  await testFiniteLiteralAlternations();
   for (const pattern of [
     String.raw`\\bpassport\\b`,
     String.raw`[\b]`,
@@ -56,16 +136,16 @@ function run(): void {
       }
     }
   }
-  assert.equal(checkPatternSafety('(.*a){20}$', '').ok, false);
-  assert.equal(checkPatternSafety('meeting.*tomorrow', '').ok, true);
+  assert.equal((await checkPatternSafety('(.*a){20}$', '')).ok, false);
+  assert.equal((await checkPatternSafety('meeting.*tomorrow', '')).ok, true);
   assert.equal(
-    checkPatternSafety('Multiline incident START.*incident END', 's', 0).ok,
+    (await checkPatternSafety('Multiline incident START.*incident END', 's', 0)).ok,
     true,
     'a provably linear single-wildcard pattern must not depend on analyzer scheduling'
   );
   for (const pattern of ['\\$[0-9,]+(\\.[0-9]{2})?', '[\\w.]+@[\\w.]+', '\\bphase-[0-9]+\\b']) {
     assert.equal(
-      checkPatternSafety(pattern, '', 0).ok,
+      (await checkPatternSafety(pattern, '', 0)).ok,
       true,
       `a syntactically proven degree-at-most-two pattern must not depend on analyzer scheduling: ${pattern}`
     );
@@ -83,7 +163,7 @@ function run(): void {
     '[A-Z]+[0-9]+[A-Z]+[0-9]+X',
   ]) {
     assert.equal(
-      checkPatternSafety(pattern, '', 0).ok,
+      (await checkPatternSafety(pattern, '', 0)).ok,
       false,
       `a collation-dependent range must never be locally proven disjoint: ${pattern}`
     );
@@ -96,7 +176,7 @@ function run(): void {
     '[A-Z]{2,4}-[0-9]{2,5}',
   ]) {
     assert.equal(
-      checkPatternSafety(pattern, '').ok,
+      (await checkPatternSafety(pattern, '')).ok,
       true,
       `a realistic range-based query must stay usable via the analyzer: ${pattern}`
     );
@@ -118,23 +198,23 @@ function run(): void {
     '[A-\\w]+x[A-\\w]+x[A-\\w]+X',
   ]) {
     assert.equal(
-      checkPatternSafety(pattern, '', 0).ok,
+      (await checkPatternSafety(pattern, '', 0)).ok,
       false,
       `an ambiguous repetition chain must remain analyzer-owned and fail closed: ${pattern}`
     );
   }
 
-  // An invalid runtime value makes recheck throw synchronously, exercising the
-  // same fail-closed branch used when its bounded analysis times out.
-  const analyzerFailure = checkPatternSafety('ordinary text', null as unknown as string);
+  // An invalid runtime value makes recheck reject, exercising the same
+  // fail-closed branch used when its bounded analysis times out.
+  const analyzerFailure = await checkPatternSafety('ordinary text', null as unknown as string);
   assert.equal(analyzerFailure.ok, false, 'analyzer failures must reject the unclassified pattern');
   assert.match(analyzerFailure.reason ?? '', /safety analysis did not complete/);
 
-  const analyzerTimeout = checkPatternSafety('(.*a){20}$', '', 0);
+  const analyzerTimeout = await checkPatternSafety('(.*a){20}$', '', 0);
   assert.equal(analyzerTimeout.ok, false, 'unknown timeout diagnostics must fail closed');
   assert.match(analyzerTimeout.reason ?? '', /safety analysis did not complete/);
 
-  const injectedAnalyzerFailure = checkPatternSafety('safe-looking-pattern', '', () => {
+  const injectedAnalyzerFailure = await checkPatternSafety('safe-looking-pattern', '', () => {
     throw new Error('simulated analyzer timeout');
   });
   assert.deepEqual(injectedAnalyzerFailure, {
@@ -145,16 +225,16 @@ function run(): void {
 
   let analyzerAttempts = 0;
   const analyzerTimeouts: number[] = [];
-  const recoveredAfterLoadTimeout = checkPatternSafety('(invoice|receipt|order)\\s+#?[0-9]+', '', ((
-    _source: string,
-    _flags: string,
-    options: { timeout: number }
-  ) => {
-    analyzerAttempts += 1;
-    analyzerTimeouts.push(options.timeout);
-    if (analyzerAttempts === 1) throw new Error('simulated load-induced analyzer timeout');
-    return { status: 'safe' };
-  }) as typeof checkSync);
+  const recoveredAfterLoadTimeout = await checkPatternSafety(
+    '(invoice|receipt|order)\\s+#?[0-9]+',
+    '',
+    ((_source: string, _flags: string, options: { timeout: number }) => {
+      analyzerAttempts += 1;
+      analyzerTimeouts.push(options.timeout);
+      if (analyzerAttempts === 1) throw new Error('simulated load-induced analyzer timeout');
+      return Promise.resolve({ status: 'safe' });
+    }) as unknown as typeof check
+  );
   assert.equal(analyzerAttempts, 2, 'a single analyzer timeout must be retried once');
   assert.ok(
     analyzerTimeouts.every((timeout) => timeout <= 1000),
@@ -166,7 +246,41 @@ function run(): void {
     'a realistic range query must stay usable after one analyzer timeout'
   );
 
+  // The 1000 ms deadline is wall-clock: recheck never settles a call whose agent
+  // died, and queued requests start its own timeout only when they run.
+  const unclassifiedAfterDeadline = async (analyzer: typeof check, label: string) => {
+    const startedAt = Date.now();
+    let watchdog: NodeJS.Timeout | undefined;
+    const verdict = await Promise.race([
+      checkPatternSafety('safe-looking-pattern', '', analyzer),
+      new Promise<never>((_resolve, reject) => {
+        watchdog = setTimeout(() => reject(new Error(`${label}: never settled`)), 3000);
+      }),
+    ]).finally(() => clearTimeout(watchdog));
+    const elapsed = Date.now() - startedAt;
+    assert.equal(verdict.ok, false, `${label}: an unsettled analysis must fail closed`);
+    assert.match(verdict.reason ?? '', /safety analysis did not complete/);
+    assert.ok(elapsed < 1500, `${label}: settled after ${elapsed} ms, past the 1000 ms deadline`);
+  };
+  await unclassifiedAfterDeadline(
+    (() => new Promise(() => undefined)) as unknown as typeof check,
+    'dead analyzer agent'
+  );
+  const signals: AbortSignal[] = [];
+  await unclassifiedAfterDeadline(
+    ((_source: string, _flags: string, options: { signal: AbortSignal }) => {
+      signals.push(options.signal);
+      return new Promise(() => undefined);
+    }) as unknown as typeof check,
+    'queued analysis'
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(
+    signals.length > 0 && signals.every((signal) => signal.aborted),
+    'every analysis must be told to abort by its deadline, so the agent stops working on it'
+  );
+
   process.stdout.write('PASS regex safety rejects dangerous and unclassified patterns\n');
 }
 
-run();
+void run();

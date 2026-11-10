@@ -1,0 +1,133 @@
+{
+  "format": "PR1857-PRESERVATION-PREP-V1",
+  "prepared_at": "2026-11-08T22:17:50.826953+00:00",
+  "pr": 1857,
+  "source_head_at_cutoff": "cf85beba8d87fa02212065c0560f32198f09de01",
+  "scope": "Finite .context/rca-784d snapshot and inherited local-only refs; not whole-devbox readiness",
+  "deletion_ready": false,
+  "archives": {
+    "rca_initial": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1857-rca784d/20261108T221605Z-initial.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "bc27d4b6d4125f9f5d1b9d92240aabddb1157b42b20165dd82a0e7b08985fb9c",
+      "gzip_sha256": "78d3e9411b5815029f78279770386d8d01e84f9967a5860d3cc44d2466a3a9b4",
+      "stored_bytes": 1653017,
+      "frames": 1,
+      "files": 95,
+      "original_bytes": 8000125,
+      "manifest_sha256": "9d3debfaddaa48d7fb797dbf6abf4167f9840f488371c15e125e35072985de9e",
+      "full_readback_verified": true
+    },
+    "control": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1857-rca784d/20261108T221635Z-control.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "f2fa530287e79d8cd6b08a3d5948fb9210b004f9cc320a411aaa28f4ca9ab729",
+      "gzip_sha256": "66e15a82d8caab52cb80c0926457f47b14d2479ca79e60ad38a6dcaa5fd19f14",
+      "stored_bytes": 4474032,
+      "frames": 1,
+      "files": 17,
+      "original_bytes": 9698580,
+      "manifest_sha256": "9ae0bb48ce9ee94e3ebb286c7fc5e1d20f681e77eb4ec57c32306349790f7ca9",
+      "full_readback_verified": true
+    },
+    "inherited_refs": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-refs.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "af364c096b2e603b222536785a7dfc05c37b5eaabc67901826c03941b771be58",
+      "gzip_sha256": "677129e6eec0a66bf34fcdd4b356ebfbbd3df144be510e78d4f6ffebd378e8ae",
+      "stored_bytes": 1005199736,
+      "frames": 120,
+      "files": 2,
+      "original_bytes": 1008139011,
+      "manifest_sha256": "c70337b74717bb4f584dff48f98c43e5d7200bfc4e9687a9261c3241e9b46bad",
+      "full_readback_verified": true
+    },
+    "inherited_stash": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1760-cdb8ce58/20261108-stash.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "562f596da66469012ae65a795329df8964f22e9ce77c4422e48432aabe5b0b67",
+      "gzip_sha256": "e4ff2aec6b41d296d532d725e7bd12fce8ac189674da0906ba4f5740cd853d86",
+      "stored_bytes": 975750960,
+      "frames": 117,
+      "files": 1,
+      "original_bytes": 977428367,
+      "manifest_sha256": "6d791de2a386e1468d3e15ce7fd7691dc9bfa1e15d5380f23810478467eea349",
+      "full_readback_verified": true
+    },
+    "final_control": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1857-rca784d/20261108T221805Z-control-final.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "f60ede3675c55ea7df684af780f76d7e600d6d4ee9d535bda1e4bf775743c88b",
+      "gzip_sha256": "156556885e0ff5b1ed0947703e6c90fd1a596447073c82c6dfa5af5218a006c6",
+      "stored_bytes": 1809538,
+      "frames": 1,
+      "files": 33,
+      "original_bytes": 6981657,
+      "manifest_sha256": "f3b661118baf8388aa8235e73fccf7cb71b6cb8076e06d7ca25a0413e027d202",
+      "full_readback_verified": true
+    },
+    "configuration": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1857-rca784d/20261108T222036Z-config.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "bf54fcb355d4f49f9f5969b268f42e4133b4877f6e24ffba124bcb9f62019fe5",
+      "gzip_sha256": "79ec648c38dae888928285751989758e87d3ff0b1702fb03b22e0a3dfb4adf9a",
+      "stored_bytes": 19918,
+      "frames": 1,
+      "files": 9,
+      "original_bytes": 38790,
+      "manifest_sha256": "ad170e31516d46cac2f3442bb34a124af4187c0a91f085f2915d80d34c30cdc2",
+      "full_readback_verified": true
+    },
+    "configuration_control": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1857-rca784d/20261108T222110Z-config-control.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "37d6ac08d4e6afa2eaba1434692251f91573e44ede3cbd1a5a1830e797db90a7",
+      "gzip_sha256": "f7bc630e61304229d258b23d8fe4aa1ad51583d611c4b4188cdb5702235f41e4",
+      "stored_bytes": 41980,
+      "frames": 1,
+      "files": 15,
+      "original_bytes": 270240,
+      "manifest_sha256": "e837f46c41c1d9f31c45e3abec395ff121baca8ce8fb12240c02adbedb565889",
+      "full_readback_verified": true
+    }
+  },
+  "proofs": {
+    "runtime_restore": "initial-20261108/restore-hash-verification.json",
+    "control_restore": "control-restore-hash-verification.json",
+    "refs_inventory": "refs-cutoff.json",
+    "exact_old_archive_tip_match": "prior-reference-match.json",
+    "delta_bundle_verify": "bundle-verify.log",
+    "native_inherited_refs_verify": "inherited-refs-verify.log",
+    "native_inherited_stash_verify": "inherited-stash-verify.log",
+    "key_fingerprint": "archive-config-fingerprints.json",
+    "escrow_fingerprint": "key-recovery-fingerprint.json",
+    "inherited_native_restore_and_bundle_heads": "inherited-restored-refs-verification.json",
+    "independent_key_and_r2_source": "render-recovery-source.sanitized.json",
+    "independent_render_bootstrap_restore": "config-render-restore-proof.sanitized.json",
+    "config_hash_and_modes": "config-restore-hash-modes.sanitized.json"
+  },
+  "pending": [
+    "Later RCA/deploy receipts after cutoff and subsequent control files",
+    "Parent review/commit/merge/link sanitized records and final deletion-check",
+    "Whole checkout final ignored-record capture, remaining platform ownership and live-resource reconciliation"
+  ],
+  "restored_git_objects": {
+    "exact_branch_tips": 72,
+    "exact_stash_tips": 1,
+    "self_contained_bundles": true
+  }
+}

@@ -10,7 +10,23 @@
  *   Mac session (C14) ──► only the user's own login is marked; own_only
  *                         availability ignores pool tokens; keepalive skips E2B
  *
- * Hermetic: local checkpoint storage, real DB rows, no E2B or provider calls.
+ * C15 rotation branches (the agents half is code_sessions.blackbox.py rotation_*):
+ *   (a) the usage-limit answer lists shared pools and funded keys; a funded
+ *       Codex limit backs only that deployment off until the reset
+ *   (b) same provider: the paused sandbox resumes with the CLI conversation id
+ *   (c) other provider: handoff prompt naming the trajectory file, and the
+ *       file is in the new sandbox after the checkpoint restore
+ *   (d) nothing leasable: the earliest reset of any path
+ *   (e) GET /credential-availability?code_session_id names the session's provider
+ *   (f) duplicate retries: one lease holder, one provider switch
+ *   (g) no credential value in any answer, handoff or log line
+ *   Codex order (code-session-codex-azure.cases.ts): own login → shared login →
+ *       funded Azure deployment → nothing; the served path is recorded
+ *   Subscriptions first (code-session-credential-order.cases.ts): P subscription →
+ *       Q subscription (handoff) → P funded key → Q funded key → paused
+ *
+ * Hermetic: local checkpoint storage, real DB rows, fake E2B over local HOMEs,
+ * no E2B or provider calls.
  */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -37,15 +53,21 @@ import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { createWithCodeSession, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { markPaused } from '../../providers/codeSessions/store';
 import {
+  __resetCodexFundedCooldown,
   codeCredentialAvailability,
   codeUsageOutlook,
   markCodeTaskUsageLimited,
   parseResetsAt,
 } from '../../providers/codeSessions/usageLimit';
+import { Sandbox } from 'e2b';
+import { registerCodeSessionRotationCases } from './code-session-rotation.cases';
+import { registerCodexAzureFallbackCases } from './code-session-codex-azure.cases';
+import { registerCodeSessionCredentialOrderCases } from './code-session-credential-order.cases';
 import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCredentials';
 import { claudeTaskIntegrationId } from '../../providers/claudeCodeSandboxAuth';
 import { localDeviceSandboxId } from '../../providers/localDevices/hub';
 import { buildLocalSessionEnvs } from '../../providers/localDevices/session';
+import { isolateFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 config();
 
@@ -63,8 +85,17 @@ const saved = {
   openrouter: process.env.OPENROUTER_API_KEY,
   gpt: process.env.GPT_API_KEY,
   decryptionKey: process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY,
+  foundryEndpoint: process.env.AZURE_FOUNDRY_ENDPOINT,
+  foundryKey: process.env.AZURE_FOUNDRY_API_KEY,
+  codexAzureHost: process.env.CODEX_AZURE_FOUNDRY_HOST,
+};
+const original = {
+  kill: Sandbox.kill,
+  create: Sandbox.create,
+  connect: Sandbox.connect,
 };
 const createdIntegrations: string[] = [];
+let restoreCooldowns: (() => Promise<void>) | undefined;
 
 async function poolToken(name: 'claude_code' | 'gpt_code'): Promise<string> {
   const row = await prisma.integration.create({
@@ -109,6 +140,9 @@ async function otherLeasable(name: string): Promise<number> {
 }
 
 before(async () => {
+  // Funded-key cases run in-process with fake keys; HTTP cases use real,
+  // fixture-owned subscription rows, which this isolation leaves untouched.
+  restoreCooldowns = await isolateFundedKeyCooldowns();
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = join(fixtureDir, 'storage');
   // Shared funded keys (and the gateways a Claude Code sandbox would use)
@@ -117,31 +151,50 @@ before(async () => {
   delete process.env.CLAUDE_CODE_ANTHROPIC_API_KEY;
   delete process.env.OPENROUTER_API_KEY;
   delete process.env.GPT_API_KEY;
+  // Only a test-owned Foundry host can back the funded Codex path here.
+  process.env.CODEX_AZURE_FOUNDRY_HOST = 'codex-funded.blackbox.invalid';
+  delete process.env.AZURE_FOUNDRY_ENDPOINT;
+  delete process.env.AZURE_FOUNDRY_API_KEY;
+  await __resetCodexFundedCooldown();
   await prisma.user.create({ data: { userId, name: 'Usage Limit' } });
   await prisma.agent.create({ data: { id: agentId, userId, goal: 'Ship the parser' } });
 });
 
 after(async () => {
-  for (const [key, value] of [
-    ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
-    ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
-    ['ANTHROPIC_API_KEY', saved.anthropic],
-    ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeKey],
-    ['OPENROUTER_API_KEY', saved.openrouter],
-    ['GPT_API_KEY', saved.gpt],
-    ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
-  ] as const) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  try {
+    for (const [key, value] of [
+      ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
+      ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
+      ['ANTHROPIC_API_KEY', saved.anthropic],
+      ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeKey],
+      ['OPENROUTER_API_KEY', saved.openrouter],
+      ['GPT_API_KEY', saved.gpt],
+      ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
+      ['AZURE_FOUNDRY_ENDPOINT', saved.foundryEndpoint],
+      ['AZURE_FOUNDRY_API_KEY', saved.foundryKey],
+      ['CODEX_AZURE_FOUNDRY_HOST', saved.codexAzureHost],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    Object.assign(Sandbox, original);
+    await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
+    await prisma.codeSession.deleteMany({ where: { userId } });
+    await prisma.integration.deleteMany({ where: { id: { in: createdIntegrations } } });
+    await prisma.agent.deleteMany({ where: { userId } });
+    await prisma.user.deleteMany({ where: { userId } });
+    rmSync(fixtureDir, { recursive: true, force: true });
+  } finally {
+    try {
+      await restoreCooldowns?.();
+    } finally {
+      await prisma.$disconnect();
+    }
   }
-  await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
-  await prisma.codeSession.deleteMany({ where: { userId } });
-  await prisma.integration.deleteMany({ where: { id: { in: createdIntegrations } } });
-  await prisma.agent.deleteMany({ where: { userId } });
-  await prisma.user.deleteMany({ where: { userId } });
-  rmSync(fixtureDir, { recursive: true, force: true });
-  await prisma.$disconnect();
 });
+
+// First, before the cases below leave pooled subscriptions of their own behind.
+registerCodeSessionCredentialOrderCases({ sealEnvelope, http });
 
 test('a usage limit rate-limits exactly the task’s token until the reset; availability follows', async () => {
   const first = await poolToken('claude_code');
@@ -156,7 +209,7 @@ test('a usage limit rate-limits exactly the task’s token until the reset; avai
   assert.deepEqual(marked.data.accounts, [], 'this user has no connected accounts of its own');
   assert.deepEqual(
     marked.data.next_lease,
-    { provider: 'claude', label: null, available_now: true, available_at: null },
+    { provider: 'claude', label: null, available_now: true, available_at: null, kind: 'pool' },
     'the respawn leases a shared Claude credential that is not limited'
   );
   const firstRow = await prisma.integration.findUniqueOrThrow({ where: { id: first } });
@@ -507,6 +560,7 @@ test('a limit on one own account marks only it; the answer lists every account a
         label: spare.accountEmail,
         available_now: true,
         available_at: null,
+        kind: 'own',
       },
       `the respawn stays on Claude with the account that is not limited (${usedEmail} is)`
     );
@@ -533,6 +587,7 @@ test('a limit on one own account marks only it; the answer lists every account a
       label: 'codex@example.com',
       available_now: false,
       available_at: soonest.toISOString(),
+      kind: 'own',
     });
   } finally {
     await prisma.claudeCodeSession.deleteMany({ where: { agentId: ownerAgent } });
@@ -540,6 +595,19 @@ test('a limit on one own account marks only it; the answer lists every account a
     await prisma.user.deleteMany({ where: { userId: owner } });
   }
 });
+
+registerCodeSessionRotationCases({
+  userId,
+  agentId,
+  fixtureDir,
+  command,
+  createdIntegrations,
+  originalSandbox: original,
+  sealEnvelope,
+  http,
+  otherLeasable,
+});
+registerCodexAzureFallbackCases({ agentId, sealEnvelope, otherLeasable });
 
 async function http(method: string, path: string, body?: unknown) {
   const response = await fetch(`${baseUrl}${path}`, {

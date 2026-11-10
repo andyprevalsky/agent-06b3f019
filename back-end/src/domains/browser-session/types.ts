@@ -125,6 +125,7 @@ export const injectLocalStorageSchema = z.object({
 
 export const prepareSessionCredentialsSchema = z.object({
   target_url: z.string().min(1).max(8192),
+  restore_browser_state: z.boolean().optional(),
 });
 
 // ---------------------------------------------------------------------------

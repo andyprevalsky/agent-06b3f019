@@ -3,40 +3,69 @@ import { useCallback } from 'react';
 import type { Message } from '@/lib/api';
 
 import { postAgentMessage } from '../api';
+import type { StagedUserMessage } from '../types';
 import type { AgentProviderState } from './useAgentProviderState';
+import {
+  buildLocalUserMessage,
+  confirmLocalUserMessage,
+  dropLocalUserMessage,
+} from './optimisticUserMessages';
 
-export function useAgentMessaging(state: AgentProviderState) {
+export function useAgentMessaging({
+  messageHandlersRef,
+  selectedAgentIdRef,
+  setMessages,
+}: Pick<AgentProviderState, 'messageHandlersRef' | 'selectedAgentIdRef' | 'setMessages'>) {
   const registerMessageHandler = useCallback(
     (subAgentId: string | null, handler: (message: Message) => void): (() => void) => {
-      state.messageHandlersRef.current.set(subAgentId, handler);
+      messageHandlersRef.current.set(subAgentId, handler);
       return () => {
-        state.messageHandlersRef.current.delete(subAgentId);
+        messageHandlersRef.current.delete(subAgentId);
       };
     },
-    [state.messageHandlersRef],
+    [messageHandlersRef],
   );
 
   const dispatchMessage = useCallback(
     (message: Message) => {
       const targetSubAgentId = message.metadata?.subAgentId ?? null;
-      const handler = state.messageHandlersRef.current.get(targetSubAgentId);
+      const handler = messageHandlersRef.current.get(targetSubAgentId);
       if (handler) {
         handler(message);
         return;
       }
-      if (targetSubAgentId !== null) state.messageHandlersRef.current.get(null)?.(message);
+      if (targetSubAgentId !== null) messageHandlersRef.current.get(null)?.(message);
     },
-    [state.messageHandlersRef],
+    [messageHandlersRef],
   );
 
   const sendMessage = useCallback(
     async (text: string) => {
-      const agentId = state.selectedAgentIdRef.current;
+      const agentId = selectedAgentIdRef.current;
       if (!agentId) throw new Error('No agent selected');
       await postAgentMessage(agentId, text);
     },
-    [state.selectedAgentIdRef],
+    [selectedAgentIdRef],
   );
 
-  return { registerMessageHandler, dispatchMessage, sendMessage };
+  const stageUserMessage = useCallback(
+    (agentId: string, text: string): StagedUserMessage => {
+      const local = buildLocalUserMessage(text);
+      const isCurrent = () => selectedAgentIdRef.current === agentId;
+      if (isCurrent()) setMessages((previous) => [...previous, local]);
+      return {
+        confirm: (server) => {
+          if (!isCurrent()) return;
+          setMessages((previous) => confirmLocalUserMessage(previous, local, server));
+        },
+        drop: () => {
+          if (isCurrent())
+            setMessages((previous) => dropLocalUserMessage(previous, local.message_id));
+        },
+      };
+    },
+    [selectedAgentIdRef, setMessages],
+  );
+
+  return { registerMessageHandler, dispatchMessage, sendMessage, stageUserMessage };
 }

@@ -2,6 +2,7 @@
  * Shared agent resume primitive for domain services that need to unblock a workflow.
  */
 
+import type { CodeCliSettingsOverride } from './codeAgentModels';
 import { prisma } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
@@ -19,6 +20,7 @@ export type ResumeAgentWorkflowResult = { success: true } | { error: string; sta
 interface ResumeAgentWorkflowDependencies {
   signalResume?: (workflowId: string) => Promise<void>;
   hasCredits?: (userId: string) => Promise<boolean>;
+  onResumeIntentRollback?: (agentId: string) => Promise<void>;
 }
 
 type ReadyResumeIntent = Extract<WorkflowResumeIntentResult, { outcome: 'ready' }>;
@@ -28,10 +30,12 @@ async function signalResume(workflowId: string): Promise<void> {
   await client.workflow.getHandle(workflowId).signal('resume');
 }
 
+/** Deliver resume intent and publish a restored snapshot only when rollback owns the state. */
 async function deliverResumeSignal(
   agentId: string,
   intent: ReadyResumeIntent,
-  signal: (workflowId: string) => Promise<void>
+  signal: (workflowId: string) => Promise<void>,
+  onRollback?: (agentId: string) => Promise<void>
 ): Promise<ResumeAgentWorkflowResult> {
   if (intent.replacementOwned && intent.persistedActiveIntent) return { success: true };
   if (intent.workflowId === null) return { success: true };
@@ -39,8 +43,20 @@ async function deliverResumeSignal(
     await signal(intent.workflowId);
   } catch (error) {
     if (intent.persistedActiveIntent) {
-      const rolledBack = await rollbackWorkflowResumeIntent(agentId, intent.workflowId);
+      const rolledBack = await rollbackWorkflowResumeIntent(
+        agentId,
+        intent.workflowId,
+        intent.userControlRevision
+      );
       if (!rolledBack) return { success: true };
+      try {
+        await onRollback?.(agentId);
+      } catch (broadcastError) {
+        log.warn('Rolled-back resume state broadcast failed', {
+          agent_id: agentId,
+          error: broadcastError instanceof Error ? broadcastError.message : String(broadcastError),
+        });
+      }
     }
     log.warn('Resume signal failed, DB status unchanged', {
       agent_id: agentId,
@@ -54,6 +70,7 @@ async function deliverResumeSignal(
   return { success: true };
 }
 
+/** Persist a resumable intent, validate credit eligibility, and deliver the workflow signal. */
 export async function resumeAgentWorkflow(
   agentId: string,
   dependencies: ResumeAgentWorkflowDependencies = {}
@@ -79,7 +96,12 @@ export async function resumeAgentWorkflow(
       return { error: 'Cannot resume a completed workflow', status: 409 };
     }
   }
-  return deliverResumeSignal(agentId, intent, dependencies.signalResume ?? signalResume);
+  return deliverResumeSignal(
+    agentId,
+    intent,
+    dependencies.signalResume ?? signalResume,
+    dependencies.onResumeIntentRollback
+  );
 }
 
 /**
@@ -204,6 +226,12 @@ export interface AgentMessageSignalPayload {
   message?: string;
   /** Resuming a paused browser/code task: continue its conversation or start fresh. */
   continue_conversation?: boolean;
+  /** The owner typed this message in the code agent's own view (may resume a finished code task). */
+  from_user?: boolean;
+  /** File pointers the owner attached to that message (the resumed CLI turn receives them). */
+  attachments?: Array<Record<string, unknown>>;
+  /** Its model / effort / speed: the resumed CLI's first turn runs on them. */
+  cli_settings?: CodeCliSettingsOverride;
 }
 
 export async function signalAgentMessage(
@@ -217,6 +245,9 @@ export async function signalAgentMessage(
     wake_task_id?: string;
     message?: string;
     continue_conversation?: boolean;
+    from_user?: boolean;
+    attachments?: Array<Record<string, unknown>>;
+    cli_settings?: CodeCliSettingsOverride;
   } = {},
   send: (workflowId: string, payload: AgentMessageSignalPayload) => Promise<void> = async (
     id,
@@ -235,6 +266,9 @@ export async function signalAgentMessage(
       payload.message = sender.message;
       if (sender.continue_conversation !== undefined)
         payload.continue_conversation = sender.continue_conversation;
+      if (sender.from_user === true) payload.from_user = true;
+      if (sender.attachments?.length) payload.attachments = sender.attachments;
+      if (sender.cli_settings) payload.cli_settings = sender.cli_settings;
     }
     await send(workflowId, payload);
     return true;

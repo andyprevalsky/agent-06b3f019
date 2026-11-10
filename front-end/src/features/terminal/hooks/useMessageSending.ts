@@ -2,7 +2,12 @@ import type { ClientSource } from '@/lib/clientSource';
 /**
  * STATE MACHINE: terminal message sending
  *
- * [IDLE] -- existing agent --> [POSTING MESSAGE] --------> [IDLE]
+ * [IDLE] -- existing agent --> [OPTIMISTIC BUBBLE + POSTING] --ok--> [IDLE]
+ *    |                                  |  (input cleared at once; the bubble
+ *    |                                  |   reads "Sending" until the agent's
+ *    |                                  |   next step, optimisticUserMessages.ts)
+ *    |                                  +--fail--> bubble dropped, text restored
+ *    |                                       (ahead of any draft typed meanwhile)
  *    |
  *    +-- new goal --> [STAGED AGENT + USER BUBBLE] --> [CREATING]
  *                              |                         |
@@ -13,7 +18,10 @@ import type { ClientSource } from '@/lib/clientSource';
  * and the sidebar refresh happen after the new conversation is visible. Fast
  * Mode and Simulator Mode are captured in the create request for that agent.
  *
- * NEW-AGENT PROJECT (Rose Desktop project "+"):
+ * NEW-AGENT LOCATION (Rose Desktop project/folder "+"):
+ *   [PROJECT] --setNewAgentFolderId(id)--> [FOLDER] --create ok--> [HOME]
+ *   [FOLDER] --create fails--> [FOLDER] (kept for retry)
+ *   [FOLDER] --setNewAgentProjectId(id|null)--> [PROJECT|HOME] (folder cleared)
  *   [HOME] --setNewAgentProjectId(id)--> [IN PROJECT id] --create ok--> [HOME]
  *   [IN PROJECT id] --create fails--> [IN PROJECT id] (kept for the retry)
  *   [IN PROJECT id] --setNewAgentProjectId(null) (New Super Agent)--> [HOME]
@@ -23,6 +31,7 @@ import type { ClientSource } from '@/lib/clientSource';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
+import { noteTreeUserMessage } from '@/hooks/useAgentTree';
 import { useQueryPreference } from '@/hooks/useQueryPreference';
 import { readQueryPreferences } from '@/lib/queryPreferences';
 import { useToast } from '@/hooks/use-toast';
@@ -30,6 +39,12 @@ import { canUseFastMode, defaultsFastModeOn } from '@/lib/fastModeAccounts';
 import { getFastModeSessionOverride, setFastModeSessionOverride } from '@/lib/fastModeSession';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
+import {
+  agentSpeedForLevel,
+  speedLevelOf,
+  setDisplayedUltraPreferred,
+  useUltraPreferred,
+} from '@/lib/agentSpeed';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, checkAndRespondToAttention } from '../api';
@@ -38,6 +53,7 @@ import type {
   AgentDetail,
   MessageTarget,
   PendingAgentCreationInput,
+  StagedUserMessage,
   TerminalView,
 } from '../types';
 
@@ -56,6 +72,7 @@ export interface UseMessageSendingArgs {
   stagePendingAgentCreation: (input: PendingAgentCreationInput) => void;
   reconcilePendingAgentCreation: (agentId: string) => Promise<void>;
   rollbackPendingAgentCreation: (agentId: string) => boolean;
+  stageUserMessage: (agentId: string, text: string) => StagedUserMessage;
 }
 
 export function useMessageSending({
@@ -73,6 +90,7 @@ export function useMessageSending({
   stagePendingAgentCreation,
   reconcilePendingAgentCreation,
   rollbackPendingAgentCreation,
+  stageUserMessage,
 }: UseMessageSendingArgs) {
   const { toast } = useToast();
 
@@ -108,7 +126,12 @@ export function useMessageSending({
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
   const [simulatorMode, setSimulatorModeState] = useState(false);
   // Project the next new agent is created in (Rose Desktop project "+"); null = Home.
-  const [newAgentProjectId, setNewAgentProjectId] = useState<string | null>(null);
+  const [newAgentProjectId, setNewAgentProjectIdState] = useState<string | null>(null);
+  const [newAgentFolderId, setNewAgentFolderId] = useState<string | null>(null);
+  const setNewAgentProjectId = useCallback((projectId: string | null) => {
+    setNewAgentProjectIdState(projectId);
+    setNewAgentFolderId(null);
+  }, []);
 
   const messageInputRef = useRef<string>('');
   const pendingSubmitRef = useRef(false);
@@ -118,6 +141,7 @@ export function useMessageSending({
   const fastModeUserOverrideRef = useRef(false);
   const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
   const userCanUseFastMode = canUseFastMode(resolvedUser);
+  const ultraPreferred = useUltraPreferred(userId);
   const userDefaultsFastModeOn = defaultsFastModeOn(resolvedUser);
   const userCanUseSimulator =
     userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId);
@@ -130,7 +154,10 @@ export function useMessageSending({
     fastModeUserOverrideRef.current = false;
   }, [userId]);
 
+  useEffect(() => () => setDisplayedUltraPreferred(null, userId), [selectedAgentId, userId]);
+
   useEffect(() => {
+    setDisplayedUltraPreferred(null, userId);
     if (!userCanUseFastMode) {
       fastModeUserOverrideRef.current = false;
       setFastModeState(false);
@@ -149,14 +176,17 @@ export function useMessageSending({
       return;
     }
 
-    if (
-      selectedAgentId !== null &&
-      agentDetail?.agent_id === selectedAgentId &&
-      typeof agentDetail.fast_mode_cache_enabled === 'boolean'
-    ) {
-      fastModeUserOverrideRef.current = false;
-      setFastModeState(agentDetail.fast_mode_cache_enabled);
-      return;
+    if (selectedAgentId !== null && agentDetail?.agent_id === selectedAgentId) {
+      const speed = agentDetail.speed;
+      const legacy = agentDetail.fast_mode_cache_enabled;
+      if (speed !== undefined || typeof legacy === 'boolean') {
+        fastModeUserOverrideRef.current = false;
+        setFastModeState(speed !== undefined ? speed !== 'standard' : legacy === true);
+        if (speed === 'fast' || speed === 'ultrafast') {
+          setDisplayedUltraPreferred(speed === 'ultrafast', userId);
+        }
+        return;
+      }
     }
 
     if (selectedAgentId !== null) return;
@@ -174,6 +204,7 @@ export function useMessageSending({
   }, [
     agentDetail?.agent_id,
     agentDetail?.fast_mode_cache_enabled,
+    agentDetail?.speed,
     agentDetail?.world_model_mode,
     selectedAgentId,
     user?.id,
@@ -239,6 +270,7 @@ export function useMessageSending({
         return;
       }
 
+      let staged: StagedUserMessage | null = null;
       try {
         setIsSendingMessage(true);
 
@@ -263,11 +295,14 @@ export function useMessageSending({
               source: clientSource as 'WEB' | 'MAC_APP',
               attachments: attachments && attachments.length > 0 ? attachments : undefined,
               price_limit_cents: pendingPriceLimitCents,
-              ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
+              ...(userCanUseFastMode
+                ? { speed: agentSpeedForLevel(speedLevelOf(fastMode, ultraPreferred)) }
+                : {}),
               ...(userCanUseSimulator
                 ? { world_model_mode: simulatorMode ? 'simulate' : 'real' }
                 : {}),
               ...(newAgentProjectId !== null ? { project_id: newAgentProjectId } : {}),
+              ...(newAgentFolderId !== null ? { folder_id: newAgentFolderId } : {}),
             });
             if (newAgent.agent_id !== agentId) {
               throw new Error('Created agent ID did not match the requested agent ID');
@@ -286,6 +321,14 @@ export function useMessageSending({
           return;
         }
 
+        // Render the message now; the server row (or the realtime INSERT)
+        // swaps in and shows Sending until the agent's next step picks it up.
+        // A Browser-composer message keeps its server-rendered "You → Browser" row.
+        if (target === undefined && trimmed) {
+          staged = stageUserMessage(selectedAgentId, messageInput);
+          setMessageInput('');
+        }
+
         // A Browser-composer message is the browser's input, never the owner's
         // answer to a pending question.
         const responded =
@@ -295,15 +338,22 @@ export function useMessageSending({
             title: 'Response sent',
             description: 'The agent will continue with your response',
           });
-          setMessageInput('');
+          // A staged send cleared the box already; keep any draft typed since.
+          if (staged === null) setMessageInput('');
+          // The sidebar orders by the newest user message; re-read it now.
+          noteTreeUserMessage(selectedAgentId, new Date().toISOString());
+          void loadAgents();
           return;
         }
 
         // The backend lifts a user pause after delivering the message, so the
         // woken workflow always has it; resuming here first would not.
         // A Browser-composer target goes straight to that browser task.
-        await postMessage(selectedAgentId, messageInput, attachments, target);
-        setMessageInput('');
+        const posted = await postMessage(selectedAgentId, messageInput, attachments, target);
+        staged?.confirm(posted);
+        if (staged === null) setMessageInput('');
+        noteTreeUserMessage(selectedAgentId, posted.timestamp);
+        void loadAgents();
         // Only a message to the agent itself lifts its pause.
         if (target === undefined && agentDetail?.status === 'PAUSED') {
           toast({
@@ -312,6 +362,12 @@ export function useMessageSending({
           });
         }
       } catch (error: unknown) {
+        if (staged !== null) {
+          staged.drop();
+          // Keep the failed text even if a new draft was started meanwhile.
+          const unsent = messageInput;
+          setMessageInput((current) => (current === '' ? unsent : `${unsent}\n${current}`));
+        }
         const msg = error instanceof Error ? error.message : '';
         if (msg === 'Not authenticated' || msg.includes('401') || msg.includes('Unauthorized')) {
           setLoginModalOpen(true);
@@ -332,11 +388,14 @@ export function useMessageSending({
       selectedAgentId,
       selectedModel,
       fastMode,
+      ultraPreferred,
       simulatorMode,
       canSubmitGoals,
       clientSource,
       pendingPriceLimitCents,
       newAgentProjectId,
+      newAgentFolderId,
+      setNewAgentProjectId,
       agentDetail,
       userCanUseFastMode,
       userCanUseSimulator,
@@ -347,6 +406,7 @@ export function useMessageSending({
       stagePendingAgentCreation,
       reconcilePendingAgentCreation,
       rollbackPendingAgentCreation,
+      stageUserMessage,
       toast,
     ],
   );
@@ -386,6 +446,8 @@ export function useMessageSending({
     simulatorMode,
     setSimulatorMode,
     newAgentProjectId,
+    newAgentFolderId,
+    setNewAgentFolderId,
     setNewAgentProjectId,
     handleSendMessage,
   };

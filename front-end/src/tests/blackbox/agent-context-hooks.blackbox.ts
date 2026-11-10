@@ -256,6 +256,88 @@ describe('useAgentProvider', () => {
     unmount();
   });
 
+  it('owns one detail request per selection and aborts old reads on switch and unmount', async () => {
+    const requests: { agentId: string; signal: AbortSignal | null | undefined }[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const agentId = String(input).split('/').at(-1) ?? '';
+      requests.push({ agentId, signal: init?.signal });
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true },
+        );
+      });
+    });
+    const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
+    try {
+      act(() => result.current.setSelectedAgentId('large-agent-a'));
+      await waitFor(() => expect(requests.length).toBeGreaterThan(0));
+      expect(requests.filter((request) => request.agentId === 'large-agent-a')).toHaveLength(1);
+      expect(requests[0].signal?.aborted).toBe(false);
+
+      act(() => result.current.setSelectedAgentId('large-agent-b'));
+      await waitFor(() =>
+        expect(requests.some((request) => request.agentId === 'large-agent-b')).toBe(true),
+      );
+      expect(requests[0].signal?.aborted).toBe(true);
+      expect(requests.filter((request) => request.agentId === 'large-agent-b')).toHaveLength(1);
+
+      unmount();
+      expect(requests.every((request) => request.signal?.aborted)).toBe(true);
+      await act(async () => {});
+      expect(requests.some((request) => request.agentId.includes('agent-preview'))).toBe(false);
+    } finally {
+      unmount();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('does not apply an old detail response after selecting A, B, then A again', async () => {
+    const requests: { agentId: string; finish: (text: string) => void }[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const agentId = String(input).split('/').at(-1) ?? '';
+      return new Promise<Response>((resolve) => {
+        requests.push({
+          agentId,
+          finish: (text) =>
+            resolve(
+              new Response(
+                JSON.stringify({
+                  agent: makeAgent({ agent_id: agentId }),
+                  messages: [
+                    { message_id: text, text, timestamp: '2026-01-01T00:00:00Z', role: 'USER' },
+                  ],
+                  pagination: { has_more: false, oldest_timestamp: null },
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } },
+              ),
+            ),
+        });
+      });
+    });
+    const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
+    try {
+      act(() => result.current.setSelectedAgentId('agent-a'));
+      const staleReads = [...requests];
+      act(() => result.current.setSelectedAgentId('agent-b'));
+      act(() => result.current.setSelectedAgentId('agent-a'));
+      const currentReads = requests.filter(
+        (request) => request.agentId === 'agent-a' && !staleReads.includes(request),
+      );
+      await act(async () =>
+        currentReads.forEach((request) => request.finish('current trajectory')),
+      );
+      expect(result.current.messages[0]?.text).toBe('current trajectory');
+      await act(async () => staleReads.forEach((request) => request.finish('stale trajectory')));
+      expect(result.current.messages[0]?.text).toBe('current trajectory');
+    } finally {
+      unmount();
+      await act(async () => requests.forEach((request) => request.finish('cleanup')));
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('stages a pending creation without a detail GET, then reconciles without duplicate user text', async () => {
     server.use(
       http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
@@ -530,6 +612,7 @@ describe('useAgentContext', () => {
       stagePendingAgentCreation: vi.fn(),
       reconcilePendingAgentCreation: vi.fn(async () => {}),
       rollbackPendingAgentCreation: vi.fn(() => true),
+      stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
       registerMessageHandler: vi.fn(() => () => {}),
       sendMessage: vi.fn(async () => {}),
       isLoadingAgent: false,

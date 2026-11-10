@@ -70,6 +70,12 @@ export function handleUpdateAgent(
   setAgent((prev) => {
     if (!prev || (updated.agentId && updated.agentId !== prev.agent_id)) return prev;
     if (predictionOnly) return applyProgressEstimateUpdate(prev, updated);
+    if (
+      updated.userControlRevision !== undefined &&
+      prev.user_control_revision !== undefined &&
+      updated.userControlRevision < prev.user_control_revision
+    )
+      return prev;
     if (updated.updatedAt && Date.parse(updated.updatedAt) < Date.parse(prev.updated_at))
       return prev;
     if (
@@ -97,6 +103,7 @@ export function handleUpdateAgent(
         updated.taskId ?? prev.task_id,
       ),
       status: updated.status ?? prev.status,
+      user_control_revision: updated.userControlRevision ?? prev.user_control_revision,
       status_message: updated.statusMessage ?? prev.status_message,
       model: updated.model ?? prev.model,
       token_count: updated.tokenCount ?? prev.token_count,
@@ -145,8 +152,9 @@ export function handleAssistantStream(
 
   setStreamingBubbles((prev) => {
     if (completedStreamIdsRef?.current.has(chunk.stream_id)) return prev;
+    const existing = prev.get(chunk.stream_id);
+    if (existing && chunk.sequence < existing.sequence) return prev;
     const newMap = new Map(prev);
-    const existing = newMap.get(chunk.stream_id);
 
     if (!existing || chunk.sequence >= existing.sequence) {
       if (existing?.timeoutId) window.clearTimeout(existing.timeoutId);
@@ -256,8 +264,10 @@ export function handleToolStream(
   if (tool.agentId !== selectedAgentId) return;
 
   setStreamingTools((prev) => {
+    const terminal = tool.status === 'FINISHED' || tool.status === 'ERROR';
+    if (terminal && !prev.has(tool.tool_call_id)) return prev;
     const newMap = new Map(prev);
-    if (tool.status === 'FINISHED' || tool.status === 'ERROR') {
+    if (terminal) {
       newMap.delete(tool.tool_call_id);
       return newMap;
     }
@@ -278,6 +288,16 @@ export function handleToolStream(
 }
 
 // ─── Cleanup helper ─────────────────────────────────────────────────────────
+
+/** Clearing streaming state also releases every expiry timer owned by its bubbles. */
+export function resetStreamingBubbles(setStreamingBubbles: RealtimeSetters['setStreamingBubbles']) {
+  setStreamingBubbles((previous) => {
+    for (const bubble of previous.values()) {
+      if (bubble.timeoutId) globalThis.clearTimeout(bubble.timeoutId);
+    }
+    return previous.size === 0 ? previous : new Map();
+  });
+}
 
 export function cleanupSubscription(
   isReconnectingRef: React.MutableRefObject<boolean>,
@@ -300,12 +320,7 @@ export function cleanupSubscription(
     channelRef.current = null;
   }
 
-  setStreamingBubbles((prev) => {
-    for (const [, bubble] of prev) {
-      if (bubble.timeoutId) globalThis.clearTimeout(bubble.timeoutId);
-    }
-    return new Map();
-  });
+  resetStreamingBubbles(setStreamingBubbles);
 
   setStreamingPlan(null);
   setStreamingTools(() => new Map());

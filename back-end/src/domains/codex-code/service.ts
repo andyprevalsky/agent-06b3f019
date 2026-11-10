@@ -5,23 +5,19 @@ import {
   getClaudeCodeSession,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
+import { GithubRateLimitedError } from '../../providers/githubRateLimit';
 import { createLogger } from '../../providers/logger';
-import {
-  markGptApiKeyOnCooldown,
-  markGptIntegrationRateLimited,
-  markGptUserTokenRateLimited,
-} from '../../providers/gptCredentials';
+import { codexSpeedFor } from '../../providers/codexSpeed';
+import { resolveSessionProject } from '../../providers/projects/session';
 
-import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
 
-export type CodexCredentialFeedback = {
-  source: 'initial' | 'oauth' | 'funded_api_key';
-  reason: string;
-};
+export type { CodexCredentialFeedback } from './credentialFeedback';
+import { detectAndMarkCodexExhaustion, type CodexCredentialFeedback } from './credentialFeedback';
+export { isCodexCredentialFeedback } from './credentialFeedback';
 
 const log = createLogger('CodexCode');
 
@@ -71,6 +67,26 @@ async function resolveGithubRepo(
   return { repoUrl: await ensureAgentTreeRepo(agentId), userId };
 }
 
+/**
+ * The agent's project, else its tree root's (one indexed read per agent row).
+ * A failed lookup is logged and reads as "no project", so session creation
+ * falls back to the agent tree's repo exactly as it did before projects existed.
+ */
+async function resolveAgentProjectId(agentId: string): Promise<string | undefined> {
+  try {
+    const agent = await repo.findAgentGithubInfo(agentId);
+    if (agent?.projectId !== undefined && agent.projectId !== null) return agent.projectId;
+    if (agent?.busId !== undefined && agent.busId !== null && agent.busId !== agentId) {
+      return (await repo.findRootAgentGithubInfo(agent.busId))?.projectId ?? undefined;
+    }
+  } catch (err) {
+    log.error('Failed to look up agent project', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return undefined;
+}
+
 export async function createSession(params: CreateSessionParams) {
   const { agent_id, goal, attachments, user_id } = params;
   if (!user_id) throw new MissingUserIdError();
@@ -78,7 +94,17 @@ export async function createSession(params: CreateSessionParams) {
   let effectiveGithubRepoUrl = params.github_repo_url;
   let effectiveUserId = user_id;
 
-  if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {
+  // A project session restores the project's checkout; never also clone a repo.
+  const projectWorkspace = await resolveSessionProject(
+    effectiveUserId,
+    await resolveAgentProjectId(agent_id)
+  );
+  if (projectWorkspace !== null) effectiveGithubRepoUrl = undefined;
+
+  if (
+    projectWorkspace === null &&
+    (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '')
+  ) {
     const resolved = await resolveGithubRepo(agent_id, effectiveUserId);
     if (resolved.repoUrl !== undefined) {
       effectiveGithubRepoUrl = resolved.repoUrl;
@@ -90,6 +116,8 @@ export async function createSession(params: CreateSessionParams) {
   let normalizedRepoUrl: string | undefined;
   if (effectiveGithubRepoUrl !== undefined && effectiveGithubRepoUrl !== '') {
     const accessCheck = await checkGithubRepoAccess(effectiveUserId, effectiveGithubRepoUrl);
+    if (accessCheck.rateLimit !== undefined)
+      throw new GithubRateLimitedError(accessCheck.rateLimit);
     if (!accessCheck.allowed) {
       log.info(`GitHub access denied for user ${effectiveUserId}: ${accessCheck.error ?? ''}`);
       throw new GitHubAccessDeniedError(accessCheck.error!);
@@ -97,19 +125,23 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
-  const { agentFastMode } = await import('../../providers/demoCacheStore');
-  const fastMode = await agentFastMode(agent_id);
-  // Codex proxy is DEMO cache replay — independent of the Fast Mode button.
-  const fastModeCacheEnabled = fastMode.enabled;
+  // A project session is scoped (and branched) by its project, as for Claude.
+  const sessionRepoUrl =
+    projectWorkspace !== null
+      ? (projectWorkspace.project.repoUrl ?? `rose-project:${projectWorkspace.project.id}`)
+      : (normalizedRepoUrl ?? null);
+  // Codex never uses the DEMO / Fast Mode cache: the agent's speed only
+  // selects Codex's native service tier.
+  const codexSpeed = codexSpeedFor(await repo.findAgentSpeed(agent_id));
   const { session, fields } = await createWithCodeSession(
     {
       agentId: agent_id,
       userId: effectiveUserId,
-      repoUrl: normalizedRepoUrl ?? null,
+      repoUrl: sessionRepoUrl,
       codeProvider: 'codex',
       codeSessionId: params.code_session_id,
       leaseOwner: params.lease_owner,
-      baseBranch: params.base_branch ?? null,
+      baseBranch: params.base_branch ?? projectWorkspace?.project.defaultBranch ?? null,
     },
     (codeSession, handoff) =>
       createCodexCodeSession(
@@ -118,12 +150,17 @@ export async function createSession(params: CreateSessionParams) {
         attachments,
         normalizedRepoUrl,
         effectiveUserId,
-        fastModeCacheEnabled,
+        codexSpeed,
         {
           harnessMode: params.harness_mode,
           roseApiBaseUrl: params.rose_api_base_url,
           memoryEnabled: params.memory_enabled,
           freshConversation: params.fresh_conversation === true,
+          projectWorkspace,
+          taskName: params.task_name ?? null,
+          cliSettings: params.cli_settings ?? null,
+          resumeConfig: params.resume_config,
+          leaseOwner: params.lease_owner,
         },
         codeSession
       )
@@ -136,6 +173,7 @@ export async function createSession(params: CreateSessionParams) {
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
     ...fields,
+    project: session.projectRestore ?? null,
     // Live dev-server preview URL (Rose dev accounts, A1); null otherwise.
     preview_url: session.previewUrl ?? null,
   };
@@ -186,153 +224,4 @@ export async function persistOutput(
   log.info(`Persisting Codex output for session ${taskId} (${output.length} bytes)`);
   await repo.persistSessionOutput(taskId, output);
   await detectAndMarkCodexExhaustion(taskId, output, credentialFeedback);
-}
-
-function parseCodexResetTime(output: string): Date | null {
-  const match = output.match(
-    /try again at\s+([A-Z][a-z]{2}\s+\d{1,2}(?:st|nd|rd|th)?,\s+\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM))/i
-  );
-  if (match === null) return null;
-  const parsed = new Date(`${match[1].replace(/(\d{1,2})(?:st|nd|rd|th)/i, '$1')} UTC`);
-  return Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now() ? null : parsed;
-}
-
-function isRevokedCodexOAuth(reason: string): boolean {
-  return (
-    reason.trim() === 'oauth_refresh_invalid' ||
-    classifyComputeGrantFailure({ status: 401, body: reason }).verdict === 'revoked'
-  );
-}
-
-function isCodexExhaustion(reason: string): boolean {
-  const exhausted =
-    /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low/i;
-  return (
-    exhausted.test(reason) ||
-    classifyComputeGrantFailure({ status: 401, body: reason }).verdict === 'payment_required'
-  );
-}
-
-/** Read only native diagnostic records, retaining their JSON/indented continuations. */
-function legacyCodexDiagnostics(output: string): string[] {
-  if (output.trim() === 'oauth_refresh_invalid') return [output.trim()];
-  let commandOutput = false;
-  let diagnostic = false;
-  const lines: string[] = [];
-  for (const line of output.split('\n')) {
-    if (line.startsWith('[Codex command output]')) {
-      commandOutput = true;
-      diagnostic = false;
-    } else if (line.startsWith('[Codex exit_code]')) commandOutput = false;
-    else if (!commandOutput) {
-      const header =
-        /^\[Codex\] (?:Error|Turn failed):/.test(line) ||
-        /^\d{4}-\d{2}-\d{2}T\S+\s+ERROR\s+codex_login::auth\S*:\s+Failed to refresh token\b/.test(
-          line
-        );
-      const fallback =
-        line === '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key';
-      const continuation =
-        /^(?:\s+|[{}"\]]|invalid_grant\b|(?:invalid_)?refresh_token_\w+\b|Your session has ended\b)/i.test(
-          line
-        );
-      if (header || fallback) lines.push(line);
-      else if (diagnostic && continuation) lines[lines.length - 1] += `\n${line}`;
-      diagnostic = header || (diagnostic && continuation);
-    }
-  }
-  return lines;
-}
-
-async function detectAndMarkCodexExhaustion(
-  taskId: string,
-  output: string,
-  credentialFeedback?: CodexCredentialFeedback[]
-): Promise<void> {
-  // A supplied structured list is authoritative, including no observed failures.
-  if (credentialFeedback?.length === 0) return;
-
-  const session = await repo.findSessionById(taskId);
-  if (session === null)
-    return log.warn(`Codex credential exhaustion detected for unknown session ${taskId}`);
-
-  const hasOAuthCredential = (session.claudeTokenIntegrationId ?? '') !== '';
-  let oauthReason = '';
-  let oauthRevoked = false;
-  let fundedKeyReason = '';
-
-  if (credentialFeedback !== undefined) {
-    for (const feedback of credentialFeedback) {
-      if (feedback.source === 'oauth' || (feedback.source === 'initial' && hasOAuthCredential)) {
-        const revoked = isRevokedCodexOAuth(feedback.reason);
-        if (revoked || !oauthReason) {
-          oauthReason = feedback.reason;
-          oauthRevoked = revoked;
-        }
-      } else if (
-        feedback.source === 'funded_api_key' ||
-        (feedback.source === 'initial' && !hasOAuthCredential)
-      ) {
-        fundedKeyReason ||= feedback.reason;
-      }
-    }
-  } else {
-    // Compatibility path for older workers that only POST the terminal
-    // snapshot. Current workers send ordered structured credential feedback,
-    // which is not vulnerable to the 500-row terminal display bound.
-    const fallbackMarker =
-      '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key';
-    let funded = !hasOAuthCredential;
-    for (const diagnostic of legacyCodexDiagnostics(output)) {
-      if (diagnostic === fallbackMarker) {
-        funded = true;
-        continue;
-      }
-      if (funded) {
-        if (isCodexExhaustion(diagnostic)) fundedKeyReason ||= diagnostic;
-      } else {
-        const revoked = isRevokedCodexOAuth(diagnostic);
-        if (revoked || (!oauthReason && isCodexExhaustion(diagnostic))) {
-          oauthReason = diagnostic;
-          oauthRevoked = revoked;
-        }
-      }
-    }
-  }
-
-  if (oauthReason !== '') await markCodexOAuthFailure(taskId, session, oauthReason, oauthRevoked);
-
-  if (isCodexExhaustion(fundedKeyReason)) {
-    await markGptApiKeyOnCooldown('codex_code_insufficient_quota');
-    log.warn(`Codex funded API key backed off for session ${taskId}`);
-  }
-}
-
-async function markCodexOAuthFailure(
-  taskId: string,
-  session: NonNullable<Awaited<ReturnType<typeof repo.findSessionById>>>,
-  reason: string,
-  revoked: boolean
-): Promise<void> {
-  const integrationId = session.claudeTokenIntegrationId ?? '';
-  if (integrationId === '')
-    return log.warn(`Codex OAuth exhaustion lacks credential identity for session ${taskId}`);
-  if (revoked) {
-    const integration = await repo.findCredentialIntegration(integrationId);
-    if (integration) {
-      await markGptUserTokenRateLimited(integration.userId, {
-        integrationId,
-        accountId: integration.accountId,
-        failureReason: 'auth_error',
-      });
-    }
-  } else {
-    const resetAt = parseCodexResetTime(reason);
-    await markGptIntegrationRateLimited(integrationId, { rateLimitedUntil: resetAt });
-    log.warn(`Codex OAuth credential backed off for session ${taskId}`, {
-      integrationId,
-      source: session.claudeTokenSource,
-      resetAt: resetAt?.toISOString(),
-    });
-  }
 }

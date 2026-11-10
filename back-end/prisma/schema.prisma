@@ -31,11 +31,18 @@ model Agent {
   taskEstimateRows                 AgentTaskProgressEstimate[]
   status                           AgentStatus                 @default(STARTING_UP)
   statusMessage                    String?
+  /// User control ordering; unrelated row writes preserve this revision.
+  userControlRevision              Int                         @default(0)
+  /// Durable user pause intent for this lifecycle; terminal reports clear it.
+  userControlPaused                Boolean                     @default(false)
   // Archive marker. Set by DELETE /api/agents/:id (soft delete); the sidebar's
   // archived view lists rows where this is non-null.
   deletedAt                        DateTime?
   createdAt                        DateTime                    @default(now())
   updatedAt                        DateTime                    @updatedAt
+  // Newest person-authored message (UI/API post, attention answer, SMS reply).
+  // Agent-authored USER rows never set it. Null → the sidebar uses createdAt.
+  lastUserMessageAt                DateTime?
   temporalWorkflowId               String?
   temporalFirstExecutionRunId      String?
   workflowReplacementToken         String?
@@ -87,6 +94,10 @@ model Agent {
   ownCostCents                     Float                       @default(0)
   writeLockEnabled                 Boolean                     @default(true)
   fastModeCacheEnabled             Boolean                     @default(true)
+  /// LLM provider speed requested at create: standard | fast | ultrafast.
+  /// Null = the row predates this column; readers derive it from
+  /// fastModeCacheEnabled (true → fast). Never gates any cache.
+  speed                            String?
   worldModelMode                   String                      @default("real")
   memoryEnabled                    Boolean                     @default(true)
   isBenchmark                      Boolean                     @default(false)
@@ -94,6 +105,10 @@ model Agent {
   /// LocalDevice.id of the Rose Mac app that started this root agent (C14).
   /// Null for web/PWA/SMS roots and for sub-agents (they resolve it via busId).
   originDeviceId                   String?
+  /// Optional one-level folder; deleting it keeps this agent in its project.
+  /// Migration defers the FK check until both project-deletion cascades settle.
+  folderId                         String?
+  folder                           ProjectFolder?              @relation(fields: [folderId], references: [id], onDelete: SetNull)
   /// Owning Project (left-bar grouping, code-session workspace). Null = Home.
   /// Set on create (owner-validated) or inherited from the parent agent.
   projectId                        String?
@@ -120,6 +135,7 @@ model Agent {
   @@index([parentAgentId, worldModelMode, createdAt])
   @@index([busId])
   @@index([projectId])
+  @@index([folderId])
   @@index([busId, taskPath])
   // Trigram search indexes stay declared here: an index Prisma can model but
   // the schema omits is dropped by `db push` and emitted by `migrate diff`.
@@ -459,6 +475,7 @@ model User {
   localDevices                LocalDevice[]
   projects                    Project[]
   previewHandoffCodes         PreviewHandoffCode[]
+  projectCliLogins            ProjectCliLogin[]
   iphoneDevice                IPhoneDevice?
   iphoneLeases                IPhoneLease[]
 
@@ -635,6 +652,8 @@ model BrowserSession {
   injectedOrigins        Json?
   controlState           BrowserControlState  @default(AGENT)
   controlLeaseExpiresAt  DateTime?
+  // Session-bound, single-flight browser history command and completion receipt.
+  navigationCommand      Json?
   // Model-driven IP rotation (rotate_ip tool). Count + current tier are keyed to
   // this stable row id (the browser sub-agent run), surviving session recycles so
   // the cap is authoritative across rotations. proxyTier: null → original session,
@@ -666,6 +685,9 @@ model ClaudeCodeSession {
   sandboxId                String
   streamUrl                String?
   goal                     String
+  /// The spawn's task_name (spawn_agent type=code); the agents list shows it as
+  /// the code agent's title. Null for legacy rows and internal callers.
+  taskName                 String?
   status                   ClaudeCodeSessionStatus @default(ACTIVE)
   output                   String?
   createdAt                DateTime                @default(now())
@@ -689,6 +711,8 @@ model ClaudeCodeSession {
   /// usage_limit (null for legacy rows and cleanup closes). The code-agents list
   /// reports the latest task of a live session as PAUSED for the resumable ones.
   closeReason              String?
+  /// Task-owned close receipt. Retains prepared outputs and the final result for HTTP retries.
+  closeResult              Json?
 
   @@index([agentId])
   @@index([sandboxId])
@@ -724,6 +748,9 @@ model CodeSession {
   /// Stable per tool call (Temporal retries of one spawn share it).
   leaseOwner          String?
   leaseExpiresAt      DateTime?
+  /// Durable close custody blocks new spawns even if the ordinary lease expires.
+  closingTaskId       String?
+  closingEpoch        String?
   latestCheckpointSeq Int       @default(0)
   nextCheckpointSeq   Int       @default(0)
   lastRepoFacts       Json?
@@ -942,6 +969,15 @@ model Integration {
   accountId              String                       @default("")
   /// Shown on the FE chip.
   accountEmail           String?
+  /// Subscription usage windows (compute rows only), 0-100 percent USED, as the
+  /// provider reported them on a response this token served. Agents carry the
+  /// latest snapshot on the lineage heartbeat they already send per LLM call;
+  /// `usageObservedAt` orders those writes and throttles them per row.
+  usage5hUsedPct         Float?
+  usage5hResetsAt        DateTime?
+  usage7dUsedPct         Float?
+  usage7dResetsAt        DateTime?
+  usageObservedAt        DateTime?
   createdAt              DateTime                     @default(now())
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]
@@ -1520,9 +1556,10 @@ model ImessageQueue {
   attempts             Int       @default(0)
   failures             Int       @default(0)
   transport            String    @default("mac")
-  phoneBrowserTaskId   String?   @unique
+  phoneBrowserTaskId   String?
   phoneSendOperationId String?   @unique
 
+  @@index([phoneBrowserTaskId], map: "ImessageQueue_phoneBrowserTaskId_idx")
   @@index([userId])
   @@index([agentId])
   @@index([userId, sentAt, failedAt, dispatchedAt, expiresAt, claimedAt, createdAt], map: "ImessageQueue_send_claim_idx")
@@ -2154,30 +2191,99 @@ model SlackAutoRcaEvent {
 /// bearing content (env files, linked config, git artifacts) is stored only as
 /// credential envelopes (RSA-OAEP + AES-256-GCM, CLAUDE_CREDENTIAL_DECRYPTION_KEY).
 model Project {
-  id              String               @id @default(uuid())
-  userId          String
-  name            String
-  repoUrl         String?
-  defaultBranch   String               @default("main")
-  startupScript   String?
-  startupTimeoutS Int                  @default(120)
-  autoWake        Boolean              @default(false)
+  id                        String                  @id @default(uuid())
+  userId                    String
+  name                      String
+  repoUrl                   String?
+  defaultBranch             String                  @default("main")
+  startupScript             String?
+  startupTimeoutS           Int                     @default(120)
+  autoWake                  Boolean                 @default(false)
   /// Default sandbox size for new code sessions: {cpu, memoryGb}; null = deployment default.
-  sandboxSize     Json?
+  sandboxSize               Json?
   /// Per-project salt for content fingerprints (incremental re-sync).
-  syncSalt        String
+  syncSalt                  String
   /// Monotonic snapshot revision; bumped by every accepted sync.
-  syncRevision    Int                  @default(0)
-  lastSyncedAt    DateTime?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  user            User                 @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  envFiles        ProjectEnvFile[]
-  syncSnapshot    ProjectSyncSnapshot?
-  agents          Agent[]
+  syncRevision              Int                     @default(0)
+  lastSyncedAt              DateTime?
+  /// Template sync ("maintenance") script, run on the project's ONE template sandbox.
+  /// null = never configured (the Rose default is filled in); "" = cleared on purpose.
+  maintenanceScript         String?
+  maintenanceTimeoutS       Int                     @default(480)
+  /// Run nightly (fixed UTC slot, see providers/projects/maintenanceSchedule.ts).
+  maintenanceNightly        Boolean                 @default(false)
+  /// Run when the repo's default branch head changes on GitHub (cron polls the head sha).
+  maintenanceOnGithubChange Boolean                 @default(false)
+  maintenanceWatchedSha     String?
+  maintenanceWatchCheckedAt DateTime?
+  /// Lease: at most one maintenance run per project; an expired lease is reclaimable.
+  maintenanceRunId          String?
+  maintenanceLeaseUntil     DateTime?
+  /// Latest successful template snapshot (E2B snapshot id); new code sessions start from it.
+  templateSnapshotId        String?
+  /// The one before it, kept until the next publish so sessions already starting from it finish.
+  templatePrevSnapshotId    String?
+  templateSnapshotAt        DateTime?
+  templateSnapshotSha       String?
+  templateSnapshotRunId     String?
+  /// {cpu, memoryGb} of the template sandbox the snapshot came from.
+  templateSnapshotSize      Json?
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+  user                      User                    @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  envFiles                  ProjectEnvFile[]
+  syncSnapshot              ProjectSyncSnapshot?
+  maintenanceRuns           ProjectMaintenanceRun[]
+  agents                    Agent[]
+  cliLogins                 ProjectCliLogin[]
+  folders                   ProjectFolder[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])
+}
+
+/// One run of a project's template sync script (trigger: manual | snapshot |
+/// nightly | github). A scheduled or GitHub trigger carries a deterministic
+/// `slotKey` (nightly:<date>, github:<sha>): the unique (projectId, slotKey)
+/// makes duplicate triggers from several backend replicas a no-op.
+model ProjectMaintenanceRun {
+  id             String    @id @default(uuid())
+  projectId      String
+  trigger        String
+  /// "sync" runs the script; "snapshot" re-snapshots the latest code without it.
+  mode           String    @default("sync")
+  /// RUNNING | SUCCEEDED | FAILED | TIMED_OUT
+  status         String
+  slotKey        String?
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  durationMs     Int?
+  exitCode       Int?
+  headSha        String?
+  sandboxId      String?
+  /// Snapshot published by this run (SUCCEEDED only).
+  snapshotId     String?
+  /// Snapshot the run's sandbox started from (null = base template + fresh clone).
+  fromSnapshotId String?
+  error          String?
+  /// Redacted, bounded tail of the run output.
+  logTail        String?
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, slotKey])
+  @@index([projectId, startedAt])
+}
+
+/// One-level grouping within a project; deletion leaves agents at project root.
+model ProjectFolder {
+  id        String  @id @default(uuid())
+  name      String
+  sortOrder Int     @default(0)
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  agents    Agent[]
+
+  @@unique([projectId, name])
 }
 
 /// One secret-bearing file materialized into a project checkout with 0600
@@ -2220,6 +2326,31 @@ model ProjectSyncSnapshot {
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
   project                   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+/// One-time CLI sign-in for `rose agent-init --login-code <code>` (Rose's
+/// "Set up with your coding agent"). A signed-in user mints a single-use code
+/// (optionally bound to one project); the CLI exchanges it once for a personal
+/// credential that only /api/projects accepts (only that project when bound).
+/// Only SHA-256 hashes of the code and the credential are stored. Backend-only
+/// (service role); no client policy.
+model ProjectCliLogin {
+  id                  String    @id @default(uuid())
+  userId              String
+  /// Bound project; null = any of the user's projects (and creating one).
+  projectId           String?
+  codeHash            String    @unique
+  codeExpiresAt       DateTime
+  /// Set by the first presentation of the code, whatever its outcome.
+  exchangedAt         DateTime?
+  credentialHash      String?   @unique
+  credentialExpiresAt DateTime?
+  createdAt           DateTime  @default(now())
+  user                User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  project             Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, codeExpiresAt])
+  @@index([projectId])
 }
 
 model AgentTaskProgressEstimate {

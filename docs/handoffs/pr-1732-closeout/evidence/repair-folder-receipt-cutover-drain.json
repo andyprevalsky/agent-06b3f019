@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "access": "create",
+  "target": {
+    "kind": "delegated_devbox",
+    "executionInstanceId": "17dd522e-2d46-4dc9-943b-29962da8834d"
+  },
+  "membership": {
+    "placementId": "p17b9vbgv4apf7kr6wsrcph8cn8hqf9j",
+    "primaryInstanceId": "0f8c2d78-3043-4af0-89bd-eb53f8500a5c",
+    "executionInstanceId": "17dd522e-2d46-4dc9-943b-29962da8834d",
+    "folderId": "z57k17gzz4egv17ag6qqtasexs8h273j",
+    "folderRevision": 1
+  }
+}

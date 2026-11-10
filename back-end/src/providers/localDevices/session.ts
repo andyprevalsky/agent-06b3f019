@@ -14,6 +14,16 @@ import { createLogger } from '../logger';
 import { fetchClaudeCodeCredentialsWithMeta } from '../claudeCredentials';
 import { fetchGptCodeCredentialsWithMeta } from '../gptCredentials';
 import { buildLocalCodeAgentSystemPrompt } from '../codeAgentPrompt';
+import {
+  claudeCodeSettingsEnvs,
+  type CodeAgentSettings,
+  codeAgentSettingsForAgent,
+  codexCodeSettingsEnvs,
+  cliSettingsEnvOverrides,
+  type CodeCliSettingsOverride,
+} from '../codeAgentModels';
+import { compatibleResumeCliSettings, type CodeAgentResumeConfig } from '../codeAgentResumeConfig';
+import { persistCodeResumeConfig, resumeLaunchCliSettings } from '../codeAgentResumeConfigStore';
 import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import {
   LocalSessionStartError,
@@ -116,6 +126,8 @@ export async function buildLocalSessionEnvs(params: {
   userId: string;
   goal: string;
   deviceName: string;
+  /** The spawning agent's tier and speed (codeAgentModels.ts); flash + fast when omitted. */
+  settings?: CodeAgentSettings;
 }): Promise<{
   envs: Record<string, string>;
   claudeTokenSource: string | null;
@@ -139,7 +151,7 @@ export async function buildLocalSessionEnvs(params: {
     return {
       envs: {
         CODEX_GOAL: params.goal,
-        CODEX_MODEL: process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra',
+        ...codexCodeSettingsEnvs(params.settings ?? { tier: 'flash', speed: 'fast' }),
         CODEX_AUTH_JSON: credential.credentials,
         CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
         CODE_AGENT_HARNESS_MODE: 'code',
@@ -152,7 +164,7 @@ export async function buildLocalSessionEnvs(params: {
   if (credential === null || credential.source !== 'user') throw noCredentials();
   const envs: Record<string, string> = {
     CLAUDE_CODE_GOAL: params.goal,
-    CLAUDE_CODE_MODEL: process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5',
+    ...claudeCodeSettingsEnvs(params.settings ?? { tier: 'flash', speed: 'fast' }),
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
   };
   if (credential.credentials !== undefined) envs.CLAUDE_CODE_CREDENTIALS = credential.credentials;
@@ -195,6 +207,11 @@ export async function createLocalDeviceCodeSession(
     /** Caller-asserted owner; must match the agent's owner. */
     expectedUserId?: string;
     deviceId?: string;
+    /** The spawn's task_name, stored on the task row (the agents list title). */
+    taskName?: string | null;
+    cliSettings?: CodeCliSettingsOverride;
+    resumeConfig?: CodeAgentResumeConfig;
+    leaseOwner?: string;
   },
   hub: LocalDeviceHub = localDeviceHub()
 ): Promise<LocalDeviceSessionResult> {
@@ -214,8 +231,34 @@ export async function createLocalDeviceCodeSession(
     userId: target.userId,
     goal: params.goal,
     deviceName: target.deviceName,
+    settings: await codeAgentSettingsForAgent(params.agentId),
   });
   const taskId = randomUUID();
+  Object.assign(
+    envs,
+    cliSettingsEnvOverrides(
+      params.provider,
+      await resumeLaunchCliSettings(
+        params.agentId,
+        params.provider,
+        params.leaseOwner,
+        compatibleResumeCliSettings(
+          params.provider,
+          params.resumeConfig?.source_code_provider,
+          params.cliSettings
+        )
+      )
+    )
+  );
+  await persistCodeResumeConfig({
+    agentId: params.agentId,
+    taskId,
+    provider: params.provider,
+    envs,
+    resumeConfig: params.resumeConfig,
+    leaseOwner: params.leaseOwner,
+    execution: { github_repo_link: null, target: 'local', code_session_id: null },
+  });
   const sandboxId = localDeviceSandboxId(target.deviceId, taskId);
   log.info(`Starting local ${params.provider} session on ${target.deviceName}`, {
     agent_id: params.agentId,
@@ -259,6 +302,7 @@ export async function createLocalDeviceCodeSession(
         sandboxId,
         streamUrl: wsUrl,
         goal: params.goal,
+        taskName: params.taskName ?? null,
         status: 'ACTIVE',
         claudeTokenSource,
         claudeTokenIntegrationId: integrationId,
@@ -294,6 +338,10 @@ export async function createLocalCodeSessionResponse(params: {
   provider: LocalCodeProvider;
   expectedUserId?: string;
   deviceId?: string;
+  taskName?: string | null;
+  cliSettings?: CodeCliSettingsOverride;
+  resumeConfig?: CodeAgentResumeConfig;
+  leaseOwner?: string;
 }): Promise<{
   task_id: string;
   sandbox_id: string;
@@ -325,17 +373,19 @@ export async function createLocalCodeSessionResponse(params: {
 export async function closeLocalDeviceCodeSession(
   taskId: string,
   sandboxId: string,
-  hub: LocalDeviceHub = localDeviceHub()
+  hub: LocalDeviceHub = localDeviceHub(),
+  options?: { propagateStopFailure?: boolean }
 ): Promise<{ outputFiles: [] }> {
   // Best-effort: the session row is marked CLOSED even when the Mac is unreachable.
   await hub
     .stopSession(taskId, parseLocalDeviceSandboxId(sandboxId)?.deviceId ?? null)
-    .catch((error: unknown) =>
+    .catch((error: unknown) => {
+      if (options?.propagateStopFailure) throw error;
       log.warn('Local session stop failed; marking it closed', {
         task_id: taskId,
         error: error instanceof Error ? error.message : String(error),
-      })
-    );
+      });
+    });
   await prisma.claudeCodeSession.updateMany({
     where: { id: taskId, status: 'ACTIVE' },
     data: { status: 'CLOSED', closedAt: new Date() },

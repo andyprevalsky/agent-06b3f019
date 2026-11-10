@@ -1,0 +1,32 @@
+{
+  "status": "DELIVERED_ROOT_NATIVE_RECEIPTS_VERIFIED",
+  "originating_merge": "b7c77bdde14badd0f957e86375f177f6ef686fc3",
+  "certificate": {
+    "repair_agent": "https://boxes.dev/thread/thr_a9345a418b15449dbda2a81d1fc19499",
+    "different_devbox": true,
+    "bugs_folder_verified": true,
+    "native_goal": "active",
+    "packet_restored_and_verified": true,
+    "outcome": "independent repair continues; no original failure relabel"
+  },
+  "dns": {
+    "repair_agent": "https://boxes.dev/thread/thr_a22cd6bd7dd145e489a128a9a0d88e4e",
+    "repair_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1860",
+    "postmerge_full_goal_delivery": "https://github.com/Rose-Ai-Labs/rose/pull/1860#issuecomment-6729330389",
+    "old_pr1844": "superseded; explicitly not a fix",
+    "occurrences": 2
+  },
+  "all_three_additional_failures_dispatched": true,
+  "retained_prior_report_link_gap": "Superseded by actual current root receipt/public routing verification; original historical packet/source evidence unchanged",
+  "native_receipt": {
+    "sha256": "ca79e7c607343e306cb0d8b566a39880cd63d2ec37cd0bbcc8aaf358c59b6e6c",
+    "bytes": 1683
+  },
+  "public_routing_receipt": {
+    "sha256": "cbf79a93eb875c6efdad7c73563c09d36538eab0bb5522feac320639ad11eda4",
+    "bytes": 1054
+  },
+  "assigned_report_bug": "original command passed; no delegation of assigned repair",
+  "financial_warning": "Two separate historical sandbox obligations of4396c each and historical LIVE100c remain current UNVERIFIED, no execution/refund/release/mint credit.",
+  "limits": "Independent repair/deploy continues; no acknowledgment/completion wait and no relabeling original failures."
+}

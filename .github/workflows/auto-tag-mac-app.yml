@@ -28,11 +28,11 @@ jobs:
       github.event_name == 'push' || (
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'main')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     steps:
       - name: Checkout main at merge commit
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
@@ -68,30 +68,38 @@ jobs:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           REASON: ${{ steps.decide.outputs.reason }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'status=$?; echo "::error::Auto-tag failed (exit $status) at line $LINENO: $BASH_COMMAND" >&2' ERR
 
           # A rerun of this workflow must not cut a second release for a commit
           # that already has one.
-          EXISTING="$(git tag --points-at "$MERGE_SHA" | head -1)"
+          # Drain Git before selecting a line: an early-closing head can give
+          # Git SIGPIPE and abort this step under pipefail.
+          EXISTING_TAGS="$(git tag --points-at "$MERGE_SHA")"
+          EXISTING="${EXISTING_TAGS%%$'\n'*}"
           if [ -n "$EXISTING" ]; then
             echo "Commit $MERGE_SHA already tagged as $EXISTING — nothing to ship."
             exit 0
           fi
 
-          LATEST_TAG=$(git tag --sort=-v:refname | head -1)
-          V="${LATEST_TAG#v}"
-          MAJOR=$(echo "$V" | cut -d. -f1)
-          MINOR=$(echo "$V" | cut -d. -f2)
-          PATCH=$(echo "$V" | cut -d. -f3)
-          NEW_PATCH=$((PATCH + 1))
+          ALL_TAGS="$(git tag --sort=-v:refname)"
+          LATEST_TAG="${ALL_TAGS%%$'\n'*}"
+          if [[ ! "$LATEST_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Cannot increment latest release tag: '$LATEST_TAG' (expected vMAJOR.MINOR.PATCH)." >&2
+            exit 1
+          fi
+          MAJOR="${BASH_REMATCH[1]}"
+          MINOR="${BASH_REMATCH[2]}"
+          PATCH="${BASH_REMATCH[3]}"
+          NEW_PATCH=$((10#$PATCH + 1))
           TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
 
           echo "Release reason: $REASON"
           echo "Latest tag: $LATEST_TAG"
           echo "New tag: $TAG"
 
-          git tag "$TAG"
-          git push origin "$TAG"
+          git tag "$TAG" "$MERGE_SHA"
+          git push origin "refs/tags/$TAG"
 
       - name: Explain a skipped release
         if: steps.decide.outputs.ship != 'true'

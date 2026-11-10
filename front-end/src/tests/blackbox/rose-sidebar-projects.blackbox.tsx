@@ -530,7 +530,7 @@ describe('New agent from a project (Terminal)', () => {
     return requests('POST', '/agents');
   }
 
-  it("a project's + shows the pending ring, passes project_id and the agent lands in that project; Home + does not", async () => {
+  it("a project's + keeps its icon plain, passes project_id and the agent lands in that project; Home + does not", async () => {
     // A backend that keeps what was created: POST echoes the requested id and
     // project_id, and the list (GET /api/agents) returns those agents.
     const created: Record<string, unknown>[] = [];
@@ -556,11 +556,11 @@ describe('New agent from a project (Terminal)', () => {
     expandBar();
     await user.click(await findCreateAgentButton('p-rose'));
 
-    // The project's icon wears the liquid-metal ring until the agent exists.
+    // The destination is tracked without highlighting the project's icon.
     expandBar();
     const rose = screen.getByTestId('rose-project-row-p-rose');
     expect(rose).toHaveAttribute('data-pending', 'true');
-    expect(within(rose).getByTestId('pending-project-ring')).toBeInTheDocument();
+    expect(within(rose).queryByTestId('pending-project-ring')).toBeNull();
 
     const composer = await screen.findByPlaceholderText('Enter any goal');
     await user.click(composer);
@@ -570,7 +570,7 @@ describe('New agent from a project (Terminal)', () => {
       expect.objectContaining({ goal: 'Fix the flaky sidebar test', project_id: 'p-rose' }),
     );
     const firstId = String((agentCreates()[0].body as { agent_id: string }).agent_id);
-    // The new agent is listed under Rose, and the ring is gone.
+    // The new agent is listed under Rose.
     await waitFor(() =>
       expect(
         within(screen.getByTestId('rose-group-p-rose')).getByTestId(`rose-agent-row-${firstId}`),
@@ -605,13 +605,13 @@ describe('Rose agent right-click menu', () => {
     mockProjectsApi([makeProject()]);
   });
 
-  it('lists exactly Archive · Pin · Rename · Copy (UI #26); removed items absent; Archive red', async () => {
+  it('lists exactly Archive · Pin · Rename · Move to… · Copy (UI #26); removed items absent; Archive red', async () => {
     renderBar();
     const menu = await openContextMenu(
       await screen.findByTestId('rose-agent-row-a-home'),
       'rose-agent-menu',
     );
-    expectAgentMenuEntries(menu);
+    expectAgentMenuEntries(menu, { move: true });
     expect(within(menu).getByRole('menuitem', { name: 'Archive agent' }).className).toContain(
       'text-[#e5484d]',
     );

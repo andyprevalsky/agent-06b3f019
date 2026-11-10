@@ -53,3 +53,9 @@ None recorded.
 ## Reusable lesson
 
 When a status flag is a worker's work list, publish it only after its work is durable, and make the worker's completing write conditional on the state it read.
+
+## October28 separate test-observation race
+
+Batch12 on b3364256 failed the large legacy upload's payload-release assertion. The retained runner read parts at02:49:02.120 and cleaned up by02:49:02.330; the concurrent backend completed that same user's part parser at02:49:02.559 and its processedAt/payload bookkeeping at02:49:02.569. MessageRecord count was visible before the worker finished. This is a test readiness defect, not evidence that the earlier accept/finalize fix regressed.
+
+A native barrier after final-part parsing and before markProcessed reproduces the exact assertion in2.875s. The identical command passes3.249s when the existing single drainUntil waits for both the message count and the already-required processedAt/nonpayload predicate. All33 assertions,120 retries and500ms delays remain unchanged; no production code changes. Independent GROUNDED review cleared exact patch14ab7ae6c60b7ef3d0924eee2a7983e0cb023771fddf836ecf93961a63ed0581 before coordinator application. Native receipts and exact-owned DB/process cleanup are in plan:.context/deploy-fresh-20261027/rca-workflow-terminal-batch12/backend-upload/REPORT.md. The registered integration case remains the regression; full coverage acceptance stays separate.

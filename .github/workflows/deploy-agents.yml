@@ -21,6 +21,7 @@ on:
       - "!agents/scripts/run_coverage_blackbox_parallel.py"
       - ".github/workflows/deploy-agents.yml"
       - "scripts/deploy-agents-cooperative-cutover.sh"
+      - "scripts/agents-image-context.sh"
       - "scripts/worker_pool_*.py"
       - "scripts/retained_agent_machine.py"
       - "back-end/scripts/worker-deployment-queue.ts"
@@ -39,7 +40,7 @@ jobs:
   deploy:
     name: Deploy to Fly.io
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Verify manual deployment source
         if: github.event_name == 'workflow_dispatch'
@@ -49,15 +50,30 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           test "$EXPECTED_SHA" = "$GITHUB_SHA"
 
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
         with:
-          fetch-depth: 2
+          persist-credentials: false
+          # 64 commits of history (commits + trees only, ~3.4 MB with
+          # blob:none) let the queue CLI prove its release contains the queued
+          # and live releases (`git merge-base --is-ancestor`) so cutovers
+          # coalesce and an older release never rolls the live one back.
+          fetch-depth: 64
+          # A full checkout downloads ~3.3 GB (2.8 GB is agents/benchmarks
+          # history the worker image excludes) and cost ~4 min per run. Fetch
+          # trees only and materialize everything except unused heavy paths.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            !/front-end/public/
+            !/claude-code-src/
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
           cache-dependency-path: back-end/package-lock.json
 
@@ -105,6 +121,8 @@ jobs:
           DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
           DEPLOY_REUSE_ONLY: "1"
           APP: ${{ steps.flyapp.outputs.name }}
+          # Beyond the shallow history, prove ancestry with one GitHub compare per pair.
+          WORKER_DEPLOYMENT_ANCESTRY_GITHUB: "1"
         run: |
           set -euo pipefail
           release() {
@@ -119,18 +137,27 @@ jobs:
   recover:
     name: Resume interrupted worker deployment
     if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     # This limits duplicate observers only. It never holds an unpersisted deploy.
     concurrency:
       group: recover-agent-pool
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
+        with:
+          persist-credentials: false
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            !/front-end/public/
+            !/claude-code-src/
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
           cache-dependency-path: back-end/package-lock.json
       - name: Resume the saved FIFO head without rebuilding or enqueuing

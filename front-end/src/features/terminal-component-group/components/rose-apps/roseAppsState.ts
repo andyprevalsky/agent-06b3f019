@@ -62,13 +62,26 @@ export interface RoseAppsValue {
   reloadBrowser: () => void;
   toggleApp: (app: RoseApp) => void;
   closeApp: () => void;
+  /** Phone app pinned to the device view (live iPhone screen, no agent/task/lease). */
+  phoneDeviceView?: boolean;
+  /** Open the Phone app in device view (iPhone integration row Connect/View). */
+  openPhoneDevice?: () => void;
   openAgentBrowser: (agentId: string, taskId: string) => void;
+  /**
+   * Open Browser on an agent whose task id is unknown: its first registered tab,
+   * else no selection until that agent's tab registers (then it takes over).
+   */
+  openAgentBrowserTab: (agentId: string) => void;
   selectBrowserTab: (agentId: string | null, taskId?: string) => void;
   /** Open an agent in the main chat (Benchmarks panel rows). */
   openAgent: (agentId: string) => void;
   /** Sign out (Settings panel); undefined when the host has no session. */
   onLogout?: () => void;
-  onCreateAgentInProject?: (project: import('@/lib/api/projects').Project) => void;
+  onCreateAgentInProject?: (
+    project: import('@/lib/api/projects').Project,
+    folderId?: string | null,
+  ) => void;
+  newAgentFolderId?: string | null;
   setSlot: (el: HTMLElement | null) => void;
   setDrawerWidth: (width: number) => void;
   setIsResizing: (resizing: boolean) => void;

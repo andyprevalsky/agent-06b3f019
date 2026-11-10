@@ -31,8 +31,12 @@ SILENCE_TIMEOUT_S: Final[float] = 1.0
 # When the CLI sends no event for this window with no tool in flight and no
 # SDK result, the session is PAUSED (checkpoint + E2B pause) and the tool
 # returns status "paused" with its code_session_id: resumable on the next
-# spawn, never a failure. Paused processes keep their memory, so a Monitor /
-# ScheduleWakeup wait continues when the session resumes. A tool in flight
+# spawn, never a failure. E2B's pause keeps memory and processes, and the next
+# spawn attaches to the CLI still running there (e2bCodeSessionSandbox.ts
+# attachLiveCodeCli): its turn, background shells and a pending Monitor /
+# ScheduleWakeup wait continue and the new goal is its next turn. Only when that
+# CLI has exited, holds another credential or is unreachable does the spawn
+# restart it with the files, commits and conversation (--resume). A tool in flight
 # (long Bash, Write, network call) keeps the session attached indefinitely:
 # silence there is work, not a hang (cuda k=3 r21/r22/r24 were productive
 # sessions the old 180s/900s idle kills aborted).
@@ -48,8 +52,7 @@ SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
 # The attached activity extends the sandbox's E2B idle window this often
 # (POST /:taskId/keepalive). Well inside the backend's 30-minute window, so an
 # attached session never auto-pauses; once keepalives stop it pauses on its own.
-# The same call reports a question the code agent asked its spawning agent
-# (blocked inside this spawn), so the session pauses and returns the question.
+# The same call reports a pending sandbox resize (C16) for the activity to apply.
 # 10k attached sessions = ~83 keepalives/s, each O(1) indexed reads.
 CODE_SESSION_KEEPALIVE_INTERVAL_S: Final[float] = 120.0
 # C16: applying a size change = checkpoint + new sandbox + restore + ws-server
@@ -71,15 +74,20 @@ CODE_AGENT_ACTIVITY_NO_DEADLINE: Final[timedelta] = timedelta(days=36500)
 # session. Errors the activity itself raises (not worker death) stop retrying
 # after this many attempts so a deterministic failure cannot loop forever.
 CODE_AGENT_ERROR_RETRY_LIMIT: Final[int] = 5
+# Heartbeat detail key carrying how many errors earlier attempts raised. The
+# attempt number also counts worker deaths, so it cannot be the error count.
+CODE_AGENT_ERRORS_HEARTBEAT_KEY: Final[str] = "code_agent_errors"
 
 # Tool result status for an idle session that was paused (resumable).
 CODE_AGENT_PAUSED_STATUS: Final[str] = "paused"
 
-# C15: the CLI stopped on a provider usage limit (structured signal). The
-# session is saved and paused; the parent gets the error with the user's
-# connected accounts and decides. A respawn with the same code_session_id
-# leases an account that is not rate-limited (the other provider when the
-# session's has none) and resumes from the latest checkpoint.
+# C15: the CLI stopped on a provider usage limit or ran out of credits
+# (structured signals only). The session is saved and its sandbox paused; the
+# parent gets the error with every credential path and the exact retry. A retry
+# with the same code_session_id prefers the session's own provider (paused
+# sandbox + the CLI's native resume), switches provider with a trajectory
+# handoff only when that provider has nothing leasable, and starts nothing
+# (same status, failure_kind "no_credentials") when no path is leasable.
 CODE_AGENT_USAGE_LIMIT_STATUS: Final[str] = "usage_limit"
 
 # Structured transcript rows (utils/code_transcript.py) are persisted in batches at most
@@ -99,59 +107,27 @@ DRAIN_CHECK_INTERVAL_S: Final[float] = 1.0
 # The retry after a dead worker starts once this passes without a heartbeat, so
 # the sandbox ws-servers serve their final buffer until the session is closed.
 CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
+# Session create: the backend may wait for its shared E2B create slot (up to
+# 15 min, back-end/src/providers/e2bCreateSlot.ts) and then start the sandbox; a
+# fresh repo sandbox restores its project for minutes (150 s on 2026-11-06,
+# when a 60 s read timed out and the retries started 3 tasks). The activity
+# heartbeats while it waits, so liveness stays the heartbeat timeout; this
+# bound only ends a backend that never answers. A retry of the same tool call
+# gets the same task back (backend createWithCodeSession).
+CODE_SESSION_CREATE_TIMEOUT_S: Final[float] = 30 * 60.0
+CODE_SESSION_CREATE_HEARTBEAT_S: Final[float] = 30.0
+# A resumed spawn whose live CLI the user holds in direct chat, behind a
+# ws-server too old to hold an attaching spawn: the backend answers 409
+# CODE_SESSION_HELD and never stops that CLI. The spawn waits (heartbeating,
+# capped backoff) for the hand back; the ws-server releases an idle hold after
+# 10 minutes, so this covers it with a margin before failing truthfully.
+CODE_SESSION_HELD_CODE: Final[str] = "CODE_SESSION_HELD"
+CODE_SESSION_HELD_WAIT_S: Final[float] = 12 * 60.0
+CODE_SESSION_HELD_BACKOFF_S: Final[tuple[float, float]] = (5.0, 30.0)
 # A reattaching attempt closes the previous sandbox and starts over only after
 # this many failed handshakes, so one network blip does not discard a live run.
 REATTACH_PROBE_ATTEMPTS: Final[int] = 3
 REATTACH_PROBE_BACKOFF_S: Final[float] = 2.0
-
-# Fatal error patterns in Claude Code output that should immediately abort the session.
-# These are unrecoverable inside a headless sandbox (e.g., OAuth login can't be completed).
-FATAL_ERROR_PATTERNS: Final[list[tuple[str, str]]] = [
-    (
-        "authentication_error",
-        "Claude Code authentication failed (401). The user's Claude credentials are invalid or expired. "
-        "They need to re-sync their Claude Code credentials.",
-    ),
-    (
-        "Invalid authentication credentials",
-        "Claude Code authentication failed. The user's API key or OAuth token is invalid.",
-    ),
-    (
-        "API Error: 401",
-        "Claude Code received a 401 from the Anthropic API. The user's credentials need to be refreshed.",
-    ),
-    (
-        "Please run /login",
-        "Claude Code is requesting interactive login, which cannot be completed in a sandbox.",
-    ),
-    (
-        "You've hit your limit",
-        "Claude Code OAuth credentials are rate-limited. The credential must be rotated until the reset time.",
-    ),
-    (
-        "/rate-limit-options",
-        "Claude Code OAuth credentials are rate-limited. The credential must be rotated instead of waiting in the sandbox.",
-    ),
-    (
-        # Anthropic emits this exact wording ("...is too low") in the CLI banner and
-        # API error body ("Your credit balance is too low to access the Anthropic API").
-        # The substring "Credit balance is too low" covers both; an earlier pattern
-        # without "is" silently never matched, so the sandbox looped instead of aborting.
-        "redit balance is too low",
-        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
-        "or refill the shared Anthropic API billing account.",
-    ),
-    (
-        "Credit balance too low",
-        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
-        "or refill the shared Anthropic API billing account.",
-    ),
-    (
-        "Add funds: https://platform.claude.com/settings/billing",
-        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
-        "or refill the shared Anthropic API billing account.",
-    ),
-]
 
 # Suppress PTY echo from triggering silence detection for this window
 ECHO_SUPPRESS_S: Final[float] = 1.0
@@ -159,8 +135,10 @@ ECHO_SUPPRESS_S: Final[float] = 1.0
 # After this many unchanged outputs, stop calling LLM (output is stale)
 MAX_UNCHANGED_OUTPUTS: Final[int] = 3
 
-# E2B sandbox cost: $0.000028/second = 0.0028 cents/second
-E2B_COST_CENTS_PER_SECOND: Final[float] = 0.0028
+# E2B sandbox cost per vCPU: $0.000014/second = 0.0014 cents/second. A sandbox
+# reports its size (C16); one without a reported size is the default 2 vCPUs.
+E2B_COST_CENTS_PER_VCPU_SECOND: Final[float] = 0.0014
+E2B_DEFAULT_SANDBOX_VCPUS: Final[int] = 2
 
 # ── Run target (C14: cloud sandbox vs the user's Mac) ──
 CODE_TARGET_CLOUD: Final[str] = "cloud"
@@ -171,6 +149,8 @@ LOCAL_TARGET_UNAVAILABLE_CODE: Final[str] = "LOCAL_TARGET_UNAVAILABLE"
 # Backend code when E2B refuses a sandbox over the plan's concurrent-sandbox limit.
 # Fails the tool immediately with the backend's message: no retry, no soft-fail.
 E2B_CAPACITY_EXHAUSTED_CODE: Final[str] = "E2B_CAPACITY_EXHAUSTED"
+# The backend answers session create 429 with this code when GitHub's rate limit stopped the repo access check.
+GITHUB_RATE_LIMITED_CODE: Final[str] = "GITHUB_RATE_LIMITED"
 # Reason codes shared with back-end/src/providers/localDevices/messages.ts.
 LOCAL_TARGET_NOT_MAC_ORIGIN: Final[str] = "not_mac_origin"
 LOCAL_TARGET_DEVICE_DISCONNECTED: Final[str] = "device_disconnected"

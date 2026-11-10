@@ -744,6 +744,7 @@ async def prepare_browser_auth(
     user_id: str,
     session_id: str,
     target_url: str,
+    restore_browser_state: bool = True,
 ) -> Dict[str, Any]:
     """Prepare all saved browser credentials before entering a new auth realm."""
     async with httpx.AsyncClient(timeout=180.0) as client:
@@ -754,7 +755,10 @@ async def prepare_browser_auth(
                 "x-user-id": user_id,
                 "Content-Type": "application/json",
             },
-            json={"target_url": target_url},
+            json={
+                "target_url": target_url,
+                **({"restore_browser_state": False} if not restore_browser_state else {}),
+            },
         )
     if response.status_code in (200, 201):
         data = response.json()
@@ -951,7 +955,9 @@ async def close_browser_session(
     if signed_in_sites:
         payload["signed_in_sites"] = sorted(set(signed_in_sites))
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # A logical-browser pause checkpoints state before releasing the native
+        # session; live checkpoint + provider cleanup can exceed ten seconds.
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/close",
                 headers={"x-api-key": config.backend.api_key or ""},

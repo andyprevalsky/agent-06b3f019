@@ -21,7 +21,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run-deploy-structural-gates.py"
-DEPLOY_MD = ROOT / ".claude" / "commands" / "deploy.md"
+# Gate registry floor: deleting a registration lowers the count. Raise it when gates
+# are added; lowering it is the deliberate, reviewable act of retiring a gate.
+MIN_REGISTERED_GATES = 96
 
 
 def _registry_commands() -> set[str]:
@@ -46,13 +48,22 @@ def _registry_commands() -> set[str]:
     return commands
 
 
-class StructuralGateDocumentationTests(unittest.TestCase):
-    """Step 4s lists its suites explicitly so a gate cannot be silently dropped.
+def _load_registry():
+    spec = importlib.util.spec_from_file_location("deploy_registry_guard", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
-    Several suites (approval-format, deploy-worktree-preflight, semantic-deploy,
-    check-agent-behavior-approval) assert their own command still appears in
-    deploy.md. Replacing that list with a registry pointer therefore removes
-    real coverage while still looking tidy. Pin both directions instead.
+
+class StructuralGateDocumentationTests(unittest.TestCase):
+    """The registry is the only gate list: deploy.md carries none by design.
+
+    `scripts/deploy gates` runs this registry, so a gate is dropped silently only if
+    its registration disappears. Without a doc to compare against, the guards here
+    keep the registry well-formed (unique names and commands, every script exists),
+    prevent it from shrinking unnoticed, and require the suites that own deploy
+    behavior to assert their own registration (several already do).
     """
 
     def test_frontend_coverage_requires_app_typecheck_before_vitest(self) -> None:
@@ -114,21 +125,57 @@ class StructuralGateDocumentationTests(unittest.TestCase):
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=60)
 
-    def test_deploy_md_lists_every_registered_gate(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)
+    def test_registry_names_and_commands_are_unique(self) -> None:
+        gates = _load_registry().GATES
+        names = [gate.name for gate in gates]
+        commands = [gate.command for gate in gates]
         self.assertEqual(
-            missing, [], f"deploy.md Step 4s is missing registered gate(s): {missing}"
+            sorted({n for n in names if names.count(n) > 1}), [], "duplicate gate names"
+        )
+        self.assertEqual(
+            sorted({" ".join(c) for c in commands if commands.count(c) > 1}),
+            [],
+            "one command registered under two gate names would run twice and hide a drop",
         )
 
-    def test_deploy_md_lists_no_unregistered_gate(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        registry = _registry_commands()
-        documented = {match.group(1) for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)}
-        stale = sorted(documented - registry)
-        self.assertEqual(
-            stale, [], f"deploy.md names gate(s) absent from the registry: {stale}"
+    def test_every_registered_command_points_at_existing_paths(self) -> None:
+        missing = []
+        for gate in _load_registry().GATES:
+            for token in gate.command[1:]:
+                if "/" in token and "*" not in token and not (ROOT / token).exists():
+                    missing.append(f"{gate.name}: {token}")
+        self.assertEqual(missing, [], f"registered gate(s) run a missing path: {missing}")
+
+    def test_registry_does_not_shrink_below_the_floor(self) -> None:
+        count = len(_load_registry().GATES)
+        self.assertGreaterEqual(
+            count,
+            MIN_REGISTERED_GATES,
+            f"{count} registered gates < floor {MIN_REGISTERED_GATES}: a gate registration was "
+            "removed; retire it deliberately by lowering MIN_REGISTERED_GATES in this test",
         )
+
+    def test_owning_suites_are_registered_once_with_their_exact_command(self) -> None:
+        """The suites that own deploy behavior also assert this about themselves."""
+        gates = _load_registry().GATES
+        owners = {
+            "deploy-structural-runner": ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
+            "cooperative-cutover-monitor": ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
+            "workflow-deployment-migration": ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
+            "durable-evidence-links": ("bash", "scripts/tests/durable-evidence-links.test.sh"),
+            "seed-memory-ratchet": ("bash", "scripts/tests/seed-memory-ratchet.test.sh"),
+            "deploy-worktree-preflight": ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
+            "semantic-deploy": ("bash", "scripts/tests/semantic-deploy-gate.test.sh"),
+            "test-quarantine": ("python3", "scripts/tests/test-quarantine.test.py"),
+            "deploy-gate-progress": ("python3", "scripts/tests/deploy-gate-progress.test.py"),
+        }
+        for name, command in owners.items():
+            registered = [g for g in gates if g.name == name or g.command == command]
+            self.assertEqual(
+                [(g.name, g.command) for g in registered],
+                [(name, command)],
+                f"{name} must be registered exactly once with {' '.join(command)}",
+            )
 
     def test_agents_blackbox_registration_guard_is_a_deploy_gate(self) -> None:
         self.assertIn(
@@ -138,12 +185,29 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         )
 
     def test_cloudbench_blackbox_is_not_duplicated_with_agents_coverage(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        step = deploy_md.split("## Step 4cb:", 1)[1].split("## Step 4c:", 1)[0]
-        self.assertIn('if [ -z "$CHANGED_AGENTS" ]; then', step)
-        self.assertIn("./venv/bin/python scripts/run_blackbox_tests.py benchmark", step)
-        self.assertIn("Step 4g's agents coverage already runs it", step)
-        self.assertIn("wait for Step 4g to finish before starting", step)
+        """The agents `benchmark` blackbox domain runs once, inside agents coverage."""
+        self.assertTrue((ROOT / "agents/tests/blackbox/benchmark.blackbox.py").is_file())
+        parallel = (ROOT / "agents/scripts/run_coverage_blackbox_parallel.py").read_text()
+        self.assertIn("TESTS_DIR = AGENTS_ROOT", parallel)
+        self.assertIn('"benchmark",', parallel)
+        controller = (ROOT / "scripts/run-cloudbench-controller-local.py").read_text()
+        self.assertNotIn("run_blackbox_tests.py", controller, "controller regressions must not rerun the benchmark domain")
+        for gate in _load_registry().GATES:
+            self.assertNotIn(
+                "run_blackbox_tests.py", " ".join(gate.command), f"{gate.name} reruns a blackbox domain"
+            )
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import deploy_test_plan as plan
+            runners = [
+                gate["name"]
+                for gate in plan.standard_template()["gates"]
+                if "run-coverage.sh" in " ".join(map(str, gate["command"]))
+                and gate.get("cwd") == "agents"
+            ]
+        finally:
+            sys.path.remove(str(ROOT / "scripts"))
+        self.assertEqual(runners, ["agents-coverage-blackbox"])
 
 
 class StructuralGatePortIsolationTests(unittest.TestCase):
@@ -360,7 +424,6 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 (scripts / "semantic-deploy-gate.test.sh").write_text(
                     "set -euo pipefail\n"
                     f"DESCEND_COMMAND_TEST={str(scripts / 'descend-command.test.sh')!r}\n"
-                    f"DEPLOY_COMMAND={str(DEPLOY_MD)!r}\n"
                     f"DEPLOY_STRUCTURAL_RUNNER={str(registry_path)!r}\n"
                     'fail() { echo "FAIL: $1" >&2; exit 1; }\n'
                     'require_text() { grep -Fq -- "$2" "$1" || fail "$3"; }\n'
@@ -374,9 +437,10 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 ):
                     result = module.run_gates(selected, max_workers=3)
                 observed = calls.read_text().splitlines()
+                # A failing owner fails its one rerun too: two executions, never three.
                 self.assertEqual(
                     sorted(observed),
-                    ["descend-command"],
+                    ["descend-command"] * (2 if failing_owner else 1),
                     output.getvalue(),
                 )
                 self.assertEqual(
@@ -435,7 +499,10 @@ class StructuralGateRunnerTests(unittest.TestCase):
 
             try:
                 with (
+                    patch.object(module.os, "cpu_count", return_value=14),
                     patch.object(module, "GATES", gates),
+                    patch.object(module, "FAILURE_STATE", root / "failures.json"),
+                    patch.object(module, "DURATIONS_STATE", root / "durations.json"),
                     patch.object(sys, "argv", [str(RUNNER)]),
                     patch.object(module.subprocess, "Popen", side_effect=launch),
                     patch.object(module.time, "sleep", side_effect=observe_admission),
@@ -445,15 +512,140 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     result = module.main()
             finally:
                 release.touch()
-            self.assertEqual(launched, [gate.command for gate in gates])
+            # Gate 10 fails, so it gets its one rerun (which fails again on its existing file).
+            self.assertEqual(launched, [gate.command for gate in gates] + [gates[10].command])
             self.assertEqual(len(list(root.glob("gate-*"))), 11)
             self.assertEqual(result, 1, "a real gate failure must remain fatal")
             with (
                 patch.object(module, "run_gates", return_value=0) as run,
+                patch.object(module, "DURATIONS_STATE", root / "unrecorded-durations.json"),
                 patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]),
             ):
                 self.assertEqual(module.main(), 0)
-                run.assert_called_once_with(module.GATES, max_workers=3)
+                # Without recorded durations the plan is the registry itself.
+                run.assert_called_once_with(
+                    list(module.GATES),
+                    max_workers=3,
+                    failure_state=module.ROOT / module.FAILURE_STATE,
+                    durations_state=module.ROOT / module.DURATIONS_STATE,
+                )
+
+    def test_exclusive_group_jobs_never_overlap_while_other_gates_keep_running(self) -> None:
+        """Suites that park or scan unreadable same-user processes must not overlap.
+
+        deploy-test-cycle's quiet() refuses on any same-user process whose cwd it cannot read
+        for 2 s. deploy-test-plan and deploy-structural-runner park exactly such processes
+        (PR_SET_DUMPABLE=0 children) as fixtures, so running beside them failed the gate on a
+        Blacksmith VM (PR 1747, run 42394708631) and on PR 1751 before it. Jobs of one group run
+        one at a time; a gate outside the group still uses the free workers.
+        """
+        module = _load_registry()
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-exclusive-") as temporary:
+            root = Path(temporary)
+
+            def gate(name: str, group: str = "") -> object:
+                code = (
+                    "import time; from pathlib import Path; "
+                    f"p = Path({str(root / name)!r}); "
+                    "p.with_suffix('.start').write_text(repr(time.monotonic())); "
+                    "time.sleep(0.4); "
+                    "p.with_suffix('.end').write_text(repr(time.monotonic()))"
+                )
+                return module.Gate(name, (sys.executable, "-c", code), exclusive=group)
+
+            gates = (gate("g0", "g"), gate("g1", "g"), gate("g2", "g"), gate("plain"))
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                result = module.run_gates(gates, max_workers=4)
+            self.assertEqual(result, 0)
+
+            def span(name: str) -> tuple[float, float]:
+                return (
+                    float((root / f"{name}.start").read_text()),
+                    float((root / f"{name}.end").read_text()),
+                )
+
+            grouped = sorted((span(name) for name in ("g0", "g1", "g2")))
+            for (_, earlier_end), (later_start, _) in zip(grouped, grouped[1:]):
+                self.assertGreaterEqual(
+                    later_start, earlier_end, "two jobs of one exclusive group overlapped"
+                )
+            plain_start, _ = span("plain")
+            first_group_end = min(end for _, end in grouped)
+            self.assertLess(
+                plain_start,
+                first_group_end,
+                "a gate outside the group waited for the exclusive group",
+            )
+
+    def test_every_suite_with_a_non_dumpable_fixture_is_in_the_proc_observation_group(self) -> None:
+        registry = _load_registry()
+        by_command = {path: gate for gate in registry.GATES for path in gate.command}
+        fixtures = [
+            path
+            for path in sorted((ROOT / "scripts" / "tests").glob("*.test.*"))
+            if "prctl(4" in path.read_text() or "PR_SET_DUMPABLE" in path.read_text()
+        ]
+        self.assertGreaterEqual(len(fixtures), 3, "the fixture scan found no suites")
+        for path in fixtures:
+            relative = str(path.relative_to(ROOT))
+            gate = by_command.get(relative)
+            self.assertIsNotNone(gate, f"{relative} builds unreadable-process fixtures but is no gate")
+            self.assertEqual(
+                gate.exclusive,
+                registry.PROC_OBSERVATION,
+                f"{gate.name} parks unreadable same-user processes; it must not overlap the scanners",
+            )
+
+    def test_gates_start_under_the_documented_umask_not_the_invokers(self) -> None:
+        """The deploy lane runs the registry inside a transient systemd service
+        (UMask 0022) while interactive devbox shells use 077. A gate must see
+        the same umask from either invoker, or a fixture can pass only where
+        the inherited umask happened to make its files private."""
+        spec = importlib.util.spec_from_file_location("deploy_runner_umask", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        self.assertEqual(module.GATE_UMASK, 0o022)
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-umask-") as temporary:
+            root = Path(temporary)
+            observed = root / "observed.json"
+            gates = (
+                module.Gate(
+                    "umask-probe",
+                    (
+                        sys.executable,
+                        "-c",
+                        (
+                            "import json, os, stat; from pathlib import Path; "
+                            f"probe = Path({str(root / 'probe')!r}); probe.write_text('x'); "
+                            f"Path({str(observed)!r}).write_text(json.dumps(dict("
+                            "umask=os.umask(0), probe_mode=stat.S_IMODE(probe.stat().st_mode))))"
+                        ),
+                    ),
+                ),
+            )
+            for inherited in (0o077, 0o000):
+                observed.unlink(missing_ok=True)
+                (root / "probe").unlink(missing_ok=True)
+                previous = os.umask(inherited)
+                try:
+                    with (
+                        patch.object(module, "GATES", gates),
+                        patch.object(module, "FAILURE_STATE", root / "failures.json"),
+                        patch.object(sys, "argv", [str(RUNNER)]),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        result = module.main()
+                finally:
+                    os.umask(previous)
+                self.assertEqual(result, 0)
+                seen = json.loads(observed.read_text())
+                self.assertEqual(seen["umask"], module.GATE_UMASK, f"inherited umask {inherited:#o}")
+                self.assertEqual(seen["probe_mode"], 0o666 & ~module.GATE_UMASK)
 
     def test_missing_host_tool_fails_before_any_gate_runs(self) -> None:
         spec = importlib.util.spec_from_file_location("deploy_runner_host_tools", RUNNER)
@@ -582,7 +774,7 @@ class LinuxGateStorageRetentionTests(unittest.TestCase):
     they are component coverage, never proof that the public route may allocate.
     """
 
-    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True, disposable=False, gate_path=None):
+    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True, disposable=False, gate_path=None, proc_fault=""):
         temporary = tempfile.TemporaryDirectory(prefix="gate-storage-retention-")
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -594,6 +786,19 @@ class LinuxGateStorageRetentionTests(unittest.TestCase):
 import json,os,sys
 from pathlib import Path
 args=sys.argv[1:]
+# The wrapper models an unrelated host sibling, outside the fake guest.
+if (args[:2]==['machine','run'] and os.environ.get('GATE_TEST_PROC_FAULT')=='foreign-unreadable'
+        and os.environ.get('GATE_TEST_PROC_WRAPPED')!='1'):
+    import subprocess
+    foreign=subprocess.Popen([sys.executable,'-c',
+        "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0)==0; print('ready',flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+    try:
+        assert foreign.stdout.readline().strip()=='ready'
+        env=dict(os.environ,GATE_TEST_PROC_WRAPPED='1')
+        raise SystemExit(subprocess.run([sys.executable,__file__,*args],env=env).returncode)
+    finally:
+        foreign.stdin.close();foreign.wait(timeout=10);foreign.stdout.close()
 with Path(os.environ['GATE_TEST_CALLS']).open('a') as out: out.write(json.dumps(args)+'\n')
 if args[:2]==['volumes','create']:
     fault=os.environ.get('GATE_TEST_VOLUME_FAULT','')
@@ -645,14 +850,20 @@ elif args[:2]==['machine','run']:
         original_iter=Path.iterdir
         def bounded_proc(path):
             if str(path)!='/proc': return original_iter(path)
-            selected=[]
-            for process in original_iter(path):
+            # Only this fake guest and its descendants inhabit the fake VM.
+            # The caller shell and its siblings are host-side processes.
+            pending=[os.getpid()];selected=set()
+            while pending:
+                pid=pending.pop()
+                if pid in selected: continue
+                selected.add(pid)
+                process=Path('/proc')/str(pid)
                 try:
-                    if process.name.isdecimal() and process.stat().st_uid==os.getuid():
-                        status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
-                        if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
-                except (FileNotFoundError, ProcessLookupError): continue  # exited mid-scan
-            return iter(selected)
+                    tasks=list(original_iter(process/'task'))
+                    for task in tasks:
+                        pending.extend(int(child) for child in (task/'children').read_text().split())
+                except FileNotFoundError: continue  # collector still observes any live task
+            return iter(Path('/proc')/str(pid) for pid in sorted(selected))
         Path.iterdir=bounded_proc
         subject={'__name__':'fake_native_collector','__file__':str(helper)}
         exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
@@ -661,8 +872,19 @@ elif args[:2]==['machine','run']:
         subject['launch'](Namespace(repo=repo,record=remote/'launch.json',driver_pid=os.getpid(),caller=Path(files['/tmp/controller-host-caller.json']),ref='a'*40,image='fixture/immutable@sha256:'+'b'*64))
         if os.environ.get('GATE_TEST_VOLUME_FAULT')=='exchanged-owner': (repo/'.context/controller-workspace-volume/ownership.json').write_text('{}')
         if os.environ.get('GATE_TEST_VOLUME_FAULT')=='missing-owner': (repo/'.context/controller-workspace-volume/ownership.json').unlink()
-        rc=subject['export'](Namespace(record=remote/'launch.json',archive=remote/'originals.tar.gz',manifest=remote/'manifest.json',pending=remote/'pending.json'))
-        if rc: raise SystemExit(rc)
+        observer=None
+        try:
+            if os.environ.get('GATE_TEST_PROC_FAULT')=='owned-unreadable':
+                import subprocess
+                observer=subprocess.Popen([sys.executable,'-c',
+                    "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0)==0; print('ready',flush=True); sys.stdin.read()"],
+                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                assert observer.stdout.readline().strip()=='ready'
+            rc=subject['export'](Namespace(record=remote/'launch.json',archive=remote/'originals.tar.gz',manifest=remote/'manifest.json',pending=remote/'pending.json'))
+            if rc: raise SystemExit(rc)
+        finally:
+            if observer is not None:
+                observer.stdin.close();observer.wait(timeout=10);observer.stdout.close()
     print('Machine ID: abcdef12345678')
 elif args[0]=='logs':
     outcome=os.environ['GATE_TEST_OUTCOME']
@@ -699,11 +921,12 @@ else: print('origin/fixture')
         env = {**os.environ, "PATH": str(transport)+os.pathsep+os.environ["PATH"],
                "FLY_API_TOKEN":"offline-fixture", "GITHUB_TOKEN":"offline-fixture",
                "CLOUDBENCH_GATE_REF":"a"*40, "WARM_IMAGE_REF":"fixture/immutable@sha256:"+"b"*64,
-               "CLOUDBENCH_GATE_NODE_VERSION":"v24.21.0", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
+               "CLOUDBENCH_GATE_NODE_VERSION":"v24.22.1", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
                "CLOUDBENCH_GATE_TIMEOUT_S":"0" if outcome=="timeout" else "30",
                "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
                "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE":keep_tmp,
                "GATE_TEST_CALLS":str(calls), "GATE_TEST_OUTCOME":outcome,
+               "GATE_TEST_PROC_FAULT":proc_fault,
                "CLOUDBENCH_GATE_EXPORT_HOST":export,"CLOUDBENCH_GATE_EXPORT_DIR":str(root/"custody"),
                "GATE_TEST_EXPORT":export,"GATE_TEST_REMOTE":str(root/"remote"),
                "GATE_TEST_BAD_COLLECTOR":"1" if bad_collector else "0",
@@ -1033,6 +1256,21 @@ else: print('origin/fixture')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(calls, [])
 
+    def test_fake_export_ignores_foreign_unreadable_host_sibling(self):
+        result,calls=self._run(retain="1",export="1",proc_fault="foreign-unreadable")
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertEqual(sum(row[:3]==["ssh","sftp","get"] for row in calls),3)
+
+    def test_fake_export_refuses_unreadable_owned_guest_child(self):
+        result,calls=self._run(retain="1",export="1",proc_fault="owned-unreadable")
+        self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("cannot observe controller writer ownership",result.stdout+result.stderr)
+        self.assertNotIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertFalse(any(row[:3]==["ssh","sftp","get"] for row in calls))
+
     def test_invalid_opt_in_values_refuse_before_native_launch(self):
         for retain,size in (("invalid","80"),("1","80gb"),("1","0"),("1","-1"),("1","80;false")):
             with self.subTest(retain=retain,size=size):
@@ -1089,6 +1327,105 @@ class LinuxGateExportIdleBoundTests(unittest.TestCase):
             self.assertNotIn("while :; do sleep 60; done", self._guest_tail(timeout_s))
 
 
+# Fixture harness for scripts/cloudbench-controller-export.py: bound /proc
+# enumeration to the fake host's native process namespace (the harness, the
+# unittest process and its other children). Birth ticks, cwd and fd
+# observations remain the real kernel values; the production guest collector
+# is root and observes every host UID. Definitions only; the activation below
+# patches Path.iterdir and runs the helper's main().
+CONTROLLER_EXPORT_HARNESS_NAMESPACE = """from pathlib import Path
+import os,sys,traceback
+original=Path.iterdir
+def namespace(path, original=original, getpid=os.getpid, getppid=os.getppid, getuid=os.getuid):
+    if str(path)!='/proc':
+        return original(path)
+    selected=[]
+    for process in original(path):
+        if not process.name.isdecimal(): continue
+        try:
+            if process.stat().st_uid!=getuid(): continue
+            status=(process/'stat').read_text()
+        except OSError:
+            # A foreign process that exited or changed credentials between the
+            # listing and the read (ENOENT/ESRCH/EACCES, routine on a loaded
+            # box) is not part of the fake host; only FileNotFoundError was
+            # tolerated before and anything else became a bare exit 75.
+            continue
+        fields=status[status.rfind(')')+2:].split()
+        if int(process.name) in (getpid(),getppid()) or int(fields[1])==getppid(): selected.append(process)
+    return iter(selected)
+"""
+CONTROLLER_EXPORT_HARNESS_RUN = """Path.iterdir=namespace
+helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
+subject={'__name__':'fake_native_host','__file__':str(helper)}
+exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
+subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
+subject['EXPORT_WRITER_DRAIN_SECONDS']=2  # these writers persist; keep the bounded drain short
+try: raise SystemExit(subject['main']())
+except (OSError,ValueError,KeyError):
+    # Same exit as the helper's __main__, but with the whole traceback: a
+    # structural-runner flake was a bare exit 75 with empty stderr (2026-10-30).
+    traceback.print_exc()
+    raise SystemExit(75)
+"""
+CONTROLLER_EXPORT_HARNESS = CONTROLLER_EXPORT_HARNESS_NAMESPACE + CONTROLLER_EXPORT_HARNESS_RUN
+
+
+class LinuxControllerExportHarnessTests(unittest.TestCase):
+    """The fixture harness itself: a flake inside it must be diagnosable and a
+    foreign process racing the /proc scan must not become a failure."""
+
+    def _namespace(self):
+        scope: dict = {}
+        exec(CONTROLLER_EXPORT_HARNESS_NAMESPACE, scope)  # definitions only; Path.iterdir untouched
+        self.assertIs(Path.iterdir, scope["original"])
+        return scope["namespace"]
+
+    @staticmethod
+    def _entry(name, uid=1000, ppid=50, stat_error=None, read_error=None):
+        class Entry:
+            def stat(self):
+                if stat_error: raise stat_error
+                return type("Stat", (), {"st_uid": uid})()
+            def __truediv__(self, child):
+                def read_text():
+                    if read_error: raise read_error
+                    return f"{name} (fixture) S {ppid} 1 1 0 -1\n"
+                return type("Leaf", (), {"read_text": staticmethod(read_text)})()
+        entry = Entry(); entry.name = name
+        return entry
+
+    def test_namespace_keeps_own_processes_and_skips_vanished_or_unreadable_foreign_ones(self):
+        namespace = self._namespace()
+        entries = [
+            self._entry("100"),                                   # the harness itself
+            self._entry("50", ppid=1),                            # the unittest process (parent)
+            self._entry("200"),                                   # a sibling child of the parent
+            self._entry("300", ppid=1),                           # foreign same-uid process
+            self._entry("400", stat_error=ProcessLookupError(3, "No such process")),
+            self._entry("401", stat_error=FileNotFoundError(2, "No such file")),
+            self._entry("500", read_error=PermissionError(13, "Permission denied")),
+            self._entry("600", uid=0),                            # another uid
+            self._entry("self"),                                  # /proc/self
+        ]
+        selected = list(namespace(Path("/proc"), original=lambda path: iter(entries),
+                                  getpid=lambda: 100, getppid=lambda: 50, getuid=lambda: 1000))
+        self.assertEqual([entry.name for entry in selected], ["100", "50", "200"])
+        other = Path(tempfile.gettempdir())
+        self.assertEqual(sorted(str(p) for p in namespace(other, original=lambda path: iter([other / "x"]))),
+                         [str(other / "x")], "non-/proc listings pass through")
+
+    def test_harness_reports_the_helper_exception_before_exit_75(self):
+        with tempfile.TemporaryDirectory(prefix="controller-export-harness-") as temporary:
+            helper = Path(temporary) / "fake-helper.py"
+            helper.write_text("def main():\n    raise ValueError('fixture boom')\n")
+            result = subprocess.run([sys.executable, "-c", CONTROLLER_EXPORT_HARNESS, str(helper), "export"],
+                                    text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("ValueError: fixture boom", result.stderr)
+        self.assertIn("fake-helper.py", result.stderr, "the traceback names the failing file")
+
+
 class LinuxControllerExportTests(unittest.TestCase):
     def _fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix="controller-original-export-")
@@ -1115,33 +1452,7 @@ class LinuxControllerExportTests(unittest.TestCase):
         return root,repo,helper,record,reserve
 
     def _call(self, helper, *args, expected=0):
-        # Bound /proc enumeration to the fake host's native process namespace.
-        # Birth ticks, cwd and fd observations remain the real kernel values;
-        # the production guest collector is root and observes every host UID.
-        harness = """from pathlib import Path
-import os,sys
-original=Path.iterdir
-def namespace(path):
-    if str(path)=='/proc':
-        selected=[]
-        for process in original(path):
-            try:
-                if process.name.isdecimal() and process.stat().st_uid==os.getuid():
-                    status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
-                    if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
-            except FileNotFoundError: continue
-        return iter(selected)
-    return original(path)
-Path.iterdir=namespace
-helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
-subject={'__name__':'fake_native_host','__file__':str(helper)}
-exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
-subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
-subject['EXPORT_WRITER_DRAIN_SECONDS']=2  # these writers persist; keep the bounded drain short
-try: raise SystemExit(subject['main']())
-except (OSError,ValueError,KeyError): raise SystemExit(75)
-"""
-        result=subprocess.run([sys.executable,"-c",harness,str(helper),*[str(a) for a in args]],text=True,capture_output=True,timeout=30)
+        result=subprocess.run([sys.executable,"-c",CONTROLLER_EXPORT_HARNESS,str(helper),*[str(a) for a in args]],text=True,capture_output=True,timeout=30)
         self.assertEqual(result.returncode,expected,result.stderr)
         return result
 
@@ -1214,6 +1525,532 @@ Path(sys.argv[2]).touch();time.sleep(30)
             self.assertTrue(reserve.exists())
         finally:
             writer.terminate();writer.wait(timeout=10)
+
+def _load_runner(name: str):
+    spec = importlib.util.spec_from_file_location(name, RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class StructuralGateProgressTests(unittest.TestCase):
+    """DEPLOY_GATE_PROGRESS: one live row per suite, the result left unchanged."""
+
+    WATCH = "STRUCTURAL_PROGRESS_FIXTURE_WATCH"
+
+    def _gates(self, module):
+        # The waiter finishes only after the failing suite's FAIL row is in the
+        # file, so the row is written live, not when the runner exits. Without
+        # a watch path it exits at once with the same output.
+        waiter = (
+            "import json, os, sys, time\n"
+            "if os.environ.get('DEPLOY_GATE_PROGRESS'):\n"
+            "    sys.exit(7)\n"
+            f"watch = os.environ.get({self.WATCH!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while watch and time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+            "    except (OSError, ValueError):\n"
+            "        rows = []\n"
+            "    if any(row['unit'] == 'fails' and row['status'] == 'FAIL' for row in rows):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    if watch:\n"
+            "        sys.exit(9)\n"
+            "print('waiter done')\n"
+        )
+        return (
+            module.Gate("fails", ("bash", "-c", "echo fails-marker-output; exit 3")),
+            module.Gate(
+                "split",
+                ("bash", "-c", '[ "$DEPLOY_GATE_SHARD" != 2/2 ] || { echo split-shard-two-broke; exit 1; }'),
+                shards=2,
+            ),
+            module.Gate("whole-split", ("bash", "-c", "echo whole-split-ok"), shards=2),
+            module.Gate("waiter", (sys.executable, "-c", waiter)),
+        )
+
+    def _run(self, module, gates, extra_env):
+        env = {key: value for key, value in os.environ.items() if key not in {"DEPLOY_GATE_PROGRESS", self.WATCH}}
+        env.update(extra_env)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(os.environ, env, clear=True),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.run_gates(gates, max_workers=6)
+
+        def timeless(text: str) -> str:
+            return re.sub(r"\d+(?:\.\d+)?s\b", "Ns", text)
+
+        head, _, slowest = timeless(stdout.getvalue()).partition("Slowest deploy structural gates:")
+        return result, (head, sorted(slowest.splitlines())), sorted(timeless(stderr.getvalue()).splitlines())
+
+    def test_each_suite_reports_one_live_row_without_changing_the_result(self) -> None:
+        module = _load_runner("deploy_runner_progress")
+        gates = self._gates(module)
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-progress-") as temporary:
+            root = Path(temporary)
+            progress = root / "reported" / "progress.jsonl"
+            progress.parent.mkdir()
+            silent = root / "silent"
+            silent.mkdir()
+            reported = self._run(
+                module,
+                gates,
+                {"DEPLOY_GATE_PROGRESS": str(progress), "DEPLOY_GATE_CASE": "structural", self.WATCH: str(progress)},
+            )
+            unset = self._run(module, gates, {})
+            # A directory is not a writable progress file: reporting fails silently.
+            broken = self._run(module, gates, {"DEPLOY_GATE_PROGRESS": str(silent)})
+            self.assertEqual(reported[0], 1, reported)
+            self.assertEqual(reported, unset, "reporting changed the exit code or output")
+            self.assertEqual(broken, unset, "an unwritable progress file changed the run")
+            self.assertEqual(list(silent.iterdir()), [], "nothing is written without a writable progress file")
+            rows = [json.loads(line) for line in progress.read_text().splitlines()]
+        units = [row["unit"] for row in rows]
+        self.assertEqual(sorted(units), ["fails", "split", "waiter", "whole-split"], "one row per suite")
+        self.assertLess(units.index("fails"), units.index("waiter"), "the FAIL row precedes later suites")
+        by_unit = {row["unit"]: row for row in rows}
+        self.assertEqual({row["scope"] for row in rows}, {"suite"})
+        self.assertEqual({row["case"] for row in rows}, {"structural"})
+        self.assertEqual(
+            {unit: row["status"] for unit, row in by_unit.items()},
+            {"fails": "FAIL", "split": "FAIL", "whole-split": "PASS", "waiter": "PASS"},
+        )
+        self.assertIn("fails-marker-output", by_unit["fails"]["detail"])
+        # Both fail their one rerun: the FAIL row points at the counted (rerun) attempt.
+        self.assertTrue(by_unit["fails"]["log"].endswith("/fails.rerun.log"))
+        self.assertIn("split-shard-two-broke", by_unit["split"]["detail"])
+        self.assertTrue(by_unit["split"]["log"].endswith("/split[2-of-2].rerun.log"))
+        self.assertEqual((by_unit["whole-split"]["detail"], by_unit["whole-split"]["log"]), ("", ""))
+        self.assertTrue(by_unit["waiter"]["log"].endswith("/waiter.log"))
+
+
+class StructuralGateSchedulingTests(unittest.TestCase):
+    """Sharding, longest-first admission, hard timeouts and failed-first retries."""
+
+    def test_shards_partition_the_selection_exactly_once(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts" / "tests"))
+        try:
+            import deploy_gate_shard as shard
+        finally:
+            sys.path.pop(0)
+        items = list(range(1117))
+        for count in (1, 2, 4, 6, 7):
+            union = []
+            for index in range(1, count + 1):
+                with patch.dict(os.environ, {shard.ENV: f"{index}/{count}"}):
+                    kept, dropped = shard.select(items)
+                self.assertTrue(kept)
+                self.assertEqual(sorted(kept + dropped), items)
+                union += kept
+            self.assertEqual(sorted(union), items, f"{count} shards")
+        with patch.dict(os.environ, {shard.ENV: "3/2"}), self.assertRaises(ValueError):
+            shard.select(items)
+        env = dict(os.environ)
+        env.pop(shard.ENV, None)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(shard.select(items), (items, []))
+
+    def test_failed_or_timed_out_gates_are_not_recorded_as_costs(self) -> None:
+        """A failure or a 600 s timeout is not a duration observation: recording
+        it would triple the next deadline for the same hung gate and let a fast
+        failure distort longest-first ordering. The previous value survives."""
+        module = _load_runner("deploy_runner_duration_costs")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "durations.json"
+            path.write_text(json.dumps({"schema_version": 1, "gates": {"timed": {"seconds": 12.5, "shards": 1}}}))
+            ok = module.Job(module.Gate("ok", ("true",)), 0)
+            failed = module.Job(module.Gate("failed", ("false",)), 0)
+            timed = module.Job(module.Gate("timed", ("sleep", "1")), 0)
+            sharded = module.Gate("sharded", ("true",), shards=2)
+            shard_jobs = [module.Job(sharded, 1), module.Job(sharded, 2)]
+            results = {"ok": (0, 1.5, ""), "failed": (1, 0.2, ""), "timed": (124, 600.0, ""),
+                       "sharded[1/2]": (0, 3.0, ""), "sharded[2/2]": (1, 4.0, "")}
+            module.record_durations(path, [ok, failed, timed, *shard_jobs], results)
+            recorded = module.load_durations(path)
+        self.assertEqual(recorded.get("ok"), 1.5)
+        self.assertNotIn("failed", recorded)
+        self.assertEqual(recorded.get("timed"), 12.5, "a timed-out gate must keep its previous cost")
+        self.assertNotIn("sharded", recorded, "one failed shard poisons the gate's observation")
+
+    def test_registered_shards_expand_with_their_environment(self) -> None:
+        module = _load_runner("deploy_runner_shards")
+        sharded = [gate for gate in module.GATES if gate.shards > 1]
+        self.assertTrue(sharded, "the long suites must stay sharded")
+        jobs = module.expand_jobs(module.GATES)
+        self.assertEqual(
+            len(jobs), sum(max(gate.shards, 1) for gate in module.GATES)
+        )
+        for gate in sharded:
+            specs = sorted(
+                job.environment()[module.SHARD_ENV] for job in jobs if job.gate is gate
+            )
+            self.assertEqual(
+                specs, sorted(f"{i}/{gate.shards}" for i in range(1, gate.shards + 1))
+            )
+        unsharded = next(job for job in jobs if job.gate.shards == 1)
+        with patch.dict(os.environ, {module.SHARD_ENV: "1/9"}):
+            self.assertNotIn(module.SHARD_ENV, unsharded.environment())
+        expected = [job.expected_seconds for job in jobs]
+        self.assertEqual(expected, sorted(expected, reverse=True), "longest first")
+
+    def test_plan_gates_uses_recorded_durations_and_splits_long_shardable_gates(self) -> None:
+        module = _load_runner("deploy_runner_plan")
+        gates = (
+            module.Gate("split", ("true",), expected_seconds=10, shards=2),
+            module.Gate("whole", ("true",)),
+            module.Gate("tiny", ("true",), expected_seconds=5),
+        )
+        # Cold start: no record -> the registry plan, unchanged.
+        self.assertEqual(module.plan_gates(gates, {}, 4), list(gates))
+        recorded = {"split": 2000.0, "whole": 900.0, "tiny": 1.0}
+        planned = module.plan_gates(gates, recorded, 4)
+        by_name = {gate.name: gate for gate in planned}
+        # budget = 2901 / 4 = 725.25 s; 70% threshold = 507.7 s -> 2000 s needs 4 shards.
+        self.assertEqual(by_name["split"].shards, 4)
+        self.assertEqual(by_name["split"].expected_seconds, 2000.0)
+        self.assertEqual(by_name["whole"].shards, 1, "a suite without DEPLOY_GATE_SHARD support never splits")
+        self.assertEqual(by_name["whole"].expected_seconds, 900.0)
+        self.assertEqual(by_name["tiny"].expected_seconds, 1.0)
+        self.assertEqual([g.name for g in planned], ["split", "whole", "tiny"], "gate set and order unchanged")
+        jobs = module.expand_jobs(planned)
+        self.assertEqual([job.label for job in jobs][:2], ["whole", "split[1/4]"], "longest job first")
+        self.assertEqual(sum(1 for job in jobs if job.gate.name == "split"), 4)
+        self.assertEqual(jobs[0].timeout_seconds, 2700.0, "timeouts follow recorded cost, never below the default")
+        # The registry count is the floor and MAX_AUTO_SHARDS the ceiling.
+        self.assertEqual(module.plan_gates(gates, {"split": 1.0}, 4)[0].shards, 2)
+        self.assertEqual(module.plan_gates(gates, {"split": 10**6}, 100)[0].shards, module.MAX_AUTO_SHARDS)
+        with self.assertRaises(ValueError):
+            module.plan_gates(gates, recorded, 0)
+
+    def test_run_gates_records_per_gate_durations_for_the_next_plan(self) -> None:
+        module = _load_runner("deploy_runner_durations")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-durations-") as temporary:
+            ledger = Path(temporary) / "durations.json"
+            gates = (
+                module.Gate("sharded", ("bash", "-c", "sleep 0.2"), expected_seconds=1, shards=2),
+                module.Gate("single", ("bash", "-c", "sleep 0.1")),
+            )
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.run_gates(gates, max_workers=3, durations_state=ledger), 0)
+            recorded = module.load_durations(ledger)
+            self.assertEqual(set(recorded), {"sharded", "single"})
+            self.assertGreaterEqual(recorded["sharded"], 0.4, "a sharded gate records the sum of its shards")
+            self.assertGreaterEqual(recorded["single"], 0.1)
+            payload = json.loads(ledger.read_text())
+            self.assertEqual(payload["gates"]["sharded"]["shards"], 2)
+            self.assertIn("sharded[1/2]", payload["jobs"])
+            planned = module.plan_gates(gates, recorded, 3)
+            self.assertEqual(planned[0].expected_seconds, recorded["sharded"])
+            # Gates absent from a later run keep their record instead of vanishing.
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                module.run_gates(
+                    (module.Gate("single", ("bash", "-c", "sleep 0.1")),), max_workers=1, durations_state=ledger
+                )
+            self.assertEqual(set(module.load_durations(ledger)), {"sharded", "single"})
+            self.assertEqual(module.load_durations(Path(temporary) / "missing.json"), {})
+            (Path(temporary) / "broken.json").write_text("{not json")
+            self.assertEqual(module.load_durations(Path(temporary) / "broken.json"), {})
+
+    def test_sharded_gate_runs_every_shard_through_the_runner(self) -> None:
+        module = _load_runner("deploy_runner_shard_run")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-shard-run-") as temporary:
+            seen = Path(temporary) / "seen"
+            gates = (
+                module.Gate(
+                    "split",
+                    ("bash", "-c", f'echo "$DEPLOY_GATE_SHARD" >> {seen}; [ "$DEPLOY_GATE_SHARD" != 2/3 ]'),
+                    expected_seconds=30,
+                    shards=3,
+                ),
+                module.Gate("whole", ("bash", "-c", f'echo "whole:${{DEPLOY_GATE_SHARD:-none}}" >> {seen}')),
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = module.run_gates(gates, max_workers=2)
+            self.assertEqual(result, 1, "one failing shard fails the gate")
+            # The failing shard's one rerun keeps its shard: 2/3 runs twice.
+            self.assertEqual(
+                sorted(seen.read_text().split()), ["1/3", "2/3", "2/3", "3/3", "whole:none"]
+            )
+            self.assertIn("split[2/3]", stderr.getvalue())
+            self.assertIn("== split[1/3]: exit=0", stdout.getvalue())
+
+    def test_hung_gate_is_killed_with_its_process_group_and_fails_by_name(self) -> None:
+        module = _load_runner("deploy_runner_timeout")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-timeout-") as temporary:
+            child_pid = Path(temporary) / "child.pid"
+            gates = (
+                module.Gate(
+                    "hangs-forever",
+                    (
+                        "bash",
+                        "-c",
+                        f"trap '' TERM; sleep 300 & echo $! > {child_pid}; wait",
+                    ),
+                ),
+                module.Gate("quick", ("bash", "-c", "exit 0")),
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            started = time.monotonic()
+            with (
+                patch.object(module, "DEFAULT_GATE_TIMEOUT_SECONDS", 2.0),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                result = module.run_gates(gates, max_workers=2)
+            elapsed = time.monotonic() - started
+            self.assertEqual(result, 1)
+            self.assertLess(elapsed, 60, "the hung gate must not hold the runner")
+            self.assertIn("hangs-forever (timed out)", stderr.getvalue())
+            self.assertNotIn("rerunning", stderr.getvalue(), "a timed-out job is not rerun")
+            self.assertIn("TIMEOUT: deploy structural gate hangs-forever", stderr.getvalue())
+            self.assertIn("== hangs-forever: exit=124", stdout.getvalue())
+            self.assertIn("== quick: exit=0", stdout.getvalue())
+            pid = int(child_pid.read_text())
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("the hung gate's background child survived the timeout")
+
+    def test_timeout_scales_with_recorded_cost(self) -> None:
+        module = _load_runner("deploy_runner_timeout_scale")
+        quick = module.Job(module.Gate("quick", ("true",)), 0)
+        slow = module.Job(module.Gate("slow", ("true",), expected_seconds=700, shards=2), 1)
+        self.assertEqual(quick.timeout_seconds, module.DEFAULT_GATE_TIMEOUT_SECONDS)
+        self.assertEqual(slow.timeout_seconds, max(module.DEFAULT_GATE_TIMEOUT_SECONDS, 3 * 350))
+
+    def test_retry_runs_previous_failures_first_then_the_full_sweep(self) -> None:
+        module = _load_runner("deploy_runner_failed_first")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-failed-first-") as temporary:
+            root = Path(temporary)
+            order = root / "order"
+            broken = root / "broken"
+            state = root / "state.json"
+
+            def gate(name: str, seconds: float) -> object:
+                body = f"echo {name} >> {order}; test ! -e {broken}.{name}"
+                return module.Gate(name, ("bash", "-c", body), expected_seconds=seconds)
+
+            gates = (gate("long", 100), gate("middle", 50), gate("short", 1))
+
+            def run() -> tuple[int, list[str], str]:
+                order.write_text("")
+                stderr = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    result = module.run_gates(gates, max_workers=1, failure_state=state)
+                return result, order.read_text().split(), stderr.getvalue()
+
+            Path(f"{broken}.short").touch()
+            result, ran, _ = run()
+            # Each failed job gets one immediate rerun at the head of the queue.
+            self.assertEqual((result, ran), (1, ["long", "middle", "short", "short"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
+
+            # Still broken: the retry stops once the first job fails its rerun too.
+            result, ran, stderr = run()
+            self.assertEqual((result, ran), (1, ["short", "short"]))
+            self.assertIn("previously failed short failed again", stderr)
+            self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
+
+            # Fixed, but the fix broke another gate: the full sweep catches it.
+            Path(f"{broken}.short").unlink()
+            Path(f"{broken}.long").touch()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (1, ["short", "long", "long", "middle"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], ["long"])
+
+            # Everything fixed: only a complete sweep passes, and clears state.
+            Path(f"{broken}.long").unlink()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (0, ["long", "middle", "short"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], [])
+
+            # Without a recorded state the order is plain longest-first.
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                order.write_text("")
+                self.assertEqual(module.run_gates(gates, max_workers=1), 0)
+            self.assertEqual(order.read_text().split(), ["long", "middle", "short"])
+
+    def test_unreadable_failure_state_runs_the_normal_order(self) -> None:
+        module = _load_runner("deploy_runner_failed_first_state")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-state-") as temporary:
+            state = Path(temporary) / "state.json"
+            self.assertEqual(module.load_previous_failures(state), set())
+            state.write_text("{not json")
+            self.assertEqual(module.load_previous_failures(state), set())
+            state.write_text('{"failed": "short"}')
+            self.assertEqual(module.load_previous_failures(state), set())
+            module.record_failures(state, ["b", "a"])
+            self.assertEqual(module.load_previous_failures(state), {"a", "b"})
+
+class StructuralGateRerunTests(unittest.TestCase):
+    """A failed job is rerun once: only its failed unittest ids when the output names them
+    all, else the whole job. Rerun pass => FLAKY (exit 0, TEST_FLAKY line, FLAKY row);
+    rerun fail => FAIL; never a third run. Quarantined rows are forwarded per suite."""
+
+    SUITE = """
+import os, sys, unittest
+from pathlib import Path
+sys.path.insert(0, {lib!r})
+from test_quarantine import quarantine
+calls = Path(os.environ["RERUN_FIXTURE_CALLS"])
+
+def attempt(name):
+    with calls.open("a") as stream:
+        stream.write(name + "\\n")
+    return calls.read_text().split().count(name)
+
+class Cases(unittest.TestCase):
+    def test_ok(self):
+        attempt("ok")
+
+    def test_flaky(self):
+        n = attempt("flaky")
+        mode = os.environ.get("RERUN_FIXTURE_MODE", "flaky")
+        self.assertTrue(mode == "flaky" and n > 1, f"attempt {{n}} failed")
+
+    @quarantine(since="2026-11-08", repair="https://boxes.dev/thread/thr_q", error="E: q", evidence="q.log")
+    def test_quarantined(self):
+        attempt("quarantined")
+        raise AssertionError("known quarantined failure")
+
+if __name__ == "__main__":
+    if os.environ.get("RERUN_FIXTURE_IGNORE_ARGV"):
+        sys.argv[1:] = []
+    unittest.main()
+"""
+
+    def _run(self, gates, root: Path, **env: str):
+        module = self.module
+        progress = root / "progress.jsonl"
+        base = {key: value for key, value in os.environ.items()
+                if not key.startswith(("DEPLOY_GATE_", "RERUN_FIXTURE_"))}
+        base.update({"DEPLOY_GATE_PROGRESS": str(progress), "DEPLOY_GATE_CASE": "structural",
+                     "RERUN_FIXTURE_CALLS": str(root / "calls")}, **env)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(os.environ, base, clear=True),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.run_gates(gates, max_workers=2, durations_state=root / "durations.json")
+        rows = [json.loads(line) for line in progress.read_text().splitlines()] if progress.exists() else []
+        calls = (root / "calls").read_text().split() if (root / "calls").exists() else []
+        return result, stdout.getvalue(), stderr.getvalue(), rows, calls
+
+    def setUp(self):
+        self.module = _load_runner("deploy_runner_rerun")
+        self.tmp = tempfile.TemporaryDirectory(prefix="deploy-runner-rerun-")
+        self.root = Path(self.tmp.name)
+        self.suite = self.root / "suite.test.py"
+        self.suite.write_text(self.SUITE.format(lib=str(ROOT / "scripts" / "lib")))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def unittest_gate(self):
+        return self.module.Gate("unit-suite", (sys.executable, str(self.suite)))
+
+    def test_failed_unittest_id_rerun_passing_is_flaky_and_the_gate_passes(self) -> None:
+        result, out, err, rows, calls = self._run((self.unittest_gate(),), self.root)
+        self.assertEqual(result, 0, out + err)
+        # The rerun ran only the failed id: test_ok and the quarantined test ran once.
+        self.assertEqual(sorted(calls), ["flaky", "flaky", "ok", "quarantined"])
+        self.assertIn("rerunning unit-suite once (1 failed test(s): Cases.test_flaky)", err)
+        self.assertIn("TEST_FLAKY unit=unit-suite attempts=2 attribution=REQUIRED", out.splitlines())
+        self.assertIn("TEST_QUARANTINE status=QUARANTINED_FAIL unit=unit-suite::Cases.test_quarantined "
+                      "since=2026-11-08 repair=https://boxes.dev/thread/thr_q", out.splitlines())
+        # The quarantined test ran only in the first attempt (the rerun named the failed id),
+        # so its row is forwarded; it never blocks.
+        self.assertEqual([(row["unit"], row["status"]) for row in rows],
+                         [("unit-suite::Cases.test_quarantined", "QUARANTINED_FAIL"), ("unit-suite", "FLAKY")])
+        self.assertEqual(rows[0]["quarantine"]["repair"], "https://boxes.dev/thread/thr_q")
+        flaky = rows[1:]
+        self.assertEqual((flaky[0]["scope"], flaky[0]["case"], flaky[0]["attempts"]), ("suite", "structural", 2))
+        self.assertIn("attempt 1 failed", flaky[0]["detail"])
+        self.assertTrue(flaky[0]["log"].endswith("/unit-suite.log"))
+        recorded = json.loads((self.root / "durations.json").read_text())
+        self.assertNotIn("unit-suite", recorded["gates"], "two attempts are not one cost observation")
+
+    def test_rerun_that_fails_again_is_a_failure_and_there_is_no_third_run(self) -> None:
+        result, out, err, rows, calls = self._run((self.unittest_gate(),), self.root,
+                                                  RERUN_FIXTURE_MODE="always")
+        self.assertEqual(result, 1)
+        self.assertEqual(calls.count("flaky"), 2)
+        self.assertNotIn("TEST_FLAKY", out)
+        self.assertEqual([(row["unit"], row["status"]) for row in rows if row["scope"] == "suite"],
+                         [("unit-suite", "FAIL")])
+        self.assertIn("attempt 2 failed", rows[-1]["detail"])
+        self.assertIn("failed deploy structural gates: unit-suite", err)
+
+    def test_rerun_must_run_exactly_the_failed_ids(self) -> None:
+        # A suite that ignores its argv reruns everything: the pass is not confirmed.
+        result, out, err, rows, calls = self._run((self.unittest_gate(),), self.root,
+                                                  RERUN_FIXTURE_IGNORE_ARGV="1")
+        self.assertEqual(result, 1, out + err)
+        self.assertEqual(calls.count("ok"), 2)
+        self.assertIn("RERUN UNCONFIRMED", out)
+        self.assertNotIn("TEST_FLAKY", out)
+        self.assertEqual(rows[-1]["status"], "FAIL")
+
+    def test_non_unittest_job_is_rerun_whole_and_keeps_its_shard(self) -> None:
+        marker = self.root / "seen"
+        gate = self.module.Gate(
+            "bash-split",
+            ("bash", "-c", f'echo "$DEPLOY_GATE_SHARD" >> {marker}; '
+                           f'[ "$DEPLOY_GATE_SHARD" != 2/2 ] || [ "$(grep -c 2/2 {marker})" -gt 1 ]'),
+            shards=2,
+        )
+        result, out, err, rows, _ = self._run((gate,), self.root)
+        self.assertEqual(result, 0, out + err)
+        self.assertEqual(sorted(marker.read_text().split()), ["1/2", "2/2", "2/2"])
+        self.assertIn("rerunning bash-split[2/2] once (whole job)", err)
+        self.assertEqual([(row["unit"], row["status"], row.get("attempts")) for row in rows],
+                         [("bash-split", "FLAKY", 2)])
+        self.assertTrue(rows[0]["log"].endswith("/bash-split[2-of-2].log"))
+
+    def test_failure_parser_names_only_complete_own_unittest_failures(self) -> None:
+        parse = self.module.failed_unittest_ids
+        python = (sys.executable, "scripts/tests/x.test.py")
+        own = ("FAIL: test_a (__main__.C.test_a)\nERROR: test_b (__main__.D.test_b)\n"
+               "Ran 5 tests in 0.1s\n\nFAILED (failures=1, errors=1, skipped=2)\n")
+        self.assertEqual(parse(python, own), ("C.test_a", "D.test_b"))
+        self.assertEqual(parse(python, own.replace("(__main__.C.test_a)", "(__main__.C)")), ("C.test_a", "D.test_b"))
+        for command, output in (
+            (("bash", "x.sh"), own),
+            ((sys.executable, "-m", "unittest"), own),
+            (python, own.replace("(__main__.C.test_a)", "(__main__.C.test_a) [case 1]")),
+            (python, own.replace("FAILED (failures=1, errors=1, skipped=2)", "FAILED (failures=2, errors=1)")),
+            (python, own.replace("test_b (__main__.D.test_b)", "setUpClass (__main__.D)")),
+            (python, own.replace("__main__.D.test_b", "fixture_module.D.test_b")),
+            (python, own + "FAILED (failures=1, unexpected successes=1)\n"),
+            (python, "Traceback: bash died\n"),
+        ):
+            with self.subTest(command=command, output=output[-60:]):
+                self.assertEqual(parse(command, output), ())
+        confirm = self.module.rerun_confirms
+        self.assertTrue(confirm(("C.test_a",), "Ran 1 test in 0.0s\n\nOK\n"))
+        self.assertFalse(confirm(("C.test_a",), "Ran 1 test in 0.0s\n\nOK (skipped=1)\n"))
+        self.assertFalse(confirm(("C.test_a", "D.test_b"), "Ran 1 test in 0.0s\n\nOK\n"))
+        self.assertFalse(confirm(("C.test_a",), "all good\n"))
 
 
 if __name__ == "__main__":

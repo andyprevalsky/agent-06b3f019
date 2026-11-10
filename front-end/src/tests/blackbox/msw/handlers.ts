@@ -13,11 +13,56 @@ export const handlers = [
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
   // Rose Desktop left bar groups agents by project; none unless a test overrides.
   http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: [] })),
+  // Project settings mints a one-time `rose agent-init` code on open.
+  http.post(`${API_BASE}/projects/cli-login-codes`, () =>
+    HttpResponse.json(
+      {
+        code: 'rlc_defaultdefaultdefaultdefaultdefa',
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+        project: null,
+      },
+      { status: 201 },
+    ),
+  ),
   // Rose profile (left-bar account row name, Settings): no name unless a test overrides.
   http.get(`${API_BASE}/user-settings`, () => HttpResponse.json({})),
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+  http.get(`${API_BASE}/integrations/granola`, () =>
+    HttpResponse.json({
+      connected: false,
+      status: 'NOT_CONNECTED',
+      accountEmail: null,
+      backfillDone: false,
+      lastSuccessfulSyncAt: null,
+      lastError: null,
+      documents: {},
+    }),
+  ),
+  // Cloud iPhone is account-gated; no assigned phone unless a test overrides it.
+  http.get(`${API_BASE}/iphone/connection`, () =>
+    HttpResponse.json({
+      enabled: false,
+      configured: false,
+      status: 'not_connected',
+      setupAgentId: null,
+      connectionRevision: 0,
+    }),
+  ),
+  // Device view (Phone app default): no enabled phone unless a test overrides it.
+  http.get(`${API_BASE}/iphone/device`, () =>
+    HttpResponse.json({
+      enabled: false,
+      setupState: 'not_connected',
+      providerState: 'IDLE',
+      holder: null,
+      waiting: [],
+    }),
+  ),
+  http.get(`${API_BASE}/iphone/device/frame`, () =>
+    HttpResponse.json({ error: 'Phone is not running', state: 'IDLE' }, { status: 409 }),
+  ),
   // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
   http.get(`${API_BASE}/integrations/progress`, () =>
     HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),

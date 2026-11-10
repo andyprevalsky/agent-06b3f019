@@ -84,6 +84,7 @@ function collectForEachChildGroupIds(messages: Message[]): Set<string> {
 interface SpawnGroup {
   firstIndex: number;
   ids: string[];
+  knownIds: Set<string>;
   firstMsg: Message;
 }
 
@@ -91,6 +92,7 @@ interface ForEachTerminalGroup {
   messageIndex: number;
   message: Message;
   ids: string[];
+  knownIds: Set<string>;
   busId?: string;
   spawnGroupId?: string;
 }
@@ -109,6 +111,7 @@ function collectForEachTerminalGroups(messages: Message[]): Map<string, ForEachT
       messageIndex: i,
       message: msg,
       ids,
+      knownIds: new Set(ids),
       busId: msg.metadata?.busId as string | undefined,
       spawnGroupId: msg.metadata?.spawnGroupId as string | undefined,
     });
@@ -124,7 +127,10 @@ function collectForEachTerminalGroups(messages: Message[]): Map<string, ForEachT
     terminal.spawnGroupId =
       (msg.metadata?.spawnGroupId as string | undefined) ?? terminal.spawnGroupId;
     for (const id of msg.metadata!.subAgentIds as string[]) {
-      if (!terminal.ids.includes(id)) terminal.ids.push(id);
+      if (!terminal.knownIds.has(id)) {
+        terminal.ids.push(id);
+        terminal.knownIds.add(id);
+      }
     }
   }
 
@@ -189,13 +195,17 @@ function groupSpawnTrees(messages: Message[]): {
     const group = groupsByKey.get(key);
     if (group) {
       for (const id of msg.metadata!.subAgentIds as string[]) {
-        if (!group.ids.includes(id)) group.ids.push(id);
+        if (!group.knownIds.has(id)) {
+          group.ids.push(id);
+          group.knownIds.add(id);
+        }
       }
       skipIndices.add(i);
     } else {
       groupsByKey.set(key, {
         firstIndex: i,
         ids: [...(msg.metadata!.subAgentIds as string[])],
+        knownIds: new Set(msg.metadata!.subAgentIds as string[]),
         firstMsg: msg,
       });
     }

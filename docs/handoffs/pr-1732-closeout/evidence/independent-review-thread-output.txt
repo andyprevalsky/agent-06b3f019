@@ -1,0 +1,26 @@
+Review of the web_fetch hang fix. The chain-longer-than-activity cause is plausible, but the evidence doesn't prove it. I read the evidence and code only and changed nothing; the thread title is set.
+
+1. **Evidence vs cause: partial.**
+   - **Supports it:**
+     - The 394s is 180s + 1s backoff + 180s + about 33s. The explore agent runs web_fetch through the in-process shim `loop/activity_helper.py:102-112`, not Temporal. The message "Activity timed out after 180.0s" is that shim's text, and it retries `maximum_attempts=2`. The error appears at 11:15:02 against a 11:08:28 start (`agent.json` msgs 53/157).
+     - Starvation and slow LLM calls are ruled out. Three sibling Lisbon fetches and the later finepassport fetch (msgs 159-160) finished in about 7s, so the worker loop was healthy.
+     - The summarize step is also ruled out. It has a 90s timeout (`handler.py:~262`) and would print "90.0s".
+   - **Doesn't prove it:**
+     - `web_fetch_download_activity` (`handler.py:301`) also has a 180s timeout, 2 attempts, and downloads files sequentially at 30s each (`repo.py:~197`). A hung download would give the same text, and the extra 33s would then be normal scrape plus summarize time. In the scrape-hang story, the 33s is unexplained.
+     - The evidence has no worker logs. To settle it, grep for `Activity timeout (attempt n/2) func=` for agent f6899445 (the shim's warning, `activity_helper.py:103`). `func=web_fetch_activity` versus `func=web_fetch_download_activity` decides it.
+   - **Root synthesis:** it is secondary. The root's 109s synthesis (11:15:15 to 11:17:04) only crossed the 549s limit because the 394s wait came first.
+2. **Diff issues:**
+   - **Retry classification:**
+     - `_is_hang` (`service.py:~116`) treats every `httpx.TimeoutException` as a hang. That includes `ConnectTimeout` and `PoolTimeout` on the shared pooled client, which are transient. Two of those now become non-retryable. Narrow it to `ProviderHung` or `ReadTimeout`.
+     - A hang on one provider plus a retryable error such as a 503 on the other stays retryable. That is fine, since 150s × 2 still fits.
+   - **Cancellation:** `wait_for` at `service.py:130` cancels the httpx call, and httpcore closes that connection. This is safe with the shared client. Because `wait_for` waits for the cancelled task to finish, any non-cancellable work (for example thread-based DNS) could still overrun the budget. The test doesn't cover that case.
+   - **Unbudgeted steps:** in the fast-mode path, `cache_get`, `soft_complete_allowed_for_agent` and `cache_set` run inside the same 180s (`handler.py:463-515`). They have 15s/30s per-phase timeouts plus retries and sit outside the 150s budget. Slack is only 30s; a deadline that spans the whole activity would be safer.
+   - **No problem found:**
+     - The shim honors `non_retryable=True` (`activity_helper.py:35-37`), and the activity re-raises `ApplicationError` (`handler.py:500`).
+     - Nothing in the diff writes failures to the DEMO cache.
+     - `WorldModelToolExecutionAdapter` passes `real_executor` through when mode is real.
+3. **Same defect elsewhere:**
+   - **Download activity:** `web_fetch_download_activity` is unbounded. Its per-file 30s timeout is per-phase and the loop is sequential (`repo.py:~197`), so seven or more slow files exceed 180s. It also retries twice.
+   - **Web search:** `tools/web_search` already uses the right pattern (a 55s deadline inside a 60s activity, `config.py:30-39`). Copy it for web_fetch.
+   - **Per-phase timeouts:** `timeout=` on `get_http_client().post` is per-phase, not total (`repo.py:107, ~151`), so only `wait_for` actually caps these calls.
+   - **Not checked:** I didn't check `summarize_and_filter_links` or the other `call_temporal_activity_from_activity` callers.

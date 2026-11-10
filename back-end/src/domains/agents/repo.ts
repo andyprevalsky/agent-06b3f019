@@ -26,6 +26,7 @@ export {
 } from './repoMutations';
 export type { BatchCreateAgentParams } from './repoMutations';
 export { findExistingAgentsByIds } from './repoDescendantStarts';
+export { findExploreToolEvidence } from './repoEvidence';
 export {
   findTopLevelAgents,
   findTopLevelAgentsMatching,
@@ -68,11 +69,15 @@ export async function findAgentsByBusId(busId: string) {
       taskPath: true,
       createdAt: true,
       updatedAt: true,
+      lastUserMessageAt: true,
     },
   });
 }
 
-/** Fetch a single agent by ID with optional user ownership check. Includes verifier and tools. */
+/**
+ * Fetch a single agent by ID with optional user ownership check. Includes verifier,
+ * tools and its project summary (one PK join on the indexed projectId FK).
+ */
 export async function findAgentWithRelations(agentId: string, userId?: string) {
   return prisma.agent.findFirst({
     where: {
@@ -87,6 +92,7 @@ export async function findAgentWithRelations(agentId: string, userId?: string) {
           tool: true,
         },
       },
+      project: { select: { name: true, repoUrl: true, defaultBranch: true } },
     },
   });
 }
@@ -212,10 +218,12 @@ export async function findExecutionModeFlagsByIds(agentIds: string[], userId?: s
     select: {
       id: true,
       fastModeCacheEnabled: true,
+      speed: true,
       worldModelMode: true,
       memoryEnabled: true,
       isBenchmark: true,
       projectId: true,
+      folderId: true,
     },
   });
 }
@@ -251,13 +259,31 @@ export async function findAncestors(agentId: string) {
 // Messages
 // ---------------------------------------------------------------------------
 
-/** Fetch messages for an agent ordered by timestamp ascending.
- *  If `since` is provided, only returns messages with timestamp > since. */
+/**
+ * Late-commit horizon for in-place user-pause annotations. Their writer sets
+ * `recordedAt` inside a transaction that times out after 10s, so a committed
+ * annotation is never older than this relative to any cursor it was hidden from.
+ */
+const USER_PAUSE_REPLAY_WINDOW_MS = 5 * 60_000;
+
+/** User-pause annotations recorded inside the late-commit window before `since`. */
+function userPauseReplay(since: Date) {
+  const recordedAfter = new Date(since.getTime() - USER_PAUSE_REPLAY_WINDOW_MS).toISOString();
+  return {
+    role: 'TOOL' as const,
+    AND: [
+      { metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+      { metadata: { path: ['userPause', 'recordedAt'], gt: recordedAfter } },
+    ],
+  };
+}
+
+/** Messages after `since`, ascending, plus recent user-pause annotations; consumers dedupe by ID. */
 export async function findMessages(agentId: string, since?: Date, browserToolCallId?: string) {
   return prisma.message.findMany({
     where: {
       agentId,
-      ...(since ? { timestamp: { gt: since } } : {}),
+      ...(since ? { AND: [{ OR: [{ timestamp: { gt: since } }, userPauseReplay(since)] }] } : {}),
       ...(browserToolCallId === undefined
         ? {}
         : {
@@ -276,28 +302,6 @@ export async function findMessages(agentId: string, since?: Date, browserToolCal
     },
     orderBy: { timestamp: 'asc' },
   });
-}
-
-/** Bounded recovery read for one explore task after its activity is cancelled. */
-export async function findExploreToolEvidence(agentId: string, userId: string, taskId: string) {
-  const where = {
-    agentId,
-    agent: { userId },
-    role: 'TOOL' as const,
-    AND: [
-      { metadata: { path: ['taskId'], equals: taskId } },
-      { metadata: { path: ['toolStatus'], equals: 'FINISHED' } },
-    ],
-    NOT: { metadata: { path: ['toolName'], equals: 'spawn_agent' } },
-  };
-  const select = { id: true, text: true, metadata: true } as const;
-  const [first, last] = await Promise.all([
-    prisma.message.findMany({ where, orderBy: { timestamp: 'asc' }, take: 8, select }),
-    prisma.message.findMany({ where, orderBy: { timestamp: 'desc' }, take: 8, select }),
-  ]);
-  // Read at most 16 rows so failed fetches can be removed before selecting
-  // early and late successful evidence.
-  return [...new Map([...first, ...last.reverse()].map((row) => [row.id, row])).values()];
 }
 
 /** One message row of a live agent by primary key, with optional owner check. */
@@ -371,10 +375,4 @@ export async function currentAgentWorkflowGeneration(agentId: string): Promise<s
     select: { temporalWorkflowId: true },
   });
   return agent?.temporalWorkflowId ?? null;
-}
-
-/** Owner of a Rose API key (Index 01 MCP auth), or null for an unknown key. */
-export async function findRoseApiKeyOwner(apiKey: string): Promise<string | null> {
-  const key = await prisma.roseApiKey.findUnique({ where: { apiKey }, select: { userId: true } });
-  return key?.userId ?? null;
 }

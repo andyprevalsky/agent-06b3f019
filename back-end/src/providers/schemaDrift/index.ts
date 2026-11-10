@@ -12,14 +12,30 @@
  * hourly production cron (runSchemaDriftCheck). The 2026-10-08 stray db push
  * left RLS off for 18 days because nothing checked between deploys.
  *
+ * The replay is only as complete as the migrations source. When the database
+ * recorded a migration (after the squashed baseline) that the source lacks, a
+ * later DROP/RENAME it applied is invisible and earlier declarations would read
+ * as missing. On 2026-11-09 a pre-merge deploy checkout without
+ * 20261105233001 reported its intentionally dropped
+ * ImessageQueue_phoneBrowserTaskId_key as drift and prescribed restoring it.
+ * Such a source reports the replay gap instead of comparing declarations.
+ *
  * Scale: one bounded catalog read per hour for the whole fleet (a leader lease
  * picks one replica); cost is O(schema objects), independent of agent count.
  */
 import type { Prisma } from '@prisma/client';
-import { loadMigrationObjects, normalizePolicyExpr, type PolicyDef } from './migrationObjects';
+import {
+  BASELINE_MIGRATION,
+  listMigrations,
+  loadMigrationObjects,
+  normalizePolicyExpr,
+  type PolicyDef,
+} from './migrationObjects';
 
 export type Catalog = {
   applied: Set<string>;
+  /** Applied migrations recorded after the squashed baseline (all of them without a baseline row). */
+  appliedAfterBaseline: Set<string>;
   indexes: Map<string, boolean>;
   triggers: Set<string>;
   functions: Set<string>;
@@ -42,9 +58,15 @@ export const CATALOG_TRANSACTION_OPTIONS = { maxWait: 15_000, timeout: 60_000 } 
 export async function readCatalogInTransaction(tx: Prisma.TransactionClient): Promise<Catalog> {
   await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
   await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '15s'");
-  const applied = await tx.$queryRawUnsafe<Array<{ migration_name: string }>>(
-    `SELECT migration_name FROM _prisma_migrations
-       WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`
+  const applied = await tx.$queryRawUnsafe<
+    Array<{ migration_name: string; after_baseline: boolean }>
+  >(
+    `SELECT migration_name,
+            started_at > COALESCE((SELECT min(started_at) FROM _prisma_migrations
+                                     WHERE migration_name = $1), '-infinity') AS after_baseline
+       FROM _prisma_migrations
+       WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`,
+    BASELINE_MIGRATION
   );
   const indexes = await tx.$queryRawUnsafe<Array<{ name: string; valid: boolean }>>(
     `SELECT c.relname AS name, i.indisvalid AS valid
@@ -90,6 +112,9 @@ export async function readCatalogInTransaction(tx: Prisma.TransactionClient): Pr
   );
   return {
     applied: new Set(applied.map((row) => row.migration_name)),
+    appliedAfterBaseline: new Set(
+      applied.filter((row) => row.after_baseline).map((row) => row.migration_name)
+    ),
     indexes: new Map(indexes.map((row) => [row.name, row.valid])),
     triggers: new Set(triggers.map((row) => row.key)),
     functions: new Set(functions.map((row) => row.name)),
@@ -115,6 +140,10 @@ export const SCHEMA_DRIFT_HINT =
   'Schema drift: objects were removed or changed after their migrations were recorded applied. ' +
   'Restore them with a new idempotent migration; never with an ad-hoc db push.';
 
+export const SCHEMA_REPLAY_HINT =
+  'Replay incomplete: rerun with SCHEMA_MIGRATIONS_DIR set to the migrations of the commit production ' +
+  'runs (or from a checkout that contains them). Do not add a migration for objects this source cannot see.';
+
 export type DriftReport = {
   missing: Record<
     'indexes' | 'triggers' | 'functions' | 'policies' | 'extensions' | 'rls',
@@ -125,6 +154,8 @@ export type DriftReport = {
   invalidIndexes: string[];
   /** Every public table needs RLS: Supabase grants anon/authenticated SELECT by default. */
   exposedTables: string[];
+  /** Applied after the baseline but absent from the replayed source: declarations were not compared. */
+  unreplayedMigrations: string[];
   checked: number;
 };
 
@@ -159,9 +190,18 @@ function samePolicy(want: PolicyDef, live: PolicyDef): boolean {
 }
 
 export function compareCatalog(catalog: Catalog, migrationsDir?: string): DriftReport {
+  const source = new Set(listMigrations(migrationsDir));
+  const unreplayedMigrations = [...catalog.appliedAfterBaseline]
+    .filter((name) => !source.has(name))
+    .sort();
   // Replay only what the target recorded as applied, so a pending migration
   // neither adds expectations nor hides objects an applied one still declares.
-  const expected = loadMigrationObjects(migrationsDir, catalog.applied);
+  // A source missing an applied migration cannot know what it dropped or
+  // renamed: compare nothing it declares rather than report false drift.
+  const expected = loadMigrationObjects(
+    migrationsDir,
+    unreplayedMigrations.length > 0 ? new Set() : catalog.applied
+  );
   const missing: DriftReport['missing'] = {
     indexes: [],
     triggers: [],
@@ -215,8 +255,27 @@ export function compareCatalog(catalog: Catalog, migrationsDir?: string): DriftR
     changedPolicies,
     invalidIndexes,
     exposedTables: [...catalog.exposed].sort(),
+    unreplayedMigrations,
     checked,
   };
+}
+
+/** Names listed in the replay-gap line: a source far behind must not crowd drift out of a bounded alert. */
+export const REPLAY_GAP_LISTED_MIGRATIONS = 5;
+
+/** The replay-gap line (SCHEMA_REPLAY_HINT applies), or null when the source holds every applied migration. */
+export function replayGap(report: DriftReport): string | null {
+  const names = report.unreplayedMigrations;
+  if (names.length === 0) return null;
+  const listed = names.slice(0, REPLAY_GAP_LISTED_MIGRATIONS).join(', ');
+  const more =
+    names.length > REPLAY_GAP_LISTED_MIGRATIONS
+      ? ` and ${names.length - REPLAY_GAP_LISTED_MIGRATIONS} more`
+      : '';
+  return (
+    `unverified: the database recorded ${names.length} applied migration(s) this migrations ` +
+    `source lacks (${listed}${more}); migration-declared objects were not compared`
+  );
 }
 
 export function driftProblems(report: DriftReport): string[] {
@@ -261,7 +320,8 @@ export async function runSchemaDriftCheck(
   );
   if (!token) return { acquired: false };
   const report = compareCatalog(await deps.readCatalog(), deps.migrationsDir);
-  const problems = driftProblems(report);
+  const gap = replayGap(report);
+  const problems = [...(gap ? [gap] : []), ...driftProblems(report)];
   if (problems.length > 0) deps.alert(problems, report);
   return { acquired: true, checked: report.checked, problems };
 }

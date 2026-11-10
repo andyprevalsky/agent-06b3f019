@@ -2,12 +2,14 @@
  * Agent control service — pause, resume, restart, update status, update config, signals.
  */
 
+import type { AgentStatus } from './types';
+
 import {
   getTemporalClient,
   startAgentWorkflowExecution,
   type StartAgentWorkflowParams,
 } from '../../providers/temporal';
-import { broadcastAgentModeStarted } from '../../providers/chat';
+import { broadcastAgentModeStarted, broadcastAgentUpdate } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import * as repo from './repo';
@@ -21,6 +23,8 @@ export {
   restartAgent,
   type RestartAgentOptions,
 } from './agentRestartService';
+import { pauseCodeAgentResumeRuns } from '../../providers/codeAgentResumeWorkflow';
+import { findSubtreeAgentIds } from './repoMessageResume';
 
 const log = createLogger('Agents');
 
@@ -29,12 +33,14 @@ const log = createLogger('Agents');
 // ---------------------------------------------------------------------------
 
 /** Pause a single agent. Children discover parent's paused state via pull-based queries. */
-export async function pauseAgent(agentId: string): Promise<void> {
+export async function pauseAgent(agentId: string): Promise<number | undefined> {
   const paused = await repo.pauseAgentUnderWorkflowLock(agentId);
   if (paused === null) return;
   if (!paused.paused) {
     log.info('Skipping pause - already terminal', { agent_id: agentId, status: paused.status });
-    return;
+    // A finished agent's code / browser agents the person resumed still pause.
+    void pauseSubtreeResumeRuns(agentId);
+    return paused.userControlRevision;
   }
 
   /* c8 ignore start -- Temporal signal requires live Temporal server */
@@ -42,6 +48,8 @@ export async function pauseAgent(agentId: string): Promise<void> {
     try {
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(paused.temporalWorkflowId);
+      // No cause argument: the cause-aware handler defaults to 'user', and a
+      // draining older generation's `pause(self)` fails its task on any argument.
       await handle.signal('pause');
     } catch (error) {
       log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', {
@@ -51,11 +59,62 @@ export async function pauseAgent(agentId: string): Promise<void> {
     }
   }
   /* c8 ignore stop */
+  // After the pause is committed and the owner signalled, in the background: the
+  // code / browser agents the person resumed outside an agent's workflow in this
+  // subtree pause too. Never on the user's pause path (rule 28).
+  void pauseSubtreeResumeRuns(agentId);
+  await broadcastUserControlState(agentId, paused);
+  return paused.userControlRevision;
+}
+
+/** Pause the resume runs of the paused agent's subtree (background; failures are logged). */
+async function pauseSubtreeResumeRuns(agentId: string): Promise<void> {
+  try {
+    await pauseCodeAgentResumeRuns(await findSubtreeAgentIds(agentId));
+  } catch (error) {
+    log.warn('Pausing resume runs failed', {
+      agent_id: agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/** Broadcast committed ordering metadata; transport failure cannot revoke accepted control. */
+async function broadcastUserControlState(
+  agentId: string,
+  agent: {
+    status: AgentStatus;
+    userControlRevision: number;
+    updatedAt: Date;
+  }
+) {
+  try {
+    await broadcastAgentUpdate(agentId, {
+      status: agent.status,
+      userControlRevision: agent.userControlRevision,
+      updatedAt: agent.updatedAt.toISOString(),
+    });
+  } catch (error) {
+    log.warn('Control state broadcast failed; snapshot reconciliation remains available', {
+      agent_id: agentId,
+      error: String(error),
+    });
+  }
 }
 
 /** Resume a single agent. Children discover parent's resumed state via pull-based queries. */
 export async function resumeAgent(agentId: string) {
-  return resumeAgentWorkflow(agentId);
+  const result = await resumeAgentWorkflow(agentId, {
+    onResumeIntentRollback: async (restoredAgentId) => {
+      const current = await repo.findAgentById(restoredAgentId);
+      if (current) await broadcastUserControlState(restoredAgentId, current);
+    },
+  });
+  if ('success' in result) {
+    const current = await repo.findAgentById(agentId);
+    if (current) await broadcastUserControlState(agentId, current);
+  }
+  return result;
 }
 
 /** Pause an agent for a user (verifies ownership first). */
@@ -66,8 +125,8 @@ export async function pauseAgentForUser(agentId: string, userId: string) {
     return { error: 'Agent not found', status: 404 };
   }
 
-  await pauseAgent(agentId);
-  return { success: true };
+  const userControlRevision = await pauseAgent(agentId);
+  return { success: true, user_control_revision: userControlRevision };
 }
 
 /** Resume an agent for a user (verifies ownership and parent state). */

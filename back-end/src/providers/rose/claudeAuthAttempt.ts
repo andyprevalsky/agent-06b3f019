@@ -65,7 +65,7 @@ export async function* attemptClaudeAuthWithRecovery(
       auth: { mode: 'oauth', token },
       requestId,
       callSite,
-      providerFastMode: options.provider_fast_mode,
+      speed: options.speed,
     });
 
   try {

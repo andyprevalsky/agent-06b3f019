@@ -109,6 +109,7 @@ _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-5.6-sol-openai":   {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
     "gpt-6-luna-openai":    {"input_cents_per_1k": 0.01,  "output_cents_per_1k": 0.05},
     "gpt-6-sol-openai":     {"input_cents_per_1k": 0.2,   "output_cents_per_1k": 1.0},
+    "gpt-6.1-sol-openai":   {"input_cents_per_1k": 0.2,   "output_cents_per_1k": 1.0},
 }
 
 

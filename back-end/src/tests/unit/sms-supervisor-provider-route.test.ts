@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { GREP_TOOL_DEFINITION } from '../../providers/grepTool';
+import { SmsSupervisorToolCallSchema } from '../../providers/smsSupervisor/schema';
+import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 import {
   buildEnvironmentToolMessages,
   buildNativeToolFeedbackMessages,
@@ -73,14 +76,19 @@ test('dumps every supervisor call for replay (dev only)', () => {
 test('keeps the full grep surface — the union limit is not a reason to cut tools', () => {
   // Guard against re-trimming. These were briefly deleted to squeeze under
   // Anthropic's union cap; that cap does not apply on the Cerebras route, and
-  // narrowing what the supervisor can search is a real capability loss.
-  const schema = readFileSync(join(__dirname, '../../providers/smsSupervisor/schema.ts'), 'utf8');
+  // narrowing what the supervisor can search is a real capability loss. The
+  // surface is the one shared grep definition (providers/grepTool), which the
+  // supervisor sends as is, so it is asserted there and on the supervisor's
+  // own tool list and response union.
+  const properties = GREP_TOOL_DEFINITION.parameters.properties as Record<string, unknown>;
   for (const flag of ['-B', '-A', '-C', '-n', '-i']) {
-    assert.ok(schema.includes(`'${flag}'`));
+    assert.ok(flag in properties, `grep definition keeps ${flag}`);
   }
   for (const field of ['multiline', 'offset', 'head_limit', 'context']) {
-    assert.ok(schema.includes(`${field}: z`));
+    assert.ok(field in properties, `grep definition keeps ${field}`);
   }
+  const filters = properties.filters as { anyOf: Array<{ properties: Record<string, unknown> }> };
+  const filterKeys = Object.keys(filters.anyOf[0].properties);
   for (const filter of [
     'account',
     'status',
@@ -89,8 +97,29 @@ test('keeps the full grep surface — the union limit is not a reason to cut too
     'path',
     'tag',
   ]) {
-    assert.ok(schema.includes(`${filter}:`));
+    assert.ok(filterKeys.includes(filter), `grep definition keeps filters.${filter}`);
   }
+  assert.ok(
+    TOOL_SCHEMAS.includes(GREP_TOOL_DEFINITION),
+    'the supervisor offers the shared grep definition itself'
+  );
+  const call = {
+    tool: 'grep',
+    arguments: {
+      pattern: 'x',
+      '-B': 1,
+      '-A': 1,
+      '-C': 1,
+      '-n': true,
+      '-i': true,
+      multiline: false,
+      offset: 0,
+      head_limit: 5,
+      context: 1,
+      filters: { account: 'a', status: 'posted', include_pending_in_totals: true, tag: 't' },
+    },
+  };
+  assert.ok(SmsSupervisorToolCallSchema.safeParse(call).success, 'the response union accepts it');
 });
 
 test('marks assistant tool_calls as type=function for OpenAI-compatible providers', () => {
@@ -121,4 +150,45 @@ test('marks assistant tool_calls as type=function for OpenAI-compatible provider
   const toolCalls = built.flatMap((message) => message.tool_calls ?? []);
   assert.equal(toolCalls.length, 4);
   for (const toolCall of toolCalls) assert.equal(toolCall.type, 'function');
+});
+
+test('every document_source the grep description offers is accepted by the supervisor schema', () => {
+  // The description once named Granola values the enums still rejected, so
+  // the supervisor was told to send arguments its own schema refused. The
+  // values are now read from the shared definition's description and parsed
+  // by the supervisor's real response union, flat and in a documents block.
+  const filters = (
+    GREP_TOOL_DEFINITION.parameters.properties as Record<string, { description?: string }>
+  ).filters;
+  const description = filters.description ?? '';
+  const offered = [
+    ...new Set(
+      description.match(
+        /\b(?:chatgpt|claude|apple_notes|obsidian|granola(?:_note|_summary|_transcript)?)\b/g
+      )
+    ),
+  ].sort();
+  assert.deepEqual(
+    offered,
+    [
+      'apple_notes',
+      'chatgpt',
+      'claude',
+      'granola',
+      'granola_note',
+      'granola_summary',
+      'granola_transcript',
+      'obsidian',
+    ],
+    'the description offers every document layer, Granola included'
+  );
+  for (const value of offered) {
+    const flat = { tool: 'grep', arguments: { pattern: 'x', filters: { document_source: value } } };
+    const nested = {
+      tool: 'grep',
+      arguments: { pattern: 'x', filters: { documents: { document_source: value } } },
+    };
+    assert.ok(SmsSupervisorToolCallSchema.safeParse(flat).success, `flat ${value} accepted`);
+    assert.ok(SmsSupervisorToolCallSchema.safeParse(nested).success, `nested ${value} accepted`);
+  }
 });

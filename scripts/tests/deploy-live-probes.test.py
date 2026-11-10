@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -126,6 +129,8 @@ class DeployLiveProbeTests(unittest.TestCase):
                 "credential-health",
                 "amplitude-live",
                 "chat-router-failover-live",
+                "browser-provider-live",
+                "report-bug-storage-live",
                 "migration-preflight",
             },
         )
@@ -134,6 +139,19 @@ class DeployLiveProbeTests(unittest.TestCase):
         self.assertIn("CHAT_ROUTER_FAILOVER_LIVE=1", probe.argv)
         self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", "chat-router-failover"))
         self.assertEqual(probe.cwd, ROOT / "back-end")
+
+    def test_live_third_party_blackbox_cases_run_as_serialized_probes(self) -> None:
+        module = _load_module()
+        commands = {command.name: command for command in module.deploy_commands()}
+        for name, after, flag, domain in (
+            ("browser-provider-live", "chat-router-failover-live", "BROWSER_PROVIDER_LIVE=1", "browser-provider"),
+            ("report-bug-storage-live", "browser-provider-live", "REPORT_BUG_STORAGE_LIVE=1", "report-bug"),
+        ):
+            probe = commands[name]
+            self.assertEqual(probe.after, after)
+            self.assertIn(flag, probe.argv)
+            self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", domain))
+            self.assertEqual(probe.cwd, ROOT / "back-end")
 
     def test_migration_preflight_checks_branch_migrations_against_production(self) -> None:
         module = _load_module()
@@ -145,6 +163,71 @@ class DeployLiveProbeTests(unittest.TestCase):
             (module.workspace_tsx(), "scripts/migration-preflight.ts"),
         )
         self.assertEqual(probe.cwd, ROOT / "back-end")
+
+    def test_each_probe_reports_one_live_progress_row_without_changing_the_result(self) -> None:
+        """DEPLOY_GATE_PROGRESS gets one row per probe the moment it exits: the
+        waiter only exits after the failing probe's FAIL row is in the file.
+        Exit code and output match a run without the variable, which writes nothing."""
+        waiter = (
+            "import json, os, sys, time\n"
+            "watch = os.environ.get('DEPLOY_GATE_PROGRESS')\n"
+            "deadline = time.monotonic() + 60\n"
+            "while watch and time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+            "    except (OSError, ValueError):\n"
+            "        rows = []\n"
+            "    if any(row['unit'] == 'fails' and row['status'] == 'FAIL' for row in rows):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    if watch:\n"
+            "        sys.exit(9)\n"
+            "print('waiter done')\n"
+        )
+        driver = (
+            "import importlib.util, sys\n"
+            f"spec = importlib.util.spec_from_file_location('live_probes_progress', {str(MODULE_PATH)!r})\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = module\n"
+            "spec.loader.exec_module(module)\n"
+            "root = module.ROOT\n"
+            "module.deploy_commands = lambda: (\n"
+            "    module.Command('fails', (sys.executable, '-c', \"print('probe-fail-marker'); raise SystemExit(4)\"), root),\n"
+            f"    module.Command('waiter', (sys.executable, '-c', {waiter!r}), root),\n"
+            "    module.Command('after-fails', (sys.executable, '-c', \"print('dependent ran')\"), root, after='fails'),\n"
+            ")\n"
+            "raise SystemExit(module.main())\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            progress = Path(temporary) / "progress.jsonl"
+
+            def run(extra: dict[str, str]) -> tuple[int, list[str], str]:
+                env = {key: value for key, value in os.environ.items() if key != "DEPLOY_GATE_PROGRESS"}
+                env.update(extra)
+                result = subprocess.run(
+                    [sys.executable, "-c", driver], env=env, capture_output=True, text=True, timeout=120
+                )
+                return result.returncode, sorted(result.stdout.splitlines()), result.stderr
+
+            reported = run({"DEPLOY_GATE_PROGRESS": str(progress), "DEPLOY_GATE_CASE": "live-probes"})
+            unset = run({})
+            self.assertEqual(reported[0], 1, reported)
+            self.assertEqual(reported, unset, "reporting changed the exit code or output")
+            self.assertIn("live probe fails: exit=4", reported[1])
+            self.assertEqual(list(Path(temporary).iterdir()), [progress], "an unset variable wrote a progress file")
+            rows = [json.loads(line) for line in progress.read_text().splitlines()]
+        units = [row["unit"] for row in rows]
+        self.assertEqual(sorted(units), ["after-fails", "fails", "waiter"], "one row per probe")
+        self.assertLess(units.index("fails"), units.index("waiter"), "the FAIL row precedes later probes")
+        by_unit = {row["unit"]: row for row in rows}
+        self.assertEqual(
+            {unit: row["status"] for unit, row in by_unit.items()},
+            {"fails": "FAIL", "waiter": "PASS", "after-fails": "PASS"},
+        )
+        self.assertEqual({(row["scope"], row["case"], row["log"]) for row in rows}, {("suite", "live-probes", "")})
+        self.assertEqual(by_unit["fails"]["detail"], "live probe fails: exit=4")
+        self.assertEqual(by_unit["waiter"]["detail"], "")
 
     def test_credential_health_uses_workspace_tsx_not_npx(self) -> None:
         module = _load_module()

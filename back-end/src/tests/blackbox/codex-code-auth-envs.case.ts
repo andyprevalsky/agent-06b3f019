@@ -1,6 +1,5 @@
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
-  CODEX_AZURE_DEFAULT_DEPLOYMENT,
   CodeAgentCredentialError,
   resolveCodexAzureFunding,
   resolveCodexCodeAuthEnvs,
@@ -26,8 +25,8 @@ const CODEX_OAUTH_META = {
 
 const AZURE = {
   apiKey: 'azure-test-key',
-  baseUrl: 'https://rose-foundry-westus.openai.azure.com/openai/v1',
-  deployment: 'gpt-5.6-terra',
+  baseUrl: 'https://rose-foundry-southcentralus.openai.azure.com/openai/v1',
+  deployment: 'gpt-6.1-sol',
 };
 
 export function testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback() {
@@ -88,8 +87,16 @@ export function testResolveCodexAuthEnvs_noCredsNoKeyThrows() {
 const FOUNDRY_ENV = [
   'AZURE_FOUNDRY_ENDPOINT',
   'AZURE_FOUNDRY_API_KEY',
+  'AZURE_FOUNDRY_DEPLOYMENTS',
+  'AZURE_FOUNDRY_ENDPOINT_2',
+  'AZURE_FOUNDRY_API_KEY_2',
+  'AZURE_FOUNDRY_DEPLOYMENTS_2',
   'AZURE_FOUNDRY_ENDPOINT_3',
   'AZURE_FOUNDRY_API_KEY_3',
+  'AZURE_FOUNDRY_DEPLOYMENTS_3',
+  'AZURE_FOUNDRY_ENDPOINT_4',
+  'AZURE_FOUNDRY_API_KEY_4',
+  'AZURE_FOUNDRY_DEPLOYMENTS_4',
   'CODEX_AZURE_FOUNDRY_HOST',
   'CODEX_AZURE_DEPLOYMENT',
 ] as const;
@@ -111,48 +118,75 @@ function withFoundryEnv(
   }
 }
 
-/** The funding resolves from the AZURE_FOUNDRY_* region whose endpoint is the westus resource. */
-export function testResolveCodexAzureFunding_selectsWestusRegion() {
+/** The production region layout (deployment names only; keys are fakes). */
+const PROD_LAYOUT = {
+  AZURE_FOUNDRY_ENDPOINT: 'https://a-4989-resource.openai.azure.com',
+  AZURE_FOUNDRY_API_KEY: 'region-1-key',
+  AZURE_FOUNDRY_DEPLOYMENTS: 'gpt-6-sol',
+  AZURE_FOUNDRY_ENDPOINT_2: 'https://rose-foundry-southcentralus.openai.azure.com',
+  AZURE_FOUNDRY_API_KEY_2: 'southcentralus-key',
+  AZURE_FOUNDRY_DEPLOYMENTS_2: 'gpt-6.1-sol',
+  AZURE_FOUNDRY_ENDPOINT_3: 'https://rose-foundry-westus.openai.azure.com/',
+  AZURE_FOUNDRY_API_KEY_3: 'westus-key',
+  AZURE_FOUNDRY_DEPLOYMENTS_3: 'gpt-6-sol',
+  AZURE_FOUNDRY_ENDPOINT_4: 'https://rose-foundry-southcentralus.openai.azure.com/',
+  AZURE_FOUNDRY_API_KEY_4: 'southcentralus-4-key',
+  AZURE_FOUNDRY_DEPLOYMENTS_4: 'gpt-6-sol',
+} as const;
+
+/**
+ * Both tiers fund Codex from gpt-6.1-sol: the first region whose deployment list
+ * names it (southcentralus, slot 2), read from AZURE_FOUNDRY_*, never a fixed host.
+ */
+export function testResolveCodexAzureFunding_selectsRegionByDeployment() {
+  withFoundryEnv(PROD_LAYOUT, () => {
+    for (const tier of ['ultra', 'flash'] as const) {
+      const funding = resolveCodexAzureFunding(tier);
+      assert(funding !== null, `${tier}: a region lists gpt-6.1-sol`);
+      assert(funding.apiKey === 'southcentralus-key', `${tier}: slot 2 key, got another region`);
+      assert(
+        funding.baseUrl === 'https://rose-foundry-southcentralus.openai.azure.com/openai/v1',
+        `${tier}: Azure v1 base URL, got ${funding.baseUrl}`
+      );
+      assert(funding.deployment === 'gpt-6.1-sol', `${tier}: deployment ${funding.deployment}`);
+    }
+  });
+  // Overrides still win: the deployment by name, the resource by host.
+  withFoundryEnv({ ...PROD_LAYOUT, CODEX_AZURE_DEPLOYMENT: 'gpt-6-sol' }, () => {
+    const funding = resolveCodexAzureFunding('ultra');
+    assert(
+      funding?.apiKey === 'region-1-key' && funding.deployment === 'gpt-6-sol',
+      'CODEX_AZURE_DEPLOYMENT picks the first region listing it'
+    );
+  });
   withFoundryEnv(
     {
-      AZURE_FOUNDRY_ENDPOINT: 'https://other-resource.openai.azure.com',
-      AZURE_FOUNDRY_API_KEY: 'other-key',
-      AZURE_FOUNDRY_ENDPOINT_3: 'https://rose-foundry-westus.openai.azure.com/',
-      AZURE_FOUNDRY_API_KEY_3: 'westus-key',
+      ...PROD_LAYOUT,
+      CODEX_AZURE_FOUNDRY_HOST: 'rose-foundry-westus.openai.azure.com',
+      CODEX_AZURE_DEPLOYMENT: 'gpt-5.6-terra',
     },
     () => {
-      const funding = resolveCodexAzureFunding();
-      assert(funding !== null, 'westus region is configured');
-      assert(funding.apiKey === 'westus-key', 'uses the westus key, not another region');
+      const funding = resolveCodexAzureFunding('flash');
       assert(
-        funding.baseUrl === 'https://rose-foundry-westus.openai.azure.com/openai/v1',
-        `Azure v1 base URL, got ${funding.baseUrl}`
+        funding?.apiKey === 'westus-key' && funding.deployment === 'gpt-5.6-terra',
+        'CODEX_AZURE_FOUNDRY_HOST pins the resource even when its list omits the deployment'
       );
-      assert(funding.deployment === CODEX_AZURE_DEFAULT_DEPLOYMENT, 'default deployment');
     }
   );
   withFoundryEnv(
     {
-      AZURE_FOUNDRY_ENDPOINT: 'https://other-resource.openai.azure.com',
-      AZURE_FOUNDRY_API_KEY: 'other-key',
-      CODEX_AZURE_FOUNDRY_HOST: 'other-resource.openai.azure.com',
-      CODEX_AZURE_DEPLOYMENT: 'gpt-5.3-codex',
+      AZURE_FOUNDRY_ENDPOINT: PROD_LAYOUT.AZURE_FOUNDRY_ENDPOINT,
+      AZURE_FOUNDRY_API_KEY: 'region-1-key',
+      AZURE_FOUNDRY_DEPLOYMENTS: 'gpt-6-sol',
+      AZURE_FOUNDRY_ENDPOINT_2: 'http://rose-foundry-southcentralus.openai.azure.com',
+      AZURE_FOUNDRY_API_KEY_2: 'insecure-key',
+      AZURE_FOUNDRY_DEPLOYMENTS_2: 'gpt-6.1-sol',
     },
     () => {
-      const funding = resolveCodexAzureFunding();
       assert(
-        funding?.apiKey === 'other-key' && funding.deployment === 'gpt-5.3-codex',
-        'host and deployment overrides select another configured region'
+        resolveCodexAzureFunding() === null,
+        'no funding when only a non-HTTPS region lists gpt-6.1-sol'
       );
-    }
-  );
-  withFoundryEnv(
-    {
-      AZURE_FOUNDRY_ENDPOINT: 'https://other-resource.openai.azure.com',
-      AZURE_FOUNDRY_API_KEY: 'other-key',
-    },
-    () => {
-      assert(resolveCodexAzureFunding() === null, 'no funding when the westus region is absent');
     }
   );
 }

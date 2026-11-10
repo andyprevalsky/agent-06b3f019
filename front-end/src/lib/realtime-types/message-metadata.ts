@@ -44,6 +44,7 @@ export type ToolStatus = 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
  * vocabulary are unioned in explicitly below.
  */
 export type BrowserActionType =
+  | 'phone'
   | (typeof BROWSER_EMITTED_ACTION_TYPES)[number]
   // Legacy literals retained for already-persisted messages. They are not in the
   // current emitted vocabulary, so they cannot be derived from it.
@@ -96,6 +97,7 @@ export interface InlineViewMessageMetadata {
  * Different message types use different subsets of these fields.
  */
 export interface MessageMetadata {
+  userPause?: { reason: 'user'; recordedAt: string };
   auxiliary?: { coordinates?: { x: number; y: number } };
   requestUserApproval?: Partial<RequestUserApprovalMetadata['requestUserApproval']>;
   imageUrl?: string | null;

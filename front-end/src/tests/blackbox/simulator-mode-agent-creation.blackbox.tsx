@@ -35,6 +35,7 @@ describe('Simulator mode agent creation', () => {
           stagePendingAgentCreation: vi.fn(),
           reconcilePendingAgentCreation: vi.fn(async () => undefined),
           rollbackPendingAgentCreation: vi.fn(() => true),
+          stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
         }),
       );
 
@@ -54,8 +55,9 @@ describe('Simulator mode agent creation', () => {
         world_model_mode: 'simulate',
       });
       expect(FAST_MODE_USER_IDS).toContain(userId);
-      // Simulator forces Fast Mode off; admin accounts still send the field.
-      expect(createPayload).toMatchObject({ fast_mode_cache_enabled: false });
+      // Simulator sends standard speed independently of the cache setting.
+      expect(createPayload).toMatchObject({ speed: 'standard' });
+      expect(createPayload).not.toHaveProperty('fast_mode_cache_enabled');
     },
   );
 });

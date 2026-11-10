@@ -6,7 +6,8 @@
  *   active   → [LIGHT] <--toggle()--> [DARK]; the stored choice is re-read
  *              whenever the signed-in account changes
  *   [DARK] mounted   → adds html.dark
- *   [DARK] unmounted / → removes only the html.dark it added
+ *   [DARK] unmounted / → removes html.dark (also when index.html's pre-paint
+ *     script set it early; a signed-in light/stock account clears that early class)
  *     theme or user changes
  *
  * COLOR TRANSITION: manual and login changes ease the painted colors.
@@ -16,10 +17,20 @@
  * the new html.dark. Everything lands on one frame (no next-tick repaint).
  */
 
-import { useCallback, useInsertionEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useInsertionEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
+import { setItem } from '@/lib/storage';
+
+import { ROSE_THEME_ACTIVE_KEY } from '../config';
 import { RoseThemeContext, readStoredRoseDark, writeStoredRoseDark } from '../hooks';
 import type { RoseThemeValue } from '../types';
 import { useThemeTransition } from '../hooks/useThemeTransition';
@@ -64,13 +75,26 @@ export function RoseThemeProvider({
   }, []);
   useLoginDarkMode(darkOnLogin ? activeUserId : null, applyLoginDark);
 
+  useEffect(() => {
+    if (userId !== null) setItem(ROSE_THEME_ACTIVE_KEY, userId);
+  }, [userId]);
+
   useInsertionEffect(() => {
-    if (!isDark) return;
     const root = document.documentElement;
-    if (root.classList.contains('dark')) return;
+    if (!isDark) {
+      // The pre-paint script in index.html may have set html.dark early; drop it
+      // once a signed-in account resolves to light. Signed-out/loading keeps it.
+      if (userId !== null && root.hasAttribute('data-rose-predark')) {
+        root.classList.remove('dark');
+        root.removeAttribute('data-rose-predark');
+      }
+      return;
+    }
+    root.removeAttribute('data-rose-predark');
+    if (root.classList.contains('dark')) return () => root.classList.remove('dark');
     root.classList.add('dark');
     return () => root.classList.remove('dark');
-  }, [isDark]);
+  }, [isDark, userId]);
 
   const value = useMemo<RoseThemeValue>(() => ({ isDark, toggle }), [isDark, toggle]);
   return <RoseThemeContext.Provider value={value}>{children}</RoseThemeContext.Provider>;

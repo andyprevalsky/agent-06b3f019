@@ -169,7 +169,7 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
       },
     },
     dump_context: { agent_id: params.agentId, call_site: 'chat_generator' },
-    provider_fast_mode: params.providerFastMode,
+    speed: params.speed,
     ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
   };
@@ -178,12 +178,17 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
 type GeneratorLlmParams = {
   agentId: string;
   messages: ChatMessage[];
-  userProfileContext?: string;
   model: string;
   providerRoute?: ChatProviderRoute;
   abortSignal?: AbortSignal;
   streamGate?: TransactionalStreamGate;
+  userProfileContext?: string;
+  projectContext?: string; // `## Project` section; '' or omitted = Home
 };
+
+/** Static generator prompt (cached prefix), then the agent's project section (projectContext.ts). */
+export const buildGeneratorSystemMessage = (projectContext = '', userProfileContext = '') =>
+  markCacheable(GENERATOR_SYSTEM_PROMPT, [projectContext, userProfileContext].filter(Boolean).join('\n\n'));
 
 export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
   let attention: GeneratorAttentionLifecycle | undefined;
@@ -210,7 +215,7 @@ async function callGeneratorLlmCore(
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [markCacheable(GENERATOR_SYSTEM_PROMPT, params.userProfileContext)];
+  }> = [buildGeneratorSystemMessage(params.projectContext, params.userProfileContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
@@ -317,6 +322,8 @@ async function callGeneratorLlmCore(
   const fastModeRead = fastMode.enabled === true && fastMode.goal !== null;
   const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
   // Button / LLM speed — independent of DEMO cache replay.
+  // Legacy Fast Mode bit: part of the DEMO cache key namespace only. Provider
+  // speed is fastMode.speed and never changes which cache entry is read.
   const providerFastMode = fastMode.providerFastMode !== false;
   let fcKey: string | null = null;
   let fcCacheWon = false;
@@ -352,7 +359,7 @@ async function callGeneratorLlmCore(
         model: params.model,
         messages: openaiMessages,
         providerRoute: params.providerRoute,
-        providerFastMode,
+        speed: fastMode.speed,
         abortSignal:
           params.abortSignal && hedgeSignal
             ? AbortSignal.any([params.abortSignal, hedgeSignal])

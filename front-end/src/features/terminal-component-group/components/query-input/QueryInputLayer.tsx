@@ -7,12 +7,24 @@
  * frame. Pinned by top, it grew downward past its slot for the ~2 frames the
  * ResizeObserver -> anchor height -> anchor position round trip took, then
  * jumped up (and the reverse on close).
+ *
+ * The layer is placed inside a fixed full-viewport frame by the difference
+ * between the frame's and the anchor's client rects. Both rects share one
+ * coordinate space, so the offset holds however the browser maps client to
+ * fixed coordinates: with the iOS keyboard up, client rects follow the panned
+ * visual viewport while fixed boxes keep the layout viewport, and the old
+ * `clientHeight - anchor.bottom` placed the composer one pan (~335pt) above
+ * its slot, over the top of the chat.
+ *
+ * The Rose left bar pinning or unpinning shifts the column without resizing
+ * it, so ROSE_BAR_OFFSET_EVENT also triggers a re-measure.
  */
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useRoseApps } from '../rose-apps/roseAppsState';
 import { createPortal } from 'react-dom';
 import { ROSE_LAYER } from '@/lib/roseLayers';
 import { browserComposerTarget } from './browserComposer';
+import { ROSE_BAR_OFFSET_EVENT } from '../rose-sidebar/roseSidebarLayout';
 
 type Geometry = { left: number; bottom: number; width: number; height: number };
 
@@ -29,19 +41,21 @@ export function QueryInputLayer({
   const browserOpen = apps?.openApp === 'browser';
   const raised = enabled && !browserOpen;
   const anchor = useRef<HTMLDivElement>(null);
+  const frame = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const [geometry, setGeometry] = useState<Geometry | null>(null);
 
   useLayoutEffect(() => {
     if (!raised) return;
     const update = () => {
-      if (!anchor.current || !layer.current) return;
+      if (!anchor.current || !frame.current || !layer.current) return;
       const bounds = anchor.current.getBoundingClientRect();
+      const viewport = frame.current.getBoundingClientRect();
       const height = layer.current.getBoundingClientRect().height;
       setGeometry((previous) => {
         const next = {
-          left: bounds.left,
-          bottom: document.documentElement.clientHeight - bounds.bottom,
+          left: bounds.left - viewport.left,
+          bottom: viewport.bottom - bounds.bottom,
           width: bounds.width,
           height,
         };
@@ -64,12 +78,14 @@ export function QueryInputLayer({
     }
     if (layer.current) observer.observe(layer.current);
     window.addEventListener('resize', update);
+    window.addEventListener(ROSE_BAR_OFFSET_EVENT, update);
     window.addEventListener('scroll', update, true);
     window.visualViewport?.addEventListener('resize', update);
     window.visualViewport?.addEventListener('scroll', update);
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', update);
+      window.removeEventListener(ROSE_BAR_OFFSET_EVENT, update);
       window.removeEventListener('scroll', update, true);
       window.visualViewport?.removeEventListener('resize', update);
       window.visualViewport?.removeEventListener('scroll', update);
@@ -101,16 +117,22 @@ export function QueryInputLayer({
       />
       {createPortal(
         <div
-          ref={layer}
-          data-testid="query-input-layer"
-          className={`fixed ${ROSE_LAYER.composer} flow-root rose-mobile-query-area`}
-          style={{
-            left: geometry?.left ?? 0,
-            bottom: geometry?.bottom ?? 0,
-            width: geometry?.width || '100%',
-          }}
+          ref={frame}
+          data-testid="query-input-frame"
+          className={`pointer-events-none fixed inset-0 ${ROSE_LAYER.composer}`}
         >
-          {children}
+          <div
+            ref={layer}
+            data-testid="query-input-layer"
+            className="pointer-events-auto absolute flow-root rose-mobile-query-area"
+            style={{
+              left: geometry?.left ?? 0,
+              bottom: geometry?.bottom ?? 0,
+              width: geometry?.width || '100%',
+            }}
+          >
+            {children}
+          </div>
         </div>,
         document.body,
       )}

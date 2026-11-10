@@ -1,5 +1,6 @@
 /**
- * Bridge exposing the data domain's grep to providers (SMS supervisor).
+ * Bridge exposing the data domain's grep to providers: the raw search, and the
+ * grep tool executor the SMS supervisor and web chat run their grep calls on.
  *
  * Providers must not import domains (structural invariant 3, layer-deps),
  * so server.ts registers `grep` from domains/data/service here at boot and
@@ -10,8 +11,6 @@
 export interface UserDataGrepParams {
   pattern?: string;
   source?: string;
-  sources?: string[];
-  agent_id?: string;
   filters?: Record<string, unknown>;
   role?: string;
   record_kind?: string;
@@ -90,13 +89,46 @@ export async function executeUserDataGrep(
   return grepExecutor(userId, params);
 }
 
-let summaryExecutor: ((userId: string) => Promise<unknown>) | null = null;
-
-export function registerUserDataSummary(fn: (userId: string) => Promise<unknown>): void {
-  summaryExecutor = fn;
+/** A grep tool call's result: the search result plus tool-level fields (summary, literal retry). */
+export interface UserDataGrepToolResult extends Omit<
+  UserDataGrepResult,
+  'display_order' | 'context_unit'
+> {
+  display_order?: UserDataGrepResult['display_order'];
+  context_unit?: UserDataGrepResult['context_unit'];
+  literal_fallback?: true;
+  original_pattern?: string;
+  effective_pattern?: string;
 }
 
-export function executeUserDataSummary(userId: string): Promise<unknown> {
-  if (!summaryExecutor) throw new Error('[UserDataSearch] user data summary not initialized');
-  return summaryExecutor(userId);
+type UserDataGrepToolFn = (
+  userId: string,
+  args: Record<string, unknown>
+) => Promise<UserDataGrepToolResult>;
+
+let grepToolExecutor: UserDataGrepToolFn | null = null;
+
+export function registerUserDataGrepTool(fn: UserDataGrepToolFn): void {
+  grepToolExecutor = fn;
+}
+
+/**
+ * Run one grep tool call (arguments as the shared grep definition declares
+ * them) for `userId`. `agentId` scopes `agent_network` to that agent's tree;
+ * without one, a default search finds an empty agent tree (with a notice).
+ */
+export async function executeUserDataGrepTool(
+  userId: string,
+  args: Record<string, unknown>,
+  context: { agentId?: string } = {}
+): Promise<UserDataGrepToolResult> {
+  if (grepToolExecutor === null) {
+    throw new Error(
+      '[UserDataSearch] grep tool not initialized — registerUserDataGrepTool was never called'
+    );
+  }
+  return grepToolExecutor(userId, {
+    ...args,
+    ...(context.agentId !== undefined ? { agent_id: context.agentId } : {}),
+  });
 }

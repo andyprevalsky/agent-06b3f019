@@ -137,10 +137,14 @@ if ensure_workspace_system_db 5432 "victoria"; then
 fi
 unset -f psql
 
-# Both runners' system fallback must go through the workspace database.
+# Both runners' system fallback must go through the workspace database. A
+# coverage shard appends its own suffix to the same workspace hint
+# ("$WORKSPACE_HINT$SHARD_DB_SUFFIX"), which stays workspace-scoped.
 for runner in run-blackbox-tests.sh run-coverage.sh; do
-  grep -q 'workspace_system_db_name "$WORKSPACE_HINT"' "$SCRIPT_DIR/$runner" || {
-    echo "Expected $runner's system Postgres fallback to use workspace_system_db_name" >&2
+  hint='$WORKSPACE_HINT'
+  [[ "$runner" != "run-coverage.sh" ]] || hint='$WORKSPACE_HINT$SHARD_DB_SUFFIX'
+  grep -Fq "workspace_system_db_name \"$hint\"" "$SCRIPT_DIR/$runner" || {
+    echo "Expected $runner's system Postgres fallback to use workspace_system_db_name with $hint" >&2
     exit 1
   }
 done
@@ -160,6 +164,36 @@ grep -q 'LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT
 }
 [[ "$(grep -c 'use_workspace_container_db$' "$SCRIPT_DIR/run-coverage.sh")" -eq 2 ]] || {
   echo "Expected both run-coverage.sh Docker branches to select the workspace database" >&2
+  exit 1
+}
+
+# ── Existing-backend runs seed the database the stack's backend reads ──
+# run.sh records that database in .context/services.json; a non-default stack
+# (victoria_stack_<workspace>) seeded through `victoria` hid every Prisma fixture
+# from the backend under test.
+MANIFEST_DIR="$(mktemp -d)"
+printf '{"database":{"name":"victoria_stack_ws-a","use_system_postgres":true}}\n' > "$MANIFEST_DIR/named.json"
+printf '{"database":{"use_system_postgres":true}}\n' > "$MANIFEST_DIR/default.json"
+printf '{"database":{"name":"x; drop"}}\n' > "$MANIFEST_DIR/bad.json"
+[[ "$(stack_manifest_db_name "$MANIFEST_DIR/named.json")" == "victoria_stack_ws-a" ]] || {
+  echo "Expected the stack manifest's database name" >&2
+  exit 1
+}
+[[ "$(stack_manifest_db_name "$MANIFEST_DIR/default.json")" == "victoria" ]] || {
+  echo "Expected run.sh's default stack database when the manifest names none" >&2
+  exit 1
+}
+for manifest in "$MANIFEST_DIR/bad.json" "$MANIFEST_DIR/missing.json"; do
+  if stack_manifest_db_name "$manifest" >/dev/null; then
+    echo "Expected $manifest to be refused" >&2
+    exit 1
+  fi
+done
+rm -rf "$MANIFEST_DIR"
+STACK_BRANCH="$(sed -n '/^# When testing an already-running stack/,/^# Try Docker container first/p' "$SCRIPT_DIR/run-blackbox-tests.sh")"
+grep -q 'STACK_DB_NAME="$(stack_manifest_db_name "$STACK_MANIFEST")"' <<<"$STACK_BRANCH" &&
+  [[ "$(grep -c 'SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$STACK_DB_NAME"' <<<"$STACK_BRANCH")" -eq 2 ]] || {
+  echo "Expected both existing-stack branches of run-blackbox-tests.sh to select the manifest's database" >&2
   exit 1
 }
 

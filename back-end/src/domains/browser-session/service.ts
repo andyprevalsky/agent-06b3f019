@@ -1,3 +1,5 @@
+import { buildBrowserSessionMetadata } from './service.metadata';
+export { buildBrowserSessionMetadata } from './service.metadata';
 import { initLegacySession } from './service.init-legacy';
 import { closeBrowserSession } from './service.close';
 import { resumeOwnedBrowserSession } from './service.control';
@@ -13,17 +15,9 @@ import {
  */
 
 import type { Browser } from 'playwright';
-import { type ProxyGeoLocation } from '../../providers/geoip';
-import { createLogger } from '../../providers/logger';
 import {
-  getSession,
   injectUserData,
-  uploadSessionFile,
-  listFiles as listProviderFiles,
-  readSessionFile,
   resizeSessionViewport,
-  captureScreenshot,
-  pressSessionKeys,
   type BrowserViewport,
 } from '../../providers/browser';
 import {
@@ -35,9 +29,7 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { prepareWorldStateFork } from './service.world-fork';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
-import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers/browser/types';
-import { validateBrowserKeySymbols } from './service.browser-input';
-import { validateSessionFilePath } from './service.file-path';
+import { storedBrowserProvider } from '../../providers/browser/types';
 import {
   injectLocalStorage,
   SessionNoUserError,
@@ -60,72 +52,6 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
-
-const log = createLogger('BrowserSession');
-
-async function requireSessionOwner(sessionId: string, userId?: string): Promise<void> {
-  if (userId === undefined) return;
-  const session = await repo.findSessionBySessionId(sessionId);
-  if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
-}
-
-interface BrowserSessionMetadataInput {
-  provider: string;
-  providerSelection?: { requestedProvider: string; fallbackReason: string };
-  geoTargeting?: BrowserGeoTargeting;
-  proxySource: string;
-  proxyLocation: ProxyGeoLocation;
-  profileId: string | null;
-  profileSource: string;
-}
-
-interface BrowserSessionInjectionMetadataInput {
-  cookies: { injected: boolean; cookieCount: number; authSource: string };
-  localStorage: { originCount: number };
-  indexedDB: { originCount: number };
-  permissions: { grantCount: number };
-  cacheStorage: { originCount: number };
-}
-
-export function buildBrowserSessionMetadata(
-  session: BrowserSessionMetadataInput,
-  injectionResult: BrowserSessionInjectionMetadataInput
-) {
-  return {
-    provider: session.provider,
-    // Benchmarks and the worker tell a real run on the requested provider from a fallback.
-    requested_provider: session.providerSelection?.requestedProvider ?? session.provider,
-    provider_fallback_reason: session.providerSelection?.fallbackReason ?? null,
-    ...(session.geoTargeting !== undefined
-      ? {
-          geo_targeting: {
-            requested: session.geoTargeting.requested,
-            applied: session.geoTargeting.applied,
-            requested_location: session.geoTargeting.requestedLocation,
-            geo_applied: session.geoTargeting.geoApplied,
-            geo_unsupported: session.geoTargeting.geoUnsupported,
-          },
-        }
-      : {}),
-    proxy_source: session.proxySource,
-    proxy_location: session.proxyLocation,
-    profile_id: session.profileId,
-    profile_source: session.profileSource,
-    auth_source: injectionResult.cookies.authSource,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    local_storage_origin_count: injectionResult.localStorage.originCount,
-    indexed_db_origin_count: injectionResult.indexedDB.originCount,
-    permission_grant_count: injectionResult.permissions.grantCount,
-    cache_storage_origin_count: injectionResult.cacheStorage.originCount,
-    ...(session.provider === 'steel'
-      ? {
-          steel_profile_id: session.profileId,
-          steel_profile_source: session.profileSource,
-        }
-      : {}),
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -151,7 +77,7 @@ export async function prepareSessionCredentials(
   sessionId: string,
   userId: string,
   targetUrl: string,
-  options: { browser?: Browser } = {}
+  options: { browser?: Browser; restoreBrowserState?: boolean } = {}
 ) {
   const session = await repo.findSessionBySessionId(sessionId);
   if (session === null || session.context.userId !== userId) {
@@ -163,25 +89,18 @@ export async function prepareSessionCredentials(
     throw new Error('Target URL must have an authentication realm');
   }
 
-  const [authOptions, storedPasswords, passkeys, onCookiesReady] = await Promise.all([
+  const [authOptions, storedPasswords, passkeys] = await Promise.all([
     getAuthOptions(userId, authRealm, {
       steelContextId: session.provider === 'steel' ? (session.providerProfileId ?? null) : null,
     }),
     repo.findPasswords(userId),
     repo.reservePasskeysForRealm(userId, authRealm),
-    // Browser-template fork (A6): recorded once injection has chosen the account.
-    prepareWorldStateFork(session, userId, targetUrl),
   ]);
 
-  const credentialPayload = buildSessionCredentialPayload(
-    authRealm,
-    authOptions,
-    storedPasswords,
-    passkeys
-  );
-  if (logicalHasPrivateState(session)) {
+  const creds = buildSessionCredentialPayload(authRealm, authOptions, storedPasswords, passkeys);
+  if (options.restoreBrowserState === false || logicalHasPrivateState(session)) {
     return {
-      ...credentialPayload,
+      ...creds,
       auth_credential_ref: null,
       cookies_injected: false,
       cookies_count: 0,
@@ -201,12 +120,14 @@ export async function prepareSessionCredentials(
       },
     };
   }
+  // Inventory refresh must not replace an in-flight authentication transaction.
+  const onCookiesReady = prepareWorldStateFork(session, userId, targetUrl);
   if (session.provider === 'tilion' && options.browser === undefined) {
     // The agent worker holds Tilion's only CDP socket: hand it the state to apply.
     // The world-state fork needs a backend CDP context, so it is not recorded here.
     const { payload, injection } = await buildTilionWorkerApplyPayload(userId, targetUrl);
     return {
-      ...credentialPayload,
+      ...creds,
       auth_credential_ref: injection.cookies.credentialRef,
       cookies_injected: false,
       cookies_count: injection.cookies.cookieCount,
@@ -215,18 +136,18 @@ export async function prepareSessionCredentials(
       worker_apply: payload,
     };
   }
-  const injectionResult = await preserveSessionCredentialPayload(
+  const injection = await preserveSessionCredentialPayload(
     () => injectUserData(sessionId, userId, targetUrl, { ...options, onCookiesReady }),
-    credentialPayload
+    creds
   );
 
   return {
-    ...credentialPayload,
-    auth_credential_ref: injectionResult.cookies.credentialRef,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    auth_source: injectionResult.cookies.authSource,
-    browser_state_injection: injectionResult,
+    ...creds,
+    auth_credential_ref: injection.cookies.credentialRef,
+    cookies_injected: injection.cookies.injected,
+    cookies_count: injection.cookies.cookieCount,
+    auth_source: injection.cookies.authSource,
+    browser_state_injection: injection,
   };
 }
 
@@ -238,10 +159,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
       prepare: prepareSessionCredentials,
       metadata: buildBrowserSessionMetadata,
     });
-    return {
-      ...result,
-      releaseOnDisconnect: () => closeBrowserSession(result.session_id, false),
-    };
+    return { ...result, releaseOnDisconnect: () => closeBrowserSession(result.session_id, false) };
   }
   await waitForBrowserInitialization(logical.id, userId);
   await repo.updateLogicalSessionUrls(
@@ -304,9 +222,7 @@ export { rotateBrowserProxy, ProxyRotationExhaustedError, RotationSessionNotFoun
 // Get context
 // ---------------------------------------------------------------------------
 
-export async function getContext(userId: string) {
-  return repo.findContextByUserId(userId);
-}
+export { findContextByUserId as getContext } from './repo';
 
 export async function resizeBrowserViewport(
   taskId: string,
@@ -323,77 +239,11 @@ export async function resizeBrowserViewport(
   return resizeSessionViewport(session.sessionId, viewport, provider);
 }
 
-// ---------------------------------------------------------------------------
-// Get session by Steel ID
-// ---------------------------------------------------------------------------
-
-/* c8 ignore start -- getSessionById, uploadFile, listFiles require Steel SDK */
-export async function getSessionById(sessionId: string) {
-  return getSession(sessionId);
-}
-
-// ---------------------------------------------------------------------------
-// Upload file
-// ---------------------------------------------------------------------------
-
-export async function uploadFile(
-  sessionId: string,
-  buffer: Buffer,
-  originalname: string,
-  mimetype: string,
-  options: { directory?: string } = {}
-) {
-  log.info('Uploading file to session', {
-    sessionId,
-    originalname,
-    sizeBytes: buffer.length,
-    directory: options.directory,
-  });
-
-  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype, options);
-
-  return {
-    path: result.path,
-    size: result.size,
-    filename: originalname,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// List files
-// ---------------------------------------------------------------------------
-
-export async function listFiles(sessionId: string) {
-  log.info('Listing files for session', { sessionId });
-
-  const files = await listProviderFiles(sessionId);
-
-  return {
-    session_id: sessionId,
-    files,
-    count: files.length,
-  };
-}
-
-export async function downloadFile(sessionId: string, filePath: string, userId?: string) {
-  await requireSessionOwner(sessionId, userId);
-  validateSessionFilePath(filePath);
-  const content = await readSessionFile(sessionId, filePath);
-  const filename = filePath.split('/').pop();
-  return {
-    content,
-    filename: filename !== undefined && filename !== '' ? filename : 'download',
-  };
-}
-
-export async function takeScreenshot(sessionId: string, userId?: string) {
-  await requireSessionOwner(sessionId, userId);
-  return captureScreenshot(sessionId);
-}
-
-export async function pressKeys(sessionId: string, keys: string[], userId: string) {
-  await requireSessionOwner(sessionId, userId);
-  validateBrowserKeySymbols(keys);
-  return pressSessionKeys(sessionId, keys);
-}
-/* c8 ignore stop */
+export {
+  getSessionById,
+  uploadFile,
+  listFiles,
+  downloadFile,
+  takeScreenshot,
+  pressKeys,
+} from './service.session-io';

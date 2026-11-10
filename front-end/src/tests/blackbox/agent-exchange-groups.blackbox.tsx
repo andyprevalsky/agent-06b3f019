@@ -84,11 +84,31 @@ describe('quiet agent coordination in a human turn', () => {
     expect(screen.getByText('Visible final result')).toBeInTheDocument();
     expect(screen.getByText('Human start')).toBeInTheDocument();
     fireEvent.click(within(row).getByRole('button', { name: /Agents coordinating/ }));
-    expect(within(row).getAllByTestId('a2a-row')).toHaveLength(20);
+    // Opens on the newest page: the 50 most recent exchanges (70–119).
+    expect(within(row).getAllByTestId('a2a-row')).toHaveLength(50);
     expect(within(row).getAllByTestId('a2a-row')[0]).toHaveAttribute('data-a2a-direction', 'sent');
-    fireEvent.click(within(row).getByRole('button', { name: 'Next exchanges' }));
+    expect(within(row).getByText('Private exchange 119')).toBeInTheDocument();
+    expect(within(row).queryByText('Private exchange 69')).toBeNull();
+    expect(within(row).getByRole('button', { name: 'Next exchanges' })).toBeDisabled();
+    fireEvent.click(within(row).getByRole('button', { name: 'Previous exchanges' }));
     expect(within(row).getByText('Private exchange 20')).toBeInTheDocument();
-    expect(within(row).queryByText('Private exchange 0')).toBeNull();
+    expect(within(row).queryByText('Private exchange 19')).toBeNull();
+  });
+  it('stays on the newest page of exchanges while open as the group crosses a multiple of 50', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const turn = (n: number) => [
+      human('start'),
+      ...Array.from({ length: n }, (_, i) => exchange(`${i}`)),
+    ];
+    const view = renderWithProviders(projection(turn(100)));
+    const row = () => screen.getByTestId('agent-exchange-group');
+    fireEvent.click(within(row()).getByRole('button', { name: /Agents coordinating/ }));
+    expect(within(row()).getByText('Private exchange 99')).toBeInTheDocument();
+    view.rerender(projection(turn(101)));
+    expect(within(row()).getByText('Private exchange 100')).toBeInTheDocument();
+    expect(within(row()).getByText('Private exchange 51')).toBeInTheDocument();
+    expect(within(row()).queryByText('Private exchange 50')).toBeNull();
   });
   it('keeps expansion and anchor across replay and updates, and completes hidden typing rows once', () => {
     vi.useFakeTimers();

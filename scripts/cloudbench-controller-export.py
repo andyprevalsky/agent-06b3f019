@@ -43,6 +43,54 @@ if not hasattr(os, "pidfd_open") or not hasattr(__import__("signal"), "pidfd_sen
 
         _pidfd_signal.pidfd_send_signal = _pidfd_send_signal
 
+# Shared with the standalone orphan-drain guest; retained inside this source so
+# copied and source-pinned export helpers have no extra runtime dependency.
+PIDFD_SOURCE = r'''
+"""Linux process handles for CPython builds without the optional pidfd bindings.
+
+Use the same libc operations as CPython, preserving errno and the bound process
+handle. A missing libc/kernel operation fails closed; never signal by numeric PID.
+This source is also embedded into standalone controller guest commands.
+"""
+import ctypes
+import os
+import signal
+
+
+def _pidfd_call(name, argument_types, arguments):
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        function = getattr(libc, name)
+    except AttributeError:
+        raise NotImplementedError("Linux libc pidfd support required") from None
+    function.argtypes = argument_types
+    function.restype = ctypes.c_int
+    result = function(*arguments)
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return result
+
+
+def pidfd_open(pid):
+    native = getattr(os, "pidfd_open", None)
+    if native is not None:
+        return native(pid)
+    return _pidfd_call("pidfd_open", [ctypes.c_int, ctypes.c_uint], (pid, 0))
+
+
+def pidfd_send_signal(fd, sig):
+    native = getattr(signal, "pidfd_send_signal", None)
+    if native is not None:
+        return native(fd, sig)
+    _pidfd_call(
+        "pidfd_send_signal",
+        [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint],
+        (fd, sig, None, 0),
+    )
+'''
+exec(compile(PIDFD_SOURCE, '<linux-pidfd>', 'exec'))
+
 os.umask(0o077)
 
 
@@ -80,14 +128,15 @@ def process_paths(process):
     paths = []
     for task in (process / "task").iterdir():
         try:
-            paths.append(os.readlink(task / "cwd"))
+            task_paths = [os.readlink(task / "cwd")]
             for fd in (task / "fd").iterdir():
-                try: paths.append(os.readlink(fd))
-                except FileNotFoundError: continue
+                try: task_paths.append(os.readlink(fd))
+                except (FileNotFoundError, ProcessLookupError): continue
             for line in (task / "maps").read_text().splitlines():
                 fields = line.split(None, 5)
-                if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
-        except FileNotFoundError:
+                if len(fields) == 6 and "w" in fields[1]: task_paths.append(fields[5])
+            paths.extend(task_paths)
+        except (FileNotFoundError, ProcessLookupError):
             continue
     return paths
 
@@ -97,7 +146,7 @@ def observed_paths(process):
     for attempt in range(WRITER_OBSERVATION_ATTEMPTS):
         try:
             return process_paths(process)
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return None
         except PermissionError:
             if not process.exists():
@@ -463,7 +512,7 @@ def retire_disposable_hubs(repo, directory, *, timeout=10):
                 raise ValueError('foreign local Hub ownership')
             if path.stat().st_uid != Path(f'/proc/{pid}').stat().st_uid:
                 raise ValueError('Hub receipt owner differs')
-            fd = os.pidfd_open(pid)
+            fd = pidfd_open(pid)
             selected.append((pid, fd, owner, raw, path))
             if birth(pid) != current: raise ValueError('Hub birth changed')
             argv = process_argv(pid)
@@ -480,7 +529,7 @@ def retire_disposable_hubs(repo, directory, *, timeout=10):
             intent = directory / f'disposable-hub-{pid}.term.intent.json'
             if not intent.exists():
                 sync_json(intent, dict(pid=pid, birth=owner['pid_start'], owner_sha256=hashlib.sha256(raw).hexdigest()))
-                signal.pidfd_send_signal(fd, signal.SIGTERM)
+                pidfd_send_signal(fd, signal.SIGTERM)
         for pid, fd, owner, raw, path in selected:
             while birth(pid) == owner['pid_start']:
                 try:

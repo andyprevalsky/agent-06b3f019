@@ -1,16 +1,16 @@
 import { emptyRetentionCases } from './worker-empty-retention.cases';
 import { retainedRouteMismatchCases } from './worker-route-retention.cases';
+import { coalesceCases, coalesceCliCases } from './worker-deployment-coalesce.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { on } from 'node:events';
 import type { Readable } from 'node:stream';
-import { promisify } from 'node:util';
 import { PrismaClient } from '@prisma/client';
+import { execTypeScript, spawnTypeScript, typeScriptProcess } from '../../providers/processSafety';
 import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 let prisma: typeof import('../../providers/database').prisma;
 let api: typeof import('../../providers/workerDeploymentQueue');
@@ -243,17 +243,15 @@ async function parentRecovery() {
   const code = `const q = require(${JSON.stringify(provider)}); const {prisma} = require(${JSON.stringify(database)}); const fs=require('node:fs'); async function main(){ const id=process.env.WORKER_DEPLOYMENT_JOB_ID; const owner=process.env.WORKER_DEPLOYMENT_OWNER_ID; const job=await q.readWorkerDeployment(id); if(job.ownerId!==owner)throw new Error('durable owner not claimed before child'); const marker=${JSON.stringify(folder)}+'/'+id; fs.appendFileSync(marker,'invoked\\n'); if(!fs.existsSync(marker+'.wait')){fs.writeFileSync(marker+'.wait',''); process.exitCode=75; return;} if(job.stage==='QUEUED'){const ids=Array.from({length:8},(_,i)=>id.slice(0,8)+'-'+i); await q.prepareWorkerDeployment(id,{priorPointer:await prisma.agentQueuePointer.findUnique({where:{id:'singleton'},select:{taskQueue:true,surfaceHash:true}}),candidateMachineIds:ids,evidence:{candidateRecords:ids.map(id=>({id,instanceId:'v1',configSHA256:'d'.repeat(64)})),previousRecords:[]}},owner);} await q.transitionWorkerDeployment(id,'PREPARING','READY',{},owner); const queue=q.workerDeploymentQueueName(id,job.identity.surfaceHash); await prisma.agentQueuePointer.upsert({where:{id:'singleton'},create:{id:'singleton',taskQueue:queue,surfaceHash:job.identity.surfaceHash},update:{taskQueue:queue,surfaceHash:job.identity.surfaceHash}}); await q.transitionWorkerDeployment(id,'READY','ACTIVATED',{},owner); await q.transitionWorkerDeployment(id,'ACTIVATED','DRAINING',{},owner); await q.transitionWorkerDeployment(id,'DRAINING','SUCCEEDED',{candidateHealthy:true,priorDisposition:'RETAINED_LEGACY'},owner); } main().catch(e=>{process.stderr.write(String(e));process.exitCode=1}).finally(()=>prisma.$disconnect());`;
   try {
     await writeFile(fixture, code);
-    const tsx = path.resolve(__dirname, '../../../../node_modules/.bin/tsx');
     const cli = path.resolve(__dirname, '../../../scripts/worker-deployment-queue.ts');
-    const abortWaiting = await promisify(execFile)(
-      tsx,
+    const [interpreter, fixtureArgs] = typeScriptProcess([fixture]);
+    const abortWaiting = await execTypeScript(
       [cli, 'run', '--allow-abort', '--job-id', b.jobId, '--', 'must-not-abort-predecessor'],
       { timeout: 5000 }
     );
     assert.equal(JSON.parse(abortWaiting.stdout.trim()).reason, 'ABORT_FIFO_PREDECESSOR');
-    const result = await promisify(execFile)(
-      tsx,
-      [cli, 'run', '--job-id', b.jobId, '--', tsx, fixture],
+    const result = await execTypeScript(
+      [cli, 'run', '--job-id', b.jobId, '--', interpreter, ...fixtureArgs],
       { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }
     );
     const events = result.stdout
@@ -270,11 +268,9 @@ async function parentRecovery() {
       (await readFile(path.join(folder, a.jobId), 'utf8')).split('invoked').length - 1,
       2
     );
-    await promisify(execFile)(
-      tsx,
-      [cli, 'run', '--job-id', b.jobId, '--', 'nonexistent-must-not-start'],
-      { timeout: 5000 }
-    );
+    await execTypeScript([cli, 'run', '--job-id', b.jobId, '--', 'nonexistent-must-not-start'], {
+      timeout: 5000,
+    });
   } finally {
     await rm(folder, { recursive: true, force: true });
   }
@@ -340,17 +336,15 @@ async function processSafety() {
   const folder = await mkdtemp(path.join(tmpdir(), 'worker-queue-signal-'));
   const marker = path.join(folder, 'child-pid');
   const cli = path.resolve(__dirname, '../../../scripts/worker-deployment-queue.ts');
-  const tsx = path.resolve(__dirname, '../../../../node_modules/.bin/tsx');
   const a = await api.enqueueWorkerDeployment(identity(appFor('signal'), 'first'));
   const hold = await acquireWorkflowDeploymentLease();
   try {
-    const idle = await promisify(execFile)(
-      tsx,
+    const idle = await execTypeScript(
       [cli, 'run', '--if-idle', '--job-id', a.jobId, '--', 'must-not-spawn'],
       { timeout: 5000 }
     );
     assert.equal(JSON.parse(idle.stdout.trim()).reason, 'GLOBAL_LEASE_BUSY');
-    const waiting = spawn(tsx, [
+    const waiting = spawnTypeScript([
       cli,
       'run',
       '--job-id',
@@ -371,14 +365,13 @@ async function processSafety() {
     await hold.release();
   }
   try {
-    const deferred = await promisify(execFile)(
-      tsx,
+    const deferred = await execTypeScript(
       [cli, 'run', '--if-idle', '--job-id', a.jobId, '--', 'must-not-spawn'],
       { timeout: 5000 }
     );
     assert.equal(JSON.parse(deferred.stdout.trim()).reason, 'FAILED_ATTEMPT_CADENCE');
     assert.equal(existsSync(marker), false);
-    const running = spawn(tsx, [
+    const running = spawnTypeScript([
       cli,
       'run',
       '--job-id',
@@ -461,6 +454,8 @@ async function main() {
       abort(lease.ownerId));
     await test('unpublished prepared abort requires real target tombstone and releases exact bank idempotently', () =>
       preparedAbort(lease.ownerId));
+    await test('unstarted queued releases coalesce into a proven git descendant only', () =>
+      coalesceCases({ api, owner: lease.ownerId, appFor, identity, plan }));
     await lease.release();
     await test(
       'parent idle admission, interrupted wait and actual owned child lease loss',
@@ -470,6 +465,8 @@ async function main() {
       'parent resumes FIFO predecessors and exit75 wait without failure or duplicate completed execution',
       parentRecovery
     );
+    await test('queue CLI coalesces into proven descendants and never rolls the live release back', () =>
+      coalesceCliCases({ api, appFor, identity }));
     lease = await acquireWorkflowDeploymentLease({ leaseMs: 60000, heartbeatMs: 59000 });
     await test('expired and replaced global owners cannot mutate', async () => {
       const app = appFor('expiry');
@@ -498,7 +495,12 @@ async function main() {
     await prisma.toolSideEffect.deleteMany({
       where: {
         operationType: {
-          in: ['WORKER_DEPLOYMENT_JOB', 'WORKER_DEPLOYMENT_RESERVATION', 'AGENT_QUEUE_ADMISSION'],
+          in: [
+            'WORKER_DEPLOYMENT_JOB',
+            'WORKER_DEPLOYMENT_RESERVATION',
+            'AGENT_QUEUE_ADMISSION',
+            'WORKER_DEPLOYMENT_ANCESTRY',
+          ],
         },
         externalId: { in: apps },
       },

@@ -37,7 +37,8 @@ import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { isRoseDevUser } from '../../utils/roseDevAccess';
 import type { CodeSessionRow } from './store';
-import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
+import { CODEX_CODE_TEMPLATE, DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
+import { CLAUDE_CODE_TEMPLATE, DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
 
 const log = createLogger('CodeSandboxSize');
 
@@ -55,10 +56,14 @@ export interface SandboxSize {
  * The template grid the sized build config produces (e2b-templates/sized-templates.json,
  * pinned equal by a structural test): 4 templates per provider. Every point is a
  * separately built E2B template, so the grid stays small.
+ *
+ * Memory stops at 8 GB: the E2B team refuses templates over 8192 MiB ("Memory
+ * can't be higher than 8192 MiB", 2026-10-28). A 16 GB size needs E2B support
+ * to raise that cap first, then a rebuild of the grid.
  */
 export const DEFAULT_SANDBOX_GRID: { cpu: number[]; memoryGb: number[] } = {
   cpu: [2, 8],
-  memoryGb: [4, 16],
+  memoryGb: [4, 8],
 };
 /** A configured grid larger than this (per provider) is refused. */
 export const MAX_GRID_POINTS = 9;
@@ -78,7 +83,7 @@ function positiveInts(value: unknown): number[] | null {
 }
 
 /**
- * CODE_SANDBOX_GRID (`{"cpu":[2,8],"memoryGb":[4,16]}`), else the default grid.
+ * CODE_SANDBOX_GRID (`{"cpu":[2,8],"memoryGb":[4,8]}`), else the default grid.
  * A grid of more than MAX_GRID_POINTS templates is refused (default grid).
  */
 export function sandboxGrid(): { cpu: number[]; memoryGb: number[] } {
@@ -180,7 +185,11 @@ export function resizeReverseWindowMs(): number {
 
 /** Template name the sized build config gives a grid point. */
 export function sizedTemplateName(provider: SandboxProvider, size: SandboxSize): string {
-  return `${provider === 'codex' ? 'codex-code' : 'claude-code'}-c${size.cpu}-m${size.memoryGb}`;
+  const prefix =
+    provider === 'codex'
+      ? CODEX_CODE_TEMPLATE.sizedAliasPrefix
+      : CLAUDE_CODE_TEMPLATE.sizedAliasPrefix;
+  return `${prefix}-c${size.cpu}-m${size.memoryGb}`;
 }
 
 type TemplateMap = Partial<Record<SandboxProvider, Record<string, string>>>;
@@ -203,8 +212,10 @@ function configuredTemplates(): TemplateMap | 'grid' {
   return {};
 }
 
-function currentTemplate(provider: SandboxProvider): string | null {
-  if (provider === 'claude') return process.env.E2B_CLAUDE_CODE_TEMPLATE_ID?.trim() || null;
+function currentTemplate(provider: SandboxProvider, size: SandboxSize): string | null {
+  if (provider === 'claude') {
+    return sameSize(size, CLAUDE_CODE_TEMPLATE.size) ? DEFAULT_CLAUDE_CODE_TEMPLATE_ID : null;
+  }
   return process.env.E2B_CODEX_CODE_TEMPLATE_ID?.trim() || DEFAULT_CODEX_CODE_TEMPLATE_ID;
 }
 
@@ -219,7 +230,7 @@ export function sandboxTemplateFor(provider: SandboxProvider, size: SandboxSize)
   if (configured === 'grid') return sizedTemplateName(provider, size);
   const named = configured[provider]?.[sizeKey(size)];
   if (typeof named === 'string' && named.trim() !== '') return named.trim();
-  return sameSize(size, defaultSandboxSize()) ? currentTemplate(provider) : null;
+  return sameSize(size, defaultSandboxSize()) ? currentTemplate(provider, size) : null;
 }
 
 export function availableSizes(provider: SandboxProvider): SandboxSize[] {
