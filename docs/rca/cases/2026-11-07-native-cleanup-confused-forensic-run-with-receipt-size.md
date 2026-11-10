@@ -208,3 +208,30 @@ The coordinator's identity/inventory error was triggered by cleanup_completefals
 The generic cleanup reader previously required an integer controller exit and parent handle for every scheduled job, rejecting the two legitimate null unlaunched rows. A separate versioned layout admits only the independently witnessed request/receipt/adapter/summary and immutable producer hashes. It validates every launched owner/audit, positive reserve-refusal or cancellation boundary, exact two never-launched rows, current process/Hub absence, zero allocation, original publication and full evidence closure. It records launch-only cleanup retirement with no test or financial credit and requires all17 task checks to execute again. The original retained isolated obligation is unchanged; its existing failed-successor renewal path recognizes only this fully revalidated typed entry for the original obligation token.
 
 Validation: actual unchanged reader rejects this proof as unsupported; candidate native reconcile succeeds on a copy while preserving attempts/failures/pending and original debt. Permanent regressions reject launched identities or broken-symlink logs in null rows and unwitnessed requests before native reads. Independent real-proof tamper controls cover allocation, provenance, Hub/relay/process reuse and coupled renewal entry forgery. Full current-source native smoke and resource closure remain mandatory after supported environment/source refresh; diagnostic admission modeling grants no acceptance credit.
+
+## November 9 recurrence: proof aggregate versus per-run admission
+
+PR1896 retained all thirteen original parent runs and its linked canary. Their
+verified original run files total 212,366,375 bytes. Each fits the existing
+128 MiB per-run forensic bound, but the shared 128 MiB proof counter rejects
+the complete cohort before native custody validation. Omitting participants or
+rewriting logs would conceal required evidence.
+
+The correction gives native cleanup a separate finite 512 MiB proof-wide raw
+I/O allowance. The per-run 128 MiB cap, ordinary 64 MiB materialization/scalar
+bounds, 64 KiB streaming, complete JSON/hash/descriptor verification and every
+variant/source-pin/custody predicate remain unchanged. Standalone readers still
+default to the original aggregate allowance. This is not a task, timeout,
+coverage or concurrency change.
+
+The same registered real two-by-65-MiB log-array test fails on the original
+aggregate guard and passes after separation; individual scalars remain 1 MiB.
+Aggregate exhaustion, per-run exhaustion, malformed/trailing input, hash drift,
+standalone defaults and scalar bounds remain negative controls. Independent
+review cleared exact diff 074e6eda07b8450a111915275d1ef2c17ec58c0d3bfcc69395493c221406b5ee.
+Evidence is retained privately under .context/deploy-pr1896-continuation/smoke-rca/aggregate-candidate.
+
+A pure replay validated all fourteen participants with credit_granted=false,
+cleanup_complete=false and obligations_preserved=true. It neither reconciled
+the live cycle nor cleared financial, browser, guest/runtime, provider or Hub
+custody. Required frozen-source gates and production acceptance remain pending.

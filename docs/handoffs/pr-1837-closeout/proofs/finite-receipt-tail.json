@@ -1,0 +1,21 @@
+{
+  "status": "VERIFIED",
+  "completed_at": "2026-11-09T20:40:48.595105+00:00",
+  "key": "devbox-closeouts/report-bug-fetch-944bdbf4/receipt-tail-9b82e8e4993c411c9ca216fb7f45ab53.enc",
+  "native_receipt_sha256": "5f1c094fe7fc77fdea950ea4d505520847a3c7b9e8b91a4524293b52e09c44bb",
+  "ciphertext_sha256": "115a2439ee0bdc8f958fdc0295326a7449488160f73abb7d36dada95668d5601",
+  "manifest_sha256": "69c84fe69b28d64002c23329ddb530f99b25d504b2d05de1b260c4a283f50321",
+  "members": 129,
+  "original_bytes": 257051434,
+  "stored_bytes": 200430481,
+  "fresh_authenticated_HEAD404": true,
+  "native_copy_exit": 0,
+  "native_upload_exit": 0,
+  "full_authenticated_readback": true,
+  "native_restore_exit": 0,
+  "every_native_restored_member_SHA_size_and_exact_membership_PASS": true,
+  "independent_every_restored_file_SHA_size_stat_PASS": true,
+  "authenticated_manifest_exact_approved_logical_map_join_PASS": true,
+  "financial_duties": "Three UNVERIFIED/no credit/no execution/refund/release/mint/no remint",
+  "limits": "Finite bounded main+tail records; later nonsecret receipts/review/merge/deletion/card durable reviewed Git/visual closure remain root-owned. No deletion or financial credit."
+}

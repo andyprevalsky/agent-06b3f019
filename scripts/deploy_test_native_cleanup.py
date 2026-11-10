@@ -21,6 +21,8 @@ MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
 # 98 MB on 2026-11-07, beyond the 64 MiB receipt cap, so its verified cleanup could never be bound
 # and every later smoke launch was refused. Run records get their own, still finite, cap.
 RUN_RECORD_MAX_BYTES = 512 * 1024 * 1024
+# A complete multi-participant proof has a separate finite I/O allowance.
+MAX_RAW_RUN_PROOF_BYTES = RUN_RECORD_MAX_BYTES
 
 
 def fleet_git_common(root):
@@ -935,7 +937,7 @@ def validate(receipt, owner, proof):
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
     run_artifacts = set()
-    raw_remaining = [MAX_RAW_FORENSIC_RUN_BYTES]
+    raw_remaining = [MAX_RAW_RUN_PROOF_BYTES]
     historical_sources = {}
     need(isinstance(bindings, dict), 'missing file bindings')
 
@@ -1269,15 +1271,18 @@ def validate(receipt, owner, proof):
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
+        life = document(fleet / '_batch/lifecycle.json')
+        # Read linked failed probes through the same finite raw budget before proving their retirement.
+        failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
         run_path = fleet / '_batch/run.json'
-        if isolated or preallocation or mixed or fleet in admission_parents:
+        if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
             need(run_path.is_file() and run_path.stat().st_size <= RUN_RECORD_MAX_BYTES, 'proof file too large')
             run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
-                                    raw_limit=MAX_RAW_FORENSIC_RUN_BYTES,
-                                    raw_remaining=raw_remaining)
+                                    raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
+                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES)
             used.add(str(run_path))
             run_artifacts.add(str(run_path))
         else:
@@ -1293,20 +1298,8 @@ def validate(receipt, owner, proof):
             raw_remaining[0] -= verified_size
             used.add(str(run_path))
             run = None
-        life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
-        # A job's linked infra-canary preflight may fail in any campaign-v1 proof (isolated implies
-        # campaign-v1). It grants no task credit and must still prove its exact parent/source/owner link and
-        # provider release below; unlinked or foreign failures refuse.
-        failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
-        if failed_canary and run is None:
-            # The ordinary branch already charged this run to raw_remaining above.
-            # Load only bounded control metadata; keep forensic task logs opaque.
-            from deploy_test_run_artifact import read_run_artifact
-            run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
-                                    raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES))
-            run_artifacts.add(str(run_path))
         need(type(life.get('version')) is int and life['version'] == 1 and life['run_id'] == fleet.name
              and life['workspace_root'] == str(root) and life['hub_publication_failed'] is False
              and type(life['controller_exit_code']) is int
@@ -1345,6 +1338,20 @@ def validate(receipt, owner, proof):
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+            if not isolated:
+                # Normal release of a failed probe still requires exact execution retirement.
+                processes = subprocess.check_output(['ps', '-ax', '-o', 'pid=,pgid=,stat='], text=True)
+                pid = int(fleet.name.rsplit('-', 1)[-1])
+                need(pid > 1 and not any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
+                    for r in processes.splitlines() if not r.split()[2].startswith('Z')),
+                    'failed canary controller still active')
+                need(document(fleet / '_batch/disposable-cleanup.json').get('successful_runtime_inferred') is False,
+                     'failed canary runtime inference is not evidence')
+                if zero_allocation:
+                    for bench in benches:
+                        for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'):
+                            artifact = fleet / bench['name'] / name
+                            need(not artifact.exists() and not artifact.is_symlink(), 'failed canary zero-allocation artifact present')
         admission_parent = fleet in admission_parents
         if admission_parent:
             from deploy_test_native_admission import validate_parent

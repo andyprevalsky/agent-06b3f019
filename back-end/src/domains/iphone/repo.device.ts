@@ -79,8 +79,8 @@ function privateInput(device: IPhoneDevice): boolean {
   }
 }
 
-/** Owner-only snapshot of a READY session; refuses private input and in-flight commands. */
-export async function frameSnapshot(userId: string) {
+/** Owner snapshot of a READY session; a private phase is refused to internal callers only. */
+export async function frameSnapshot(userId: string, owner = false) {
   if (!permitted(await prisma.user.findUnique({ where: { userId } })))
     throw new IPhoneError(403, 'iPhone access denied');
   const device = await prisma.iPhoneDevice.findUnique({ where: { userId } });
@@ -92,7 +92,8 @@ export async function frameSnapshot(userId: string) {
     device.providerSessionEncrypted === null
   )
     throw new PhoneDeviceUnavailable(device.providerState, 'Phone session is not ready');
-  if (privateInput(device)) throw new PhoneDeviceUnavailable('private', 'Private input is active');
+  if (!owner && privateInput(device))
+    throw new PhoneDeviceUnavailable('private', 'Private input is active');
   const inFlight = await prisma.iPhoneOperation.findFirst({
     where: { deviceId: device.id, state: { in: ['CONNECTING', 'RUNNING'] } },
     select: { id: true },
@@ -108,10 +109,14 @@ export async function frameSnapshot(userId: string) {
 }
 
 /** After the provider read: the same READY session generation, still not private. */
-export async function frameStillValid(snapshot: Awaited<ReturnType<typeof frameSnapshot>>) {
+export async function frameStillValid(
+  snapshot: Awaited<ReturnType<typeof frameSnapshot>>,
+  owner = false
+) {
   const device = await prisma.iPhoneDevice.findUnique({ where: { id: snapshot.deviceId } });
   if (device === null || !device.enabled) throw new IPhoneError(403, 'iPhone device is disabled');
-  if (privateInput(device)) throw new PhoneDeviceUnavailable('private', 'Private input is active');
+  if (!owner && privateInput(device))
+    throw new PhoneDeviceUnavailable('private', 'Private input is active');
   if (
     device.providerState !== 'READY' ||
     device.providerStartKey !== snapshot.startKey ||

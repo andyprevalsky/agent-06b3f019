@@ -1,0 +1,16 @@
+{
+  "status": "VERIFIED",
+  "receipt_sha256": "675f95ac69b898695e16818b2398e714dddccf9ebed9c8a13e6b60e2c7c1f20a",
+  "assigned_tar_sha256": "03fff683fe677e709e6b7be4f6ba51c41470bf90be07bcb9799e33acd40d0f58",
+  "assigned_tar_bytes": 120513026,
+  "outer_members": 2,
+  "inner_members": 6574,
+  "full_returned_artifact_files": 6533,
+  "native_upload_exit": 0,
+  "native_restore_exit": 0,
+  "full_authenticated_readback": true,
+  "every_outer_and_inner_hash_size_verified": true,
+  "distinct_empty_restore": true,
+  "prior_dns_v1_and_certificate_v1_unchanged": true,
+  "limits": "Historical13b DNS occurrence, distinct from certificate occurrence. Original failures and prior owner evidence retained. Actual current ownership/handoff and originating merge are parent pending facts; no duplicate repair, outage or new-source PASS claim."
+}

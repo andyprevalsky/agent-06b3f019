@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/report-bug-fetch-944bdbf4/receipt-tail-9b82e8e4993c411c9ca216fb7f45ab53.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "115a2439ee0bdc8f958fdc0295326a7449488160f73abb7d36dada95668d5601",
+  "gzip_sha256": "2f7a795f19bf53fcb8138616f1314e0894b21ada4abdff886939869d5a9017a0",
+  "stored_bytes": 200430481,
+  "frames": 24,
+  "files": 129,
+  "original_bytes": 257051434,
+  "manifest_sha256": "69c84fe69b28d64002c23329ddb530f99b25d504b2d05de1b260c4a283f50321",
+  "full_readback_verified": true
+}

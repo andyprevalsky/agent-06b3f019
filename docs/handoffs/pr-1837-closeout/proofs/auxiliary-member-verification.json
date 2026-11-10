@@ -1,0 +1,75 @@
+{
+  "observed_at": "2026-11-08T16:08:41.246550+00:00",
+  "native_upload_exit": 0,
+  "native_restore_exit": 0,
+  "orchestration_native_exit": 0,
+  "every_member_verification_sha256": "a49397527d4980a1e5286e2de4180218a77e5fb2c429691f91bda42a1e572b2f",
+  "uploaded_manifest_sha256": "8c5266e06ddfc4d215a27c8f0ba659b8a34e94d527641587cc0a51ba225f73b1",
+  "approved_snapshot_manifest_sha256": "7a001de3a36b32c7dd3052bbf1ccc4a834f1a5be1d7c4c6015c29743da126619",
+  "native_receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+  "every_member_and_exact_membership_verified": true,
+  "restored_members": 236259,
+  "scope_coverage": [
+    {
+      "scope": "node_modules",
+      "regular_source_files_preserved": 151285,
+      "regular_source_bytes_preserved": 1432162906,
+      "policy_files_deferred_final": 196
+    },
+    {
+      "scope": "codex",
+      "regular_source_files_preserved": 9044,
+      "regular_source_bytes_preserved": 87917172,
+      "policy_files_deferred_final": 19
+    },
+    {
+      "scope": "hermes-agent",
+      "regular_source_files_preserved": 17812,
+      "regular_source_bytes_preserved": 209223237,
+      "policy_files_deferred_final": 136
+    },
+    {
+      "scope": "openclaw",
+      "regular_source_files_preserved": 52162,
+      "regular_source_bytes_preserved": 646401784,
+      "policy_files_deferred_final": 382
+    },
+    {
+      "scope": "kimi-code",
+      "regular_source_files_preserved": 4399,
+      "regular_source_bytes_preserved": 62360559,
+      "policy_files_deferred_final": 9
+    },
+    {
+      "scope": "prime-agent",
+      "regular_source_files_preserved": 1484,
+      "regular_source_bytes_preserved": 28336455,
+      "policy_files_deferred_final": 0
+    },
+    {
+      "scope": ".devbox",
+      "regular_source_files_preserved": 1,
+      "regular_source_bytes_preserved": 118,
+      "policy_files_deferred_final": 9
+    },
+    {
+      "scope": "package-lock.json",
+      "regular_source_files_preserved": 1,
+      "regular_source_bytes_preserved": 1047257,
+      "policy_files_deferred_final": 0
+    },
+    {
+      "scope": "agents/helpers/__pycache__",
+      "regular_source_files_preserved": 64,
+      "regular_source_bytes_preserved": 1126642,
+      "policy_files_deferred_final": 0
+    },
+    {
+      "scope": "agents/providers/fast_cache/__pycache__",
+      "regular_source_files_preserved": 6,
+      "regular_source_bytes_preserved": 150758,
+      "policy_files_deferred_final": 0
+    }
+  ],
+  "no_cleanup_or_credit": true
+}

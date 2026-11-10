@@ -1,0 +1,14 @@
+{
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "service_tier": "UNRECORDED",
+  "harness": "codex",
+  "harness_version": "0.166.0",
+  "source": "Native root-session turn_context and session_meta captured privately",
+  "usage_scope": "Measured native root-session interval17:16:59.987Z\u201320:28:20.675Z; excludes first request and later closeout; not aggregate child/deploy usage",
+  "cost_usd": null,
+  "historical_work_intervals": "Mostly unrecorded; gaps must be counted as waiting with reason unrecorded, never inferred active work",
+  "native_runtime_started_at": "2026-11-09T17:21:01Z",
+  "native_runtime_finished_at": "2026-11-09T20:34:52Z",
+  "closeout": "Same deployment continues through reviewed preservation and final scorecard; later actual record/publication times remain separate."
+}
