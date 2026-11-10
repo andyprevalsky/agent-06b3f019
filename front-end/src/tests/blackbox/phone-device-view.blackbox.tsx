@@ -10,7 +10,7 @@
  *    "Queued behind agent <id> (position N)" instead of a queue placeholder
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { delay, http, HttpResponse } from 'msw';
 
@@ -78,6 +78,7 @@ beforeEach(() => {
   );
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   localStorage.clear();
 });
@@ -130,19 +131,35 @@ describe('Phone app device view', () => {
   }, 15_000);
 
   it('shows boot-up, then idle copy, and stops reading frames while the phone is idle', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const state = device({ providerState: 'STARTING', holder: null, frame: 'STARTING' });
-    const view = await openPhone();
-    expect(await within(view).findByText('Booting the phone…')).toBeInTheDocument();
+    renderWithProviders(<RoseAppIcons />);
+    fireEvent.click(screen.getByTestId('rose-app-phone'));
+    const view = within(screen.getByTestId('rose-phone')).getByTestId('phone-device-view');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await vi.waitFor(
+      () => expect(within(view).getByText('Booting the phone…')).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
     expect(within(view).getByTestId('phone-device-holder')).toHaveTextContent(/^Idle$/);
-    await waitFor(() => expect(state.frames).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(state.frames).toBeGreaterThan(0), { timeout: 5000 });
     state.providerState = 'IDLE';
     state.frame = 'IDLE';
-    expect(
-      await within(view).findByText('Phone is idle', {}, { timeout: 5000 }),
-    ).toBeInTheDocument();
-    await new Promise((resolve) => setTimeout(resolve, 3_200));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await vi.waitFor(() => expect(within(view).getByText('Phone is idle')).toBeInTheDocument(), {
+      timeout: 5000,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_200);
+    });
     const idleFrames = state.frames;
-    await new Promise((resolve) => setTimeout(resolve, 2_200));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_200);
+    });
     expect(state.frames).toBe(idleFrames);
     expect(leaseOrQueueRequests()).toEqual([]);
   }, 20_000);

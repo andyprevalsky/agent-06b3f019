@@ -79,5 +79,62 @@ class ProgressTest(unittest.TestCase):
                                'check=g/suite-a id=abc rca=/r/abc.json')
 
 
+class QuarantineProtocolTest(unittest.TestCase):
+    """Statuses and optional keys shared byte for byte with the TypeScript writers
+    (back-end/src/tests/helpers/gateProgress.ts, front-end/src/tests/gate-progress/gateProgress.ts)."""
+
+    META = {'since': '2026-11-08', 'repair': 'https://boxes.dev/thread/thr_q', 'error': 'E: x', 'evidence': 'l.log'}
+
+    def test_status_and_key_vocabulary_is_frozen(self):
+        self.assertEqual(progress.STATUSES, ('PASS', 'FAIL', 'UNVERIFIED', 'QUARANTINED_FAIL',
+                                             'QUARANTINED_PASS', 'FLAKY'))
+        self.assertEqual(progress.BLOCKING, ('FAIL', 'UNVERIFIED'))
+        self.assertEqual(progress.QUARANTINE_KEYS, ('since', 'repair', 'error', 'evidence'))
+
+    def test_optional_keys_follow_the_original_eight_byte_for_byte(self):
+        quarantined = progress.row('suite::C.t', 'QUARANTINED_FAIL', case='g', at=1762540000.125,
+                                   detail='\u00e9 tb', quarantine=dict(reversed(list(self.META.items()))))
+        self.assertEqual(progress.serialize(quarantined).decode(),
+                         '{"v":1,"scope":"test","case":"g","unit":"suite::C.t","status":"QUARANTINED_FAIL",'
+                         '"at":1762540000.125,"detail":"\\u00e9 tb","log":"","quarantine":{"since":"2026-11-08",'
+                         '"repair":"https://boxes.dev/thread/thr_q","error":"E: x","evidence":"l.log"}}\n')
+        flaky = progress.row('benchmark', 'FLAKY', scope='domain', case='g', at=2, attempts=2)
+        self.assertEqual(progress.serialize(flaky).decode(),
+                         '{"v":1,"scope":"domain","case":"g","unit":"benchmark","status":"FLAKY","at":2,'
+                         '"detail":"","log":"","attempts":2}\n')
+        plain = progress.row('a', 'PASS', case='', at=3)
+        self.assertEqual(list(plain), ['v', 'scope', 'case', 'unit', 'status', 'at', 'detail', 'log'])
+
+    def test_row_refuses_metadata_on_the_wrong_status(self):
+        for status, kwargs in (('QUARANTINED_FAIL', {}), ('QUARANTINED_PASS', {'quarantine': {}}),
+                               ('FAIL', {'quarantine': self.META}), ('PASS', {'attempts': 2}),
+                               ('FLAKY', {'attempts': 1}), ('FLAKY', {'attempts': True}),
+                               ('QUARANTINED_PASS', {'quarantine': {**self.META, 'extra': 'x'}}),
+                               ('QUARANTINED_PASS', {'quarantine': {**self.META, 'repair': ''}})):
+            with self.subTest(status=status, kwargs=kwargs), self.assertRaises(ValueError):
+                progress.row('u', status, **kwargs)
+
+    def test_readers_split_blocking_quarantined_and_flaky_rows(self):
+        rows = [progress.row('p', 'PASS'), progress.row('f', 'FAIL'), progress.row('u', 'UNVERIFIED'),
+                progress.row('qf', 'QUARANTINED_FAIL', quarantine=self.META),
+                progress.row('qp', 'QUARANTINED_PASS', quarantine=self.META),
+                progress.row('fl', 'FLAKY', attempts=2), progress.row('fl2', 'FLAKY')]
+        parsed = progress.parse(b''.join(progress.serialize(r) for r in rows)
+                                + b'{"v":1,"scope":"test","case":"","unit":"x","status":"QUARANTINED_FAIL","at":1}\n'
+                                + b'{"v":1,"scope":"test","case":"","unit":"y","status":"FAIL","at":1,"attempts":2}\n')
+        self.assertEqual([r['unit'] for r in parsed], ['p', 'f', 'u', 'qf', 'qp', 'fl', 'fl2'])
+        self.assertEqual([r['unit'] for r in progress.failures(parsed)], ['f', 'u'])
+        self.assertEqual([r['unit'] for r in progress.quarantined(parsed)], ['qf', 'qp'])
+        self.assertEqual([r['unit'] for r in progress.flaky(parsed)], ['fl', 'fl2'])
+
+    def test_stdout_lines(self):
+        self.assertEqual(progress.stdout_line(progress.row('d::c', 'QUARANTINED_FAIL', quarantine=self.META)),
+                         'TEST_QUARANTINE status=QUARANTINED_FAIL unit=d::c since=2026-11-08 '
+                         'repair=https://boxes.dev/thread/thr_q')
+        self.assertEqual(progress.stdout_line(progress.row('benchmark', 'FLAKY', attempts=2)),
+                         'TEST_FLAKY unit=benchmark attempts=2 attribution=REQUIRED')
+        self.assertIsNone(progress.stdout_line(progress.row('a', 'FAIL')))
+
+
 if __name__ == '__main__':
     unittest.main()

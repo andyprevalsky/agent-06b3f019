@@ -23,6 +23,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from condition_wait import wait_until
 import deploy_gates as g
 import deploy_test_plan as p
 from deploy_test_bindings import generate
@@ -343,6 +345,19 @@ class Executor(unittest.TestCase):
         self.assertEqual('2', structural['command'][-1])
         self.assertEqual('2', semantic['env'][g.SEMANTIC_ENV])
 
+    def test_local_new_test_stability_bounds_its_cpu_load_and_blacksmith_keeps_nproc(self):
+        def with_stability():
+            template = standard()
+            template['gates'].append({'name': 'new-test-stability', 'checks': ['new-test-stability'], 'command': [
+                'python3', 'scripts/select_affected_tests.py', '--stability', '--base', 'origin/main']})
+            return template
+        remote = next(gate for gate in g.build_template(2, 2, with_stability, executor='blacksmith')['gates']
+                      if gate['name'] == 'new-test-stability')
+        self.assertNotIn('--load-workers', remote['command'])
+        local = next(gate for gate in g.build_template(2, 2, with_stability, executor='local')['gates']
+                     if gate['name'] == 'new-test-stability')
+        self.assertEqual(['--load-workers', str(g.LOCAL_STABILITY_LOAD_WORKERS)], local['command'][-2:])
+
     def test_cli_defaults_to_blacksmith_and_refuses_host_cuts_there(self):
         with patch.object(g, 'run', return_value=0) as run, patch.object(g, 'ROOT', self.root):
             g.main([])
@@ -408,6 +423,27 @@ class Launcher(unittest.TestCase):
         with self.assertRaises(ValueError):
             gh.tag_name('ubuntu-latest', 'g', 'tok')
 
+    def test_user_elected_overrides_travel_to_the_vm_and_nothing_else_does(self):
+        """deploy.md lets the user override a named gate; a Blacksmith VM's env is its own, so the
+        coordinator's DEPLOY_GATE_OVERRIDES must ride the envelope (PR #1854's live Tilion override)."""
+        self.assertEqual('a:b,browser-provider:tilion-residential-live',
+                         gh.gate_overrides(' browser-provider:tilion-residential-live , a:b,a:b '))
+        for bad in ('Bad Name', 'x;rm -rf /', '-flag'):
+            with self.assertRaises(ValueError):
+                gh.gate_overrides(bad)
+        with patch.dict(os.environ, {gh.OVERRIDES_ENV: ''}):
+            plain = gh.envelope(remote_request('a' * 40), 'deploy_test_worker.py', RUNNER)
+        self.assertNotIn(b'overrides', plain)  # an ordinary request keeps its deterministic tag
+        with patch.dict(os.environ, {gh.OVERRIDES_ENV: 'browser-provider:tilion-residential-live'}):
+            elected = gh.envelope(remote_request('a' * 40), 'deploy_test_worker.py', RUNNER)
+        self.assertEqual('browser-provider:tilion-residential-live', json.loads(elected)['overrides'])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            head = git_repo(root)
+            for elected_value in ('browser-provider:tilion-residential-live', ''):
+                out = self.run_extract(root, remote_request(head, root=str(root)), overrides=elected_value)
+                self.assertEqual(elected_value, (out / 'overrides').read_text())
+
     def test_envelope_binds_the_runner_root_and_a_known_worker(self):
         with self.assertRaises(ValueError):
             gh.envelope(remote_request('a' * 40, root='/elsewhere'), 'deploy_test_worker.py', RUNNER)
@@ -425,10 +461,12 @@ class Launcher(unittest.TestCase):
             self.assertEqual((fields['object'], fields['type']), (head, 'commit'))
             self.assertEqual(json.loads(body)['request']['source']['head'], head)
 
-    def run_extract(self, root, request, runner=RUNNER, script='deploy_test_worker.py', name=None):
+    def run_extract(self, root, request, runner=RUNNER, script='deploy_test_worker.py', name=None, overrides=''):
         name = name or gh.tag_name(runner, request['gate'], request['token'])
-        body = (json.dumps({'version': gh.ENVELOPE_VERSION, 'worker_script': script, 'runner': runner,
-                            'request': request}) + '\n').encode()
+        fields = {'version': gh.ENVELOPE_VERSION, 'worker_script': script, 'runner': runner, 'request': request}
+        if overrides:
+            fields['overrides'] = overrides
+        body = (json.dumps(fields) + '\n').encode()
         head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, check=True, capture_output=True,
                               text=True).stdout.strip()
         sha = subprocess.run(['git', 'hash-object', '-t', 'tag', '-w', '--stdin'], cwd=root, check=True,
@@ -751,6 +789,197 @@ class RestQuota(unittest.TestCase):
         self.assertEqual(polled, [True, True, True])
 
 
+class PoolReads(unittest.TestCase):
+    """Reads use the token-pool member with the most quota; writes keep the launch identity.
+
+    A pool member's 401/403/404 is not authoritative (it may lack access) and its rate limit is not the
+    launch identity's, so the read is retried with the launch token; that token's answer stays final.
+    """
+
+    def http_error(self, code, body=b'{}', headers=None):
+        from email.message import Message
+        message = Message()
+        for key, value in (headers or {}).items():
+            message[key] = value
+        return gh.urllib.error.HTTPError('https://api.github.com/x', code, 'x', message, io.BytesIO(body))
+
+    def client(self, behave, picks=(('GITHUB_APP', 'pool'),), now=1_000_000.0):
+        """A GitHub client whose transport calls behave(method, token, if_none_match) for every request."""
+        seen, pauses, queue = [], [], list(picks)
+
+        class Response:
+            def __init__(self, status, headers, body):
+                self.status, self.headers, self.body = status, headers, body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self.body
+
+        class Opener:
+            def open(self, req, timeout):
+                token = req.get_header('Authorization').removeprefix('Bearer ')
+                etag = req.get_header('If-none-match')
+                seen.append((req.get_method(), token, etag))
+                outcome = behave(req.get_method(), token, etag)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return Response(*outcome)
+
+        client = gh.GitHub('launch', 'acme/rose', read_picker=lambda: queue.pop(0) if queue else None)
+        patches = [patch.object(gh.urllib.request, 'build_opener', return_value=Opener()),
+                   patch.object(gh.time, 'time', return_value=now),
+                   patch.object(gh.STOP, 'wait', side_effect=pauses.append)]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        return client, seen, pauses
+
+    def ok(self, body=b'{"ok": 1}', headers=None):
+        return 200, dict(headers or {}), body
+
+    def test_reads_use_the_pool_member_and_writes_keep_the_launch_identity(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok())
+        client.request('GET', '/actions/runs/1')
+        client.request('POST', '/actions/runs/1/cancel')
+        self.assertEqual([('GET', 'pool', None), ('POST', 'launch', None)], seen)
+        self.assertEqual(('GITHUB_APP', 0), (client.read_name, client.read_fallbacks))
+
+    def test_a_pool_404_403_or_401_is_retried_with_the_launch_token_whose_404_is_final(self):
+        for code in (404, 403, 401):
+            client, seen, _ = self.client(
+                lambda method, token, etag, code=code: self.http_error(code) if token == 'pool' else self.ok())
+            self.assertEqual(200, client.request('GET', '/actions/runs/1/artifacts')[0])
+            self.assertEqual(['pool', 'launch'], [token for _, token, _ in seen], code)
+            self.assertEqual(1, client.read_fallbacks)
+        client, seen, _ = self.client(lambda method, token, etag: self.http_error(404))
+        with self.assertRaises(gh.urllib.error.HTTPError) as raised:
+            client.request('GET', '/actions/runs/1')
+        self.assertEqual(404, raised.exception.code)
+        self.assertEqual(['pool', 'launch'], [token for _, token, _ in seen])
+
+    def test_a_member_the_launch_token_outranked_is_never_handed_out_again(self):
+        for code in (404, 403, 401):
+            client, seen, _ = self.client(
+                lambda method, token, etag, code=code: self.http_error(code) if token == 'pool' else self.ok(),
+                picks=(('GITHUB_APP', 'pool'), ('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+            client.request('GET', '/actions/runs/1/artifacts')
+            client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+            client.request('GET', '/actions/runs/2')  # the re-pick returns the denied member: refused
+            client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+            client.request('GET', '/actions/runs/3')
+            self.assertEqual(['pool', 'launch', 'launch', 'pool2'], [token for _, token, _ in seen], code)
+            self.assertEqual({gh.identity('pool')}, client.read_denied)
+        # Both identities answered 404: that is GitHub's answer, and the member keeps serving reads.
+        client, seen, _ = self.client(
+            lambda method, token, etag: self.http_error(404) if len(seen) <= 2 else self.ok())
+        with self.assertRaises(gh.urllib.error.HTTPError):
+            client.request('GET', '/actions/runs/1')
+        client.request('GET', '/actions/runs/2')
+        self.assertEqual(['pool', 'launch', 'pool'], [token for _, token, _ in seen])
+        self.assertEqual(set(), client.read_denied)
+
+    def test_a_bounded_stop_window_reads_with_the_launch_token_only(self):
+        picked = []
+        client, seen, _ = self.client(lambda method, token, etag: self.ok())
+        client.read_picker = lambda: picked.append(1) or ('GITHUB_APP', 'pool')
+        client.until = 1_000_010.0
+        self.assertEqual(['launch'], client.tokens('GET'))
+        client.request('GET', '/actions/runs/1')
+        self.assertEqual(([], [('GET', 'launch', None)]), (picked, seen))
+        client.until = None
+        self.assertEqual(['pool', 'launch'], client.tokens('GET'))
+
+    def test_a_drained_pool_member_asks_the_launch_token_before_the_existing_reset_wait(self):
+        limit = b'{"message": "API rate limit exceeded"}'
+        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1000010'}
+        client, seen, pauses = self.client(
+            lambda method, token, etag: self.http_error(403, limit, reset) if token == 'pool' else self.ok())
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(200, client.request('GET', '/actions/runs/1')[0])
+        self.assertEqual(([], ['pool', 'launch']), (pauses, [token for _, token, _ in seen]))
+        # Both identities drained: the unchanged wait until X-RateLimit-Reset, then the pool member first again.
+        calls = []
+
+        def both(method, token, etag):
+            calls.append(token)
+            return self.http_error(403, limit, reset) if len(calls) <= 2 else self.ok()
+
+        client, seen, pauses = self.client(both, picks=(('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(200, client.request('GET', '/actions/runs/1')[0])
+        self.assertEqual([11.0], pauses)
+        self.assertEqual(11.0, client.rate_limited_seconds)
+        self.assertIn('DEPLOY_GATE_RATE_LIMITED waiting 11s', out.getvalue())
+        self.assertEqual(['pool', 'launch', 'pool2'], calls, 'the drained member is re-picked after the wait')
+
+    def test_etags_and_cached_bodies_are_per_identity_so_a_304_stays_free(self):
+        tags = {'pool': '"p"', 'launch': '"l"'}
+
+        def behave(method, token, etag):
+            if etag == tags[token]:
+                return self.http_error(304)
+            if etag is not None:
+                raise AssertionError(f'{token} was sent another identity\'s ETag')
+            return self.ok(json.dumps({'who': token}).encode(), {'ETag': tags[token]})
+
+        client, seen, _ = self.client(behave)
+        self.assertEqual({'who': 'pool'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual({'who': 'pool'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'pool', '"p"'), seen[-1])
+        client.read_token = 'launch'  # the pool now picks the launch identity: its own ETag, never the pool's
+        self.assertEqual({'who': 'launch'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'launch', None), seen[-1])
+        self.assertEqual({'who': 'launch'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'launch', '"l"'), seen[-1])
+
+    def test_the_read_member_is_re_picked_when_low_stale_or_rejected(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(headers={'X-RateLimit-Remaining': '50'}),
+                                      picks=(('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+        client.request('GET', '/a')
+        client.request('GET', '/b')  # remaining 50 < READ_LOW_REMAINING, but a re-pick waits a minute
+        self.assertEqual(['pool', 'pool'], [token for _, token, _ in seen])
+        client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+        client.request('GET', '/c')
+        self.assertEqual(('pool2', 'GITHUB_TOKEN_2'), (seen[-1][1], client.read_name))
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(), picks=(('A', 'pool'),))
+        client.request('GET', '/a')
+        client.read_picked_at -= gh.READ_REPICK_SECONDS
+        client.read_attempted_at -= gh.READ_REPICK_SECONDS
+        client.request('GET', '/b')  # stale, and the pool has nothing better: the old member stays
+        self.assertEqual(['pool', 'pool'], [token for _, token, _ in seen])
+
+    def test_no_picker_or_a_pick_of_the_launch_token_reads_with_the_launch_token(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(), picks=(('GITHUB_TOKEN', 'launch'),))
+        client.request('GET', '/a')
+        self.assertEqual([('GET', 'launch', None)], seen)
+        plain = gh.GitHub('launch', 'acme/rose')
+        self.assertEqual(['launch'], plain.tokens('GET'))
+
+    def test_pick_read_member_uses_core_quota_and_fails_open_to_the_launch_token(self):
+        import github_token_pool as pool
+        calls = []
+
+        def fake_pick(resource, repo_root=None, timeout=None):
+            calls.append((resource, repo_root))
+            return pool.Member('GITHUB_APP', 'pool')
+
+        with patch.object(pool, 'pick_member', fake_pick), patch.dict(os.environ, {'DEPLOY_GATE_GITHUB_POOL': '1'}):
+            self.assertEqual(('GITHUB_APP', 'pool'), gh.pick_read_member(ROOT))
+        self.assertEqual([('core', ROOT)], calls)
+        with patch.object(pool, 'pick_member', side_effect=RuntimeError('probe')), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertIsNone(gh.pick_read_member(ROOT))
+        self.assertNotIn('pool', out.getvalue().split('(')[0].lower().replace('deploy_gate_github_pool', ''))
+        with patch.object(pool, 'pick_member', fake_pick), patch.dict(os.environ, {'DEPLOY_GATE_GITHUB_POOL': '0'}):
+            self.assertIsNone(gh.pick_read_member(ROOT))
+        self.assertEqual(1, len(calls))
+
+
 class TagPush(unittest.TestCase):
     def test_a_transient_remote_rejection_is_retried_with_the_same_tag_object(self):
         calls = []
@@ -804,6 +1033,7 @@ class Channel:
     def __init__(self, env, client=None):
         pass
     def get(self, name, leaf):
+        note(op='channel-get', leaf=leaf)  # the observable "launcher is watching its channel" signal
         mode = os.environ['FAKE_MODE']
         if leaf == 'started.json' and mode != 'silent':
             return json.dumps({'transport': gh.TRANSPORT, 'run_id': RUN, 'url': 'u', 'tag': name}).encode()
@@ -899,19 +1129,15 @@ class LauncherStopTest(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def launched(self, proc):
-        """Wait until the fake tag push happened (the remote run now exists), never on a fixed sleep."""
-        end = time.monotonic() + 30
-        while not any(r['op'] == 'push' for r in self.rows()):
+        """Wait until the tag push happened (the remote run exists) and the launcher polls its channel."""
+        def watching():
             self.assertIsNone(proc.poll(), 'launcher exited before launching')
-            self.assertLess(time.monotonic(), end, 'launcher never pushed its tag')
-            time.sleep(0.05)
-        time.sleep(0.3)  # a few channel polls: the launcher is now watching
+            ops = [r['op'] for r in self.rows()]
+            return 'push' in ops and ops[ops.index('push'):].count('channel-get') >= 2
+        wait_until(watching, timeout=30, description='launcher pushed its tag and polls its channel')
 
     def wait_result(self, seconds=20):
-        end = time.monotonic() + seconds
-        while not self.result.exists():
-            self.assertLess(time.monotonic(), end, 'launcher wrote no receipt')
-            time.sleep(0.05)
+        wait_until(self.result.exists, timeout=seconds, description='launcher receipt')
         return json.loads(self.result.read_text())
 
     def assert_cancelled_once(self, result, cause):
@@ -1047,6 +1273,9 @@ class WorkflowMirrorCheckout(unittest.TestCase):
             self.assertEqual(log.stderr, '')
             self.assertEqual(log.stdout.strip(), self.git('rev-parse', 'deploy-gates/8vcpu/x^{commit}', cwd=origin).stdout.strip())
             self.assertIn('-c gc.autoDetach=false', script, 'mirror gc must not outlive the step')
+            # Git 2.47+ starts `maintenance run --auto --detach` from fetch; it rewrites the split
+            # commit-graph after the --shared clone chained onto it (hunt round 10, original600).
+            self.assertIn('-c maintenance.autoDetach=false', script, 'mirror maintenance must not outlive the step')
 
 
 

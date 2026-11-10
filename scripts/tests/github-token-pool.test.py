@@ -137,6 +137,15 @@ class GithubTokenPoolTests(unittest.TestCase):
         env = {"GITHUB_TOKEN": "tok-a", "GITHUB_TOKEN_2": "tok-b", "GITHUB_TOKEN_3": "tok-c"}
         self.assertEqual(self.pick(env), "tok-b")
 
+    def test_pick_member_names_the_chosen_read_member_for_core_reads(self) -> None:
+        # deploy_test_github reads with this member and records only its name; core decides REST reads.
+        BEHAVIOUR.update({"tok-a": (200, 20, 4000, RESET, 0), "tok-b": (200, 3000, 10, RESET, 0)})
+        env = {"GITHUB_TOKEN": "tok-a", "GITHUB_TOKEN_2": "tok-b"}
+        self.assertEqual(pool.pick_member("core", self.tmp, env, self.base, 5.0), pool.Member("GITHUB_TOKEN_2", "tok-b"))
+        self.assertEqual(pool.pick_member("graphql", self.tmp, env, self.base, 5.0).name, "GITHUB_TOKEN")
+        BEHAVIOUR.update({"tok-a": (401, 0, 0, RESET, 0), "tok-b": (401, 0, 0, RESET, 0)})
+        self.assertIsNone(pool.pick_member("core", self.tmp, env, self.base, 5.0))
+
     def test_rejected_member_is_skipped(self) -> None:
         BEHAVIOUR.update({"tok-a": (200, 10, 10, RESET, 0), "tok-b": (401, 0, 0, RESET, 0)})
         env = {"GITHUB_TOKEN": "tok-a", "GITHUB_TOKEN_2": "tok-b"}
