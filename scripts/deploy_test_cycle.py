@@ -1259,8 +1259,16 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
     bindings = []
     for entry in entries:
         old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')
-        need(entry['validation_source'] == request['source'] and request['token'] != entry['token']
-             and (set(old['checks']) | set(old.get('skips', {}))) <= set(gate['checks']), 'next source/inventory binding')
+        need(entry['validation_source'] == request['source'] and request['token'] != entry['token'],
+             'next source/inventory binding')
+        original_checks = set(old['checks']) | set(old.get('skips', {}))
+        if not original_checks <= set(gate['checks']):
+            # Only the current catalog's explicit deploy exclusions may narrow
+            # a fresh inventory; original receipts and retained debts stay bound.
+            try:
+                quarantine.deploy_selection_omissions(root, {**gate, 'checks': sorted(original_checks)}, gate)
+            except ValueError as error:
+                need(False, 'next source/inventory binding: ' + str(error))
         bindings.append({'original_receipt_sha256': entry['proof']['receipt_sha256'],
                          'original_request_token': entry['token'], 'new_request_token': request['token'],
                          'source': request['source'], 'new_native_root': str(new_root),
@@ -2474,12 +2482,17 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     removed = {election['gate']} if election else set()
     if not old_gates.keys() <= new_gates.keys() | removed:
         raise ValueError("repair cannot silently remove originally selected gates")
+    selection_omissions = {}
     for name, gate in old_gates.items():
         if name in removed:
             continue
         preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
-            raise ValueError("repair cannot silently remove originally selected checks")
+            omissions = quarantine.deploy_selection_omissions(root, gate, new_gates[name])
+            pending_checks = {f['check'] for f in state['failures'] if f['id'] in state.get('pending', [])}
+            if any(name + '/' + check in pending_checks for check in omissions):
+                raise ValueError('adjudicate the original failure before excluding its future execution')
+            selection_omissions.update({name + '/' + check: reason for check, reason in omissions.items()})
     fingerprints = input_fingerprints(new, root)
     if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
             and fingerprints == state["input_fingerprints"]):
@@ -2568,6 +2581,11 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
                             if name not in carried and name not in completed_repairs]
     from deploy_test_election import apply as apply_election
     apply_election(state, election)
+    if selection_omissions:
+        state.setdefault('deploy_selection_omissions', []).append({
+            'from_source': copy.deepcopy(state['source']), 'source': copy.deepcopy(new['source']),
+            'checks': selection_omissions, 'executed': False, 'credit_granted': False,
+        })
     if interrupted_refresh:
         state.pop('resume_phase')
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},

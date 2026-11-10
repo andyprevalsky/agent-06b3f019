@@ -226,6 +226,8 @@ class Selection:
     pass_streak_required: int = DEFAULT_PASS_STREAK
     # Catalog eligibility/instructions only; runtime evidence owns every verdict.
     skip_eligibility: dict[str, list[str]] = field(default_factory=dict)
+    # Explicit user-approved omissions, never execution PASS or failure masking.
+    deploy_quarantined: dict[str, str] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -234,6 +236,9 @@ class Selection:
 
 def task_ref_from_entry(item: dict[str, Any]) -> TaskRef:
     """Parse one catalog entry; rejects an unknown `deploy_category`."""
+    quarantine = item.get("deploy_quarantine")
+    if quarantine is not None and (not isinstance(quarantine, str) or not quarantine.strip()):
+        raise ValueError(f"{item['name']}: deploy_quarantine must be a nonempty reason")
     tags = tuple(str(t) for t in (item.get("tags") or []))
     timeout = item.get("timeout_seconds")
     try:
@@ -429,7 +434,9 @@ def categories_triggered_by_paths(changed_files: Sequence[str]) -> list[str]:
     return found
 
 
-def _eligible(task: TaskRef, surface: str) -> bool:
+def _eligible(task: TaskRef, surface: str, *, for_deploy: bool = True) -> bool:
+    if for_deploy and task.raw.get("deploy_quarantine"):
+        return False
     if not task.eligible_status or task.production_only:
         return False
     # Both local and cloud predeploy execute against isolated backends. The
@@ -706,6 +713,8 @@ def select_predeploy_benches(
         uncovered_categories=uncovered_categories,
         pass_streak_required=pass_streak,
         skip_eligibility=standing_skip_eligibility(tasks, selected),
+        deploy_quarantined={t.name: t.raw["deploy_quarantine"] for t in tasks
+                            if t.raw.get("deploy_quarantine")},
     )
 
 
@@ -724,6 +733,8 @@ def format_report(selection: Selection) -> str:
         f"Path extras ({len(selection.path_extras)}): {', '.join(selection.path_extras) or '(none)'}",
         f"TOTAL SELECTED: {selection.total} / {selection.cap}",
     ]
+    for name, reason in selection.deploy_quarantined.items():
+        lines.append(f"Deploy quarantine (not run): {name}: {reason}")
     if selection.skipped_history:
         lines.append(
             f"Skipped (need last {selection.pass_streak_required} historic passes) "
@@ -862,6 +873,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(
                 {
                     "selected": selection.selected,
+                    "deploy_quarantined": selection.deploy_quarantined,
                     "floor": selection.floor,
                     "path_extras": selection.path_extras,
                     "dropped": selection.dropped,

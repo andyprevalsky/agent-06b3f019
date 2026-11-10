@@ -224,6 +224,39 @@ class Cycle(unittest.TestCase):
         fresh = c.initialize(new, self.root)
         return fresh, file, index
 
+    def test_refresh_retains_explicit_deploy_exclusion_without_pass_credit(self):
+        gate = self.plan['gates'][1]
+        gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])
+        self.state = c.initialize(self.plan, self.root)
+        self.state.update(phase='needs-focused-plan', repair_gates=['api'])
+        old = copy.deepcopy(self.plan)
+        original_state = copy.deepcopy(self.state)
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps([{'name':'mass', 'deploy_quarantine':'User requested exclusion'}, {'name':'peer'}]))
+        new = copy.deepcopy(old)
+        new['source'] = c.source(self.root)
+        new['gates'][1]['checks'] = ['peer']
+        history = copy.deepcopy(self.state['attempts'])
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual(history, self.state['attempts'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual({}, self.state['carried_passes'])
+        omission, = self.state['deploy_selection_omissions']
+        self.assertEqual({'api/mass':'User requested exclusion'}, omission['checks'])
+        self.assertIs(omission['executed'], False)
+        self.assertIs(omission['credit_granted'], False)
+        self.assertEqual(old['source'], omission['from_source'])
+        self.assertEqual(new['source'], omission['source'])
+        self.assertEqual(['peer'], self.state['plan']['gates'][1]['checks'])
+        blocked = copy.deepcopy(original_state)
+        blocked.update(phase='triage', pending=['mass-fail'], failures=[{'id':'mass-fail', 'check':'api/mass', 'gate':'api'}])
+        untouched = copy.deepcopy(blocked)
+        with self.assertRaisesRegex(ValueError, 'adjudicate the original failure'):
+            c.refresh(blocked, old, new, self.root)
+        self.assertEqual(untouched, blocked)
+
+
     def test_historical_import_only_indexed_duties_not_lost_supervisor_history(self):
         import deploy_test_historical_custody as h
         fresh, donor, index = self.transfer_fixture()
@@ -5850,6 +5883,50 @@ class Cycle(unittest.TestCase):
             c.isolated_request(state, narrowed, dict(request, checks=narrowed['checks']), self.root, {})
         with self.assertRaisesRegex(ValueError, 'fresh native adapter'):
             c.isolated_request(state, extended, request, self.root, {'CLOUDBENCH_ARCHIVED_REUSE_REQUEST':'old'})
+        self.assertEqual(before, state)
+
+    def test_isolated_next_inventory_allows_only_explicit_deploy_omission(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        c.reconcile(state, failure['id'], proof)
+        state['source'] = proof['validation_source']
+        removed = gate['checks'][0]
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        rows = [{'name': removed, 'deploy_quarantine': 'Explicit user deploy exclusion'}]
+        c.write(catalog, rows)
+        before = copy.deepcopy(state)
+        narrowed = {**gate, 'category': 'smoke', 'checks': gate['checks'][1:]}
+        request = dict(token='fresh-explicit-omission', source=state['source'], checks=narrowed['checks'], skips={})
+        bindings = c.isolated_request(state, narrowed, request, self.root, {})
+        entry = next(iter(state['reconciled_owners'].values()))
+        self.assertEqual(1, len(bindings))
+        self.assertEqual(entry['excluded_resources'], bindings[0]['excluded_resources'])
+        self.assertFalse(bindings[0]['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before, state)
+        # A normal quarantine, malformed declaration, omitted peer, stale source,
+        # duplicate inventory, reused token or original-evidence mutation refuses.
+        for value in [None, '', False, {}, 1]:
+            c.write(catalog, [{'name': removed, 'quarantine': {'error':'still runs'}, 'deploy_quarantine': value}])
+            with self.assertRaises(ValueError):
+                c.isolated_request(state, narrowed, request, self.root, {})
+        c.write(catalog, rows)
+        for bad_gate, bad_request in [
+            ({**narrowed, 'checks': narrowed['checks'][1:]}, {**request, 'checks': narrowed['checks'][1:]}),
+            (narrowed, {**request, 'source': {'head':'f'*40, 'digest':'e'*64}}),
+            (narrowed, {**request, 'token': entry['token']}),
+            (narrowed, {**request, 'checks': narrowed['checks'] + [narrowed['checks'][0]]}),
+            ({**narrowed, 'category': 'backend'}, request),
+        ]:
+            with self.assertRaises(ValueError):
+                c.isolated_request(state, bad_gate, bad_request, self.root, {})
+        c.write(catalog, rows + rows)
+        with self.assertRaises(ValueError):
+            c.isolated_request(state, narrowed, request, self.root, {})
+        c.write(catalog, rows)
+        packet.write_text(packet.read_text() + ' ')
+        with self.assertRaisesRegex(ValueError, 'obligation changed'):
+            c.isolated_request(state, narrowed, request, self.root, {})
         self.assertEqual(before, state)
 
     def test_isolated_native_validation_preserves_original_debt_and_requires_new_full_request(self):

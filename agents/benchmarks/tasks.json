@@ -1,6 +1,7 @@
 [
   {
     "name": "test-mass-agent-run-0",
+    "deploy_quarantine": "User-directed indefinite exclusion from all deploys (2026-11-10, PR1682): flaky mass-agent test. Keep explicit benchmark execution and historical failures; do not count this omission as PASS.",
     "quarantine": {
       "since": "2026-11-09",
       "repair": "pending-handoff:b2be041030b840a68535a65d2ee57560",
