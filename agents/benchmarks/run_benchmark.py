@@ -15806,7 +15806,7 @@ async def _run_single_task_as_run_user(
                 start_fixture_ref, result = await asyncio.gather(archive, observation)
             finally:
                 for pending in (archive, observation):
-                    if not pending.done():
+                    if not pending.done() and not pending.cancelling():
                         pending.cancel()
                 await asyncio.gather(archive, observation, return_exceptions=True)
             if start_fixture_ref:

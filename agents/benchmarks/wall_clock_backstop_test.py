@@ -537,3 +537,62 @@ def test_external_cancel_joins_archive_and_poll_at_actual_backstop_boundary(monk
         assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
 
     asyncio.run(case())
+
+
+@pytest.mark.parametrize("cancel_phase", ["running", "deadline-drain"])
+def test_external_cancel_preserves_slow_sibling_finalizer_at_backstop_boundary(monkeypatch, cancel_phase):
+    async def case():
+        entered = {name: asyncio.Event() for name in ("archive", "poll")}
+        retired, children = set(), {}
+        boundary = {}
+        finalizing = asyncio.Event()
+        backstop = runner._run_with_agent_execution_backstop
+        if cancel_phase == "deadline-drain":
+            monkeypatch.setattr(runner, "agent_execution_backstop_seconds", lambda task=None: 0.01)
+
+        async def operation(name):
+            children[name] = asyncio.current_task()
+            entered[name].set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalizing.set()
+                if name == "poll":
+                    await asyncio.sleep(0.05)
+                retired.add(name)
+
+        async def archive(*args):
+            return await operation("archive")
+
+        async def poll(*args):
+            return await operation("poll")
+
+        _, run, _ = _archive_observation_owner(monkeypatch, archive, poll)
+
+        async def check_boundary(*args, **kwargs):
+            owner = asyncio.create_task(backstop(*args, **kwargs))
+            try:
+                for event in entered.values():
+                    await asyncio.wait_for(event.wait(), 1)
+                if cancel_phase == "deadline-drain":
+                    await asyncio.wait_for(finalizing.wait(), 1)
+                owner.cancel()
+                if cancel_phase == "deadline-drain":
+                    await asyncio.sleep(0.01)
+                    owner.cancel()  # Repeated cancellation must not abandon or restart the drain.
+                with pytest.raises(asyncio.CancelledError):
+                    await owner
+                boundary["retired"] = set(retired)
+                boundary["children_done"] = all(child.done() for child in children.values())
+            finally:
+                owner.cancel()
+                await asyncio.gather(owner, *children.values(), return_exceptions=True)
+            raise _ExecutionObserved
+
+        monkeypatch.setattr(runner, "_run_with_agent_execution_backstop", check_boundary)
+        await run()
+        assert boundary["retired"] == {"archive", "poll"}, "backstop returned before async finalizers joined"
+        assert boundary["children_done"]
+        assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+
+    asyncio.run(case())

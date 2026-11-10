@@ -235,3 +235,10 @@ A pure replay validated all fourteen participants with credit_granted=false,
 cleanup_complete=false and obligations_preserved=true. It neither reconciled
 the live cycle nor cleared financial, browser, guest/runtime, provider or Hub
 custody. Required frozen-source gates and production acceptance remain pending.
+
+
+### November 10 recurrence: main-sync fixtures retained obsolete admission inputs
+
+The first actual semantic/structural sweep at merged source b64a017c94fbac59324191780a82fec5afcf1432 ran421 deploy-cycle tests and emitted two errors plus two failures. The branch's two failed-canary fixtures still named the physical run directory canary, while inherited main now verifies the native controller PID from the numeric run-ID suffix. Two retained-obligation/fresh-proof negative controls still patched the per-run raw cap to simulate aggregate exhaustion after upstream separated the proof-wide allowance. This was introduced by integrating both repairs without adapting these branch fixtures to the resulting native contracts.
+
+The exact four existing owning tests reproduced locally: RED (two invalid literal for int() canary errors and two missing expected aggregate-bound refusals) in1.498s. A fixture-only correction uses a valid unused numeric-PID native runID and updates its lifecycle/audit/log/proof identities consistently. Aggregate controls patch the actual proof-wide MAX_RAW_RUN_PROOF_BYTES to the unchanged total-minus-one boundary. The same four-test command then passes in3.480s. All assertions, expected messages, resource bounds, producer guards and deadlines remain identical; the production validator is unchanged. Current-source full deploy-cycle and native structural revalidation remain required. No original cycle receipt, failed history, custody debt or execution credit was altered by this preparation.

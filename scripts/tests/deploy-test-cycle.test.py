@@ -6486,10 +6486,23 @@ class Cycle(unittest.TestCase):
             (audit / 'source-audit').write_text(f'path={canonical}\nsha256={digest.hexdigest()}\n')
             return canonical
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
-        fleet = parents[0].parent / 'canary'
+        old_fleet = parents[0].parent / 'canary'
+        fleet = old_fleet.with_name('20261103-080441-2147483001')
+        old_fleet.rename(fleet)
+        life = c.read(fleet / '_batch/lifecycle.json')
+        for tree in (fleet / 'teardown-ownership',
+                     self.root / '.git/cloudbench-fleet-audits' / life['fleet_owner_token']):
+            for path in tree.rglob('*'):
+                if path.is_file():
+                    path.write_bytes(path.read_bytes().replace(b'run_id=canary',
+                        ('run_id=' + fleet.name).encode()))
+        log = Path(proof['campaign']) / 'r001-j0003.log'
+        log.write_text(log.read_text().replace(str(old_fleet), str(fleet)))
+        proof['files'] = {path.replace(str(old_fleet), str(fleet)): value
+                          for path, value in proof['files'].items()}
         life_path = fleet / '_batch/lifecycle.json'
         life = c.read(life_path)
-        life.update(status='failed', controller_exit_code=1 if allocated else 143)
+        life.update(run_id=fleet.name, status='failed', controller_exit_code=1 if allocated else 143)
         c.write(life_path, life)
         if not allocated:
             audit = fleet / 'teardown-ownership'
@@ -6566,7 +6579,7 @@ class Cycle(unittest.TestCase):
         before = copy.deepcopy(state)
         with patch.dict(getattr(native, 'RETAINED_ISOLATED_ACCEPTANCES', {}), {digest: proof['validation_source']}), \
                 patch.object(native.subprocess, 'check_output', side_effect=source_bytes), \
-                patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total - 1):
+                patch.object(native, 'MAX_RAW_RUN_PROOF_BYTES', total - 1):
             with self.assertRaisesRegex(ValueError, 'aggregate raw admission bound exceeded'):
                 native.validate(receipt, c.receipt_owner(gate['name'], receipt), proof)
             self.assertTrue(native.still_bound(prior, receipt, c.receipt_owner(gate['name'], receipt)))
@@ -6603,7 +6616,7 @@ class Cycle(unittest.TestCase):
                 digest='f2ac68cc13f3d93b9c03a81405bcb3055ffddcf990557990b19daabfdb25dc7d'),
             validator_sha256='946e2f88acc6e175cf752f74305120f5578c9faac0bfd266589fc98aff29f550',
             proof_body_sha256='73057ff465e9d696367f5c0eaceb0a52f8f8bed10a6bfb7abeba632d58975a26')
-        with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', total - 1), \
+        with patch.object(native, 'MAX_RAW_RUN_PROOF_BYTES', total - 1), \
                 self.assertRaisesRegex(ValueError, 'aggregate raw admission bound exceeded'):
             c.reconcile(state, occurrence['id'], proof)
         self.assertEqual(before, state)
