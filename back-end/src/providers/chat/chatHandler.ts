@@ -42,7 +42,7 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
 import type { Prisma } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
-import { formatUserContext, USER_PROFILE_SELECT } from '../userProfileContext';
+import { loadChatUserProfileContext } from './chatUserContext';
 import { startAgentWorkflowExecution, type TemporalWorkflowExecutionRef } from '../temporal';
 import { normalizeWorldModelMode } from '../worldModelMode';
 import { createMessage } from '../messages';
@@ -96,12 +96,11 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     requestedModel: config.model,
   });
-  const [messages, projectContext, userProfile] = await Promise.all([
+  const [messages, projectContext, userProfileContext] = await Promise.all([
     initialContext.messages,
     loadRouterProjectContext(config.agentId),
-    prisma.user.findUnique({ where: { userId: config.userId }, select: USER_PROFILE_SELECT }),
+    loadChatUserProfileContext(config.agentId, config.userId),
   ]);
-  const userProfileContext = formatUserContext(userProfile);
   const chatContextConfig = { agentId: config.agentId, requestedModel: config.model };
 
   const runGenerator = async (
@@ -314,7 +313,6 @@ export async function handleChatMessage(config: {
         phaseModels,
         projectContext,
         userProfileContext,
-      userProfileContext,
         runGenerator,
         stage: round < MAX_CHAT_SEARCH_ROUNDS ? 'after_search' : 'search_budget_spent',
       });

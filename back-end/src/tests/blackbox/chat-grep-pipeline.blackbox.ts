@@ -6,8 +6,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { handleChatMessage } from '../../providers/chat/chatHandler';
-import { registerUserDataGrep } from '../../providers/userDataSearch';
-import { grep } from '../../domains/data/service';
+import { registerUserDataGrepTool } from '../../providers/userDataSearch';
+import { executeGatelessGrepTool } from '../../domains/data/grepTool';
 import { __flushBroadcastQueueForTests } from '../../providers/chat/supabaseBroadcast';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import { replayCall, stalledResponse } from './chat-search-escalation.network.support';
@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   let routerCalls = 0;
   const generatorContexts: string[] = [];
   const originalFetch = globalThis.fetch;
-  registerUserDataGrep(grep);
+  registerUserDataGrepTool(executeGatelessGrepTool);
   globalThis.fetch = (async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith('/realtime/v1/api/broadcast')) return Response.json({});

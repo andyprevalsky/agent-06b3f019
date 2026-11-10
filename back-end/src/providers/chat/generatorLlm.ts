@@ -6,17 +6,13 @@
  */
 
 import { z } from 'zod';
-import {
-  createStreamingCompletion,
-  markCacheable,
-  type CompletionChunk,
-  type CompletionOptions,
-} from '../rose';
+import { createStreamingCompletion, type CompletionChunk, type CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheSet } from '../demoCacheStore';
 import { goalHash } from '../demoCacheNormalizeCore';
 import { contentKey } from '../demoCacheNormalizeKeys';
-import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
+import { buildGeneratorSystemMessage } from './chatSystemContext';
+export { buildGeneratorSystemMessage } from './chatSystemContext';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { createLogger } from '../logger';
 import {
@@ -185,10 +181,6 @@ type GeneratorLlmParams = {
   userProfileContext?: string;
   projectContext?: string; // `## Project` section; '' or omitted = Home
 };
-
-/** Static generator prompt (cached prefix), then the agent's project section (projectContext.ts). */
-export const buildGeneratorSystemMessage = (projectContext = '', userProfileContext = '') =>
-  markCacheable(GENERATOR_SYSTEM_PROMPT, [projectContext, userProfileContext].filter(Boolean).join('\n\n'));
 
 export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
   let attention: GeneratorAttentionLifecycle | undefined;

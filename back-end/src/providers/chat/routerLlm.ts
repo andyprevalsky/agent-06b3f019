@@ -4,21 +4,13 @@
  * Uses the in-process Rose completions client for streaming.
  */
 
-import {
-  createStreamingCompletion,
-  markCacheable,
-  type CompletionChunk,
-  type CompletionOptions,
-} from '../rose';
+import { createStreamingCompletion, type CompletionChunk, type CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheSet } from '../demoCacheStore';
 import { goalHash } from '../demoCacheNormalizeCore';
 import { contentKey } from '../demoCacheNormalizeKeys';
-import {
-  ROUTER_AFTER_SEARCH_SYSTEM_PROMPT,
-  ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT,
-  ROUTER_SYSTEM_PROMPT,
-} from './chatPrompts';
+import { ROUTER_STAGES, buildRouterSystemMessage } from './chatSystemContext';
+export { buildRouterSystemMessage } from './chatSystemContext';
 import {
   broadcastAssistantStream,
   broadcastToolEvent,
@@ -40,10 +32,6 @@ import type { ChatProviderRoute } from './phaseModels';
 import type { ChatCompletionParams } from './completionOptions';
 import { withCurrentTimeContext } from '../currentTimeContext';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
-import {
-  ROUTER_JSON_SCHEMA,
-  ROUTER_SEARCH_BUDGET_SPENT_JSON_SCHEMA,
-} from './routerDecisionJsonSchema';
 import {
   chatRouterCompletionTimeoutMs,
   createRouterCompletionDeadline,
@@ -73,23 +61,6 @@ const log = createLogger('RouterLLM');
  * route's DEMO cache rows (including the opening-turn drift replay) and
  * apart in LLM dumps. Once the search rounds are spent, web_search is gone.
  */
-const ROUTER_STAGES = {
-  initial: {
-    callSite: 'chat_router',
-    systemPrompt: ROUTER_SYSTEM_PROMPT,
-    schema: ROUTER_JSON_SCHEMA,
-  },
-  after_search: {
-    callSite: 'chat_router_after_search',
-    systemPrompt: ROUTER_AFTER_SEARCH_SYSTEM_PROMPT,
-    schema: ROUTER_JSON_SCHEMA,
-  },
-  search_budget_spent: {
-    callSite: 'chat_router_after_search',
-    systemPrompt: ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT,
-    schema: ROUTER_SEARCH_BUDGET_SPENT_JSON_SCHEMA,
-  },
-} as const;
 const ROUTER_CACHE_HANG_MS = 5_000;
 // Routing is a classification step; sampling can escalate a one-search chat request to agent mode.
 const ROUTER_TEMPERATURE = 0;
@@ -213,10 +184,6 @@ export function buildRouterCompletionOptions(
     abort_signal: params.abortSignal,
   };
 }
-
-/** Static stage prompt (cached prefix), then the agent's project section (projectContext.ts). */
-export const buildRouterSystemMessage = (stage: RouterStage, projectContext = '', userProfileContext = '') =>
-  markCacheable(ROUTER_STAGES[stage].systemPrompt, [projectContext, userProfileContext].filter(Boolean).join('\n\n'));
 
 export async function callRouterLlm(params: {
   agentId: string;
