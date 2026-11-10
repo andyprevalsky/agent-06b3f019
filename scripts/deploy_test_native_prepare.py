@@ -9,6 +9,9 @@ import re
 import runpy
 import subprocess
 
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+
+
 REVIEWED_SOURCES = {
     'run-bench-campaign.py': 'f4ffbdc42c6b1b06b62fc55846b74a1f16bc88eacbec5f7a6476f6bfaca8990b',
     'cloudbench-cleanup-tickets.py': '29c2f6e4c71bf45a182f2beb59298e63f7a82e1e0bddd3956ac7d603a823c81b',
@@ -71,7 +74,18 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
         for name in REVIEWED_SOURCES}
     observed = {name: hashlib.sha256(raw).hexdigest() for name, raw in originals.items()}
     current = observed == CURRENT_PREPARE_PRODUCERS
-    need(current or any(observed == reviewed for reviewed in REVIEWED_SOURCE_SETS), 'prepare producer changed')
+    source_bound = proof.get('source_bound_prepare') is True
+    if source_bound:
+        # Use the installed reviewed producers, not another historical hash allowlist.
+        # Both commits and the installed files must have the exact failed producer bytes.
+        for name, original in originals.items():
+            installed = SOURCE_ROOT / 'scripts' / name
+            need(installed.is_file() and not installed.is_symlink()
+                 and installed.read_bytes() == original
+                 and subprocess.check_output(['git', '--no-replace-objects', '-C',
+                     str(SOURCE_ROOT), 'show', 'HEAD:scripts/' + name]) == original,
+                 'prepare installed producer differs')
+    need(source_bound or current or any(observed == reviewed for reviewed in REVIEWED_SOURCE_SETS), 'prepare producer changed')
     if current:
         need(receipt['source'] == {'head': CURRENT_PREPARE_SOURCE,
              'digest': 'b4caeead07132658dcc875c1231be33a9ec9c916ec36830d5e0ab7e2b53418a9'},
@@ -87,18 +101,35 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     checks, jobs = request['checks'], summary.get('jobs')
     need(isinstance(checks, list) and all(isinstance(c, str) for c in checks), 'prepare unexecuted cases')
     count = 12 if current else 14
+    if source_bound:
+        from deploy_test_historical_custody import guard, state_identity
+        from deploy_test_cycle import digest
+        ledger = document(Path(proof.get('custody_ledger', '')))
+        need(ledger.get('source') == receipt['source']
+             and state_identity(ledger) == request.get('custody_state_sha256')
+             and digest(ledger['plan']) == ledger.get('plan_digest'), 'prepare custody ledger binding')
+        gates = [g for g in ledger['plan']['gates'] if g.get('name') == receipt['gate']]
+        need(len(gates) == 1, 'prepare custody gate')
+        gate = gates[0]
+        current_binding = {k: ledger[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+        expected = guard(ledger, gate, root, current=current_binding)
+        need(request.get('skips') == expected and receipt.get('custody_skips') == expected
+             and request['checks'] == [name for name in gate['checks'] if name not in expected]
+             and request['checks'] == list(CURRENT_PREPARE_CHECKS) +
+                 ['browser-auth-guest-purchase', 'browser-auth-member-discount-purchase']
+             and set(expected) == {'agent-payment-abandonment'}, 'prepare custody inventory')
     expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
-    if current:
+    if current or source_bound:
         skips = request.get('skips', {})
         protected = skips.get('agent-payment-abandonment', {})
-        need(checks == list(CURRENT_PREPARE_CHECKS)
+        need((source_bound or checks == list(CURRENT_PREPARE_CHECKS))
              and set(skips) == {'agent-payment-abandonment'}
              and protected.get('kind') == 'historical-agentcard-no-retry-v1'
              and protected.get('disposition') == 'NO_RETRY_CUSTODY'
              and protected.get('source') == receipt['source'], 'prepare current inventory/custody')
         need(receipt.get('custody_skips') == skips
-             and hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(',', ':'),
-                                           allow_nan=False).encode()).hexdigest() == CURRENT_PREPARE_CUSTODY_SHA256,
+             and (source_bound or hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(',', ':'),
+                                           allow_nan=False).encode()).hexdigest() == CURRENT_PREPARE_CUSTODY_SHA256),
              'prepare full historical custody certificate')
         need(adapter.get('native_command') == ['bash', 'scripts/run-bench', *checks,
              '--runs', '1', '--concurrency', str(count), '--retry-infra', '0', '--ref', head],
@@ -110,7 +141,7 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
         need(not any(proof.get(k) for k in ('credit_granted', 'financial_cleanup_credit', 'transfer_credit')),
              'prepare cleanup only')
     need(isinstance(checks, list) and len(checks) == len(set(checks)) == count
-         and (current or not request.get('skips'))
+         and (current or source_bound or not request.get('skips'))
          and receipt['cases'] == expected_cases and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
          and adapter.get('complete') is False and adapter.get('cleanup_complete') is False, 'prepare unexecuted cases')
     need(summary.get('campaign_id') == campaign.name and summary.get('status') == 'failed'
@@ -155,7 +186,7 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     supervision = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
     need(supervision['orphaned_children'] is False and supervision['term_sent'] == []
          and supervision['kill_sent'] == [], 'prepare exact retirement')
-    if current:
+    if current or source_bound:
         logs = [runs.parent / 'cli.log', campaign / 'shared-relay/broker.private.log',
                 campaign / 'shared-inventory/publisher.private.log', campaign / 'hub-group-publication.private.log']
         for path in logs:

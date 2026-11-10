@@ -1077,14 +1077,17 @@ class locked_state:
         self.handle = open(LOCK, "a+")
         fcntl.flock(self.handle, fcntl.LOCK_EX)
         with open(STATE) as fh:
-            self.state = json.load(fh)
+            self.original = fh.read()
+            self.state = json.loads(self.original)
         return self.state
 
     def __exit__(self, exc_type, exc, tb):
         if exc_type is None:
-            with open(STATE + ".tmp", "w") as fh:
-                json.dump(self.state, fh)
-            os.replace(STATE + ".tmp", STATE)
+            serialized = json.dumps(self.state)
+            if serialized != self.original:
+                with open(STATE + ".tmp", "w") as fh:
+                    fh.write(serialized)
+                os.replace(STATE + ".tmp", STATE)
         fcntl.flock(self.handle, fcntl.LOCK_UN)
         self.handle.close()
         return False
@@ -2638,9 +2641,20 @@ assert not failures, failures
 PY_TERMINAL_CONTRACT
 [ "$?" -eq 0 ] || fail "fake admitted outcomes must preserve terminal evidence independently of success"
 
+# Compile the immutable fixture helper once; the standard module loader still
+# validates its source hash before every call and preserves normal sitecustomize.
+python3 - "$FAKE_DIR/flyctl.py" <<'PY_COMPILE_FAKE_FLY'
+import py_compile
+import sys
+
+py_compile.compile(sys.argv[1], doraise=True,
+                   invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+PY_COMPILE_FAKE_FLY
+[ "$?" -eq 0 ] || fail "fake provider helper did not compile"
+
 cat > "$FAKE_BIN/flyctl" <<SH
 #!/usr/bin/env bash
-exec python3 "$FAKE_DIR/flyctl.py" "\$@"
+exec python3 -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("flyctl",run_name="__main__",alter_sys=True)' "$FAKE_DIR" "\$@"
 SH
 chmod +x "$FAKE_BIN/flyctl"
 
