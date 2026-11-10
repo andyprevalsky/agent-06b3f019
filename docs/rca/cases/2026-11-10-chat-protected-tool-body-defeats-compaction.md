@@ -22,7 +22,7 @@ sources:
   - agent ebb350db-303b-4e6a-b8b0-2d40dc9f9251
   - commit c1a3a0c71e589a486e6f4b07ae982bee74406504
 repro: back-end/src/tests/blackbox/chat-compaction.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -79,11 +79,33 @@ request; only external summary text is controlled. Before: throws
 user request, preserved tool identity/status and explicit summary. This is
 causal contract proof, not proof of summary intelligence or the user's retrieval
 outcome. Production failure bodies and complete original wire capture remain an
-observability gap; a controlled reconstructed provider replay is separate work.
+observability gap; a controlled reconstructed provider replay is recorded below.
+
+Live source-plus-transcript reconstruction, original seven rows through the same
+router client and unchanged schema/model/provider/retry/deadline configuration:
+before, 30.018s `Chat router completion expired`; captured Cerebras body says
+`context_length_exceeded`, 769476 tokens against 131072. This is newly captured
+replay evidence, not the lost historical body. After the actual candidate live
+compactor: 785994 -> 1717 estimated tokens (1222ms), followed by a validated
+`grep` router decision (520ms), both on Cerebras qwen-3.8-27b without retries.
+Full diagnostic 2453ms; original input objects unchanged, local fixture deleted,
+production broadcasts suppressed. Generated time/IDs/provider state differ; this
+proves the reconstructed path, not completion of the original retrieval task.
+
+Independent review caught an introduced savings edge on the first candidate:
+179906-token history fell below the trigger but saved only 9.7%, skipping the
+ordinary middle pass and throwing at the existing 10% guard. Baseline main
+compacted that same history successfully. The new registered regression failed
+on the candidate before correction; ordinary compaction now continues unless
+both budget and savings contracts pass. The unchanged regression then passes,
+without weakening either guard. Both cases remain in the existing owning suite. Independent re-review found no
+remaining blockers; all fifteen registered cases and its independent checkpoint,
+short-history, multi-tool and metadata preservation controls pass. Deployment
+acceptance is recorded in PR #1918 separately from this causal proof.
 
 ## Solution
 
-Candidate: before ordinary head/tail compaction, summarize oversized TOOL bodies
+Before ordinary head/tail compaction, summarize oversized TOOL bodies
 in place under context pressure, largest first, using the existing summarizer
 and existing KEEP_RECENT_TOKENS bound. Stop once the context fits; otherwise
 continue normal head/tail compaction. Preserve message order, user/assistant
@@ -96,11 +118,13 @@ demotion explicitly summarizes even the newest huge tool body; Claude Code
 `src/utils/toolResultStorage.ts:276` retains original tool output and substitutes
 a smaller model-facing representation; OpenClaw
 `src/agents/embedded-agent-runner/tool-result-truncation.ts` bounds model-facing
-tool projections separately from durable history. Golden review and deployment
-remain pending; do not interpret this candidate as production acceptance.
+tool projections separately from durable history. The freeze guards report no prompt/schema/trajectory-approval hunks. Independent
+code review and deployment are tracked separately; do not interpret local proof
+as production acceptance.
 
-At 10k concurrent agents, work remains per-conversation: O(n log n) local
-selection only when over budget, no extra DB reads or broadcasts. Only oversized
+At 10k concurrent agents, work remains per-conversation: O(n log n + kn) local
+selection and budget scans only when over budget (n rows, k summarized tools),
+no extra DB reads or broadcasts. Only oversized
 tool results need additional existing-summary calls; ordinary chats retain their
 current path. Summaries are lossy and model-dependent; source records remain
 available through the original search. No raw production text or credentials are

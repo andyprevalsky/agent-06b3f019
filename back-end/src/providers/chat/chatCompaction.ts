@@ -182,6 +182,7 @@ export async function compressChatContext(params: {
   model: string;
   agentId: string;
 }): Promise<ChatMessage[]> {
+  const originalTokens = estimateContextTokens(params.messages);
   // A recent result can outweigh the entire model window. Compact its body
   // before protecting the tail; the raw DB row remains available as evidence.
   // Preserve message order, user instructions, tool-call identity and status.
@@ -210,8 +211,14 @@ export async function compressChatContext(params: {
     }
   }
 
-  // Pressure compaction can already make the ordinary head/tail pass unnecessary.
-  if (compressed === params.messages || shouldAutoCompactChat(compressed)) {
+  // Skip the ordinary pass only if pressure relief satisfies both budget and
+  // savings contracts; otherwise the final guard would discard that relief.
+  if (
+    compressed === params.messages ||
+    shouldAutoCompactChat(compressed) ||
+    compactionSavedRatio(originalTokens, estimateContextTokens(compressed)) <
+      MIN_AUTOCOMPACT_SAVINGS_RATIO
+  ) {
     const split = splitHeadMiddleTail(compressed);
     if (split) {
       const summary = await summarizeMiddle(
@@ -230,7 +237,6 @@ export async function compressChatContext(params: {
     }
   }
 
-  const originalTokens = estimateContextTokens(params.messages);
   const compressedTokens = estimateContextTokens(compressed);
   if (compressedTokens >= originalTokens) {
     throw new Error(

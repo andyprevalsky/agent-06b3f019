@@ -68,3 +68,49 @@ export async function testOversizedRecentToolCompaction(): Promise<void> {
     globalThis.fetch = originalFetch;
   }
 }
+
+/** Pressure relief must also satisfy the existing minimum-savings contract. */
+export async function testPressureCompactionSavings(): Promise<void> {
+  const messages: ChatMessage[] = [
+    { role: 'USER', text: 'Original request' },
+    { role: 'ASSISTANT', text: 'A'.repeat(150_000) },
+    { role: 'USER', text: 'U'.repeat(150_000) },
+    { role: 'ASSISTANT', text: 'A'.repeat(150_000) },
+    { role: 'USER', text: 'U'.repeat(5_000) },
+    { role: 'ASSISTANT', text: 'A'.repeat(1_000) },
+    { role: 'TOOL', text: '' },
+    {
+      role: 'TOOL',
+      text: 'T'.repeat(58_000),
+      metadata: { toolCallId: 'savings-edge', toolStatus: 'FINISHED' },
+    },
+  ];
+  const original = structuredClone(messages);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    assert([CEREBRAS_API_URL, OPENROUTER_API_URL].includes(url), `unexpected network call ${url}`);
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    return replayCall({ model: body.model, content: 'S'.repeat(8_000) }, init?.signal, () => {});
+  }) as typeof fetch;
+  try {
+    const compressed = await compressChatContext({
+      messages,
+      model: 'rose-labs/rose-1-flash',
+      agentId: 'blackbox-compaction-savings',
+    });
+    assert(!shouldAutoCompactChat(compressed), 'router context must fit after compaction');
+    assert(
+      estimateContextTokens(compressed) <= estimateContextTokens(messages) * 0.9,
+      'minimum savings remains enforced'
+    );
+    assert.deepEqual(messages, original, 'raw history must remain unchanged');
+    assert.deepEqual(compressed[0], original[0], 'original request retained');
+    assert(
+      compressed.some((message) => message.text === original[4].text),
+      'latest user instructions retained'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
