@@ -10318,4 +10318,210 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
 
 
+class IsolatedRunlessWitnesses(unittest.TestCase):
+    """Launch-only typed witnesses: local fake native bytes, no network or resource effect."""
+    def setUp(self):
+        import hashlib, base64, time
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);(self.root/'.git').mkdir()
+        self.owner='a'*32;self.mid='0123456789abcd';self.vid='vol_owned';self.ref='c'*40
+        self.fleet=self.root/'.context/deploy-cloud'/('d'*64)/'runs/20261110-000000-2147483001';self.fleet.mkdir(parents=True)
+        self.audit=self.root/'.git/cloudbench-fleet-audits'/self.owner;self.registry=self.root/'.git/cloudbench-fleet-ownership'/self.owner
+        for p in [self.audit/'fresh',self.audit/'by-machine-id',self.registry]:p.mkdir(parents=True)
+        self.meta='fleet_owner_token='+self.owner+'\nrun_id='+self.fleet.name+'\nworkspace_root='+str(self.root)+'\napp=fixture\nstatus=incomplete\n'
+        self.save(self.audit/'meta',self.meta);self.save(self.registry/'meta',self.meta+'cleanup_policy=reap\n')
+        self.save(self.registry/'runtime-evidence-unconfirmed','immutable original debt\n')
+        self.row=dict(fleet_owner_token=self.owner,run_id=self.fleet.name,app='fixture',clone_name='cloudbench-owned',
+            source='fresh-clone',source_machine_id='fedcba98765432',machine_id=self.mid,volume_id=self.vid,disposition='owned')
+        self.save(self.audit/'fresh/cloudbench-owned',''.join(k+'='+v+'\n' for k,v in self.row.items()))
+        self.save(self.audit/'by-machine-id'/self.mid,'cloudbench-owned\n')
+        source=dict(machine_id=self.row['source_machine_id']);raw=json.dumps(source).encode()
+        for p in [self.audit,self.registry,self.fleet]:self.save(p/'source-manifest.json',raw)
+        import cloudbench_execution_provenance as prov
+        values={'base_source_manifest_sha256':hashlib.sha256(raw).hexdigest()};config=dict(schema_version=prov.CONFIG_SCHEMA_VERSION,values=values)
+        self.save(self.fleet/'execution-provenance.json',dict(schema_version=prov.EXECUTION_SCHEMA_VERSION,base_sha=self.ref,workspace_patch_sha256='none',
+            controller_snapshot=dict(schema_version=prov.SNAPSHOT_SCHEMA_VERSION,sha256='b'*64),config=dict(config,sha256=prov.canonical_sha256(config))))
+        self.save(self.fleet/'execution-task-matrix.json',dict(tasks=['fixture']))
+        self.life=dict(fleet_owner_token=self.owner);self.receipt=dict(source=dict(head=self.ref),started_at=time.time()-30,finished_at=time.time()-20)
+        self.proof=dict(purpose='isolated-validation',confirmed_at=time.time()+1,execution_quiescence={})
+        self.native=__import__('deploy_test_native_cleanup');self.now=time.time()
+        self.binding=dict(app='fixture',owner=self.owner,run_id=self.fleet.name,machine_id=self.mid,
+            volume_id=self.vid,run_token=self.owner+'-0',source=self.ref)
+        self.machine=dict(id=self.mid,name='cloudbench-owned',instance_id='known-instance',state='started',
+            config=dict(image='image@sha256:'+'f'*64,env=dict(REF=self.ref,CLOUDBENCH_RUN_TOKEN=self.owner+'-0'),
+                        mounts=[dict(volume=self.vid,path='/data')]))
+        self.packet=self.root/'packet.json'
+
+    def save(self,path,value):
+        path=Path(path)
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(value if isinstance(value,bytes) else value.encode() if isinstance(value,str) else json.dumps(value).encode())
+        return str(path)
+
+    def pair(self,name,absent=False):
+        import hashlib
+        rows=[]
+        for kind,identifier,value in [('machine',self.mid,None if absent else self.machine),
+                ('volume',self.vid,dict(id=self.vid,encrypted=True,state='pending_destroy' if absent else 'created',
+                    attached_machine_id=None if absent else self.mid))]:
+            raw=json.dumps(value).encode();path=self.root/(name+'-'+kind+'.raw')
+            rows.append(dict(kind=kind,method='GET',path='/'+('machines/' if kind=='machine' else 'volumes/')+identifier,
+                no_retry=True,http_status=404 if absent and kind=='machine' else 200,
+                response_sha256=hashlib.sha256(raw).hexdigest(),body_path=self.save(path,raw),wire=str(self.root/(name+'-'+kind+'-wire'))))
+            wire=Path(rows[-1]['wire'])
+            self.save(wire/'request.json',dict(app='fixture',method='GET',path=rows[-1]['path'],body=None,headers={}))
+            import base64
+            self.save(wire/'0001-wire.json',dict(method='GET',path=rows[-1]['path'],status=rows[-1]['http_status'],
+                body_b64=base64.b64encode(raw).decode(),sha256=hashlib.sha256(raw).hexdigest()))
+        return dict(rows=rows,app='fixture')
+
+    def absent(self):
+        import hashlib,base64
+        n=self.native;canonical=lambda v:json.dumps(v,sort_keys=True,separators=(',',':')).encode()
+        effect=self.root/'.git/cloudbench-native-effect-fences'/self.owner/self.fleet.name/self.mid/'destroy'
+        fence=effect/hashlib.sha256(canonical([self.mid,self.machine['instance_id'],self.machine['config']])).hexdigest()
+        self.save(fence/'intent.json',dict(machine=self.machine,operation='destroy'));self.save(fence/'ack.json',dict(ok=True))
+        for kind,identifier in [('machine',self.mid),('volume',self.vid)]:
+            self.save(self.registry/('disposable-delete-'+kind+'-'+identifier+'.json'),dict(owner=self.owner,app='fixture',kind=kind,identifier=identifier))
+        nonce='original-lease';wire=None
+        for i,(method,url,result,status) in enumerate([
+                ('POST','/machines/'+self.mid+'/lease',{'data':{'nonce':nonce,'version':self.machine['instance_id']}},201),
+                ('GET','/machines/'+self.mid,self.machine,200),
+                ('DELETE','/machines/'+self.mid+'?force=true',{'ok':True},200),
+                ('DELETE','/machines/'+self.mid+'/lease',{'data':{'ok':True}},200)]):
+            d=effect/'wire'/str(i);raw=canonical(result)
+            self.save(d/'request.json',dict(app='fixture',method=method,path=url,body=None,
+                headers={} if method=='POST' else {'fly-machine-lease-nonce':nonce}))
+            self.save(d/'0001-wire.json',dict(method=method,path=url,status=status,body_b64=base64.b64encode(raw).decode(),
+                sha256=hashlib.sha256(raw).hexdigest(),monotonic_ns=i+1));self.save(d/'result.json',result)
+            if i==2:wire=d
+        packet=dict(self.pair('current',True),schema='original-absent-pair-v1',binding=self.binding,
+            endpoint_origin='https://api.machines.dev',observed_epoch=self.now,delete_fence=str(fence),delete_wire=str(wire))
+        self.save(self.packet,packet);return packet
+
+    def runless(self):
+        import base64,hashlib,shlex
+        n=self.native;original=self.fleet.parent.parent/'campaigns'/('deploy-'+self.fleet.parent.parent.name)/'shared-inventory/machines.json'
+        self.save(original,[self.machine]);task=self.fleet/'fixture'
+        self.save(self.fleet/'_batch/benches.json',[dict(name='fixture')])
+        self.save(task/'runtime-evidence.owner.json',dict(version=1,machine_id=self.mid,run_token=self.owner+'-0'))
+        self.save(task/'.cid','clone '+self.mid+'\n')
+        backend=task/'guest-cleanup.backend.log';self.save(backend,b'original log')
+        services=dict(schema_version=1,status='stopped',benchmark_mode=True,worktree='/data/repo',run_sh_pid=300,
+            services=[dict(name='backend',pid=301)],ports=dict(backend=3001,disabled=0))
+        state=dict(machine_id=self.mid,guest_run_token=self.owner+'-0',services_status='stopped',live_service_pids=[],
+            driver_pid=None,driver_state='exited',stopped_service_pids=[300,301]);self.save(task/'guest-cleanup.state.json',state)
+        def process(pid,parent):
+            values=['0']*50;values[0]='S';values[1]=str(parent);values[6]='0';values[19]='123'
+            raw=str(pid)+' (fixture) '+' '.join(values)
+            return dict(pid=pid,stat=raw,stat_after=raw,run_token='',cwd='/',exe='/bin/python3',
+                cmdline_b64=base64.b64encode(b'python3\0').decode())
+        empty='header\n';timewait='header\n0: 00000000:0BB9 00000000:0000 06 0 0 0 0 0 0\n'
+        scan=dict(schema='original-runless-proc-scan-v1',binding=self.binding,uid=0,machine_id=self.mid,repo_head=self.ref,
+            processes=[process(1,0),process(2,1),process(100,2)],ancestors=[100,2],self_pid=100,errors=[],run_present=False,
+            services_b64=base64.b64encode(json.dumps(services).encode()).decode(),backend_sha256=hashlib.sha256(backend.read_bytes()).hexdigest(),
+            sockets=dict(tcp=timewait,tcp6=empty,udp=empty,udp6=empty),finished_epoch=self.now)
+        cmd=shlex.join(['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c',n.RUNLESS_SCAN,json.dumps(self.binding,sort_keys=True,separators=(',',':'))])
+        packet=dict(schema='original-runless-current-os-v1',binding=self.binding,endpoint_origin='https://api.machines.dev',observed_epoch=self.now,
+            before=self.save(self.root/'before.json',self.pair('before')),after=self.save(self.root/'after.json',self.pair('after')),
+            original_native=str(original),original_state=str(task/'guest-cleanup.state.json'),original_backend=str(backend),
+            scan=self.save(self.root/'scan.json',scan),ssh_stdout=self.save(self.root/'stdout.json',scan),ssh_stderr=self.save(self.root/'stderr',b''),
+            command=cmd,ssh_argv=['ssh','console','--quiet','-a','fixture','--machine',self.mid,'-C',cmd],ssh_exit=0,
+            program_sha256=hashlib.sha256(n.RUNLESS_SCAN.encode()).hexdigest())
+        self.save(self.packet,packet);return packet,scan
+
+    def invoke(self,kind):
+        self.proof['execution_quiescence']={self.mid:{kind:str(self.packet)}}
+        bound=lambda p:Path(p).read_bytes();document=lambda p:json.loads(bound(p))
+        with patch.object(self.native.subprocess,'check_output',return_value=''):
+            return self.native.isolated_execution(self.fleet,self.life,self.root,self.receipt,self.proof,bound,document,lambda p:'sealed')
+
+    def test_isolated_original_absent_pair_requires_original_authenticated_delete(self):
+        packet=self.absent();self.assertEqual(self.invoke('original_absent_pair'),{self.mid:self.vid})
+        original=copy.deepcopy(packet)
+        for key,value in [('owner','f'*32),('source','d'*40),('machine_id','ffffffffffffff'),('volume_id','vol_foreign')]:
+            packet=copy.deepcopy(original);packet['binding'][key]=value;self.save(self.packet,packet)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.invoke('original_absent_pair')
+        self.save(self.packet,original)
+        saved_purpose=self.proof['purpose'];self.proof['purpose']=None
+        with self.assertRaises(ValueError):self.invoke('original_absent_pair')
+        self.proof['purpose']=saved_purpose
+        ack=Path(original['delete_fence'])/'ack.json';raw=ack.read_bytes();ack.unlink()
+        with self.assertRaises((ValueError,OSError)):self.invoke('original_absent_pair')
+        ack.write_bytes(raw);cross=copy.deepcopy(original);cross['delete_fence']=str(self.root/'foreign/intent')
+        self.save(self.packet,cross)
+        with self.assertRaises((ValueError,OSError)):self.invoke('original_absent_pair')
+        self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
+
+    def test_isolated_runless_requires_raw_quiescent_original_incarnation(self):
+        packet,scan=self.runless();self.assertEqual(self.invoke('runless_current_os'),{self.mid:self.vid})
+        # TIME_WAIT and disabled port0 above are legitimate; a live original listener is not.
+        for mutation in ['active-process','repo-command','listener','wrong-source','reused-instance','missing-program','crossroot']:
+            candidate=copy.deepcopy(packet);changed=copy.deepcopy(scan)
+            if mutation=='active-process':changed['processes'][0]['run_token']=self.owner+'-0'
+            if mutation=='repo-command':
+                import base64
+                changed['processes'][0]['cmdline_b64']=base64.b64encode(b'node\0/data/repo/back-end/dist/server.js\0').decode()
+            if mutation=='listener':changed['sockets']['tcp']=changed['sockets']['tcp'].replace(' 06 ',' 0A ')
+            if mutation=='wrong-source':changed['repo_head']='e'*40
+            if mutation=='missing-program':candidate['program_sha256']='0'*64
+            if mutation=='crossroot':candidate['binding']=dict(candidate['binding'],run_id='foreign')
+            if mutation=='reused-instance':
+                after=json.loads(Path(packet['after']).read_text());rawpath=Path(after['rows'][0]['body_path']);saved=rawpath.read_bytes()
+                native=json.loads(saved);native['instance_id']='reused';self.save(rawpath,native)
+                import hashlib
+                import base64
+                after['rows'][0]['response_sha256']=hashlib.sha256(rawpath.read_bytes()).hexdigest();self.save(packet['after'],after)
+                wire=Path(after['rows'][0]['wire']);record=json.loads((wire/'0001-wire.json').read_text())
+                record.update(body_b64=base64.b64encode(rawpath.read_bytes()).decode(),sha256=hashlib.sha256(rawpath.read_bytes()).hexdigest());self.save(wire/'0001-wire.json',record)
+            self.save(packet['scan'],changed);self.save(packet['ssh_stdout'],changed);self.save(self.packet,candidate)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.invoke('runless_current_os')
+            if mutation=='reused-instance':
+                rawpath.write_bytes(saved);self.save(packet['after'],self.pair('after'))
+        self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
+
+
+    def test_runless_collector_performs_only_finite_exact_gets_and_one_ssh(self):
+        import hashlib,base64
+        packet,scan=self.runless();self.save(self.fleet/'_batch/lifecycle.json',self.life)
+        receipt_path=self.root/'receipt.json';self.save(receipt_path,self.receipt)
+        ledger=self.audit/'fresh/cloudbench-owned';outer=self;calls=[]
+        class FakeFly:
+            base='https://api.machines.dev'
+            def flyctl(self,seconds,*argv):
+                outer.assertEqual(seconds,20);outer.assertEqual(argv[:3],('ssh','console','--quiet'))
+                outer.assertEqual(argv[argv.index('--machine')+1],outer.mid)
+                calls.append(('SSH',outer.mid));return 0,json.dumps(scan),''
+        class FakeAdapter:
+            def __init__(self,fly,journal):self.journal=journal;self.sequence=0
+            def request(self,method,path,timeout):
+                outer.assertEqual(method,'GET');outer.assertEqual(timeout,15);calls.append((method,path))
+                self.sequence+=1;folder=self.journal/str(self.sequence)
+                data=outer.machine if path.startswith('/machines/') else dict(id=outer.vid,encrypted=True,state='created',attached_machine_id=outer.mid)
+                raw=json.dumps(data).encode();outer.save(folder/'request.json',dict(app='fixture',method=method,path=path,body=None,headers={}))
+                outer.save(folder/'0001-wire.json',dict(method=method,path=path,status=200,body_b64=base64.b64encode(raw).decode(),sha256=hashlib.sha256(raw).hexdigest()))
+                return data
+        plan=dict(schema='original-isolation-read-plan-v1',branch='runless-os',root=str(self.root),fleet=str(self.fleet),
+            owner=self.owner,receipt=str(receipt_path),ledger=str(ledger),binding=self.binding,
+            collector_sha256=hashlib.sha256(Path(self.native.__file__).read_bytes()).hexdigest(),
+            original_native=packet['original_native'],original_state=packet['original_state'],original_backend=packet['original_backend'],
+            files={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in self.root.rglob('*') if p.is_file()})
+        real=self.native.runpy.run_path
+        def dependencies(path,*args,**kwargs):
+            if str(path).endswith('cloudbench-archived-machine-reuse.py'):return {'NativeAdapter':FakeAdapter}
+            return real(path,*args,**kwargs)
+        output=self.root/'collection'
+        with patch.object(self.native.runpy,'run_path',side_effect=dependencies):
+            value=self.native.collect_isolated_witness(plan,output,fly_factory=lambda *args:FakeFly())
+        self.assertEqual(calls,[('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid),('SSH',self.mid),
+                                ('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid)])
+        self.assertEqual(value['schema'],'original-runless-current-os-v1')
+        self.assertFalse('qualified' in value)
+        calls.clear();self.machine['state']='stopped'
+        with patch.object(self.native.runpy,'run_path',side_effect=dependencies),self.assertRaises(ValueError):
+            self.native.collect_isolated_witness(plan,self.root/'stopped-collection',fly_factory=lambda *args:FakeFly())
+        self.assertEqual(calls,[('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid)])
+
+
+
 if __name__ == '__main__': unittest.main()
