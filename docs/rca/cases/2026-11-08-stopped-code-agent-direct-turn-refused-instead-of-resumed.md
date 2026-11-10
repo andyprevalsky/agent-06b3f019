@@ -260,3 +260,18 @@ or a later sibling CLI. Missing credentials was therefore an unsupported
 claim, separate from real original-devbox/controller access gaps. Prompt
 additions and profile-aware automatic exports were proposed to the user; they
 are not included in this parameter-preservation patch.
+
+Full validation caught two test-integration updates introduced by the repair.
+The agent-control test worker needed to register the new config-recovery
+activity and assert the retained schema/settings; its native failed attempts
+were retained and the corrected owning reproduction passed. The backend's
+`demo-cache-code-agent.test.ts` required a literal direct model-selection call
+that moved behind the resume-settings wrapper. `Gate: INTRODUCED` for that
+test failure: base `9a4eae1d6e` calls the tier helper directly, while repair
+`655005b770` delegates to `codeAgentResumeCliEnvs`, which still calls the same
+shared tier helper after restoring saved settings. The unchanged standalone
+test failed before updating this structural assertion and passed afterward;
+it now checks the complete wrapper-to-tier call chain. No model, timeout,
+coverage threshold or production assertion was relaxed. The first full
+backend run passed all 254 API domains and 390 of 391 unit files; that failed
+run remains a failure until the complete required coverage gate passes.
