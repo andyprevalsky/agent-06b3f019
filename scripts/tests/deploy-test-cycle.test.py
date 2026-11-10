@@ -10481,11 +10481,47 @@ class IsolatedRunlessWitnesses(unittest.TestCase):
         self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
 
 
+    def test_runless_explicit_null_attachment_requires_positive_original_mount(self):
+        import base64,hashlib,stat
+        self.machine['region']='iad'
+        self.machine['config']['mounts'][0].update(name='cbs_owned',size_gb=40,encrypted=True)
+        packet,scan=self.runless()
+        packet['attachment_observation']='explicit-null-original-quarantined-v1'
+        filesystem=dict(mountinfo='1 0 8:0 / / rw - ext4 /dev/vda rw\n2 1 8:16 / /data rw - ext4 /dev/vdb rw\n3 2 0:25 / /data/repo/back-end/node_modules rw - overlay overlay rw\n',
+            paths={p:dict(device=d,inode=10+i,mode=stat.S_IFDIR|0o755,realpath=p) for i,(p,d) in enumerate([('/',2048),('/data',2064),('/data/repo',2064)])},
+            payloads={p:dict(device=2064,mode=stat.S_IFREG|0o600) for p in ('/data/repo/.context/cloudbench/services.json','/data/repo/.context/cloudbench/logs/backend.log')})
+        filesystem['mountinfo_after']=filesystem['mountinfo'];scan['filesystem']=filesystem
+        volume=dict(id=self.vid,name='cbs_owned',region='iad',size_gb=40,encrypted=True,state='created',attached_machine_id=None,attached_alloc_id=None)
+        def reseal(phase,value,kind='volume'):
+            pair=json.loads(Path(packet[phase]).read_text());row=next(x for x in pair['rows'] if x['kind']==kind)
+            raw=json.dumps(value).encode();self.save(row['body_path'],raw);row['response_sha256']=hashlib.sha256(raw).hexdigest()
+            wire=Path(row['wire'])/'0001-wire.json';record=json.loads(wire.read_text());record.update(body_b64=base64.b64encode(raw).decode(),sha256=row['response_sha256']);self.save(wire,record);self.save(packet[phase],pair)
+        for phase in ('before','after'):reseal(phase,volume)
+        def publish(value):self.save(packet['scan'],value);self.save(packet['ssh_stdout'],value);self.save(self.packet,packet)
+        publish(scan);self.assertEqual(self.invoke('runless_current_os'),{self.mid:self.vid})
+        for mutation in ('foreign','omitted','mount','payload-redirect','rootfs','payload-device','symlink','epoch','pid','socket'):
+            changed=copy.deepcopy(scan);v=copy.deepcopy(volume);m=copy.deepcopy(self.machine)
+            if mutation=='foreign':v['attached_machine_id']='foreign'
+            if mutation=='omitted':del v['attached_alloc_id']
+            if mutation=='mount':changed['filesystem']['mountinfo']=changed['filesystem']['mountinfo'].replace('/data rw','/elsewhere rw')
+            if mutation=='payload-redirect':
+                changed['filesystem']['mountinfo']+='4 2 0:26 / /data/repo/.context/cloudbench rw - overlay overlay rw\n'
+                changed['filesystem']['mountinfo_after']=changed['filesystem']['mountinfo']
+            if mutation=='rootfs':changed['filesystem']['paths']['/data']['device']=2048
+            if mutation=='payload-device':changed['filesystem']['payloads']['/data/repo/.context/cloudbench/services.json']['device']=2048
+            if mutation=='symlink':changed['filesystem']['paths']['/data/repo']['mode']=stat.S_IFLNK|0o777
+            if mutation=='epoch':m['instance_id']='foreign-instance'
+            if mutation=='pid':changed['processes'][0]['run_token']=self.owner+'-0'
+            if mutation=='socket':changed['sockets']['tcp']=changed['sockets']['tcp'].replace(' 06 ',' 0A ')
+            reseal('after',v);reseal('after',m,'machine');publish(changed)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.invoke('runless_current_os')
+        self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
+
     def test_runless_collector_performs_only_finite_exact_gets_and_one_ssh(self):
         import hashlib,base64
         packet,scan=self.runless();self.save(self.fleet/'_batch/lifecycle.json',self.life)
         receipt_path=self.root/'receipt.json';self.save(receipt_path,self.receipt)
-        ledger=self.audit/'fresh/cloudbench-owned';outer=self;calls=[]
+        ledger=self.audit/'fresh/cloudbench-owned';outer=self;calls=[];unresolved=False
         class FakeFly:
             base='https://api.machines.dev'
             def flyctl(self,seconds,*argv):
@@ -10498,6 +10534,8 @@ class IsolatedRunlessWitnesses(unittest.TestCase):
                 outer.assertEqual(method,'GET');outer.assertEqual(timeout,15);calls.append((method,path))
                 self.sequence+=1;folder=self.journal/str(self.sequence)
                 data=outer.machine if path.startswith('/machines/') else dict(id=outer.vid,encrypted=True,state='created',attached_machine_id=outer.mid)
+                if unresolved and path.startswith('/volumes/'):
+                    data.update(name='cbs_owned',size_gb=40,region='iad',attached_machine_id=None,attached_alloc_id=None)
                 raw=json.dumps(data).encode();outer.save(folder/'request.json',dict(app='fixture',method=method,path=path,body=None,headers={}))
                 outer.save(folder/'0001-wire.json',dict(method=method,path=path,status=200,body_b64=base64.b64encode(raw).decode(),sha256=hashlib.sha256(raw).hexdigest()))
                 return data
@@ -10517,6 +10555,14 @@ class IsolatedRunlessWitnesses(unittest.TestCase):
                                 ('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid)])
         self.assertEqual(value['schema'],'original-runless-current-os-v1')
         self.assertFalse('qualified' in value)
+        calls.clear();unresolved=True
+        self.machine['region']='iad';self.machine['config']['mounts'][0].update(name='cbs_owned',size_gb=40,encrypted=True)
+        self.save(packet['original_native'],[self.machine]);plan['files'][packet['original_native']]=hashlib.sha256(Path(packet['original_native']).read_bytes()).hexdigest()
+        with patch.object(self.native.runpy,'run_path',side_effect=dependencies):
+            value=self.native.collect_isolated_witness(plan,self.root/'null-collection',fly_factory=lambda *args:FakeFly())
+        self.assertEqual(value['attachment_observation'],'explicit-null-original-quarantined-v1')
+        self.assertEqual(calls,[('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid),('SSH',self.mid),
+                                ('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid)])
         calls.clear();self.machine['state']='stopped'
         with patch.object(self.native.runpy,'run_path',side_effect=dependencies),self.assertRaises(ValueError):
             self.native.collect_isolated_witness(plan,self.root/'stopped-collection',fly_factory=lambda *args:FakeFly())

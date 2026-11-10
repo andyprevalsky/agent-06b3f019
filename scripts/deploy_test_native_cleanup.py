@@ -189,6 +189,7 @@ b=json.loads(sys.argv[1]);end=time.monotonic()+8
 assert os.geteuid()==0 and os.environ.get('FLY_MACHINE_ID')==b['machine_id']
 boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 repo_head=subprocess.check_output(['/usr/bin/git','-c','safe.directory=/data/repo','-C','/data/repo','rev-parse','HEAD'],text=True,timeout=2,env={'PATH':'/usr/bin:/bin','GIT_CONFIG_GLOBAL':'/dev/null','GIT_CONFIG_NOSYSTEM':'1','GIT_OPTIONAL_LOCKS':'0'}).strip()
+payload_stats={}
 def payload(path,limit):
  p=Path(path)
  if not p.exists():return None
@@ -199,8 +200,13 @@ def payload(path,limit):
   with os.fdopen(fd,'rb',closefd=False) as stream:raw=stream.read(limit+1)
   after=os.fstat(fd)
   assert len(raw)==before.st_size and (before.st_ino,before.st_dev,before.st_size,before.st_mtime_ns)==(after.st_ino,after.st_dev,after.st_size,after.st_mtime_ns)
+  payload_stats[path]=dict(device=before.st_dev,mode=before.st_mode)
   return raw
  finally:os.close(fd)
+mountinfo=Path('/proc/self/mountinfo').read_text();assert len(mountinfo.encode())<=2097152
+paths={}
+for name in ('/','/data','/data/repo'):
+ info=os.lstat(name);paths[name]=dict(device=info.st_dev,inode=info.st_ino,mode=info.st_mode,realpath=str(Path(name).resolve(strict=True)))
 services=payload('/data/repo/.context/cloudbench/services.json',1048576)
 run=payload('/data/repo/.context/cloudbench/run.json',134217728)
 backend=payload('/data/repo/.context/cloudbench/logs/backend.log',67108864)
@@ -232,6 +238,7 @@ for name in ('tcp','tcp6','udp','udp6'):
  assert len(sockets[name].encode())<=2097152
 print(json.dumps(dict(schema='original-runless-proc-scan-v1',binding=b,uid=os.geteuid(),machine_id=os.environ.get('FLY_MACHINE_ID'),
  boot=boot,repo_head=repo_head,self_pid=os.getpid(),ancestors=ancestry,processes=rows,gone=gone,errors=errors,sockets=sockets,
+ filesystem=dict(mountinfo=mountinfo,mountinfo_after=Path('/proc/self/mountinfo').read_text(),paths=paths,payloads=payload_stats),
  services_b64=None if services is None else base64.b64encode(services).decode(),run_present=run is not None,
  backend_sha256=None if backend is None else hashlib.sha256(backend).hexdigest(),finished_epoch=time.time())))
 '''
@@ -355,6 +362,10 @@ def isolated_runless_os(fleet, owner, root, receipt, row, evidence, proof, bound
     originals=json.loads(bound(original_path));need(isinstance(originals,list),'original native array');matches=[x for x in originals if isinstance(x,dict) and x.get('id')==row['machine_id']]
     need(len(matches)==1,'original native exact row');expected=matches[0]
     observed = []
+    attachment = packet.get('attachment_observation')
+    need(attachment in (None,'explicit-null-original-quarantined-v1'), 'runless attachment observation kind')
+    unresolved = attachment is not None
+    volumes = []
     for phase in ('before','after'):
         native = document(packet[phase])
         need(native.get('app')==binding['app'],'current native app')
@@ -365,13 +376,24 @@ def isolated_runless_os(fleet, owner, root, receipt, row, evidence, proof, bound
              and machine['config']['env'].get('CLOUDBENCH_RUN_TOKEN') == binding['run_token']
              and [(m['volume'],m['path']) for m in machine['config']['mounts']] == [(row['volume_id'],'/data')]
              and volume['id'] == row['volume_id'] and volume.get('encrypted') is True
-             and volume.get('attached_machine_id') == row['machine_id'] and volume['state'] == 'created',
+             and volume['state'] == 'created'
+             and (volume.get('attached_machine_id') == row['machine_id'] if not unresolved else
+                  all(key in volume and volume[key] is None for key in ('attached_machine_id','attached_alloc_id'))),
              'runless exact current native identity')
         need(all(machine.get(key) == expected.get(key) for key in ('id','name','instance_id','config')),
              'runless original incarnation differs')
+        if unresolved:
+            mount=expected['config']['mounts'][0]
+            need(all(key in volume and key in mount and volume[key] == mount[key] for key in ('name','size_gb'))
+                 and type(volume['size_gb']) is int and volume['size_gb']>0
+                 and mount.get('encrypted') is True and volume.get('region') == expected.get('region')
+                 and isinstance(expected.get('region'),str) and expected['region'],
+                 'unresolved original Volume identity differs')
+            volumes.append({key:volume[key] for key in ('id','name','region','size_gb','encrypted','state','attached_machine_id','attached_alloc_id')})
         observed.append(machine)
     need(all(observed[0][key] == observed[1][key] for key in ('id','name','instance_id','config','state')),
          'runless native incarnation changed')
+    need(not unresolved or volumes[0] == volumes[1], 'unresolved Volume observation changed')
     scan = document(packet['scan'])
     need(packet['program_sha256'] == hashlib.sha256(RUNLESS_SCAN.encode()).hexdigest()
          and packet['command'] == shlex.join(['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c',RUNLESS_SCAN,
@@ -384,6 +406,31 @@ def isolated_runless_os(fleet, owner, root, receipt, row, evidence, proof, bound
          and scan['machine_id'] == row['machine_id'] and scan['repo_head'] == binding['source'] and scan['errors'] == []
          and scan['run_present'] is False and receipt['finished_at'] <= scan['finished_epoch'] <= proof['confirmed_at'],
          'runless authentic collector output')
+    if unresolved:
+        import stat
+        fs=scan['filesystem'];paths=fs['paths'];payloads=fs['payloads']
+        need(isinstance(fs['mountinfo'],str) and fs['mountinfo']==fs['mountinfo_after']
+             and len(fs['mountinfo'].encode())<=2097152, 'unresolved mount changed during scan')
+        for path in ('/','/data','/data/repo'):
+            entry=paths[path]
+            need(type(entry['device']) is int and entry['device']>=0 and type(entry['mode']) is int
+                 and stat.S_ISDIR(entry['mode']) and entry['realpath']==path, 'unresolved canonical directory')
+        device=paths['/data']['device']
+        need(device!=paths['/']['device'] and paths['/data/repo']['device']==device, 'unresolved data rootfs or device mismatch')
+        mounts=[]
+        for line in fs['mountinfo'].splitlines():
+            parts=line.split();need(len(parts)>=10 and '-' in parts, 'unresolved mountinfo malformed')
+            mounts.append(parts)
+        data=[parts for parts in mounts if parts[4]=='/data']
+        need(len(data)==1 and data[0][2]==str(os.major(device))+':'+str(os.minor(device))
+             and data[0][3]=='/' and not any(parts[4]!='/' and parts[4]!='/data' and (target==parts[4] or target.startswith(parts[4].rstrip('/')+'/'))
+                 for parts in mounts for target in ('/data/repo','/data/repo/.context/cloudbench/services.json','/data/repo/.context/cloudbench/logs/backend.log')),
+             'unresolved actual data mount missing or redirected')
+        for path in ('/data/repo/.context/cloudbench/services.json','/data/repo/.context/cloudbench/logs/backend.log'):
+            entry=payloads[path]
+            need(type(entry['device']) is int and entry['device']==device and type(entry['mode']) is int
+                 and stat.S_ISREG(entry['mode']), 'unresolved original payload is on another filesystem')
+        # This proves Machine/filesystem execution only, never physical Volume attachment or release.
     services = json.loads(base64.b64decode(scan['services_b64'],validate=True))
     original_state=document(packet['original_state'])
     task=Path(packet['original_state']).parent
@@ -540,10 +587,18 @@ def collect_isolated_witness(plan, output, *, fly_factory=None):
             delete_fence=plan['delete_fence'],delete_wire=plan['delete_wire'])
     else:
         before,values=native_pair('before');originals=json.loads(bound(plan['original_native']));need(isinstance(originals,list),'collector original native array');matches=[x for x in originals if isinstance(x,dict) and x.get('id')==binding['machine_id']];need(len(matches)==1,'collector original native row');expected=matches[0]
+        volume=values['volume'];mount=expected['config']['mounts'][0]
+        unresolved=volume is not None and all(key in volume and volume[key] is None for key in ('attached_machine_id','attached_alloc_id'))
+        if unresolved:
+            need(all(key in volume and key in mount and volume[key]==mount[key] for key in ('name','size_gb'))
+                 and type(volume['size_gb']) is int and volume['size_gb']>0 and mount.get('encrypted') is True
+                 and isinstance(expected.get('region'),str) and expected['region']
+                 and volume.get('region')==expected['region'], 'collector unresolved original Volume differs')
+            packet['attachment_observation']='explicit-null-original-quarantined-v1'
         need(values['machine'] is not None and values['machine'].get('state')=='started' and all(values['machine'].get(k)==expected.get(k)
              for k in ('id','name','instance_id','config')) and values['volume'] is not None
              and values['volume'].get('id')==binding['volume_id'] and values['volume'].get('encrypted') is True
-             and values['volume'].get('attached_machine_id')==binding['machine_id']
+             and (values['volume'].get('attached_machine_id')==binding['machine_id'] or unresolved)
              and values['volume'].get('state')=='created', 'collector original incarnation differs before SSH')
         command=shlex.join(['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c',RUNLESS_SCAN,
                            json.dumps(binding,sort_keys=True,separators=(',',':'))])
