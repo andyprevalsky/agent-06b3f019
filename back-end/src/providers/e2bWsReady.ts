@@ -61,6 +61,16 @@ export function wsStartupBudgetMs(): number {
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_WS_STARTUP_BUDGET_MS;
 }
 
+/** Shared launch readiness policy; the provider-specific initial wait stays unchanged. */
+export function codeSessionWsReadyOptions(provider: 'claude' | 'codex') {
+  return {
+    port: 3000,
+    timeoutMs: provider === 'claude' ? 10000 : 30000,
+    pollMs: 100,
+    startupBudgetMs: wsStartupBudgetMs(),
+  };
+}
+
 const WS_READINESS_NAMES = {
   claude: { logName: 'WebSocket server', errorName: 'Claude Code WebSocket server' },
   codex: { logName: 'Codex WebSocket server', errorName: 'Codex WebSocket server' },

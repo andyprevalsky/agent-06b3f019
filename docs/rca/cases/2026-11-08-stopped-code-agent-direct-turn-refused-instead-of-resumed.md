@@ -22,6 +22,9 @@ sources:
   - plan:back-end/src/domains/claude-code/directChatResume.ts
   - agent 91cd1296-4fff-46a8-9e1f-fd67e0aaabbf
   - commit aa2cc1d1ab320268c1ca5e73a8ac1f0dc19ecd4d
+  - commit 655005b770
+  - commit 707e048ae8
+  - commit f9f10e7bf0
 repro: back-end/src/tests/blackbox/claude-code-direct-chat.blackbox.ts ("a message to a stopped code agent resumes it instead of failing"); agents/tests/blackbox/agent_control.blackbox.py (user_message_resumes_completed_code_task); front-end/src/tests/blackbox/code-agent-resume-on-message.blackbox.tsx
 status: fixed
 ---
@@ -196,3 +199,101 @@ between genuine user input and workflow-authored USER rows.
 User: "we need to make sure that any user message unpauses by default" and
 "/rca then /push". The repair addresses the missing stopped-code execution
 boundary without treating automatic agent notifications as a new user intent.
+
+## November 10 follow-up: retain the original contract and launch settings
+
+User correction: "resuming should resume w the exact same params though no?"
+The empty custom-field contract above fixed activity startup but did not meet
+this requirement. The captured original `land_on_main` call declares six custom
+fields: `main_sha`, `merge_evidence`, `verification_on_main`, `evidence_on_main`,
+`handoff_document` and `remaining_blockers`. Replacing those with an empty
+field list changed its acceptance contract. The earlier regression incorrectly
+asserted the replacement schema, so it passed while missing parameter loss.
+
+The stronger permanent reproduction runs:
+
+```bash
+cd agents
+BLACKBOX_CASE_FUNCTIONS=test_user_turn_resumes_through_the_real_code_activity venv/bin/python scripts/run_blackbox_tests.py code-agent-resume
+```
+
+Before this correction it fails the exact original-schema assertion (1.2 s).
+Afterward the unchanged command passes for both providers (1.6 s), checking
+the original schema, repo, target, resolved attachments, frozen CLI settings
+and cache flag through the real workflow/manager/activity.
+
+The corrected resume recovers the saved configuration for the exact spawn tool
+call. New tasks persist a durable, immutable per-task Message snapshot before
+CLI startup, including original task inputs, resolved execution values,
+resolved file pointers, provider and complete model/effort/speed launch
+settings. The snapshot has its own hidden metadata identity, so an attempted
+launch is not mistaken for a real code-session chip. It stores no auth or
+control environment, has no ephemeral-state TTL, and is idempotent per task.
+
+The worker copies that contract. The new user message becomes the next
+conversation input, the actual persistent session ID identifies the session,
+and only explicit new-turn settings override saved values. Original files and
+new-turn files remain distinct inputs and are deduplicated on delivery. A later
+complete effective-settings receipt supersedes initial launch settings. The
+backend also preserves settings for owner-driven wakes, scoped to the same
+agent, exact tool call and provider. Another spawn sharing the worktree cannot
+supply its configuration. Existing credential-provider failover retains
+portable settings and selects a compatible model for the receiving provider.
+
+Historical flat ASSISTANT `metadata.tool_calls` recover original declarations;
+attachment recovery uses the context that existed before that call. Complete
+observed settings receipts can recover historical CLI settings. Missing or
+conflicting contracts fail explicitly. When historical model/effort/speed were
+never recorded, the resume reports that gap and requires complete explicit
+settings rather than claiming to know their old values. Explicitly empty
+original fields remain valid; an empty default never replaces a custom schema.
+
+The independent reviewer retracted the earlier empty-field recommendation and
+confirmed these preservation gaps. Golden references remain Codex turn/schema
+propagation and persisted Claude resume reconstruction; the repair converges
+on restoring saved execution state instead of reselecting defaults.
+
+The user also asked whether the stitched code-agent prefix explains the env.
+It does not describe configured env-file paths or export semantics. Read-only
+inspection established that the original sandbox could read both principal
+env files and all audited keys were present across them; most were not in the
+default process environment. The startup runner reads env files for redaction
+but does not export them, and child startup exports cannot affect its launcher
+or a later sibling CLI. Missing credentials was therefore an unsupported
+claim, separate from real original-devbox/controller access gaps. Prompt
+additions and profile-aware automatic exports were proposed to the user; they
+are not included in this parameter-preservation patch.
+
+Full validation caught two test-integration updates introduced by the repair.
+The agent-control test worker needed to register the new config-recovery
+activity and assert the retained schema/settings; its native failed attempts
+were retained and the corrected owning reproduction passed. The backend's
+`demo-cache-code-agent.test.ts` required a literal direct model-selection call
+that moved behind the resume-settings wrapper. `Gate: INTRODUCED` for that
+test failure: base `9a4eae1d6e` calls the tier helper directly, while repair
+`655005b770` delegates to `codeAgentResumeCliEnvs`, which still calls the same
+shared tier helper after restoring saved settings. The unchanged standalone
+test failed before updating this structural assertion and passed afterward;
+it now checks the complete wrapper-to-tier call chain. No model, timeout,
+coverage threshold or production assertion was relaxed. The first full
+backend run passed all 254 API domains and 390 of 391 unit files; that failed
+run remains a failure until the complete required coverage gate passes.
+
+Final follow-up validation on source `f9f10e7bf0` passed all 254 backend API
+domains and all 391 unit files. Native coverage is 90.25% statements/lines,
+82.9% branches and 93.11% functions, above the unchanged thresholds. Agent
+product source `707e048ae8` passed all 132 domains without flakes, 214 demo-cache
+and 207 unit cases, with 85% coverage. The final backend TypeScript check,
+changed-file lint/format checks and 2,228 structural assertions also passed.
+The earlier failed attempts remain retained as failures, rather than being
+relabelled by the clean runs.
+
+The deterministic coverage runner excludes live credential health by design.
+A separate unchanged live integration-health command completed with six
+passes, one warning and no hard failures or overrides. E2B, Steel, Parallel,
+OpenRouter/auth/balance and Supabase probes passed. Anthropic's completion
+probe reported exhausted account credits. This funding limitation is distinct
+from env-file availability or missing shell exports, and is not repaired by
+parameter restoration. No benchmark was started and the original Rose root's
+explicit pause was preserved. Production availability remains a separate
+worker/backend rollout verification after the authorized push.

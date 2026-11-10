@@ -141,6 +141,9 @@ router.post(
               expectedUserId: body.user_id,
               deviceId: body.device_id,
               taskName: body.task_name ?? null,
+              cliSettings: body.cli_settings,
+              resumeConfig: body.resume_config,
+              leaseOwner: body.lease_owner,
             })
           : await service.createSession({
               ...body,
