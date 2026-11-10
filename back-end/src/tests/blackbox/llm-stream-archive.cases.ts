@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { FakeClock } from '../helpers/waitFor';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -112,6 +113,7 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
       }
     }
     const chronologyRoot = randomUUID();
+    const chronologyIterators: AsyncIterator<unknown>[] = [];
     const open = async (content: string) => {
       const options = buildGeneratorCompletionOptions({
         agentId: chronologyRoot,
@@ -125,31 +127,52 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
       options.dump_context.root_agent_id = chronologyRoot;
       const stream = await createStreamingCompletion(options);
       const iterator = stream[Symbol.asyncIterator]();
+      chronologyIterators.push(iterator);
       assert.equal((await iterator.next()).done, false);
       return iterator;
     };
-    const older = await open('Older offline call fixture');
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    const newer = await open('Newer offline call fixture');
-    await newer.return?.();
-    await drainLlmCaptures([chronologyRoot]);
-    await older.return?.();
-    await drainLlmCaptures([chronologyRoot]);
-    const chronology = await materializeArchiveLlmDumps(
-      chronologyRoot,
-      path.join(directory, 'chronology'),
-      {
-        list: (root) => listArchivedObjects(root, { throwOnError: true }),
-        read: (rootAgentId, objectPath) => readArchivedArtifactStrict({ rootAgentId, objectPath }),
+    const clock = new FakeClock();
+    const originalNow = Date.now;
+    const recordedOlderStart = clock.now();
+    Date.now = () => clock.now();
+    try {
+      const older = await open('Older offline call fixture');
+      clock.advance(1);
+      const newer = await open('Newer offline call fixture');
+      await newer.return?.();
+      await drainLlmCaptures([chronologyRoot]);
+      clock.advance(1);
+      await older.return?.();
+      await drainLlmCaptures([chronologyRoot]);
+      const chronology = await materializeArchiveLlmDumps(
+        chronologyRoot,
+        path.join(directory, 'chronology'),
+        {
+          list: (root) => listArchivedObjects(root, { throwOnError: true }),
+          read: (rootAgentId, objectPath) =>
+            readArchivedArtifactStrict({ rootAgentId, objectPath }),
+        }
+      );
+      assert.equal(chronology.baseCallCount, 2);
+      assert.deepEqual(
+        chronology.calls.map((call) => call.recordedCreatedAtMs),
+        [recordedOlderStart, recordedOlderStart + 1],
+        'archive timestamps must be captured at real call start, before reversed finishes'
+      );
+      const latest = JSON.parse(fs.readFileSync(chronology.latest.path, 'utf8'));
+      assert.equal(
+        latest.messages[0].content,
+        'Newer offline call fixture',
+        'latest call follows recorded start clock despite reverse completion order'
+      );
+    } finally {
+      try {
+        await Promise.allSettled(chronologyIterators.map((iterator) => iterator.return?.()));
+        await Promise.allSettled([drainLlmCaptures([chronologyRoot])]);
+      } finally {
+        Date.now = originalNow;
       }
-    );
-    assert.equal(chronology.baseCallCount, 2);
-    const latest = JSON.parse(fs.readFileSync(chronology.latest.path, 'utf8'));
-    assert.equal(
-      latest.messages[0].content,
-      'Newer offline call fixture',
-      'latest call follows recorded start clock despite reverse completion order'
-    );
+    }
     assert.equal(providerCalls, 11, 'archival never adds provider calls');
     assert.equal(implicitLookups, 0, 'capture must not open database pools in completion clients');
   } finally {

@@ -5875,15 +5875,17 @@ class Cycle(unittest.TestCase):
             c.retained_owners(state, [gate['name']])
         self.assertIsNotNone(c.pending_completion_block(state))
 
-    def renewal_state(self):
+    def renewal_state(self, reconcile_by_failure=False):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         receipt = state['attempts'][-1]['results'][0]
         state.update(phase='interrupted', resume_phase='focused')
         state['attempts'][-1]['interrupted'] = True
-        state['failures'] = []
+        if not reconcile_by_failure:
+            state['failures'] = []
         receipt.update(executed=True)
         c.write(paths['receipt'], receipt); proof['receipt_sha256'] = c.sha_file(paths['receipt'])
-        c.reconcile(state, receipt['token'], proof)
+        c.reconcile(state, failure['id'] if reconcile_by_failure else receipt['token'], proof)
+        state.pop('resume_phase')
         # Ordinary source refresh + a completed quick phase leaves the original smoke latest.
         (self.root / 'new-source').write_text('next source')
         state.update(source=c.source(self.root), phase='triage', ready=False)
@@ -5908,8 +5910,8 @@ class Cycle(unittest.TestCase):
         before = copy.deepcopy(state); c.reconcile(state, receipt['token'], renewed)
         self.assertEqual(before, state)  # idempotent, no duplicate renewal record
 
-    def clean_successor_renewal_state(self):
-        state, paths, proof, gate, packet, original = self.renewal_state()
+    def clean_successor_renewal_state(self, reconcile_by_failure=False):
+        state, paths, proof, gate, packet, original = self.renewal_state(reconcile_by_failure)
         prior = state['reconciled_owners'][proof['receipt_sha256']]
         folder = self.directory / 'successor'
         token, native_source = 'clean-full-successor', copy.deepcopy(prior['validation_source'])
@@ -5942,6 +5944,81 @@ class Cycle(unittest.TestCase):
         c.write(folder/'request.json', request); c.write(folder/'receipt.json', successor)
         state['attempts'].append(dict(phase='focused', results=[successor]))
         return state, paths, proof, gate, packet, original, folder, successor
+
+    def test_isolated_renewal_follows_normal_ready_refresh_without_reopening_repair(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        gate.update(worker_transport='benchmark-cloud-cli', case_protocol=True)
+        successor['execution_binding']['contract_digest'] = c.digest(gate)
+        c.write(folder/'receipt.json', successor)
+        state.update(source=copy.deepcopy(successor['source']), phase='ready', ready=True, repair_gates=[])
+        state.pop('pending', None)
+        state['plan']['source'] = copy.deepcopy(state['source'])
+        old = copy.deepcopy(state['plan'])
+        state['plan_digest'] = c.digest(old)
+        new = copy.deepcopy(old); new['source'] = c.source(self.root)
+        c.refresh(state, old, new, self.root)
+        self.assertEqual('quick', state['phase'])
+        self.assertEqual('final', state['next_after_quick'])
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        for phase in ('quick', 'final'):
+            if phase == 'final':
+                c.advance(state, [], [])  # State transition only; no fixture test PASS is invented.
+            self.assertEqual(phase, state['phase'])
+            before = copy.deepcopy(state)
+            c.reconcile(state, original['token'], incoming)
+            for key in ('plan', 'attempts', 'failures', 'round', 'phase', 'repair_gates'):
+                self.assertEqual(before[key], state[key])
+            entry = state['reconciled_owners'][proof['receipt_sha256']]
+            self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+            same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
+            self.assertEqual(same, state)
+
+    def test_isolated_renewal_preserves_exact_unexecuted_source_refusal_and_native_checks(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False,
+            cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=copy.deepcopy(state['source']),
+            reason='native cleanup: next source/inventory binding')
+        state['attempts'].append(dict(phase='final', source=copy.deepcopy(state['source']), results=[refusal]))
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        changes = [
+            ('other-reason', lambda s: s['attempts'][-1]['results'][0].update(reason='unknown setup error')),
+            ('execution-present', lambda s: s['attempts'][-1]['results'][0].update(executed=True)),
+            ('token-present', lambda s: s['attempts'][-1]['results'][0].update(token='unobserved-native-owner')),
+            ('foreign-source', lambda s: s['attempts'][-1]['results'][0].update(source=proof['source'])),
+            ('partial-inventory', lambda s: s['attempts'][-1]['results'][0]['cases'].pop(gate['checks'][0])),
+            ('interrupted', lambda s: s['attempts'][-1].update(interrupted=True)),
+            ('missing-source', lambda s: (s['attempts'][-1].update(source=None), s['attempts'][-1]['results'][0].update(source=None))),
+            ('newer-native', lambda s: s['attempts'].append(dict(phase='final', results=[{**successor, 'token':'later-native', 'complete':False}]))),
+            ('native-incomplete', lambda s: s['attempts'][-2]['results'][0].update(complete=False)),
+        ]
+        for name, change in changes:
+            with self.subTest(name=name):
+                candidate = copy.deepcopy(state); change(candidate); before = copy.deepcopy(candidate)
+                with self.assertRaises(ValueError): c.reconcile(candidate, original['token'], incoming)
+                self.assertEqual(before, candidate)
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], incoming)
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['failures'], state['failures'])
+        self.assertEqual(refusal, state['attempts'][-1]['results'][0])
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertIsNone(c.full_pass_binding(state, gate))
+        request = dict(token='fresh-after-unexecuted-refusal', source=state['source'], checks=gate['checks'], skips={})
+        self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
+
+    def test_original_occurrence_cannot_reregister_changed_source_without_successor_checks(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state(True)
+        occurrence = state['reconciled_owners'][proof['receipt_sha256']]['occurrence']
+        self.assertNotEqual(original['token'], occurrence)
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        successor['complete'] = False
+        before = copy.deepcopy(state)
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence, incoming)
+        self.assertEqual(before, state)
+        successor['complete'] = True
+        c.reconcile(state, occurrence, incoming)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
 
     def test_isolated_source_renewal_accepts_only_bound_clean_full_successor_without_credit(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
@@ -6188,6 +6265,17 @@ class Cycle(unittest.TestCase):
     def test_reconciled_failed_successor_rejects_untrusted_authority_atomically(self):
         state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
         incoming = dict(proof, validation_source=state['source'])
+        # Normal source refresh reaches these quiescent pre-execution phases.
+        # They grant renewal authority only; every native successor check remains.
+        for phase in ('quick', 'final'):
+            with self.subTest(quiescent_phase=phase):
+                candidate = copy.deepcopy(state); candidate['phase'] = phase
+                before = copy.deepcopy(candidate)
+                c.reconcile(candidate, original['token'], incoming)
+                for field in before:
+                    if field not in ('reconciled_owners', 'reconciled_owner_history'):
+                        self.assertEqual(before[field], candidate[field], field)
+                self.assertFalse(candidate['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
         normal_key = native_proof['receipt_sha256']
         mutations = [
             ('missing-normal', lambda s: s['reconciled_owners'].pop(normal_key)),
@@ -6212,7 +6300,7 @@ class Cycle(unittest.TestCase):
             ('running', lambda s: s.update(running={'gate':successor['gate']})),
             ('live-failures', lambda s: s.update(live_failures=[])),
             *[(phase, lambda s, phase=phase: s.update(phase=phase))
-              for phase in ('interrupted', 'ready', 'quick', 'focused', 'initial', 'final', 'stale', 'unknown')]]
+              for phase in ('interrupted', 'ready', 'focused', 'initial', 'stale', 'unknown')]]
         for label, mutate in mutations:
             with self.subTest(label=label):
                 candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
@@ -6237,11 +6325,23 @@ class Cycle(unittest.TestCase):
     def test_isolated_renewal_accepts_only_quiescent_repair_phases(self):
         state, paths, proof, gate, packet, original = self.renewal_state()
         incoming = dict(proof, validation_source=state['source'])
-        for phase in ('triage', 'needs-focused-plan', 'failed-gates'):
+        for phase in ('quick', 'final', 'triage', 'needs-focused-plan', 'failed-gates'):
             with self.subTest(phase=phase):
                 candidate = copy.deepcopy(state); candidate['phase'] = phase
                 c.reconcile(candidate, original['token'], incoming)
                 self.assertEqual(phase, candidate['phase'])
+                for active in ({'running': {'gate':gate['name']}}, {'live_failures': []}, {'ready': True}):
+                    blocked = copy.deepcopy(state); blocked.update(phase=phase, **active)
+                    before = copy.deepcopy(blocked)
+                    with self.assertRaises(ValueError): c.reconcile(blocked, original['token'], incoming)
+                    self.assertEqual(before, blocked)
+                blocked = copy.deepcopy(state); blocked['phase'] = phase
+                before = copy.deepcopy(blocked); c.CANCEL.set()
+                try:
+                    with self.assertRaises(ValueError): c.reconcile(blocked, original['token'], incoming)
+                    self.assertEqual(before, blocked)
+                finally:
+                    c.CANCEL.clear()
 
     def test_isolated_native_validation_requires_current_os_payload_authority(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()

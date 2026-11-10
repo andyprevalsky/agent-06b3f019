@@ -1,4 +1,5 @@
 import assert from 'node:assert';
+import { waitFor } from '../helpers/waitFor';
 import {
   decryptAndValidateArtifact,
   encryptArtifact,
@@ -164,6 +165,31 @@ export async function assertDirectCaptureFinalizationOwnership(params: {
     });
     return { promise, release };
   };
+  // Observe actual enrollment by Promise.all in drainLlmCaptures. Ownership's
+  // synchronous catch/finally wiring occurs before this observation is armed.
+  const ownObservedCapture = (agentId: string, task: Promise<void>) => {
+    const observation = { joined: false };
+    let armed = false;
+    class JoinedPromise<T> extends Promise<T> {
+      override then<TResult1 = T, TResult2 = never>(
+        onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+      ): Promise<TResult1 | TResult2> {
+        const result = super.then(onfulfilled, onrejected);
+        if (armed) observation.joined = true;
+        return result;
+      }
+    }
+    ownLlmCapture(
+      agentId,
+      new JoinedPromise<void>((resolve, reject) => {
+        void task.then(resolve, reject);
+      })
+    );
+    armed = true;
+    return observation;
+  };
+  let childObservation: ReturnType<typeof ownObservedCapture> | undefined;
   const first = gate();
   const second = gate();
   const registered = gate();
@@ -182,10 +208,10 @@ export async function assertDirectCaptureFinalizationOwnership(params: {
     'application/json'
   );
   assert(encrypted);
-  ownLlmCapture(
+  const rootObservation = ownObservedCapture(
     params.rootAgentId,
     first.promise.then(() => {
-      ownLlmCapture(
+      childObservation = ownObservedCapture(
         params.childAgentId,
         second.promise.then(async () => {
           await storeWorkerArtifact({
@@ -210,11 +236,17 @@ export async function assertDirectCaptureFinalizationOwnership(params: {
     }
   );
   try {
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await waitFor('finalizer enrolled the held root writer', () => {
+      assert.strictEqual(settled, false, 'finalization returned with an owned writer held');
+      return rootObservation.joined;
+    });
     assert.strictEqual(settled, false, 'finalization returned with an owned writer held');
     first.release();
     await registered.promise;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await waitFor('finalizer enrolled the newly registered child writer', () => {
+      assert.strictEqual(settled, false, 'finalization missed the newly registered child writer');
+      return childObservation?.joined;
+    });
     assert.strictEqual(settled, false, 'finalization missed the newly registered child writer');
     second.release();
     assert((await finalization).manifest);
@@ -232,7 +264,6 @@ export async function assertDirectCaptureFinalizationOwnership(params: {
     assert.deepStrictEqual(JSON.parse(decryptAndValidateArtifact(stored).toString()), payload);
     const failure = new Error('owned archive writer fixture failure');
     ownLlmCapture(params.childAgentId, Promise.reject(failure));
-    await Promise.resolve();
     await assert.rejects(
       () => finalizeAgent({ rootAgentId: params.rootAgentId }),
       (error: unknown) => error instanceof Error && error.cause === failure

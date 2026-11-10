@@ -12,7 +12,7 @@ import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
-ISOLATED_RENEWAL_PHASES = frozenset({'triage', 'needs-focused-plan', 'failed-gates'})
+ISOLATED_RENEWAL_PHASES = frozenset({'quick', 'final', 'triage', 'needs-focused-plan', 'failed-gates'})
 
 # Bound raw run evidence per proof; ordinary receipts retain their existing limit.
 MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
@@ -1705,9 +1705,45 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
+def isolated_successor(state, prior):
+    """A known pre-dispatch source refusal is not a newer native execution.
+
+    Keep that failed attempt as the latest coverage result. Only renewal may
+    inspect its immediate native predecessor, whose full validation is unchanged.
+    This exact six-field row is emitted by run_phase when isolated_request fails
+    before it writes a request or starts the native adapter.
+    """
+    rows = [(attempt, row) for attempt in state.get('attempts', [])
+            for row in attempt.get('results', []) if row.get('gate') == prior['gate']]
+    if not rows:
+        return None
+    attempt, latest = rows[-1]
+    if (set(latest) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+            and latest.get('reason') == 'native cleanup: next source/inventory binding'):
+        gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+        need(latest['status'] == 'FAIL' and latest['complete'] is False
+             and latest['cases'] == dict.fromkeys(gate['checks'], 'UNVERIFIED')
+             and isinstance(latest['source'], dict) and set(latest['source']) == {'head', 'digest'}
+             and isinstance(latest['source']['head'], str)
+             and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', latest['source']['head'])
+             and isinstance(latest['source']['digest'], str)
+             and re.fullmatch(r'[0-9a-f]{64}', latest['source']['digest'])
+             and latest['source'] == attempt.get('source')
+             and latest['source'] != prior['validation_source']
+             and attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
+             and not attempt.get('interrupted') and not attempt.get('stale')
+             and len(rows) >= 2, 'unexecuted source refusal identity')
+        # Never skip another refusal, an unknown setup failure or a native attempt.
+        previous = rows[-2][1]
+        need(previous.get('executed') is True and previous.get('complete') is True,
+             'source refusal requires immediate complete native predecessor')
+        return previous
+    return latest
+
+
 def renew_isolated_validation(state, request_token, proof, renewal_witness=None):
     """Renew only the next source of an already verified original operation."""
-    from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
+    from deploy_test_cycle import CANCEL, receipt_owner, source
     need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
          and not state.get('running')
          and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
@@ -1722,7 +1758,7 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
-    latest = latest_receipts(state).get(prior['gate'])
+    latest = isolated_successor(state, prior)
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             need(renewal_witness is None, 'historical witness requires complete successor')
@@ -1754,6 +1790,16 @@ def reconcile(state, occurrence_id, proof, renewal_witness=None):
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
+        existing = [entry for entry in state.get('reconciled_owners', {}).values()
+                    if entry.get('kind') == KIND and entry.get('purpose') == 'isolated-validation'
+                    and entry.get('token') == proof.get('request_token')]
+        if proof.get('purpose') == 'isolated-validation' and existing:
+            need(len(existing) == 1, 'one prior reconciliation required')
+            prior = existing[0]
+            need(occurrence_id in {prior['token'], prior.get('occurrence')}, 'original renewal selector')
+            if (occurrence_id == prior['token'] or proof != prior.get('proof')
+                    or renewal_witness is not None):
+                return renew_isolated_validation(state, prior['token'], proof, renewal_witness)
         if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
                 and proof.get('purpose') == 'isolated-validation'):
             return renew_isolated_validation(state, occurrence_id, proof, renewal_witness)
