@@ -65,6 +65,97 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.summary_status(['FAIL', 'UNVERIFIED']), 'UNVERIFIED')
         self.assertEqual(adapter.summary_status([]), 'UNVERIFIED')
 
+    def retried_fixture(self, final='failed'):
+        item, events, report = self.fixture()
+        first = copy.deepcopy(events[1:-1])
+        second = [dict(row, retry=1) for row in first]
+        second[-1]['status'] = final
+        events = [events[0], *first, *second, events[-1]]
+        events[-1]['status'] = 'passed' if final == 'passed' else 'failed'
+        results = report['suites'][0]['specs'][0]['tests'][0]['results']
+        results.append(dict(copy.deepcopy(results[0]), retry=1, status=final))
+        return item, events, report
+
+    def test_one_native_retry_has_complete_attempt_evidence(self):
+        for final, expected in [('failed', 'FAIL'), ('timedOut', 'FAIL'), ('passed', 'PASS')]:
+            with self.subTest(final=final):
+                item, events, report = self.retried_fixture(final)
+                self.assertEqual(adapter.classify_lane('ui', [item], report, events),
+                                 {adapter.case_key('ui', item): expected})
+                self.assertEqual(report['suites'][0]['specs'][0]['tests'][0]['results'][0]['errors'],
+                                 [{'message': 'expect received false'}])
+
+    def test_retry_cannot_repair_missing_or_contradictory_lifecycle(self):
+        for defect in ('missing_first_hook', 'missing_retry_hook', 'first_hook_error',
+                       'retry_hook_error', 'missing_first_result', 'extra_retry', 'wrong_retry',
+                       'event_retry', 'status_mismatch', 'first_pass', 'first_skipped',
+                       'retry_interrupted', 'duplicate_event'):
+            with self.subTest(defect=defect):
+                item, events, report = self.retried_fixture('passed')
+                results = report['suites'][0]['specs'][0]['tests'][0]['results']
+                if defect == 'missing_first_hook': events.pop(2)
+                if defect == 'missing_retry_hook': events.pop(6)
+                if defect == 'first_hook_error': events[2]['ok'] = False
+                if defect == 'retry_hook_error': events[6]['ok'] = False
+                if defect == 'missing_first_result': results.pop(0)
+                if defect == 'extra_retry': results.append(dict(results[-1], retry=2))
+                if defect == 'wrong_retry': results[1]['retry'] = 2
+                if defect == 'event_retry': events[5]['retry'] = 0
+                if defect == 'status_mismatch': events[8]['status'] = 'failed'
+                if defect == 'first_pass': results[0]['status'] = events[4]['status'] = 'passed'
+                if defect == 'first_skipped': results[0]['status'] = events[4]['status'] = 'skipped'
+                if defect == 'retry_interrupted': results[1]['status'] = events[8]['status'] = 'interrupted'
+                if defect == 'duplicate_event': events.insert(5, copy.deepcopy(events[4]))
+                self.assertEqual(set(adapter.classify_lane('ui', [item], report, events).values()),
+                                 {'UNVERIFIED'})
+
+    def test_actual_playwright_retry_keeps_final_failure_and_flaky_first_error(self):
+        import os
+        import deploy_test_quarantine as quarantine
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            pkg = Path(subprocess.check_output(
+                ['node', '-p', "require.resolve('@playwright/test')"], cwd=ROOT / 'front-end', text=True
+            ).strip())
+            (folder / 'fixture.spec.cjs').write_text(
+                f"const {{test,expect}} = require({json.dumps(str(pkg))});\n"
+                "test('final assertion',()=>expect(1).toBe(2));\n"
+                "test('retried pass',({},info)=>expect(info.retry).toBe(1));\n"
+                "test.describe('setup',()=>{test.beforeEach(()=>{throw Error('setup failed')});"
+                "test('not executed',()=>{});});\n")
+            (folder / 'playwright.config.cjs').write_text(
+                "module.exports={testDir:'.',retries:1,workers:1,projects:[{name:'chromium'}]};")
+            progress = folder / 'progress.jsonl'
+            env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
+                   'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json'),
+                   'DEPLOY_GATE_PROGRESS': str(progress), 'DEPLOY_GATE_CASE': 'semantic-stack'}
+            reporters = ['json', str(ROOT / 'scripts/deploy-semantic-reporter.cjs'),
+                         str(ROOT / 'front-end/src/tests/gate-progress/playwrightReporter.ts')]
+            proc = subprocess.run([*adapter.playwright_command(ROOT), 'test',
+                                   '--reporter=' + ','.join(reporters)], cwd=folder, env=env,
+                                  capture_output=True, timeout=45)
+            self.assertEqual(proc.returncode, 1, proc.stderr.decode())
+            events = [json.loads(line) for line in (folder / 'events.jsonl').read_text().splitlines()]
+            report = json.loads((folder / 'report.json').read_text())
+            cases = adapter.classify_lane('ui', events[0]['tests'], report, events)
+            self.assertEqual(sorted(cases.values()), ['FAIL', 'PASS', 'UNVERIFIED'])
+            flaky = quarantine.gate_outcomes(progress)['flaky']
+            self.assertEqual(len(flaky), 1)
+            self.assertEqual(flaky[0]['attempts'], 2)
+            self.assertIn('retried pass', flaky[0]['unit'])
+            self.assertIn('expect(received).toBe(expected)', flaky[0]['detail'])
+            raw_flaky = [json.loads(line) for line in progress.read_text().splitlines()
+                         if json.loads(line)['status'] == 'FLAKY']
+            self.assertEqual(len(raw_flaky), 1)
+            self.assertIn('Expected: 1', raw_flaky[0]['detail'])
+            final_flaky = adapter.native_flaky('ui', events[0]['tests'], report, cases)
+            self.assertEqual(len(final_flaky), 1)
+            self.assertEqual(final_flaky[0]['unit'], raw_flaky[0]['unit'])
+            self.assertEqual(final_flaky[0]['attempts'], 2)
+            self.assertIn('Expected: 1', final_flaky[0]['detail'])
+            progress.unlink()  # Final evidence survives loss of the advisory file.
+            self.assertEqual(adapter.native_flaky('ui', events[0]['tests'], report, cases), final_flaky)
+
     def run_worker(self, defect=None):
         import deploy_test_worker as worker
         import deploy_test_result as result_contract

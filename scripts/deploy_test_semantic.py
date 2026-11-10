@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """One native semantic-stack sweep, exact per-Playwright-case evidence. No aggregate credit."""
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -64,23 +66,60 @@ def classify_lane(lane, expected, report, events):
             if len(tests) != 1 or tests[0].get('expectedStatus') != 'passed':
                 continue
             results = tests[0]['results']
-            if len(results) != 1 or results[0].get('retry') != 0:
+            # The deploy config permits exactly one automatic retry. Both attempts
+            # must have their own complete, corroborated lifecycle; a retry never
+            # repairs missing hooks, interrupted execution or missing evidence.
+            if (len(results) not in (1, 2)
+                    or [r.get('retry') for r in results] != list(range(len(results)))
+                    or (len(results) == 2 and results[0].get('status') not in ('failed', 'timedOut'))):
                 continue
-            result = results[0]
-            # Native Before Hooks completes before Playwright invokes the body;
-            # After Hooks completes after it. A failed hook is not a test failure.
             shape = [('testBegin', None), ('hookEnd', 'Before Hooks'),
                      ('hookEnd', 'After Hooks'), ('testEnd', None)]
-            if ([(e.get('event'), e.get('title')) for e in own] != shape
-                    or any(e.get('retry') != 0 for e in own)
-                    or not all(e.get('ok') is True for e in own if e['event'] == 'hookEnd')
-                    or own[-1].get('status') != result.get('status')):
+            if len(own) != len(shape) * len(results):
                 continue
-            cases[case_key(lane, item)] = {'passed': 'PASS', 'failed': 'FAIL',
-                                         'timedOut': 'FAIL'}.get(result.get('status'), 'UNVERIFIED')
+            verified = True
+            for retry, result in enumerate(results):
+                attempt = own[retry * len(shape):(retry + 1) * len(shape)]
+                if ([(e.get('event'), e.get('title')) for e in attempt] != shape
+                        or any(e.get('retry') != retry for e in attempt)
+                        or not all(e.get('ok') is True for e in attempt if e['event'] == 'hookEnd')
+                        or attempt[-1].get('status') != result.get('status')
+                        or result.get('status') not in ('passed', 'failed', 'timedOut')):
+                    verified = False
+                    break
+            if verified:
+                # A retried pass retains its first error in the native report;
+                # the existing progress reporter separately opens FLAKY attribution.
+                cases[case_key(lane, item)] = 'PASS' if results[-1]['status'] == 'passed' else 'FAIL'
     except (KeyError, TypeError, ValueError):
         return dict.fromkeys(cases, 'UNVERIFIED')
     return cases
+
+
+def native_flaky(lane, expected, report, cases):
+    """Final native evidence, independent of best-effort live progress delivery."""
+    from deploy_gate_progress import row
+    rows = {item['id']: item for item in specs(report['suites'])}
+    outcomes = []
+    for item in expected:
+        if cases[case_key(lane, item)] != 'PASS':
+            continue
+        results = rows[item['id']]['tests'][0]['results']
+        if len(results) != 2:
+            continue
+        config = report['config']
+        file = (Path(config['rootDir']) / item['file']).relative_to(Path(config['configFile']).parent)
+        unit = file.as_posix() + ' > ' + ' > '.join(item['title'][1:])
+        detail = '\n'.join(error.get('message') or error.get('value') or ''
+                           for error in results[0].get('errors', []))
+        detail = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', detail)
+        finished = datetime.fromisoformat(results[-1]['startTime'].replace('Z', '+00:00')).timestamp()
+        finished += results[-1]['duration'] / 1000
+        if not detail or not math.isfinite(finished):
+            raise ValueError('retried pass lacks original failure evidence')
+        outcomes.append(row(unit, 'FLAKY', case='semantic-stack', scope='test', detail=detail,
+                            attempts=2, at=finished))
+    return outcomes
 
 
 def events_at(path):
@@ -183,7 +222,7 @@ def _execute(request, root):
     started = time.time()
     with (directory / 'runner.log').open('wb') as log:
         code, timeout, cancelled, lingering = run_command(RUNNER, cwd=root, env=env, output=log, timeout=budget)
-    cases, errors, lane_ends = {}, [], {}
+    cases, errors, lane_ends, flakes = {}, [], {}, []
     hashes = {}
     for lane in LANES:
         try:
@@ -191,9 +230,12 @@ def _execute(request, root):
             for path in paths:
                 hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
             events = events_at(paths[1])
-            cases.update(classify_lane(lane, selected[lane], read(paths[0]), events))
+            report = read(paths[0])
+            lane_cases = classify_lane(lane, selected[lane], report, events)
+            flakes.extend(native_flaky(lane, selected[lane], report, lane_cases))
+            cases.update(lane_cases)
             lane_ends[lane] = events[-1].get('status') if events and events[-1].get('event') == 'end' else None
-        except (OSError, ValueError, TypeError) as error:
+        except (OSError, ValueError, TypeError, KeyError) as error:
             errors.append(lane + ': ' + type(error).__name__)
             cases.update(dict.fromkeys([case_key(lane, row) for row in selected[lane]], 'UNVERIFIED'))
     cleaned = False
@@ -228,7 +270,8 @@ def _execute(request, root):
     evidence = {'artifacts': hashes, 'artifact_directory': str(directory),
                 'artifact_paths': {name: str(directory / name) for name in hashes},
                 'stack': lifecycle, 'errors': errors, 'inventory': selected,
-                'native_cases': native_cases, 'reported_native_cases': reported_native_cases}
+                'native_cases': native_cases, 'reported_native_cases': reported_native_cases,
+                'native_flaky': flakes}
     result = {key: request[key] for key in ('token', 'source', 'gate')}
     result.update(cases=cases, complete=cases['semantic-stack'] != 'UNVERIFIED',
                   cleanup_complete=cleaned and not lingering, reused=False, native_exit=code,

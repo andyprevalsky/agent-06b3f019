@@ -597,6 +597,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     complete = False
     reason = None
     worker_evidence = {}
+    native_flaky = []
     if gate.get('result_transport') == 'stdout':
         try:
             if (folder / 'output.log').stat().st_size > MAX_RECEIPT_BYTES:
@@ -630,6 +631,20 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
             else:
                 raw_cases, complete = validate_result(result, request, code,
                     invalid_process=timed_out or cancelled or lingering)
+            # The final source-bound result retains retry outcomes even when
+            # best-effort live progress was unavailable or a transport fell back.
+            for check, evidence in worker_evidence.items():
+                if not isinstance(evidence, dict):
+                    continue
+                rows = evidence.get('native_flaky', [])
+                if not isinstance(rows, list):
+                    raise ValueError('invalid final native retry outcomes')
+                for row in rows:
+                    if (not progress.valid(row) or row['status'] != 'FLAKY'
+                            or row.get('attempts') != 2 or row.get('case') != check
+                            or check not in active or not math.isfinite(row['at'])):
+                        raise ValueError('invalid final native retry outcome')
+                    native_flaky.append({**row, 'log': str(result_path)})
             cases.update(raw_cases)
             valid = True
         except (KeyError, TypeError, ValueError) as error:
@@ -691,7 +706,13 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result['worker_evidence'] = worker_evidence
     result['resource_skips'] = qualified
     # Quarantined rows never change the verdict above; FLAKY rows open their attribution in record().
-    result.update(quarantine.gate_outcomes(folder / 'progress.jsonl'))
+    outcomes = quarantine.gate_outcomes(folder / 'progress.jsonl')
+    if valid:
+        # Final evidence is authoritative; duplicate live rows open no second occurrence.
+        merged = {(r.get('case'), r['unit']): r for r in outcomes['flaky']}
+        merged.update({(r.get('case'), r['unit']): quarantine.slim(r) for r in native_flaky})
+        outcomes['flaky'] = list(merged.values())
+    result.update(outcomes)
     result['worker_result'] = str(result_path) if result_path.exists() else None
     if teardown is not None:
         result['teardown'] = teardown

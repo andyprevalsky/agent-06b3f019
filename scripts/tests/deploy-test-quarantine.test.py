@@ -91,6 +91,46 @@ class CycleQuarantine(unittest.TestCase):
         self.assertEqual(0, code)
         return out.getvalue()
 
+    def final_retry_evidence(self, row, live=False):
+        code = "import atexit\n"
+        if live:
+            code += "p.report('test_flaky_unit','FLAKY',case='a',attempts=2,detail='first error')\n"
+        code += ("def attach_final():\n"
+                 " path=os.environ['DEPLOY_GATE_RESULT']\n"
+                 " result=json.load(open(path))\n"
+                 " result['evidence']={'a':{'native_flaky':[%r]}}\n"
+                 " json.dump(result,open(path,'w'))\n"
+                 "atexit.register(attach_final)\n") % row
+        return self.run_gate(code)
+
+    def test_final_native_retry_opens_attribution_without_live_progress(self):
+        row = progress.row('test_flaky_unit', 'FLAKY', case='a', attempts=2, detail='original first failure')
+        self.final_retry_evidence(row)
+        self.assertTrue(self.state['ready'])
+        [occurrence] = self.state['flaky']
+        self.assertEqual(occurrence['unit'], row['unit'])
+        self.assertEqual(occurrence['detail'], 'original first failure')
+        self.assertTrue(Path(occurrence['evidence']).is_file())
+        self.assertIn('lack /RCA attribution', c.pending_completion_block(self.state))
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+
+    def test_final_and_live_retry_metadata_open_only_one_occurrence(self):
+        row = progress.row('test_flaky_unit', 'FLAKY', case='a', attempts=2, detail='original first failure')
+        self.final_retry_evidence(row, live=True)
+        self.assertEqual(len(self.state['flaky']), 1)
+        result = self.state['attempts'][-1]['results'][0]
+        self.assertEqual(len(result['flaky']), 1)
+        self.assertEqual(result['flaky'][0]['detail'], 'original first failure')
+
+    def test_foreign_final_retry_metadata_cannot_grant_a_complete_pass(self):
+        row = progress.row('test_flaky_unit', 'FLAKY', case='foreign', attempts=2)
+        self.final_retry_evidence(row)
+        self.assertFalse(self.state['ready'])
+        result = self.state['attempts'][-1]['results'][0]
+        self.assertFalse(result['complete'])
+        self.assertEqual(set(result['cases'].values()), {'UNVERIFIED'})
+        self.assertIn('invalid final native retry outcome', result['reason'])
+
     def test_quarantined_fail_is_non_blocking_and_reported(self):
         printed = self.run_gate(
             "p.report('test_flaky_unit','QUARANTINED_FAIL',case='a',detail='AssertionError: boom',quarantine=%r)\n"
