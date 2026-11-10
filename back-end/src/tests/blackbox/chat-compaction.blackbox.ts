@@ -30,6 +30,7 @@ import {
   PROD_CHAT_SUBAGENT_LEAK_SPAWN_RESULT_MARKER,
 } from '../fixtures/chat-subagent-leak-prod-3b5c2813';
 import { COMPACTION_SUMMARY_PREFIX } from '../../providers/chat/chatCompactionPrompts';
+import { testOversizedRecentToolCompaction } from './chat-compaction-pressure.cases';
 import {
   filterInternalSubagentMessages,
   isInternalSubagentMessage,
@@ -99,6 +100,10 @@ function makeMessages(count: number, textSize = 2_000): ChatMessage[] {
 }
 
 const tests: Array<[string, () => Promise<void> | void]> = [
+  [
+    'oversized recent tool results can compact without changing raw history',
+    testOversizedRecentToolCompaction,
+  ],
   [
     'projection keeps checkpoint tail and hides raw pre-checkpoint rows',
     () => {
