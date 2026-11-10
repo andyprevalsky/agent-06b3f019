@@ -239,9 +239,7 @@ test('desktop opening ASCII stays centered on the large grid tile', async ({ pag
     if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     if (HAS_INJECTED_SESSION) {
-      await expect(page.getByTestId('terminal-main-content')).toHaveClass(
-        /md:pl-\[var\(--rose-bar-offset,64px\)\]/,
-      );
+      await expect(page.getByTestId('terminal-main-content')).toHaveClass(/md:pl-\[64px\]/);
     }
     const frame = page.locator('pre[data-ascii-layer="frame"]').first();
     await expect(frame).toBeVisible();

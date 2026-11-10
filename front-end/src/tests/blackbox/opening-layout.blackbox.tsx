@@ -29,9 +29,7 @@ it('anchors the desktop opening loader to the viewport rather than the sidebar-i
   );
   localStorage.setItem('app-user', JSON.stringify(user));
   renderWithProviders(<Terminal />);
-  expect(await screen.findByTestId('terminal-main-content')).toHaveClass(
-    'md:pl-[var(--rose-bar-offset,64px)]',
-  );
+  expect(await screen.findByTestId('terminal-main-content')).toHaveClass('md:pl-[64px]');
   expect(await screen.findByTestId('terminal-opening-loader')).toHaveClass(
     'absolute',
     'md:fixed',
