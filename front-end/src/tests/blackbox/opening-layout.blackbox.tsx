@@ -38,3 +38,11 @@ it('anchors the desktop opening loader to the viewport rather than the sidebar-i
     'md:inset-0',
   );
 });
+
+it('keeps the desktop caption at its November 3 reference position', async () => {
+  renderWithProviders(<Terminal />);
+  expect(await screen.findByTestId('terminal-opening-caption-slot')).toHaveClass(
+    'md:!mt-3',
+    'md:-translate-y-1/2',
+  );
+});

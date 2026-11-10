@@ -33,7 +33,9 @@ interface ChatScrollAreaProps {
 /** Phone only: the caption is anchored inside the large grid tile (429px square
  * centered at 40% of the shell), 5.5rem above its bottom edge; the loader box
  * starts below the mobile header, so that offset is subtracted. On desktop the
- * caption is out of flow so only the art determines its grid-centered position. */
+ * caption keeps its November 3 position: half the original gap below the art
+ * edge, with its own half-height subtracted. It stays out of flow so the art
+ * remains independently centered. */
 /** Phone only: the art is absolutely centered 2.5rem above the large tile's
  * center (tile = 429px square at 40% of the shell; the loader box starts below
  * the mobile header, so that offset is subtracted), leaving the tile's lower
@@ -43,7 +45,7 @@ const OPENING_ASCII_CLASS =
   'relative scale-95 max-md:absolute max-md:left-1/2 max-md:top-[calc(0.4*var(--app-height,100dvh)-var(--mobile-terminal-header-height)-2.5rem)] max-md:-translate-x-1/2 max-md:-translate-y-1/2 max-md:[@media(max-height:720px)]:scale-[0.68] md:translate-y-0 md:scale-100';
 
 const OPENING_CAPTION_SLOT_CLASS =
-  '-mt-3 max-md:absolute max-md:inset-x-0 max-md:top-[calc(0.4*var(--app-height,100dvh)+214.5px-var(--mobile-terminal-header-height)-5.5rem)] max-md:!mt-0 md:absolute md:left-1/2 md:top-full md:-translate-x-1/2';
+  '-mt-3 max-md:absolute max-md:inset-x-0 max-md:top-[calc(0.4*var(--app-height,100dvh)+214.5px-var(--mobile-terminal-header-height)-5.5rem)] max-md:!mt-0 md:absolute md:left-1/2 md:top-full md:!mt-3 md:-translate-x-1/2 md:-translate-y-1/2';
 
 export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: ChatScrollAreaProps) {
   const showLoader = !a.selectedAgentId || a.messages.length === 0;

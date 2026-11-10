@@ -262,3 +262,32 @@ test('desktop opening ASCII stays centered on the large grid tile', async ({ pag
       .toBeLessThan(2);
   }
 });
+
+// Frozen from the November 3 render (0784fff6) in the pinned Playwright browser.
+test('desktop opening caption matches the November 3 reference geometry', async ({ page }) => {
+  for (const reference of [
+    { width: 1440, height: 900, x: 420, y: 518, captionHeight: 32 },
+    { width: 1280, height: 900, x: 339.984375, y: 500.515625, captionHeight: 28.4375 },
+    { width: 768, height: 900, x: 83.984375, y: 470.6875, captionHeight: 22.390625 },
+  ]) {
+    await page.setViewportSize({ width: reference.width, height: reference.height });
+    if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
+    await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+    const caption = page.getByTestId('opening-message-display');
+    await expect
+      .poll(
+        async () => {
+          const box = await caption.boundingBox();
+          if (!box) return Infinity;
+          return Math.max(
+            Math.abs(box.x - reference.x),
+            Math.abs(box.y - reference.y),
+            Math.abs(box.width - 600),
+            Math.abs(box.height - reference.captionHeight),
+          );
+        },
+        { message: 'Caption must match the historical rendered box within a tenth of a CSS pixel' },
+      )
+      .toBeLessThan(0.1);
+  }
+});
