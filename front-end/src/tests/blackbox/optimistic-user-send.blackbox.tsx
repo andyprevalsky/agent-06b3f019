@@ -432,6 +432,15 @@ describe('user bubble meta line', () => {
     vi.unstubAllGlobals();
   });
 
+  it('shows a Copy tooltip when the copy action is hovered', async () => {
+    const user = userEvent.setup();
+    render(<UserBubble message={serverRow()} />);
+    await user.hover(screen.getByRole('button', { name: 'Copy message' }));
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Copy');
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull());
+  });
+
   it('returns to the copy icon after the confirmation expires', async () => {
     vi.useFakeTimers();
     const writeText = vi.fn().mockResolvedValue(undefined);
