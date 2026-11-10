@@ -141,6 +141,7 @@ export interface LlmCapture {
   startedAtMs: number;
 }
 
+/** Capture call identities and the start clock before provider streaming begins. */
 export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
   const trace = currentTraceContext();
   const agentId = payload.agent_id || trace?.agent_id || 'unbound';
@@ -153,6 +154,7 @@ export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
   return { localPath: dumpLlmContext(value), agentId, value, startedAtMs: Date.now() };
 }
 
+/** Register the completed capture with both owners without blocking stream return. */
 export function finishLlmCapture(capture: LlmCapture, patch: Record<string, unknown>): void {
   updateLlmDump(capture.localPath, patch);
   if (!capture.value.root_agent_id) return;
@@ -167,6 +169,7 @@ export function finishLlmCapture(capture: LlmCapture, patch: Record<string, unkn
   ownLlmCapture(capture.agentId, task, capture.value.root_agent_id);
 }
 
+/** Encrypt the complete call under its explicit root, preserving its start time. */
 async function persistLlmCapture(
   capture: LlmCapture,
   patch: Record<string, unknown>

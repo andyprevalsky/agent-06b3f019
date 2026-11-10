@@ -1,4 +1,5 @@
 """Read-only, launch-only reconciliation of sealed native cloud fleet cleanup."""
+import base64
 import copy
 import hashlib
 import json
@@ -213,7 +214,7 @@ def stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, 
          'stopped startup positive terminal boundary')
 
 
-def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
+def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived=None):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
     owner = life['fleet_owner_token']
     audit = fleet_audit_root(root) / owner
@@ -222,11 +223,12 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
          and meta.get('workspace_root') == str(root), 'isolated audit identity')
     tree(audit)
     registry = fleet_ownership_root(root) / owner
-    if registry.exists():
+    registry_present = registry.exists() if archived is None else str(registry / 'meta') in archived
+    if registry_present:
         registered = fields(bound(registry / 'meta'))
         need(all(registered.get(k) == meta.get(k) for k in ('fleet_owner_token', 'run_id', 'workspace_root', 'app'))
              and registered.get('cleanup_policy') in {'reap', 'retain'}
-             and any((registry / k).is_file() for k in
+             and any((registry / k).is_file() if archived is None else str(registry / k) in archived for k in
                      ('runtime-evidence-unconfirmed', 'guest-cleanup-unconfirmed', 'cold-handoff-outgoing')),
              'old resources must remain natively quarantined')
         tree(registry)
@@ -234,10 +236,31 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
         need(meta.get('status') == 'provider-teardown-verified', 'unowned unreleased fleet')
     processes = subprocess.check_output(['ps', '-ax', '-o', 'pid=,pgid=,stat='], text=True)
     pid = int(fleet.name.rsplit('-', 1)[-1])
-    need(pid > 1 and not any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
-                            for r in processes.splitlines() if not r.split()[2].startswith('Z')),
-         'old controller still active')
-    rows = [fields(bound(p)) for p in (audit / 'fresh').iterdir()] if (audit / 'fresh').exists() else []
+    collision = any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
+                    for r in processes.splitlines() if not r.split()[2].startswith('Z'))
+    need(pid > 1, 'old controller identity')
+    if collision and archived is not None:
+        # Only authenticated original registry identity distinguishes a reused PID.
+        identity = fields(bound(registry / 'meta'))
+        need(identity.get('host') == os.uname().nodename and identity.get('pid') == str(pid),
+             'archived controller host/PID identity')
+        # A surviving group without its leader has no proven replacement identity.
+        leader = Path('/proc', str(pid), 'stat')
+        need(leader.is_file(), 'archived controller group identity unproven')
+        retired_local_process(dict(pid=pid, birth=identity.get('pid_start')))
+        leader_start = int(leader.read_text().rsplit(') ', 1)[1].split()[19])
+        for row in processes.splitlines():
+            member, group, status = row.split()
+            if int(group) == pid and not status.startswith('Z'):
+                start = int(Path('/proc', member, 'stat').read_text().rsplit(') ', 1)[1].split()[19])
+                need(start >= leader_start, 'original controller group member remains')
+    else:
+        need(not collision, 'old controller still active')
+    if archived is None:
+        paths = list((audit / 'fresh').iterdir()) if (audit / 'fresh').exists() else []
+    else:
+        paths = [Path(p) for p in proof['files'] if Path(p).parent == audit / 'fresh']
+    rows = [fields(bound(p)) for p in paths]
     need(len({r['machine_id'] for r in rows}) == len(rows), 'duplicate old machine')
     observations = proof['execution_quiescence']
     for row in rows:
@@ -246,7 +269,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
              and row.get('source') == 'fresh-clone' and row.get('app') == meta['app'], 'old resource custody')
         evidence = observations[machine]
         if evidence == {'sealed_native_release': True}:
-            need(not registry.exists() and meta.get('status') == 'provider-teardown-verified'
+            need(not registry_present and meta.get('status') == 'provider-teardown-verified'
                  and row.get('disposition') == 'destroyed-provider-retained', 'native release not sealed')
             local = fleet / 'teardown-ownership'
             seal = tree(local)
@@ -262,7 +285,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
             need(len(pair) == 2 and {r['kind'] for r in pair} == {'machine', 'volume'}, 'provider pair closure')
             stopped_startup = next(r for r in pair if r['kind'] == 'machine')['metadata'].get('state') == 'stopped'
             if stopped_startup:
-                need(registry.exists() and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
+                need(registry_present and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
                 stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document)
             for observed in pair:
                 need(observed['method'] == 'GET' and observed['http_status'] == 200 and observed['no_retry'] is True
@@ -316,7 +339,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
                  'current original execution quiescence unproven')
             for key in ('run', 'backend', 'services'):
                 need(hashlib.sha256(bound(evidence[key])).hexdigest() == value[key + '_sha256'], 'OS payload binding')
-        need(registry.exists() or row.get('disposition') == 'destroyed-provider-retained', 'resource not excluded')
+        need(registry_present or row.get('disposition') == 'destroyed-provider-retained', 'resource not excluded')
     return {r['machine_id']: r['volume_id'] for r in rows}
 
 
@@ -962,9 +985,35 @@ def inventory_init_failure(root, runs, campaign, request, receipt, adapter, boun
         need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
 
 
-def validate(receipt, owner, proof):
+def quarantine_bytes(archive, proof, root):
+    """Authenticate original mutable audit/registry bytes against the admitted proof."""
+    from deploy_test_cycle import MAX_RECEIPT_BYTES
+    need(isinstance(archive, dict) and set(archive) == {'kind', 'receipt_sha256', 'files'}
+         and archive['kind'] == 'original-quarantine-bytes-v1'
+         and archive['receipt_sha256'] == proof['receipt_sha256']
+         and isinstance(archive['files'], dict) and archive['files'], 'quarantine archive identity')
+    runs = root / '.context/deploy-cloud' / hashlib.sha256(proof['request_token'].encode()).hexdigest() / 'runs'
+    result, total = {}, 0
+    for name, encoded in archive['files'].items():
+        path = Path(name)
+        local = path.is_relative_to(runs) and len(path.relative_to(runs).parts) >= 3 and path.relative_to(runs).parts[1] == 'teardown-ownership'
+        need(name in proof['files'] and path.is_absolute() and path.resolve() == path
+             and (local or any(path.is_relative_to(base) for base in (fleet_audit_root(root), fleet_ownership_root(root)))),
+             'quarantine archive scope')
+        need(isinstance(encoded, str) and len(encoded) <= 2 * MAX_RECEIPT_BYTES, 'quarantine archive size')
+        raw = base64.b64decode(encoded, validate=True)
+        total += len(raw)
+        need(total <= MAX_RECEIPT_BYTES and hashlib.sha256(raw).hexdigest() == proof['files'][name],
+             'quarantine archive bytes changed')
+        result[name] = raw
+    return result
+
+
+def validate(receipt, owner, proof, *, quarantine_archive=None):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
+    need(quarantine_archive is None or proof.get('purpose') == 'isolated-validation',
+         'archive overlay requires historical isolated proof')
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
     need(set(owner) == {'request_token', 'worker_root', 'native_cleanup_reference'}, 'unsupported owner shape')
     token, root = receipt['token'], Path(owner['worker_root'])
@@ -985,6 +1034,7 @@ def validate(receipt, owner, proof):
     confirmed = proof['confirmed_at']
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
+    archived = None if quarantine_archive is None else quarantine_bytes(quarantine_archive, proof, root)
     bindings, used = proof['files'], set()
     run_artifacts = set()
     raw_remaining = [MAX_RAW_RUN_PROOF_BYTES]
@@ -992,6 +1042,7 @@ def validate(receipt, owner, proof):
     need(isinstance(bindings, dict), 'missing file bindings')
 
     def bound(path, limit=MAX_RECEIPT_BYTES, *, historical_head=None):
+        """Read original bytes and require the original admitted SHA-256 binding."""
         path = Path(path)
         historical_head = historical_head or historical_sources.get(str(path))
         need(path.is_absolute() and path.resolve() == path and not path.is_symlink(), 'noncanonical proof file')
@@ -1002,6 +1053,9 @@ def validate(receipt, owner, proof):
             need(relative.parts[0] == 'scripts', 'historical producer scope')
             raw = subprocess.check_output(['git', '-C', str(root), 'show', historical_head + ':' + relative.as_posix()])
             need(len(raw) <= min(limit, MAX_RECEIPT_BYTES), 'proof file too large')
+        elif archived is not None and str(path) in archived:
+            raw = archived[str(path)]
+            need(len(raw) <= limit, 'proof file too large')
         else:
             need(path.is_file(), 'noncanonical proof file')
             need(path.stat().st_size <= limit, 'proof file too large')
@@ -1013,11 +1067,22 @@ def validate(receipt, owner, proof):
         return raw
 
     def document(path, limit=MAX_RECEIPT_BYTES):
+        """Read a hash-bound object through the selected evidence custody path."""
         value = json.loads(bound(path, limit))
         need(isinstance(value, dict), 'expected object')
         return value
 
     def tree(path):
+        """Hash a current audit tree or its authenticated original file inventory."""
+        if archived is not None and any(Path(p).is_relative_to(path) for p in archived):
+            digest = hashlib.sha256()
+            for item in sorted((Path(p) for p in bindings if Path(p).is_relative_to(path)),
+                               key=lambda p: str(p.relative_to(path))):
+                if item.name != 'source-audit':
+                    for value in (str(item.relative_to(path)).encode(), bound(item)):
+                        digest.update(len(value).to_bytes(8, 'big'))
+                        digest.update(value)
+            return digest.hexdigest()
         need(path.resolve() == path and path.is_dir() and not path.is_symlink(), 'audit directory')
         digest = hashlib.sha256()
         for item in sorted(path.rglob('*'), key=lambda p: str(p.relative_to(path))):
@@ -1409,7 +1474,7 @@ def validate(receipt, owner, proof):
             need(len(benches) == len(matrix['tasks'])
                  and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
         if isolated:
-            excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree))
+            excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived))
             continue
         audit = fleet / 'teardown-ownership'
         canonical = fleet_audit_root(root) / owner_token
@@ -1734,6 +1799,8 @@ def isolated_successor(state, prior):
              and len(rows) >= 2, 'unexecuted source refusal identity')
         # Never skip another refusal, an unknown setup failure or a native attempt.
         previous = rows[-2][1]
+        if previous.get('token') == prior['token']:
+            return previous
         need(previous.get('executed') is True and previous.get('complete') is True,
              'source refusal requires immediate complete native predecessor')
         return previous
@@ -1821,7 +1888,8 @@ def retire_known_isolation(state, occurrence_id, proof, key, prior):
     need(state['source'] == state['plan'].get('source') == source(Path(owner['worker_root'])),
          'current source binding')
     reconciliation_occurrence(state, prior, receipt)
-    need(still_bound(prior, receipt, owner, state), 'prior native proof changed')
+    need(still_bound(prior, receipt, owner, state, quarantine_archive=proof.get('quarantine_archive')),
+         'prior native proof changed')
     entry = validate(receipt, owner, proof)
     entry['occurrence'] = prior['occurrence']
     if 'retired_isolation_sha256' in prior:
@@ -1902,14 +1970,17 @@ def reconcile(state, occurrence_id, proof, renewal_witness=None):
     state.setdefault('reconciled_owners', {})[key] = entry
 
 
-def still_bound(entry, receipt, owner, state=None):
+def still_bound(entry, receipt, owner, state=None, *, quarantine_archive=None):
+    """Revalidate original quarantine custody and independent current retirement proof."""
     try:
         if 'retired_isolation_sha256' in entry:
             need(state is not None, 'retired isolation custody state required')
             origin = retired_isolation_origin(state, entry)
             reconciliation_occurrence(state, origin, receipt)
-            need(still_bound(origin, receipt, owner), 'archived isolated proof changed')
-        actual = validate(receipt, owner, entry['proof'])
+            need(still_bound(origin, receipt, owner, quarantine_archive=entry['proof'].get('quarantine_archive')),
+                 'archived isolated proof changed')
+        actual = validate(receipt, owner, entry['proof'], quarantine_archive=quarantine_archive
+                          if entry.get('purpose') == 'isolated-validation' else None)
         return actual == {k: v for k, v in entry.items()
                           if k not in {'occurrence', 'retired_isolation_sha256'}}
     except (OSError, ValueError, KeyError, TypeError):

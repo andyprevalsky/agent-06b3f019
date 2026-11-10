@@ -79,6 +79,7 @@ export interface ChatResult {
 // ============================================
 // Main Chat Handler
 // ============================================
+/** Run routing, tools and answer generation for a chat turn with one evidence root. */
 export async function handleChatMessage(config: {
   agentId: string;
   rootAgentId?: string;

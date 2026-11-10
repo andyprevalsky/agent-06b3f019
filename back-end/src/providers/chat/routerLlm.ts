@@ -146,6 +146,7 @@ function extractStreamableReasoning(
 // ============================================
 // Router LLM Call with Streaming
 // ============================================
+/** Bind router parameters and capture context to the owning chat tree. */
 export function buildRouterCompletionOptions(
   params: ChatCompletionParams & { stage?: RouterStage }
 ): CompletionOptions {
@@ -184,6 +185,7 @@ export function buildRouterCompletionOptions(
 export const buildRouterSystemMessage = (stage: RouterStage, projectContext = '') =>
   markCacheable(ROUTER_STAGES[stage].systemPrompt, projectContext);
 
+/** Route the current chat context within its provider deadline and evidence ownership. */
 export async function callRouterLlm(params: {
   agentId: string;
   rootAgentId?: string;

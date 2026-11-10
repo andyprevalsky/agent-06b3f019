@@ -521,6 +521,7 @@ export async function finalizeAgent(input: AgentFinalizeRequest): Promise<Finali
   }
 }
 
+/** Join root and child capture writers before fencing the terminal archive manifest. */
 async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeAgentResult> {
   const endFixture = await collectFixture(input.rootAgentId, 'end');
   assertArchiveFinalizable(input, endFixture);

@@ -133,6 +133,7 @@ export function shouldAutoCompactChat(
   return estimateContextTokens(messages) >= trigger;
 }
 
+/** Summarize selected context with the chat turn's agent and archive root. */
 async function summarizeMiddle(
   messages: ChatMessage[],
   middleIndices: number[],
@@ -178,6 +179,7 @@ ${NO_TOOLS_TRAILER}`;
   return summary;
 }
 
+/** Compact the middle context using the chat turn's model and evidence ownership. */
 export async function compressChatContext(params: {
   messages: ChatMessage[];
   model: string;
@@ -252,6 +254,7 @@ async function persistCompactionCheckpoint(params: {
   });
 }
 
+/** Enforce the existing context budget and persist successful compaction checkpoints. */
 export async function ensureChatContextWithinBudget(params: {
   agentId: string;
   rootAgentId?: string;

@@ -23,6 +23,7 @@ export interface ChatLlmUsage {
   from_fast_cache: boolean;
 }
 
+/** Initialize per-phase usage before receiving streamed provider counters. */
 export function emptyChatLlmUsage(): ChatLlmUsage {
   return {
     prompt_tokens: 0,
@@ -35,6 +36,7 @@ export function emptyChatLlmUsage(): ChatLlmUsage {
   };
 }
 
+/** Replace phase counters with the latest cumulative provider usage. */
 export function applyChunkUsage(
   target: ChatLlmUsage,
   chunkUsage: {
@@ -52,6 +54,7 @@ export function applyChunkUsage(
   target.cache_read_input_tokens = chunkUsage.cache_read_input_tokens ?? 0;
 }
 
+/** Add phase token counters to the turn totals without changing model metadata. */
 export function accumulateChatLlmUsage(target: ChatLlmUsage, increment: ChatLlmUsage): void {
   target.prompt_tokens += increment.prompt_tokens;
   target.completion_tokens += increment.completion_tokens;

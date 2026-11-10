@@ -45,6 +45,7 @@ const OPENING_ASCII_CLASS =
 const OPENING_CAPTION_SLOT_CLASS =
   '-mt-3 max-md:absolute max-md:inset-x-0 max-md:top-[calc(0.4*var(--app-height,100dvh)+214.5px-var(--mobile-terminal-header-height)-5.5rem)] max-md:!mt-0 md:absolute md:left-1/2 md:top-full md:-translate-x-1/2';
 
+/** Render messages and the responsive empty-chat opening inside the shared scroll area. */
 export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: ChatScrollAreaProps) {
   const showLoader = !a.selectedAgentId || a.messages.length === 0;
   const showNetworkDots =

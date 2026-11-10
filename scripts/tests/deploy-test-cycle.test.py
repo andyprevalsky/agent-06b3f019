@@ -4970,7 +4970,7 @@ class Cycle(unittest.TestCase):
         campaign.mkdir(parents=True)
         parents, jobs = [], []
         for index, name in enumerate(names, 1):
-            fleet = runs / ('20261103-080440-' + str(310000 + index))
+            fleet = runs / ('20261103-080440-' + str(getattr(self, '_cleanup_review_pid', 310001) if index == 1 else 310000 + index))
             shutil.copytree(template, fleet)
             token = f'{index + getattr(self, "_renewal_campaign_offset", 10):032x}'
             audit = fleet / 'teardown-ownership'
@@ -5003,7 +5003,7 @@ class Cycle(unittest.TestCase):
             log.write_text(''.join(f'{self.root}/scripts/run-bench monitor {f}\n' for f in handles))
             jobs.append(dict(job_id=log.stem, task=name, run=1, attempt=1, attempts=[],
                 status='failed' if index == 6 else 'cancelled', controller_exit_code=1,
-                controller_pid=310000 + index, log=str(log)))
+                controller_pid=getattr(self, '_cleanup_review_pid', 310001) if index == 1 else 310000 + index, log=str(log)))
             parents.append(fleet)
         shutil.rmtree(template)
         for f in runs.glob('detached-*'): f.unlink()
@@ -5746,6 +5746,157 @@ class Cycle(unittest.TestCase):
             c.reconcile(copy.deepcopy(original), failure['id'], proof)
         ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
         with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
+
+    def test_cleanup_review_refusal_directly_after_original(self):
+        """The actual six-field prelaunch refusal permits only source renewal."""
+        state, paths, proof, gate, packet, receipt = self.renewal_state()
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False,
+            cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=copy.deepcopy(state['source']),
+            reason='native cleanup: next source/inventory binding')
+        state['attempts'].append(dict(phase='final', source=copy.deepcopy(state['source']), results=[refusal]))
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        for mutation in ('executed', 'token', 'cases', 'reason', 'source', 'interrupted', 'duplicate-refusal'):
+            candidate = copy.deepcopy(state)
+            row = candidate['attempts'][-1]['results'][0]
+            if mutation == 'cases': row['cases'].pop(gate['checks'][0])
+            elif mutation == 'reason': row['reason'] = 'unknown setup failure'
+            elif mutation == 'source': row['source'] = proof['source']
+            elif mutation == 'interrupted': candidate['attempts'][-1]['interrupted'] = True
+            elif mutation == 'duplicate-refusal': candidate['attempts'].append(copy.deepcopy(candidate['attempts'][-1]))
+            else: row[mutation] = True
+            before = copy.deepcopy(candidate)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                c.reconcile(candidate, receipt['token'], incoming)
+            self.assertEqual(before, candidate)
+        with self.assertRaises(ValueError):
+            c.reconcile(copy.deepcopy(state), receipt['token'], incoming, renewal_witness={})
+        before = copy.deepcopy(state)
+        c.reconcile(state, receipt['token'], incoming)
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['failures'], state['failures'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['cleanup_complete'])
+        request = dict(token='fresh-after-direct-refusal', source=state['source'], checks=gate['checks'], skips={})
+        self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
+
+    def cleanup_review_retirement_state(self, birth=None):
+        """Capture original quarantine bytes before the native audit/registry transition."""
+        import base64
+        import shutil
+        import types
+        import deploy_test_native_cleanup as native
+        state, occurrence, paths, normal, parents = self.campaign_recon_state()
+        # Normalize the linked canary through the existing supported sealed fixture.
+        old = parents[0].parent / 'canary'
+        renamed = old.with_name('20261103-080441-2147483001')
+        old.rename(renamed)
+        for tree in (renamed, self.root / '.git/cloudbench-fleet-audits' / ('2' * 32)):
+            for path in tree.rglob('*'):
+                if path.is_file(): path.write_bytes(path.read_bytes().replace(b'run_id=canary', ('run_id='+renamed.name).encode()))
+        import hashlib
+        digest = hashlib.sha256()
+        for path in sorted((renamed/'teardown-ownership').rglob('*'), key=lambda p: str(p.relative_to(renamed/'teardown-ownership'))):
+            if path.is_file() and path.name != 'source-audit':
+                for raw in (str(path.relative_to(renamed/'teardown-ownership')).encode(), path.read_bytes()):
+                    digest.update(len(raw).to_bytes(8,'big')); digest.update(raw)
+        canonical = self.root / '.git/cloudbench-fleet-audits' / ('2'*32)
+        (renamed/'teardown-ownership/source-audit').write_text(f'path={canonical}\nsha256={digest.hexdigest()}\n')
+        life = c.read(renamed / '_batch/lifecycle.json'); life.update(run_id=renamed.name, audit_sha256=digest.hexdigest())
+        c.write(renamed / '_batch/lifecycle.json', life)
+        for path in Path(normal['campaign']).glob('*.log'):
+            path.write_text(path.read_text().replace(str(old), str(renamed)))
+        normal['files'] = {p.replace(str(old), str(renamed)): v for p,v in normal['files'].items()}
+        normal['files'] = {p: c.sha_file(p) for p in normal['files']}
+        fleet = parents[0]
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        audit = self.root / '.git/cloudbench-fleet-audits' / owner
+        original_meta = (audit / 'meta').read_bytes()
+        (audit / 'meta').write_bytes(original_meta.replace(b'status=provider-teardown-verified', b'status=incomplete'))
+        local = fleet / 'teardown-ownership'
+        local_meta = (local / 'meta').read_bytes()
+        (local / 'meta').write_bytes(local_meta.replace(b'status=provider-teardown-verified', b'status=incomplete'))
+        registry = self.root / '.git/cloudbench-fleet-ownership' / owner
+        registry.mkdir(parents=True)
+        identity = '' if birth is None else f'host={os.uname().nodename}\npid={fleet.name.rsplit("-",1)[-1]}\npid_start={birth}\n'
+        (registry / 'meta').write_text((audit / 'meta').read_text() + 'cleanup_policy=reap\n' + identity)
+        (registry / 'runtime-evidence-unconfirmed').write_text('original native quarantine obligation\n')
+        isolated = dict(copy.deepcopy(normal), purpose='isolated-validation',
+            validation_source=copy.deepcopy(state['source']), execution_quiescence={'machine1': {'sealed_native_release': True}})
+        archived = [p for tree in (audit, registry, local) for p in tree.rglob('*') if p.is_file()]
+        isolated['files'].update({str(p): c.sha_file(p) for p in archived})
+        # Scope a recorded process observation to this module; never patch global subprocess.
+        observed = types.SimpleNamespace(**vars(subprocess))
+        observed.check_output = lambda args, **kw: '' if args[:2] == ['ps', '-ax'] else subprocess.check_output(args, **kw)
+        with patch.object(native, 'subprocess', observed):
+            c.reconcile(state, occurrence['id'], isolated)
+        prior = copy.deepcopy(state['reconciled_owners'][normal['receipt_sha256']])
+        normal['quarantine_archive'] = dict(kind='original-quarantine-bytes-v1', receipt_sha256=normal['receipt_sha256'],
+            files={str(p): base64.b64encode(p.read_bytes()).decode('ascii') for p in archived})
+        (audit / 'meta').write_bytes(original_meta)
+        (local / 'meta').write_bytes(local_meta)
+        shutil.rmtree(registry)
+        state.update(phase='quick', ready=False, source=c.source(self.root))
+        state['plan']['source'] = copy.deepcopy(state['source'])
+        return state, occurrence, normal, prior, fleet
+
+    def test_cleanup_review_retirement_preserves_quarantine_bytes(self):
+        """A real audit change and removed registry retain independently verified debt bytes."""
+        state, occurrence, proof, prior, fleet = self.cleanup_review_retirement_state()
+        for mutation in ('missing-bytes', 'tamper', 'foreign-path', 'wrong-receipt', 'current-proof'):
+            candidate, incoming = copy.deepcopy(state), copy.deepcopy(proof)
+            archive = incoming['quarantine_archive']
+            path = next(p for p in archive['files'] if p.endswith('runtime-evidence-unconfirmed'))
+            if mutation == 'missing-bytes': archive['files'].pop(path)
+            elif mutation == 'tamper': archive['files'][path] = 'dGFtcGVy'
+            elif mutation == 'foreign-path': archive['files'][str(self.root/'foreign')] = archive['files'].pop(path)
+            elif mutation == 'wrong-receipt': archive['receipt_sha256'] = '0'*64
+            else: incoming['files'][path] = '0'*64
+            before = copy.deepcopy(candidate)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                c.reconcile(candidate, occurrence['id'], incoming)
+            self.assertEqual(before, candidate)
+        before = copy.deepcopy(state)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual([prior], state['reconciled_owner_history'])
+        import deploy_test_native_cleanup as native
+        receipt = state['attempts'][0]['results'][0]
+        with self.assertRaisesRegex(ValueError, 'archive overlay requires historical isolated proof'):
+            native.validate(receipt, prior['owner'], proof, quarantine_archive=proof['quarantine_archive'])
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['failures'], state['failures'])
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted'])
+        self.assertNotIn('purpose', entry)
+        self.assertEqual([], c.isolated_admissions(state, occurrence['gate']))
+        same = copy.deepcopy(state); c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(same, state)
+        current = fleet / 'teardown-ownership/meta'
+        raw = current.read_bytes(); current.write_bytes(raw + b'tampered=1\n')
+        with self.assertRaises(ValueError): c.isolated_admissions(state, occurrence['gate'])
+        current.write_bytes(raw)
+        path = next(iter(entry['proof']['quarantine_archive']['files']))
+        entry['proof']['quarantine_archive']['files'][path] = 'dGFtcGVy'
+        with self.assertRaises(ValueError): c.isolated_admissions(state, occurrence['gate'])
+
+    def test_cleanup_review_retired_pid_reuse_and_exact_live_identity(self):
+        """A reused real PID/PGID is distinct from its authenticated original birth."""
+        import deploy_test_native_cleanup as native
+        self._cleanup_review_pid = os.getpid()
+        old_birth = 'proc-start:00000000-0000-0000-0000-000000000000:123'
+        state, occurrence, proof, prior, fleet = self.cleanup_review_retirement_state(old_birth)
+        receipt = state['attempts'][0]['results'][0]
+        self.assertFalse(native.still_bound(prior, receipt, prior['owner']), 'ACTIVE isolation must retain live PID checks')
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual([], c.isolated_admissions(state, occurrence['gate']))
+        # Make an independently authenticated original with the actual current birth.
+        self.tearDown(); self.setUp()
+        self._cleanup_review_pid = os.getpid()
+        start = Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19]
+        birth = 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + start
+        state, occurrence, proof, prior, fleet = self.cleanup_review_retirement_state(birth)
+        before = copy.deepcopy(state)
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
 
     def normal_failed_canary_state(self, zero=False):
         import hashlib, shutil

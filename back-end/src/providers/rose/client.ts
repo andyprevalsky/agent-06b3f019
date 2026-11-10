@@ -154,6 +154,7 @@ interface WrapOptions {
   callSite: string;
 }
 
+/** Normalize provider chunks and finalize opted-in capture on completion, error or close. */
 async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const poolSpec = getPool(opts.pool);
   const startedAt = Date.now();

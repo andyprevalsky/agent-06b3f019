@@ -147,6 +147,7 @@ function extractStreamableReasoning(
 // ============================================
 // Generator LLM Call with Streaming
 // ============================================
+/** Bind generator parameters and capture context to the owning chat tree. */
 export function buildGeneratorCompletionOptions(params: ChatCompletionParams): CompletionOptions {
   return {
     model: params.model,
@@ -206,6 +207,7 @@ export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<Gene
   }
 }
 
+/** Stream the chat answer while collecting its content, usage and completion state. */
 async function callGeneratorLlmCore(
   params: GeneratorLlmParams,
   setAttention: (attention: GeneratorAttentionLifecycle) => void

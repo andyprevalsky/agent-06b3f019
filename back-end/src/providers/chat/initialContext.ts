@@ -67,6 +67,7 @@ const defaultDependencies: InitialChatContextDependencies = {
   ensureWithinBudget: ensureChatContextWithinBudget,
 };
 
+/** Load and compact model-visible messages while carrying the chat archive root. */
 export async function loadChatModelMessages(
   config: StartInitialChatContextConfig,
   dependencies: InitialChatContextDependencies = defaultDependencies
