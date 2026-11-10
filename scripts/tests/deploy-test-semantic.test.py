@@ -124,7 +124,7 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.summary_status(['FAIL', 'UNVERIFIED']), 'UNVERIFIED')
         self.assertEqual(adapter.summary_status([]), 'UNVERIFIED')
 
-    def run_worker(self, defect=None):
+    def run_worker(self, defect=None, malformed_event=None):
         import deploy_test_worker as worker
         import deploy_test_result as result_contract
         with tempfile.TemporaryDirectory() as d:
@@ -151,6 +151,8 @@ class SemanticReports(unittest.TestCase):
                     if lane == 'latency' or defect == 'all_pass_nonzero':
                         e[4]['status'] = e[5]['status'] = 'passed'
                         r['suites'][0]['specs'][0]['tests'][0]['results'][0]['status'] = 'passed'
+                    if lane == 'ui' and defect == 'malformed_event':
+                        e.append(malformed_event)
                     (folder / (lane + '.json')).write_text(json.dumps(r))
                     (folder / (lane + '.jsonl')).write_text(''.join(json.dumps(x) + '\n' for x in e))
                 receipt = {'token': request['token'], 'source': freeze, 'ready': True,
@@ -179,6 +181,23 @@ class SemanticReports(unittest.TestCase):
             else:
                 self.assertEqual(result['cases'], {'semantic-stack': 'UNVERIFIED'})
                 self.assertFalse(result['complete'])
+            if defect == 'malformed_event':
+                self.assertEqual(result['evidence']['semantic-stack']['errors'], ['ui: ValueError'])
+                self.assertTrue(result['cleanup_complete'])
+                self.assertEqual(result['native_exit'], 1)
+                self.assertFalse(result['interrupted'])
+                native = result['evidence']['semantic-stack']['native_cases']
+                self.assertEqual(native[adapter.case_key('ui', selected['ui'][0])], 'UNVERIFIED')
+                self.assertEqual(native[adapter.case_key('latency', selected['latency'][0])], 'PASS')
+                captured = Path(result['evidence']['semantic-stack']['artifact_directory'])
+                self.assertEqual(adapter.events_at(captured / 'ui.jsonl')[-1], malformed_event)
+                raw = json.loads((captured / 'ui.json').read_text())
+                self.assertEqual(raw['suites'][0]['specs'][0]['tests'][0]['results'][0]['status'], 'failed')
+
+    def test_malformed_final_native_event_is_unknown_with_lane_diagnostic(self):
+        for value in (1, [], 'x', None):
+            with self.subTest(value=value):
+                self.run_worker('malformed_event', malformed_event=value)
 
     def test_existing_worker_dispatch_one_sweep_original_recipe(self):
         self.run_worker()

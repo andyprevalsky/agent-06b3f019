@@ -103,6 +103,24 @@ run with TMPDIR=/tmp, outside the repository's installed dependency ancestors.
 Final source-bound native gate validation and deployment remain required;
 these local checks do not upgrade the original receipt or the three UI grades.
 
+The full native rerun on commit 8187414b0fe70a2f1f114a05ebac141b9703bc49
+completed with 55 UI PASS, three UI FAIL and five latency PASS. Its aggregate is
+now correctly FAIL with complete=true, native exit one, unchanged source and
+verified stack cleanup. The same three assertions remain separately attributed
+to the existing UI repair owner; the original UNVERIFIED receipt is unchanged.
+
+CodeRabbit review 5836575916 identified a valid remaining caller defect:
+`_execute` accessed the last event after `classify_lane` had rejected a non-object
+JSONL record. The permanent existing-suite regression appends each of 1, an empty
+list, a string and null to an otherwise complete native lifecycle. All four
+reproduce AttributeError against 8187414. Rejecting non-object events inside the
+existing lane try/except preserves UNVERIFIED and the `ui: ValueError` diagnostic
+without broadly suppressing programming errors. The identical regression then
+passes, as does the full thirteen-test owning suite. Cleanup, native exit, the
+healthy latency lane and the original malformed record are explicitly retained.
+The immutable prior capture still produces its three FAIL results. Final
+validation must bind this additional caller repair to its own frozen source.
+
 ## Human feedback
 
 None recorded.

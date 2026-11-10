@@ -45,6 +45,7 @@ def specs(suites):
 
 
 def classify_lane(lane, expected, report, events):
+    """Classify complete native attempt chains; uncertain evidence stays unknown."""
     cases = {case_key(lane, row): 'UNVERIFIED' for row in expected}
     try:
         if (not isinstance(report, dict) or not isinstance(events, list)
@@ -201,6 +202,7 @@ def execute(request, root):
 
 
 def _execute(request, root):
+    """Run one source-bound sweep and retain invalid-lane diagnostics as unknown."""
     if source(root) != request['source'] or request.get('worker_root', str(root)) != str(root):
         raise ValueError('semantic source/worker root differs from request')
     directory = root / '.context/deploy-semantic' / hashlib.sha256(request['token'].encode()).hexdigest()
@@ -227,6 +229,8 @@ def _execute(request, root):
             for path in paths:
                 hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
             events = events_at(paths[1])
+            if any(not isinstance(event, dict) for event in events):
+                raise ValueError('native lifecycle events must be JSON objects')
             cases.update(classify_lane(lane, selected[lane], read(paths[0]), events))
             lane_ends[lane] = events[-1].get('status') if events and events[-1].get('event') == 'end' else None
         except (OSError, ValueError, TypeError) as error:
