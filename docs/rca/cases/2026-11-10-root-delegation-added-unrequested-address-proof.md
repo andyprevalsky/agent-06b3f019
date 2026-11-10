@@ -10,6 +10,7 @@ first_bad_boundary: earliest observed obligation expansion is raw root model spa
 symptoms:
   - delivery_summary requirement remains unverifiable
   - required use of the supplied delivery address remains unverifiable
+  - required shipping_destination remains unverifiable
   - Timeout after 1204s
   - PAUSED
 tags:
@@ -23,6 +24,12 @@ sources:
   - benchmark run d8a675a0-c7e6-48c0-854b-250b5dc3ffc8
   - commit f61b9e9394b0e6cf0bd51f929d682c2ee57a5497
   - plan:.context/agentcard-e2e/stability-proof-20261109/round05-signup-trajectory-rca/receipt.json
+  - agent deb778e9-b87b-47ef-8170-df3245fce861
+  - benchmark run 1f077019-c81f-4d8f-b1a3-69a10c6205c7
+  - commit ec6c24c530ddbb04e1e49672dbda809a8f7a5f18
+  - plan:.context/agentcard-e2e/stability-proof-20261109/postfix05-session-expiry-rca/diagnosis.json
+  - plan:.context/agentcard-e2e/stability-proof-20261109/postfix05-session-expiry-rca/before-results-manifest.json
+  - plan:.context/agentcard-e2e/stability-proof-20261109/postfix05-session-expiry-rca/after-results-manifest.json
 repro: none-recorded
 status: open
 ---
@@ -101,6 +108,64 @@ changed schema-generation/normalization contracts. Here the additional
 obligation was in raw root output, so those downstream repairs are not the
 owning boundary.
 
+### Recurrence after the first general mitigation
+
+On unchanged `ec6c24c530ddbb04e1e49672dbda809a8f7a5f18`, four full eleven-case
+postfix rounds passed. The fifth ended10PASS/1FAIL: the failed case was now
+`browser-auth-session-expires-at-checkout`, root
+`deb778e9-b87b-47ef-8170-df3245fce861`. Its original1200s timeout and1219.0s
+duration produced native `FAILED`/`PAUSED`. The historical55 attempts remain
+54PASS/1FAIL, not five qualified full rounds or new-source proof.
+
+The merchant trail proves the expected authentication recovery completed:
+password sign-in22:49:32Z, deliberate expired-session rejection22:51:13Z,
+password sign-in22:51:41Z, and paid order `ORD-51318213` at22:52:12Z.
+One2123-cent sandbox chain was `CLEARED`/`CONSUMED`, with one card, transfer
+and Stripe intent, zero unlinked transfers, zero capturable funds and closed
+card balance0. Authentication and payment therefore do not explain the
+subsequent completion loop. The root's pause again followed driver timeout.
+
+Raw root request `b7e5282d`, served through user GPT auth as
+`gpt-6.1-sol-gpt`, added a required `shipping_destination` among nine child
+fields although its parent schema required only product URL and order ID.
+The goal asked for the destination shown in confirmation; it did not make
+that observation conditional. All fields and the goal match persisted and
+background inputs. Ten completed verifier requests scored0.5 on absent actual
+destination evidence after independently grounding the paid order; an eleventh
+was unfinished during cleanup. The canonical artifact is
+`agents/benchmarks/runs/20261110_230851_1f077019-c81f-4d8f-b1a3-69a10c6205c7_browser-auth-session-expires-at-checkout.json`,
+SHA256 `b2854ede61ceb45fc3fdd82c0b3b1d10cc3fcfeefae124e127c474dee35c3b67`.
+
+The first mitigation was present in all five actual root tool descriptions,
+with identical description SHA256
+`e232cf37bae091cca8098e8177c2c6eba607fdc6aced9b8a12a7afdfe3601e12`.
+Native offline Codex projection retains the full goal description and schema;
+historical outgoing wire bytes were not captured. Missing deployment or
+projection is not supported. The prior four same-case passes recovered the
+same expiry and used optional/conditional supplementary details. They used
+Foundry while this failure used direct GPT auth; that difference is recorded,
+not a controlled attribution to model capability or provider routing.
+
+The authorized bounded BEFORE diagnostic made five actual model POSTs through
+current canonical same-user/source GPT auth: three exact captured-root inputs
+and two labelled counterfactual controls. Two exact outputs added no explicit
+mandatory actual-destination proof; one required `shipping_summary` was an
+ambiguous extra obligation that could be satisfied by a shipping charge or
+status. Independent review did not classify it as reproduction of the actual
+destination-only deadlock. Both controls preserved explicit user-address and
+wrong-destination correctness. This is a NONDECISIVE reproduction, not0/3 or
+1/3 native failures, not semantic/native PASS, and not a model-capability proof.
+
+All five responses used `gpt-6.1-sol-gpt` and HTTP200; recorded input including
+cache58202 plus output1623 totals59825 tokens, dollar cost UNMETERED. No
+returned tools were dispatched. Private lease release was verified and all94
+original evidence files were unchanged. Current production credentialauthority,
+private lease/thread/cache and unrecorded historical token/account state limit
+fidelity. A preceding retired-localhost setup attempt made0 model POSTs and
+had unverified release; its failed receipt remains intact. No after-model or
+new native outcome was generated. The case remains OPEN without the owning
+causal red/green and unchanged native after proof.
+
 ## Solution
 
 The parent applied the reviewed general mitigation in
@@ -144,11 +209,84 @@ original-goal custody and boundary checks; parent-reported passes do not prove
 the model's delegation choice. The unchanged native
 `browser-auth-signup-purchase` case is the existing behavioral regression.
 No new paid CI, description-string test, prompt nudge, retry or timeout change
-was added. Native after-run proof is pending. Any affected same-source streak
-must restart after this prompt change: all11 scenarios still require five
-consecutive full passes, including financial assertions, recordings and exact
-cleanup. A standalone pass would not satisfy that55-pass acceptance bar or
-the separate production requirements. This case remains OPEN.
+was added. At initial filing, native after-run proof was pending. A subsequent
+focused signup run and four full rounds passed before the recurrence above;
+those outcomes do not establish that the general mitigation eliminated the
+failure class. Original native results remain unchanged. This case remains OPEN.
+
+The next proposal on `307e719d09d4290808b0322adb8eb3d8ca06f9ea` is one hunk
+in the same shared note: supplementary observations stay conditional in
+the delegated goal and optional in `output_schema`, while explicit/standing
+user constraints and all necessary steps/evidence remain strict. Patch SHA256
+is `87c295e35a00993efdceedea01a2c50df237c99f1e566dc31f83eaf8f2692da9`,
+candidate source SHA256
+`c1a71ccb05881cfec457cd2d06d9771cf07558bc54ee9e8e8e02ad32c3680dd1`.
+It is an unproven general policy experiment, not a source-bug or fix claim.
+The exact complete packet and snapshot are retained under
+`.context/agentcard-e2e/stability-proof-20261109/postfix05-session-expiry-rca/proposal/`.
+Fresh independent review grounded the unchanged hunk after correcting a
+packet-only Claude citation overclaim. Reviewer
+`ph7afnee3j0dm6axgjd98jq3tn8htpgr` acknowledged final packet SHA256
+`684da46f96dd15ca0959a9c331b5d20d2190088fe90219a1a3250f22bee4641f`;
+the prompt mechanism gate is clear, without efficacy or outcome certification.
+
+The parent applied that exact hunk, yielding the candidate source hash above.
+The existing public `llm` and `tool-schemas` blackbox domains passed2/2, with
+268 LLM boundary checks; these mocked checks do not establish model choice.
+The authorized AFTER diagnostic completed five actual direct-GPT requests:
+three exact captured-root inputs and the same two labelled controls as BEFORE.
+Full offline native request comparison allowed only the approved description
+change and private cache identity; the six messages and both controls matched.
+
+Independent reviewer `ph7afnee3j0dm6axgjd98jq3tn8htpgr` verified all13 artifact
+hashes and read all five raw AFTER returns against the original request and
+the same controls. In all three generic returns, supplementary delivery
+details were optional or absent, while required purchase confirmation remained.
+Both controls retained explicit profile-address correctness and correction of
+the observed wrong destination before ordering. However, the wrong-destination
+control also demanded matching destination evidence from the order confirmation,
+although its input required correcting checkout before ordering rather than
+confirmation-page address display. That extra source requirement could strand
+a correct paid order when the confirmation omits the destination. This is a
+remaining contract-overreach risk, not a reproduced failure or permission to
+weaken address safety. The controls do not receive a blanket semantic PASS.
+Five responses were HTTP200 on the recorded model route; input including
+cache58362 plus output1608 totals59970 tokens,
+with dollar cost UNMETERED. Across BEFORE/AFTER, ten model requests used119795
+recorded tokens. Both private leases were released and94 original evidence
+files remained unchanged. No returned tool was dispatched. No further model
+calls or retries are authorized under those exhausted budgets.
+
+These observations support investigating the mitigation's intended behavior;
+they do not turn the nondecisive BEFORE sample into a causal failing test.
+There is no decisive owning red/green, controlled capability comparison,
+merchant/verifier outcome from the dry calls, or native after-run proof yet.
+The original native failure stays authoritative and this RCA remains OPEN.
+
+Step5b considered deleting extra model fields, unifying the contract guidance,
+and adding a guard. Field deletion would mutate model-selected schemas and
+could remove necessary constraints. A deterministic parent-field subset would
+reject necessary subtask outputs; a new semantic runtime guard would require
+another unproven decision boundary and extra model calls. The selected bounded
+experiment keeps one existing policy source for goal and schema optionality.
+Hermes's static output-schema guidance requires only fields the parent needs;
+Codex narrows delegated asks to concrete needed output. Their actual static
+mechanisms support the proposal, not a guarantee of compliance. No verifier
+relaxation, classifier, forced completion or new runtime architecture is added.
+
+The parent selected focused repeatability plus full regression as the next
+validation plan: existing boundary checks, at most five separately authorized
+AFTER diagnostics (three exact inputs/two labelled controls), five consecutive
+passes of the exact unchanged failed native case, then one complete eleven-case
+final-source regression sweep, normal deploy gates and separate production
+proof. The prior55-run depth was assistant-selected planning, not an explicit
+user count requirement; choosing this plan does not change catalog criteria,
+timeouts or concurrency or create a new human approval gate. It must be
+reported as focused repeatability plus full regression, never55 passes or five
+full-round qualification. Old54PASS/1FAIL gives no pass credit to changed
+behavior. Application, after calls and native launches remain parent-owned.
+Application and the bounded dry AFTER calls are now recorded above; native
+launches and their financial, recording and cleanup qualification remain pending.
 
 ## Human feedback
 
