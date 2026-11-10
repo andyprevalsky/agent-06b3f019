@@ -2663,6 +2663,7 @@ def recover_round(plan: dict, directory: Path, root: Path, proof: dict) -> None:
          and not CANCEL.is_set(), 'not an orphan executable boundary')
     files = proof.get('files')
     need(isinstance(files, dict) and files, 'reviewed original file hashes required')
+    need(str(state_path) not in files, 'canonical state is bound separately from immutable artifacts')
     for name, expected in files.items():
         need(hashlib.sha256(sealed(Path(name))).hexdigest() == expected, 'original artifact changed: ' + name)
     phase_dir = directory / 'attempts' / str(round_number) / original['phase']
@@ -2776,6 +2777,8 @@ def recover_round(plan: dict, directory: Path, root: Path, proof: dict) -> None:
     proposed = {'kind': 'native-settlement-journal-v1', 'round': round_number, 'positive_credit': False,
                 'proof_digest': digest(proof), 'original_state_hex': original_raw.hex(),
                 'after_state': after, 'receipts': publications}
+    need(len(json.dumps(proposed, indent=2, allow_nan=False).encode()) + 1 <= MAX_RECEIPT_BYTES,
+         'journal exceeds the existing read limit before publication')
     for name, expected in files.items():
         need(hashlib.sha256(sealed(Path(name))).hexdigest() == expected, 'artifact changed during admission')
     namespace_quiet(phase_dir, set())
@@ -3010,6 +3013,8 @@ def main(argv: list[str] | None = None) -> int:
                         or environment_digest() != state["environment"]
                         or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
                     raise ValueError("cycle not complete on exact current source and plan")
+                for gate in isolated_obligation_gates(state):
+                    isolated_admissions(state, gate)
                 blocked = quarantine.attribution_block(state.get("flaky", []), args.root)
                 if blocked:
                     raise ValueError(blocked)

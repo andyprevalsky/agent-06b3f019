@@ -1770,6 +1770,138 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
+def recovered_isolated_successor_v1(state, prior, original, successor):
+    """Committed negative recovery grants source renewal only, never outer execution credit."""
+    import stat
+    import deploy_test_cycle as c
+    from deploy_test_historical_custody import state_identity
+    from deploy_test_interrupted_cleanup import namespace_quiet
+    from deploy_test_process import scan_same_user_processes
+
+    seals = {}
+    def sealed(path):
+        path = Path(path)
+        info = path.lstat()
+        need(path.is_absolute() and path.resolve(strict=True) == path and stat.S_ISREG(info.st_mode)
+             and info.st_uid == os.getuid() and not info.st_mode & 0o022
+             and info.st_size <= c.MAX_RECEIPT_BYTES, 'negative successor unsafe artifact')
+        raw = path.read_bytes()
+        seals[str(path)] = hashlib.sha256(raw).hexdigest()
+        return raw
+
+    def doc(path):
+        value = json.loads(sealed(path))
+        need(isinstance(value, dict), 'negative successor artifact object')
+        return value
+
+    rows = [(a, r) for a in state['attempts'] for r in a.get('results', [])
+            if r.get('gate') == prior['gate'] and r.get('token') == successor.get('token')]
+    need(len(rows) == 1 and rows[0][1] is successor and successor.get('token') != original['token'],
+         'negative successor unique attempt')
+    attempt = rows[0][0]
+    round_number = attempt.get('round')
+    need(type(round_number) is int and round_number > 0 and attempt.get('recovered') is True
+         and attempt.get('positive_credit') is False and not attempt.get('interrupted')
+         and not attempt.get('stale'), 'negative successor recovered attempt')
+    folder = Path(successor['log']).parent
+    directory = folder.parents[3]
+    need(folder == directory / 'attempts' / str(round_number) / attempt['phase'] / prior['gate']
+         and successor['log'] == str(folder / 'output.log'), 'negative successor round locator')
+    journal_path = directory / f'settlement-round{round_number}-journal.json'
+    journal = doc(journal_path)
+    need(doc(directory / f'settlement-round{round_number}-committed.json') ==
+         {'journal_sha256': seals[str(journal_path)]}
+         and set(journal) == {'kind', 'round', 'positive_credit', 'proof_digest', 'original_state_hex',
+                             'after_state', 'receipts'}
+         and journal['kind'] == 'native-settlement-journal-v1' and journal['round'] == round_number
+         and type(journal['round']) is int and journal['positive_credit'] is False,
+         'negative successor committed typed journal')
+    raw = bytes.fromhex(journal['original_state_hex'])
+    snapshot = json.loads(raw)
+    need(isinstance(snapshot, dict) and snapshot['round'] == round_number
+         and snapshot['phase'] == attempt['phase'] and snapshot['phase'] in {'initial', 'focused', 'failed-gates', 'final'}
+         and snapshot.get('ready') is False and 'live_failures' in snapshot
+         and not snapshot.get('running') and not snapshot.get('resume_phase')
+         and snapshot['source'] == snapshot['plan']['source'] == successor['source']
+         and snapshot['plan_digest'] == c.digest(snapshot['plan']), 'negative successor original snapshot')
+    after = journal['after_state']
+    need(after['attempts'] == snapshot['attempts'] + [attempt]
+         and state['attempts'][:len(after['attempts'])] == after['attempts']
+         and attempt.get('source') == snapshot['source']
+         and after['attempts'][-1] == attempt and after.get('ready') is False
+         and journal['receipts'].get(str(folder / 'receipt.json')) == successor
+         and doc(folder / 'receipt.json') == successor, 'negative successor journal projection')
+    recovery = successor['recovery_evidence']
+    need(isinstance(recovery, dict) and set(recovery) == {'files', 'native'}
+         and isinstance(recovery['files'], dict) and recovery['files'], 'negative successor recovery binding')
+    proof = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=round_number,
+        phase=snapshot['phase'], state_sha256=hashlib.sha256(raw).hexdigest(), plan_digest=snapshot['plan_digest'],
+        files=recovery['files'], native={r['gate']: r['recovery_evidence']['native']
+            for r in journal['receipts'].values()})
+    need(c.digest(proof) == journal['proof_digest'], 'negative successor reviewed recovery proof')
+    for path, expected in recovery['files'].items():
+        need(hashlib.sha256(sealed(path)).hexdigest() == expected, 'negative successor original file changed')
+    request_path, result_path = folder / 'request.json', folder / 'result.json'
+    need(all(str(p) in recovery['files'] for p in (request_path, result_path)),
+         'negative successor request/result seals')
+    request, result = doc(request_path), doc(result_path)
+    historical, = [g for g in snapshot['plan']['gates'] if g['name'] == prior['gate']]
+    checks, skips = request['checks'], request['skips']
+    need(historical.get('native_cloud') is True and historical['command'] == successor['command']
+         and request.get('worker_recipe') == historical.get('worker_recipe')
+         and successor['execution_binding'] == dict(contract_digest=c.digest(historical),
+             environment=snapshot['environment'], input_fingerprint=snapshot['input_fingerprints'][prior['gate']])
+         and all(request.get(k) == successor.get(k) == result.get(k) for k in ('gate', 'source', 'token'))
+         and request.get('phase') == snapshot['phase']
+         and request.get('custody_state') == str(directory / 'cycle.json')
+         and request.get('custody_state_sha256') == state_identity(snapshot),
+         'negative successor historical admission inputs')
+    need(isinstance(checks, list) and checks and len(set(checks)) == len(checks)
+         and isinstance(skips, dict) and not set(checks) & set(skips)
+         and set(checks) | set(skips) == set(historical['checks'])
+         and all(isinstance(v, dict) and v.get('source') == successor['source'] for v in skips.values())
+         and result.get('complete') is True and set(result['cases']) == set(checks)
+         and all(v in {'PASS', 'FAIL'} for v in result['cases'].values())
+         and result.get('cleanup_complete') is True and not result.get('cleanup_owner')
+         and result.get('reused', False) is False, 'negative successor full inventory/cleanup')
+    need(successor.get('kind') == 'recovered-native-execution-v1' and successor.get('executed') is True
+         and successor.get('status') == 'FAIL' and successor.get('complete') is False
+         and successor.get('positive_credit') is False and successor.get('lingering_group') is False
+         and all(successor.get(k) is None for k in ('native_exit', 'timed_out', 'cancelled', 'started_at', 'finished_at'))
+         and successor.get('original_coordinator') == dict(timed_out='UNVERIFIED', cancelled='UNVERIFIED',
+             native_exit='UNVERIFIED', finished_at='UNVERIFIED')
+         and successor.get('cases') == {k: 'SKIP' if k in skips else 'UNVERIFIED' for k in historical['checks']}
+         and successor.get('case_complete') == dict.fromkeys(historical['checks'], False)
+         and successor.get('current_execution') == dict.fromkeys(skips, 'UNVERIFIED')
+         and successor.get('custody_skips') == {k:v for k,v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY'}
+         and successor.get('worker_result') == str(result_path)
+         and c.receipt_owner(prior['gate'], successor) is None, 'negative successor no execution credit')
+    root = Path(prior['owner']['worker_root'])
+    native_root = root / '.context/deploy-cloud' / hashlib.sha256(successor['token'].encode()).hexdigest()
+    expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'], original_request_token=prior['token'],
+        new_request_token=successor['token'], source=successor['source'], new_native_root=str(native_root),
+        excluded_resources=prior['excluded_resources'], credit_granted=False)
+    admissions = request.get('isolated_validation')
+    need(isinstance(admissions, list) and all(isinstance(v, dict) for v in admissions)
+         and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
+         'negative successor original isolation binding')
+    need(finite(original.get('finished_at')) and finite(result.get('started_at'))
+         and finite(result.get('finished_at'))
+         and original['finished_at'] <= result['started_at'] <= result['finished_at'], 'negative successor native clocks')
+    def inspect_owner(process):
+        environment = (process / 'environ').read_bytes().split(b'\0')
+        need(not any(item in environment for item in (
+            os.fsencode('DEPLOY_GATE_TOKEN=' + successor['token']),
+            os.fsencode('DEPLOY_GATE_REQUEST=' + str(request_path)),
+            os.fsencode('DEPLOY_GATE_RESULT=' + str(result_path)))), 'negative successor live adapter')
+    scan_same_user_processes(inspect_owner,
+        lambda pid: need(False, 'negative successor owner unknown: ' + str(pid)))
+    namespace_quiet(folder.parent, set())
+    need(c.settlement_native(request, result, root) == recovery['native'], 'negative successor current native closure')
+    for path, expected in list(seals.items()):
+        need(hashlib.sha256(sealed(path)).hexdigest() == expected, 'negative successor changed during validation')
+
+
 def isolated_successor(state, prior):
     """A known pre-dispatch source refusal is not a newer native execution.
 
@@ -1794,7 +1926,8 @@ def isolated_successor(state, prior):
              and isinstance(latest['source']['digest'], str)
              and re.fullmatch(r'[0-9a-f]{64}', latest['source']['digest'])
              and latest['source'] == attempt.get('source')
-             and attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
+             and (attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
+                  or attempt.get('phase') == 'triage' and attempt.get('independent_full') is True)
              and not attempt.get('interrupted') and not attempt.get('stale')
              and len(rows) >= 2, 'unexecuted source refusal identity')
         # Never skip another refusal, an unknown setup failure or a native attempt.
@@ -1828,7 +1961,10 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             need(renewal_witness is None, 'historical witness requires complete successor')
-            reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
+            if latest.get('kind') == 'recovered-native-execution-v1':
+                recovered_isolated_successor_v1(state, prior, receipt, latest)
+            else:
+                reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
         else:
             clean_isolated_successor(state, prior, receipt, latest, renewal_witness)
     else:

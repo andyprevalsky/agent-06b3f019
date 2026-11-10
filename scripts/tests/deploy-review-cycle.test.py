@@ -794,6 +794,93 @@ class OverrideDispositionTest(unittest.TestCase):
         self.assertEqual((receipt["disposition"], receipt["deferred_to"]),
                          ("overridden", "deploy/speed-followup-9-body-read"))
 
+    def completed_findings(self) -> dict:
+        # Three delivered reviews; finish through the same public action as the operator.
+        state = MODULE.read_state(self.state_path)
+        state["cycles"][1]["result"] = "findings"
+        state["cycles"][-1].update(number=3, kind="verification")
+        MODULE.write_state(self.state_path, state)
+        return MODULE.finish_cycle(self.state_path, head=HEAD_C, result="findings")
+
+    def completed_override_cli(self, data: dict, *, head=HEAD_C) -> subprocess.CompletedProcess:
+        evidence_path = self.state_path.parent / "evidence.json"
+        evidence_path.write_text(json.dumps(data))
+        return subprocess.run(
+            [sys.executable, "-B", str(ROOT / "scripts/deploy_review_cycle.py"),
+             "--state", str(self.state_path), "override", "--head", head, "--pr", "1656",
+             "--finding-ids", "4431365241", "--deferred-to", "deploy/speed-followup-9-body-read",
+             "--evidence-json", str(evidence_path), "--receipt", str(self.receipts)],
+            text=True, capture_output=True, check=False)
+
+    def test_completed_findings_override_cli_preserves_original_before_accounting(self) -> None:
+        import hashlib
+        original = self.completed_findings()
+        before = self.state_path.read_bytes()
+        prior_cycles = MODULE.read_state(self.state_path)["cycles"][:-1]
+        result = self.completed_override_cli(self.data)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cycle = MODULE.read_state(self.state_path)["cycles"][-1]
+        self.assertEqual((cycle["disposition"], cycle["result"], cycle["rounds"]),
+                         ("overridden", "clean", 3))
+        self.assertEqual(MODULE.read_state(self.state_path)["cycles"][:-1], prior_cycles)
+        saved = cycle["completed_review"]
+        self.assertEqual(saved["snapshot"], original)
+        self.assertEqual(saved["snapshot"]["result"], "findings")
+        self.assertEqual(saved["snapshot"]["finished_at"], original["finished_at"])
+        self.assertEqual(saved["ledger_sha256"], hashlib.sha256(before).hexdigest())
+        self.assertEqual(saved["sha256"], hashlib.sha256(json.dumps(
+            original, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        receipts = [json.loads(line) for line in self.receipts.read_text().splitlines()]
+        self.assertEqual(receipts[-2]["event"], "completed-findings-before-override")
+        self.assertEqual(receipts[-2]["completed_review"], saved)
+        self.assertEqual(receipts[-1]["completed_review"], saved)
+        ledger, receipt = self.state_path.read_bytes(), self.receipts.read_bytes()
+        self.assertNotEqual(self.completed_override_cli(self.data).returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        self.assertEqual(self.receipts.read_bytes(), receipt)
+
+    def test_completed_override_refusals_are_atomic(self) -> None:
+        self.completed_findings()
+        original = MODULE.read_state(self.state_path)
+        cases = [dict(result="clean"), dict(disposition="skipped", skip_reason="usage-cap"),
+                 dict(disposition="overridden"), dict(head=HEAD_A), dict(kind="post-cap-unreviewed"),
+                 dict(one_final_review_approval={"approval_id": "fixture:forbidden"}),
+                 dict(post_findings_review_approval={"approval_id": "fixture:forbidden"})]
+        for changes in cases + [None, "budget", "review-head", "unanswered", "other-unanswered"]:
+            with self.subTest(changes=changes):
+                state, data = deepcopy(original), deepcopy(self.data)
+                if isinstance(changes, dict):
+                    state["cycles"][-1].update(changes)
+                elif changes == "budget":
+                    state["cycles"][1]["result"] = "unavailable"
+                elif changes == "review-head":
+                    data["reviews"] = [{**FINDINGS_REVIEW, "commit_id": HEAD_A}]
+                elif changes == "unanswered":
+                    data["review_comments"] = [FINDING_COMMENT]
+                elif changes == "other-unanswered":
+                    data["review_comments"].append(review_comment(4431365300, HEAD_C, "another finding"))
+                else:
+                    state["cycles"].append(dict(head=HEAD_A, status="completed", result="findings"))
+                MODULE.write_state(self.state_path, state)
+                before = self.state_path.read_bytes()
+                result = self.completed_override_cli(data)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.state_path.read_bytes(), before)
+                self.assertFalse(self.receipts.exists())
+
+    def test_completed_findings_archive_failure_preserves_native_result(self) -> None:
+        self.completed_findings()
+        before = self.state_path.read_bytes()
+        def fail_archive(path, record):
+            self.assertEqual(record["event"], "completed-findings-before-override")
+            self.assertEqual(self.state_path.read_bytes(), before)
+            raise OSError("fixture archive unavailable")
+        with patch.object(MODULE, "_append_receipt", side_effect=fail_archive):
+            with self.assertRaisesRegex(OSError, "archive unavailable"):
+                self.override(self.data)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertFalse(self.receipts.exists())
+
     def test_override_requires_three_rounds_counting_prior_deploys(self) -> None:
         MODULE.start_cycle(self.state_path, head=HEAD_A, kind="initial", reset=True)
         with self.assertRaisesRegex(MODULE.ReviewCycleError,

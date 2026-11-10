@@ -1247,7 +1247,7 @@ def override_cycle(
     prior_rounds: int,
     receipts_path: Path,
 ) -> dict[str, object]:
-    """Close the open cycle clean after three review rounds, deferring findings.
+    """Account for an open or completed-findings cycle after three review rounds.
 
     Standing user pre-authorization (2026-10-18, reaffirmed 2026-10-27): after
     three review rounds the remaining findings may be deferred. Every listed
@@ -1259,9 +1259,25 @@ def override_cycle(
     if prior_rounds < 0:
         raise ReviewCycleError("--prior-rounds must not be negative")
     state = read_state(path)
-    cycle = _open_cycle(state, head)
     entries = state["cycles"]
     assert isinstance(entries, list)
+    latest = entries[-1] if entries else None
+    completed = (
+        isinstance(latest, dict)
+        and latest.get("status") == "completed"
+        and latest.get("result") == "findings"
+        and latest.get("kind") in KINDS
+        and not latest.get("disposition")
+        and not latest.get("skip_reason")
+        and not latest.get("one_final_review_approval")
+        and "post_findings_review_approval" not in latest
+    )
+    if completed:
+        cycle = latest
+        if cycle.get("head") != head:
+            raise ReviewCycleError(f"review HEAD mismatch: cycle has {cycle.get('head')}, got {head}")
+    else:
+        cycle = _open_cycle(state, head)
     # Only cycles that delivered a review count: an `unavailable` cycle consumed no review budget.
     rounds = sum(
         cycle.get("disposition") != "skipped" and not cycle.get("skip_reason")
@@ -1342,6 +1358,19 @@ def override_cycle(
     publication = publication_evidence(review, head, evidence)
     if publication is not None and not SUBSTANTIVE_REVIEW.search(_body(review)):
         fields["evidence"]["review_publication"] = publication
+    if completed:
+        # Retain the native findings result before changing merge accounting.
+        # A failed archive append must leave the completed cycle untouched.
+        serialized = json.dumps(cycle, sort_keys=True, separators=(",", ":"))
+        fields["completed_review"] = {
+            "snapshot": json.loads(serialized),
+            "sha256": hashlib.sha256(serialized.encode()).hexdigest(),
+            "ledger_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        _append_receipt(receipts_path, {
+            "event": "completed-findings-before-override", "pr": pr, "head": head,
+            "at": now(), "completed_review": fields["completed_review"],
+        })
     return _close_with_disposition(
         path, receipts_path, state, cycle, pr=pr, disposition="overridden", report_row=report_row, fields=fields
     )
