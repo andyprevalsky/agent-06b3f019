@@ -14129,6 +14129,122 @@ recover_exact_stale_fleet_owner {owner} || recovery_status=$?
     assert sum("\nid=" in f"\n{record.read_text()}" for record in records) == 9
     assert sum("volume_id=" in record.read_text() for record in records) == 10
 
+    # The live disposable teardown must preserve the same evidence latch as
+    # exact-owner recovery. Exercise its real policy selector and reaper before
+    # any provider mutation; sealed current owners remain eligible for cleanup.
+    reaper = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_current_disposable_registry() {",
+            "reap_registry_clones() {",
+        )
+    )
+    for disposable in (False, True):
+        for evidence in ("sealed", "pending", "dangling-pending"):
+            scope = tmp_path / f"current-{disposable}-{evidence}"
+            current_registry = scope / "ownership" / owner
+            current_clones = current_registry / "clones"
+            current_clones.mkdir(parents=True)
+            (current_registry / "meta").write_text("version=2\n")
+            if disposable:
+                (current_registry / "disposable-resources-v1").write_text(
+                    owner + "\nbench-app\n"
+                )
+            pending = current_registry / "runtime-evidence-unconfirmed"
+            if evidence == "pending":
+                pending.touch()
+            elif evidence == "dangling-pending":
+                pending.symlink_to(scope / "absent-evidence")
+            current_record = current_clones / "cloudbench-current"
+            current_record.write_text(
+                "name=cloudbench-current\nid=deadbeef000001\nvolume_id=vol_current\n"
+            )
+            original_record = current_record.read_bytes()
+            provider_calls = scope / "provider-calls"
+            current_script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(current_registry.parent))}
+FLEET_REGISTRY_DIR={shlex.quote(str(current_registry))}
+FLEET_OWNER_TOKEN={owner}
+DISPOSABLE_LIFECYCLE={int(disposable)}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+{reaper}
+fleet_validate_reap_cohort() {{ return 0; }}
+fleet_reap_registry_record() {{
+    printf '%s\\n' "$5" >> {shlex.quote(str(provider_calls))}
+    rm -- "$5"
+}}
+reap_registry_clones "$FLEET_REGISTRY_DIR" current
+"""
+            current = subprocess.run(
+                ["bash", "-c", current_script],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            if evidence == "sealed":
+                assert current.returncode == 0, current.stderr + current.stdout
+                assert provider_calls.read_text().splitlines() == [str(current_record)]
+                assert not current_record.exists()
+            else:
+                assert current.returncode == 1, (disposable, evidence, current.stderr)
+                assert "runtime evidence is unconfirmed" in current.stderr
+                assert not provider_calls.exists(), "unsealed owner reached provider deletion"
+                assert current_record.read_bytes() == original_record
+                assert pending.is_symlink() == (evidence == "dangling-pending")
+
+    # A failed worker capture must retain the worker's volume/ledger too; a
+    # disposable worker cannot turn a missing archive into deletion authority.
+    worker_cleanup = _worker_cleanup_bundle(fleet)
+    for disposable in (False, True):
+        for sealed in (False, True):
+            scope = tmp_path / f"worker-{disposable}-{sealed}"
+            worker_out = scope / "output"
+            worker_id = "deadbeef000002"
+            evidence_dir = worker_out / "worker-runtime-evidence" / worker_id
+            evidence_dir.mkdir(parents=True)
+            evidence_owner = evidence_dir / "owner.json"
+            evidence_owner.write_text(json.dumps({"machine_id": worker_id}))
+            for name in ("worker-clones.ids", "worker-ready.ids"):
+                (worker_out / name).write_text(worker_id + "\n")
+            ready_marker = worker_out / f"worker-{worker_id}.ready"
+            ready_marker.touch()
+            calls = scope / "provider-calls"
+            worker_script = f"""set -uo pipefail
+{worker_cleanup}
+fleet_current_disposable_registry() {{ return {0 if disposable else 1}; }}
+cloudbench_preserve_unlaunched_worker() {{ return 1; }}
+cloudbench_capture_worker_runtime_evidence() {{ return {0 if sealed else 1}; }}
+reap_machine() {{ printf 'reap %s\\n' "$1" >> {shlex.quote(str(calls))}; }}
+fleet_audit_update_fresh_clone_by_id() {{ printf 'audit %s\\n' "$1" >> {shlex.quote(str(calls))}; }}
+fleet_registry_release_id() {{ printf 'release %s\\n' "$1" >> {shlex.quote(str(calls))}; }}
+cleanup_failed_worker {shlex.quote(str(worker_out))} {worker_id}
+"""
+            worker = subprocess.run(
+                ["bash", "-c", worker_script],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            assert worker.returncode == (0 if sealed else 1), worker.stderr
+            assert evidence_owner.read_text() == json.dumps({"machine_id": worker_id})
+            if sealed:
+                assert calls.read_text().splitlines() == [
+                    f"reap {worker_id}", f"audit {worker_id}", f"release {worker_id}"
+                ]
+                assert not (worker_out / "worker-clones.ids").read_text()
+                assert not ready_marker.exists()
+            else:
+                assert not calls.exists(), "unsealed worker reached provider deletion or release"
+                for name in ("worker-clones.ids", "worker-ready.ids"):
+                    assert (worker_out / name).read_text() == worker_id + "\n"
+                assert ready_marker.exists()
+                failure = worker_out / f"worker-{worker_id}.cleanup-failed"
+                assert "runtime evidence was not preserved" in failure.read_text()
+
 
 def test_interrupted_archive_routes_exact_pool_stop_before_evidence_release(
     tmp_path: Path,

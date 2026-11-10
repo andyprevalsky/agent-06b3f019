@@ -6415,7 +6415,7 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
         echo "❌ refusing to destroy fleet machines whose guest cleanup is unconfirmed: $registry" >&2
         return 1
     fi
-    if [ "${DISPOSABLE_REAP:-0}" != 1 ] && { [ -e "$registry/runtime-evidence-unconfirmed" ] \
+    if { [ -e "$registry/runtime-evidence-unconfirmed" ] \
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; }; then
         echo "❌ refusing to destroy fleet machines whose runtime evidence is unconfirmed: $registry" >&2
         return 1
@@ -15481,7 +15481,7 @@ cleanup() {
     # before the benchmark finished.
     if ! cloudbench_collect_remaining_runtime_evidence; then
         if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" && [ "${KEEP_CLONES:-0}" != 1 ]; then
-            echo "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" >&2
+            echo "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" >&2
         else
             echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
         fi
@@ -17878,7 +17878,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         && ! cloudbench_capture_worker_runtime_evidence "$cleanup_out" "$cleanup_wid"; then
         echo "❌ worker $cleanup_wid runtime evidence was not preserved" >&2
         runtime_missing=1
-        [ "$DISPOSABLE_REAP" = 1 ] || rc=1
+        rc=1
         # Every cleanup path (cancelled provisioner, scale-down or controller)
         # publishes the same stable run-failure reason for the final verdict.
         local failure_reason="worker $cleanup_wid runtime evidence was not preserved"
