@@ -312,6 +312,34 @@ sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr','')
         return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'--request',str(self.root/request_name),
                                '--output',str(self.root/output_name)],env=env,capture_output=True,text=True,timeout=35)
 
+    def test_request_builder_fingerprints_oversized_git_pinned_helper_with_real_bash(self):
+        root=self.root/'fingerprint-source';root.mkdir()
+        for member in ('package.json','back-end/package.json','back-end/package-lock.json','front-end/package.json',
+                       'agents/requirements.txt','scripts/cloudbench-fetch-ref.sh','scripts/cloudbench-sync-deps.sh'):
+            target=root/member;target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes((HERE.parent/member).read_bytes())
+        helper=root/'scripts/lib/cloudbench-env.sh';helper.parent.mkdir()
+        original=(HERE/'lib/cloudbench-env.sh').read_bytes()
+        expected=subprocess.check_output(['bash','-euc',
+            'source "$1"; cloudbench_node_dependency_fingerprint "$2"; cloudbench_manifest_fingerprint "$2" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"',
+            'fingerprint-oracle',str(HERE/'lib/cloudbench-env.sh'),str(root)],text=True,timeout=20).splitlines()
+        helper.write_bytes(original+b'\n#'+b'oversized pinned helper padding '*5000+
+            b'\ntest "$(stat -c %a "${BASH_SOURCE[0]}")" = 600\n')
+        self.assertGreater(helper.stat().st_size,131072)
+        git=['git','-C',str(root)]
+        subprocess.run(git+['init','-q'],check=True)
+        subprocess.run(git+['add','.'],check=True)
+        subprocess.run(git+['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','pinned oversized helper'],check=True)
+        ref=subprocess.check_output(git+['rev-parse','HEAD'],text=True).strip()
+        self.write('fingerprint-build.json',dict(schema='cloudbench-image-build-v1',image_ref=self.image,source_sha=ref,source_dirty=False))
+        self.write('fingerprint-env.json',self.request['guest_env_sha256'])
+        self.write('fingerprint-protected.json',self.request['protected_resources'])
+        value=self.m['build_request'](self.request['ownership']['path'],self.root/'fingerprint-build.json',root,ref,
+            self.root/'fingerprint-env.json',self.root/'fingerprint-protected.json',self.root/'fingerprint-request.json')
+        self.assertEqual([value['node_fingerprint'],value['python_fingerprint']],expected)
+        self.assertEqual(value['scripts']['lib/cloudbench-env.sh'],self.m['sha'](helper.read_bytes()))
+        self.assertFalse(self.calls)
+
     def test_real_cli_bounded_transport_full_chain_with_foreign_churn(self):
         result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
         manifest=self.m['verify_prepared_source'](self.root/'request.json',self.root/'output/result.json',self.root/'output/source-manifest.json',

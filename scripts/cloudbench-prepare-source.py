@@ -1457,9 +1457,12 @@ def build_request(ownership, build, source_root, source_ref, guest_env_contract,
     subprocess.run(['git', '-C', str(root), 'diff', '--quiet', source_ref, '--', *IMAGE_INPUTS], check=True, timeout=20)
     transport_value = load(transport) if transport else None
     effective_ref = transport_value['replayed_tree'] if transport_value else source_ref
-    script = source_bytes(root, effective_ref, 'lib/cloudbench-env.sh').decode()
-    command = script + '\ncloudbench_node_dependency_fingerprint "$1"\ncloudbench_manifest_fingerprint "$1" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"\n'
-    fingerprints = subprocess.check_output(['bash', '-euc', command, 'prepare-source-request', str(root)], text=True, timeout=20).splitlines()
+    script = source_bytes(root, effective_ref, 'lib/cloudbench-env.sh')
+    command = 'source "$1"\ncloudbench_node_dependency_fingerprint "$2"\ncloudbench_manifest_fingerprint "$2" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"\n'
+    with tempfile.NamedTemporaryFile(prefix='cloudbench-fingerprint-', suffix='.sh') as snapshot:
+        os.fchmod(snapshot.fileno(), 0o600)
+        snapshot.write(script); snapshot.flush()
+        fingerprints = subprocess.check_output(['bash', '-euc', command, 'prepare-source-request', snapshot.name, str(root)], text=True, timeout=20).splitlines()
     need(len(fingerprints) == 2, 'source fingerprints unavailable')
     value = dict(schema=REQUEST, nonce=transport_value['token'] if transport_value else secrets.token_hex(16), source_root=str(root), source_ref=source_ref,
                  guest_transport='cloudbench-ssh-guest-v1',

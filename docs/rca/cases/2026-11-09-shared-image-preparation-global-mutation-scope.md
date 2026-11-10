@@ -188,6 +188,14 @@ is unchanged. Independent producer and consumer source reviews passed on their
 exact frozen bytes, including local create/prepare/retire protocol composition.
 Native qualification, full deployment and parallel campaign outcome remain open.
 
+The frozen d706 request-builder invocation failed locally with Linux `E2BIG`
+before creating a request or constructing a native client. It concatenated the
+131,000-byte pinned environment helper and fingerprint calls into one Bash
+argument. The total crossed the per-argument limit. This is a request transport
+boundary failure, independent of native preparation; preserving the same pinned
+helper bytes in a private file removes the oversized argument without changing
+fingerprint semantics or deadlines.
+
 The user explicitly authorized this separate pre-parent-merge repair and full
 deploy. They require genuine parallel independent smoke campaigns, no app-wide
 quiet window, original unchanged receipts, exact source/image/volume ownership,
