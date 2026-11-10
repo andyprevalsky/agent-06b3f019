@@ -1611,7 +1611,7 @@ def attribute_flaky(state: dict, occurrence_id: str, entry: dict, root: Path) ->
         raise ValueError("only a recorded FLAKY occurrence can be attributed")
     if "resolved_post_merge" in (occurrence.get("attribution") or {}):
         raise ValueError("this FLAKY occurrence's post-merge repair is already resolved; it cannot be re-attributed")
-    attribution = quarantine.validate_attribution(occurrence, entry, root)  # validate before mutating state
+    attribution = quarantine.validate_attribution(occurrence, entry, root, state=state)  # validate before mutating state
     occurrence["attribution"] = attribution
     # A re-attribution replaces this occurrence's pending packet; only one carrying post_merge queues one.
     pending = [p for p in state.get("pending_post_merge", []) if p["id"] != occurrence_id]
@@ -2553,7 +2553,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
         for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
                      if e.get('purpose') == 'isolated-validation'}:
             isolated_admissions(state, gate)
-        blocked = quarantine.attribution_block(state.get('flaky', []), root)
+        blocked = quarantine.attribution_block(state.get('flaky', []), root, state=state)
         if blocked:
             print(f'DEPLOY_CYCLE FLAKY_UNATTRIBUTED: {blocked}', file=sys.stderr)
             return 1  # merge refuses until every FLAKY unit has its recorded /RCA attribution
@@ -2766,7 +2766,7 @@ def main(argv: list[str] | None = None) -> int:
                         or environment_digest() != state["environment"]
                         or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
                     raise ValueError("cycle not complete on exact current source and plan")
-                blocked = quarantine.attribution_block(state.get("flaky", []), args.root)
+                blocked = quarantine.attribution_block(state.get("flaky", []), args.root, state=state)
                 if blocked:
                     raise ValueError(blocked)
             elif args.action == "report":

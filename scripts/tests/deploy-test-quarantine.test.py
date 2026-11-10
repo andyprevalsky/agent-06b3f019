@@ -440,5 +440,156 @@ class ReleaseReport(unittest.TestCase):
         self.assertIn('2 quarantined test(s); 1 ready to release', out)
 
 
+
+class NativeDefinitionBinding(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.node = 'agents/benchmarks/code_bench_test.py::test_commit_fixture_rewritten_history_fails'
+        self.error = 'FileNotFoundError: missing maintenance.lock'
+        self.source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        self.folder = self.root / '.context/deploy-pipeline/attempts/6/triage/agents-coverage-blackbox'
+        self.folder.mkdir(parents=True)
+        self.worker_root = '/home/runner/_work/rose/rose'
+        self.relative = '.context/test-runs/native/benchmark.log'
+        self.output_relative = '.context/deploy-worker/native/output.log'
+        self.log = self.folder / 'remote-artifact/files' / self.relative
+        self.output = self.folder / 'remote-artifact/files' / self.output_relative
+        self.log.parent.mkdir(parents=True)
+        self.output.parent.mkdir(parents=True)
+        self.marker = self.root / 'agents/benchmarks/code_bench_test.py'
+        self.marker.parent.mkdir(parents=True)
+        self.build()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def save(self, name, value):
+        (self.folder / name).write_text(json.dumps(value))
+
+    def build(self):
+        import hashlib, copy
+        self.marker.write_text("@quarantine(since='2026-11-10', repair='pending-handoff:" + 'c' * 32 +
+            "', error='FileNotFoundError: missing maintenance.lock', evidence='rca')\n"
+            "def test_commit_fixture_rewritten_history_fails():\n    pass\n")
+        raw = ('FAILED ' + self.node + ' - ' + self.error + '\n1 failed, 87 passed in 5.93s\n').encode()
+        self.log.write_bytes(raw)
+        self.output.write_bytes(b'original output\n' + raw + b'automatic rerun PASS\n')
+        self.row = {'unit':'benchmark','status':'FLAKY','scope':'domain','attempts':2,'at':100,
+                    'log':self.worker_root + '/' + self.relative}
+        self.receipt = {'gate':'agents-coverage-blackbox','source':self.source,'token':'native-token',
+            'complete':True,'executed':True,'native_exit':0,'status':'PASS','flaky':[self.row],
+            'log':str(self.folder/'output.log'),'worker_result':str(self.folder/'result.json')}
+        self.request = {'gate':self.receipt['gate'],'source':self.source,'token':'native-token',
+                        'worker_root':self.worker_root,'phase':'triage'}
+        self.worker = {'gate':self.receipt['gate'],'source':self.source,'token':'native-token',
+            'complete':True,'worker_root':self.worker_root,'remote':{'transport':'github-actions','event_sha':self.source['head']},
+            'evidence':{self.receipt['gate']:{'status':'PASS','native_exit':0,'log':str(self.output),
+                'remote_log':self.worker_root+'/'+self.output_relative,
+                'sha256':hashlib.sha256(self.output.read_bytes()).hexdigest()}}}
+        for name, value in [('receipt.json',self.receipt),('request.json',self.request),('result.json',self.worker)]:
+            self.save(name,value)
+        self.occ = {'id':'c'*32,'source':self.source,'gate':self.receipt['gate'],'phase':'triage','round':6,
+                    'unit':'benchmark','check':'agents-coverage-blackbox/agents-coverage-blackbox','native_result':'FLAKY','attempts':2,'unit_finished_at':100,'evidence':self.row['log']}
+        self.state = {'source':self.source,'plan':{'gates':[{'name':self.receipt['gate'],'worker_root':self.worker_root}]},
+            'attempts':[{'source':self.source,'phase':'triage','results':[copy.deepcopy(self.receipt)]}], 'flaky':[self.occ]}
+        self.entry = {'attribution':'NOT_INTRODUCED','evidence':'rca','marker':'agents/benchmarks/code_bench_test.py',
+            'native_case':{'definition':self.node,'error':self.error,'log_sha256':hashlib.sha256(raw).hexdigest()},
+            'post_merge':{'test':self.node,'command':['python','-m','pytest','agents/benchmarks/code_bench_test.py'],
+                          'scope':'archive grader','error':self.error,'source':self.source,'evidence':'original native log'}}
+
+    def test_original_single_native_definition_binds_without_rewriting_unit(self):
+        import copy
+        original = copy.deepcopy(self.occ)
+        c.attribute_flaky(self.state,self.occ['id'],self.entry,self.root)
+        for key,value in original.items():
+            self.assertEqual(self.occ[key],value)
+        proof=self.occ['attribution']['native_binding']
+        self.assertEqual(proof['definition'],self.node)
+        self.assertEqual(proof['unit'],'benchmark')
+        self.assertEqual(self.state['pending_post_merge'][0]['packet']['test'],self.node)
+        self.assertIsNone(q.attribution_block(self.state['flaky'],self.root,state=self.state))
+        self.request['retained_document_drift'] = True
+        self.save('request.json', self.request)
+        self.assertIn('retained binding changed', q.attribution_block(self.state['flaky'], self.root))
+
+    def test_wrong_or_missing_original_native_binding_remains_blocked(self):
+        import copy, hashlib
+        for defect in ('source','token','gate','round','hash','path','traversal','multiple','missing','marker',
+                       'error','worker_root','recorded_receipt','output_hash','unbound_log','packet_source','malformed_rows','malformed_evidence','native_traversal'):
+            with self.subTest(defect=defect):
+                self.build()
+                if defect=='source': self.receipt['source']={'head':'d'*40,'digest':'e'*64};self.save('receipt.json',self.receipt)
+                if defect=='token': self.request['token']='foreign';self.save('request.json',self.request)
+                if defect=='gate': self.worker['gate']='foreign';self.save('result.json',self.worker)
+                if defect=='round': self.occ['round']=7
+                if defect=='hash': self.entry['native_case']['log_sha256']='0'*64
+                if defect=='path': self.entry['native_case']['definition']='agents/benchmarks/other.py::test_other'
+                if defect=='traversal': self.entry['marker']='../outside.py'
+                if defect=='multiple':
+                    raw=self.log.read_bytes()+b'FAILED agents/benchmarks/other.py::test_other - AssertionError: other\n'
+                    self.log.write_bytes(raw);self.output.write_bytes(raw)
+                    self.entry['native_case']['log_sha256']=hashlib.sha256(raw).hexdigest()
+                    self.worker['evidence'][self.receipt['gate']]['sha256']=hashlib.sha256(raw).hexdigest();self.save('result.json',self.worker)
+                if defect=='missing': self.log.unlink()
+                if defect=='marker': self.marker.write_text(self.marker.read_text().replace('def test_commit_fixture_rewritten_history_fails','def test_other'))
+                if defect=='error': self.entry['native_case']['error']='AssertionError: foreign'
+                if defect=='worker_root': self.request['worker_root']='/foreign';self.save('request.json',self.request)
+                if defect=='recorded_receipt': self.state['attempts'][0]['results'][0]['token']='foreign'
+                if defect=='output_hash': self.output.write_bytes(self.output.read_bytes()+b'drift')
+                if defect=='unbound_log':
+                    self.output.write_bytes(b'unrelated output');self.worker['evidence'][self.receipt['gate']]['sha256']=hashlib.sha256(self.output.read_bytes()).hexdigest();self.save('result.json',self.worker)
+                if defect=='malformed_rows': self.receipt['flaky']=[None];self.save('receipt.json',self.receipt)
+                if defect=='malformed_evidence': self.worker['evidence']=[];self.save('result.json',self.worker)
+                if defect=='native_traversal': self.receipt['flaky'][0]['log']=self.worker_root+'/../outside';self.occ['evidence']=self.receipt['flaky'][0]['log'];self.save('receipt.json',self.receipt)
+                if defect=='packet_source': self.entry['post_merge']['source']={'head':'f'*40,'digest':'e'*64}
+                with self.assertRaises(ValueError):
+                    c.attribute_flaky(self.state,self.occ['id'],self.entry,self.root)
+                self.assertNotIn('attribution',self.occ)
+
+
+    def test_reviewed_contradictions_and_malformed_lineage_block(self):
+        import hashlib
+        for defect in ('pytest_error', 'source_changed', 'interrupted', 'native_exit',
+                       'attempt_shape', 'result_shape', 'plan_shape'):
+            with self.subTest(defect=defect):
+                self.build()
+                if defect == 'pytest_error':
+                    raw = self.log.read_bytes().replace(b'1 failed, 87 passed', b'1 failed, 86 passed, 1 error')
+                    raw += b'ERROR agents/benchmarks/code_bench_test.py::test_other - RuntimeError: setup broke\n'
+                    self.log.write_bytes(raw)
+                    self.output.write_bytes(raw)
+                    self.entry['native_case']['log_sha256'] = hashlib.sha256(raw).hexdigest()
+                    self.worker['evidence'][self.receipt['gate']]['sha256'] = hashlib.sha256(raw).hexdigest()
+                if defect == 'source_changed': self.worker['source_unchanged'] = False
+                if defect == 'interrupted': self.worker['interrupted'] = True
+                if defect == 'native_exit': self.worker['native_exit'] = 1
+                if defect == 'attempt_shape': self.state['attempts'] = [None]
+                if defect == 'result_shape': self.state['attempts'][0]['results'] = [None]
+                if defect == 'plan_shape': self.state['plan'] = None
+                self.save('result.json', self.worker)
+                with self.assertRaises(ValueError):
+                    c.attribute_flaky(self.state, self.occ['id'], self.entry, self.root)
+                self.assertNotIn('attribution', self.occ)
+
+    def test_retained_binding_revalidates_original_state_and_plan(self):
+        for defect in ('receipt_token', 'captured_request', 'current_plan'):
+            with self.subTest(defect=defect):
+                self.build()
+                c.attribute_flaky(self.state, self.occ['id'], self.entry, self.root)
+                if defect == 'receipt_token':
+                    self.state['attempts'][0]['results'][0]['token'] = 'foreign'
+                elif defect == 'captured_request':
+                    self.request['worker_root'] = '/foreign'
+                    self.save('request.json', self.request)
+                else:
+                    self.state['plan']['gates'][0]['worker_root'] = '/new-current-worker'
+                block = q.attribution_block(self.state['flaky'], self.root, state=self.state)
+                if defect == 'current_plan':
+                    self.assertIsNone(block)
+                else:
+                    self.assertIsNotNone(block)
+
+
 if __name__ == '__main__':
     unittest.main()
