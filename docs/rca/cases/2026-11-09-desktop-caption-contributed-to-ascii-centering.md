@@ -86,3 +86,52 @@ The user explicitly requested `/rca` then `/push`.
 ## Reusable lesson
 
 Center the art independently of adjacent caption dimensions, using breakpoint-scoped containing blocks to preserve mobile positioning.
+
+
+## Recurrence — November 10, signed-in horizontal alignment
+
+User: "its still off center, fix, validate, then /push", with a dark-mode
+screenshot showing art right of the large tile. The earlier signed-out vertical
+proof was valid but incomplete coverage of signed-in layouts.
+
+Runtime evidence from the deploy coordinator and our independent local real
+Terminal render agrees: at 1440x900 with the signed-in RoseDesktop 64px rail,
+art center was [752,360], tile center [720,360]. The background SVG owns
+viewport-centered geometry, whereas TerminalMainContent adds sidebar padding
+to its chat column. The absolute opening loader inherited that inset, moving
+its center by half the rail width. This is a separate horizontal boundary
+missed by the original reproduction; retain the original vertical fix/proof.
+
+Our unchanged local command `node .context/ascii-centering/horizontal.cjs`
+failed before with `art horizontally centered in tile`, then passed at
+art=[720,360], tile=[720,360], padding=64px. This renders the actual app with a
+synthetic local signed-in session; it proves layout, not authentication.
+The permanent opening-layout blackbox extension failed before because md:fixed
+was absent. The owning fix adds md:fixed to the opening loader so its desktop
+containing block agrees with the grid, independent of sidebar width; mobile
+remains absolute. No pixel compensation or duplicated sidebar state is added.
+The existing desktop Playwright regression now injects the supplied semantic
+session and measures against the actual SVG tile rather than a second formula.
+
+Archive searches: `ASCII desktop center` and `sidebar viewport horizontal offset`.
+This is a recurrence of the reported visual symptom with a newly proven
+horizontal cause, recorded here to preserve the prior evidence and its gap.
+
+Final recurrence validation: full frontend coverage passed 324 files,
+4,718 tests passed / one skipped, thresholds met (87.38% statements,
+81.78% branches, 87.70% functions, 89.63% lines). Changed-file ESLint passed.
+The final strengthened blackbox explicitly renders a signed-in account and
+asserts the sidebar-inset main before asserting the viewport-anchored loader.
+That exact final file failed on original source and passed on the fix.
+The exact final signed-in browser test failed with measured error 32px on
+original source and passed after restoring the fix, with the 2px bound unchanged.
+Commands: `cd front-end && npx vitest run src/tests/blackbox/opening-layout.blackbox.tsx`
+and `FRONTEND_URL=http://127.0.0.1:4102 SEMANTIC_SESSION=<local-layout-fixture>
+npx playwright test tests-e2e/mobile-layout.spec.ts -g 'desktop opening ASCII'`.
+The synthetic session is only a local layout fixture, never an auth validity claim.
+
+Independent managed review found no blocking implementation objection or
+ancestor containing-block trap. Existing pointer-events-none, z18 loader,
+z20 messages, dimming and transcript tests remain intact; no claim of a new
+end-to-end chat screenshot is made. The 24-case local geometry matrix passed
+six sizes, two rail offsets, and both themes, including the 767/768px boundary.
