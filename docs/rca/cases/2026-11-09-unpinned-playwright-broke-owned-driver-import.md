@@ -36,7 +36,7 @@ Both independent investigations reproduced the exact owning import failure with 
 
 ## Solution
 
-The requirements now pin Playwright 1.63.0, matching the SDK contract the existing owner implements. The existing post-copy image verification step also imports the real owner, so an incompatible graph fails before publication/activation. Retain its native process-exit, cancellation and resource ownership behavior; do not rename one private import and assume the newer SDK has identical internals. Keep the existing owning browser-cleanup suite and all browser/payment task assertions. A new compatible source-bound image and fresh native task/publisher/full-gate acceptance remain required before closure.
+The requirements now pin Playwright 1.63.0, matching the SDK contract the existing owner implements. The warm benchmark image verification step imports the real owner after source copy. The production worker Dockerfile also runs that import after switching to its final non-root runtime user, so each artifact rejects an incompatible graph during its own build before publication/activation. Retain its native process-exit, cancellation and resource ownership behavior; do not rename one private import and assume the newer SDK has identical internals. Keep the existing owning browser-cleanup suite and all browser/payment task assertions. A new compatible source-bound image and fresh native task/publisher/full-gate acceptance remain required before closure.
 
 ## Verification and retained limits
 
@@ -78,6 +78,36 @@ sandbox AgentCard release stall. Neither supplies acceptance credit or a waiver
 for the assigned SDK failure. All original controller and cleanup receipts are
 retained. A separate semantic adapter defect dropped completed retried UI
 assertion failures to UNVERIFIED; its distinct case records the reporting repair.
+
+### Production recurrence on November 10 at 23:06–23:07 UTC
+
+Root agent `64d34b38-7a15-49f9-a347-d153dd0d69b9` reported two independent
+browser launches failing before navigation. Independently retained native logs
+show zero-action initialization failures at 23:06:48.571462602 and
+23:07:28.589502646 UTC on machine `8676e2ae915e28`. An authenticated read of that
+exact worker bound image `75309c5d7f48f0392b3a401c0065807dba3e1c6b3af13eb189d7d132f327c423`
+to source `c1a3a0c71`. A read-only Python probe found installed Playwright 1.65.0,
+no private `_connection` module and the unchanged owner SHA256
+`58fd96e0cbbfaaf32c6303b8a191c27146fb302f8730ad8d3a3cba88ed9c7955`.
+The real owner import exited one with the exact original ModuleNotFoundError.
+This corroborates the same owning dependency boundary, not a ChatGPT site or
+authentication failure. No services, credentials or browser workflow changed
+to collect the proof. Private original attachments and checksums are retained
+under `.context/rca-playwright/reconciliation-64d34/recurrence/`.
+
+This recurrence adds no production repair credit. The existing deployment is
+unmerged and requires an explicit verification review of the final stabilized
+source before rollout.
+
+Independent review of the later production recurrence identified an artifact
+coverage gap: the warm benchmark Dockerfile import check does not validate the
+production worker Dockerfile. The production image now executes the same real
+owner import after source copy and the final USER worker directive. The exact
+RUN command, executed against the retained authentic 1.65 wheel, fails at the
+original owner.py:14; the unchanged command with installed 1.63 passes. These
+command-level controls are not an image-build or production acceptance claim.
+The production artifact must actually build with this check before activation,
+and live installed-package/import readback and browser navigation remain required.
 
 ## Related cases
 
