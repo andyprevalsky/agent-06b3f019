@@ -1,6 +1,7 @@
 /**
  * Right-aligned USER bubble with optional inline attachment row.
  *
+ * Copy shows a checkmark and Copied for two seconds after a successful write.
  * META LINE (always, under the bubble): the local send time (formatMessageSentAt:
  * day label once before today), with one state to its left:
  *   resume (from real rows only, codeAgentResume.ts; live region, role="status"):
@@ -18,7 +19,10 @@
  * straight to that browser, not this agent: it reads "You → Browser: …" in the
  * code-agent "You → <agent>" text style.
  */
-import { useContext } from 'react';
+import { useContext, useEffect, useState } from 'react';
+import { Check, Copy } from 'lucide-react';
+import { toast } from '@/hooks/use-toast';
+import { copyToClipboard } from '@/lib/clipboard';
 import { formatMessageSentAt } from '@/lib/localDateTime';
 import { cn } from '@/lib/utils';
 import { AgentContext, type Message } from '../../hooks';
@@ -70,6 +74,41 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
   );
 }
 
+function CopyMessageButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  async function copy() {
+    try {
+      await copyToClipboard(text);
+      setCopied(true);
+    } catch {
+      toast({ title: 'Could not copy message', variant: 'destructive' });
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      aria-label={copied ? 'Copied' : 'Copy message'}
+      title={copied ? 'Copied' : 'Copy'}
+      onClick={() => void copy()}
+      className="inline-flex min-h-7 min-w-7 items-center justify-center gap-1 rounded-md px-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {copied ? (
+        <Check className="h-3.5 w-3.5" aria-hidden />
+      ) : (
+        <Copy className="h-3.5 w-3.5" aria-hidden />
+      )}
+      <span aria-live="polite">{copied ? 'Copied' : ''}</span>
+    </button>
+  );
+}
+
 function MetaLine({ message }: { message: Message }) {
   const messages = useContext(AgentContext)?.messages ?? [];
   const resume =
@@ -77,6 +116,9 @@ function MetaLine({ message }: { message: Message }) {
     browserResumeState(messages, message) ??
     roseResumeState(messages, message);
   const time = <time dateTime={message.timestamp}>{formatMessageSentAt(message.timestamp)}</time>;
+  const copyButton = message.text ? (
+    <CopyMessageButton key={`${message.message_id}:${message.text}`} text={message.text} />
+  ) : null;
   if (resume) {
     return (
       <p
@@ -84,11 +126,14 @@ function MetaLine({ message }: { message: Message }) {
         data-testid="code-agent-resume-status"
         data-resume-status={resume.status}
         className={cn(
-          '-mt-1 pr-1 text-xs text-muted-foreground',
+          '-mt-1 flex items-center gap-2 pr-1 text-xs text-muted-foreground',
           resume.status === 'failed' && 'text-red-500 dark:text-red-400',
         )}
       >
-        {time} · {codeAgentResumeLabel(resume)}
+        {copyButton}
+        <span>
+          {time} · {codeAgentResumeLabel(resume)}
+        </span>
       </p>
     );
   }
@@ -99,6 +144,7 @@ function MetaLine({ message }: { message: Message }) {
         data-testid="user-message-meta"
         className="-mt-1 flex items-center gap-2 pr-1 text-xs text-muted-foreground"
       >
+        {copyButton}
         {sending && (
           <span
             aria-hidden
