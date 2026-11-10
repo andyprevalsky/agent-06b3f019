@@ -1729,7 +1729,6 @@ def isolated_successor(state, prior):
              and isinstance(latest['source']['digest'], str)
              and re.fullmatch(r'[0-9a-f]{64}', latest['source']['digest'])
              and latest['source'] == attempt.get('source')
-             and latest['source'] != prior['validation_source']
              and attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
              and not attempt.get('interrupted') and not attempt.get('stale')
              and len(rows) >= 2, 'unexecuted source refusal identity')

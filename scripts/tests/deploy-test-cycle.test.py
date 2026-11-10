@@ -6006,6 +6006,14 @@ class Cycle(unittest.TestCase):
         self.assertIsNone(c.full_pass_binding(state, gate))
         request = dict(token='fresh-after-unexecuted-refusal', source=state['source'], checks=gate['checks'], skips={})
         self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
+        # Renewal cannot invalidate the retained refusal or its own repeat call.
+        # Recheck all native authority through both public selector forms.
+        for phase in ('quick', 'final'):
+            state['phase'] = phase
+            for selector in (original['token'], entry['occurrence']):
+                same = copy.deepcopy(state)
+                c.reconcile(state, selector, incoming)
+                self.assertEqual(same, state)
 
     def test_original_occurrence_cannot_reregister_changed_source_without_successor_checks(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state(True)
