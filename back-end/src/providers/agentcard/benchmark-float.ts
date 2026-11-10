@@ -104,6 +104,46 @@ function preferredBenchmarkCardholderIds(
   return [...new Set(preferred)];
 }
 
+/** Follow the provider's declared offset contract under the resolver's original deadline. */
+async function* benchmarkCardholderPages(
+  callOrgTool: AgentCardOrgToolCaller,
+  deadlineAtMs: number
+): AsyncGenerator<AgentCardSandboxCardholder[]> {
+  const limit = 100; // Provider tools/list: documented maximum, not a total discovery cap.
+  const seen = new Set<string>();
+  let offset = 0;
+  for (;;) {
+    if (Date.now() >= deadlineAtMs) {
+      throw new Error('AgentCard cardholder discovery exceeded its original read deadline');
+    }
+    const result = await callOrgTool('list_cardholders', { limit, offset }, deadlineAtMs);
+    const outer = asRecord(result);
+    const structured = asRecord(outer?.structuredContent) ?? outer;
+    const page = extractCardholders(result);
+    const count = (structured?.cardholders as unknown[]).length;
+    const total = structured?.total;
+    if (
+      count > limit ||
+      page.length !== count ||
+      (total !== undefined && (!Number.isSafeInteger(total) || (total as number) < 0))
+    ) {
+      throw new Error('AgentCard cardholder pagination metadata is malformed');
+    }
+    const fresh = page.filter(({ id }) => !seen.has(id));
+    for (const { id } of page) seen.add(id);
+    if (
+      (count === 0 && typeof total === 'number' && offset < total) ||
+      (offset > 0 && count > 0 && fresh.length === 0)
+    ) {
+      throw new Error('AgentCard cardholder pagination made no progress');
+    }
+    yield page;
+    // Legacy fixtures without total are a single observed page; never invent another page.
+    if (total === undefined || offset + count >= (total as number)) return;
+    offset += count;
+  }
+}
+
 /** AgentCard's terminal, mint-capable verification states. */
 const KYC_READY_STATUSES = new Set(['verified', 'approved']);
 
@@ -133,7 +173,32 @@ export async function resolveBenchmarkCardholderId(
   const deadlineAtMs = orgRetryDeadlineAtMs();
   const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
     callOrgTool(toolName, args, deadlineAtMs);
-  const cardholders = extractCardholders(await callWithinBudget('list_cardholders', {}));
+  const statuses = new Map<string, string | undefined>();
+  const readStatus = async (id: string): Promise<string | undefined> => {
+    if (statuses.has(id)) return statuses.get(id);
+    const status = await getOrgCardholderVerificationStatus(id, {
+      callOrgTool: callWithinBudget,
+    }).catch((error: unknown) => {
+      if (isOrgBackpressureError(error)) throw error;
+      return undefined;
+    });
+    statuses.set(id, status);
+    return status;
+  };
+  const discovered = new Map<string, AgentCardSandboxCardholder>();
+  for await (const page of benchmarkCardholderPages(callWithinBudget, deadlineAtMs)) {
+    for (const cardholder of page) {
+      if (!discovered.has(cardholder.id)) discovered.set(cardholder.id, cardholder);
+    }
+    // The highest-priority explicit candidate needs only positive membership and KYC.
+    // Do not wait for unrelated org-wide discovery/churn once that exact target is ready.
+    if (preferredIds[0] && discovered.has(preferredIds[0])) {
+      const status = await readStatus(preferredIds[0]);
+      if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase()))
+        return preferredIds[0];
+    }
+  }
+  const cardholders = [...discovered.values()];
   if (cardholders.length === 0) {
     throw new Error(
       'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +
@@ -158,12 +223,7 @@ export async function resolveBenchmarkCardholderId(
     // whole resolution: another candidate may still be verified. Org-wide backpressure says
     // nothing about this cardholder: skipping it could seed a less-preferred, unverified one, and
     // reading the next candidate would only add load.
-    const status = await getOrgCardholderVerificationStatus(id, {
-      callOrgTool: callWithinBudget,
-    }).catch((error: unknown) => {
-      if (isOrgBackpressureError(error)) throw error;
-      return undefined;
-    });
+    const status = await readStatus(id);
     if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase())) return id;
   }
   // Nothing verifiable: fall back to the highest-preference candidate so the caller's more
