@@ -1041,6 +1041,11 @@ def validate(receipt, owner, proof):
         return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
+    if layout == 'campaign-partial-zero-allocation-v1':
+        from deploy_test_native_partial_admission import validate_partial
+        result = validate_partial(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)
+        need(used == set(bindings), 'partial proof file closure')
+        return result
     if layout == 'campaign-ref-preflight-v1':
         from deploy_test_native_ref_preflight import validate_ref_preflight
         result = validate_ref_preflight(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
@@ -1680,9 +1685,14 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     need(len(entries) == 1, 'one strict normal successor reconciliation required')
     key, entry = entries[0]
     normal = entry.get('proof', {})
+    partial = (normal.get('layout') == 'campaign-partial-zero-allocation-v1'
+               and entry.get('partial_preexecution_zero_allocation') is True
+               and entry.get('financial_cleanup_credit') is False
+               and entry.get('original_outcomes_preserved') is True
+               and original['token'] == '6428b1b8c79c47fbb0422465fec357e1')
     need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
          and entry.get('purpose') is None and normal.get('purpose') is None
-         and normal.get('layout') == 'campaign-v1' and key == normal.get('receipt_sha256')
+         and (normal.get('layout') == 'campaign-v1' or partial) and key == normal.get('receipt_sha256')
          and key == sha_file(folder / 'receipt.json') and entry.get('credit_granted') is False,
          'strict normal successor reconciliation required')
     reconciliation_occurrence(state, entry, successor)

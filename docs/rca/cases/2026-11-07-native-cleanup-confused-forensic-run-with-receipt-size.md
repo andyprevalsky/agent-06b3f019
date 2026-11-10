@@ -197,3 +197,14 @@ run only through the pending quick-to-triage boundary, generate a proof that
 changes only validation_source to the actual frozen HEAD/digest, and native-
 reconcile it before reexecution/focus can launch cloud smoke. No reset or
 manual cycle surgery is authorized.
+
+
+### Followup: partial zero-allocation campaign after cleanup-reserve refusal (PR1865)
+
+On source bd64033af812958f8d89d58532f9686af5a356cb, native smoke round32 scheduled17 tasks at live provider width15. Six launched controllers refused the unchanged physical cleanup-reserve floor, nine admitted controllers were cancelled through owned teardown, and two scheduled tasks never launched. The exact native admission predicate reproduces9 admitted/6 refused at observed6831MiB; width8 admits8 with the same512MiB preferred reserve/256MiB headroom/32MiB minimum. These causal predicates match inherited main; reducing supported ambient concurrency preserves all17 tasks and every floor.
+
+The coordinator's identity/inventory error was triggered by cleanup_completefalse; request/result identities and17-case inventory matched. Native controller execution remains FAIL/native_exit1, all17 task outcomes remain UNVERIFIED, and historical abandonment remains a zero-credit custody SKIP. All15 immutable mirrored/native ownership scopes are empty and sealed, all9 native Hub owners are retired, and relay/controller/publisher closure is independently verified. No task or provider allocation was observed; this does not convert the failed execution into PASS.
+
+The generic cleanup reader previously required an integer controller exit and parent handle for every scheduled job, rejecting the two legitimate null unlaunched rows. A separate versioned layout admits only the independently witnessed request/receipt/adapter/summary and immutable producer hashes. It validates every launched owner/audit, positive reserve-refusal or cancellation boundary, exact two never-launched rows, current process/Hub absence, zero allocation, original publication and full evidence closure. It records launch-only cleanup retirement with no test or financial credit and requires all17 task checks to execute again. The original retained isolated obligation is unchanged; its existing failed-successor renewal path recognizes only this fully revalidated typed entry for the original obligation token.
+
+Validation: actual unchanged reader rejects this proof as unsupported; candidate native reconcile succeeds on a copy while preserving attempts/failures/pending and original debt. Permanent regressions reject launched identities or broken-symlink logs in null rows and unwitnessed requests before native reads. Independent real-proof tamper controls cover allocation, provenance, Hub/relay/process reuse and coupled renewal entry forgery. Full current-source native smoke and resource closure remain mandatory after supported environment/source refresh; diagnostic admission modeling grants no acceptance credit.

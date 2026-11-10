@@ -10577,4 +10577,47 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
 
 
+
+class PartialNativeAdmission(unittest.TestCase):
+    def test_unstarted_partial_rows_preserve_nulls_and_refuse_launched_identity(self):
+        from deploy_test_native_partial_admission import require_unlaunched
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign=Path(tmp)
+            for index in (16,17):
+                job=dict(job_id=f'r001-j{index:04d}',status='cancelled',
+                         log=str(campaign/f'r001-j{index:04d}.log'))
+                for field in ('controller_pid','controller_exit_code','started_at','finished_at',
+                              'wall_clock_seconds','run_id','fleet_dir','fleet_owner_token'):
+                    job[field]=None
+                original=copy.deepcopy(job)
+                require_unlaunched(job,index,campaign)
+                self.assertEqual(job,original)
+                for field,value in [('controller_pid',123),('controller_exit_code',0),
+                                    ('run_id','native-run'),('fleet_dir','/allocated'),
+                                    ('fleet_owner_token','a'*32),('started_at','2026-11-09T23:31:00Z')]:
+                    with self.subTest(index=index,field=field),self.assertRaisesRegex(ValueError,'unlaunched'):
+                        require_unlaunched(dict(job,**{field:value}),index,campaign)
+                path=Path(job['log']);path.symlink_to(campaign/'missing')
+                with self.assertRaisesRegex(ValueError,'unlaunched'):
+                    require_unlaunched(job,index,campaign)
+                path.unlink()
+
+    def test_partial_cleanup_refuses_unwitnessed_request_before_native_read(self):
+        from deploy_test_native_partial_admission import CAPTURE,validate_partial
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);runs=root/'.context/deploy-cloud/native/runs'
+            campaign=runs.parent/'campaigns'/('deploy-'+runs.parent.name)
+            receipt=dict(source=CAPTURE['source'],token='f'*32,log=str(root/'receipt.log'))
+            owner={'native_cleanup_reference':{'native_directory':str(campaign)}}
+            adapter={'fleet_directory':str(campaign)}
+            proof=dict.fromkeys(('kind','owner','request_token','source','receipt_sha256','worker_result_sha256',
+                                 'confirmed_at','observed_by','layout','campaign','files'))
+            proof['campaign']=str(campaign)
+            def forbidden(*args,**kwargs):
+                raise AssertionError('unwitnessed request reached native file read')
+            with self.assertRaisesRegex(ValueError,'capture identity'):
+                validate_partial(receipt,owner,proof,adapter,root,runs,str(campaign),
+                                 forbidden,forbidden,forbidden)
+
+
 if __name__ == '__main__': unittest.main()
