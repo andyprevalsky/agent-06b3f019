@@ -17,7 +17,7 @@ Lifecycle
   ✅ Guests released · 3/3 terminal jobs
   ✅ Lifecycle verified · 3/3 terminal jobs
 LAST 3 EXPERIMENTS
-  #1 🔵 RUNNING mixed5 · Oct 18, 12:28:52 PM PDT → RUNNING · PASS 1/2 · INFRA 2/4
+  #1 🔵 RUNNING mixed5 · Oct 18, 12:28:52 PM PDT → RUNNING · PASS 1/2 · INFRA 1/5
 ACTIVE SUB-AGENTS / PARENT
   No active agents
 ISSUES / NEXT ACTION

@@ -1369,9 +1369,8 @@ def _history_html(card) -> str:
         o, total = h.get("outcomes"), h.get("scheduled_total")
         if o:
             scored = h.get("scored") or 0
-            attempts = h.get("terminal_attempts") or 0
             pass_text = f'PASS {o["PASS"]}/{scored} ({pct(o["PASS"], scored)})' if scored else "NO SCORED TASKS"
-            infra_text = ("INFRA UNRECONCILED" if h.get("infra_unreconciled") else f'INFRA {h.get("infra_attempts") or 0}/{attempts}' if attempts else "NO TERMINAL ATTEMPTS")
+            infra_text = ("INFRA UNRECONCILED" if h.get("infra_unreconciled") else "NO TERMINAL ATTEMPTS" if not h.get("terminal_attempts") else f'INFRA {h["infra_jobs"]}/{total}' if isinstance(h.get("infra_jobs"), int) and total else "INFRA UNMEASURED")
             harness = "HARNESS " + (str(o["HARNESS"]) if o["HARNESS"] or h.get("harness_classified") else "UNCLASSIFIED")
             extra = [f"{c.lower()} {o[c]}" for c in ("AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED") if o.get(c)]
             if h.get("cancelled_before_release"):
@@ -1452,7 +1451,7 @@ def render_text(card: dict) -> str:
                      f'{pacific(h.get("triggered_at"))} → '
                      + ("RUNNING" if h["state"] == "RUNNING" and not h.get("ended_at") else pacific(h["ended_at"], date=False) if h.get("ended_at") else "END UNRECORDED")
                      + ((f' · PASS {ho.get("PASS")}/{h.get("scored")}' if h.get("scored") else " · NO SCORED TASKS")
-                        + (" · INFRA UNRECONCILED" if h.get("infra_unreconciled") else f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
+                        + (" · INFRA UNRECONCILED" if h.get("infra_unreconciled") else " · NO TERMINAL ATTEMPTS" if not h.get("terminal_attempts") else f' · INFRA {h["infra_jobs"]}/{h["scheduled_total"]}' if isinstance(h.get("infra_jobs"), int) and h.get("scheduled_total") else " · INFRA UNMEASURED")
                         + (f' · {ho["CANCELLED"]} cancelled' if ho.get("CANCELLED") else "")
                         + (f' · {h["scheduled_total"]} never started' if h.get("never_started") else "") if ho else " · UNMEASURED"))
     lines.append("ACTIVE SUB-AGENTS / PARENT")

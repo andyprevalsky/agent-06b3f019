@@ -1,3 +1,4 @@
+import { assertAllStripeCustodyContract } from './test-payment-stripe-custody.cases';
 import assert from 'node:assert/strict';
 import { PurchaseSpendStatus } from '@prisma/client';
 import {
@@ -465,6 +466,7 @@ export async function assertV2LifecycleContract(): Promise<void> {
     getV2OwnerId: owner,
   };
   const result = await getTestPaymentLifecycle('a-v2', dependencies as never);
+  await assertAllStripeCustodyContract(dependencies);
   assert.equal(result.agentCard?.status, 'closed');
   assert.equal(result.agentCard?.balanceCents, 0);
   assert.equal(result.orgTransfer?.id, 'owt_v2');

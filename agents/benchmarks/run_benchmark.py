@@ -3547,14 +3547,14 @@ async def get_llm_usage_details(base_url: str, root_agent_id: str, tree_stats: d
     return aggregate_usage_items(items), aggregate_prompt_cache_share(items)
 
 
-async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
+async def get_test_payment_lifecycle(base_url: str, agent_id: str, *, stripe_custody: bool = False) -> dict:
     """Read the sanitized cross-provider lifecycle snapshot for a benchmark agent."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{base_url}/api/test-payment/lifecycle",
             headers=headers,
-            params={"agentId": agent_id},
+            params={"agentId": agent_id, **({"stripeCustody": "1"} if stripe_custody else {})},
         )
         if resp.status_code != 200:
             raise Exception(f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}")
@@ -7070,7 +7070,13 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
             evidence["payment_snapshot"] = snapshot
             pending = cloud_batch_cleanup.pending_root_payments(snapshot)
             if not pending:
-                return {"root_agent_id": root_id, "purchases": snapshot["purchase_cleanup"]}
+                agents_with_intents = {row["agent_id"] for row in snapshot["purchase_cleanup"]
+                                       if row["stripe_payment_intent_id"] is not None}
+                lifecycles = {aid: await get_test_payment_lifecycle(base_url, aid, stripe_custody=True)
+                              for aid in sorted(agents_with_intents)}
+                stripe_custody = cloud_batch_cleanup.verified_root_stripe_custody(snapshot, lifecycles)
+                return {"root_agent_id": root_id, "purchases": snapshot["purchase_cleanup"],
+                        "stripe_custody": stripe_custody}
             # An accepted mint remains visible before its remote side effects
             # finish. Do not classify its early empty card/transfer as cleanup.
             actionable = [row for row in pending if row["status"] not in {"PENDING_APPROVAL", "CHARGING"}]

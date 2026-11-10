@@ -114,3 +114,22 @@ export async function findHeldLifecycleProbePurchases(
     select: { id: true, agentId: true },
   });
 }
+
+/** Immutable billing snapshots for every exact-agent intent, including failed setup attempts. */
+export async function findStripePurchasesByAgentId(agentId: string) {
+  return prisma.purchaseSpend.findMany({
+    where: { agentId, stripePaymentIntentId: { not: null } },
+    select: {
+      id: true,
+      userId: true,
+      agentId: true,
+      status: true,
+      totalCents: true,
+      stripePaymentIntentId: true,
+      stripeLivemode: true,
+      stripeCustomerId: true,
+    },
+    orderBy: { id: 'asc' },
+    take: 101,
+  });
+}

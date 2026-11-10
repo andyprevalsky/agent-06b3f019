@@ -917,6 +917,7 @@ async def _owned_payment_cleanup_case(*, refund_fails):
         "status": "CHARGING",
         "card_id": None,
         "stripe_payment_intent_id": "pi_owned",
+        "user_id": ROOT, "stripe_livemode": False, "stripe_customer_id": "cus_owned",
         "total_cents": 4396,
         "funding_status": "PENDING",
         "provider_transfer_id": None,
@@ -956,8 +957,17 @@ async def _owned_payment_cleanup_case(*, refund_fails):
         payment.update(status="VOIDED", funding_status="RECLAIMED", reclaim_provider_transfer_id="owned-transfer")
         return {}
 
+    async def custody(_url, aid, **kwargs):
+        assert aid == ROOT and kwargs == {"stripe_custody": True}
+        return {"agentId": ROOT, "stripeCustody": [{
+            "purchaseId": payment["purchase_id"], "userId": ROOT, "agentId": ROOT,
+            "purchaseStatus": payment["status"], "paymentIntentId": "pi_owned", "customerId": "cus_owned",
+            "livemode": False, "status": "canceled", "currency": "usd", "amountCents": 4396,
+            "amountReceivedCents": 0, "amountCapturableCents": 0, "refundedCents": 0, "outcome": "unspent"}]}
+
     row = result(ROOT)
     with (
+        patch.object(bench, "get_test_payment_lifecycle", custody),
         patch.object(cleanup, "exact_root_sessions", query),
         patch.object(cleanup.runpy, "run_path", return_value={"provider_request": lambda *_args: (204, "receipt")}),
         patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
@@ -1398,7 +1408,8 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
                   "agentId" TEXT NOT NULL, "sessionId" TEXT NOT NULL UNIQUE,
                   status "BrowserSessionStatus" NOT NULL DEFAULT 'ACTIVE', provider TEXT NOT NULL DEFAULT 'steel');
                 CREATE TABLE "PurchaseSpend" (id TEXT PRIMARY KEY, "agentId" TEXT, status TEXT, "cardId" TEXT,
-                  "stripePaymentIntentId" TEXT, "totalCents" INTEGER);
+                  "stripePaymentIntentId" TEXT, "totalCents" INTEGER, "userId" TEXT NOT NULL,
+                  "stripeLivemode" BOOLEAN NOT NULL, "stripeCustomerId" TEXT);
                 CREATE TABLE "PurchaseWalletFunding" ("purchaseId" TEXT, status TEXT, "providerTransferId" TEXT,
                   "reclaimProviderTransferId" TEXT);
                 """ + logical_identity_ddl,
@@ -1418,6 +1429,13 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
                 "owned_fixture",
             )
             assert inserted.returncode == 0, inserted.stderr
+            purchase_id = "00000000-0000-4000-8000-000000000003"
+            billing = sql(
+                f"""INSERT INTO "PurchaseSpend" (id, "agentId", status, "stripePaymentIntentId", "totalCents",
+                     "userId", "stripeLivemode", "stripeCustomerId")
+                    VALUES ('{purchase_id}', '{ROOT}', 'FAILED', 'pi_initial_fixture', 4396,
+                            '{ROOT}', false, 'cus_owned_fixture')""", "owned_fixture")
+            assert billing.returncode == 0, billing.stderr
             # The schema itself guarantees a NULL-session row is only an unmaterialized logical identity.
             orphan = sql(
                 f"""INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider)
@@ -1445,6 +1463,12 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
                 snapshot = cleanup.exact_root_sessions("http://localhost:31001", ROOT)
                 assert snapshot["tree_agent_ids"] == sorted([ROOT, CHILD])
                 assert snapshot["browser_sessions"] == []
+                assert snapshot["purchase_cleanup"] == [{
+                    "purchase_id": purchase_id, "agent_id": ROOT, "status": "FAILED", "card_id": None,
+                    "stripe_payment_intent_id": "pi_initial_fixture", "user_id": ROOT,
+                    "stripe_livemode": False, "stripe_customer_id": "cus_owned_fixture", "total_cents": 4396,
+                    "funding_status": None, "provider_transfer_id": None, "reclaim_provider_transfer_id": None,
+                }]
                 # A materialized Kernel session is still returned and owned exactly.
                 materialized = sql(
                     f"""UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
@@ -3166,3 +3190,44 @@ async def test_terminal_report_closed_sink_preserves_cleanup_runtime_error():
 @async_case
 async def test_terminal_report_closed_sink_preserves_real_cleanup_cancellation():
     await _assert_terminal_report_final_grade(("cleanup-cancelled-closed",))
+
+
+@async_case
+async def test_terminal_failed_setup_intent_requires_external_custody():
+    failed = {"purchase_id": "00000000-0000-4000-8000-000000000003", "agent_id": ROOT,
+              "user_id": ROOT, "stripe_livemode": False, "stripe_customer_id": "cus_owned",
+              "status": "FAILED", "card_id": None, "stripe_payment_intent_id": "pi_initial",
+              "total_cents": 4396, "funding_status": None, "provider_transfer_id": None,
+              "reclaim_provider_transfer_id": None}
+    paid = {**failed, "purchase_id": "00000000-0000-4000-8000-000000000004", "status": "CLEARED",
+            "card_id": "card_owned", "stripe_payment_intent_id": "pi_paid", "funding_status": "CONSUMED"}
+    def proof(row, outcome):
+        return {"purchaseId": row["purchase_id"], "userId": ROOT, "agentId": ROOT,
+                "purchaseStatus": row["status"], "paymentIntentId": row["stripe_payment_intent_id"],
+                "customerId": "cus_owned", "livemode": False, "status": "canceled" if outcome == "unspent" else "succeeded",
+                "currency": "usd", "amountCents": 4396, "amountReceivedCents": 0 if outcome == "unspent" else 4396,
+                "amountCapturableCents": 0, "refundedCents": 0, "outcome": outcome}
+    snapshot = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "purchase_cleanup": [failed, paid]}
+    observations = [proof(failed, "unspent"), proof(paid, "paid")]
+    fetch = AsyncMock(return_value={"agentId": ROOT, "stripeCustody": observations})
+    with patch.object(cleanup, "exact_root_sessions", return_value=snapshot), patch.object(bench, "get_test_payment_lifecycle", fetch):
+        result = await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+        fetch.assert_awaited_once_with("http://localhost:1", ROOT, stripe_custody=True)
+        assert result["stripe_custody"] == observations
+        for field, value in [("livemode", True), ("customerId", "cus_foreign"), ("userId", CHILD),
+                             ("status", "requires_capture"), ("amountCapturableCents", 4396),
+                             ("paymentIntentId", "pi_foreign"), ("amountReceivedCents", 4396)]:
+            broken = copy.deepcopy(observations); broken[0][field] = value
+            fetch.return_value = {"agentId": ROOT, "stripeCustody": broken}
+            with pytest.raises(RuntimeError, match="custody"):
+                await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+        refunded = copy.deepcopy(observations)
+        refunded[0].update(status="succeeded", outcome="refunded", amountReceivedCents=4396, refundedCents=4396)
+        fetch.return_value = {"agentId": ROOT, "stripeCustody": refunded}
+        assert (await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {}))["stripe_custody"] == refunded
+        refunded[0]["refundedCents"] = 4395
+        with pytest.raises(RuntimeError, match="custody"):
+            await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+        fetch.return_value = {"agentId": ROOT, "stripeCustody": observations[1:]}
+        with pytest.raises(RuntimeError, match="custody"):
+            await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})

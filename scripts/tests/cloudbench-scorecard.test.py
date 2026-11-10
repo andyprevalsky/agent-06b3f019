@@ -192,6 +192,29 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_history_infra_uses_scheduled_jobs_not_scored_attempts(self):
+        cases = [(11, 1, 1, 0, 0, 0, False, "INFRA 0/11"),
+                 (1, 1, 1, 0, 0, 0, False, "INFRA 0/1"),
+                 (11, 0, 0, 0, 0, 0, False, "NO TERMINAL ATTEMPTS"),
+                 (11, 1, 1, 0, 0, 10, False, "INFRA 0/11"),
+                 (11, 1, 3, 2, 1, 8, False, "INFRA 1/11"),
+                 (None, 1, 1, 0, None, 0, False, "INFRA UNMEASURED"),
+                 (11, 1, 1, 0, 0, 10, True, "INFRA UNRECONCILED")]
+        for total, scored, attempts, infra_attempts, jobs, cancelled, unknown, expected in cases:
+            with self.subTest(total=total, attempts=attempts, cancelled=cancelled, unknown=unknown):
+                data = render(self.f.fleet(), self.f)
+                row = data["history"][0]
+                row.update(scheduled_total=total, scored=scored, terminal_attempts=attempts,
+                           infra_attempts=infra_attempts, infra_jobs=jobs,
+                           infra_unreconciled=unknown)
+                row["outcomes"].update(PASS=1 if scored else 0, CANCELLED=cancelled)
+                document = self.valid(data)
+                history = re.search(r'<section data-section="history">(.*?)</section>', document, re.S).group(1)
+                self.assertIn(expected, history)
+                self.assertIn(expected, CARD["render_text"](data).split("LAST 3 EXPERIMENTS", 1)[1])
+                self.assertEqual(row["scheduled_total"], total)
+                self.assertEqual(row["outcomes"]["CANCELLED"], cancelled)
+
     def test_fleet_golden_and_html(self):
         data = render(self.f.fleet(), self.f)
         self.golden("fleet", CARD["render_text"](data))

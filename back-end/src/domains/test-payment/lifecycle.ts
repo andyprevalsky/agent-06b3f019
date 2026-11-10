@@ -1,3 +1,4 @@
+import { observeStripeCustody } from './lifecycleStripeCustody';
 import { isV2LifecycleFunding, observeV2Lifecycle } from './lifecycleV2';
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { getOrgManagedCardholderId } from '../../providers/agentcard/store';
@@ -35,8 +36,7 @@ async function getOrgCardSummary(cardId: string): Promise<{
   status: string;
   balanceCents: number;
 }> {
-  const result = await callOrgTool('get_card', { card_id: cardId });
-  return agentCardSummaryFromMcpResult(result);
+  return agentCardSummaryFromMcpResult(await callOrgTool('get_card', { card_id: cardId }));
 }
 
 function resolveDependencies(
@@ -268,7 +268,7 @@ async function buildLoadedLifecycle(
   };
 }
 
-export async function getTestPaymentLifecycle(
+async function readTestPaymentLifecycle(
   agentId: string,
   dependencies: TestPaymentLifecycleDependencies = {}
 ): Promise<TestPaymentLifecycle> {
@@ -305,4 +305,14 @@ export async function getTestPaymentLifecycle(
     };
   }
   return buildLoadedLifecycle(agentId, purchase, attentionRequests, integrity, dependencies);
+}
+
+export async function getTestPaymentLifecycle(
+  agentId: string,
+  dependencies: TestPaymentLifecycleDependencies = {}
+): Promise<TestPaymentLifecycle> {
+  const result = await readTestPaymentLifecycle(agentId, dependencies);
+  if (dependencies.includeStripeCustody === true)
+    result.stripeCustody = await observeStripeCustody(agentId, dependencies);
+  return result;
 }
