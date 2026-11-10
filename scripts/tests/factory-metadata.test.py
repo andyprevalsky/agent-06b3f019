@@ -593,7 +593,7 @@ class FactoryDetailTest(unittest.TestCase):
                 output = io.StringIO()
                 root = Path(directory)
 
-                async def fake_domain(domain, semaphore, coverage, artifacts):
+                async def fake_domain(domain, semaphore, coverage, artifacts, attempt=1):
                     log = artifacts / (domain + ".log")
                     log.write_text("expected Connection refused negative control\n")
                     return runner.DomainResult(domain, domain == "healthy", 0.1,

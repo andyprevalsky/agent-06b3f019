@@ -72,6 +72,9 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 
 ## Testing
 
+- The only accepted non-blocking failures are quarantined tests marked as `.claude/commands/deploy.md` describes.
+
+  **Deploy-only exception:** apply `.claude/shared/deploy-failure-policy.md` to repair ownership and qualified waivers. This exception does not change the rule outside `/deploy`.
 - Write the assertion first: designing the test is the main work, untested behavior is assumed broken, and a demo or eyeballing is not proof (rule 2).
 - Work is incomplete until a test in a consistently run `/deploy` path asserts the behavior; every bug fix lands its reproduction test there, and where it makes sense add validation criteria to an existing test instead of writing a new one (rule 1).
 - Before finalizing a new test, run that test (not its whole suite) five consecutive times with unchanged test code to make sure it isn't flaky, consider whether it would flake under machine load or other conditions, and have it cross-reviewed once for flakiness.

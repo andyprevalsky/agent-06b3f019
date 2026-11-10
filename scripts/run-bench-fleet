@@ -6520,8 +6520,12 @@ fleet_registry_release_verified() {
         --fleet "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" --run "$RUN_ID"
 }
 
-acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir>
-    local registry="$1" lock="$1/recovery-lock" tmp
+acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir> [skip-busy]
+    # Returns 0 when acquired, 2 when the registry vanished, and 1 on refusal or
+    # timeout. With skip-busy, a recovery held by a live process returns 3 at
+    # once: that peer owns the registry exactly as a live controller would, so
+    # an unrelated startup scan must not queue behind its provider teardown.
+    local registry="$1" lock="$1/recovery-lock" tmp busy_policy="${2:-wait}"
     local guard="${registry%/*/*}/cloudbench-fleet-recovery-locks/${registry##*/}"
     # The capture helper uses this same persistent inode. Never unlink it:
     # removing the registry metadata must not split concurrent recoverers.
@@ -6557,6 +6561,8 @@ except BlockingIOError:
     raise SystemExit(1)
 PYGUARD
         if [ "$guard_status" -eq 1 ]; then
+            # The kernel releases flock on exit: contention proves a live holder.
+            if [ "$busy_policy" = skip-busy ]; then release_registry_recovery_guard; return 3; fi
             sleep 1
             continue
         fi
@@ -6580,7 +6586,9 @@ PYGUARD
         if [ -f "$lock/meta" ]; then
             registry_owner_alive "$lock/meta"
             case $? in
-                0) sleep 1; continue ;;
+                0)
+                    if [ "$busy_policy" = skip-busy ]; then release_registry_recovery_guard; return 3; fi
+                    sleep 1; continue ;;
                 1) rm -rf "$lock"; continue ;;
                 *) echo "❌ cannot prove stale recovery lock ownership for $registry" >&2; release_registry_recovery_guard; return 1 ;;
             esac
@@ -7544,9 +7552,17 @@ reconcile_stale_fleet_registries_full() {
             unresolved=1
             continue
         }
-        acquire_registry_recovery_lock "$registry"
+        acquire_registry_recovery_lock "$registry" skip-busy
         recovery_lock_status=$?
         [ "$recovery_lock_status" -eq 2 ] && continue
+        if [ "$recovery_lock_status" -eq 3 ]; then
+            # Concurrent jobs share this host-wide scan. The live recoverer
+            # finishes (or fails closed for) this registry; its clones remain
+            # visible to the provider capacity snapshot, refreshed below.
+            echo "↪️  stale fleet registry $(basename "$registry") is being recovered by a live peer; leaving it to that owner"
+            FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=1
+            continue
+        fi
         if [ "$recovery_lock_status" -ne 0 ]; then
             unresolved=1
             continue

@@ -132,6 +132,12 @@ def test_existing_catalog_rows_unchanged():
     # validation requires (select_predeploy_benches.require_deploy_category).
     old = json.loads(subprocess.check_output(['git', 'show', '5f9a8d94a9f584a8b16ead9be263827f84feac48:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
+    # Quarantine is validated deploy metadata, not an executable task change.
+    from benchmarks.long_horizon import validate_task_quarantine
+    for rows in (old, current):
+        for row in rows:
+            validate_task_quarantine(row, row['name'])
+            row.pop('quarantine', None)
     # Sync retains every row from the reviewed snapshot; new tasks append only.
     assert current[:len(old)] == old
 

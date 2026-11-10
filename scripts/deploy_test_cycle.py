@@ -28,6 +28,7 @@ import time
 import uuid
 
 import deploy_gate_progress as progress
+import deploy_test_quarantine as quarantine
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
 from deploy_test_isolation import validate as validate_isolation
@@ -145,7 +146,8 @@ def runtime_config_sha256(path: Path) -> str:
     return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
 
 
-def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None) -> dict:
+def source_files(root: Path) -> dict:
+    """Per-file content/mode digests of the current source inputs (output ledgers excluded)."""
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
     links = index_gitlinks(root)
@@ -164,6 +166,11 @@ def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None
             content = b"DELETED"
         mode = 0o160000 if raw in links else source_mode(path) if path.exists() or path.is_symlink() else None
         files[os.fsdecode(raw)] = digest([hashlib.sha256(content).hexdigest(), mode])
+    return files
+
+
+def input_fingerprints(plan: dict, root: Path, *, environment: str | None = None, files: dict | None = None) -> dict:
+    files = source_files(root) if files is None else files
     # Runtime configuration is an input even when Git ignores its secrets and
     # the gate narrows its source globs. Never let source selection hide it.
     runtime_config = {}
@@ -308,8 +315,12 @@ def qualification_identity(skips: dict) -> dict:
     return result
 
 
-def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -> dict | None:
-    """Latest FULL execution: native PASS subset plus exact existing qualified exclusions."""
+def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=False,
+                      input_fingerprint: str | None = None) -> dict | None:
+    """Latest FULL execution: native PASS subset plus exact existing qualified exclusions.
+
+    input_fingerprint names the native execution's inputs when a graph carry proved they differ
+    from the current ones only outside this gate; by default they must be the current inputs."""
     latest = latest_receipts(state).get(gate['name'])
     if not latest or gate.get('quick'):
         return None
@@ -334,7 +345,7 @@ def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=Fal
             or receipt.get('cleanup_owner')
             or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
-            or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
+            or receipt.get('execution_binding') != {'input_fingerprint': input_fingerprint or state['input_fingerprints'].get(gate['name']),
                 'contract_digest': digest(gate), 'environment': state['environment']}):
         return None
     try:
@@ -375,7 +386,8 @@ def carried_pass(state: dict, gate: dict, *, root=ROOT, custody_refresh=False) -
     return (entry.get('validated_source') == state['source']
             and entry.get('input_fingerprint') == state['input_fingerprints'].get(gate['name'])
             and entry.get('contract_digest') == digest(gate)
-            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh) == entry.get('native_binding'))
+            and full_pass_binding(state, gate, root=root, custody_refresh=custody_refresh,
+                                  input_fingerprint=entry.get('native_input_fingerprint')) == entry.get('native_binding'))
 
 
 def reusable_full_pass(state: dict, gate: dict) -> bool:
@@ -678,6 +690,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                                    'native_cleanup_reference': native_cleanup_reference}
     result['worker_evidence'] = worker_evidence
     result['resource_skips'] = qualified
+    # Quarantined rows never change the verdict above; FLAKY rows open their attribution in record().
+    result.update(quarantine.gate_outcomes(folder / 'progress.jsonl'))
     result['worker_result'] = str(result_path) if result_path.exists() else None
     if teardown is not None:
         result['teardown'] = teardown
@@ -1637,6 +1651,62 @@ def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path,
     return opened
 
 
+FLAKY_INSTRUCTION = ("/RCA: this unit FAILED and passed its single rerun on the same source (FLAKY). "
+                     "Return the evidence-backed INTRODUCED/NOT_INTRODUCED gate under "
+                     ".claude/shared/deploy-failure-policy.md. INTRODUCED: fix before merge, no quarantine. "
+                     "NOT_INTRODUCED: add the quarantine marker with its repair link (.claude/commands/deploy.md). "
+                     "UNKNOWN blocks the merge. Do not weaken assertions/timeouts.")
+
+
+def open_flaky(state: dict, gate: dict, rows: list[dict], directory: Path) -> list[tuple[dict, Path]]:
+    """One attribution occurrence (and /RCA request) per FLAKY unit of this gate on this source.
+
+    A FLAKY unit passed its rerun, so its check may PASS; the merge still refuses until its
+    attribution is recorded (attribute-flaky). Later rows for the same unit open nothing.
+    """
+    seen = {(f["gate"], f["unit"]) for f in state.get("flaky", []) if f["source"] == state["source"]}
+    opened = []
+    for row in quarantine.flaky(rows):
+        if (gate["name"], row["unit"]) in seen:
+            continue
+        seen.add((gate["name"], row["unit"]))
+        mapped = early_check(gate, row)
+        occurrence = {"id": uuid.uuid4().hex, "gate": gate["name"], "unit": row["unit"],
+                      "check": gate["name"] + "/" + (mapped or row.get("case") or row["unit"]),
+                      "native_result": "FLAKY", "attempts": row.get("attempts", 2),
+                      "detail": row.get("detail", ""), "evidence": row.get("log") or None,
+                      "source": state["source"], "phase": state["phase"], "round": state["round"],
+                      "detected_at": time.time(), "unit_finished_at": row["at"], "attribution": None}
+        state.setdefault("flaky", []).append(occurrence)
+        path = directory / "rca" / (occurrence["id"] + ".json")
+        write(path, {**occurrence, "instruction": FLAKY_INSTRUCTION})
+        opened.append((occurrence, path))
+    return opened
+
+
+def flaky_notice(occurrence: dict, path: Path) -> str:
+    return (f"TEST_FLAKY gate={occurrence['gate']} unit={occurrence['unit']} attempts={occurrence['attempts']} "
+            f"attribution=REQUIRED id={occurrence['id']} rca={path} (start /RCA on this request now)")
+
+
+def attribute_flaky(state: dict, occurrence_id: str, entry: dict, root: Path) -> None:
+    occurrence = next((f for f in state.get("flaky", []) if f["id"] == occurrence_id), None)
+    if occurrence is None:
+        raise ValueError("only a recorded FLAKY occurrence can be attributed")
+    if "resolved_post_merge" in (occurrence.get("attribution") or {}):
+        raise ValueError("this FLAKY occurrence's post-merge repair is already resolved; it cannot be re-attributed")
+    attribution = quarantine.validate_attribution(occurrence, entry, root)  # validate before mutating state
+    occurrence["attribution"] = attribution
+    # A re-attribution replaces this occurrence's pending packet; only one carrying post_merge queues one.
+    pending = [p for p in state.get("pending_post_merge", []) if p["id"] != occurrence_id]
+    if "post_merge" in attribution:
+        # The existing completion block: dispatch after merge, then `resolve` with the repair link.
+        pending.append({"id": occurrence_id, "check": occurrence["check"], "gate": occurrence["gate"],
+                        "native_result": "FLAKY", "packet": attribution["post_merge"]})
+    if pending or "pending_post_merge" in state:
+        state["pending_post_merge"] = pending
+
+
 def settle_early(state: dict, result: dict, fresh: list[dict]) -> list[dict]:
     """Bind a gate's final failures to its early occurrences: same id (one RCA), or superseded on PASS.
 
@@ -1935,13 +2005,28 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         print(f"DEPLOY_GATE_EARLY_SUPERSEDED gate={match['gate']} check={match['check']} "
                               f"id={match['id']} {match['settled']}: stop its /RCA", flush=True)
                 state["live_failures"].extend(fresh)
+                gate = next((g for g in selected if g["name"] == result["gate"]), None)
+                late = open_flaky(state, gate, result.get("flaky") or [], directory) if gate else []
                 write(directory / "cycle.json", state)
+                announce_flaky(late)
+                qfail = sum(1 for r in result.get("quarantined") or [] if r["status"] == quarantine.QUARANTINED_FAIL)
+                if result.get("quarantined"):
+                    print(f"DEPLOY_GATE_QUARANTINED gate={result['gate']} failed={qfail} "
+                          f"passed={len(result['quarantined']) - qfail} (non-blocking)", flush=True)
                 # Publish and dispatch each failure while healthy siblings run.
                 for path in rca_requests(state, directory):
                     # A smoke gate blocked by its prerequisite has nothing of its own to diagnose.
                     if (launcher and not CANCEL.is_set() and not result.get('prerequisite')
                             and path.stem in {f["id"] for f in fresh}):
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
+
+            def announce_flaky(opened):
+                for occurrence, path in opened:
+                    if launcher:
+                        if not CANCEL.is_set():
+                            launched.append(rc_pool.submit(launch_rca, path, launcher))
+                    else:
+                        print(flaky_notice(occurrence, path), flush=True)
 
             offsets = {}
             def scan(running):
@@ -1951,8 +2036,10 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                             / "progress.jsonl")
                     rows, offsets[gate["name"]] = progress.read_new(path, offsets.get(gate["name"], 0))
                     opened = early_failures(state, gate, rows, directory)
-                    if opened:
+                    flaked = open_flaky(state, gate, rows, directory)
+                    if opened or flaked:
                         write(directory / "cycle.json", state)
+                    announce_flaky(flaked)
                     for occurrence, path, row in opened:
                         if launcher:
                             # The cycle owns this RCA: launch it now; the deploy agent is not asked to.
@@ -2222,6 +2309,82 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
+GRAPH_CARRY_BASIS = 'affected-test graph: delta selects no lane of this gate'
+GIT_MODES = {b'100644': stat.S_IFREG, b'100755': stat.S_IFREG | stat.S_IXUSR,
+             b'120000': stat.S_IFLNK | stat.S_IXUSR}  # source_mode() of a checked-out entry
+
+
+def native_inputs(root: Path, head: str, current: dict) -> tuple[list[str], dict]:
+    """Paths differing between the native commit and the current inputs, and that commit's file map.
+
+    The map is rebuilt from Git objects. Callers bind it to the native input fingerprint, so a dirty
+    or untracked native source, or any change outside this delta, fails that comparison."""
+    def git(*args: str, data: bytes | None = None) -> bytes:
+        return subprocess.run(['git', *args], cwd=root, check=True, capture_output=True, input=data).stdout
+    changed = set(git('diff', '--no-renames', '--name-only', '-z', head, '--').split(b'\0'))
+    changed |= set(git('ls-files', '-z', '--others', '--exclude-standard').split(b'\0'))
+    delta = sorted(os.fsdecode(p) for p in changed - {b''} if not p.startswith(b'agents/benchmarks/history/'))
+    tree = {}
+    for record in git('ls-tree', '-r', '-z', '--full-tree', head).split(b'\0'):
+        if record:
+            meta, path = record.split(b'\t', 1)
+            mode, _, oid = meta.split()
+            tree[os.fsdecode(path)] = (mode, oid)
+    blobs = [tree[p][1] for p in delta if p in tree and tree[p][0] != b'160000']
+    output, contents = git('cat-file', '--batch', data=b''.join(oid + b'\n' for oid in blobs)), {}
+    for oid in blobs:
+        header, output = output.split(b'\n', 1)
+        size = int(header.split()[2])
+        contents[oid], output = output[:size], output[size + 1:]
+    files = dict(current)
+    for path in delta:
+        files.pop(path, None)
+        if path in tree:
+            mode, oid = tree[path]
+            content = b'GITLINK\0' + oid if mode == b'160000' else contents[oid]
+            files[path] = digest([hashlib.sha256(content).hexdigest(),
+                                  0o160000 if mode == b'160000' else GIT_MODES[mode]])
+    return delta, files
+
+
+def graph_carries(state: dict, candidates: dict, gates: dict, new_source: dict, fingerprints: dict,
+                  root: Path) -> dict:
+    """Carry FULL passes whose native-to-current delta deploy_test_plan.select does not select.
+
+    Unknown impact carries nothing: run_all/unmapped files, a selector or Git error, or any
+    input outside the delta (runtime configuration included) that the native fingerprint rejects."""
+    import deploy_test_plan
+    import select_affected_tests
+    carried, deltas, graphs, selector = {}, {}, {}, None
+    try:
+        if Path(root).resolve() != select_affected_tests.ROOT.resolve():
+            return {}  # The graph describes its own checkout, not this root.
+        current = source_files(root)
+        for name, (binding, native) in candidates.items():
+            head = binding['native_source']['head']
+            if head not in deltas:
+                deltas[head] = native_inputs(root, head, current)
+            delta, files = deltas[head]
+            if input_fingerprints({'gates': [gates[name]]}, root, files=files)[name] != native:
+                continue
+            if tuple(delta) not in graphs:
+                selector = selector or deploy_test_plan.Selector()
+                graphs[tuple(delta)] = deploy_test_plan.affected(delta, selector)
+            graph = graphs[tuple(delta)]
+            plan = deploy_test_plan.select({'gates': [gates[name]]}, delta, graph, None)
+            if (graph['all'] or plan['gates']
+                    or [o.get('reason') for o in plan['omitted']] != ['no dependency or runtime-path trigger']):
+                continue
+            carried[name] = {'native_binding': binding, 'from_source': state['source'],
+                             'validated_source': new_source, 'input_fingerprint': fingerprints[name],
+                             'native_input_fingerprint': native, 'contract_digest': digest(gates[name]),
+                             'basis': GRAPH_CARRY_BASIS, 'delta': {'from_head': head, 'files': delta},
+                             'selector': graph}
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError):
+        return {}  # Unknown impact reruns every candidate.
+    return carried
+
+
 def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None,
             historical_no_retry_proof: dict | None = None) -> None:
     from deploy_test_historical_custody import known, prepare, apply, verify
@@ -2300,16 +2463,18 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
             and fingerprints == state["input_fingerprints"]):
         raise ValueError("refresh requires actual changed source or plan")
-    # No scope is inferred: absent input_paths means '*' and any source-file change reruns that gate.
-    # History-only/tree-identical syncs work for the current broad production plan; declared scopes may be selective.
-    carried, completed_repairs = {}, set()
+    # Absent input_paths means '*': identical inputs carry, and otherwise a gate carries only when the
+    # affected-test graph on the native-to-new delta selects none of its lanes. Unknown impact reruns.
+    carried, completed_repairs, candidates = {}, set(), {}
     pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}
     pending_gates.update(state.get('triage_repair_gates', []))
     if state['environment'] == environment_digest():
         for name, gate in old_gates.items():
             if name in removed:
                 continue
-            binding = full_pass_binding(state, gate, root=root, custody_refresh=True)
+            native = state.get('carried_passes', {}).get(name, {}).get('native_input_fingerprint',
+                                                                       state['input_fingerprints'].get(name))
+            binding = full_pass_binding(state, gate, root=root, custody_refresh=True, input_fingerprint=native)
             if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate, root=root, custody_refresh=True))
                     and digest(gate) == digest(new_gates[name])):
                 # Retire historical repair routing using the OLD validated FULL
@@ -2322,10 +2487,15 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
                             completed_repairs.add(name)
                     except (OSError, ValueError, KeyError, TypeError, StopIteration):
                         pass  # Unknown execution ownership cannot retire a repair.
-                if state['input_fingerprints'].get(name) == fingerprints.get(name):
+                if native == fingerprints.get(name):
                     carried[name] = {'native_binding': binding, 'from_source': state['source'],
                         'validated_source': new['source'], 'input_fingerprint': fingerprints[name],
                         'contract_digest': digest(new_gates[name]), 'basis': 'identical gate inputs and full execution contract'}
+                elif (name not in pending_gates and 'qualification_digest' not in binding
+                        and old['gates'] == new['gates']):
+                    candidates[name] = (binding, native)
+        if candidates:
+            carried.update(graph_carries(state, candidates, new_gates, new['source'], fingerprints, root))
     carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]
@@ -2390,6 +2560,15 @@ def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> No
     if not isinstance(repair_agent, str) or not repair_agent.strip():
         raise ValueError("resolving a pending post-merge packet requires the actual repair link")
     pending = next((p for p in state.get("pending_post_merge", []) if p["id"] == occurrence_id), None)
+    flaked = next((f for f in state.get("flaky", []) if f["id"] == occurrence_id), None)
+    if pending is not None and flaked is not None and "post_merge" in (flaked.get("attribution") or {}):
+        entry = {"repair_agent": repair_agent, "attribution": "NOT_INTRODUCED", "id": occurrence_id,
+                 "description": flaked["check"], "evidence": flaked["attribution"]["evidence"],
+                 "native_result": "FLAKY"}
+        decision(entry)  # validates the link like every other handoff
+        flaked["attribution"]["resolved_post_merge"] = repair_agent
+        state["pending_post_merge"] = [p for p in state["pending_post_merge"] if p["id"] != occurrence_id]
+        return
     failure = next((f for f in state["failures"] if f["id"] == occurrence_id), None)
     if pending is None or failure is None or failure.get("disposition") != "pending post-merge":
         raise ValueError("only a recorded pending post-merge occurrence can be resolved")
@@ -2421,6 +2600,9 @@ def pending_completion_block(state: dict) -> str | None:
                 return 'isolated validation still requires complete current-source full coverage; original obligations preserved'
     except (OSError, ValueError, KeyError, TypeError) as error:
         return str(error)
+    blocked = quarantine.attribution_block(state.get("flaky", []))  # recorded, not re-derived post-merge
+    if blocked:
+        return blocked
     pending = state.get("pending_post_merge") or []
     if pending:
         return (f"{len(pending)} pending post-merge packet(s) block completion; "
@@ -2455,6 +2637,10 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
         for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
                      if e.get('purpose') == 'isolated-validation'}:
             isolated_admissions(state, gate)
+        blocked = quarantine.attribution_block(state.get('flaky', []), root)
+        if blocked:
+            print(f'DEPLOY_CYCLE FLAKY_UNATTRIBUTED: {blocked}', file=sys.stderr)
+            return 1  # merge refuses until every FLAKY unit has its recorded /RCA attribution
         return 0
     except (OSError, ValueError, KeyError, TypeError):
         return 2
@@ -2463,7 +2649,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "attribute-flaky"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -2475,7 +2661,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--include-repair-local', action='store_true',
                         help='repair-independent: also observe complete original local repair gates; cloud stays deferred')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
-    parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
+    parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id; attribute-flaky: FLAKY id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
     parser.add_argument("--require-resolved", action="store_true",
                         help="verify: also refuse while pending post-merge packets exist (post-merge completion)")
@@ -2626,6 +2812,10 @@ def main(argv: list[str] | None = None) -> int:
                         job.result()
             elif args.action == "resolve":
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
+            elif args.action == "attribute-flaky":
+                if args.input is None or not args.occurrence:
+                    raise ValueError("--occurrence FLAKY id and --input attribution JSON required")
+                attribute_flaky(state, args.occurrence, bounded_read(args.input, "FLAKY attribution"), args.root)
             elif args.action == 'accept-omitted-custody':
                 if args.input is None:
                     raise ValueError('--input native operational acceptance required')
@@ -2660,18 +2850,29 @@ def main(argv: list[str] | None = None) -> int:
                         or environment_digest() != state["environment"]
                         or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
                     raise ValueError("cycle not complete on exact current source and plan")
+                blocked = quarantine.attribution_block(state.get("flaky", []), args.root)
+                if blocked:
+                    raise ValueError(blocked)
             elif args.action == "report":
                 from deploy_test_historical_custody import verify as verify_custody
                 verify_custody(state, args.root)
                 from deploy_failure_report import render
                 failures = [{**f["rca"], "disposition": f["disposition"]}
                             for f in state["failures"] if "rca" in f]
+                latest = list(latest_receipts(state).values())
                 header = (f"Deploy validation: {state['phase']}\nSource: {state['source']['head']}\n"
                           f"Pending RCA: {len(state.get('pending', []))}\n"
                           f"Pending post-merge: {len(state.get('pending_post_merge', []))}\n"
-                          f"Resource warnings: {len(state.get('resource_warnings', []))}\n")
+                          f"Resource warnings: {len(state.get('resource_warnings', []))}\n"
+                          + "".join(line + "\n" for line in quarantine.scorecard_lines(latest, state.get("flaky", []))))
                 # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
                 text = header + render({"failures": failures})
+                text += "".join(line + "\n" for line in quarantine.quarantine_section(latest))
+                for f in state.get("flaky", []):
+                    a = f.get("attribution") or {}
+                    text += (f"FLAKY {f['gate']} :: {f['unit']} — "
+                             + (f"{a['attribution']} · {a.get('fix_commit') or a.get('repair_agent') or 'post-merge packet'}"
+                                if a else "awaiting /RCA attribution (blocks merge)") + "\n")
                 for election in state.get('elected_omissions', []):
                     text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
                              + election['reason'] + '\nNative: ' + election['native_result']

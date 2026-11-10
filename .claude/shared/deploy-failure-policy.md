@@ -53,6 +53,15 @@ to retroactively justify the delegation.
   required by the originating deploy. Record the actual repair link and waiver,
   then continue immediately. Pending handoffs must be dispatched before the
   originating deploy can report completion.
+- **FLAKY:** a unit that failed and passed its single automatic rerun on the
+  same source gets the same attribution; the passing rerun is not evidence.
+  INTRODUCED is fixed before merge. NOT INTRODUCED gets the quarantine marker
+  in its own test definition in this PR, naming `pending-handoff:<occurrence id>`,
+  and its failed-test packet, which carries the attribution and /RCA evidence,
+  is dispatched after merge like every other NOT INTRODUCED packet. The
+  records follow-up PR links the marker to the dispatched thread. UNKNOWN blocks
+  the merge. The quarantined test keeps running and reporting
+  (`.claude/commands/deploy.md`).
 - **UNKNOWN:** establish attribution before granting a delegation waiver.
   An unrelated filename, an unexplained timeout or a missing baseline is not
   evidence of NOT INTRODUCED.
@@ -90,6 +99,7 @@ command pass, and finish /deploy through merge, production verification,
 cleanup and a completed deploy scorecard.
 
 Failed test: <existing test name>
+Attribution: <Gate: NOT_INTRODUCED and the /RCA evidence that established it>
 Command: <exact executed command and relevant invocation settings>
 Scope: <affected behavior and boundaries to preserve>
 Exact error: <verbatim native test failure>
@@ -289,7 +299,8 @@ record `Delegated / waived` in this helper before that dispatch succeeds.
 
 The delegating deploy can complete while those repairs and external-provider
 alerts remain outstanding. Its own introduced failures, unknown failures and
-all other applicable requirements remain blocking. Do not rerun a failed
+all other applicable requirements remain blocking. The runners' single
+automatic rerun of a failed unit records FLAKY or the final FAIL; otherwise do not rerun a failed
 aggregate solely to conceal a qualified exception; preserve its native exit
 and identify exactly which constituent failure was waived. An unexecuted
 remaining check is still unverified and must be run.

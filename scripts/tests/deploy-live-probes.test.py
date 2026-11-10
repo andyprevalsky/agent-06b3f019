@@ -131,6 +131,8 @@ class DeployLiveProbeTests(unittest.TestCase):
                 "credential-health",
                 "amplitude-live",
                 "chat-router-failover-live",
+                "browser-provider-live",
+                "report-bug-storage-live",
                 "migration-preflight",
             },
         )
@@ -139,6 +141,19 @@ class DeployLiveProbeTests(unittest.TestCase):
         self.assertIn("CHAT_ROUTER_FAILOVER_LIVE=1", probe.argv)
         self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", "chat-router-failover"))
         self.assertEqual(probe.cwd, ROOT / "back-end")
+
+    def test_live_third_party_blackbox_cases_run_as_serialized_probes(self) -> None:
+        module = _load_module()
+        commands = {command.name: command for command in module.deploy_commands()}
+        for name, after, flag, domain in (
+            ("browser-provider-live", "chat-router-failover-live", "BROWSER_PROVIDER_LIVE=1", "browser-provider"),
+            ("report-bug-storage-live", "browser-provider-live", "REPORT_BUG_STORAGE_LIVE=1", "report-bug"),
+        ):
+            probe = commands[name]
+            self.assertEqual(probe.after, after)
+            self.assertIn(flag, probe.argv)
+            self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", domain))
+            self.assertEqual(probe.cwd, ROOT / "back-end")
 
     def test_migration_preflight_checks_branch_migrations_against_production(self) -> None:
         module = _load_module()

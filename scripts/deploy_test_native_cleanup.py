@@ -184,6 +184,35 @@ def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, docu
     need(machines == {row['machine_id'] for row in rows}, 'recovered resource coverage')
 
 
+def stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document):
+    """Launch isolation only for a positively captured pre-stack dependency rejection."""
+    native_driver = bound(root / 'scripts/cloudbench-run.sh', historical_head=receipt['source']['head'])
+    need(hashlib.sha256(native_driver).hexdigest()
+         == '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521',
+         'unreviewed pre-stack driver')
+    benches = json.loads(bound(fleet / '_batch/benches.json'))
+    need(len(benches) == 1, 'stopped startup task closure')
+    out = fleet / benches[0]['name']
+    need(bound(out / '.cid') == ('clone ' + machine + '\n').encode()
+         and document(out / 'runtime-evidence.owner.json')
+             == {'version': 1, 'machine_id': machine, 'run_token': token}, 'stopped startup owner')
+    import base64, gzip
+    payload = json.loads(gzip.decompress(bound(out / 'cloudbench-boot-payload.json.gz')))
+    need(base64.b64decode(payload['files']['cloudbench-run.sh'], validate=True) == native_driver,
+         'stopped startup driver payload changed')
+    path = out / 'remote-logs/cloudbench-driver.log'
+    need(evidence.get('startup_rejection_log') == str(path), 'stopped startup log binding')
+    log = bound(path).decode()
+    steps = re.findall(r'^\[cloudbench [0-9:]+\] STEP (\S+)$', log, re.M)
+    need(steps == ['git_sync', 'env_decode', 'dep_sync']
+         and log.count('RUNSTAMP-' + token + '\n') == 1
+         and ('[cloudbench] verified checkout ' + receipt['source']['head'] + '\n') in log
+         and log.count('FATAL: cloudbench dependency synchronization failed') == 1
+         and log.count('::CLOUDBENCH-DONE:: token=' + token + ' exit=1\n') == 1
+         and 'driver cleanup evidence interrupt_status=0 cleanup_ack=1' in log,
+         'stopped startup positive terminal boundary')
+
+
 def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
     owner = life['fleet_owner_token']
@@ -231,18 +260,39 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
                  'provider observation origin')
             pair = [r for r in packet['rows'] if r.get('expected_machine') == machine]
             need(len(pair) == 2 and {r['kind'] for r in pair} == {'machine', 'volume'}, 'provider pair closure')
+            stopped_startup = next(r for r in pair if r['kind'] == 'machine')['metadata'].get('state') == 'stopped'
+            if stopped_startup:
+                need(registry.exists() and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
+                stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document)
             for observed in pair:
                 need(observed['method'] == 'GET' and observed['http_status'] == 200 and observed['no_retry'] is True
                      and observed['expected_volume'] == row['volume_id']
                      and re.fullmatch('[0-9a-f]{64}', observed['response_sha256']), 'provider response identity')
                 value = observed['metadata']
+                if stopped_startup:
+                    raw = bound(Path(observed['raw_response']))
+                    need(hashlib.sha256(raw).hexdigest() == observed['response_sha256'],
+                         'stopped startup provider response hash')
+                    native_value = json.loads(raw)
+                    need(native_value['id'] == value['id'] and native_value['state'] == value['state'],
+                         'stopped startup provider response state')
+                    if observed['kind'] == 'machine':
+                        env = native_value['config']['env']
+                        need({key: env.get(key) for key in ('REF', 'CLOUDBENCH_RUN_TOKEN')} == value['source_binding']
+                             and any(mount.get('volume') == row['volume_id'] and mount.get('path') == '/data'
+                                     for mount in native_value['config']['mounts']),
+                             'stopped startup provider source and mount')
+                    else:
+                        need(native_value['attached_machine_id'] == value['attached_machine_id'],
+                             'stopped startup provider attachment')
                 if observed['kind'] == 'machine':
-                    need(observed['id'] == value['id'] == machine and value['state'] == 'destroyed'
+                    need(observed['id'] == value['id'] == machine and value['state'] == ('stopped' if stopped_startup else 'destroyed')
                          and value['source_binding'] == {'REF': receipt['source']['head'], 'CLOUDBENCH_RUN_TOKEN': token},
                          'old execution not provider terminal')
                 else:
                     need(observed['id'] == value['id'] == row['volume_id']
-                         and value['state'] in {'pending_destroy', 'destroyed'} and value['attached_machine_id'] is None,
+                         and (value['state'] == 'created' and value['attached_machine_id'] == machine if stopped_startup
+                              else value['state'] in {'pending_destroy', 'destroyed'} and value['attached_machine_id'] is None),
                          'old volume remains attached')
         else:
             observed = document(evidence['current_os'])
@@ -1479,14 +1529,30 @@ def clean_isolated_successor(state, prior, original, successor):
          and not rows[0][0].get('interrupted')
          and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
     binding = successor.get('execution_binding', {})
-    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
-         and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     folder = Path(successor['log']).parent
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     request = bounded_read(folder / 'request.json', 'successor request')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
     checks, skips = request['checks'], request['skips']
+    if binding.get('contract_digest') != digest(gate):
+        # Authenticate the complete historical gate, not current-case coverage. Only an
+        # inventory extension can be reconstructed: every other byte and old ordering
+        # must still hash to the immutable successor receipt's original contract.
+        attempt = rows[0][0]
+        need(attempt.get('source') == successor['source'] and not attempt.get('stale')
+             and request.get('phase') == attempt['phase'], 'successor historical attempt')
+        need(isinstance(checks, list) and checks and all(isinstance(v, str) for v in checks)
+             and isinstance(skips, dict) and all(isinstance(v, str) for v in skips)
+             and len(set(checks)) == len(checks) and not set(checks) & set(skips),
+             'successor historical inventory shape')
+        historical_checks = set(checks) | set(skips)
+        need(set(original['cases']) <= historical_checks <= set(gate['checks']),
+             'successor historical inventory must preserve original debt')
+        gate = copy.deepcopy(gate)
+        gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
+    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
+         and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
          and set(checks) | set(skips) == set(gate['checks'])

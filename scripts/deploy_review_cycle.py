@@ -11,6 +11,11 @@ Two versioned dispositions close an open cycle ``clean`` with evidence and a
 ``TEST_REPORT`` row (deploy.md Skippable tests: CodeRabbit): ``skip`` for confirmed CodeRabbit
 usage exhaustion and ``override`` for the standing three-round deferral. Both
 refuse without the evidence and append ``deploy-review-dispositions.jsonl``.
+
+``no-reviewable-paths`` records, instead of a CodeRabbit request, a HEAD whose
+changed paths are all excluded by ``.coderabbit.yaml`` ``reviews.path_filters``
+(CodeRabbit would review nothing and only spend shared quota). It consumes no
+review budget, carries only a clean predecessor and refuses a config change.
 """
 
 from __future__ import annotations
@@ -31,6 +36,11 @@ RESULTS = {"clean", "findings", "unavailable"}
 UNAVAILABLE = "unavailable"
 KIND_BY_POSITION = {1: "initial", 2: "incremental", 3: "verification"}
 SYNC_KIND = "sync-inherited"
+NO_REVIEW_KIND = "no-reviewable-paths"
+POST_CAP_KIND = "post-cap-unreviewed"
+# Audited entries that carry or need no CodeRabbit review; never part of the cap.
+UNCOUNTED_KINDS = frozenset({SYNC_KIND, NO_REVIEW_KIND, POST_CAP_KIND})
+CODERABBIT_CONFIG = ".coderabbit.yaml"
 # Files regenerated from the merged tree after a main sync. Their content is
 # derived, so a sync may change them without new review.
 GENERATED_PATHS = frozenset({"docs/rca/INDEX.md"})
@@ -108,11 +118,11 @@ def now() -> str:
 
 
 def review_cycles(entries: list[object]) -> list[dict[str, object]]:
-    """Real review cycles; audited sync inheritances never count toward the cap."""
+    """Real review cycles; audited sync inheritances and unreviewable HEADs never count toward the cap."""
     return [
         entry
         for entry in entries
-        if isinstance(entry, dict) and entry.get("kind") != SYNC_KIND
+        if isinstance(entry, dict) and entry.get("kind") not in UNCOUNTED_KINDS
     ]
 
 
@@ -424,7 +434,8 @@ def inherit_sync(
     reviewed_diff = branch_diff(repo, source, base_sha)
     synced_diff = branch_diff(repo, head, base_sha)
     if reviewed_diff != synced_diff:
-        raise ReviewCycleError("branch diff differs from the reviewed diff; review the change")
+        raise ReviewCycleError("branch diff differs from the reviewed diff; review the change "
+                               f"(after the {MAX_REVIEW_CYCLES}-cycle cap: `{POST_CAP_KIND}`)")
     fork = git(repo, "merge-base", source, base_sha).strip()
     main_side = changed_files(repo, fork, base_sha)
     unexpected = sorted(changed_files(repo, source, head) - main_side - GENERATED_PATHS)
@@ -448,6 +459,234 @@ def inherit_sync(
     }
     entries.append(entry)
     write_state(path, state)
+    return entry
+
+
+def post_cap_unreviewed(path: Path, *, head: str, base: str, repo: Path, reason: str) -> dict[str, object]:
+    """Record changes after the three-cycle cap as merged unreviewed, never as reviewed.
+
+    The standing user pre-authorization (2026-10-18, reaffirmed 2026-10-27) allows merging without another
+    cycle after three review rounds. A conflicting main sync then changes the branch diff, which
+    ``inherit-sync`` rightly refuses, and the ledger refuses a fourth cycle. This entry needs three delivered
+    rounds (quota skips never count), the cap reached and a clean final cycle (defer its findings with
+    ``override`` first). It names every file changed since the reviewed HEAD.
+    """
+    if not reason.strip():
+        raise ReviewCycleError("--reason must name the user authorization and why review cannot run")
+    state = read_state(path)
+    entries = state["cycles"]
+    assert isinstance(entries, list)
+    cycles = review_cycles(entries)
+    if not cycles or cycles[-1].get("status") != "completed":
+        raise ReviewCycleError("post-cap recording needs a completed review cycle")
+    if cycles[-1].get("result") != "clean":
+        raise ReviewCycleError(
+            f"latest review result is {cycles[-1].get('result')}; defer its findings with `override` first"
+        )
+    budget = budget_cycles(entries)
+    delivered = sum(c.get("disposition") != "skipped" and not c.get("skip_reason") for c in budget)
+    if len(budget) < MAX_REVIEW_CYCLES or delivered < MIN_OVERRIDE_ROUNDS:
+        raise ReviewCycleError(
+            f"the review cap is not reached ({len(budget)} cycles, {delivered} delivered rounds); "
+            "request the next review cycle"
+        )
+    source = resolve(repo, str(entries[-1].get("head")))
+    head = resolve(repo, head)
+    if head == source:
+        raise ReviewCycleError("HEAD is already recorded")
+    if not is_ancestor(repo, source, head):
+        raise ReviewCycleError("recorded HEAD is not an ancestor of HEAD")
+    base_sha = resolve(repo, base)
+    fork = git(repo, "merge-base", source, base_sha).strip()
+    main_side, branch_side = changed_files(repo, fork, base_sha), changed_files(repo, fork, source)
+    # Files only main changed arrive reviewed on main; files both sides changed may carry a conflict resolution.
+    unreviewed = sorted(changed_files(repo, source, head) - (main_side - branch_side))
+    entry = {
+        "number": len(entries) + 1,
+        "kind": POST_CAP_KIND,
+        "head": head,
+        "status": "completed",
+        "result": "clean",
+        "disposition": "unreviewed",
+        "inherited_from": source,
+        "base": base_sha,
+        "reviewed_branch_diff_sha256": hashlib.sha256(branch_diff(repo, source, base_sha).encode()).hexdigest(),
+        "branch_diff_sha256": hashlib.sha256(branch_diff(repo, head, base_sha).encode()).hexdigest(),
+        "changed_files": unreviewed,
+        "reason": reason,
+        "started_at": now(),
+        "finished_at": now(),
+    }
+    entry["report_row"] = (
+        f"Code Review | \u26a0\ufe0f Overridden | merged unreviewed after the {MAX_REVIEW_CYCLES}-cycle cap: "
+        f"{len(entry['changed_files'])} file(s) changed since {source[:9]} ({reason})"
+    )
+    entries.append(entry)
+    write_state(path, state)
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit path filters: HEADs with nothing CodeRabbit would review
+# ---------------------------------------------------------------------------
+
+
+def _glob_segment(segment: str) -> str:
+    """One path segment of a minimatch glob (``*``, ``?``, ``!(a|b)``) as a regex; dotfiles stay unmatched."""
+    out = ""
+    index = 0
+    while index < len(segment):
+        char = segment[index]
+        if segment.startswith("!(", index):
+            close = segment.find(")", index)
+            if close < 0:
+                raise ReviewCycleError(f"unsupported CodeRabbit path filter segment: {segment!r}")
+            alternatives = "|".join(_glob_segment(alt) for alt in segment[index + 2:close].split("|"))
+            rest = _glob_segment(segment[close + 1:])
+            # The excluded values end at this segment's boundary (a "/" or the path's end), not the path's end.
+            return out + f"(?:(?!(?:{alternatives}){rest}(?![^/]))[^/]*?){rest}"
+        if char == "*":
+            out += "[^/]*"
+        elif char == "?":
+            out += "[^/]"
+        elif char in "[]{}()+@":
+            raise ReviewCycleError(f"unsupported CodeRabbit path filter segment: {segment!r}")
+        else:
+            out += re.escape(char)
+        index += 1
+    return out
+
+
+def glob_regex(pattern: str) -> re.Pattern[str]:
+    """Compile a CodeRabbit (minimatch, no dot, no matchBase) path glob.
+
+    Unsupported syntax raises, so the caller requests the review instead of
+    guessing; matching is deliberately no broader than minimatch's defaults.
+    """
+    segments = pattern.split("/")
+    if not pattern or any(not segment for segment in segments):
+        raise ReviewCycleError(f"unsupported CodeRabbit path filter: {pattern!r}")
+    parts: list[str] = []
+    for position, segment in enumerate(segments):
+        last = position == len(segments) - 1
+        if segment == "**":
+            parts.append(r"(?!\.)[^/]+(?:/(?!\.)[^/]+)*" if last else r"(?:(?!\.)[^/]+/)*")
+            continue
+        guard = r"(?!\.)" if segment[0] in "*?!" else ""
+        parts.append(guard + _glob_segment(segment) + ("" if last else "/"))
+    return re.compile("^" + "".join(parts) + "$")
+
+
+def path_filters(repo: Path, head: str) -> tuple[list[re.Pattern[str]], list[re.Pattern[str]], str]:
+    """(include, exclude, sha256) of ``reviews.path_filters`` in HEAD's committed ``.coderabbit.yaml``."""
+    import yaml
+
+    text = git(repo, "show", f"{head}:{CODERABBIT_CONFIG}")
+    try:
+        config = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        raise ReviewCycleError(f"could not parse {CODERABBIT_CONFIG}: {error}") from error
+    reviews = config.get("reviews") if isinstance(config, dict) else None
+    filters = reviews.get("path_filters") if isinstance(reviews, dict) else None
+    if not isinstance(filters, list) or not filters or not all(isinstance(item, str) for item in filters):
+        raise ReviewCycleError(f"{CODERABBIT_CONFIG} has no reviews.path_filters list")
+    include = [glob_regex(item) for item in filters if not item.startswith("!")]
+    exclude = [glob_regex(item[1:]) for item in filters if item.startswith("!")]
+    digest = hashlib.sha256(json.dumps(filters).encode()).hexdigest()
+    return include, exclude, digest
+
+
+def is_reviewable(path: str, include: list[re.Pattern[str]], exclude: list[re.Pattern[str]]) -> bool:
+    """CodeRabbit's case sensitivity for custom (extglob) filters is unverified, so either reading that reviews wins."""
+    def reviewable(flags: int) -> bool:
+        def hit(pattern: re.Pattern[str]) -> bool:
+            return re.match(pattern.pattern, path, flags) is not None
+        included = not include or any(hit(pattern) for pattern in include)
+        return included and not any(hit(pattern) for pattern in exclude)
+    return reviewable(0) or reviewable(re.IGNORECASE)
+
+
+def record_no_reviewable_paths(
+    path: Path, *, head: str, repo: Path, receipts_path: Path, base: str | None = None,
+    reset: bool = False, pr: str = "",
+) -> dict[str, object]:
+    """Record a HEAD whose every changed path CodeRabbit's path filters exclude.
+
+    ``reset`` (a new deploy's first cycle) compares the branch with
+    merge-base(HEAD, base). Otherwise HEAD must descend from the latest
+    completed clean entry, which it carries; findings, an open cycle, a
+    ``.coderabbit.yaml`` change or any reviewable path refuse, and the caller
+    requests the normal review.
+    """
+    head = resolve(repo, head)
+    prior: dict[str, object] | None = None
+    if reset:
+        if not base:
+            raise ReviewCycleError("a new deploy's first HEAD needs --base")
+        state: dict[str, object] = {"schema_version": 1, "cycles": []}
+        source = git(repo, "merge-base", head, resolve(repo, base)).strip()
+    else:
+        state = read_state(path)
+        entries = state["cycles"]
+        assert isinstance(entries, list)
+        cycles = review_cycles(entries)
+        if cycles and cycles[-1].get("status") == "open":
+            raise ReviewCycleError("the previous review cycle is still open")
+        completed = [entry for entry in entries if isinstance(entry, dict)
+                     and entry.get("status") == "completed" and entry.get("result") != UNAVAILABLE]
+        if not completed:
+            raise ReviewCycleError("no completed review to carry; request the review")
+        prior = completed[-1]
+        if prior.get("result") != "clean":
+            raise ReviewCycleError(
+                f"latest review result is {prior.get('result')}; its findings need a review cycle"
+            )
+        source = resolve(repo, str(prior.get("head")))
+        if head == source:
+            raise ReviewCycleError("HEAD is already the latest recorded HEAD")
+        if not is_ancestor(repo, source, head):
+            raise ReviewCycleError("the recorded HEAD is not an ancestor of HEAD; request the review")
+    changed = sorted(
+        line for line in git(repo, "diff", "--name-only", "--no-renames", source, head).splitlines() if line
+    )
+    if CODERABBIT_CONFIG in changed:
+        raise ReviewCycleError(f"{CODERABBIT_CONFIG} changed; request the review")
+    include, exclude, digest = path_filters(repo, head)
+    reviewable = [name for name in changed if is_reviewable(name, include, exclude)]
+    if reviewable:
+        shown = ", ".join(reviewable[:10]) + (" …" if len(reviewable) > 10 else "")
+        raise ReviewCycleError(f"{len(reviewable)} reviewable path(s): {shown}; request the review")
+    report_row = (
+        f"Code Review | ➖ No reviewable paths | {len(changed)} changed path(s) since {source[:9]} on "
+        f"{head[:9]} are all excluded by {CODERABBIT_CONFIG} path_filters; no CodeRabbit request spent"
+    )
+    if prior is not None:
+        carried = prior.get("disposition") or prior.get("kind")
+        report_row += f"; carries the {carried} clean result of {str(prior.get('head'))[:9]}"
+    entries = state["cycles"]
+    assert isinstance(entries, list)
+    entry: dict[str, object] = {
+        "number": len(entries) + 1,
+        "kind": NO_REVIEW_KIND,
+        "head": head,
+        "status": "completed",
+        "result": "clean",
+        "disposition": NO_REVIEW_KIND,
+        "compared_from": source,
+        "inherited_from": prior.get("head") if prior else None,
+        "changed_paths": changed,
+        "path_filters_sha256": digest,
+        "report_row": report_row,
+        "started_at": now(),
+        "finished_at": now(),
+    }
+    entries.append(entry)
+    write_state(path, state)
+    _append_receipt(receipts_path, {
+        "pr": pr, "head": head, "cycle_number": entry["number"], "kind": NO_REVIEW_KIND,
+        "disposition": NO_REVIEW_KIND, "report_row": report_row, "at": entry["finished_at"],
+        "compared_from": source, "changed_paths": changed,
+    })
     return entry
 
 
@@ -1320,6 +1559,24 @@ def parse_args() -> argparse.Namespace:
     inherit.add_argument("--base", default="origin/main")
     inherit.add_argument("--repo", type=Path, default=Path.cwd())
 
+    post_cap = subparsers.add_parser(
+        POST_CAP_KIND, help="after the 3-cycle cap, record later changes (e.g. a conflicting main sync) as merged unreviewed"
+    )
+    post_cap.add_argument("--head", required=True)
+    post_cap.add_argument("--base", default="origin/main")
+    post_cap.add_argument("--repo", type=Path, default=Path.cwd())
+    post_cap.add_argument("--reason", required=True, help="the user authorization and why review cannot run")
+
+    unreviewable = subparsers.add_parser(
+        NO_REVIEW_KIND, help="record a HEAD whose changed paths CodeRabbit's path filters all exclude"
+    )
+    unreviewable.add_argument("--head", required=True)
+    unreviewable.add_argument("--base", help="with --reset: compare the branch from merge-base(HEAD, BASE)")
+    unreviewable.add_argument("--reset", action="store_true", help="a new deploy's first HEAD")
+    unreviewable.add_argument("--pr", default="", help="pull-request number for the receipt")
+    unreviewable.add_argument("--repo", type=Path, default=Path.cwd())
+    unreviewable.add_argument("--receipt", type=Path, help=f"receipt ledger (default: <state dir>/{RECEIPTS_NAME})")
+
     merge = subparsers.add_parser("require-mergeable")
     merge.add_argument("--head", required=True)
 
@@ -1377,6 +1634,17 @@ def main() -> int:
             payload = inherit_sync(
                 args.state, head=args.head, base=args.base, repo=args.repo
             )
+        elif args.command == POST_CAP_KIND:
+            payload = post_cap_unreviewed(
+                args.state, head=args.head, base=args.base, repo=args.repo, reason=args.reason
+            )
+            print(payload["report_row"])
+        elif args.command == NO_REVIEW_KIND:
+            payload = record_no_reviewable_paths(
+                args.state, head=args.head, repo=args.repo, base=args.base, reset=args.reset, pr=args.pr,
+                receipts_path=args.receipt or default_receipts_path(args.state),
+            )
+            print(payload["report_row"])
         elif args.command == "require-mergeable":
             payload = require_mergeable(args.state, head=args.head)
         elif args.command == "next":

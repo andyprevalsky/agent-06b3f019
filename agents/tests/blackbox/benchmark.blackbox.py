@@ -15611,6 +15611,43 @@ def test_catalog_world_model_mode_is_optional_and_validated():
         validate_task_contract({**base, "world_model_mode": "sim"})
 
 
+def test_catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules():
+    """A smoke task's `quarantine` object carries the four @quarantine keys and the same validation."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import BenchmarkTask, normalize_legacy_catalog_fields
+    from benchmarks.long_horizon import load_raw_catalog, validate_task_contract, validate_task_quarantine
+
+    base = {"name": "t", "bench": "pipeline-e2e"}
+    marker = {
+        "since": "2026-11-01",
+        "repair": "https://boxes.dev/thread/thr_smoke1",
+        "error": "AssertionError: no receipt",
+        "evidence": "runs/smoke-1/run.json",
+    }
+    validate_task_contract(dict(base))  # absent: not quarantined
+    validate_task_contract({**base, "quarantine": dict(marker)})
+    assert validate_task_quarantine({**base, "quarantine": dict(marker)}, "t") == marker
+    assert validate_task_quarantine(dict(base), "t") is None
+    # The runtime dataclass loader accepts the field (unknown catalog keys are a TypeError there).
+    raw = next(t for t in load_raw_catalog() if t["name"] == "demo-fleet-alpha")
+    task = BenchmarkTask(**normalize_legacy_catalog_fields({**raw, "quarantine": dict(marker)}))
+    assert task.quarantine == marker and task.prompt == raw["prompt"]
+    bad_markers = [
+        {**marker, "repair": "https://example.com/thread/x"},  # not a boxes.dev repair thread
+        {**marker, "since": "2026-02-30"},  # not a calendar date
+        {**marker, "error": "first\nsecond"},  # not one line
+        {**marker, "evidence": " "},
+        {k: v for k, v in marker.items() if k != "evidence"},  # missing field
+        {**marker, "owner": "me"},  # unknown field
+        "quarantined",
+        None,
+    ]
+    for bad in bad_markers:
+        with pytest.raises(ValueError, match="quarantine refused"):
+            validate_task_contract({**base, "quarantine": bad})
+
+
 def test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls():
     """Local benchmark agents are scheduled onto the queue the harness preflights."""
     import os
@@ -29007,6 +29044,10 @@ async def run_all_tests():
     )
     r.record(
         "catalog_world_model_mode_is_optional_and_validated", test_catalog_world_model_mode_is_optional_and_validated
+    )
+    r.record(
+        "catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules",
+        test_catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules,
     )
     r.record(
         "benchmark_sms_source_override_updates_local_agent_source",

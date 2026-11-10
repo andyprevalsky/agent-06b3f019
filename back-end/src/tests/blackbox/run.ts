@@ -13,12 +13,24 @@
  *
  * With DEPLOY_GATE_PROGRESS set, each finished domain appends one `scope: "domain"` row to that
  * JSONL file (src/tests/helpers/gateProgress.ts); concurrent shards share the file safely.
+ *
+ * Rerun once (deploy gates: on when DEPLOY_GATE_PROGRESS is set; BLACKBOX_TEST_RERUN_FAILED=1|0
+ * forces it on/off). A failed domain is rerun exactly once, in the same worker slot and phase,
+ * on the same source; there is never a third run:
+ *
+ *   attempt 1 PASS ─────────────────────────> PASS row
+ *   attempt 1 FAIL ──rerun──> attempt 2 PASS > FLAKY row (attempts 2, detail = attempt 1) +
+ *                                              TEST_FLAKY stdout line; exit stays 0, /RCA required
+ *                                └─ attempt 2 FAIL > FAIL row (detail = attempt 2); exit 1
+ *
+ * Quarantined cases (src/tests/helpers/quarantine.ts) write their own `domain::case` rows from the
+ * domain process; the summary lists their TEST_QUARANTINE lines as non-blocking.
  */
 import { mkdirSync, readdirSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve, dirname, join } from 'path';
-import { reportGateProgress } from '../helpers/gateProgress';
+import { reportGateProgress, reportVisibleGateProgress } from '../helpers/gateProgress';
 
 function readEnv(...names: string[]): string | undefined {
   for (const name of names) {
@@ -215,6 +227,14 @@ const priorityDomainNames = new Set(
     .filter((domain) => domain && requested.includes(domain))
 );
 const abortOnPriorityFailure = readEnv('BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE') === '1';
+const rerunFailedSetting = readEnv('BLACKBOX_TEST_RERUN_FAILED');
+if (rerunFailedSetting !== undefined && rerunFailedSetting !== '0' && rerunFailedSetting !== '1') {
+  process.stderr.write(
+    `Invalid BLACKBOX_TEST_RERUN_FAILED: ${rerunFailedSetting}. Expected 0 or 1.\n`
+  );
+  process.exit(1);
+}
+const rerunFailed = (rerunFailedSetting ?? (readEnv('DEPLOY_GATE_PROGRESS') ? '1' : '0')) === '1';
 const priorityFirst = (left: string, right: string): number =>
   Number(priorityDomainNames.has(right)) - Number(priorityDomainNames.has(left));
 const lateExclusiveDomains = requested
@@ -267,6 +287,9 @@ interface Result {
   output: string;
   logPath?: string;
   aborted?: boolean;
+  /** Failed once, then passed its single rerun. */
+  flaky?: boolean;
+  attempts?: number;
 }
 
 const runnerStartedAt = Date.now();
@@ -276,13 +299,38 @@ async function runScheduledDomain(
   workerIndex: number
 ): Promise<Result | undefined> {
   if (abortScheduling) return undefined;
-  const result = await runDomain(domain, workerIndex);
-  // Live deploy-gate progress: one row the moment the domain settles, so a failure is
-  // reported while sibling domains and shards are still running (no-op when unset).
-  reportGateProgress(domain, result.passed ? 'PASS' : 'FAIL', {
-    scope: 'domain',
-    detail: result.passed ? '' : result.output,
-  });
+  const first = await runDomain(domain, workerIndex);
+  let result = first;
+  if (!first.passed && rerunFailed) {
+    // Exactly one rerun of this failed domain only; its verdict is final either way.
+    process.stdout.write(`RERUN: ${domain} failed (${first.duration}ms); rerunning once\n`);
+    const second = await runDomain(domain, workerIndex);
+    const output = `=== attempt 1 (FAIL) ===\n${first.output}\n=== attempt 2 (${second.passed ? 'PASS' : 'FAIL'}) ===\n${second.output}`;
+    result = {
+      ...second,
+      duration: first.duration + second.duration,
+      output,
+      flaky: second.passed,
+      attempts: 2,
+    };
+    if (second.passed) {
+      // Not a free pass: the row and stdout line ask the deploy for /RCA attribution.
+      reportVisibleGateProgress(domain, 'FLAKY', {
+        scope: 'domain',
+        detail: first.output,
+        attempts: 2,
+      });
+    } else {
+      reportGateProgress(domain, 'FAIL', { scope: 'domain', detail: second.output });
+    }
+  } else {
+    // Live deploy-gate progress: one row the moment the domain settles, so a failure is
+    // reported while sibling domains and shards are still running (no-op when unset).
+    reportGateProgress(domain, result.passed ? 'PASS' : 'FAIL', {
+      scope: 'domain',
+      detail: result.passed ? '' : result.output,
+    });
+  }
   if (!result.passed && priorityDomainNames.has(domain)) {
     process.stdout.write(
       `PRIORITY FAILURE: ${domain} failed again ${Date.now() - runnerStartedAt}ms after start\n`
@@ -465,14 +513,29 @@ async function main(): Promise<void> {
   process.stdout.write(`${'='.repeat(60)}\n`);
   process.stdout.write('\nBlack-box Test Summary:\n\n');
   for (const r of results) {
-    const verdict = r.aborted === true ? 'NOT RUN' : r.passed ? 'PASS' : 'FAIL';
+    const verdict =
+      r.aborted === true ? 'NOT RUN' : r.flaky === true ? 'FLAKY' : r.passed ? 'PASS' : 'FAIL';
     process.stdout.write(`  ${verdict}  ${r.domain} (${r.duration}ms)\n`);
   }
   const passed = results.filter((r) => r.passed).length;
   const failed = failures.length;
+  const flakyDomains = results.filter((r) => r.flaky === true);
+  // Quarantined cases print their own one-line marker; collect them so the summary shows them.
+  const quarantineLines = results.flatMap((r) =>
+    r.output.split('\n').filter((line) => line.startsWith('TEST_QUARANTINE '))
+  );
+  if (quarantineLines.length) {
+    process.stdout.write(`\nQuarantined cases (non-blocking): ${quarantineLines.length}\n`);
+    for (const line of quarantineLines) process.stdout.write(`  ${line}\n`);
+  }
   process.stdout.write(
     `\n${passed} passed, ${failed} failed, ${notRun.length} not run, ${results.length} total\n`
   );
+  if (flakyDomains.length) {
+    process.stdout.write(
+      `${flakyDomains.length} flaky (failed, then passed the single rerun; /RCA attribution required): ${flakyDomains.map((r) => r.domain).join(', ')}\n`
+    );
+  }
   if (artifactDir) {
     writeFileSync(
       join(artifactDir, 'summary.json'),
@@ -490,6 +553,8 @@ async function main(): Promise<void> {
             domain: result.domain,
             passed: result.passed,
             aborted: result.aborted === true,
+            flaky: result.flaky === true,
+            attempts: result.attempts ?? (result.aborted === true ? 0 : 1),
             duration: result.duration,
             logPath: result.logPath,
           })),
