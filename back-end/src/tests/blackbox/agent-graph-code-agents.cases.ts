@@ -31,6 +31,86 @@ async function get(ctx: CodeAgentListContext, path: string, userId: string) {
 
 type CodeAgentItem = Record<string, unknown>;
 
+export async function testCodeAgentRenamePersistsAndIsOwnerScoped(
+  ctx: CodeAgentListContext
+): Promise<void> {
+  const taskId = randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: taskId,
+      agentId: ctx.ids.C,
+      sandboxId: `sb-${taskId}`,
+      goal: 'Original goal stays unchanged',
+      taskName: 'original_task',
+      codeProvider: 'codex',
+      status: 'CLOSED',
+    },
+  });
+  const patch = async (id: string, body: unknown, userId?: string, authenticated = true) => {
+    const response = await fetch(`${ctx.baseUrl}/api/agents/code-agents/${id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authenticated ? { 'X-API-Key': ctx.apiKey } : {}),
+        ...(userId === undefined ? {} : { 'X-User-Id': userId }),
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    return { status: response.status, text };
+  };
+  try {
+    const renamed = await patch(taskId, { title: '  Parser repair — ready  ' }, ctx.userA);
+    assert(renamed.status === 200, `rename: expected 200, got ${renamed.status} ${renamed.text}`);
+    const result = JSON.parse(renamed.text) as Record<string, unknown>;
+    assert(
+      result.code_agent_id === taskId && result.title === 'Parser repair — ready',
+      'rename response'
+    );
+    const listed = await get(ctx, `/api/agents/code-agents?root_ids=${ctx.ids.R}`, ctx.userA);
+    const item = (listed.data.code_agents as CodeAgentItem[]).find(
+      (row) => row.code_agent_id === taskId
+    );
+    assert(item?.title === 'Parser repair — ready', 'a fresh list reads the persisted title');
+    assert(
+      (await patch(taskId, { title: 'stolen' }, ctx.userB)).status === 404,
+      'foreign task is hidden'
+    );
+    assert(
+      (await patch(randomUUID(), { title: 'missing' }, ctx.userA)).status === 404,
+      'missing task'
+    );
+    assert(
+      (await patch(taskId, { title: 'unauthorized' }, ctx.userA, false)).status === 401,
+      'authentication required'
+    );
+    assert((await patch(taskId, { title: 'unscoped' })).status === 401, 'user identity required');
+    for (const body of [
+      {},
+      { title: null },
+      { title: 12 },
+      { title: '  ' },
+      { title: 'x'.repeat(81) },
+      { title: 'x'.repeat(161) },
+    ]) {
+      assert(
+        (await patch(taskId, body, ctx.userA)).status === 400,
+        `invalid title: ${JSON.stringify(body)}`
+      );
+    }
+    const row = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: taskId } });
+    assert(row.taskName === 'Parser repair — ready', 'denied and invalid writes preserve title');
+    assert(
+      row.goal === 'Original goal stays unchanged' &&
+        row.status === 'CLOSED' &&
+        row.codeProvider === 'codex',
+      'rename preserves execution state'
+    );
+  } finally {
+    await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
+  }
+}
+
 export async function testCodeAgentProviderInTreeAndBatchedList(
   ctx: CodeAgentListContext
 ): Promise<void> {

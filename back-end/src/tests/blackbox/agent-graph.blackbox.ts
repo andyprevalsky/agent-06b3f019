@@ -50,6 +50,7 @@ import { testRoseAgentHasOneUiOnlySentReceipt, killCases } from './agent-graph-r
 import {
   testCodeAgentListIsNewestFirstPerRoot,
   testCodeAgentProviderInTreeAndBatchedList,
+  testCodeAgentRenamePersistsAndIsOwnerScoped,
 } from './agent-graph-code-agents.cases';
 import {
   adversarialCases,
@@ -627,7 +628,12 @@ async function testRootMessagesRunningCodeAgentOnce(): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
+const codeAgentListContext = { baseUrl: BASE_URL, apiKey: API_KEY, userA, userB, ids };
 const cases: Array<[string, () => Promise<void>]> = [
+  [
+    'code-agent rename persists and is owner scoped',
+    () => testCodeAgentRenamePersistsAndIsOwnerScoped(codeAgentListContext),
+  ],
   ['list is scoped to the tree and includes code agents', testListIsScopedToTheTree],
   ['code agent messages a Rose agent once', testCodeAgentMessagesRoseAgentOnce],
   [
@@ -642,25 +648,11 @@ const cases: Array<[string, () => Promise<void>]> = [
   ['root messages a running code agent once', testRootMessagesRunningCodeAgentOnce],
   [
     'code agents report their provider in the tree and the batched list',
-    () =>
-      testCodeAgentProviderInTreeAndBatchedList({
-        baseUrl: BASE_URL,
-        apiKey: API_KEY,
-        userA,
-        userB,
-        ids,
-      }),
+    () => testCodeAgentProviderInTreeAndBatchedList(codeAgentListContext),
   ],
   [
     'the batched code-agent list is newest first, at most 50 per root',
-    () =>
-      testCodeAgentListIsNewestFirstPerRoot({
-        baseUrl: BASE_URL,
-        apiKey: API_KEY,
-        userA,
-        userB,
-        ids,
-      }),
+    () => testCodeAgentListIsNewestFirstPerRoot(codeAgentListContext),
   ],
   ...adversarialCases({ baseUrl: BASE_URL, apiKey: API_KEY }),
 ];

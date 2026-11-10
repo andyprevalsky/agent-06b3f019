@@ -27,7 +27,7 @@ import type { Agent } from '../hooks';
 
 interface RenameAgentDialogProps {
   /** Non-null opens the dialog for that agent. */
-  agent: Agent | null;
+  agent: Pick<Agent, 'agent_id' | 'title' | 'goal'> | null;
   onClose: () => void;
   onSubmit: (agentId: string, title: string) => Promise<void>;
 }
