@@ -10984,4 +10984,71 @@ class PartialNativeAdmission38(unittest.TestCase):
                                  forbidden,forbidden,forbidden)
 
 
+class NativeUnstartedCampaign(unittest.TestCase):
+    def fixture(self, campaign):
+        source = 'd866e364d492f120da86cae905de3e75c74a8583'
+        checks = ['first', 'cancelled-sibling', 'not-started']
+        jobs = []
+        for index, task in enumerate(checks, 1):
+            jobs.append(dict(job_id=f'r001-j{index:04d}', index=index, task=task,
+                             run=1, attempt=1, attempts=[], log=str(campaign/f'r001-j{index:04d}.log'),
+                             controller_command=['bash',str(ROOT/'scripts/run-bench'),task,'--ref',source,'--foreground'],
+                             controller_pid=100+index, controller_exit_code=1 if index==1 else 143,
+                             status='failed' if index==1 else 'cancelled', task_status='INFRA_ERROR',infra_failure=True))
+        jobs[-1].update(controller_exit_code=None,status='cancelled',started_at=None,finished_at=None,wall_clock_seconds=None,controller_lock='owned-test.lock')
+        for key in ('controller_pid','task_status','infra_failure'): del jobs[-1][key]
+        summary=dict(jobs=jobs,status='failed',concurrency=2,peak_concurrency=2,
+                     infra_stop=dict(policy='enabled',scheduled_total=3,job_id=jobs[0]['job_id'],
+                                     task_status='INFRA_ERROR',infra_jobs=1,infra_job_ids=[jobs[0]['job_id']]))
+        proof=dict.fromkeys(('kind','owner','request_token','source','receipt_sha256','worker_result_sha256',
+                             'confirmed_at','observed_by','layout','campaign','files'))
+        proof['unstarted_campaign']=dict(kind='native-unstarted-campaign-v1',version=1,
+            producer_sha256='cf60fcee75fc673ea2d6ccee928009a67262fdd8e3c5e28f38a3724ac33f57ca',
+            unstarted_jobs=[jobs[-1]['job_id']],credit=dict(test_execution=False,assertions=False,financial_release=False))
+        return dict(checks=checks),dict(source=dict(head=source)),summary,proof
+
+    def test_producer_unstarted_rows_preserve_nulls_and_all_original_outcomes(self):
+        from deploy_test_native_cleanup import partial_campaign_jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign=Path(tmp); request,receipt,summary,proof=self.fixture(campaign)
+            original=copy.deepcopy((summary,proof))
+            self.assertEqual(partial_campaign_jobs(ROOT,campaign,request,receipt,{},summary,proof),
+                             frozenset(['r001-j0003']))
+            self.assertEqual((summary,proof),original)
+
+    def test_unstarted_claim_refuses_real_log_and_every_allocated_identity(self):
+        from deploy_test_native_cleanup import partial_campaign_jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign=Path(tmp); request,receipt,summary,proof=self.fixture(campaign)
+            for field,value in [('controller_pid',123),('controller_exit_code',0),('started_at','started'),('finished_at','finished'),
+                                ('run_id','run'),('fleet_dir','/allocated'),('fleet_owner_token','a'*32)]:
+                changed=copy.deepcopy(summary); changed['jobs'][-1][field]=value
+                with self.subTest(field=field),self.assertRaises(ValueError):
+                    partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
+            for field in ('controller_exit_code','started_at','finished_at','wall_clock_seconds'):
+                changed=copy.deepcopy(summary);del changed['jobs'][-1][field]
+                with self.subTest(missing=field),self.assertRaises(ValueError):
+                    partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
+            for field in ('terminal_task','lifecycle_verified','resources_released'):
+                changed=copy.deepcopy(summary);changed['jobs'][-1][field]=True
+                with self.subTest(claim=field),self.assertRaises(ValueError):
+                    partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
+            log=Path(summary['jobs'][-1]['log']); log.symlink_to(campaign/'missing')
+            with self.assertRaises(ValueError):
+                partial_campaign_jobs(ROOT,campaign,request,receipt,{},summary,proof)
+
+    def test_unstarted_inventory_source_and_credit_cannot_be_relabelled(self):
+        from deploy_test_native_cleanup import partial_campaign_jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign=Path(tmp); request,receipt,summary,proof=self.fixture(campaign)
+            for key,value in [('unstarted_jobs',['r001-j0001']),('producer_sha256','0'*64),('version',True),
+                              ('credit',dict(test_execution=False,assertions=False,financial_release=0))]:
+                changed=copy.deepcopy(proof);changed['unstarted_campaign'][key]=value
+                with self.subTest(key=key),self.assertRaises(ValueError):
+                    partial_campaign_jobs(ROOT,campaign,request,receipt,{},summary,changed)
+            changed=copy.deepcopy(summary);changed['jobs'][-1]['controller_command'][-2]='foreign-source'
+            with self.assertRaises(ValueError):
+                partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
+
+
 if __name__ == '__main__': unittest.main()

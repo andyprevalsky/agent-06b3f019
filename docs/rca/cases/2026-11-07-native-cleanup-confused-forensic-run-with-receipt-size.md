@@ -258,3 +258,73 @@ At subsequent frozen source2390845cf087491b96e4d8ea83d16188f80f64bd (source dige
 Smoke38 cleanup-only admission gap (distinct from capacity cause): native run20261110-035121-1793297 fails3.714s at cleanupreserve ENOSPC before provider mutation; infra-stop1/17 cancels7launched and9neverlaunched. Aggregate17UNVERIFIED/cleanupfalse remains original. Existing typed cleanup validators pin prior10alllaunched or15launched/2unlaunched captures, so current8launched/9unlaunched cannot obtain cleanup-only admission despite retired exact resources. New separate actual38 capture-bound validator retains all original lifecycle/provenance/outcomes, exact8rawnative hashes/4historical producer hashes/request/receipt/summary/owner/auditmirror/zeroallocation/native terminalHub/relay/publication/process guards. Actual replay8participants5Hubowners140boundfiles,0execution/financialcredit PASS;11malformed/missing/live/allocation/unlaunched controls refuse;8owningDTCtests PASS4.033s. No native action executed by RCA. Root applies reviewed extension and actualtyped reconcile for original cdb922863225412dae565d03a8b28cf1; nativefresh execution stillrequired for17cases. Capacity causalcase stays separate under rca-smoke38-admission packet; no duplicate case decision or cleanupfalse/financialcredit relabeling.
 
 Parent integration: the exact independently reviewed cleanup extension was applied after privileged checkout-quiescence proof. Actual native reconcile for occurrence cdb922863225412dae565d03a8b28cf1 accepted the140-file proof at the original239source boundary; it records separate owner reconciliation and preserves original17UNVERIFIED/completefalse/cleanupfalse outcomes, credit_granted=false and financial_cleanup_credit=false. The applied-source owning regression command passes all8 selected old+new tests in4.197s. All17 incomplete occurrences were routed through native assigned-repair triage, never waived; fresh native execution remains required. No original receipt or lifecycle flag was rewritten.
+
+
+### Round40 followup: current-producer partial campaign closure
+
+Actual native attempt40 on d866e364d492f120da86cae905de3e75c74a8583 stopped
+when a nested N2 probe could not reserve cleanup disk. Its unchanged campaign
+has eight launched parents, two linked nested probes, nine never-started rows
+and seventeen UNVERIFIED checks. The separate capacity/scheduling investigation
+owns the cause of that native failure; this recurrence addresses only the
+subsequent cleanup admission boundary. Prior capture-specific layouts correctly
+refuse this new source/request, and ordinary campaign-v1 rejects its genuine
+NULL unstarted exits as `native cleanup: campaign terminal jobs`.
+
+Gate: NOT_INTRODUCED for this cleanup-contract boundary: replaying the same
+original40 capture against exact main f8c8255003d70ac639facf623b30397d62baf38a
+and d866 returns that identical terminal-jobs refusal. The absence of a general
+partial-campaign contract is inherited; earlier branch capture-specific debt
+validators remain correctly restricted. This does not waive this assigned fix
+or attribute the separate resource-capacity failure.
+
+The bounded correction reuses the existing normal validator with a typed
+native-unstarted-campaign-v1 sub-contract. It admits only the reviewed immutable
+dispatcher protocol, ordered complete request inventory, exact native unstarted
+row schema with four explicit NULL timestamps/exit fields, absent native
+identity/logs and positive recorded infra-stop. Every launched parent and both
+nested probes still require exhaustive monitor linkage, bounded run projection,
+source/task-matrix authority where produced, sealed mirrored canonical provider
+release, zero allocated task artifacts, exact current process/Hub absence,
+relay-consumer retirement, publisher and supervisor closure. Missing rows,
+positive unstarted execution claims, invented exits and numeric credit values
+refuse. It grants no test, assertion or financial credit and leaves every
+original result, lifecycle and cleanup flag unchanged.
+
+Actual immutable capture replay is RED on the original validator and GREEN
+twice on the candidate with all ten participants and177 file hashes frozen.
+Fifteen actual-proof mutation controls reject foreign source/nonce/dispatch,
+coherently changed NULL rows/inventory/provenance, either omitted nested probe,
+nonempty allocation scopes and missing guest cleanup. Three permanent owning
+regressions preserve producer NULLs/outcomes and reject truncation, launched
+identities, symlink logs, unsupported protocol and credit claims. Twelve existing
+historical/canary/publication/aggregate controls also pass unchanged. Independent
+review separately reproduced full-validator truncation/positive-claim negatives
+and verified the six historical debt/successor function ASTs unchanged.
+
+A diagnostic in-memory copy of the actual cycle accepts native reconcile,
+still_bound and the unchanged original6428 failed-successor selector while
+retaining original attempts, failures and all seventeen pending occurrences.
+This is not actual native reconciliation or acceptance credit. Operational
+application, native original-source reconciliation, fresh frozen-source
+execution of every required check and completed production remain pending.
+The initial full434 local suite exposed four unchanged backend observer-mode
+errors because this prepared host's audited source is0600; an exact-byte0644
+external source copy resolves the same four tests without changing any guard.
+Final full-suite outcome is recorded separately in the source-bound repair
+receipt; no PASS is inferred from partial output. No incident-specific human
+feedback was recorded. The user's standing Freedom protection remains in force.
+
+### Actual native structural verification on d866
+
+Frozen source d866e364d492f120da86cae905de3e75c74a8583, digest e76b4db63f57fcb3e4ab7ee99b0f8bdd2dc5a292615c25afb7ef11cdca7fbaa8, completed actual focused structural attempt40 with PASS, complete=true, native_exit0 and worker cleanup_complete=true; no retained cleanup owner.
+
+The original registered deploy-test-cycle unit executed431 tests in102.942s (unit103.12s), exit0/OK, skipped0.
+
+The original registered run-bench-durable-service unit executed5 tests in8.01s (unit8.07s), exit0/OK, skipped0.
+
+The original registered deploy-test-semantic unit executed21 tests in2.745s (unit2.81s), exit0/OK, skipped0.
+
+Exact native receipt SHA-256 e52011045e8a2c4f190d0f4457528cc0428027e80491c02665693256a847c9c3, result SHA-256 81cbcf06734684a789f2033311892957009ad91a92c5c9ca782c8d9ec06f75c8, fetched original aggregate log SHA-256 45b3c6eb0813af99ddb3fcc9422f25ab951c145f92db214f1a9b2a9508a3941c. Source-bound original paths and complete unit counts are retained in /var/tmp/deploy-mf1108/native40-structural-verification/native40-verification.json. This verifies the repaired owning fixtures, parser tests and deploy-cycle regressions in the actual frozen-source full structural gate. It does not relabel the original native38 FAIL/UNVERIFIED, its retry, older421/429source results, actual semantic UI outcomes, original isolated cleanupfalse/financial debts, or future whole-deployment/production acceptance. All remain separately recorded.
+
+Parent integration at2026-11-10T05:27Z: reviewed code was applied at verified native checkout quiescence. The exact current177-file proof was accepted by actual native reconcile for a2c28d7f46da40699a6f091e506dc7a6 against the unchanged d866 attempt40. Separate owner closure retains all17 original UNVERIFIED/completefalse/cleanupfalse outcomes and all credits false. Actual native assigned-repair triage accepted all17 entries, yielding needs-focused-plan/pending0 with the one separately accepted semantic postmerge packet retained. Actual applied-source15owning tests PASS3.543s; external full434 PASS163.790s using the documented exact-byte external observer setup. Fresh source/environment-bound full gates remain required. No source result, exit or lifecycle was rewritten.

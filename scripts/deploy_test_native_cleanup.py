@@ -962,6 +962,65 @@ def inventory_init_failure(root, runs, campaign, request, receipt, adapter, boun
         need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
 
 
+def partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, proof):
+    """Typed pre-execution closure, never task/financial credit or a guessed exit."""
+    contract = proof['unstarted_campaign']
+    need(set(proof) == {'kind','owner','request_token','source','receipt_sha256','worker_result_sha256',
+                       'confirmed_at','observed_by','layout','campaign','files','unstarted_campaign'},
+         'partial campaign proof fields')
+    need(isinstance(contract, dict) and set(contract) == {'kind','version','producer_sha256','unstarted_jobs','credit'}
+         and contract['kind'] == 'native-unstarted-campaign-v1' and type(contract['version']) is int
+         and contract['version'] == 1 and isinstance(contract['credit'], dict)
+         and set(contract['credit']) == {'test_execution','assertions','financial_release'}
+         and all(value is False for value in contract['credit'].values()), 'partial campaign contract/credit')
+    original = subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',
+                                       receipt['source']['head']+':scripts/run-bench-campaign.py'])
+    need(contract['producer_sha256'] == hashlib.sha256(original).hexdigest()
+         == 'cf60fcee75fc673ea2d6ccee928009a67262fdd8e3c5e28f38a3724ac33f57ca',
+         'partial campaign unsupported dispatch contract')
+    checks, jobs = request['checks'], summary['jobs']
+    unstarted, launched = [], []
+    for index, job in enumerate(jobs, 1):
+        need(job['job_id'] == f'r001-j{index:04d}' and type(job['index']) is int and job['index'] == index
+             and type(job['run']) is int and type(job['attempt']) is int
+             and job['task'] == checks[index-1] and job['run'] == job['attempt'] == 1
+             and job['attempts'] == [] and job['log'] == str(campaign/(job['job_id']+'.log'))
+             and job.get('controller_command') == ['bash',str(root/'scripts/run-bench'),job['task'],
+                                                    '--ref',receipt['source']['head'],'--foreground'],
+             'partial campaign ordered inventory')
+        if job.get('controller_pid') is None:
+            need(set(job) == {'index','job_id','task','run','status','controller_exit_code',
+                              'started_at','finished_at','wall_clock_seconds','controller_lock','log',
+                              'attempt','attempts','controller_command'}
+                 and job['status'] == 'cancelled' and all(job.get(key) is None for key in
+                 ('controller_pid','controller_exit_code','started_at','finished_at','wall_clock_seconds',
+                  'run_id','fleet_dir','fleet_owner_token'))
+                 and not Path(job['log']).exists() and not Path(job['log']).is_symlink(),
+                 'partial campaign unstarted acquired identity or log')
+            unstarted.append(job['job_id'])
+        else:
+            need(type(job['controller_pid']) is int and job['controller_pid'] > 1
+                 and type(job['controller_exit_code']) is int and job['controller_exit_code'] in (1,143)
+                 and job['status'] == ('failed' if job['controller_exit_code'] == 1 else 'cancelled')
+                 and job.get('task_status') == 'INFRA_ERROR' and job.get('infra_failure') is True,
+                 'partial campaign launched terminal outcome')
+            launched.append(job)
+    stop = summary.get('infra_stop', {})
+    need(unstarted and launched and contract['unstarted_jobs'] == unstarted
+         and summary['status'] == 'failed' and not summary.get('workspace_binding')
+         and type(summary['concurrency']) is int and type(summary['peak_concurrency']) is int
+         and 1 <= summary['peak_concurrency'] <= summary['concurrency'] <= len(checks)
+         and summary['peak_concurrency'] <= len(launched)
+         and stop.get('policy') == 'enabled' and stop.get('scheduled_total') == len(checks)
+         and stop.get('job_id') in {job['job_id'] for job in launched if job['status'] == 'failed'}
+         and stop.get('task_status') == 'INFRA_ERROR'
+         and type(stop.get('infra_jobs')) is int and stop['infra_jobs'] >= 1
+         and len(set(stop.get('infra_job_ids', []))) == stop['infra_jobs']
+         and set(stop['infra_job_ids']) <= {job['job_id'] for job in launched if job['status'] == 'failed'},
+         'partial campaign positive infra-stop/unstarted closure')
+    return frozenset(unstarted)
+
+
 def validate(receipt, owner, proof):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -1156,9 +1215,11 @@ def validate(receipt, owner, proof):
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [],
                 'preflight_refusals': refused, 'credit_granted': False}
+    partial = 'unstarted_campaign' in proof
+    need(not partial or layout == 'campaign-v1', 'partial campaign requires strict normal layout')
     preallocation = layout == 'campaign-preallocation-v1'
     mixed = layout == 'campaign-mixed-preallocation-v1'
-    staged_preallocation = preallocation or mixed
+    staged_preallocation = preallocation or mixed or partial
     supervision = None
     if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
@@ -1174,12 +1235,15 @@ def validate(receipt, owner, proof):
              and summary['retry_infra'] == 0 and summary['task_count'] == len(checks)
              and summary['total_jobs'] == len(checks) == len(jobs)
              and summary['status'] in {'passed', 'failed', 'cancelled'}, 'campaign inventory')
-        need(len({j['job_id'] for j in jobs}) == len(jobs)
-             and {j['task'] for j in jobs} == set(checks)
-             and all(j['run'] == 1 and j['attempt'] == 1 and j['attempts'] == []
-                     and j['status'] in {'passed', 'failed', 'cancelled'}
-                     and type(j['controller_exit_code']) is int
-                     and 0 <= j['controller_exit_code'] <= 255 for j in jobs), 'campaign terminal jobs')
+        if partial:
+            unstarted_jobs = partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, proof)
+        else:
+            need(len({j['job_id'] for j in jobs}) == len(jobs)
+                 and {j['task'] for j in jobs} == set(checks)
+                 and all(j['run'] == 1 and j['attempt'] == 1 and j['attempts'] == []
+                         and j['status'] in {'passed', 'failed', 'cancelled'}
+                         and type(j['controller_exit_code']) is int
+                         and 0 <= j['controller_exit_code'] <= 255 for j in jobs), 'campaign terminal jobs')
         from datetime import datetime
         start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
         need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
@@ -1206,7 +1270,7 @@ def validate(receipt, owner, proof):
             bound(path)
         if staged_preallocation:
             expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
-            if mixed:
+            if mixed or partial:
                 from deploy_test_historical_custody import KIND as CUSTODY_KIND
                 skips = request.get('skips', {})
                 need(isinstance(skips, dict) and not set(skips).intersection(checks)
@@ -1247,6 +1311,8 @@ def validate(receipt, owner, proof):
                 need(not proof.get('current_hub_retirement'), 'unexpected current Hub retirement proof')
         handles = []
         for job in jobs:
+            if partial and job['job_id'] in unstarted_jobs:
+                continue  # Positive native never-started rows retain NULLs and no execution credit.
             need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']), 'campaign job id')
             log = campaign / (job['job_id'] + '.log')
             need(job['log'] == str(log), 'campaign job log binding')
@@ -1270,7 +1336,7 @@ def validate(receipt, owner, proof):
                     match = re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.', owner_line)
                     canary_links[Path(args[2])] = {'parent': one[0], 'ref': ref, 'owner': match[1] if match else None}
                     infra = False
-                if preallocation or mixed and not one:
+                if preallocation or (mixed or partial) and not one:
                     match=re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory[.]',
                                        lines[index+1].strip() if index+1<len(lines) else '')
                     need(match is not None, 'preallocation controller owner')
@@ -1281,6 +1347,13 @@ def validate(receipt, owner, proof):
             need(one and one[0] not in parents and type(job.get('controller_pid')) is int
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
                  'campaign parent identity')
+            if partial:
+                need(job.get('fleet_dir') == str(one[0]) and job.get('run_id') == one[0].name
+                     and job.get('fleet_owner_token') == preallocation_links[one[0]]['owner'],
+                     'partial campaign original parent binding')
+                if job['status'] == 'cancelled':
+                    need(sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line)
+                             is not None for line in lines) >= 1, 'partial campaign positive sibling cancellation')
             parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code']}
             handles.extend(one)
         need(len(handles) == len(set(handles)), 'duplicate campaign participant')
@@ -1330,7 +1403,7 @@ def validate(receipt, owner, proof):
         # Read linked failed probes through the same finite raw budget before proving their retirement.
         failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
         run_path = fleet / '_batch/run.json'
-        if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
+        if isolated or preallocation or mixed or partial or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
@@ -1420,6 +1493,17 @@ def validate(receipt, owner, proof):
                  and provenance['base_sha'] == receipt['source']['head'] and provenance['workspace_patch_sha256'] == 'none', 'execution source')
             need(len(benches) == len(matrix['tasks'])
                  and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
+        if partial:
+            link = preallocation_links.get(fleet) if fleet in parents else canary_links.get(fleet)
+            need((fleet in parents or link and link['parent'] in parents)
+                 and isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree),
+                 'partial campaign participant zero allocation')
+            for bench in benches:
+                for name in ('cloudbench-run.json','.cid','primary.ids','worker-clones.ids'):
+                    path = fleet/bench['name']/name
+                    need(not path.exists() and not path.is_symlink(), 'partial campaign task allocation artifact')
+            if fleet in parents:
+                zero_parents.add(fleet)
         if isolated:
             excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree))
             continue
@@ -1486,6 +1570,18 @@ def validate(receipt, owner, proof):
              'preallocation unexpected supervised termination')
         for value in retained.values():
             retired_local_process(dict(pid=int(value['owner']['pid']),birth=value['owner']['pid_start']))
+    if partial:
+        native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+        for hub in sorted((runs/'_hub').glob('agent-link-server.*.owner')):
+            value = fields(bound(hub))
+            need(native['native_hub_owner_retired'](hub,runs,root), 'partial campaign Hub live/reused')
+            retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': value,
+                                  'disposition': 'native-owner-retired-current-absence'}
+        need(retained, 'partial campaign native Hub inventory absent')
+        location = Path(document(campaign/'shared-relay-location.json')['directory'])
+        for leases in (campaign/'shared-relay/leases',location/'leases'):
+            need(not leases.is_symlink() and (not leases.exists() or leases.is_dir() and not any(leases.iterdir())),
+                 'partial campaign relay consumers remain')
     need(isolated or set(recovered) == set(recovery), 'recovered fleet closure')
     if isolated:
         need(set(proof['execution_quiescence']) == set(excluded), 'execution observation closure')
@@ -1511,6 +1607,9 @@ def validate(receipt, owner, proof):
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
             'participants': sorted(map(str, participants)), 'native_audit_seals': audit_seals,
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
+    if partial:
+        result.update(unstarted_campaign_verified=True, financial_cleanup_credit=False,
+                      original_outcomes_preserved=True)
     if staged_preallocation:
         result['preallocation_source_authorities']={str(k):v['source_authority'] for k,v in preallocation_links.items()
                                                      if preallocation or k in zero_parents}

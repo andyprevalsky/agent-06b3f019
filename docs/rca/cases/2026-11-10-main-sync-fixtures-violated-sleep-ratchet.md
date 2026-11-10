@@ -247,3 +247,15 @@ synchronization timer and an unchanged primary baseline.
 ## Reusable lesson
 
 Prevalidate every tracked test against a newly merged test policy using exact source bindings and an explicit fixture overlay allowlist before admitting the merged source to native gates.
+
+### Actual native structural verification on d866
+
+Frozen source d866e364d492f120da86cae905de3e75c74a8583, digest e76b4db63f57fcb3e4ab7ee99b0f8bdd2dc5a292615c25afb7ef11cdca7fbaa8, completed actual focused structural attempt40 with PASS, complete=true, native_exit0 and worker cleanup_complete=true; no retained cleanup owner.
+
+The original registered deploy-test-cycle unit executed431 tests in102.942s (unit103.12s), exit0/OK, skipped0.
+
+The original registered run-bench-durable-service unit executed5 tests in8.01s (unit8.07s), exit0/OK, skipped0.
+
+The original registered deploy-test-semantic unit executed21 tests in2.745s (unit2.81s), exit0/OK, skipped0.
+
+Exact native receipt SHA-256 e52011045e8a2c4f190d0f4457528cc0428027e80491c02665693256a847c9c3, result SHA-256 81cbcf06734684a789f2033311892957009ad91a92c5c9ca782c8d9ec06f75c8, fetched original aggregate log SHA-256 45b3c6eb0813af99ddb3fcc9422f25ab951c145f92db214f1a9b2a9508a3941c. Source-bound original paths and complete unit counts are retained in /var/tmp/deploy-mf1108/native40-structural-verification/native40-verification.json. This verifies the repaired owning fixtures, parser tests and deploy-cycle regressions in the actual frozen-source full structural gate. It does not relabel the original native38 FAIL/UNVERIFIED, its retry, older421/429source results, actual semantic UI outcomes, original isolated cleanupfalse/financial debts, or future whole-deployment/production acceptance. All remain separately recorded.
