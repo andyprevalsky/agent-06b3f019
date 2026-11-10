@@ -196,6 +196,17 @@ boundary failure, independent of native preparation; preserving the same pinned
 helper bytes in a private file removes the oversized argument without changing
 fingerprint semantics or deadlines.
 
+The following 70d4 native checkpoint reached capsule staging but flyctl refused
+the already-created destination file: its SFTP put command does not overwrite
+existing files. The test transport had overwritten that file and therefore did
+not model the real boundary. The native attempt retained its failed result,
+verified stop/park and released its lease; it published no capsule or snapshot.
+The corrected protocol reserves an exclusive private nonce directory and leaves
+the upload filename absent. Publication still requires exact directory identity,
+stable private file metadata and bytes, and a no-replace final link. Historical
+file-based staging remains a separately pinned failure proof, never a guessed
+successful upload or retry authority.
+
 The user explicitly authorized this separate pre-parent-merge repair and full
 deploy. They require genuine parallel independent smoke campaigns, no app-wide
 quiet window, original unchanged receipts, exact source/image/volume ownership,

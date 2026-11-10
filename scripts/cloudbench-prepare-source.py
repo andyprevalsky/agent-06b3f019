@@ -543,7 +543,7 @@ def ssh_argv(app, mid, command):
 
 def capsule_paths(request):
     digest=request['guest_env_capsule']['sha256'];root='/data/.cloudbench-private/env'
-    return root+'/.'+digest+'.'+request['nonce']+'.staging',root+'/'+digest+'.json'
+    return root+'/.'+digest+'.'+request['nonce']+'.staging/capsule.json',root+'/'+digest+'.json'
 
 
 def capsule_sftp_argv(request):
@@ -559,17 +559,24 @@ for name in ('/data/.cloudbench-private','/data/.cloudbench-private/env'):
  try:p.mkdir(mode=0o700)
  except FileExistsError:pass
  s=p.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700
-p=STAGE
-fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-s=os.fstat(fd);os.fsync(fd);os.close(fd)
-print(json.dumps(dict(schema='cloudbench-capsule-stage-v1',path=p,inode=s.st_ino,device=s.st_dev)))
+p=pathlib.Path(STAGE);p.parent.mkdir(mode=0o700)
+s=p.parent.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700
+assert not os.path.lexists(p)
+fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);os.fsync(fd);os.close(fd)
+print(json.dumps(dict(schema='cloudbench-capsule-directory-stage-v2',path=str(p),inode=s.st_ino,device=s.st_dev)))
 '''.replace('STAGE',repr(stage))]
 
 
 def capsule_seal(request,stage_proof):
     stage,final=capsule_paths(request)
-    return ['python3','-c','''import os,stat,hashlib,json
+    return ['python3','-c','''import os,pathlib,stat,hashlib,json
 p=STAGE;target=FINAL
+d=pathlib.Path(p).parent
+def directory():
+ for parent in ('/data/.cloudbench-private','/data/.cloudbench-private/env',str(d)):
+  s=os.lstat(parent);assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700
+ s=os.lstat(d);assert s.st_ino==INODE and s.st_dev==DEVICE
+directory()
 def read(path):
  fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
  try:
@@ -580,10 +587,11 @@ def read(path):
   assert len(raw)==a.st_size and hashlib.sha256(raw).hexdigest()==DIGEST
   os.fsync(fd);return a,raw
  finally:os.close(fd)
-s,raw=read(p);assert s.st_ino==INODE and s.st_dev==DEVICE
+s,raw=read(p);directory()
 try:os.link(p,target,follow_symlinks=False)
 except FileExistsError:read(target)
 os.unlink(p)
+os.rmdir(d)
 s,raw=read(target)
 fd=os.open('/data/.cloudbench-private/env',os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 print(json.dumps(dict(schema='cloudbench-capsule-published-v1',path=target,sha256=DIGEST,size=len(raw),uid=s.st_uid,mode=stat.S_IMODE(s.st_mode))))
@@ -595,7 +603,7 @@ def stage_capsule(api,request):
     module=runpy.run_path(str(HERE/'cloudbench-source-env.py'))
     module['descriptor'](request['guest_env_capsule'],private=True)
     proof=json.loads(guest_command(api,request,capsule_bootstrap(request),journal_name='capsule-ssh')['stdout'])
-    need(proof.get('schema')=='cloudbench-capsule-stage-v1' and proof.get('path')==capsule_paths(request)[0]
+    need(proof.get('schema')=='cloudbench-capsule-directory-stage-v2' and proof.get('path')==capsule_paths(request)[0]
          and type(proof.get('inode')) is int and proof['inode']>0 and type(proof.get('device')) is int,'fresh capsule staging inode')
     directory=api.journal.parent/'capsule-sftp'/'0';directory.mkdir(parents=True,mode=0o700)
     context=api.guest_context
@@ -806,12 +814,12 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
     return rows
 
 
-def verify_ssh_journal(value,native,request,prestart,*,sftp=False,allow_incomplete=False):
+def verify_ssh_journal(value,native,request,prestart,*,sftp=False,allow_incomplete=False,capsule_builders=None):
     need(journal_index(value['path'])==value,'SSH journal changed')
     root=Path(value['path']);records=[];mid=request['native']['machine_id'];own='/machines/'+mid
     for path in sorted(root.glob('*/request.json'),key=lambda p:int(p.parent.name)):
         sent=load(path)
-        expected_argv=capsule_sftp_argv(request) if sftp else ssh_argv('navi-whisper-lux-bench',mid,sent['command'])
+        expected_argv=(capsule_builders or globals())['capsule_sftp_argv'](request) if sftp else ssh_argv('navi-whisper-lux-bench',mid,sent['command'])
         if allow_incomplete and not (path.parent/'result.json').exists():
             need(sent.get('schema')==('cloudbench-sftp-command-v1' if sftp else 'cloudbench-ssh-command-v1')
                  and sent['argv']==expected_argv and sent['timeout']==20 and sent['instance_id']==prestart['instance_id']
@@ -867,26 +875,27 @@ def verify_ssh_journal(value,native,request,prestart,*,sftp=False,allow_incomple
     return records
 
 
-def verify_failed_capsule_staging(result,rows,request,prestart,stop_started):
+def verify_failed_capsule_staging(result,rows,request,prestart,stop_started,builders):
     need(result.get('capsule_ssh') is not None,'failed capsule staging journal required')
     commands=verify_ssh_journal(result['capsule_ssh'],rows,request,prestart,allow_incomplete=True)
-    need(1<=len(commands)<=2 and commands[0]['body']==dict(command=capsule_bootstrap(request),timeout=5)
+    need(1<=len(commands)<=2 and commands[0]['body']==dict(command=builders['capsule_bootstrap'](request),timeout=5)
          and all(row['started']<stop_started for row in commands),'failed capsule bootstrap prefix')
     stage=None
     if commands[0]['response'] is not None:
         stage=json.loads(commands[0]['response']['stdout'])
-        need(stage.get('schema')=='cloudbench-capsule-stage-v1' and stage.get('path')==capsule_paths(request)[0]
+        expected_schema='cloudbench-capsule-directory-stage-v2' if builders['capsule_paths'](request)[0].endswith('/capsule.json') else 'cloudbench-capsule-stage-v1'
+        need(stage.get('schema')==expected_schema and stage.get('path')==builders['capsule_paths'](request)[0]
              and type(stage.get('inode')) is int and stage['inode']>0 and type(stage.get('device')) is int,
              'failed capsule staging inode')
     transfers=[]
     if result.get('capsule_sftp') is not None:
-        transfers=verify_ssh_journal(result['capsule_sftp'],rows,request,prestart,sftp=True,allow_incomplete=True)
+        transfers=verify_ssh_journal(result['capsule_sftp'],rows,request,prestart,sftp=True,allow_incomplete=True,capsule_builders=builders)
         need(stage is not None and len(transfers)==1 and transfers[0]['body']['capsule']==request['guest_env_capsule']
              and transfers[0]['body']['stage']==stage and commands[0]['finished']<=transfers[0]['started']<stop_started,
              'failed capsule exact SFTP attempt')
     if len(commands)==2:
         need(stage is not None and len(transfers)==1 and transfers[0]['response'] is not None
-             and commands[1]['body']==dict(command=capsule_seal(request,stage),timeout=5)
+             and commands[1]['body']==dict(command=builders['capsule_seal'](request,stage),timeout=5)
              and transfers[0]['finished']<=commands[1]['started'],'failed capsule seal attempt prefix')
     else:need(not transfers or transfers[0].get('pending') is True,'completed capsule upload lacks seal attempt')
 
@@ -899,7 +908,7 @@ def verify_capsule_transport(ssh,sftp,native,request,prestart,guest_started):
     bootstrap,seal=commands;transfer=transfers[0]
     need(bootstrap['body']==dict(command=capsule_bootstrap(request),timeout=5),'capsule directory bootstrap command')
     stage=json.loads(bootstrap['response']['stdout'])
-    need(stage.get('schema')=='cloudbench-capsule-stage-v1' and stage.get('path')==capsule_paths(request)[0]
+    need(stage.get('schema')=='cloudbench-capsule-directory-stage-v2' and stage.get('path')==capsule_paths(request)[0]
          and type(stage.get('inode')) is int and stage['inode']>0 and type(stage.get('device')) is int,
          'capsule exclusive staging inode proof')
     need(transfer['body']['capsule']==request['guest_env_capsule'] and transfer['body']['stage']==stage
@@ -1142,9 +1151,10 @@ def historical_guest_functions(origin,request):
     if sha(raw)!=origin['helper_sha256']:
         need(origin['helper_sha256']==sha((HERE/'cloudbench-prepare-source.py').read_bytes()),'historical payload producer')
         raw=(HERE/'cloudbench-prepare-source.py').read_bytes()
-    nodes=[node for node in ast.parse(raw).body if isinstance(node,ast.FunctionDef)
-           and node.name in ('guest_program','delivery_commands','job_launcher')]
-    need(len(nodes)==3,'pinned payload builders unavailable')
+    names={'guest_program','delivery_commands','job_launcher'}
+    if request.get('guest_env_mode')==OWNED_MODE:names.update(('capsule_paths','capsule_sftp_argv','capsule_bootstrap','capsule_seal'))
+    nodes=[node for node in ast.parse(raw).body if isinstance(node,ast.FunctionDef) and node.name in names]
+    need(len(nodes)==len(names),'pinned payload builders unavailable')
     constants=[node for node in ast.parse(raw).body if isinstance(node,ast.Assign)
                and any(isinstance(target,ast.Name) and target.id=='SAFE_ENV_OBSERVER' for target in node.targets)]
     need(all(isinstance(node.value,ast.Constant) and isinstance(node.value.value,str) for node in constants),
@@ -1186,7 +1196,7 @@ def ssh_failure_proof(request,result,directory,origin,predecessor,before,rows,fo
             need(row['id']==before['id'] and row['name']==before['name'] and row['region']==before['region']
                  and any(row['instance_id']==item['instance_id'] and row['config']==item['config'] for item in (before,ack,park['response']))
                  and row['state'] in ('created','stopped','replacing','started','stopping'),'unknown failed capsule native epoch')
-        verify_failed_capsule_staging(result,rows,request,prestart,stops[0]['started'])
+        verify_failed_capsule_staging(result,rows,request,prestart,stops[0]['started'],historical_guest_functions(origin,request))
         need(update['finished']<=starts[0]['started']<=stops[0]['started']<=park['started'],'failed capsule power-off order')
         return park['response']
     index=result.get('ssh')

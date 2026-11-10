@@ -202,16 +202,27 @@ class NativeLifecycle(unittest.TestCase):
                 if args[3:10]!=['-a','navi-whisper-lux-bench','--machine',self.mid,'-q','-m','0600']:return 403,{}
                 if self.fault=='sftp-unknown':return 503,{}
                 remote=Path(args[11].replace('/data/.cloudbench-private',str(self.remote_parent)))
-                shutil.copyfile(args[10],remote);remote.chmod(0o600)
+                if remote.exists() or remote.is_symlink():
+                    return 200,dict(exit_code=1,stdout='',stderr='remote file already exists; flyctl sftp does not overwrite existing files for safety')
+                with open(remote,'xb') as target:target.write(Path(args[10]).read_bytes())
+                remote.chmod(0o600)
                 if self.fault=='capsule-inode':
-                    raw=remote.read_bytes();remote.rename(remote.with_name(remote.name+'.old-inode'))
-                    remote.write_bytes(raw);remote.chmod(0o600)
+                    raw=remote.read_bytes();directory=remote.parent
+                    directory.rename(directory.with_name(directory.name+'.old-inode'))
+                    directory.mkdir(mode=0o700);remote.write_bytes(raw);remote.chmod(0o600)
+                if self.fault=='capsule-symlink':remote.unlink();remote.symlink_to(args[10])
+                if self.fault=='capsule-mode':remote.chmod(0o644)
+                if self.fault=='capsule-hash':remote.write_bytes(b'wrong-hash')
+                if self.fault=='capsule-directory-mode':remote.parent.chmod(0o755)
+                if self.fault=='capsule-directory-symlink':
+                    directory=remote.parent;other=directory.with_name(directory.name+'.original')
+                    directory.rename(other);directory.symlink_to(other,target_is_directory=True)
                 return 200,dict(exit_code=0,stdout='',stderr='')
             if args[:6]!=['ssh','console','-a','navi-whisper-lux-bench','--machine',self.mid] or args[6]!='-C':return 403,{}
             argv=shlex.split(args[7])
             if argv[:3]!=['timeout','--signal=TERM','5s'] or self.lease_version!=self.machine['instance_id'] or not self.nonce:return 409,{}
             if self.fault=='ssh-failed':return 503,{}
-            if 'cloudbench-capsule-stage-v1' in argv[-1] or 'cloudbench-capsule-published-v1' in argv[-1]:
+            if any(marker in argv[-1] for marker in ('cloudbench-capsule-stage-v1','cloudbench-capsule-directory-stage-v2','cloudbench-capsule-published-v1')):
                 # Model guest root with the test process's UID on its real private filesystem.
                 self.remote_parent.parent.mkdir(exist_ok=True)
                 code=argv[-1].replace('/data/.cloudbench-private',str(self.remote_parent)).replace('s.st_uid==0','s.st_uid==os.getuid()').replace('a.st_uid==0','a.st_uid==os.getuid()')
@@ -503,6 +514,30 @@ sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr','')
         self.owned_capsule_request();self.fault='capsule-inode'
         result=self.invoke();self.assertNotEqual(result.returncode,0)
         self.assertFalse((self.root/'output/source-manifest.json').exists())
+
+    def test_owned_capsule_uploaded_symlink_mode_or_hash_refuses_publication(self):
+        self.owned_capsule_request()
+        for fault in ('capsule-symlink','capsule-mode','capsule-hash'):
+            with self.subTest(fault=fault):
+                self.fault=fault;self.request['nonce']=self.m['secrets'].token_hex(16)
+                result=self.invoke('request-'+fault+'.json','output-'+fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertFalse((self.root/('output-'+fault)/'source-manifest.json').exists())
+                self.assertEqual(self.machine['state'],'stopped')
+                # Each operation requires exact current bootstrap authority;
+                # restore only the fixture's original owned epoch for the next fault.
+                self.machine['config']=copy.deepcopy(self.config);self.machine['instance_id']='OLD1'
+
+    def test_owned_capsule_stage_directory_symlink_or_mode_refuses_publication(self):
+        self.owned_capsule_request()
+        for fault in ('capsule-directory-symlink','capsule-directory-mode'):
+            with self.subTest(fault=fault):
+                self.fault=fault;self.request['nonce']=self.m['secrets'].token_hex(16)
+                result=self.invoke('request-'+fault+'.json','output-'+fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertFalse((self.root/('output-'+fault)/'source-manifest.json').exists())
+                self.assertEqual(self.machine['state'],'stopped')
+                self.machine['config']=copy.deepcopy(self.config);self.machine['instance_id']='OLD1'
 
     def test_two_owned_capsules_prepare_concurrently_with_different_approved_env(self):
         from concurrent.futures import ThreadPoolExecutor
