@@ -10,6 +10,7 @@ import re
 import shlex
 import runpy
 import subprocess
+import shutil
 import sys
 import tempfile
 import threading
@@ -69,13 +70,32 @@ class Preparation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.m['verify_scope']([row], 'owned', 'vol_owned')
 
+    def test_guest_environment_observation_uses_pinned_semantics_without_secret_values(self):
+        namespace={};exec(self.m['SAFE_ENV_OBSERVER'],namespace)
+        raw=b'export BROWSER_PROVIDER="steel"\nTEMPORAL_NAMESPACE="private-namespace"\nAPI_KEY=private-value\n'
+        encoded=self.m['base64'].b64encode(raw).decode()
+        blobs={key:' \n'+encoded[:12]+'\t'+encoded[12:]+'\r\n' for key in ('AGENTS_ENV_B64','BACKEND_ENV_B64')}
+        with tempfile.TemporaryDirectory() as directory,patch.dict(os.environ,{
+                'CLOUDBENCH_BROWSER_PROVIDER':'steel','CLOUDBENCH_WORKER_BROWSER_PROVIDER':'steel'}):
+            value=namespace['observe_guest_environment'](blobs,directory,HERE/'lib/cloudbench-env.sh')
+            self.assertTrue(value['provider_contract_verified'])
+            for item in value['blobs'].values():
+                self.assertTrue(item['decoded_valid']);self.assertEqual(item['decoded_sha256'],self.m['sha'](raw))
+                self.assertEqual(item['provider']['value'],'steel')
+                self.assertEqual(item['namespace_sha256'],self.m['sha'](b'private-namespace'))
+            text=json.dumps(value);self.assertNotIn('private-value',text);self.assertNotIn('private-namespace',text)
+        with tempfile.TemporaryDirectory() as directory:
+            invalid=namespace['observe_guest_environment']({'AGENTS_ENV_B64':'%%%','BACKEND_ENV_B64':'%%%'},directory,HERE/'lib/cloudbench-env.sh')
+            self.assertFalse(invalid['provider_contract_verified'])
+            self.assertTrue(all(not item['decoded_valid'] for item in invalid['blobs'].values()))
+
 
 class NativeLifecycle(unittest.TestCase):
     def setUp(self):
         self.m = runpy.run_path(str(HERE / 'cloudbench-prepare-source.py'))
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.owner = 'a'*32; self.mid = '0123456789abcd'; self.vid = 'vol_owned'
+        self.owner = getattr(self,'fixture_owner','a'*32); self.mid = '0123456789abcd'; self.vid = 'vol_owned'
         self.image = 'registry.fly.io/navi-whisper-lux-bench@sha256:'+'e'*64
         self.shared = dict(id='683e47df5094d8', name='cloudbench-warm',
                            config={'mounts':[{'volume':'vol_vwnym366kn7k8mmv','path':'/data'}]})
@@ -143,6 +163,7 @@ class NativeLifecycle(unittest.TestCase):
         self.transition_reads=[]
         self.lease_version=None
         self.enforce_exec_version=False
+        self.remote_parent=self.root/'guest-data/.cloudbench-private'
         outer=self
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args): pass
@@ -177,10 +198,29 @@ class NativeLifecycle(unittest.TestCase):
         own='/machines/'+self.mid
         if path=='/_test_ssh':
             args=body['args']
+            if args[:3]==['ssh','sftp','put']:
+                if args[3:10]!=['-a','navi-whisper-lux-bench','--machine',self.mid,'-q','-m','0600']:return 403,{}
+                if self.fault=='sftp-unknown':return 503,{}
+                remote=Path(args[11].replace('/data/.cloudbench-private',str(self.remote_parent)))
+                shutil.copyfile(args[10],remote);remote.chmod(0o600)
+                if self.fault=='capsule-inode':
+                    raw=remote.read_bytes();remote.rename(remote.with_name(remote.name+'.old-inode'))
+                    remote.write_bytes(raw);remote.chmod(0o600)
+                return 200,dict(exit_code=0,stdout='',stderr='')
             if args[:6]!=['ssh','console','-a','navi-whisper-lux-bench','--machine',self.mid] or args[6]!='-C':return 403,{}
             argv=shlex.split(args[7])
             if argv[:3]!=['timeout','--signal=TERM','5s'] or self.lease_version!=self.machine['instance_id'] or not self.nonce:return 409,{}
             if self.fault=='ssh-failed':return 503,{}
+            if 'cloudbench-capsule-stage-v1' in argv[-1] or 'cloudbench-capsule-published-v1' in argv[-1]:
+                # Model guest root with the test process's UID on its real private filesystem.
+                self.remote_parent.parent.mkdir(exist_ok=True)
+                code=argv[-1].replace('/data/.cloudbench-private',str(self.remote_parent)).replace('s.st_uid==0','s.st_uid==os.getuid()').replace('a.st_uid==0','a.st_uid==os.getuid()')
+                result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=5)
+                if result.returncode:return 200,dict(exit_code=result.returncode,stdout='',stderr='guest-staging-refused')
+                value=json.loads(result.stdout)
+                value['path']=value['path'].replace(str(self.remote_parent),'/data/.cloudbench-private')
+                if 'uid' in value:value['uid']=0
+                return 200,dict(exit_code=0,stdout=json.dumps(value),stderr='')
             status,answer=self.handle('POST',own+'/exec',dict(command=argv[3:],timeout=5),self.nonce)
             self.volume['bytes_used']=self.volume.get('bytes_used',0)+1024
             self.machine['events']=[{'type':'fixture-observation','sequence':self.foreign_changes}]
@@ -226,6 +266,13 @@ class NativeLifecycle(unittest.TestCase):
             delivery=re.search(r'CLOUDBENCH-DELIVERY:[0-9]+',body['command'][-1])
             if delivery:return 200,{'exit_code':0,'stdout':delivery.group(0)+'\n'}
             if 'subprocess.Popen' in body['command'][-1]:return 200,{'exit_code':0,'stdout':json.dumps(job)}
+            if self.fault=='guest-env-failure':
+                failure=dict(schema='cloudbench-source-guest-v1',nonce=self.request['nonce'],guest_exit=1,
+                    error='AssertionError',phase='preconditions',job=job,started_epoch=int(time.time()),finished_epoch=int(time.time()),
+                    preconditions=dict(euid=0,machine_id=self.mid,data_mount=True,repo_physical='/data/repo',git_dir=True,
+                        env_present={key:True for key in self.request['guest_env_sha256']},
+                        guest_env_sha256={key:'7'*64 for key in self.request['guest_env_sha256']}))
+                return 200,dict(exit_code=0,stdout=json.dumps(failure))
             guest=dict(schema='cloudbench-source-guest-v1',nonce=self.request['nonce'],source_ref=self.request['source_ref'],
                        machine_id=self.mid,node_fingerprint=self.request['node_fingerprint'],
                        python_fingerprint=self.request['python_fingerprint'],installed_node=self.request['node_fingerprint'],
@@ -234,6 +281,9 @@ class NativeLifecycle(unittest.TestCase):
                        mount='/data',guest_exit=0,started_epoch=int(time.time()),finished_epoch=int(time.time()),job=job)
             if 'transport' in self.request:
                 guest['transport']={key:self.request['transport'][key] for key in ('base_sha','workspace_patch_sha256','replayed_tree')}
+            if self.request.get('guest_env_mode')==self.m['OWNED_MODE']:
+                owned=self.m['owned_manifest'](self.request,dict(owner_token=self.owner,creation_nonce='6'*32))
+                guest.update({key:owned[key] for key in self.m['OWNED_FIELDS']})
             if self.fault=='deps':guest['installed_node']='9'*64
             if self.fault=='env':guest['guest_env_sha256']=dict(guest['guest_env_sha256'],AGENTS_ENV_B64='8'*64)
             return 200,{'exit_code':0,'stdout':json.dumps(guest)}
@@ -242,15 +292,15 @@ class NativeLifecycle(unittest.TestCase):
             self.snapshots.append(row);return 201,row
         return 403,{}
 
-    def invoke(self):
-        self.write('request.json',self.request)
+    def invoke(self,request_name='request.json',output_name='output'):
+        self.write(request_name,self.request)
         env=dict(os.environ,FLY_API_TOKEN='fixture-private',FLY_API_HOSTNAME=f'http://127.0.0.1:{self.server.server_port}')
         # Existing raw API resolves a flyctl binary even with a bearer credential.
         binary=self.root/'flyctl'
         binary.write_text('''#!/usr/bin/env python3
 import json,os,sys,urllib.request
 args=sys.argv[1:]
-assert len(args)==8 and args[:2]==['ssh','console']
+assert (len(args)==8 and args[:2]==['ssh','console']) or (len(args)==12 and args[:3]==['ssh','sftp','put'])
 assert max(len(a.encode()) for a in args)<32768
 request=urllib.request.Request(os.environ['FLY_API_HOSTNAME']+'/v1/apps/navi-whisper-lux-bench/_test_ssh',data=json.dumps({'args':args}).encode(),headers={'Content-Type':'application/json'})
 try:
@@ -259,8 +309,8 @@ except Exception:sys.exit(71)
 sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr',''));sys.exit(value.get('exit_code',1))
 ''');binary.chmod(0o700)
         env['PATH']=str(self.root)+os.pathsep+env['PATH']
-        return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'--request',str(self.root/'request.json'),
-                               '--output',str(self.root/'output')],env=env,capture_output=True,text=True,timeout=35)
+        return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'--request',str(self.root/request_name),
+                               '--output',str(self.root/output_name)],env=env,capture_output=True,text=True,timeout=35)
 
     def test_real_cli_bounded_transport_full_chain_with_foreign_churn(self):
         result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
@@ -312,6 +362,199 @@ sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr','')
         self.assertEqual(self.machine['config']['guest']['memory_mb'],2048)
         receipt=self.m['load'](self.root/'output/result.json')
         self.assertFalse(receipt['qualified']);self.assertTrue(receipt['stopped_verified'])
+
+    def owned_capsule_request(self,variant=None):
+        self.volume.update(name='cbs_'+self.owner[:26],encrypted=True)
+        index=self.root/'module-index'
+        env=dict(os.environ,GIT_INDEX_FILE=str(index))
+        git=['git','-C',str(HERE.parent)]
+        subprocess.run(git+['read-tree',self.request['source_ref']],env=env,check=True)
+        blob=subprocess.check_output(git+['hash-object','-w',str(HERE/'cloudbench-source-env.py')],text=True).strip()
+        subprocess.run(git+['update-index','--add','--cacheinfo','100644,'+blob+',scripts/cloudbench-source-env.py'],env=env,check=True)
+        tree=subprocess.check_output(git+['write-tree'],env=env,text=True).strip()
+        ref=subprocess.check_output(git+['commit-tree',tree,'-p',self.request['source_ref'],'-m','isolated capsule producer fixture'],env=env,text=True).strip()
+        fixture=runpy.run_path(str(HERE/'tests/cloudbench-source-env.test.py'))['CapsuleTest']();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        if variant is not None:
+            for key in fixture.originals:
+                original=fixture.originals[key].replace(fixture.secret.encode(),(fixture.secret+variant).encode())
+                projected=fixture.projected[key].replace(fixture.secret.encode(),(fixture.secret+variant).encode())
+                fixture.request['approved_inputs'][key]=fixture.write(key+'.approved',original)
+                fixture.request['projected_inputs'][key]=fixture.write(key+'.projected',projected)
+            fixture.secret+=variant
+        fixture.request['binding'].update(owner_token=self.owner,create_nonce='6'*32,source_ref=ref,image_ref=self.image,
+            node_fingerprint=self.request['node_fingerprint'],python_fingerprint=self.request['python_fingerprint'])
+        fixture.build();capsule=json.loads(fixture.output.read_text())
+        self.request.update(source_ref=ref,guest_transport='cloudbench-ssh-guest-v1',guest_env_mode=self.m['OWNED_MODE'],
+            guest_env_capsule=self.m['descriptor'](fixture.output),guest_env_sha256=capsule['guest_env_sha256'])
+        self.request['scripts']['cloudbench-source-env.py']=self.m['sha']((HERE/'cloudbench-source-env.py').read_bytes())
+        return fixture,capsule
+
+    def test_owned_capsule_sftp_cli_publication_and_no_secret_transport(self):
+        fixture,capsule=self.owned_capsule_request()
+        with patch.dict(os.environ,{'AGENTS_ENV_B64':'ambient-rotated','BACKEND_ENV_B64':'other-ambient'}):result=self.invoke()
+        self.assertEqual(result.returncode,0,result.stderr)
+        manifest=self.m['verify_prepared_source'](self.root/'request.json',self.root/'output/result.json',self.root/'output/source-manifest.json',
+            source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        self.assertEqual(manifest['guest_env_capsule_binding'],capsule['binding'])
+        final=self.remote_parent/'env'/ (self.request['guest_env_capsule']['sha256']+'.json')
+        self.assertEqual(final.read_bytes(),fixture.output.read_bytes());self.assertEqual(final.stat().st_mode&0o777,0o600)
+        receipt=self.m['load'](self.root/'output/result.json');self.assertIn('capsule_sftp',receipt);self.assertIn('capsule_ssh',receipt)
+        for member in (self.root/'output').rglob('*'):
+            if member.is_file():
+                raw=member.read_bytes()
+                self.assertNotIn(fixture.secret.encode(),raw)
+                for value in capsule['env'].values():self.assertNotIn(value.encode(),raw)
+        self.assertNotIn(fixture.secret,json.dumps(self.calls))
+        path=self.root/'output/result.json';original=path.read_bytes()
+        transfer=next((self.root/'output/capsule-sftp').glob('*/request.json'));raw=transfer.read_bytes()
+        answer_path=transfer.parent/'result.json';answer_raw=answer_path.read_bytes()
+        for kind in ('target','nonce','stage-inode','capsule-hash'):
+            sent=json.loads(raw)
+            if kind=='target':sent['argv'][6]='ffffffffffffff'
+            elif kind=='nonce':sent['nonce']='foreign'
+            elif kind=='stage-inode':sent['stage']['inode']+=1
+            else:sent['capsule']['sha256']='0'*64
+            transfer.write_text(json.dumps(sent));answer=json.loads(answer_raw);answer['request']=self.m['descriptor'](transfer)
+            answer_path.write_text(json.dumps(answer));changed=json.loads(original)
+            changed['capsule_sftp']=self.m['journal_index'](self.root/'output/capsule-sftp');path.write_text(json.dumps(changed))
+            with self.assertRaises(ValueError,msg=kind):
+                self.m['verify_prepared_source'](self.root/'request.json',path,self.root/'output/source-manifest.json',
+                    source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        transfer.write_bytes(raw);answer_path.write_bytes(answer_raw);path.write_bytes(original)
+        # Equal before/after witnesses must prove encryption positively, rather
+        # than accepting two consistently false observations in a resealed chain.
+        native=self.m['verify_journal'](receipt['journal'],self.mid,self.vid,(self.shared['id'],))
+        for row in native:
+            if row['method']=='GET' and row['path']=='/volumes/'+self.vid:row['response']['encrypted']=False
+        sent=json.loads(raw);sent['volume_before']['encrypted']=False
+        transfer.write_text(json.dumps(sent));answer=json.loads(answer_raw)
+        answer['request']=self.m['descriptor'](transfer);answer['volume_after']['encrypted']=False
+        answer_path.write_text(json.dumps(answer))
+        with self.assertRaisesRegex(ValueError,'encrypted Volume'):
+            self.m['verify_ssh_journal'](self.m['journal_index'](transfer.parent.parent),native,self.request,
+                self.m['described'](receipt['prestart']),sftp=True)
+        transfer.write_bytes(raw);answer_path.write_bytes(answer_raw)
+
+    def test_owned_capsule_unencrypted_volume_refuses_before_delivery(self):
+        self.owned_capsule_request();self.volume['encrypted']=False
+        result=self.invoke()
+        self.assertNotEqual(result.returncode,0)
+        self.assertFalse(any(path=='/_test_ssh' or method=='POST' and path=='/machines/'+self.mid
+                             for method,path,body,nonce in self.calls))
+        self.assertFalse((self.root/'output/source-manifest.json').exists())
+
+    def test_owned_capsule_wrong_binding_or_symlink_refuses_before_native(self):
+        fixture,capsule=self.owned_capsule_request()
+        original=copy.deepcopy(self.request)
+        for kind in ('owner_token','create_nonce','source_ref','image_ref','node_fingerprint','python_fingerprint','provider','hash','mode','symlink'):
+            self.request=copy.deepcopy(original);wrong=copy.deepcopy(capsule)
+            changed=self.root/('wrong-capsule-'+kind)
+            if kind in wrong['binding']:wrong['binding'][kind]='f'*len(wrong['binding'][kind])
+            if kind=='provider':wrong['providers']['backend']='steel' if wrong['providers']['backend']!='steel' else 'kernel'
+            changed.write_text(json.dumps(wrong));changed.chmod(0o600)
+            self.request['guest_env_capsule']=self.m['descriptor'](changed)
+            if kind=='hash':self.request['guest_env_capsule']['sha256']='0'*64
+            if kind=='mode':self.request['guest_env_mode']='foreign-mode'
+            if kind=='symlink':
+                changed.unlink();changed.symlink_to(fixture.output)
+            result=self.invoke('request-'+kind+'.json','output-'+kind);self.assertNotEqual(result.returncode,0,kind);self.assertFalse(self.calls)
+
+    def test_owned_capsule_unknown_sftp_outcome_never_retries_and_parks(self):
+        self.owned_capsule_request();self.fault='sftp-unknown'
+        result=self.invoke();self.assertNotEqual(result.returncode,0)
+        self.assertEqual(sum(body.get('args',[])[:3]==['ssh','sftp','put'] for method,path,body,nonce in self.calls if path=='/_test_ssh'),1)
+        self.assertEqual(self.machine['state'],'stopped');self.assertEqual(self.machine['config']['guest']['memory_mb'],2048)
+        self.assertIsNone(self.nonce);self.assertFalse((self.root/'output/source-manifest.json').exists())
+        failed=self.root/'output/result.json'
+        recovered=self.invoke_ssh_recovery(failed,'recover-sftp-unknown')
+        self.assertEqual(recovered.returncode,0,recovered.stderr)
+        receipt=self.m['load'](self.root/'recover-sftp-unknown/result.json')
+        self.assertFalse(receipt['qualified']);self.assertTrue(receipt['filesystem_untrusted'])
+
+    def test_owned_capsule_stage_inode_tamper_refuses_publication(self):
+        self.owned_capsule_request();self.fault='capsule-inode'
+        result=self.invoke();self.assertNotEqual(result.returncode,0)
+        self.assertFalse((self.root/'output/source-manifest.json').exists())
+
+    def test_two_owned_capsules_prepare_concurrently_with_different_approved_env(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.owned_capsule_request('A')
+        peer=NativeLifecycle();peer.fixture_owner='b'*32;peer.setUp();self.addCleanup(peer.doCleanups)
+        peer.owned_capsule_request('B')
+        self.assertNotEqual(self.request['guest_env_sha256'],peer.request['guest_env_sha256'])
+        with patch.dict(os.environ,{'AGENTS_ENV_B64':'ambient-rotated','BACKEND_ENV_B64':'ambient-also-rotated'}):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                answers=list(executor.map(lambda case:case.invoke(),(self,peer)))
+        for case,result in zip((self,peer),answers):
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(case.m['load'](case.root/'output/source-manifest.json')['guest_env_capsule_sha256'],case.request['guest_env_capsule']['sha256'])
+
+    def failed_ssh_guest(self):
+        self.volume.update(name='cbs_'+self.owner[:26],encrypted=True)
+        self.request['guest_transport']='cloudbench-ssh-guest-v1';self.fault='guest-env-failure'
+        result=self.invoke();self.assertNotEqual(result.returncode,0)
+        path=self.root/'output/result.json';receipt=self.m['load'](path)
+        self.assertIn('ssh',receipt)
+        self.assertEqual(receipt['ssh'],self.m['journal_index'](self.root/'output/ssh'))
+        self.assertTrue(receipt['stopped_verified']);self.assertFalse(receipt['qualified'])
+        self.fault=None
+        return path
+
+    def invoke_ssh_recovery(self,failed,output='recovery-guest'):
+        env=dict(os.environ,FLY_API_TOKEN='fixture-private',FLY_API_HOSTNAME=f'http://127.0.0.1:{self.server.server_port}',
+                 PATH=str(self.root)+os.pathsep+os.environ['PATH'])
+        return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'recover-bootstrap',
+            '--request',str(self.root/'request.json'),'--failed-result',str(failed),'--output',str(self.root/output)],
+            env=env,capture_output=True,text=True,timeout=35)
+
+    def test_failed_ssh_env_guest_seals_evidence_recovers_untrusted_and_fresh_contract_prepares(self):
+        failed=self.failed_ssh_guest();oldraw=failed.read_bytes();oldrequest=(self.root/'request.json').read_bytes()
+        result=self.invoke_ssh_recovery(failed);self.assertEqual(result.returncode,0,result.stderr)
+        path=self.root/'recovery-guest/result.json';receipt=self.m['load'](path)
+        self.assertFalse(receipt['qualified']);self.assertFalse(receipt['credit_granted']);self.assertTrue(receipt['filesystem_untrusted'])
+        self.assertFalse(receipt.get('legacy_unsealed_ssh',False))
+        raw_receipt=path.read_bytes()
+        for field in ('intent','filesystem_untrusted'):
+            altered=copy.deepcopy(receipt);altered.pop(field);path.write_text(json.dumps(altered))
+            with self.assertRaises(ValueError):self.m['verify_recovered_bootstrap'](path)
+        path.write_bytes(raw_receipt)
+        authority=self.m['resolve_bootstrap_ownership'](path)
+        self.assertEqual(failed.read_bytes(),oldraw);self.assertEqual((self.root/'request.json').read_bytes(),oldrequest)
+        self.request=dict(self.request,nonce='e'*32,ownership=self.m['descriptor'](path),
+            guest_env_sha256={key:'7'*64 for key in self.request['guest_env_sha256']},
+            native=dict(self.request['native'],instance_id=authority['machine']['instance_id'],
+                        config_sha256=self.m['sha'](self.m['canonical'](authority['machine']['config']))))
+        self.write('fresh-request.json',self.request)
+        env=dict(os.environ,FLY_API_TOKEN='fixture-private',FLY_API_HOSTNAME=f'http://127.0.0.1:{self.server.server_port}',PATH=str(self.root)+os.pathsep+os.environ['PATH'])
+        prepared=subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'--request',str(self.root/'fresh-request.json'),
+            '--output',str(self.root/'fresh')],env=env,capture_output=True,text=True,timeout=35)
+        self.assertEqual(prepared.returncode,0,prepared.stderr)
+        self.m['verify_prepared_source'](self.root/'fresh-request.json',self.root/'fresh/result.json',self.root/'fresh/source-manifest.json',
+            source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        self.assertEqual(failed.read_bytes(),oldraw)
+
+    def test_failed_ssh_guest_unknown_epoch_refuses_recovery_before_write(self):
+        failed=self.failed_ssh_guest();original=copy.deepcopy(self.machine)
+        for index,kind in enumerate(('unknown-epoch','consumer-claim','mount')):
+            self.machine=copy.deepcopy(original)
+            if kind=='unknown-epoch':self.machine['instance_id']='UNKNOWN3'
+            elif kind=='consumer-claim':self.machine['config']['metadata']['cloudbench_source_consumer_'+'f'*32]='claim'
+            else:self.machine['config']['mounts'][0]['volume']='vol_foreign'
+            before=len(self.calls);result=self.invoke_ssh_recovery(failed,'recovery-negative-'+str(index))
+            self.assertNotEqual(result.returncode,0)
+            self.assertTrue(all(method=='GET' or path.endswith('/lease') for method,path,body,nonce in self.calls[before:]))
+
+    def test_failed_ssh_guest_altered_command_or_publication_refuses_pure_recovery(self):
+        failed=self.failed_ssh_guest()
+        self.write('output/source-manifest.json',{'forged':'published'})
+        with self.assertRaises(ValueError):self.m['prestart_failure'](self.root/'request.json',failed)
+        (self.root/'output/source-manifest.json').unlink()
+        path=next((self.root/'output/ssh').glob('*/request.json'));value=self.m['load'](path)
+        value['command']=['echo','foreign'];value['argv']=self.m['ssh_argv']('navi-whisper-lux-bench',self.mid,value['command'])
+        path.write_text(json.dumps(value));answer_path=path.parent/'result.json';answer=self.m['load'](answer_path)
+        answer['request']=self.m['descriptor'](path);answer_path.write_text(json.dumps(answer))
+        result=self.m['load'](failed);result['ssh']=self.m['journal_index'](self.root/'output/ssh');failed.write_text(json.dumps(result))
+        with self.assertRaises(ValueError):self.m['prestart_failure'](self.root/'request.json',failed)
 
     def test_real_http_known_cas_predecessor_replacing_waits_before_start(self):
         self.fault='transition'

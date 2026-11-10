@@ -168,3 +168,36 @@ creation flags plus `--prepared-request`, `--prepared-result` and
 unknown claims. Preserve all journals and source manifests through consumer
 cleanup. A failed or ambiguous preparation never supplies a successful successor
 or guessed cleanup authority.
+
+## Isolated guest environment
+
+An explicit `owned-capsule-v1` preparation can carry the authorized environment
+on its own encrypted volume. The capsule builder verifies private, hash-pinned
+approved files, the canonical worker browser-provider projection, the existing
+benchmark Temporal projection and the coordinator's authenticated production
+provider capture. It preserves the approved backend bytes. Capsule contents
+never enter Git, Machine configuration, command arguments or ordinary journals.
+
+Use `cloudbench-source-env.py build --request PRIVATE_JSON --request-sha256 HEX
+--output PRIVATE_FILE`, then pass that private file to the preparation request
+builder with `--guest-env-capsule`. The request's two raw-base64 digests must
+match the capsule. Preparation transfers the file through bounded private SFTP
+under its native lease, verifies the exclusive staging inode and bytes, and
+publishes an immutable hash-named file under `/data/.cloudbench-private/env`.
+The directory is root-owned mode 0700 and the file is mode 0600.
+
+Owned manifests add exactly `guest_env_mode`, `guest_env_capsule_sha256` and
+`guest_env_capsule_binding`. The binding seals owner, creation nonce, preparation
+source, image and both dependency fingerprints. The captured manifest hash is
+bound to execution provenance. Its preparation source can differ from the
+consumer's fetchable base when the existing base-plus-patch transport proves
+the actual consumer tree.
+
+Owned-capsule consumers explicitly use the qualified private source snapshot
+for primary and new worker volumes, so the private file exists before boot.
+An incompatible explicit fresh-only or cold-bootstrap request refuses before
+allocation. Ordinary ambient consumers retain their existing fresh-volume
+behavior. Every owned runner replaces its original shell through the capsule
+loader before decoding environment files or starting work; reentry checks the
+effective values again. Missing files, changed bindings or cleared markers
+cannot fall back to ambient app secrets.

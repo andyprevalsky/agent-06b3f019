@@ -864,6 +864,13 @@ def retirement_successor(args, journal, intent):
              'recovered owned resource identity changed')
         expected = json.loads(json.dumps(prior['config']))
         expected['image'] = before['config']['image']
+        env_mode = before['config'].get('metadata', {}).get('cloudbench_source_guest_env_mode')
+        env_hash = before['config'].get('metadata', {}).get('cloudbench_source_guest_env_capsule_sha256')
+        if env_mode is not None or env_hash is not None:
+            need(env_mode == 'owned-capsule-v1' and isinstance(env_hash, str)
+                 and re.fullmatch('[a-f0-9]{64}', env_hash), 'recovered environment metadata changed')
+            expected['metadata'].update(cloudbench_source_guest_env_mode=env_mode,
+                                        cloudbench_source_guest_env_capsule_sha256=env_hash)
         need(canonical(normalized_config(before['config'], intent, volume['id']))
              == canonical(normalized_config(expected, intent, volume['id'])),
              'recovered bootstrap changed original parked configuration')
@@ -878,6 +885,12 @@ def retirement_successor(args, journal, intent):
     after = helper['described'](prepared['after'])
     original = json.loads(json.dumps(bootstrap['machine']['config']))
     original['image'] = request['image_ref']
+    if successor.get('guest_env_mode') == 'owned-capsule-v1':
+        need(request.get('guest_env_mode') == 'owned-capsule-v1'
+             and request['guest_env_capsule']['sha256'] == successor['guest_env_capsule_sha256'],
+             'prepared environment capsule authority changed')
+        original['metadata'].update(cloudbench_source_guest_env_mode='owned-capsule-v1',
+                                    cloudbench_source_guest_env_capsule_sha256=successor['guest_env_capsule_sha256'])
     need(after['id'] == successor['machine_id'] and after['config'] == original
          and after['state'] == 'stopped' and after['instance_id'] == successor['instance_id'],
          'prepared retirement identity/config changed')

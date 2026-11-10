@@ -859,7 +859,8 @@ class Boundary(unittest.TestCase):
             return actual(path,*args,**kwargs)
         args=SimpleNamespace(prepared_request=request_path,prepared_result=result_path,prepared_manifest=manifest_path)
         baseline=copy.deepcopy(recovered)
-        mutations=['original-path','original-sha','journal','intent','machine','volume','mount','owner','nonce','claim','shape','state','version']
+        mutations=['original-path','original-sha','journal','intent','machine','volume','mount','owner','nonce','claim','shape','state','version',
+                   'environment-mode-only','environment-hash-only','environment-unknown']
         before=len(self.writes())
         with patch.object(runpy,'run_path',side_effect=load):
             for mutation in mutations:
@@ -877,6 +878,9 @@ class Boundary(unittest.TestCase):
                 elif mutation=='shape':recovered['machine']['config']['guest']['cpus']=4
                 elif mutation=='state':recovered['machine']['state']='started'
                 elif mutation=='version':recovered['machine']['instance_id']=''
+                elif mutation=='environment-mode-only':recovered['machine']['config']['metadata']['cloudbench_source_guest_env_mode']='owned-capsule-v1'
+                elif mutation=='environment-hash-only':recovered['machine']['config']['metadata']['cloudbench_source_guest_env_capsule_sha256']='1'*64
+                elif mutation=='environment-unknown':recovered['machine']['config']['metadata'].update(cloudbench_source_guest_env_mode='unknown',cloudbench_source_guest_env_capsule_sha256='1'*64)
                 with self.subTest(mutation=mutation),self.assertRaises(ValueError):
                     creator['retirement_successor'](args,journal,intent)
                 verified.assert_not_called()
@@ -884,6 +888,22 @@ class Boundary(unittest.TestCase):
             recovered.clear();recovered.update(copy.deepcopy(baseline))
             self.assertEqual(creator['retirement_successor'](args,journal,intent),after)
             verified.assert_called_once()
+            # Model a separate admission for the owned-capsule successor; no native retirement ran.
+            (journal/'retirement.admission.json').unlink()
+            verified.reset_mock()
+            recovered['machine']['config']['metadata'].update(cloudbench_source_guest_env_mode='owned-capsule-v1',
+                cloudbench_source_guest_env_capsule_sha256='1'*64)
+            request.update(guest_env_mode='owned-capsule-v1',guest_env_capsule=dict(path=str(self.root/'private-capsule.json'),sha256='2'*64))
+            request_path.write_text(json.dumps(request))
+            after['config']['metadata'].update(cloudbench_source_guest_env_mode='owned-capsule-v1',
+                cloudbench_source_guest_env_capsule_sha256='2'*64)
+            after_path.write_text(json.dumps(after))
+            verified.return_value.update(guest_env_mode='owned-capsule-v1',guest_env_capsule_sha256='2'*64)
+            self.assertEqual(creator['retirement_successor'](args,journal,intent),after)
+            (journal/'retirement.admission.json').unlink()
+            request['guest_env_capsule']['sha256']='3'*64
+            request_path.write_text(json.dumps(request))
+            with self.assertRaises(ValueError):creator['retirement_successor'](args,journal,intent)
         self.assertEqual(len(self.writes()),before)
 
     def test_ready_native_get_shape_is_authoritative_and_sealed(self):

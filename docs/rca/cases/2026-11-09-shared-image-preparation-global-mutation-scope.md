@@ -158,6 +158,36 @@ actual native validation before this RCA can close.
 
 ## Human feedback
 
+The bounded 117b79b checkpoint used separate exact-Machine SSH delivery while
+retaining its native lease. Delivery and launcher acknowledgements succeeded;
+the guest then returned an AssertionError before attestation. Its original
+receipt omitted a failed-operation SSH index and did not record the exact
+assertion phase. Both gaps remain explicit historical limitations. A later
+hash-only diagnostic found different effective ambient environment hashes;
+that observation does not establish which assertion failed in the earlier job.
+Stop, park and lease release succeeded, leaving the same owned encrypted source
+stopped at one CPU/2048 MiB. The failed request and result remain unchanged and
+grant no source or task credit.
+
+New failures seal their SSH index in cleanup and report only phase, job,
+presence and safe environment digests. A narrowly verified recovery can retain
+the original unsealed historical evidence as a newly labelled forensic input;
+it never invents an old seal or successful guest result. Recovered filesystems
+remain untrusted until a fresh successful preparation.
+
+The remaining parent-environment incompatibility requires an owned capsule,
+rather than adopting current app secrets. The builder now uses the exact
+canonical worker-only browser projection followed by the existing Temporal
+transform, preserving backend bytes. Private SFTP staging and immutable
+hash-named files are bound to the owner, source, image and dependencies. Offline
+tests include distinct concurrent owners and capsules under ambient rotation.
+Independent review also exposed that default empty fresh volumes could not
+inherit the capsule. Owned mode therefore explicitly selects its qualified
+source snapshot and rejects incompatible fresh-only requests; ambient behavior
+is unchanged. Independent producer and consumer source reviews passed on their
+exact frozen bytes, including local create/prepare/retire protocol composition.
+Native qualification, full deployment and parallel campaign outcome remain open.
+
 The user explicitly authorized this separate pre-parent-merge repair and full
 deploy. They require genuine parallel independent smoke campaigns, no app-wide
 quiet window, original unchanged receipts, exact source/image/volume ownership,

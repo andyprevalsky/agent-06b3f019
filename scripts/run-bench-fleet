@@ -786,6 +786,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-source.py" \
+       "$ROOT_DIR/scripts/cloudbench-source-env.py" \
        "$ROOT_DIR/scripts/cloudbench-source-lease.py" \
        "$ROOT_DIR/scripts/deploy_test_native_cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-prepare-source-create.py" \
@@ -1105,6 +1106,7 @@ POOL_COLD_BOOTSTRAP="0"  # future empty-checkout intent, never historical warm e
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
 FRESH_VOLUMES_REQUESTED=0
+SNAPSHOT_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
 SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
 QUALIFY_WORKER=0
@@ -1224,6 +1226,8 @@ list_donor_snapshots() {
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
 PRIVATE_SOURCE_LEASE_PROTOCOL="none"
+PRIVATE_SOURCE_GUEST_ENV_MODE="none"
+PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256="none"
 PRIVATE_SOURCE_LEASE_PID=""
 PRIVATE_SOURCE_LEASE_READY=""
 PRIVATE_SOURCE_LEASE_RELEASE=""
@@ -1240,6 +1244,13 @@ if [ -n "${CLOUDBENCH_SOURCE_MANIFEST:-}" ]; then
         SHARED_WARM_ID SHARED_WARM_VOLUME_ID PRIVATE_SOURCE_INSTANCE_ID < <(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE")
     [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
     PRIVATE_SOURCE_LEASE_PROTOCOL="$(python3 "$SOURCE_HELPER" protocol "$PRIVATE_SOURCE_FILE")" || exit 1
+    read -r PRIVATE_SOURCE_GUEST_ENV_MODE PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256 < <(
+        python3 - "$PRIVATE_SOURCE_FILE" <<'PY_CAPSULE_CAPTURE'
+import json, sys
+value = json.load(open(sys.argv[1]))
+print(value.get('guest_env_mode', 'none'), value.get('guest_env_capsule_sha256', 'none'))
+PY_CAPSULE_CAPTURE
+    )
     # Re-exec children consume the same captured bytes, never the caller's path.
     export CLOUDBENCH_SOURCE_MANIFEST="$PRIVATE_SOURCE_FILE"
 fi
@@ -1356,8 +1367,8 @@ while [ $# -gt 0 ]; do
             if [ "$#" -ge 2 ]; then shift 2; else shift; fi
             ;;
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
-        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; shift ;;
-        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; shift ;;
+        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; SNAPSHOT_VOLUMES_REQUESTED=0; shift ;;
+        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; SNAPSHOT_VOLUMES_REQUESTED=1; shift ;;
         --qualify-worker) QUALIFY_WORKER=1; shift ;;
         --infra-probe)    INFRA_PROBE="1"; STRICT_BARRIER="1"; shift ;;
         --skip-autoscaler) SKIP_AUTOSCALER="1"; shift ;;
@@ -1378,6 +1389,24 @@ done
 # Maintenance reconciles its original ownership; never converts old borrowed resources.
 [ "$RECOVER_STALE_ONLY" != 1 ] || DISPOSABLE_LIFECYCLE=0
 case "$FRESH_VOLUMES" in 0|1) ;; *) echo "❌ invalid fresh-volume mode" >&2; exit 2 ;; esac
+owned_capsule_storage_admission() {
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] || return 0
+    [ "${RECOVER_STALE_ONLY:-0}" != 1 ] || return 0
+    # This typed source stores its private capsule outside the checkout on its
+    # immutable Volume snapshot. Empty storage cannot execute its environment.
+    if [ "${FRESH_VOLUMES_REQUESTED:-0}" != 0 ] \
+        || { [ "${CLOUDBENCH_FRESH_VOLUMES:-0}" = 1 ] && [ "${SNAPSHOT_VOLUMES_REQUESTED:-0}" != 1 ]; } \
+        || [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
+        echo "❌ owned-capsule source requires its captured snapshot; explicit fresh-empty or cold bootstrap policy conflicts" >&2
+        return 1
+    fi
+    [ -n "${PRIVATE_SOURCE_FILE:-}" ] && [ -n "${PRIVATE_SOURCE_SNAPSHOT:-}" ] \
+        && [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ]
+}
+owned_capsule_storage_admission || exit 2
+if [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ]; then
+    FRESH_VOLUMES=0
+fi
 reuse_pool_only_admission() {
     [ "${POOL_REUSE_ONLY:-0}" = 1 ] || return 0
     # Recovery maintenance allocates no new Machine and must remain available.
@@ -2058,6 +2087,7 @@ bench_simulates() {  # <task>; --sim-on or a catalog simulate task (the guest se
 }
 primary_clone_storage_mode() {
     local bench="$1" index
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] || { printf snapshot; return; }
     [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
     is_sim_on "$bench" && { printf snapshot; return; }
     for index in "${!BENCHES[@]}"; do
@@ -13157,6 +13187,24 @@ clone_create_owned_volume() {  # <ledger> <clone> <source> <region> <vm-size> <v
         --inventory "${INVENTORY_INDEX:-}/current/admission-machines.json")
     CLONE_VOLUME_ID=""
     CLONE_VOLUME_OUT=""
+    if [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ]; then
+        # Recheck the captured authority and the live consumer guard at the
+        # last boundary before the native Volume POST, including worker clones.
+        local captured_fields captured_id captured_volume captured_snapshot
+        captured_fields="$(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE" --sha256 "$PRIVATE_SOURCE_SHA256")" || return 3
+        read -r captured_id captured_volume captured_snapshot _ <<< "$captured_fields"
+        [ "$captured_id" = "$PRIVATE_SOURCE_ID" ] && [ "$captured_volume" = "$PRIVATE_SOURCE_VOLUME_ID" ] \
+            && [ "$captured_snapshot" = "$PRIVATE_SOURCE_SNAPSHOT" ] \
+            && [ "$storage_mode" = snapshot ] && [ "$snapshot_id" = "$captured_snapshot" ] \
+            && [ -n "$snapshot_id" ] && private_fleet_source_admission || return 3
+        python3 - "${INVENTORY_INDEX:-}/current/admission-machines.json" "$source_id" <<'PY_CAPSULE_ENCRYPTED' || return 3
+import json, sys
+rows=[row for row in json.load(open(sys.argv[1])) if row.get('id')==sys.argv[2]]
+assert len(rows)==1
+mounts=rows[0]['config']['mounts']
+assert len(mounts)==1 and mounts[0]['encrypted'] is True
+PY_CAPSULE_ENCRYPTED
+    fi
     # Shared donor mount names keep the native same-name host anti-affinity.
     # The explicit no-anti-affinity policy names each Volume after its durable
     # clone name instead, so even an unanswered create is exactly attributable.
@@ -17275,6 +17323,8 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "volume_snapshot_id=$SNAP_ID"
     --config-value "base_source_manifest_sha256=${PRIVATE_SOURCE_SHA256:-none}"
     --config-value "base_source_lease_protocol=${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}"
+    --config-value "base_source_guest_env_mode=${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}"
+    --config-value "base_source_guest_env_capsule_sha256=${PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256:-none}"
     --config-value "node_dependency_fingerprint=$CURRENT_NODE_FP"
     --config-value "python_dependency_fingerprint=$CURRENT_PY_FP"
     --config-value "per_child_max_concurrency=5"
@@ -17616,6 +17666,23 @@ PY
     done < "$POOL_IDS_FILE"
 }
 
+owned_capsule_worker_source_admission() {  # <validated worker proof custody>
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] || return 0
+    # Imported worker pools predate the private-source namespace. Require their
+    # original captured provenance to name this exact source before claiming;
+    # the existing worker validator still verifies the full import afterwards.
+    python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py" \
+        "$1" "$PRIVATE_SOURCE_SHA256" "$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256" <<'PY_WORKER_CAPSULE_SOURCE'
+import json, runpy, sys
+h=runpy.run_path(sys.argv[1])
+packet=json.loads(h['read'](sys.argv[2]))
+values=json.loads(h['originals'](packet)['run/execution-provenance.json'])['config']['values']
+assert values['base_source_manifest_sha256']==sys.argv[3]
+assert values['base_source_guest_env_mode']=='owned-capsule-v1'
+assert values['base_source_guest_env_capsule_sha256']==sys.argv[4]
+PY_WORKER_CAPSULE_SOURCE
+}
+
 claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6pn>
     local out="$1" primary="$2" workspace="$3" token="$4" pip="$5" ledger id proof volume digest attempt
     local current_owner="${FLEET_OWNER_TOKEN:-}" claim_owner explicit_id
@@ -17637,6 +17704,7 @@ claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6p
             [ ! -e "$POOL_CLAIMS_DIR/$id" ] && [ ! -L "$POOL_CLAIMS_DIR/$id" ] || continue
             proof="$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/$id.json"
             [ -f "$proof" ] || continue
+            owned_capsule_worker_source_admission "$proof" || continue
             volume="$(python3 - "$proof" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1]))['volume_id'])
@@ -18219,14 +18287,16 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local worker_storage
     worker_storage=snapshot
     if [ "$borrowed_worker" = 0 ]; then
-    [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] \
+        || { [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh; }
     if [ "$worker_storage" = fresh ]; then
         worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
     else
     primary_volume_size="$(machine_volume_size_gb "$primary_id")" || primary_volume_size=""
     if [ "$primary_volume_size" = "$WARM_SOURCE_SIZE_GB" ]; then
         worker_snapshot="$SNAP_ID"
-    elif [ -n "${WORKER_POOL_SNAPSHOT_ID:-}" ] \
+    elif [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] \
+        && [ -n "${WORKER_POOL_SNAPSHOT_ID:-}" ] \
         && [ "$primary_volume_size" = "$WORKER_POOL_SNAPSHOT_SIZE_GB" ]; then
         worker_snapshot="$WORKER_POOL_SNAPSHOT_ID"
     else
@@ -18373,6 +18443,9 @@ PY
         echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
         echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+        echo "export CLOUDBENCH_SOURCE_ENV_HELPER=/data/cloudbench-source-env.py"
+        echo "export CLOUDBENCH_SOURCE_GUEST_ENV_MODE=$(printf '%q' "$PRIVATE_SOURCE_GUEST_ENV_MODE")"
+        echo "export CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256=$(printf '%q' "$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256")"
         echo "export CLOUDBENCH_EXECUTION_PROVENANCE_FILE=/data/cloudbench-execution-provenance.json"
         echo "export CLOUDBENCH_SOURCE_MANIFEST_FILE=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf /data/cloudbench-source-manifest.json)")"
         echo "export CLOUDBENCH_SOURCE_MANIFEST_SHA256=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf '%s' "$PRIVATE_SOURCE_SHA256")")"
@@ -18525,6 +18598,8 @@ PY
                 }; } \
              && run_worker_stage_cmd "upload cloudbench-env.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-env.sh" /data/cloudbench-env.sh \
+             && run_worker_stage_cmd "upload owned capsule loader" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source-env.py" /data/cloudbench-source-env.py \
              && { [ -z "$PRIVATE_SOURCE_FILE" ] || run_worker_stage_cmd "upload captured source manifest" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$PRIVATE_SOURCE_FILE" /data/cloudbench-source-manifest.json; } \
              && run_worker_stage_cmd "upload execution provenance" \
@@ -19532,6 +19607,8 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CLOUDBENCH_SOURCE_MANIFEST_FILE="$PRIVATE_SOURCE_FILE" \
     CLOUDBENCH_SOURCE_MANIFEST_SHA256="$PRIVATE_SOURCE_SHA256" \
     CLOUDBENCH_SOURCE_LEASE_PROTOCOL="$PRIVATE_SOURCE_LEASE_PROTOCOL" \
+    CLOUDBENCH_SOURCE_GUEST_ENV_MODE="$PRIVATE_SOURCE_GUEST_ENV_MODE" \
+    CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256="$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256" \
     NO_OPEN=1 \
         run_fleet_child_supervised "$out/benchmark-child.finished" \
             bash "$RUN_BENCH_CLOUD_BIN" "$bench" \

@@ -72,5 +72,34 @@ class SourceVersion(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(len(result.stdout.split()),9)
 
+    def owned(self):
+        return dict(self.v2, guest_env_mode='owned-capsule-v1', guest_env_capsule_sha256='f'*64,
+            guest_env_capsule_binding=dict(owner_token='a'*32, create_nonce='e'*32,
+                source_ref='3'*40, image_ref=self.machine['config']['image'],
+                node_fingerprint=self.v2['node_fingerprint'], python_fingerprint=self.v2['python_fingerprint']))
+
+    def test_owned_capsule_requires_complete_source_binding(self):
+        value=self.owned()
+        self.assertEqual(M['manifest'](json.dumps(value).encode()),value)
+        for key in ('guest_env_mode','guest_env_capsule_sha256','guest_env_capsule_binding'):
+            candidate=dict(value);candidate.pop(key)
+            with self.subTest(missing=key),self.assertRaises(ValueError):M['manifest'](json.dumps(candidate).encode())
+        for key, replacement in [('owner_token','b'*32),('create_nonce','b'*32),('source_ref','bad'),
+                ('image_ref','registry.fly.io/navi-whisper-lux-bench@sha256:'+'a'*64),
+                ('node_fingerprint','a'*64),('python_fingerprint','a'*64),('unknown','field')]:
+            candidate=self.owned();candidate['guest_env_capsule_binding'][key]=replacement
+            with self.subTest(binding=key),self.assertRaises(ValueError):M['manifest'](json.dumps(candidate).encode())
+
+    def test_native_owned_capsule_cannot_be_downgraded_or_replaced(self):
+        value=self.owned()
+        meta=self.machine['config']['metadata']
+        meta.update(cloudbench_source_protocol='cloudbench-source-lease-v1',cloudbench_source_create_nonce='e'*32)
+        with self.assertRaises(ValueError):M['verify'](value,self.inventory,parked_memory=2048)
+        meta.update(cloudbench_source_guest_env_mode='owned-capsule-v1',cloudbench_source_guest_env_capsule_sha256='f'*64)
+        M['verify'](value,self.inventory,parked_memory=2048)
+        with self.assertRaises(ValueError):M['verify'](self.v2,self.inventory,parked_memory=2048)
+        meta['cloudbench_source_guest_env_capsule_sha256']='a'*64
+        with self.assertRaises(ValueError):M['verify'](value,self.inventory,parked_memory=2048)
+
 
 if __name__ == '__main__':unittest.main()

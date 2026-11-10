@@ -9,6 +9,7 @@ The coordinator supplies admission and owns any live invocation.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 from contextlib import contextmanager
 import copy
@@ -39,6 +40,31 @@ PROTECTED = frozenset({'683e47df5094d8', '811d632f2650e8'})
 PROTECTED_RESOURCES = {'683e47df5094d8': 'vol_vwnym366kn7k8mmv',
                        '811d632f2650e8': 'vol_r1jde9donnx2mn9r'}
 ENV_KEYS = frozenset({'AGENTS_ENV_B64', 'BACKEND_ENV_B64'})
+SAFE_ENV_OBSERVER = '''def observe_guest_environment(blobs,directory,helper):
+ import base64,hashlib,os,pathlib,re,subprocess
+ def provider(value):
+  return dict(value=value if value in ('tilion','kernel','steel','browser-use') else 'unknown',sha256=hashlib.sha256(value.encode()).hexdigest(),present=bool(value))
+ observed=dict(schema='cloudbench-guest-env-observation-v1',blobs={},selectors={key:provider(os.environ.get(key,'')) for key in ('CLOUDBENCH_BROWSER_PROVIDER','CLOUDBENCH_WORKER_BROWSER_PROVIDER')},provider_contract_verified=False)
+ paths={}
+ for key,value in blobs.items():
+  item=dict(decoded_valid=False,decoded_sha256=None,provider=provider(''),namespace_present=False,namespace_sha256=None)
+  try:
+   raw=base64.b64decode(re.sub(rb'[ \\t\\r\\n\\v\\f]',b'',value.encode('ascii')),validate=True)
+   item.update(decoded_valid=True,decoded_sha256=hashlib.sha256(raw).hexdigest())
+   path=pathlib.Path(directory)/('observed-'+key+'.private.env')
+   with open(path,'xb',opener=lambda p,f:os.open(p,f,0o600)) as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+   paths[key]=path
+   def field(name):
+    return subprocess.check_output(['bash','-c','source "$1"; cloudbench_env_value "$2" "$3"','guest-env-observation',str(helper),str(path),name],text=True,stderr=subprocess.DEVNULL,timeout=5).strip()
+   selected=field('BROWSER_PROVIDER');namespace=field('TEMPORAL_NAMESPACE')
+   item.update(provider=provider(selected),namespace_present=bool(namespace),namespace_sha256=hashlib.sha256(namespace.encode()).hexdigest())
+  except (ValueError,UnicodeError,subprocess.SubprocessError):pass
+  observed['blobs'][key]=item
+ if len(paths)==2:
+  verified=subprocess.run(['bash','-c','source "$1"; cloudbench_validate_browser_provider_contract "$2" "$3" "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_WORKER_BROWSER_PROVIDER:-}"','guest-env-contract',str(helper),str(paths['AGENTS_ENV_B64']),str(paths['BACKEND_ENV_B64'])],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
+  observed['provider_contract_verified']=verified.returncode==0
+ return observed
+'''
 IMAGE_INPUTS = ('Dockerfile.cloudbench-warm', 'fly.cloudbench-warm.toml', '.dockerignore',
                 'package.json', 'package-lock.json', '.npmrc', 'back-end/package.json',
                 'back-end/package-lock.json', 'back-end/prisma', 'front-end', 'agents/package.json',
@@ -48,7 +74,9 @@ DEPENDENCIES = ('cloudbench-source.py', 'cloudbench-volume-migration.py', 'cloud
                 'cloudbench-select-snapshot.py', 'cloudbench-archived-machine-reuse.py',
                 'cloudbench-archived-reuse-effects.py', 'cloudbench-original600-runner.py',
                 'cloudbench-original-volume-capture.py', 'cloudbench-disposable-controller.py',
-                'cloudbench-prepare-source-create.py', 'process-identity.py')
+                'cloudbench-prepare-source-create.py', 'process-identity.py', 'cloudbench-source-env.py')
+OWNED_MODE='owned-capsule-v1'
+OWNED_FIELDS={'guest_env_mode','guest_env_capsule_sha256','guest_env_capsule_binding'}
 
 
 def dependency_seals():
@@ -119,12 +147,34 @@ def source_bytes(root, ref, member):
                                     'show', ref + ':scripts/' + member], timeout=20)
 
 
+def owned_manifest(request,predecessor):
+    return dict(version=2,lease_protocol='cloudbench-source-lease-v1',owner_token=predecessor['owner_token'],
+        creation_nonce=predecessor['creation_nonce'],image_digest=request['image_ref'].rsplit('@',1)[1],
+        node_fingerprint=request['node_fingerprint'],python_fingerprint=request['python_fingerprint'],
+        guest_env_sha256=request['guest_env_sha256'],guest_env_mode=OWNED_MODE,
+        guest_env_capsule_sha256=request['guest_env_capsule']['sha256'],
+        guest_env_capsule_binding=dict(owner_token=predecessor['owner_token'],create_nonce=predecessor['creation_nonce'],
+            source_ref=request['source_ref'],image_ref=request['image_ref'],node_fingerprint=request['node_fingerprint'],
+            python_fingerprint=request['python_fingerprint']))
+
+
+def capsule_metadata(config,request):
+    value=copy.deepcopy(config)
+    if request.get('guest_env_mode')==OWNED_MODE:
+        value['metadata']=dict(value['metadata'],cloudbench_source_guest_env_mode=OWNED_MODE,
+                              cloudbench_source_guest_env_capsule_sha256=request['guest_env_capsule']['sha256'])
+    return value
+
+
 def read_request(path):
     value = load(path)
     need(value.get('schema') == REQUEST, 'request schema')
     fields = {'schema', 'nonce', 'source_ref', 'node_fingerprint', 'python_fingerprint', 'image_ref',
               'source_root', 'native', 'guest_env_sha256', 'protected_resources', 'scripts', 'build'}
-    base_fields = set(value) - {'transport', 'guest_transport'}
+    base_fields = set(value) - {'transport', 'guest_transport', 'guest_env_mode', 'guest_env_capsule'}
+    if 'guest_env_mode' in value or 'guest_env_capsule' in value:
+        need(value.get('guest_env_mode')==OWNED_MODE and isinstance(value.get('guest_env_capsule'),dict), 'owned capsule request pair')
+        need(value.get('guest_transport')=='cloudbench-ssh-guest-v1','owned capsule requires typed SSH transport')
     need(value.get('guest_transport', 'native-exec-v1') in ('native-exec-v1','cloudbench-ssh-guest-v1'),
          'unsupported guest execution transport')
     need(base_fields == fields | {'ownership'}, 'fresh unpublished creator authority required; published sources are immutable')
@@ -140,6 +190,11 @@ def read_request(path):
         described(value['ownership'])
         authority = resolve_bootstrap_ownership(Path(value['ownership']['path']))
         machine, donor = authority['machine'], authority['donor']
+        metadata=machine['config'].get('metadata',{})
+        if 'cloudbench_source_guest_env_mode' in metadata or 'cloudbench_source_guest_env_capsule_sha256' in metadata:
+            need(metadata.get('cloudbench_source_guest_env_mode')==OWNED_MODE
+                 and re.fullmatch('[a-f0-9]{64}',metadata.get('cloudbench_source_guest_env_capsule_sha256',''))
+                 and value.get('guest_env_mode')==OWNED_MODE,'existing owned environment cannot downgrade to ambient')
         proof = donor['dependency_proof']
         need(machine['config']['metadata'].get('cloudbench_source_protocol') == 'cloudbench-source-lease-v1'
              and machine['config']['metadata'].get('cloudbench_source_create_nonce') == authority['intent']['nonce'],
@@ -155,6 +210,10 @@ def read_request(path):
         SOURCE['manifest'](canonical(predecessor))
     else:
         predecessor = SOURCE['manifest'](canonical(described(value['predecessor'])))
+    if value.get('guest_env_mode')==OWNED_MODE:
+        module=runpy.run_path(str(HERE/'cloudbench-source-env.py'))
+        raw=module['descriptor'](value['guest_env_capsule'],private=True)
+        module['validate_capsule'](raw,owned_manifest(value,predecessor),value['source_ref'])
     native = value['native']
     need(set(native) == {'machine_id', 'volume_id', 'instance_id', 'config_sha256', 'env_sha256'}, 'native fields')
     protected = value['protected_resources']
@@ -204,6 +263,7 @@ def read_request(path):
                                         '-r', '--full-tree', ref, '--', *IMAGE_INPUTS], timeout=20)
     need(image_inputs(effective_ref) == image_inputs(build['source_sha']), 'image input closure differs from source')
     members = {'cloudbench-fetch-ref.sh', 'lib/cloudbench-env.sh', 'cloudbench-sync-deps.sh'} | ({'cloudbench-prepare-patch.sh'} if 'transport' in value else set())
+    if value.get('guest_env_mode')==OWNED_MODE:members.add('cloudbench-source-env.py')
     need(set(value['scripts']) == members, 'pinned script fields')
     for member in members:
         need(sha(source_bytes(root, effective_ref, member)) == value['scripts'][member],
@@ -216,6 +276,11 @@ def verify_guest(request, guest):
          'guest terminal result')
     for key in ('nonce', 'source_ref', 'node_fingerprint', 'python_fingerprint', 'guest_env_sha256'):
         need(guest.get(key) == request[key], 'observed guest ' + key)
+    if request.get('guest_env_mode')==OWNED_MODE:
+        authority=resolve_bootstrap_ownership(request['ownership']['path'])
+        expected=owned_manifest(request,dict(owner_token=authority['intent']['binding']['owner_token'],creation_nonce=authority['intent']['nonce']))
+        need(all(guest.get(key)==expected[key] for key in OWNED_FIELDS),'observed owned capsule binding')
+    else:need(not OWNED_FIELDS & set(guest),'unexpected owned guest attestation')
     need(guest.get('machine_id') == request['native']['machine_id'] and guest.get('mount') == '/data',
          'guest native mount/identity')
     if 'transport' in request:
@@ -319,6 +384,8 @@ def exact_machine(api, request, predecessor, config, *, state=None, instance=Non
          and volume.get('attached_machine_id') == predecessor['machine_id']
          and volume.get('state') in SOURCE['readiness'].__globals__['MOUNTABLE_VOLUME_STATES'],
          'exact attached source Volume')
+    need(request.get('guest_env_mode') != OWNED_MODE or volume.get('encrypted') is True,
+         'owned capsule requires encrypted source Volume')
     return value, volume
 
 
@@ -355,6 +422,11 @@ def guest_program(request):
     minimal = {key: request[key] for key in ('nonce', 'source_ref', 'node_fingerprint', 'python_fingerprint', 'guest_env_sha256')}
     minimal['machine_id'] = request['native']['machine_id']
     minimal['transport'] = request.get('transport')
+    minimal['owned_manifest']=None
+    if request.get('guest_env_mode')==OWNED_MODE:
+        authority=resolve_bootstrap_ownership(request['ownership']['path'])
+        minimal['owned_manifest']=owned_manifest(request,dict(owner_token=authority['intent']['binding']['owner_token'],
+                                                            creation_nonce=authority['intent']['nonce']))
     return '''import base64,hashlib,json,os,pathlib,subprocess,time
 r=REQUEST
 directory=pathlib.Path('/tmp/cloudbench-prepare-source-'+r['nonce'])
@@ -363,14 +435,33 @@ def save(name,value):
  with open(directory/name,'x') as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
 started=int(time.time())
 job=dict(pid=os.getpid(),birth=pathlib.Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19],boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+OBSERVATION_CODE
+phase='preconditions'
+preconditions=dict(euid=os.geteuid(),machine_id=os.environ.get('FLY_MACHINE_ID',''),data_mount=os.path.ismount('/data'),repo_physical=str(pathlib.Path('/data/repo').resolve()),git_dir=pathlib.Path('/data/repo/.git').is_dir(),env_present={k:bool(os.environ.get(k)) for k in r['guest_env_sha256']},guest_env_sha256={k:hashlib.sha256(os.environ.get(k,'').encode()).hexdigest() for k in r['guest_env_sha256']})
 try:
  assert os.geteuid()==0 and os.environ['FLY_MACHINE_ID']==r['machine_id']
  assert os.path.ismount('/data') and pathlib.Path('/data/repo').resolve()==pathlib.Path('/data/repo')
  assert pathlib.Path('/data/repo/.git').is_dir()
  for name,raw in FILES.items():
   p=directory/name;p.parent.mkdir(mode=0o700,exist_ok=True);p.write_bytes(base64.b64decode(raw))
+ capsule_attestation=None
+ if r['owned_manifest'] is not None:
+  import runpy,stat
+  module=runpy.run_path(str(directory/'cloudbench-source-env.py'))
+  manifest=r['owned_manifest'];root=pathlib.Path('/data/.cloudbench-private/env')
+  for parent in (root.parent,root):
+   info=parent.lstat();assert stat.S_ISDIR(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700
+  raw=module['read_regular'](str(root/(manifest['guest_env_capsule_sha256']+'.json')),uid=0,mode=0o600)
+  capsule=module['validate_capsule'](raw,manifest,r['source_ref'])
+  os.environ.update(module['effective_env'](capsule,os.environ))
+  capsule_attestation={key:manifest[key] for key in ('guest_env_mode','guest_env_capsule_sha256','guest_env_capsule_binding')}
+  preconditions['env_present']={k:bool(os.environ.get(k)) for k in r['guest_env_sha256']}
+  preconditions['guest_env_sha256']={k:hashlib.sha256(os.environ.get(k,'').encode()).hexdigest() for k in r['guest_env_sha256']}
+ preconditions['environment_contract']=observe_guest_environment({k:os.environ.get(k,'') for k in r['guest_env_sha256']},directory,directory/'lib/cloudbench-env.sh')
  env={k:os.environ[k] for k in ('PATH','HOME','GITHUB_TOKEN','AGENTS_ENV_B64','BACKEND_ENV_B64','FLY_MACHINE_ID') if k in os.environ}
  assert all(env.get(k) and hashlib.sha256(env[k].encode()).hexdigest()==v for k,v in r['guest_env_sha256'].items())
+ assert preconditions['environment_contract']['provider_contract_verified']
+ phase='fetch'
  # Use the existing inherited app credential in a process environment, never argv.
  if not env.get('CLOUDBENCH_GITHUB_TOKEN_B64') and env.get('GITHUB_TOKEN'):
   env['CLOUDBENCH_GITHUB_TOKEN_B64']=base64.b64encode(env['GITHUB_TOKEN'].encode()).decode()
@@ -379,6 +470,7 @@ try:
   subprocess.run(['bash',str(directory/'cloudbench-fetch-ref.sh'),'/data/repo',fetch_ref],env=env,stdout=log,stderr=log,check=True,timeout=300)
  ref=subprocess.check_output(['git','-c','safe.directory=/data/repo','-C','/data/repo','rev-parse','HEAD'],text=True).strip()
  transport=None
+ phase='source-transport'
  if r['transport']:
   t=r['transport'];assert ref==t['base_sha']
   git=['git','-c','safe.directory=/data/repo','-C','/data/repo']
@@ -396,6 +488,7 @@ try:
   ref=r['source_ref']
  cmd='source '+str(directory/'lib/cloudbench-env.sh')+'; cloudbench_node_dependency_fingerprint /data/repo; cloudbench_manifest_fingerprint /data/repo "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"'
  fps=subprocess.check_output(['bash','-euc',cmd],text=True).splitlines()
+ phase='dependencies'
  assert fps==[r['node_fingerprint'],r['python_fingerprint']]
  image_cmd='source '+str(directory/'lib/cloudbench-env.sh')+'; cloudbench_node_dependency_fingerprint /app; cloudbench_manifest_fingerprint /app "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"'
  image_fps=subprocess.check_output(['bash','-euc',image_cmd],text=True).splitlines();assert image_fps==fps
@@ -404,14 +497,15 @@ try:
  env.update(CLOUDBENCH_REBUILD_DEPS='0',CLOUDBENCH_DEPENDENCY_OVERLAY='0',CLOUDBENCH_ENV_HELPER=str(directory/'lib/cloudbench-env.sh'))
  with open(directory/'sync-deps.private.log','x') as log:
   subprocess.run(['bash',str(directory/'cloudbench-sync-deps.sh'),'/app','/data/repo'],env=env,stdout=log,stderr=log,check=True,timeout=1800)
- observed=dict(schema='cloudbench-source-guest-v1',nonce=r['nonce'],source_ref=ref,machine_id=os.environ['FLY_MACHINE_ID'],node_fingerprint=fps[0],python_fingerprint=fps[1],installed_node=pathlib.Path('/data/repo/node_modules/.cloudbench-deps-fingerprint').read_text().strip(),installed_python=pathlib.Path('/data/repo/agents/venv/.cloudbench-deps-fingerprint').read_text().strip(),guest_env_sha256={k:hashlib.sha256(os.environ[k].encode()).hexdigest() for k in r['guest_env_sha256']},mount='/data',guest_exit=0,started_epoch=started,finished_epoch=int(time.time()),job=job)
+ observed=dict(schema='cloudbench-source-guest-v1',nonce=r['nonce'],source_ref=ref,machine_id=os.environ['FLY_MACHINE_ID'],node_fingerprint=fps[0],python_fingerprint=fps[1],installed_node=pathlib.Path('/data/repo/node_modules/.cloudbench-deps-fingerprint').read_text().strip(),installed_python=pathlib.Path('/data/repo/agents/venv/.cloudbench-deps-fingerprint').read_text().strip(),guest_env_sha256={k:hashlib.sha256(os.environ[k].encode()).hexdigest() for k in r['guest_env_sha256']},mount='/data',guest_exit=0,started_epoch=started,finished_epoch=int(time.time()),job=job,preconditions=preconditions)
  subprocess.run(['sync','-f','/data'],check=True)
  if transport is not None:observed['transport']=transport
+ if capsule_attestation is not None:observed.update(capsule_attestation)
  observed['image_node_fingerprint']=image_fps[0];observed['image_python_fingerprint']=image_fps[1]
  save('result.json',observed)
 except BaseException as error:
- save('result.json',dict(schema='cloudbench-source-guest-v1',nonce=r['nonce'],guest_exit=1,error=type(error).__name__,started_epoch=started,finished_epoch=int(time.time())))
-'''.replace('REQUEST', repr(minimal), 1).replace('FILES', repr(files), 1)
+ save('result.json',dict(schema='cloudbench-source-guest-v1',nonce=r['nonce'],guest_exit=1,error=type(error).__name__,phase=phase,job=job,preconditions=preconditions,started_epoch=started,finished_epoch=int(time.time())))
+'''.replace('REQUEST', repr(minimal), 1).replace('FILES', repr(files), 1).replace('OBSERVATION_CODE',SAFE_ENV_OBSERVER,1)
 
 
 def delivery_commands(raw, directory):
@@ -447,13 +541,94 @@ def ssh_argv(app, mid, command):
     return ['ssh','console','-a',app,'--machine',mid,'-C',shlex.join(['timeout','--signal=TERM','5s',*command])]
 
 
-def guest_command(api, request, command):
+def capsule_paths(request):
+    digest=request['guest_env_capsule']['sha256'];root='/data/.cloudbench-private/env'
+    return root+'/.'+digest+'.'+request['nonce']+'.staging',root+'/'+digest+'.json'
+
+
+def capsule_sftp_argv(request):
+    return ['ssh','sftp','put','-a','navi-whisper-lux-bench','--machine',request['native']['machine_id'],
+            '-q','-m','0600',request['guest_env_capsule']['path'],capsule_paths(request)[0]]
+
+
+def capsule_bootstrap(request):
+    stage,final=capsule_paths(request)
+    return ['python3','-c','''import os,pathlib,stat,json
+for name in ('/data/.cloudbench-private','/data/.cloudbench-private/env'):
+ p=pathlib.Path(name)
+ try:p.mkdir(mode=0o700)
+ except FileExistsError:pass
+ s=p.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700
+p=STAGE
+fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+s=os.fstat(fd);os.fsync(fd);os.close(fd)
+print(json.dumps(dict(schema='cloudbench-capsule-stage-v1',path=p,inode=s.st_ino,device=s.st_dev)))
+'''.replace('STAGE',repr(stage))]
+
+
+def capsule_seal(request,stage_proof):
+    stage,final=capsule_paths(request)
+    return ['python3','-c','''import os,stat,hashlib,json
+p=STAGE;target=FINAL
+def read(path):
+ fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ try:
+  a=os.fstat(fd);assert stat.S_ISREG(a.st_mode) and a.st_uid==0 and stat.S_IMODE(a.st_mode)==0o600 and a.st_nlink==1
+  assert a.st_size<=16*1024*1024
+  with os.fdopen(fd,'rb',closefd=False) as f:raw=f.read(16*1024*1024+1)
+  b=os.fstat(fd);assert (a.st_ino,a.st_dev,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(b.st_ino,b.st_dev,b.st_size,b.st_mtime_ns,b.st_ctime_ns)
+  assert len(raw)==a.st_size and hashlib.sha256(raw).hexdigest()==DIGEST
+  os.fsync(fd);return a,raw
+ finally:os.close(fd)
+s,raw=read(p);assert s.st_ino==INODE and s.st_dev==DEVICE
+try:os.link(p,target,follow_symlinks=False)
+except FileExistsError:read(target)
+os.unlink(p)
+s,raw=read(target)
+fd=os.open('/data/.cloudbench-private/env',os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+print(json.dumps(dict(schema='cloudbench-capsule-published-v1',path=target,sha256=DIGEST,size=len(raw),uid=s.st_uid,mode=stat.S_IMODE(s.st_mode))))
+'''.replace('STAGE',repr(stage)).replace('FINAL',repr(final)).replace('DIGEST',repr(request['guest_env_capsule']['sha256']))
+       .replace('INODE',repr(stage_proof['inode'])).replace('DEVICE',repr(stage_proof['device']))]
+
+
+def stage_capsule(api,request):
+    module=runpy.run_path(str(HERE/'cloudbench-source-env.py'))
+    module['descriptor'](request['guest_env_capsule'],private=True)
+    proof=json.loads(guest_command(api,request,capsule_bootstrap(request),journal_name='capsule-ssh')['stdout'])
+    need(proof.get('schema')=='cloudbench-capsule-stage-v1' and proof.get('path')==capsule_paths(request)[0]
+         and type(proof.get('inode')) is int and proof['inode']>0 and type(proof.get('device')) is int,'fresh capsule staging inode')
+    directory=api.journal.parent/'capsule-sftp'/'0';directory.mkdir(parents=True,mode=0o700)
+    context=api.guest_context
+    before,volume=exact_machine(api,request,context['predecessor'],context['config'],state='started',instance=api.target_version)
+    sent=dict(schema='cloudbench-sftp-command-v1',argv=capsule_sftp_argv(request),timeout=20,
+              capsule=request['guest_env_capsule'],stage=proof,nonce=api.nonce,instance_id=api.target_version,
+              before=before,volume_before=volume,started=time.monotonic_ns())
+    save(directory/'request.json',sent)
+    rc,stdout,stderr=api.api.flyctl(20,*sent['argv']);finished=time.monotonic_ns()
+    need(len(stdout.encode())<=1024*1024 and len(stderr.encode())<=1024*1024,'SFTP output exceeds bounded receipt size')
+    for name,data in (('stdout.private.log',stdout),('stderr.private.log',stderr)):
+        fd=os.open(directory/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as stream:stream.write(data);stream.flush();os.fsync(stream.fileno())
+    need(rc==0,'SFTP outcome failed/ambiguous; no retry')
+    module['descriptor'](request['guest_env_capsule'],private=True)
+    after,volume_after=exact_machine(api,request,context['predecessor'],context['config'],state='started',instance=sent['instance_id'])
+    save(directory/'result.json',dict(schema='cloudbench-sftp-result-v1',request=descriptor(directory/'request.json'),
+        exit_code=rc,stdout=descriptor(directory/'stdout.private.log'),stderr=descriptor(directory/'stderr.private.log'),
+        finished=finished,after=after,volume_after=volume_after))
+    published=json.loads(guest_command(api,request,capsule_seal(request,proof),journal_name='capsule-ssh')['stdout'])
+    need(published==dict(schema='cloudbench-capsule-published-v1',path=capsule_paths(request)[1],
+        sha256=request['guest_env_capsule']['sha256'],size=len(module['descriptor'](request['guest_env_capsule'],private=True)),uid=0,mode=0o600),
+        'immutable capsule publication readback')
+
+
+def guest_command(api, request, command, *, journal_name='ssh'):
     if request.get('guest_transport','native-exec-v1') != 'cloudbench-ssh-guest-v1':
         return api.request('POST','/machines/'+request['native']['machine_id']+'/exec',dict(command=command,timeout=5))
     need(api.nonce and not api.lost and api.lease_version==api.target_version and api.target_version,
          'SSH requires continuously held current-version lease')
     context=api.guest_context
-    directory=api.journal.parent/'ssh'/str(len(list((api.journal.parent/'ssh').glob('*'))) if (api.journal.parent/'ssh').exists() else 0)
+    root=api.journal.parent/journal_name
+    directory=root/str(len(list(root.glob('*'))) if root.exists() else 0)
     directory.mkdir(parents=True,mode=0o700)
     before,volume=exact_machine(api,request,context['predecessor'],context['config'],state='started',instance=api.target_version)
     argv=ssh_argv(context['predecessor']['app'],api.mid,command)
@@ -512,7 +687,7 @@ def journal_index(directory):
 
 
 def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=None, guest=None, successor=None, prestart=None,
-                   allow_pending_prestart_stop=False, allow_rejected_bootstrap=False, versioned=False, ssh=None):
+                   allow_pending_prestart_stop=False, allow_rejected_bootstrap=False, versioned=False, ssh=None, capsule_ssh=None,capsule_sftp=None):
     actual = journal_index(value['path'])
     need(actual == value, 'native journal changed')
     rows = []
@@ -581,7 +756,7 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
         own = '/machines/' + mid
         updates = [row for row in rows if row['method'] == 'POST' and row['path'] == own]
         need(len(updates) == 2, 'exact prepare and park updates required')
-        expected_config = copy.deepcopy(before['config']); expected_config['image'] = request['image_ref']
+        expected_config = capsule_metadata(before['config'],request); expected_config['image'] = request['image_ref']
         maintenance_config = copy.deepcopy(expected_config)
         maintenance_config['guest'] = dict(maintenance_config['guest'], cpus=4, memory_mb=8192)
         update, park = updates
@@ -598,6 +773,9 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
         if request.get('guest_transport','native-exec-v1')=='cloudbench-ssh-guest-v1':
             need(not execs and ssh is not None,'SSH transport must not fabricate native EXEC')
             execs=verify_ssh_journal(ssh,rows,request,prestart)
+        if request.get('guest_env_mode')==OWNED_MODE:
+            verify_capsule_transport(capsule_ssh,capsule_sftp,rows,request,prestart,execs[0]['started'])
+        else:need(capsule_ssh is None and capsule_sftp is None,'unexpected capsule transport evidence')
         need(len(starts) == len(stops) == len(snapshots) == 1 and len(execs) >= 2,
              'native lifecycle chain incomplete')
         need(update['finished'] <= starts[0]['started'] <= execs[0]['started'] <= execs[-1]['started']
@@ -628,14 +806,35 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
     return rows
 
 
-def verify_ssh_journal(value,native,request,prestart):
+def verify_ssh_journal(value,native,request,prestart,*,sftp=False,allow_incomplete=False):
     need(journal_index(value['path'])==value,'SSH journal changed')
     root=Path(value['path']);records=[];mid=request['native']['machine_id'];own='/machines/'+mid
     for path in sorted(root.glob('*/request.json'),key=lambda p:int(p.parent.name)):
-        sent=load(path);answer=load(path.parent/'result.json')
-        need(sent.get('schema')=='cloudbench-ssh-command-v1' and answer.get('schema')=='cloudbench-ssh-result-v1'
-             and answer['request']==descriptor(path) and sent['timeout']==20 and sent['guest_timeout']==5
-             and sent['argv']==ssh_argv('navi-whisper-lux-bench',mid,sent['command'])
+        sent=load(path)
+        expected_argv=capsule_sftp_argv(request) if sftp else ssh_argv('navi-whisper-lux-bench',mid,sent['command'])
+        if allow_incomplete and not (path.parent/'result.json').exists():
+            need(sent.get('schema')==('cloudbench-sftp-command-v1' if sftp else 'cloudbench-ssh-command-v1')
+                 and sent['argv']==expected_argv and sent['timeout']==20 and sent['instance_id']==prestart['instance_id']
+                 and sent['before']['id']==mid and sent['before']['config']==prestart['config']
+                 and sent['before']['state']=='started' and sent['volume_before']['id']==request['native']['volume_id']
+                 and sent['volume_before']['attached_machine_id']==mid,'incomplete capsule transport ownership')
+            need(request.get('guest_env_mode') != OWNED_MODE or sent['volume_before'].get('encrypted') is True,
+                 'owned capsule transport requires encrypted Volume')
+            prior=[r for r in native if r['finished']<=sent['started']]
+            leases=[r for r in prior if r['method']=='POST' and r['path']==own+'/lease']
+            need(leases and leases[-1]['response']['data']['nonce']==sent['nonce']
+                 and leases[-1]['response']['data']['version']==sent['instance_id']
+                 and any(r['method']=='GET' and r['path']==own and r['response']==sent['before'] for r in prior),
+                 'incomplete capsule transport original lease/readback')
+            records.append(dict(transport='sftp-v1' if sftp else 'ssh-v1',body=sent if sftp else dict(command=sent['command'],timeout=5),
+                                response=None,started=sent['started'],finished=sent['started'],pending=True))
+            continue
+        answer=load(path.parent/'result.json')
+        need(sent.get('schema')==('cloudbench-sftp-command-v1' if sftp else 'cloudbench-ssh-command-v1')
+             and answer.get('schema')==('cloudbench-sftp-result-v1' if sftp else 'cloudbench-ssh-result-v1')
+             and answer['request']==descriptor(path) and sent['timeout']==20
+             and (sftp or sent['guest_timeout']==5)
+             and sent['argv']==expected_argv
              and answer['exit_code']==0 and sent['started']<=answer['finished']<=sent['started']+20_000_000_000
              and sent['instance_id']==prestart['instance_id'],'typed SSH command/result contract')
         before,after=sent['before'],answer['after']
@@ -646,6 +845,8 @@ def verify_ssh_journal(value,native,request,prestart):
              and all(sent['volume_before'].get(k)==answer['volume_after'].get(k) for k in volume_fields)
              and answer['volume_after']['id']==request['native']['volume_id']
              and answer['volume_after']['attached_machine_id']==mid,'SSH native ownership witnesses')
+        need(request.get('guest_env_mode') != OWNED_MODE or sent['volume_before'].get('encrypted') is True,
+             'owned capsule transport requires encrypted Volume')
         prior=[r for r in native if r['finished']<=sent['started']]
         leases=[r for r in prior if r['method']=='POST' and r['path']==own+'/lease']
         need(leases and leases[-1]['response']['data']['nonce']==sent['nonce']
@@ -660,10 +861,57 @@ def verify_ssh_journal(value,native,request,prestart):
         stdout=IO['read'](Path(answer['stdout']['path']));stderr=IO['read'](Path(answer['stderr']['path']))
         need(descriptor(answer['stdout']['path'])==answer['stdout'] and descriptor(answer['stderr']['path'])==answer['stderr'],
              'SSH output evidence changed')
-        records.append(dict(transport='ssh-v1',body=dict(command=sent['command'],timeout=5),
+        records.append(dict(transport='sftp-v1' if sftp else 'ssh-v1',body=sent if sftp else dict(command=sent['command'],timeout=5),
                             response=dict(exit_code=0,stdout=stdout.decode()),started=sent['started'],finished=answer['finished']))
     need(records,'SSH command chain absent')
     return records
+
+
+def verify_failed_capsule_staging(result,rows,request,prestart,stop_started):
+    need(result.get('capsule_ssh') is not None,'failed capsule staging journal required')
+    commands=verify_ssh_journal(result['capsule_ssh'],rows,request,prestart,allow_incomplete=True)
+    need(1<=len(commands)<=2 and commands[0]['body']==dict(command=capsule_bootstrap(request),timeout=5)
+         and all(row['started']<stop_started for row in commands),'failed capsule bootstrap prefix')
+    stage=None
+    if commands[0]['response'] is not None:
+        stage=json.loads(commands[0]['response']['stdout'])
+        need(stage.get('schema')=='cloudbench-capsule-stage-v1' and stage.get('path')==capsule_paths(request)[0]
+             and type(stage.get('inode')) is int and stage['inode']>0 and type(stage.get('device')) is int,
+             'failed capsule staging inode')
+    transfers=[]
+    if result.get('capsule_sftp') is not None:
+        transfers=verify_ssh_journal(result['capsule_sftp'],rows,request,prestart,sftp=True,allow_incomplete=True)
+        need(stage is not None and len(transfers)==1 and transfers[0]['body']['capsule']==request['guest_env_capsule']
+             and transfers[0]['body']['stage']==stage and commands[0]['finished']<=transfers[0]['started']<stop_started,
+             'failed capsule exact SFTP attempt')
+    if len(commands)==2:
+        need(stage is not None and len(transfers)==1 and transfers[0]['response'] is not None
+             and commands[1]['body']==dict(command=capsule_seal(request,stage),timeout=5)
+             and transfers[0]['finished']<=commands[1]['started'],'failed capsule seal attempt prefix')
+    else:need(not transfers or transfers[0].get('pending') is True,'completed capsule upload lacks seal attempt')
+
+
+def verify_capsule_transport(ssh,sftp,native,request,prestart,guest_started):
+    need(ssh is not None and sftp is not None,'owned capsule requires distinct transport proof')
+    commands=verify_ssh_journal(ssh,native,request,prestart)
+    transfers=verify_ssh_journal(sftp,native,request,prestart,sftp=True)
+    need(len(commands)==2 and len(transfers)==1,'exact capsule staging/upload/seal sequence')
+    bootstrap,seal=commands;transfer=transfers[0]
+    need(bootstrap['body']==dict(command=capsule_bootstrap(request),timeout=5),'capsule directory bootstrap command')
+    stage=json.loads(bootstrap['response']['stdout'])
+    need(stage.get('schema')=='cloudbench-capsule-stage-v1' and stage.get('path')==capsule_paths(request)[0]
+         and type(stage.get('inode')) is int and stage['inode']>0 and type(stage.get('device')) is int,
+         'capsule exclusive staging inode proof')
+    need(transfer['body']['capsule']==request['guest_env_capsule'] and transfer['body']['stage']==stage
+         and seal['body']==dict(command=capsule_seal(request,stage),timeout=5),'capsule SFTP source/inode/seal binding')
+    module=runpy.run_path(str(HERE/'cloudbench-source-env.py'))
+    raw=module['descriptor'](request['guest_env_capsule'],private=True)
+    need(json.loads(seal['response']['stdout'])==dict(schema='cloudbench-capsule-published-v1',path=capsule_paths(request)[1],
+         sha256=request['guest_env_capsule']['sha256'],size=len(raw),uid=0,mode=0o600),'capsule immutable final hash/mode proof')
+    starts=[r for r in native if r['method']=='POST' and r['path']=='/machines/'+request['native']['machine_id']+'/start']
+    need(len(starts)==1 and starts[0]['finished']<=bootstrap['started']<=bootstrap['finished']
+         <=transfer['started']<=transfer['finished']<=seal['started']<=seal['finished']<=guest_started,
+         'capsule staging timeline before guest delivery')
 
 
 def prepare(request_path, output, api_factory=None, *, before_effects=None):
@@ -746,6 +994,7 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             known_versions.add(before['instance_id'])
             armed = True
             config['image'] = request['image_ref']
+            config=capsule_metadata(config,request)
             config['guest'] = dict(config['guest'], cpus=4, memory_mb=8192)
             ack = api.request('POST', '/machines/' + predecessor['machine_id'],
                               dict(config=config, current_version=before['instance_id'], skip_launch=True))
@@ -758,7 +1007,9 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             api.request('POST', '/machines/' + predecessor['machine_id'] + '/start', {})
             wait_state(api, request, predecessor, config, 'started', instance, time.monotonic() + 120)
             api.guest_context=dict(predecessor=predecessor,config=copy.deepcopy(config))
-            guest = guest_job(api, request, time.monotonic() + 2160)
+            guest_deadline=time.monotonic()+2160
+            if request.get('guest_env_mode')==OWNED_MODE:stage_capsule(api,request)
+            guest = guest_job(api, request, guest_deadline)
             save(output / 'guest.json', guest)
             api.request('POST', '/machines/' + predecessor['machine_id'] + '/stop', {})
             after, volume = wait_state(api, request, predecessor, config, 'stopped', instance, time.monotonic() + 120)
@@ -776,6 +1027,9 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
                              snapshot_id=snapshot_id, verified_at=guest['finished_epoch'],
                              node_fingerprint=request['node_fingerprint'], python_fingerprint=request['python_fingerprint'],
                              guest_env_sha256=copy.deepcopy(guest['guest_env_sha256']))
+            if request.get('guest_env_mode')==OWNED_MODE:
+                attestation=owned_manifest(request,predecessor)
+                successor.update({key:attestation[key] for key in OWNED_FIELDS})
             deadline = time.monotonic() + 120
             while True:
                 snapshots = api.request('GET', '/volumes/' + predecessor['volume_id'] + '/snapshots')
@@ -804,6 +1058,9 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
     finally:
         result['finished_epoch'] = int(time.time())
         result['journal'] = journal_index(output / 'native')
+        if (output/'ssh').is_dir():result['ssh']=journal_index(output/'ssh')
+        for member in ('capsule-ssh','capsule-sftp'):
+            if (output/member).is_dir():result[member.replace('-','_')]=journal_index(output/member)
         save(output / 'result.json', result)
     return result
 
@@ -831,16 +1088,20 @@ def verify_prepared_source(request_path, result_path, manifest_path, *, source_r
     need(result['source_ref'] == source_ref and result['image_ref'] == image_ref, 'result source/image')
     successor = SOURCE['manifest'](canonical(load(manifest_path)))
     need(described(result['manifest']) == successor and descriptor(manifest_path) == result['manifest'], 'successor manifest seal')
-    for key in set(successor) - {'instance_id', 'image_digest', 'snapshot_id', 'verified_at', 'node_fingerprint', 'python_fingerprint'}:
+    for key in set(successor) - {'instance_id', 'image_digest', 'snapshot_id', 'verified_at', 'node_fingerprint', 'python_fingerprint'} - OWNED_FIELDS:
         need(successor[key] == predecessor[key], 'successor ownership changed: ' + key)
     need(successor['image_digest'] == image_ref.rsplit('@', 1)[1], 'successor image digest')
     need(successor['node_fingerprint'] == node_fingerprint and successor['python_fingerprint'] == python_fingerprint,
          'successor dependency set')
     need(successor['guest_env_sha256'] == request['guest_env_sha256'], 'successor effective guest environment')
+    if request.get('guest_env_mode')==OWNED_MODE:
+        owned=owned_manifest(request,predecessor)
+        need(all(successor.get(key)==owned[key] for key in OWNED_FIELDS),'successor owned environment binding')
+    else:need(not OWNED_FIELDS & set(successor),'unexpected owned successor')
     before, after = described(result['before']), described(result['after'])
     need(before['instance_id'] == predecessor['instance_id']
          and sha(canonical(before['config'])) == request['native']['config_sha256'], 'original native source')
-    expected_config = copy.deepcopy(before['config']); expected_config['image'] = image_ref
+    expected_config = capsule_metadata(before['config'],request); expected_config['image'] = image_ref
     need(after['config'] == expected_config and after['instance_id'] == successor['instance_id']
          and before['id'] == after['id'] == successor['machine_id'] and after['state'] == 'stopped', 'only exact image changed')
     guest = described(result['guest']); verify_guest(request, guest)
@@ -853,21 +1114,138 @@ def verify_prepared_source(request_path, result_path, manifest_path, *, source_r
          and successor['verified_at'] == guest['finished_epoch'], 'preparation chronology')
     SOURCE['verify'](successor, described(result['inventory']), parked_memory=2048)
     verify_journal(result['journal'], successor['machine_id'], successor['volume_id'], (successor['shared_machine_id'],),
-                   request=request, before=before, after=after, guest=guest, successor=successor, prestart=prestart,ssh=result.get('ssh'))
+                   request=request, before=before, after=after, guest=guest, successor=successor, prestart=prestart,ssh=result.get('ssh'),
+                   capsule_ssh=result.get('capsule_ssh'),capsule_sftp=result.get('capsule_sftp'))
     return successor
 
 
 def verify_producer(origin, root, tree):
-    need(set(origin['dependencies']) == set(DEPENDENCIES), 'producer dependency closure')
     if (origin['helper_sha256'] == sha((HERE / 'cloudbench-prepare-source.py').read_bytes())
             and origin['dependencies'] == dependency_seals()):
         return
-    need(origin['helper_sha256'] == sha(source_bytes(root, tree, 'cloudbench-prepare-source.py'))
+    raw=source_bytes(root,tree,'cloudbench-prepare-source.py')
+    declarations=[node.value for node in ast.parse(raw).body if isinstance(node,ast.Assign)
+                  and any(isinstance(target,ast.Name) and target.id=='DEPENDENCIES' for target in node.targets)]
+    need(len(declarations)==1,'historical dependency declaration')
+    dependencies=ast.literal_eval(declarations[0])
+    need(isinstance(dependencies,tuple) and all(isinstance(name,str) and re.fullmatch('[A-Za-z0-9_.-]+',name) for name in dependencies)
+         and len(set(dependencies))==len(dependencies) and set(origin['dependencies'])==set(dependencies),'exact historical producer dependency closure')
+    need(origin['helper_sha256'] == sha(raw)
          and all(value == sha(source_bytes(root, tree, member)) for member, value in origin['dependencies'].items()),
          'historical producer source/dependency proof')
 
 
-def prestart_failure(request_path, result_path):
+def historical_guest_functions(origin,request):
+    """Read only the pinned producer's three payload builders, never its entrypoint."""
+    tree=request.get('transport',{}).get('replayed_tree',request['source_ref'])
+    raw=source_bytes(Path(request['source_root']),tree,'cloudbench-prepare-source.py')
+    if sha(raw)!=origin['helper_sha256']:
+        need(origin['helper_sha256']==sha((HERE/'cloudbench-prepare-source.py').read_bytes()),'historical payload producer')
+        raw=(HERE/'cloudbench-prepare-source.py').read_bytes()
+    nodes=[node for node in ast.parse(raw).body if isinstance(node,ast.FunctionDef)
+           and node.name in ('guest_program','delivery_commands','job_launcher')]
+    need(len(nodes)==3,'pinned payload builders unavailable')
+    constants=[node for node in ast.parse(raw).body if isinstance(node,ast.Assign)
+               and any(isinstance(target,ast.Name) and target.id=='SAFE_ENV_OBSERVER' for target in node.targets)]
+    need(all(isinstance(node.value,ast.Constant) and isinstance(node.value.value,str) for node in constants),
+         'pinned guest observation constant')
+    nodes=constants+nodes
+    namespace=dict(globals());exec(compile(ast.Module(body=nodes,type_ignores=[]),'<pinned-payload-builders>','exec'),namespace)
+    return namespace
+
+
+def ssh_failure_proof(request,result,directory,origin,predecessor,before,rows,forensic_ssh=None):
+    """Guest filesystem is untrusted: only proven power-off/park grants reuse."""
+    own='/machines/'+predecessor['machine_id']
+    need(request.get('guest_transport')=='cloudbench-ssh-guest-v1' and result.get('stopped_verified') is True,
+         'clean failed SSH preparation required')
+    need(all(r['method']=='GET' or r['path'] in (own,own+'/lease',own+'/start',own+'/stop') for r in rows),
+         'failed SSH journal has EXEC/snapshot/foreign effects')
+    updates=[r for r in rows if r['method']=='POST' and r['path']==own]
+    starts=[r for r in rows if r['method']=='POST' and r['path']==own+'/start']
+    stops=[r for r in rows if r['method']=='POST' and r['path']==own+'/stop']
+    need(len(updates)==2 and len(starts)==len(stops)==1,'failed SSH native lifecycle incomplete')
+    target=capsule_metadata(before['config'],request);target['image']=request['image_ref'];target['guest']=dict(target['guest'],cpus=4,memory_mb=8192)
+    update,park=updates;ack=update['response'];prestart=load(directory/'prestart.json')
+    need(update['body']==dict(config=target,current_version=before['instance_id'],skip_launch=True)
+         and ack['config']==target and prestart['id']==before['id'] and prestart['instance_id']==ack['instance_id']
+         and prestart['config']==target and prestart['state']=='stopped','failed SSH accepted maintenance CAS/prestart')
+    parked=copy.deepcopy(target);parked['guest']=copy.deepcopy(before['config']['guest'])
+    need(park['body']==dict(config=parked,current_version=ack['instance_id'],skip_launch=True)
+         and park['response']['id']==before['id'] and park['response']['config']==parked,
+         'failed SSH cleanup parking CAS')
+    reads=[r for r in rows if r['method']=='GET' and r['path']==own]
+    need(any(r['response']==prestart and update['finished']<=r['started']<=starts[0]['started'] for r in reads),
+         'failed SSH original prestart wire')
+    final=[r['response'] for r in reads if r['started']>park['finished']]
+    need(final and final[-1]['state']=='stopped' and final[-1]['instance_id']==park['response']['instance_id']
+         and final[-1]['config']==parked,'failed SSH final power-off/parking readback')
+    if request.get('guest_env_mode')==OWNED_MODE and not (directory/'ssh').exists():
+        for read in reads:
+            row=read['response']
+            need(row['id']==before['id'] and row['name']==before['name'] and row['region']==before['region']
+                 and any(row['instance_id']==item['instance_id'] and row['config']==item['config'] for item in (before,ack,park['response']))
+                 and row['state'] in ('created','stopped','replacing','started','stopping'),'unknown failed capsule native epoch')
+        verify_failed_capsule_staging(result,rows,request,prestart,stops[0]['started'])
+        need(update['finished']<=starts[0]['started']<=stops[0]['started']<=park['started'],'failed capsule power-off order')
+        return park['response']
+    index=result.get('ssh')
+    if index is None:
+        need(origin['helper_sha256']=='1928c061e13aaff097a9836d69b589d9dc93dc82634687484a936154051b10a1'
+             and forensic_ssh is not None,'legacy unsealed SSH requires explicit forensic descriptor')
+        index=forensic_ssh
+    need(index.get('path')==str(directory/'ssh') and Path(index['path']).resolve()==directory/'ssh',
+         'failed SSH evidence must remain in original operation directory')
+    records=verify_ssh_journal(index,rows,request,prestart)
+    if request.get('guest_env_mode')==OWNED_MODE:
+        verify_capsule_transport(result.get('capsule_ssh'),result.get('capsule_sftp'),rows,request,prestart,records[0]['started'])
+    builders=historical_guest_functions(origin,request)
+    commands=list(builders['delivery_commands'](builders['guest_program'](request).encode(),'/tmp/cloudbench-prepare-delivery-'+request['nonce']))
+    need(len(records)>=len(commands)+2,'failed SSH complete guest execution evidence required')
+    for row,(command,expected) in zip(records,commands):
+        need(row['body']==dict(command=command,timeout=5) and row['response']['stdout'].strip()==expected,
+             'failed SSH original pinned payload delivery')
+    launch=records[len(commands)]
+    need(launch['body']==dict(command=['python3','-c',builders['job_launcher']('/tmp/cloudbench-prepare-delivery-'+request['nonce']+'/worker.py')],timeout=5),
+         'failed SSH original job launcher')
+    job=json.loads(launch['response']['stdout'])
+    need(type(job.get('pid')) is int and job['pid']>1 and re.fullmatch('[0-9]+',job.get('birth',''))
+         and re.fullmatch('[a-f0-9-]{36}',job.get('boot','')),'failed SSH launched process identity')
+    result_path='/tmp/cloudbench-prepare-source-'+request['nonce']+'/result.json'
+    probe=('import pathlib; p=pathlib.Path('+repr(result_path)+'); print(p.read_text() if p.is_file() else "PENDING")')
+    polls=records[len(commands)+1:]
+    for poll in polls:need(poll['body']==dict(command=['python3','-c',probe],timeout=5),'failed SSH exact result observation')
+    need(all(r['response']['stdout'].strip()=='PENDING' for r in polls[:-1]),'failed SSH contradictory terminal results')
+    failure=json.loads(polls[-1]['response']['stdout'])
+    need(failure.get('schema')=='cloudbench-source-guest-v1' and failure.get('nonce')==request['nonce']
+         and failure.get('guest_exit')==1 and isinstance(failure.get('error'),str)
+         and type(failure.get('started_epoch')) is int and type(failure.get('finished_epoch')) is int
+         and failure['started_epoch']<=failure['finished_epoch'],'failed SSH terminal failure')
+    if 'job' not in failure:
+        need(origin['helper_sha256']=='1928c061e13aaff097a9836d69b589d9dc93dc82634687484a936154051b10a1'
+             and set(failure)=={'schema','nonce','guest_exit','error','started_epoch','finished_epoch'},
+             'legacy guest job gap is not approved for this producer')
+    else:
+        need(failure['job']==job and failure.get('phase') in ('preconditions','fetch','source-transport','dependencies'),
+             'failed SSH job/phase proof')
+        observation=failure['preconditions']
+        expected_fields={'euid','machine_id','data_mount','repo_physical','git_dir','env_present','guest_env_sha256'}
+        need(set(observation) in (expected_fields,expected_fields|{'environment_contract'})
+             and set(observation['env_present'])==ENV_KEYS and all(type(v) is bool for v in observation['env_present'].values())
+             and set(observation['guest_env_sha256'])==ENV_KEYS
+             and all(isinstance(v,str) and re.fullmatch('[a-f0-9]{64}',v) for v in observation['guest_env_sha256'].values()),
+             'failed SSH safe precondition evidence')
+    need(update['finished']<=starts[0]['started']<=records[0]['started']<=records[-1]['finished']
+         <=stops[0]['started']<=park['started'],'failed SSH native execution/cleanup order')
+    for read in reads:
+        row=read['response']
+        need(row['id']==before['id'] and row['name']==before['name'] and row['region']==before['region']
+             and any(row['instance_id']==item['instance_id'] and row['config']==item['config'] for item in (before,ack,park['response']))
+             and row['state'] in ('created','stopped','replacing','started','stopping'),'unknown failed SSH native observation')
+    return park['response']
+
+
+def prestart_failure(request_path, result_path, *, forensic_ssh=None):
     """Only accepted preparation CAS with no start, guest execution or snapshot."""
     request, predecessor = read_request(request_path)
     authority = resolve_bootstrap_ownership(request['ownership']['path'])
@@ -890,11 +1268,15 @@ def prestart_failure(request_path, result_path):
                           (predecessor['shared_machine_id'],), allow_pending_prestart_stop=True,
                           allow_rejected_bootstrap=True)
     own = '/machines/' + predecessor['machine_id']
+    if request.get('guest_transport')=='cloudbench-ssh-guest-v1' and ((directory/'ssh').exists() or
+            request.get('guest_env_mode')==OWNED_MODE and (directory/'capsule-ssh').exists()):
+        parked=ssh_failure_proof(request,result,directory,origin,predecessor,before,rows,forensic_ssh)
+        return request,predecessor,authority,before,parked
     updates = [row for row in rows if row['method'] == 'POST' and row['path'] == own]
     execs=[row for row in rows if row['method']=='POST' and row['path']==own+'/exec']
     starts=[row for row in rows if row['method']=='POST' and row['path']==own+'/start']
     stops=[row for row in rows if row['method']=='POST' and row['path']==own+'/stop']
-    target = copy.deepcopy(before['config']); target['image'] = request['image_ref']
+    target = capsule_metadata(before['config'],request); target['image'] = request['image_ref']
     target['guest'] = dict(target['guest'], cpus=4, memory_mb=8192)
     need(updates, 'original preparation CAS absent')
     update = updates[0]; ack = update['response']
@@ -955,12 +1337,20 @@ def recovery_machine(api, request, predecessor, candidates, owned_volume):
 
 
 def recover_bootstrap(request_path, failed_result_path, output, api_factory=None):
-    request, predecessor, authority, original, ack = prestart_failure(request_path, failed_result_path)
+    old=load(failed_result_path);failed_directory=Path(failed_result_path).absolute().parent
+    forensic=journal_index(failed_directory/'ssh') if 'ssh' not in old and (failed_directory/'ssh').is_dir() else None
+    request, predecessor, authority, original, ack = prestart_failure(request_path, failed_result_path,forensic_ssh=forensic)
     output = Path(output).absolute(); output.mkdir(mode=0o700)
     nonce = secrets.token_hex(16)
     result = dict(schema=RECOVERY, nonce=nonce, qualified=False, credit_granted=False, cleanup_complete=False,
                   recovered=False, original_creator=authority.get('original_creator',descriptor(request['ownership']['path'])),
                   original_request=descriptor(request_path), failed_result=descriptor(failed_result_path))
+    result['filesystem_untrusted']=True
+    intent=dict(schema='cloudbench-bootstrap-recovery-intent-v1',nonce=nonce,original_request=result['original_request'],
+                failed_result=result['failed_result'],original_creator=result['original_creator'],
+                legacy_unsealed_ssh=forensic is not None,forensic_ssh=forensic)
+    save(output/'intent.json',intent);result['intent']=descriptor(output/'intent.json')
+    if forensic is not None:result.update(legacy_unsealed_ssh=True,forensic_ssh=forensic)
     origin = dict(schema='cloudbench-recovery-origin-v1', nonce=nonce, output=str(output),
                   helper_sha256=sha((HERE/'cloudbench-prepare-source.py').read_bytes()), dependencies=dependency_seals(),
                   source_ref=subprocess.check_output(['git','-C',str(HERE.parent),'rev-parse','HEAD'],text=True).strip(),
@@ -974,7 +1364,8 @@ def recover_bootstrap(request_path, failed_result_path, output, api_factory=None
         else:
             api = api_factory(output/'native', request, predecessor)
         with api.lease():
-            before, volume = recovery_machine(api, request, predecessor, (original, ack), authority['intent']['volume_request'])
+            candidates=(ack,) if request.get('guest_transport')=='cloudbench-ssh-guest-v1' else (original,ack)
+            before, volume = recovery_machine(api, request, predecessor, candidates, authority['intent']['volume_request'])
             save(output/'before.json',before)
             parked = copy.deepcopy(before['config']); parked['guest'] = copy.deepcopy(original['config']['guest'])
             answer = api.request('POST','/machines/'+predecessor['machine_id'],
@@ -1002,7 +1393,18 @@ def verify_recovered_bootstrap(result_path):
          and re.fullmatch('[a-f0-9]{32}',result.get('nonce','')), 'recovered bootstrap receipt required')
     request_path=result['original_request']['path']; failed_path=result['failed_result']['path']
     described(result['original_request']); described(result['failed_result'])
-    request, predecessor, authority, original, ack=prestart_failure(request_path,failed_path)
+    forensic=result.get('forensic_ssh')
+    request, predecessor, authority, original, ack=prestart_failure(request_path,failed_path,forensic_ssh=forensic)
+    if request.get('guest_transport')=='cloudbench-ssh-guest-v1':
+        need('intent' in result and result.get('filesystem_untrusted') is True,'failed SSH recovery requires explicit untrusted filesystem intent')
+    if 'intent' in result:
+        intent=described(result['intent'])
+        need(intent==dict(schema='cloudbench-bootstrap-recovery-intent-v1',nonce=result['nonce'],
+              original_request=result['original_request'],failed_result=result['failed_result'],original_creator=result['original_creator'],
+              legacy_unsealed_ssh=forensic is not None,forensic_ssh=forensic)
+             and result.get('filesystem_untrusted') is True,'recovery before-effects intent/filesystem trust')
+    if forensic is not None:
+        need(result.get('legacy_unsealed_ssh') is True and 'intent' in result,'legacy forensic custody is not original SSH seal')
     need(result['original_creator']==authority.get('original_creator',descriptor(request['ownership']['path'])) and result['nonce'] != request['nonce'],
          'original creator recovery link/new nonce')
     origin=described(result['origin'])
@@ -1013,7 +1415,8 @@ def verify_recovered_bootstrap(result_path):
          'recovery producer origin')
     verify_producer(origin,HERE.parent,origin['source_ref'])
     before,after,volume=(described(result[key]) for key in ('before','after','volume'))
-    need(any(before['instance_id']==item['instance_id'] and before['config']==item['config'] for item in (original,ack)),
+    candidates=(ack,) if request.get('guest_transport')=='cloudbench-ssh-guest-v1' else (original,ack)
+    need(any(before['instance_id']==item['instance_id'] and before['config']==item['config'] for item in candidates),
          'recovery before version')
     need(before['id']==original['id'] and before['name']==original['name'] and before['region']==original['region']
          and before['state'] in ('created','stopped'), 'recovery inactive before identity')
@@ -1044,7 +1447,7 @@ def verify_recovered_bootstrap(result_path):
     return value
 
 
-def build_request(ownership, build, source_root, source_ref, guest_env_contract, protected_resources, output, transport=None):
+def build_request(ownership, build, source_root, source_ref, guest_env_contract, protected_resources, output, transport=None,guest_env_capsule=None):
     """Canonical mutation-free request producer from creator authority and explicit env expectations."""
     authority = resolve_bootstrap_ownership(Path(ownership))
     machine = authority['machine']; config = machine['config']
@@ -1069,6 +1472,9 @@ def build_request(ownership, build, source_root, source_ref, guest_env_contract,
                           for member in ('cloudbench-fetch-ref.sh', 'lib/cloudbench-env.sh', 'cloudbench-sync-deps.sh', *(['cloudbench-prepare-patch.sh'] if transport_value else []))})
     if transport_value:
         value['transport'] = transport_value
+    if guest_env_capsule is not None:
+        value.update(guest_env_mode=OWNED_MODE,guest_env_capsule=descriptor(guest_env_capsule))
+        value['scripts']['cloudbench-source-env.py']=sha(source_bytes(root,effective_ref,'cloudbench-source-env.py'))
     save(Path(output).absolute(), value)
     read_request(output)  # Run the identical execution preflight before publishing a usable request.
     return value
@@ -1095,11 +1501,12 @@ def main():
             parser.add_argument('--' + name, type=Path, required=True)
         parser.add_argument('--source-ref', required=True)
         parser.add_argument('--transport', type=Path)
+        parser.add_argument('--guest-env-capsule',type=Path)
         args = parser.parse_args(sys.argv[2:])
         os.umask(0o077)
         try:
             build_request(args.ownership, args.build, args.source_root, args.source_ref,
-                          args.guest_env_contract, args.protected_resources, args.output, args.transport)
+                          args.guest_env_contract, args.protected_resources, args.output, args.transport,args.guest_env_capsule)
         except Exception as error:
             print('private source request failed: ' + type(error).__name__, file=sys.stderr)
             return 1

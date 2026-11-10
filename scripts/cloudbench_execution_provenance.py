@@ -99,6 +99,8 @@ _CONFIG_SCALAR_KEYS = {
     "volume_snapshot_id",
     "base_source_manifest_sha256",
     "base_source_lease_protocol",
+    "base_source_guest_env_mode",
+    "base_source_guest_env_capsule_sha256",
     "node_dependency_fingerprint",
     "python_dependency_fingerprint",
     "per_child_max_concurrency",

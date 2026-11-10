@@ -48,13 +48,17 @@ KEYS = {
 }
 LEASE_PROTOCOL = "cloudbench-source-lease-v1"
 LEASE_KEYS = KEYS | {"lease_protocol", "creation_nonce", "guest_env_sha256"}
+OWNED_ENV_MODE = "owned-capsule-v1"
+OWNED_ENV_KEYS = {"guest_env_mode", "guest_env_capsule_sha256", "guest_env_capsule_binding"}
 
 
 def manifest(data: bytes) -> dict:
     value = json.loads(data, object_pairs_hook=storage["unique_object"])
     require(isinstance(value, dict), "manifest object")
     require(type(value.get("version")) is int and value["version"] in (1, 2), "manifest version")
-    require(set(value) == (KEYS if value["version"] == 1 else LEASE_KEYS), "manifest fields")
+    owned = bool(OWNED_ENV_KEYS & set(value))
+    expected = KEYS if value["version"] == 1 else LEASE_KEYS | (OWNED_ENV_KEYS if owned else set())
+    require(set(value) == expected, "manifest fields")
     if value["version"] == 2:
         require(value["lease_protocol"] == LEASE_PROTOCOL, "source lease protocol")
         require(isinstance(value["creation_nonce"], str)
@@ -65,6 +69,22 @@ def manifest(data: bytes) -> dict:
                 and set(contract) == {"AGENTS_ENV_B64", "BACKEND_ENV_B64"}
                 and all(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
                         for digest in contract.values()), "source guest environment contract")
+        if owned:
+            require(value["guest_env_mode"] == OWNED_ENV_MODE, "owned environment mode")
+            require(isinstance(value["guest_env_capsule_sha256"], str)
+                    and re.fullmatch(r"[0-9a-f]{64}", value["guest_env_capsule_sha256"]), "owned environment capsule hash")
+            binding = value["guest_env_capsule_binding"]
+            require(isinstance(binding, dict) and set(binding) == {
+                "owner_token", "create_nonce", "source_ref", "image_ref", "node_fingerprint", "python_fingerprint"},
+                "owned environment capsule binding")
+            require(binding["owner_token"] == value["owner_token"]
+                    and binding["create_nonce"] == value["creation_nonce"]
+                    and binding["node_fingerprint"] == value["node_fingerprint"]
+                    and binding["python_fingerprint"] == value["python_fingerprint"]
+                    and isinstance(binding["source_ref"], str) and re.fullmatch(r"[0-9a-f]{40}", binding["source_ref"])
+                    and isinstance(binding["image_ref"], str)
+                    and re.fullmatch(r"registry\.fly\.io/navi-whisper-lux-bench[^\s]*@sha256:[0-9a-f]{64}", binding["image_ref"])
+                    and binding["image_ref"].endswith("@" + value["image_digest"]), "owned environment source/image/dependency binding")
     require(value["app"] == "navi-whisper-lux-bench", "manifest app")
     patterns = {
         "owner_token": r"[0-9a-f]{32}",
@@ -145,6 +165,10 @@ def verify(value: dict, inventory: dict, *, parked_memory: int) -> None:
                 "native source lease protocol")
         require(not any(key.startswith("cloudbench_source_retiring") for key in metadata),
                 "source retirement has begun")
+        require(metadata.get("cloudbench_source_guest_env_mode", "none") == value.get("guest_env_mode", "none"),
+                "native source environment mode or downgrade")
+        require(metadata.get("cloudbench_source_guest_env_capsule_sha256", "none")
+                == value.get("guest_env_capsule_sha256", "none"), "native source environment capsule hash")
     else:
         require("cloudbench_source_protocol" not in metadata, "source protocol downgrade")
     require(

@@ -427,6 +427,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Fleet Source Lease" python3 scripts/tests/cloudbench-source-lease-fleet.test.py
   run_suite "Cloud Benchmark Source Lease Recovery" python3 scripts/tests/cloudbench-source-lease-recovery.test.py
   run_suite "Cloud Benchmark Source Guest Environment" python3 scripts/tests/cloudbench-source-guest-env.test.py
+  run_suite "Cloud Benchmark Owned Source Environment" python3 scripts/tests/cloudbench-source-env.test.py
   run_suite "Cloud Benchmark Source Environment Handoff" python3 scripts/tests/cloudbench-source-env-handoff.test.py
   run_suite "Cloud Benchmark Kernel Allocation Custody" python3 scripts/tests/cloudbench-kernel-custody.test.py
   run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh

@@ -53,6 +53,22 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# The controller stages this self-contained loader next to the trusted driver.
+# It replaces this process for owned capsules; re-entry verifies effective bytes.
+_source_env_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+_source_env_helper="${CLOUDBENCH_SOURCE_ENV_HELPER:-$_source_env_dir/cloudbench-source-env.py}"
+[ -f "$_source_env_helper" ] || { echo 'FATAL: missing source environment loader' >&2; exit 1; }
+_source_env_mode="$(python3 "$_source_env_helper" mode)" || exit 1
+case "$_source_env_mode" in
+    none) ;;
+    owned-capsule-v1)
+        if [ "${CLOUDBENCH_SOURCE_ENV_EXECUTED:-}" != owned-capsule-v1 ]; then
+            exec python3 "$_source_env_helper" exec -- /bin/bash "${BASH_SOURCE[0]}" "$@"
+        fi
+        python3 "$_source_env_helper" check-effective || exit 1 ;;
+    *) exit 1 ;;
+esac
+
 # The provenance helper and result tooling are controller-staged code. Never
 # create sibling bytecode while consuming that immutable bundle on the guest.
 export PYTHONDONTWRITEBYTECODE=1
