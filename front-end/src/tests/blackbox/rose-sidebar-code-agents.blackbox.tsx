@@ -14,9 +14,9 @@
  * rejects >50 ids like the server. Rows are on screen per a controllable
  * IntersectionObserver (jsdom has none). Flag off reads nothing.
  *
- * A code-agent row is ONLY its provider icon + title: no done check, failed x,
- * amber needs-input alert or thinking bubble in any state (supersedes ledger
- * row 79). Agent (robot) rows keep their own status glyphs.
+ * A running code-agent row has its provider icon + title and a Working badge
+ * at the icon's top right. Inactive rows fold into the owner's Finished agents
+ * drawer and retain only their provider icon (no check, x or alert).
  *
  * With the CodeAgentViewProvider (as TerminalContent mounts it) a row opens
  * that code agent's own conversation: the row is marked (color/weight), its
@@ -31,7 +31,6 @@ import AppSidebar from '@/features/terminal-component-group/components/AppSideba
 import { CodeAgentViewProvider } from '@/features/terminal-component-group/components/code-agent-view/CodeAgentViewProvider';
 import { AttentionRequestsContext } from '@/features/terminal-component-group/components/attention-inbox/attentionRequestsContext';
 import type { Agent, AttentionRequest } from '@/lib/api';
-import type { CodeAgentListItem } from '@/lib/api/tree';
 
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
 import { capturedRequests, clearCaptures } from './msw/capture';
@@ -44,6 +43,16 @@ import {
   signedInUser,
 } from './rose-sidebar.fixtures';
 import { renderWithProviders } from './test-wrapper';
+import {
+  AGENTS,
+  ROWS,
+  RUNNING,
+  bulkAgents,
+  codeAgent,
+  codeAgentQuestion,
+  createdMinutesAgo,
+  mockCodeAgents,
+} from './rose-sidebar-code-agents.fixtures';
 
 vi.mock('@/lib/realtime', async (original) => ({
   ...(await original<typeof import('@/lib/realtime')>()),
@@ -52,48 +61,6 @@ vi.mock('@/lib/realtime', async (original) => ({
 }));
 
 const API_BASE = 'http://localhost:3001/api';
-const RUNNING = { status: 'ACTIVE' as const, temporal_workflow_id: 'wf-1' };
-const createdMinutesAgo = (minutes: number) => ({
-  created_at: new Date(Date.parse('2026-10-20T12:00:00Z') - minutes * 60_000).toISOString(),
-});
-const AGENTS = [
-  makeAgent({ agent_id: 'home-run', goal: 'Plan Tahoe trip', ...RUNNING, ...createdMinutesAgo(1) }),
-  makeAgent({
-    agent_id: 'home-done',
-    goal: 'Get me socks',
-    status: 'COMPLETED',
-    ...createdMinutesAgo(2),
-  }),
-  makeAgent({
-    agent_id: 'rose-run',
-    goal: 'Rose UI polish',
-    ...RUNNING,
-    project_id: 'p-rose',
-    ...createdMinutesAgo(3),
-  }),
-  makeAgent({
-    agent_id: 'rose-fail',
-    goal: 'Fix Hub export retry',
-    status: 'FAILED',
-    project_id: 'p-rose',
-    ...createdMinutesAgo(4),
-  }),
-  makeAgent({
-    agent_id: 'habits-done',
-    goal: 'Streak widget',
-    status: 'COMPLETED',
-    project_id: 'p-habits',
-    ...createdMinutesAgo(5),
-  }),
-  makeAgent({
-    agent_id: 'orphan',
-    goal: 'Unknown project agent',
-    ...RUNNING,
-    project_id: 'gone',
-    ...createdMinutesAgo(6),
-  }),
-];
-
 // ─── On-screen control (one shared observer per bar) ────────────────────────
 
 let onScreen: (agentId: string) => boolean = () => true;
@@ -143,36 +110,6 @@ const originalIntersectionObserver = window.IntersectionObserver;
 
 // ─── Backend mock (strict like routes.codeAgents.ts) ────────────────────────
 
-function codeAgent(
-  overrides: Partial<CodeAgentListItem> & { code_agent_id: string },
-): CodeAgentListItem {
-  return {
-    owner_agent_id: 'home-run',
-    root_agent_id: 'home-run',
-    provider: 'claude',
-    title: 'Write the export retry',
-    status: 'ACTIVE',
-    created_at: '2026-10-20T11:00:00.000Z',
-    ...overrides,
-  };
-}
-
-function mockCodeAgents(rows: CodeAgentListItem[]) {
-  server.use(
-    http.get(`${API_BASE}/agents/code-agents`, ({ request }) => {
-      const raw = new URL(request.url).searchParams.get('root_ids') ?? '';
-      const ids = raw.split(',').filter(Boolean);
-      if (ids.length === 0 || ids.length > 50) {
-        return HttpResponse.json({ error: 'root_ids must list 1-50 agent ids' }, { status: 400 });
-      }
-      const roots = new Set(ids);
-      return HttpResponse.json({
-        code_agents: rows.filter((row) => roots.has(row.root_agent_id)).slice(0, 500),
-      });
-    }),
-  );
-}
-
 function codeAgentRequests(): string[][] {
   return capturedRequests
     .filter((r) => r.method === 'GET' && new URL(r.url).pathname === '/api/agents/code-agents')
@@ -198,30 +135,6 @@ function renderBar(
   );
 }
 
-/** The attention row agent-tools writes for a code agent's question (questionService). */
-function codeAgentQuestion(taskId: string, answered = false): AttentionRequest {
-  return {
-    id: `atq_${taskId}`,
-    agent_id: 'home-run',
-    workflow_id: 'wf-1',
-    question: 'Ship the 26px button?',
-    metadata: {
-      agentTools: { kind: 'question', deliverTo: 'user', routedAgentId: 'home-run' },
-      requestingAgent: {
-        kind: 'code_agent',
-        agent_id: 'home-run',
-        label: 'Claude Code',
-        provider: 'claude',
-        task_id: taskId,
-      },
-      sandboxTool: { provider: 'claude', taskId },
-    },
-    created_at: '2026-10-20T11:30:00.000Z',
-    updated_at: '2026-10-20T11:30:00.000Z',
-    answered,
-  };
-}
-
 function barRowOrder(): string[] {
   const groups = screen.getByTestId('rose-agent-groups');
   return [
@@ -234,42 +147,6 @@ function barRowOrder(): string[] {
 function ids(agents: Agent[]): Set<string> {
   return new Set(agents.map((agent) => agent.agent_id));
 }
-
-function bulkAgents(count: number, overrides: (i: number) => Partial<Agent> = () => ({})) {
-  return Array.from({ length: count }, (_, i) =>
-    makeAgent({
-      agent_id: `bulk-${i}`,
-      goal: `Bulk ${i}`,
-      status: 'COMPLETED',
-      ...createdMinutesAgo(i + 1),
-      ...overrides(i),
-    }),
-  );
-}
-
-const ROWS = [
-  codeAgent({
-    code_agent_id: 'cc-fix',
-    provider: 'codex',
-    status: 'ERROR',
-    title: 'Fix flaky test',
-  }),
-  codeAgent({
-    code_agent_id: 'cc-build',
-    provider: 'claude',
-    title: 'Build the widget',
-    created_at: '2026-10-20T10:00:00.000Z',
-  }),
-  // Owned by a sub-agent of rose-run: listed under its root row; provider null = legacy → Claude.
-  codeAgent({
-    code_agent_id: 'cc-sub',
-    owner_agent_id: 'rose-sub',
-    root_agent_id: 'rose-run',
-    provider: null,
-    status: 'COMPLETED',
-    title: 'Refactor nav',
-  }),
-];
 
 beforeEach(() => {
   localStorage.clear();
@@ -318,15 +195,104 @@ async function openCodeRow(id: string) {
   const owner = id === 'cc-sub' ? 'rose-sub' : root;
   if (root === 'rose-run') await screen.findByTestId('rose-project-row-p-rose');
   for (const agentId of new Set([root, owner])) {
+    if (!screen.queryByTestId(`rose-agent-row-${agentId}`)) {
+      const finished = within(screen.getByTestId(`rose-agent-children-${root}`)).getByRole(
+        'button',
+        { name: /^Finished agents/ },
+      );
+      if (finished.getAttribute('aria-expanded') === 'false') fireEvent.click(finished);
+    }
     const row = await screen.findByTestId(`rose-agent-row-${agentId}`);
     const wrapper = row.closest('[data-agent-depth]') as HTMLElement;
     const toggle = await within(wrapper).findByRole('button', { name: /^Expand|^Collapse/ });
     if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle);
   }
+  if (!screen.queryByTestId(`rose-code-agent-row-${id}`)) {
+    const finished = within(screen.getByTestId(`rose-agent-children-${owner}`)).queryByRole(
+      'button',
+      { name: /^Finished agents/ },
+    );
+    if (finished?.getAttribute('aria-expanded') === 'false') fireEvent.click(finished);
+  }
   return screen.findByTestId(`rose-code-agent-row-${id}`);
 }
 
 describe('Rose left bar code agents (flag on)', () => {
+  it.each(['claude', 'codex'] as const)(
+    'badges a running %s icon in its top-right corner and folds inactive sessions away',
+    async (provider) => {
+      mockCodeAgents([
+        codeAgent({ code_agent_id: 'running', provider, title: 'Running' }),
+        codeAgent({ code_agent_id: 'paused', provider, status: 'PAUSED', title: 'Paused' }),
+        codeAgent({
+          code_agent_id: 'stopped',
+          provider,
+          container_state: 'stopped',
+          title: 'Stopped',
+        }),
+        codeAgent({ code_agent_id: 'done', provider, status: 'COMPLETED', title: 'Done' }),
+        codeAgent({ code_agent_id: 'closed', provider, status: 'CLOSED', title: 'Closed' }),
+        codeAgent({ code_agent_id: 'error', provider, status: 'ERROR', title: 'Error' }),
+        codeAgent({
+          code_agent_id: 'waiting',
+          provider,
+          awaiting_parent: { question: 'Review this?', at: '2026-10-20T12:00:00Z' },
+          title: 'Waiting',
+        }),
+      ]);
+      renderBar();
+      expect(await screen.findByTestId('rose-agent-count-home-run')).toHaveTextContent('2');
+      expandBar();
+      fireEvent.click(await screen.findByRole('button', { name: 'Expand Plan Tahoe trip' }));
+      const row = await screen.findByTestId('rose-code-agent-row-running');
+      const working = within(row).getByRole('img', { name: 'Working' });
+      expect(working.parentElement).toHaveClass('absolute', '-right-1.5', '-top-1');
+      expect(working.parentElement?.parentElement).toHaveClass('relative');
+      expect(row).toHaveAttribute('data-provider', provider);
+      for (const id of ['paused', 'stopped', 'done', 'closed', 'error', 'waiting']) {
+        expect(screen.queryByTestId(`rose-code-agent-row-${id}`)).toBeNull();
+      }
+      const drawer = within(screen.getByTestId('rose-agent-children-home-run')).getByRole(
+        'button',
+        { name: 'Finished agents (6)' },
+      );
+      expect(drawer).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(drawer);
+      for (const id of ['paused', 'stopped', 'done', 'closed', 'error', 'waiting']) {
+        expect(
+          within(screen.getByTestId(`rose-code-agent-row-${id}`)).queryByRole('img', {
+            name: 'Working',
+          }),
+        ).toBeNull();
+      }
+      fireEvent.click(drawer);
+      expect(screen.queryByTestId('rose-code-agent-row-paused')).toBeNull();
+    },
+  );
+
+  it('moves a coding session between the list and drawer as its live page pauses and resumes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const rows = [
+      codeAgent({ code_agent_id: 'cc-live', provider: 'codex', title: 'Live session' }),
+    ];
+    mockCodeAgents(rows);
+    renderBar();
+    expect(await openCodeRow('cc-live')).toBeInTheDocument();
+    rows[0].status = 'PAUSED';
+    await act(() => vi.advanceTimersByTimeAsync(30_500));
+    await waitFor(() => expect(screen.queryByTestId('rose-code-agent-row-cc-live')).toBeNull());
+    const children = within(screen.getByTestId('rose-agent-children-home-run'));
+    expect(children.getByRole('button', { name: 'Finished agents (1)' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    rows[0].status = 'ACTIVE';
+    await act(() => vi.advanceTimersByTimeAsync(30_500));
+    const resumed = await screen.findByTestId('rose-code-agent-row-cc-live');
+    expect(within(resumed).getByRole('img', { name: 'Working' })).toBeInTheDocument();
+    expect(children.queryByRole('button', { name: /^Finished agents/ })).toBeNull();
+  });
+
   it('code-agent pages follow display order: project agents (on top) share the first page', async () => {
     const home = bulkAgents(50, () => ({ project_id: null }));
     const projectAgent = makeAgent({
@@ -517,16 +483,16 @@ describe('Rose left bar code agents (flag on)', () => {
   });
 });
 
-describe('code-agent rows carry no status glyph (flag on)', () => {
-  /** Every image in a row (the provider icon is the only one allowed). */
+describe('code-agent rows show a Working badge only while running (flag on)', () => {
+  /** Every image in a row: provider, and Working only when running. */
   const rowImages = (id: string) =>
     within(screen.getByTestId(`rose-code-agent-row-${id}`))
       .queryAllByRole('img')
       .map((img) => img.getAttribute('aria-label') ?? img.getAttribute('alt'));
 
-  function expectIconOnly(id: string, provider: 'Claude Code' | 'Codex') {
+  function expectIconOnly(id: string, provider: 'Claude Code' | 'Codex', running = false) {
     const row = screen.getByTestId(`rose-code-agent-row-${id}`);
-    expect(rowImages(id)).toEqual([provider]);
+    expect(rowImages(id)).toEqual(running ? [provider, 'Working'] : [provider]);
     // No check, x, alert, spinner or thinking.svg bubble.
     expect(row.querySelectorAll('svg')).toHaveLength(0);
     expect(row.querySelectorAll('img')).toHaveLength(1);
@@ -536,20 +502,20 @@ describe('code-agent rows carry no status glyph (flag on)', () => {
   it.each([
     ['light', false],
     ['dark', true],
-  ])('running, failed and completed rows show only the provider icon (%s)', async (_, dark) => {
+  ])('only running rows add the corner Working badge (%s)', async (_, dark) => {
     renderBar({}, { dark });
     await openCodeRow('cc-sub');
     await openCodeRow('cc-fix');
     expandBar();
-    expectIconOnly('cc-build', 'Claude Code');
+    expectIconOnly('cc-build', 'Claude Code', true);
     expectIconOnly('cc-fix', 'Codex');
     expectIconOnly('cc-sub', 'Claude Code');
   });
 
-  it('a running code agent waiting on an unanswered question still shows no glyph', async () => {
+  it('an ACTIVE task retains its running badge until the session reports it is waiting', async () => {
     renderBar({}, { attention: [codeAgentQuestion('cc-build')] });
     await openCodeRow('cc-build');
-    expectIconOnly('cc-build', 'Claude Code');
+    expectIconOnly('cc-build', 'Claude Code', true);
   });
 
   it('a paused (CLOSED) session shows no glyph either', async () => {
@@ -635,6 +601,68 @@ describe('a code-agent row opens its own conversation (flag on, view provider)',
     await user.click(screen.getByTestId('rose-agent-row-home-done'));
     expect(onSelectAgent).toHaveBeenLastCalledWith('home-done');
     rerenderWith('home-done');
-    expect(screen.getByTestId('rose-code-agent-row-cc-sub')).not.toHaveAttribute('aria-current');
+    // Crossing sidebar rows can collapse the hovered bar; finished drawers
+    // start closed when reopened. Reopen it to inspect the previous row.
+    expect(await openCodeRow('cc-sub')).not.toHaveAttribute('aria-current');
+  });
+});
+
+describe('Code-agent row actions', () => {
+  it('keeps the hovered sidebar open while using a coding-agent menu or rename dialog', async () => {
+    const user = userEvent.setup();
+    renderBar();
+    fireEvent.contextMenu(await openCodeRow('cc-fix'));
+    fireEvent.mouseLeave(roseBar());
+    expect(roseBar()).toHaveAttribute('data-expanded', 'true');
+    await user.click(await screen.findByRole('menuitem', { name: 'Rename agent' }));
+    fireEvent.mouseLeave(roseBar());
+    expect(screen.getByRole('dialog', { name: 'Rename' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Rename' })).toBeNull();
+    fireEvent.mouseLeave(roseBar());
+    expect(roseBar()).toHaveAttribute('data-expanded', 'false');
+  });
+
+  it.each(['cc-fix', 'cc-build', 'cc-sub'])(
+    'copies the code task ID for %s, never its owner ID',
+    async (id) => {
+      const user = userEvent.setup();
+      const write = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+      renderBar();
+      const row = await openCodeRow(id);
+      fireEvent.contextMenu(row);
+      await user.click(await screen.findByRole('menuitem', { name: 'Copy agent ID' }));
+      expect(write).toHaveBeenCalledWith(id);
+    },
+  );
+
+  it('persists a code-agent rename and displays the saved name after remount', async () => {
+    const user = userEvent.setup();
+    const rows = ROWS.map((row) => ({ ...row }));
+    mockCodeAgents(rows);
+    const patches: unknown[] = [];
+    server.use(
+      http.patch(`${API_BASE}/agents/code-agents/cc-fix`, async ({ request }) => {
+        const body = (await request.json()) as { title: string };
+        patches.push(body);
+        rows[0].title = body.title;
+        return HttpResponse.json({ code_agent_id: 'cc-fix', title: body.title });
+      }),
+    );
+    const view = renderBar();
+    fireEvent.contextMenu(await openCodeRow('cc-fix'));
+    await user.click(await screen.findByRole('menuitem', { name: 'Rename agent' }));
+    const input = await screen.findByRole('textbox', { name: 'Agent name' });
+    expect(input).toHaveValue('Fix flaky test');
+    await user.clear(input);
+    await user.type(input, '  Fix export tests  ');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patches).toEqual([{ title: 'Fix export tests' }]));
+    expect(await screen.findByTestId('rose-code-agent-row-cc-fix')).toHaveTextContent(
+      'Fix export tests',
+    );
+    view.unmount();
+    renderBar();
+    expect(await openCodeRow('cc-fix')).toHaveTextContent('Fix export tests');
   });
 });

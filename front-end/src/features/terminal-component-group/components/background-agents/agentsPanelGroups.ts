@@ -131,7 +131,7 @@ export function taskTreeNode(args: {
   };
 }
 
-function fromTreeTask(task: TreeBackgroundTask, parentAgentId: string): TreeNode {
+export function fromTreeTask(task: TreeBackgroundTask, parentAgentId: string): TreeNode {
   return taskTreeNode({
     address: task.address,
     parentAgentId,
