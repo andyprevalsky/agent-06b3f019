@@ -240,6 +240,43 @@ and fixed weak snapshot-completion and original-producer checks. No snapshot
 POST or guest attempt is repeated; native finalization and the remaining full
 deployment/parallel campaign validation are still required.
 
+The distinct 3a0 finalization subsequently qualified that same acknowledged
+snapshot after it completed. Its result SHA256 is
+`9885bdaaa12c86c04207a2cd8612d402020cfc6a684dde682505adaafcfc8cff`;
+the source manifest SHA256 is
+`d933b668ddd0ad3e108a66edb7dda9d6459b1b2617c6fb37664d7023060c293c`.
+The guest's attested source remains 5affa, while the finalization producer is
+3a0. The earlier false result is unchanged; the new authority does not grant
+historical task or financial credit.
+
+A separately admitted source B then prepared its own approved capsule and
+completed its guest on 3a0 while source A's ordinary fleet canary was active.
+Source B stopped and parked correctly, but its one accepted snapshot remained
+incomplete at the original 120-second deadline. Its preparation result remains
+false, pending readiness and a separate finalization; neither guest execution
+nor snapshot creation is retried. Parallel campaign task results, the complete
+deployment gates and production verification remain unverified at this point.
+
+Source B's accepted snapshot later completed, and a distinct GET-only
+finalization qualified it. The new result SHA256 is
+`cafa4ae76f82c37b60a0cf7b7aca30a7b5f123a068f2f494a58035e3179f89e5`;
+its manifest SHA256 is
+`f70f8364bdf639f841133ee3df27a577da5ffd44da987971c0b4979b464bc413`.
+Both independently owned sources are now qualified. Parallel campaign task
+acceptance remains pending.
+
+The first ordinary source A canary refused a mismatch between frozen execution
+provenance and its staged workspace patch before guest dispatch. The actual
+temporary patch bytes were not retained, so the incident's precise patch
+contents remain unknown. An unchanged real-Bash boundary control reproduces
+the same failure when a clean frozen launch later discovers mutable checkout
+edits. A provenanced launch must use only its captured patch handoff; the
+standalone unprovenanced fallback and explicit captured-patch verification
+remain intact. The failed canary is retained, and no chat task result is claimed.
+Its Machines are absent; its durable source claim remains until native deletion
+of the two recorded volumes completes. This is cleanup authority only and
+grants no historical task credit.
+
 The user explicitly authorized this separate pre-parent-merge repair and full
 deploy. They require genuine parallel independent smoke campaigns, no app-wide
 quiet window, original unchanged receipts, exact source/image/volume ownership,

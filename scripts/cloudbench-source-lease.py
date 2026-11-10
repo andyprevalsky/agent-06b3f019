@@ -18,6 +18,7 @@ import runpy
 import secrets
 import signal
 import stat
+import subprocess
 import sys
 import time
 
@@ -120,11 +121,23 @@ def put_metadata(lease, key, value):
     need(metadata(current).get(key) == value, 'source metadata write acknowledgement unconfirmed')
 
 
+def fleet_git_common(root):
+    """run-bench-fleet's GIT_COMMON_DIR, which holds both FLEET_AUDIT_ROOT and FLEET_OWNERSHIP_ROOT. A linked
+    worktree's .git is a file, so <root>/.git/cloudbench-fleet-* never existed for a deploy worktree: audits
+    could not be bound and a retained ownership registry was invisible (2026-11-07)."""
+    dot = Path(root) / '.git'
+    if dot.is_dir():
+        return dot
+    out = subprocess.run(['git', '-C', str(root), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                         capture_output=True, text=True, timeout=30)
+    need(out.returncode == 0 and out.stdout.strip(), 'git common directory')
+    return Path(out.stdout.strip())
+
+
 def canonical_custody(workspace, consumer_owner, run_id, manifest_digest, parent_pid):
     root = Path(workspace)
     C['STORAGE']['plain'](root, True)
-    helpers = runpy.run_path(str(HERE / 'deploy_test_native_cleanup.py'))
-    common = helpers['fleet_git_common'](root).resolve(strict=True)
+    common = fleet_git_common(root).resolve(strict=True)
     registry = common / 'cloudbench-fleet-ownership' / consumer_owner
     meta = C['STORAGE']['fields'](registry / 'meta')
     audit = common / 'cloudbench-fleet-audits' / consumer_owner
@@ -204,8 +217,7 @@ def digest_tree(root):
 def terminal_authority(proof, consumer_owner, run_id, manifest_digest, workspace, custody=None):
     need(set(proof) == {'audit_dir', 'lifecycle'}, 'normal fleet cleanup audit and lifecycle required')
     audit, lifecycle = Path(proof['audit_dir']), Path(proof['lifecycle'])
-    helpers = runpy.run_path(str(HERE / 'deploy_test_native_cleanup.py'))
-    common = helpers['fleet_git_common'](Path(workspace)).resolve(strict=True)
+    common = fleet_git_common(Path(workspace)).resolve(strict=True)
     expected_audit = common / 'cloudbench-fleet-audits' / consumer_owner
     need(audit == expected_audit and custody is not None and custody['audit_dir'] == str(expected_audit)
          and custody['workspace'] == workspace and custody['manifest_digest'] == manifest_digest
@@ -498,7 +510,7 @@ def recover_workspace(args):
     """Discover original custody from the native claim; never guess an old runs root."""
     root = args.workspace.absolute()
     C['STORAGE']['plain'](root, True)
-    common = runpy.run_path(str(HERE / 'deploy_test_native_cleanup.py'))['fleet_git_common'](root).resolve(strict=True)
+    common = fleet_git_common(root).resolve(strict=True)
     audit = common / 'cloudbench-fleet-audits' / args.consumer_owner
     C['STORAGE']['plain'](audit, True)
     fields = C['STORAGE']['fields'](audit / 'meta')

@@ -2833,10 +2833,30 @@ source """
         + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh"))
         + """
 mkdir -p "$BENCHMARK_CONTEXT_DIR"
+health_pid=""
+if [ "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" = 1 ]; then
+    node back-end/fixture-health.cjs &
+    health_pid=$!
+    while [ ! -f "$BENCHMARK_CONTEXT_DIR/custody-health.ready" ]; do
+        kill -0 "$health_pid" || exit 1
+        sleep 0.02
+    done
+fi
 printf '{"status":"running"}\n' > "$BENCHMARK_CONTEXT_DIR/services.json"
-trap 'run_publish_stack_cleanup_status clean; exit 0' TERM INT
+trap '[ -z "$health_pid" ] || { kill -TERM "$health_pid" 2>/dev/null || true; wait "$health_pid" || true; }; run_publish_stack_cleanup_status clean; exit 0' TERM INT
 while :; do sleep 1; done
 """,
+    )
+    (repo / "back-end/fixture-health.cjs").write_text(
+        "const http=require('node:http');\n"
+        "const proxy=globalThis[Symbol.for('rose.test.kernelProxyCustody')];\n"
+        "const resource=globalThis[Symbol.for('rose.test.kernelResourceCustody')];\n"
+        "if(proxy!==true||resource!==true)throw new Error('real custody preload missing');\n"
+        "http.createServer((req,res)=>{res.writeHead(200,{\n"
+        "'x-rose-kernel-proxy-custody':'enforced-v1',\n"
+        "'x-rose-kernel-resource-custody':'enforced-v1'});res.end('{}');\n"
+        "}).listen(Number(process.env.CONDUCTOR_PORT),'127.0.0.1',()=>{\n"
+        "require('node:fs').writeFileSync(process.env.BENCHMARK_CONTEXT_DIR+'/custody-health.ready','ready');});\n"
     )
     runner_wrapper = repo / "agents/benchmarks/run_benchmark.py"
     runner_wrapper.write_text(
@@ -2982,8 +3002,14 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
         controls / "target.py",
         "#!/usr/bin/env python3\nimport sys\nprint('local')\nprint('--port')\nprint(sys.argv[2])\n",
     )
+    real_env_functions = "\n".join(
+        _extract_fleet_function(ENV_HELPER_SCRIPT.read_text(), name + "() {")
+        for name in ("cloudbench_verify_source_guest_env", "cloudbench_kernel_proxy_node_options",
+                     "cloudbench_kernel_proxy_custody_policy")
+    )
     (controls / "env.sh").write_text(
-        """cloudbench_verify_env_file() { return 0; }
+        real_env_functions + "\n"
+        + """cloudbench_verify_env_file() { return 0; }
 cloudbench_require_guest_temporal_namespace() { return 0; }
 cloudbench_require_agentcard_org_oauth() { return 0; }
 cloudbench_validate_browser_provider_contract() { return 0; }
@@ -2991,6 +3017,11 @@ cloudbench_env_value() { return 0; }
 cloudbench_apply_compute_token_authority() { return 0; }
 """
     )
+    guard = repo / "back-end/scripts/blackbox-kernel-proxy-custody.cjs"
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "back-end/scripts/blackbox-kernel-proxy-custody.cjs", guard)
+    shutil.copy2(ROOT / "back-end/scripts/verify-kernel-proxy-custody.cjs",
+                 guard.with_name("verify-kernel-proxy-custody.cjs"))
     (controls / "seed-budget.sh").write_text("stack_wait_budget_seconds() { printf '5\\n'; }\n")
 
     def unused_tcp_port() -> int:
@@ -3022,6 +3053,7 @@ cloudbench_apply_compute_token_authority() { return 0; }
             "CLOUDBENCH_BENCHMARK_TARGET_SCRIPT": str(controls / "target.py"),
             "CLOUDBENCH_CATALOG_SCRIPT": str(controls / "catalog.py"),
             "CLOUDBENCH_ENV_HELPER": str(controls / "env.sh"),
+            "CLOUDBENCH_SOURCE_ENV_HELPER": str(ROOT / "scripts/cloudbench-source-env.py"),
             "CLOUDBENCH_SEED_BUDGET_LIB": str(controls / "seed-budget.sh"),
             "CLOUDBENCH_DEPS_DIR": str(tmp_path / "deps"),
             "CLOUDBENCH_WMH_DIR": str(data_dir / "world-model"),
@@ -4062,6 +4094,76 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     provenance = _extract_fleet_function(fleet, "print_code_provenance() {")
     assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in provenance
     assert "local changes intentionally excluded" in provenance
+
+
+@pytest.mark.parametrize("scenario", ["frozen-none", "captured-patch", "tampered-patch", "missing-capture", "standalone"])
+def test_cloud_frozen_patch_handoff_ignores_later_workspace_edits(tmp_path: Path, scenario: str) -> None:
+    """Execute the real controller boundary and verifier after a late edit."""
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    tracked = repo / "tracked.txt"
+    tracked.write_text("committed base\n")
+    git = ["git", "-C", str(repo)]
+    for args in (["init", "-q"], ["add", "."],
+                 ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "base"]):
+        subprocess.run(git + args, check=True, capture_output=True)
+    snapshot, manifest, provenance = _make_execution_provenance(tmp_path)
+    captured = tmp_path / "captured.patch"
+    tracked.write_text("captured unpublished parent delta\n")
+    with captured.open("w") as output:
+        subprocess.run(["bash", str(WORKTREE_PATCH_SCRIPT), str(repo), "HEAD"],
+                       stdout=output, stderr=subprocess.PIPE, text=True, check=True)
+    captured_sha = hashlib.sha256(captured.read_bytes()).hexdigest()
+    document = json.loads(provenance.read_text())
+    document["workspace_patch_sha256"] = captured_sha if scenario in {
+        "captured-patch", "tampered-patch", "missing-capture"
+    } else "none"
+    provenance.write_text(json.dumps(document))
+    # This edit occurs AFTER the controller froze either its patch or "none".
+    tracked.write_text("unrelated later workspace edit\n")
+    if scenario == "tampered-patch":
+        captured.write_bytes(captured.read_bytes() + b"tampered\n")
+    cloud = CLOUD_SCRIPT.read_text()
+    start = cloud.index('LOCAL_PATCH_FILE=""')
+    end_marker = "verify_execution_provenance_contract || exit 1"
+    end = cloud.index(end_marker, start) + len(end_marker)
+    block = cloud[start:end].replace(
+        '"$ROOT_DIR/scripts/create-worktree-patch.sh"', shlex.quote(str(WORKTREE_PATCH_SCRIPT))
+    )
+    environment = os.environ.copy()
+    for key in ("CLOUDBENCH_SKIP_LOCAL_PATCH", "CLOUDBENCH_LOCAL_PATCH_SOURCE", "CLOUDBENCH_LOCAL_PATCH_SHA256"):
+        environment.pop(key, None)
+    environment.update(
+        CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE="0" if scenario == "standalone" else "1",
+        CLOUDBENCH_EXECUTION_PROVENANCE_FILE=str(provenance),
+        CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT=str(EXECUTION_PROVENANCE_SCRIPT),
+        CLOUDBENCH_RESULT_SCRIPT=str(CLOUDBENCH_RESULT_SCRIPT),
+        CLOUDBENCH_RUNTIME_SCRIPT_ROOT=str(snapshot),
+        CONTROLLER_SNAPSHOT_MANIFEST=str(manifest), BENCH_REF="a" * 40,
+    )
+    if scenario in {"captured-patch", "tampered-patch"}:
+        environment.update(CLOUDBENCH_LOCAL_PATCH_SOURCE=str(captured),
+                           CLOUDBENCH_LOCAL_PATCH_SHA256=captured_sha)
+    result = subprocess.run(
+        ["bash", "-euc", 'source "$1"\nROOT_DIR="$2"\nSTAGED_LOCAL_FILES=()\n' + block
+         + '\nprintf "PATCH=%s\\n" "${LOCAL_PATCH_SHA256:-none}"',
+         "patch-handoff", str(ENV_HELPER_SCRIPT), str(repo)],
+        env=environment, text=True, capture_output=True, timeout=20,
+    )
+    if scenario == "tampered-patch":
+        assert result.returncode != 0
+        assert "shared local workspace patch checksum mismatch" in result.stderr
+    elif scenario == "missing-capture":
+        assert result.returncode != 0
+        assert "workspace patch does not match the staged guest patch" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        actual = result.stdout.strip().split("PATCH=")[-1]
+        if scenario == "standalone":
+            assert re.fullmatch(r"[0-9a-f]{64}", actual)
+            assert actual != captured_sha
+        else:
+            assert actual == (captured_sha if scenario == "captured-patch" else "none")
 
 
 def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
@@ -10071,6 +10173,7 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
             "fleet_release_cleanup_capacity() {",
             "fleet_billing_stop_retained_idle() {",
             "fleet_registry_release_verified() {",
+            "finish_private_source_lease() {",
             "cleanup() {",
         )
     )
@@ -27525,7 +27628,9 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
         (binaries / name).chmod(0o755)
     driver = DRIVER_SCRIPT.read_text()
     start = driver.index('BENCH_TARGET_MODE_FOR_STACK=""')
-    end = driver.index('log "launching stack (run.sh --benchmark)', start)
+    # Exercise ngrok bootstrap only; custody launch/verification has its own
+    # real preload tests, including production-target refusal.
+    end = driver.index('# Cloud guest Kernel proxy custody', start)
     target = "prod" if scenario == "production" else "local"
     requested_repo = tmp_path / "historical-repo" if scenario == "historical" else ROOT
     requested_repo.mkdir(exist_ok=True)
@@ -31394,6 +31499,9 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
         _extract_fleet_function(fleet_source_text(), signature)
         for signature in (
             "registry_meta_value() {",
+            "release_registry_recovery_guard() {",
+            "release_registry_recovery_lock() {",
+            "fleet_close_recovered_source_consumer() {",
             "fleet_registry_cleanup_state() {",
             "fleet_recovery_confirm_forensic_retirement() {",
             "fleet_recovery_confirm_runtime_evidence() {",
@@ -31408,6 +31516,7 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
     script = f"""set -u
 APP=bench-app
 FLEET_OWNER_HOST=fixture-host
+FLEET_OWNER_PID_START=fixture-birth
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_record.parents[2]))}
 FORENSIC_RETIREMENT_HELPER={shlex.quote(str(FORENSIC_RETIREMENT_SCRIPT))}
@@ -32610,6 +32719,12 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
         "SKIP_AUTOSCALER": "0",
         "CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE": "0",
         "EXECUTION_PROVENANCE_FILE": str(tmp_path / "fixture-provenance"),
+        # Match ordinary controller bootstrap before extracting its child handoff.
+        "PRIVATE_SOURCE_FILE": "",
+        "PRIVATE_SOURCE_SHA256": "none",
+        "PRIVATE_SOURCE_LEASE_PROTOCOL": "none",
+        "PRIVATE_SOURCE_GUEST_ENV_MODE": "none",
+        "PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256": "none",
         "BENCH_REF": "fixture-ref",
         "CHILD_RUN_TIMEOUT": "10",
         "RUN_BENCH_CLOUD_BIN": str(child),
@@ -34081,7 +34196,9 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release(tmp_p
                   "registry_owner_alive() {", "acquire_registry_recovery_lock() {",
                   "release_cleanup_disk_reserve() {", "recover_exact_stale_fleet_owner() {",
                   "finalize_terminal_projection() {"]
-    for signature in ("fleet_finalize_released_projection() {", "fleet_publish_recovered_terminal_projection() {"):
+    for signature in ("release_registry_recovery_guard() {", "release_registry_recovery_lock() {",
+                      "fleet_close_recovered_source_consumer() {",
+                      "fleet_finalize_released_projection() {", "fleet_publish_recovered_terminal_projection() {"):
         if signature in fleet:
             signatures.append(signature)
     functions = _fleet_pid_identity_helpers(fleet) + "\n".join(_extract_fleet_function(fleet, signature) for signature in signatures)
@@ -34251,6 +34368,9 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release_after
             "fleet_registry_cleanup_state() {",
             "registry_owner_alive() {",
             "acquire_registry_recovery_lock() {",
+            "release_registry_recovery_guard() {",
+            "release_registry_recovery_lock() {",
+            "fleet_close_recovered_source_consumer() {",
             "release_cleanup_disk_reserve() {",
             "recover_exact_stale_fleet_owner() {",
             "fleet_registry_remove_if_empty() {",

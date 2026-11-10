@@ -45,3 +45,19 @@ Keep original real cloud width4, caps56/140, all tasks/assertions/budgets and li
 ## Reusable lesson
 
 Isolate standalone fixture authority and capacity inputs within restoring test setup while preserving explicit production guard and limit tests.
+
+## November 10 recurrence: opted-in Kernel custody in offline layout fixtures
+
+PR1910's full deployment enabled the required Kernel allocation guard in its
+real worker environment. Three offline worker-layout assertions inherited that
+policy even though their fixture expectations describe the default, unselected
+layout. The same commands reproduce two failures in `deploy-gates.test.py` and
+one in `deploy-test-github.test.py` with custody enabled.
+
+The offline fixture setup now explicitly selects its default policy and clears
+the inherited Node preload within the restoring environment patch. Production
+worker environments and the guard remain unchanged. The three original
+assertions pass, as does the unchanged positive control that explicitly enables
+custody and loads the guard in a real Node child. Full deployment qualification
+remains separate. Evidence: the original PR1910 deployment gate receipts and
+`.context/rca-3a0-hermetic-tests/report.json`.

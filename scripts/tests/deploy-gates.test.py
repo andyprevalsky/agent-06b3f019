@@ -90,7 +90,8 @@ class Fixture(unittest.TestCase):
         (self.root / 'a.txt').write_text('two')
         self.commit('second')
         self.head = sh(self.root, 'git', 'rev-parse', 'HEAD').strip()
-        self.environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers)})
+        self.environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers),
+                                               'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0', 'NODE_OPTIONS': ''})
         self.environ.start()
         os.environ.pop('DEPLOY_TEST_CYCLE_STATE_DIR', None)
         os.environ.pop('DEPLOY_RUN_ROOT', None)

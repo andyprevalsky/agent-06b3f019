@@ -716,12 +716,20 @@ class Graph:
         pkg = package_root(rel)
         allow_dirs = is_test_support(rel)
         shell = PurePosixPath(rel).suffix in {".sh", ".bash", ""}
+        copy_continuation = False
         for line in source.splitlines():
+            # A plain snapshot copy reads bytes; it does not run each copied
+            # module and its imports. Keep compound/substituted commands
+            # conservative, including executable paths on the same line.
+            copy_start = re.search(r"(?:^|&&|\|\||\bthen)\s*!?\s*(?:command\s+)?cp(?:\s|$)", line) if shell else None
+            copy_tail = line[copy_start.end():] if copy_start else line
+            copy_data = shell and (copy_continuation or copy_start is not None) and not re.search(r"\$\(|[<>]\(|`|[;&|]", copy_tail)
+            copy_continuation = bool(copy_data and line.rstrip().endswith("\\"))
             if not PATH_HINT_RE.search(line):
                 continue
             # Product code names repo scripts in help text and error messages;
             # only tests, scripts and shell are treated as executing them.
-            exec_line = shell or (allow_dirs and bool(EXEC_LINE_RE.search(line)))
+            exec_line = (shell and not copy_data) or (allow_dirs and bool(EXEC_LINE_RE.search(line)))
             for token in PATH_TOKEN_RE.findall(line):
                 stripped = token.lstrip("/")
                 while stripped.startswith(("./", "../")):

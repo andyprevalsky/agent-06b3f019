@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real holder/check/close processes and creator retirement at native HTTP boundary."""
 from datetime import datetime, timezone
+import ast
 import hashlib
 import json
 import os
@@ -392,6 +393,31 @@ class SourceLease(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.ready.exists())
         self.assertFalse(any(k.startswith(self.m['CLAIM_PREFIX']) for k in self.b.machines[self.mid]['config']['metadata']))
+
+
+class FleetGitCommon(unittest.TestCase):
+    def test_same_canonical_path_implementation_without_deploy_planner_import(self):
+        def implementation(path):
+            return next(node for node in ast.parse(path.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'fleet_git_common')
+        self.assertEqual(ast.dump(implementation(HERE/'deploy_test_native_cleanup.py')),
+                         ast.dump(implementation(HELPER)))
+
+    def test_normal_gitfile_and_invalid_repositories(self):
+        module = runpy.run_path(str(HELPER))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            regular = root/'regular'
+            subprocess.run(['git', 'init', '-q', str(regular)], check=True, capture_output=True)
+            self.assertEqual(module['fleet_git_common'](regular), regular/'.git')
+            separate, common = root/'separate', root/'common'
+            subprocess.run(['git', 'init', '-q', '--separate-git-dir', str(common), str(separate)],
+                           check=True, capture_output=True)
+            self.assertTrue((separate/'.git').is_file())
+            self.assertEqual(module['fleet_git_common'](separate), common)
+            invalid = root/'invalid'; invalid.mkdir()
+            with self.assertRaises(ValueError):
+                module['fleet_git_common'](invalid)
 
 
 class AuditFDBound(unittest.TestCase):

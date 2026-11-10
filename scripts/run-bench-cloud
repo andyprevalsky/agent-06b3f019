@@ -5370,7 +5370,8 @@ if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
         # The hash above verifies bytes, but never promotes a mutated child's
         # newly observed value to the expected checksum.
         LOCAL_PATCH_SHA256="$CLOUDBENCH_LOCAL_PATCH_SHA256"
-    elif cloudbench_worktree_has_changes "$ROOT_DIR"; then
+    elif [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" != "1" ] \
+        && cloudbench_worktree_has_changes "$ROOT_DIR"; then
         _candidate_patch="$(mktemp)"
         STAGED_LOCAL_FILES+=("$_candidate_patch")
         _local_patch_rc=0
