@@ -1,0 +1,17 @@
+{
+  "source": "dcf0af7fa5a4957b0305779af052ca9ba8c505c8",
+  "review_url": "https://github.com/Rose-Ai-Labs/rose/pull/1837#pullrequestreview-5818421698",
+  "review_state": "COMMENTED",
+  "correctness_security_findings": 0,
+  "inline_comments": 0,
+  "ignored_style_only_findings": [
+    {
+      "text": "Docstring Coverage: write docstrings for functions missing them",
+      "disposition": "IGNORED",
+      "reason": "Pure documentation/style coverage suggestion; no correctness/security finding. Owning31 regressions and identical guard RED/GREEN verified; repository explicitly ignores pure style nits."
+    }
+  ],
+  "terminal_evidence_sha256": "7edb4c9b968b6ad65c1e55e118e2842d8b0c57ea67a9e433ec4fcf791af84df8",
+  "disposition_sha256": "842552ddfb7fca55bb1c240e56f08b5ba67f9f7d359209791c515020d5ecd942",
+  "limits": "Actual dcf application review only; final history/cycle source and review are not yet known."
+}

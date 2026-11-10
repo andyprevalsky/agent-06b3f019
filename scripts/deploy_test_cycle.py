@@ -1177,6 +1177,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
         if entry and entry.get('kind') == 'github-actions-cleanup-v1':
             return github_cleanup_evidence(state, receipt, entry['proof']) == entry
+        if entry and entry.get('kind') == 'github-terminal-cleanup-v1':
+            from deploy_test_github_cleanup import still_bound
+            return still_bound(state, receipt, owner, entry)
         if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
             from deploy_test_cloud_refusal import still_bound
             return still_bound(state, receipt, entry)
@@ -1340,6 +1343,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> 
             raise ValueError('github cleanup requires the latest original receipt')
         entry = github_cleanup_evidence(state, receipt, proof)
         state.setdefault('reconciled_owners', {})[proof['receipt_sha256']] = entry
+        return
+    if proof.get('kind') == 'github-terminal-cleanup-v1':
+        from deploy_test_github_cleanup import reconcile as reconcile_github
+        reconcile_github(state, occurrence_id, proof)
         return
     if proof.get('kind') == 'round49-launch-debt-retirement-v1':
         from deploy_test_round49_retirement import reconcile as retire_round49

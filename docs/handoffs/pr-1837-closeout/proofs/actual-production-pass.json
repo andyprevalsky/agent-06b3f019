@@ -1,0 +1,53 @@
+{
+  "status": "PASS",
+  "native_exit": 0,
+  "exact_merge": "b7c77bdde14badd0f957e86375f177f6ef686fc3",
+  "started_at": "2026-11-09T00:25:40Z",
+  "finished_at": "2026-11-09T00:34:40Z",
+  "lanes": {
+    "render": {
+      "status": "PASS"
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable"
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable"
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable"
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable"
+    },
+    "backend-probes": {
+      "status": "PASS"
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable"
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable"
+    },
+    "semantic": {
+      "status": "PASS"
+    }
+  },
+  "endpoint_checks_passed": 15,
+  "post_deploy_error_lines": 0,
+  "frontend_semantic": {
+    "status": "PASS",
+    "jobs_passed": 5,
+    "run": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42540346581",
+    "authority": "Root native production coordinator terminal proof"
+  },
+  "native_coordinator_exit": 0,
+  "native_coordinator_retired": true,
+  "native_receipt_sha256": "21e6a622cdbba8b272eb7c628f1bc99ddda6e75f85ae26807ba3753c52468bd1",
+  "terminal_proof": {
+    "sha256": "c822167246bf955a29fcbb6e30cb97ac0c639006ec56854dce72ab532d002df7",
+    "bytes": 1554
+  },
+  "no_financial_execution_or_credit": true,
+  "limits": "Not-applicable lanes remain SKIPPED, not executed passes. Deploy finish, final preservation, reviewed records followup/deletionREADY and scorecard final approval remain separate."
+}

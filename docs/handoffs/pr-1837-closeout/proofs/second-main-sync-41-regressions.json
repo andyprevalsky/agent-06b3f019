@@ -1,0 +1,52 @@
+{
+  "scope": "Historical non-live integration proof; no real-cycle reset/migration",
+  "focused_union": {
+    "tests": 41,
+    "native_exit": 0,
+    "test_sha256": "e1c2ec3aa47dfac7ac26a39c2d10d61cf225601b9b6aa90e4046f1b4c48f8225",
+    "source_sha256": "7d69eef45d8cc916ef4eb5dce44f0da11a11d66b1b87167efe78bfce1caaee22",
+    "started_at": "2026-11-08T22:45:03.610309+00:00",
+    "finished_at": "2026-11-08T22:46:37.946557+00:00",
+    "receipt": {
+      "sha256": "9cc8f63ec2380cdb99f10cd8abe9301c8d25a036faff4e816ca1dd2f531b1d6e",
+      "bytes": 3800
+    }
+  },
+  "actual_publication_defect": {
+    "gate": "INTRODUCED in uncommitted integration",
+    "failure": "Legacy admission validated but failed to publish candidate into caller state; two missing-custody errors and persistent-guard refusal absent",
+    "correction": "Original state.clear/update publication restored after validation; strict main publication retained",
+    "unchanged_assertions": true,
+    "corrected_union_native_exit": 0,
+    "private_rca_reference": {
+      "sha256": "3da66eed449d2cbe495c30b937fe4e615280c116f6f02b74bb6834740e349303",
+      "bytes": 741
+    }
+  },
+  "main_verifier_legacy_compatibility": {
+    "red_native_exit": 1,
+    "green_native_exit": 0,
+    "same_final_test_sha256": "e1c2ec3aa47dfac7ac26a39c2d10d61cf225601b9b6aa90e4046f1b4c48f8225",
+    "method": "Exact main verify_import_origin replayed in memory against legitimate retained legacy fixture; shared actual donor/build/adopt guards retained; same test then passes combined implementation including tamper refusals",
+    "red_receipt": {
+      "sha256": "a9f0285279c429b6bd01233538ea0d7edea6c858ea091bd02513667ceb9366cf",
+      "bytes": 629
+    },
+    "green_receipt": {
+      "sha256": "14384a8bc54b734dc0d42bb40eb8cc3c1bbe15cec2edffee5fed107b886eb15b",
+      "bytes": 470
+    }
+  },
+  "preservation": {
+    "main_functions_changed_for_shared_compatibility_only": [
+      "donor_rows",
+      "verify_import_origin"
+    ],
+    "main_shared_donor_validation_body_AST_exact": true,
+    "branch_old_assertions_lost": {},
+    "main_all_test_methods_AST_unchanged": true,
+    "branch_main_fixture_evolution": "Only main fixture/support dependency additions and stricter relay environment assertion; old assertions preserved.",
+    "history_missing_raw_rows": []
+  },
+  "runtime_new_source_credit": false
+}

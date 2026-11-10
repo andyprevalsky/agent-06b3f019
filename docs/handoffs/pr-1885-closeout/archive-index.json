@@ -1,0 +1,480 @@
+{
+  "format": "PR1885-PRIVATE-PRESERVATION-CATALOG-V1",
+  "verified_at": "2026-11-09T20:45:21.366350+00:00",
+  "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+  "key_env": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+  "key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "key_binding": "Each archive authenticated with current matching managed key by reading/decrypting one retained object; every full archive part was separately authenticated readback at creation.",
+  "final_logical_index_archive": "final-20261109T204100683427Z",
+  "logical_namespace_entries": 110016,
+  "all_final_carrier_references_verified": true,
+  "archive_count": 5,
+  "archives": {
+    "original-native": {
+      "format": "TAR-GZ-AESGCM-V1",
+      "key": "devbox-closeout-private/pr1885/original-fa52acfc73223e2088098ba262d337da9f07f1aef418e76d8dc58bdd94407cb8.tar.gz.aesgcm",
+      "sha256": "fa52acfc73223e2088098ba262d337da9f07f1aef418e76d8dc58bdd94407cb8",
+      "ciphertext_sha256": "1be51390566fec11aaf6902137bbb47b4f204da653bbd8e7c0870c4063b450b5",
+      "roundtrip_verified": true,
+      "files": {
+        "findings--d6f846ef050a51402e5e.json": "855cc46deb61ae553f011220b316991fcac37bf78b637384be32322da2de585e",
+        "production-lanes--f78a0985a4aee15c518b.json": "8b8eeb04b414a2663fdcd41db5515a5990b60f87d64431d050f0b289c439dc6d",
+        "original-result--f61bbc085a72a9dbcac6.json": "9649a851eb2294219b30afa80e67f31d7b1c95f91dca65990cc3f8d4c3e39824",
+        "workflow-migration--4e7163465053fd0f2cfb.log": "a6ea02bc4e02aa783188799b1c0f0d287ae1bb9a56295a6e30c806e98523f825"
+      },
+      "source_receipt": ".context/prepared-liveness/original-archive-receipt.json",
+      "key_fingerprint_verified_by_authenticated_sample": true
+    },
+    "inherited-git-refs": {
+      "format": "GIT-BUNDLE-AESGCM-FRAMES-V1",
+      "prefix": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm",
+      "sha256": "77988a320577269be76774fe75569d6533b3b44836c0bd393048bd24275dc492",
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0000",
+          "sha256": "8f96839af5696c1d7524f87139850a032dbeb12821f4a1dd9544c7d1a0e1c923",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0001",
+          "sha256": "417b675b189207ae29b1b8a36cbb0731e3068d25604239e330fdaeccd719a224",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0002",
+          "sha256": "0bd666d7b5d25f81e3669a4d6acd90be580d461440e0aae180f36cb780f2a3b9",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0003",
+          "sha256": "60c6a60291845505e36c68e70b532be06ccbb56f89e1a5da09f4d2586e30d011",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0004",
+          "sha256": "34dac5c4725444e977b40c950e8ee6af99bb1665f967897ac37cb8f3a50e109e",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0005",
+          "sha256": "4b89e16b97f8f20c2151e02b4bf66294da0681b7408ca62d91caa3cb381efd66",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0006",
+          "sha256": "84a5ccb821120168e7c0873dac221d59f20d56d1f3304cb002194e8e96ebd374",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0007",
+          "sha256": "63fc4fc014a91c45a9a45bb86e8d1856a1eed62bb6d191553f9573b83af341ce",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0008",
+          "sha256": "ba843d3937a5b6d7e4aa9b23493b992fa66e733e0e1a71d5e9294f6f4aaf40b5",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0009",
+          "sha256": "a30cccf67c54a50867c96d8b04538a358327eeda766178477c3492e544c8cbbd",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0010",
+          "sha256": "d0656484c67bba4bd81f7089949945bdcb935183b7d9b75ad20f04ec3e0e057b",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0011",
+          "sha256": "57ab003ad9655bcaefcf3152830395770a2793d21fb5f01d28ec3707b49e7bad",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0012",
+          "sha256": "a2f427ecb39009a75cd8a8b6d0c1571a1541168f0915bcb8545d1e1d571ea608",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0013",
+          "sha256": "b005d7639c29f4300cfcf04ee8cb4198392d1a10a8e030ed8ea145a075e546f3",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0014",
+          "sha256": "dca39634fbcc5245d636384e838d00792d44de42d53bf99cbc7c66aff9e7d795",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0015",
+          "sha256": "af328dbd35bf661a78afe2b8501a8652be146566ff799ed6ab1eb08e6f91f0c2",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0016",
+          "sha256": "3cf5a91a780253abfe10edbb036be7186c222c56c3ec3b764597c17b504c70c9",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0017",
+          "sha256": "6702be9c2752ec29f9a4fb7e765fdb21c89e515c5c93af786d4a3699e8af773d",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0018",
+          "sha256": "35922c7a91aca8bdea48d16ac169f59ab68aa1408d6adbff8ba169bd800b211c",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0019",
+          "sha256": "5ae51ff9bde3ffeaaebaac6f5ab58f3245975ff7f38ddb5ac1d5b9e34a673f43",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0020",
+          "sha256": "be43f49c545c95fad2b3b7f9b2688aa954d08a67ba61a8e08ba65629e1eb77e4",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0021",
+          "sha256": "1e94d5f6b00724d3665b9019c831ff7fa8d6a417632803bdff4b6ee0bf6354d8",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0022",
+          "sha256": "a55ee454be5bf8f4d41e83037ad63ae0d4cbdd6dc93fd7377badbdee432339f0",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0023",
+          "sha256": "29a07dc6196e2dc972d4413f07199ef2b129466d251eb10e84140fbf5cd0966a",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0024",
+          "sha256": "2cde29719ed7caa2b160ff12d9cee12841f32b47b5382e6d53a42b1945b7f7ff",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0025",
+          "sha256": "867a957f756b0c4278e2ac64ac8008732db2ff7485f24bfd2920e477edbeac30",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0026",
+          "sha256": "703bd6e05b47580dd54fba8957a4c9184d1c40781600215020f56220c3dfc5e1",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0027",
+          "sha256": "0e0df0a79e2e47cc6952e9e0fd0ad995a004eee142e950db85198525815bfd07",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0028",
+          "sha256": "2f7ee459bddb81521d53fc1d21ec673c1a649f23fbc0b7b38cf7174aef378298",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0029",
+          "sha256": "93691de27ddda2c52bdd5dc92b688fc30a289077ccc7fd4c01aedb809a420a3d",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0030",
+          "sha256": "cecd49bd7d602f3cfcf171a3845a49cdea995ff95afe573ca9fde3c3c8e8f4d2",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0031",
+          "sha256": "e0f51a73dd9d7e90b2b8e19947664514b4964faaa9ac2108770847dd93a193c4",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0032",
+          "sha256": "e1264217aedb48e27337870606dac0f5d9186635b98ec3559508a3e28f351ea5",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0033",
+          "sha256": "926777191ea5688205c70836b1578336a57a75f04eb00591ac5756fe8c9c962f",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0034",
+          "sha256": "417f0f35f7d08884477a7ede24652aca9af3a919836084ef7c376cc2901a59fa",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0035",
+          "sha256": "2e84b18c02864ee86771dafaeae408f1c175ba5ae4b2905abfe844d080e264a5",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0036",
+          "sha256": "48bcc743e819e4c534471c971be2f5b435b49ea94a72d708d58ba1ea8c3b0fb0",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/inherited-refs-20261109.bundle.aesgcm.part0037",
+          "sha256": "f839abefb1fa4c1e0306b82c0d427e3d07c5cd3bfc1d840bc56dbe42d7feca92",
+          "plain_bytes": 14182707
+        }
+      ],
+      "roundtrip_verified": true,
+      "source_receipt": ".context/prepared-liveness/inherited-refs-archive-receipt.json",
+      "key_fingerprint_verified_by_authenticated_sample": true
+    },
+    "native-failures-d792-20261109": {
+      "format": "TAR-GZ-AESGCM-FRAMES-V1",
+      "prefix": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm",
+      "sha256": "be551ee27b0a7b419e00daf2bb86eee552f588957fce8d22c209715232e1197e",
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0000",
+          "sha256": "a30c2c00fb6e3e3e9ae02623380c547a8c1c6985ab77f61eda7bdafef3eb319c",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0001",
+          "sha256": "c8c391384c094cd98292a09395d271c6b6c0a2abd4447ccbf6de2fc3b0391d53",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0002",
+          "sha256": "201d0ffe975fdf237309729d34da42acbc9ad2cc70f530539704d3799b279513",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0003",
+          "sha256": "b6e29171b0f2a1bb775c3eb347f726d61dc856cf6dd5b71a99c010e221e2a868",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0004",
+          "sha256": "ebc2ca5ac21e90c87813e0e07130bff37d11c4c2f0fc2e4554ada032f264a911",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0005",
+          "sha256": "95534651aece1a65b9adb338abb9a69876c35681db2e38961bfcc009471f68f2",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0006",
+          "sha256": "d32f8ae1ecf4bd047e9ea464afa04b5a8a42d951294068d4cb3a281bb4efc3b1",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0007",
+          "sha256": "f9d46b789ccb60a162fc473f152f29a6f8799ab9faabadf4789b51fb351e7031",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0008",
+          "sha256": "391d8700f8678b5db42188c314cf2967375a7a53efe9174445ed827b9ffebd62",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0009",
+          "sha256": "242133a89b94b0f6ef3d51c9d0fa2653a681defcca34744ba9e3f2d37bebbe5b",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0010",
+          "sha256": "c86470e5558222d87ee2129cdea50868ee8ea6512f3809455730a05a19d3f0a7",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0011",
+          "sha256": "d7630a9798b99142cf1a3c03d42d6c332a6077e7c597162612d06af84a282c0c",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0012",
+          "sha256": "f67469009cc76db92d350db08e9e794c06ecfd07fc061a3ca554e7202083bfdc",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0013",
+          "sha256": "64ea660616bec8013c2c7b111cb632518f18f35634a93284d50c483c265441f8",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0014",
+          "sha256": "15afd9890772ecc19996d9fdc7314d59462be8b3dbad0959d1b335fa6e561739",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0015",
+          "sha256": "ea644fbd442fa74e4719cc9dbe3bd31d8a6cf905abec2c86aaa6bcbce77ac44c",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0016",
+          "sha256": "e8ddc279def748dd7ca48587b78030e51c781aff9c5dcc9ce7d6ae54867f803f",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0017",
+          "sha256": "7cc2aec0a1824109b7ba27d8f340fc3f4974863b70cbc4bf819d28665b99b3da",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0018",
+          "sha256": "fe0e349d8db40b50970e59324ac64b49dc7b9fb517d9d5f602fd3e4747299f34",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0019",
+          "sha256": "f3c072302dd77a441d996c6fa8bb170855e383cc1091a3c7aaa9fa12df7994b7",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0020",
+          "sha256": "3df4964e79a704aaa6ed863dd6a5c3b39cccdf3a7db87e936beb739f421cd8db",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0021",
+          "sha256": "6b417b0ac7145c6b509b080cb7da3bc10e05bc9b4954243ba8219a5da9b7df0e",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/native-failures-d792-20261109.tar.gz.aesgcm.part0022",
+          "sha256": "1ace47ae473d88df7e26e2bb23c5adf14751ed781d7047a6e2808b57064d40e6",
+          "plain_bytes": 18985970
+        }
+      ],
+      "roundtrip_verified": true,
+      "members": 1948,
+      "member_manifest_sha256": "caa0b9de2009a1a60206784012a39873bf4660406b1c9f0e4cd72ae06cc78fa1",
+      "created_at": "2026-11-09T19:57:41.313199+00:00",
+      "source": "d792e59539b453753d052fd9fb00a497f98ed930",
+      "privacy": "Ciphertext objects only; raw logs remain private. This is authenticated storage readback, not proof of bucket access policy.",
+      "source_receipt": ".context/prepared-liveness/failure-evidence-receipt.json",
+      "key_fingerprint_verified_by_authenticated_sample": true
+    },
+    "baseline-20261109T201716682015Z": {
+      "format": "TAR-GZ-AESGCM-FRAMES-V1",
+      "archive_id": "baseline-20261109T201716682015Z",
+      "prefix": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm",
+      "sha256": "6267bf03f3b9056b04e6e149b257dccdcc28f0fb4cd017e2b9e148ea68ebb3f8",
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0000",
+          "sha256": "aaea99a731c2e34e9454e14844faad95b98149c83581e255516d6e5c10d507d1",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0001",
+          "sha256": "43ce9568c7dca3ea4585ded387d16dab594a876db37876490dbfc8111a23bda8",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0002",
+          "sha256": "2269cbb8be38270352627938e0dd24212c394fbda69f36e08f34281caf515f9a",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0003",
+          "sha256": "556b7622163a832612d92728ceafacd21dcc52582c94f839f4c2761de2d218a5",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0004",
+          "sha256": "2687dc0a583a3b92b45c8b18cbef8fb30831018fba11961988e167ce84fa5459",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0005",
+          "sha256": "1567c10a4dc6959e5395f666257273f806ef37b3e194b06cb70d10153ed9bb63",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0006",
+          "sha256": "85eaf9a1c6db6796fea053453f6b5188cd951e6196b03afa62e4d59bea5bffe5",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0007",
+          "sha256": "261dbb3425a736f24dbd9c10a2797b488c091c433bd8a5d2de480c4c68654e80",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0008",
+          "sha256": "7ce26ee58fb5de42f57ad066a346c64bdb24adf453a08cfd600d7a56af2cec3f",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0009",
+          "sha256": "fca26546dd9acf4b30b6bf538f53addbbdad45234fab7ce69ebd8564189bde9d",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0010",
+          "sha256": "0a03fcea6994006af3f9f404e178a39ba5ea7ff2389a2d322bb543ce416039c5",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0011",
+          "sha256": "31b9784c2c6840e315106efea33485a71b56750bc06652a525517c64d009132f",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0012",
+          "sha256": "a6776397aeb27fe3c4e044a54f60c22de5176988bfeee98d8e56640198d85e83",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0013",
+          "sha256": "e24f5b87b8eb67b2646a50327d02085807b321876738ca7c6dd2540293df02de",
+          "plain_bytes": 33554432
+        },
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-baseline-20261109T201716682015Z.tar.gz.aesgcm.part0014",
+          "sha256": "0d7dfe3e015f02ccaced18ccbe620433a4eb4da5e96500765711329bf7c4c043",
+          "plain_bytes": 570906
+        }
+      ],
+      "roundtrip_verified": true,
+      "new_member_hashes_verified": 108046,
+      "reused_exact_hash_files": 1950,
+      "file_count": 110005,
+      "local_archive": ".context/prepared-liveness/preservation-baseline-20261109T201716682015Z.tar.gz",
+      "private_index": ".context/prepared-liveness/preservation-baseline-20261109T201716682015Z.index.private.json",
+      "private_index_sha256": "8247006c69e85ce655a8633a1cde5f1f0a50745f6b14701e19f6ce9b859f141c",
+      "started_at": "2026-11-09T20:17:16.682015+00:00",
+      "finished_at": "2026-11-09T20:20:45.462329+00:00",
+      "privacy": "Encrypted private objects only; authenticated readback does not establish bucket access policy; no deletion performed.",
+      "source_receipt": ".context/prepared-liveness/preservation-baseline-20261109T201716682015Z.receipt.json",
+      "key_fingerprint_verified_by_authenticated_sample": true
+    },
+    "final-20261109T204100683427Z": {
+      "format": "TAR-GZ-AESGCM-FRAMES-V1",
+      "archive_id": "final-20261109T204100683427Z",
+      "prefix": "devbox-closeout-private/pr1885/preservation-final-20261109T204100683427Z.tar.gz.aesgcm",
+      "sha256": "e7211379eaca041a7ac3931002f2a931634963eafdccdccb30ecb858b18fb7d5",
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1885/preservation-final-20261109T204100683427Z.tar.gz.aesgcm.part0000",
+          "sha256": "38642de667be78b0875663eabb89d2549e018955d46406236377ed3aeba0e774",
+          "plain_bytes": 13252638
+        }
+      ],
+      "roundtrip_verified": true,
+      "new_member_hashes_verified": 19,
+      "reused_exact_hash_files": 109988,
+      "file_count": 110016,
+      "local_archive": ".context/prepared-liveness/preservation-final-20261109T204100683427Z.tar.gz",
+      "private_index": ".context/prepared-liveness/preservation-final-20261109T204100683427Z.index.private.json",
+      "private_index_sha256": "2866c25d7de804e186e4fb9d3260f501ad3991e9e4e39d540512dd75326363fa",
+      "started_at": "2026-11-09T20:41:00.683427+00:00",
+      "finished_at": "2026-11-09T20:41:29.376117+00:00",
+      "privacy": "Encrypted private objects only; authenticated readback does not establish bucket access policy; no deletion performed.",
+      "source_receipt": ".context/prepared-liveness/preservation-final-20261109T204100683427Z.receipt.json",
+      "key_fingerprint_verified_by_authenticated_sample": true
+    }
+  },
+  "privacy_limits": "Ciphertext uploads only; authenticated readback does not verify bucket access policy. Original matching key and R2 read access remain required. Finite per-file captures, no process-memory or atomic whole-machine restore claim."
+}

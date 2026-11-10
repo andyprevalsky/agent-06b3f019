@@ -1,0 +1,74 @@
+{
+  "experiment": 4,
+  "scope": "Historical13b native smoke, not current06b qualification",
+  "source": {
+    "head": "13bedc43a968f815b77a3cc1b0640740beb35eb8",
+    "digest": "fc1c6acd6d3555fb482513cbe2b6914e85ae6994a06a1225b3d4d08032c192cd"
+  },
+  "native_exit": 0,
+  "passed": 11,
+  "scheduled": 11,
+  "cleanup_complete": true,
+  "all_child_controller_native_exits": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "clocks": {
+    "started_at": "2026-11-08T16:59:39.456856+00:00",
+    "finished_at": "2026-11-08T17:30:01.915686+00:00",
+    "wall_clock_seconds": 1822.419,
+    "e2e_started_at_epoch": 1794157179.447267,
+    "e2e_wall_clock_seconds": 1822.468,
+    "e2e_timeout_seconds": null,
+    "e2e_timeout_exceeded": false
+  },
+  "native_closure": {
+    "fleets_verified": 12,
+    "primary_fleets": 11,
+    "nested_fleets": 1,
+    "resource_rows": 14,
+    "hub_owners_retired": 5,
+    "all_hub_owners_retired": true,
+    "all_native_closures_verified": true,
+    "proof": {
+      "sha256": "3834b3692c7afc87977807910c9acee39fe5dbc48c2355d651b5de9b22e3282e",
+      "bytes": 65218
+    }
+  },
+  "history": {
+    "authorization_record": {
+      "sha256": "b57350a1755c7e4e75492a5c8d9f609d86606ad2cfb4cd4ab159a12cbc9c7880",
+      "bytes": 500
+    },
+    "authorized_at": "2026-11-08T22:33:09.269590+00:00",
+    "api": "BenchmarkRun.load/_record_history",
+    "counts_for_deploy_eligibility": false,
+    "rows": {
+      "attempts": 11,
+      "durations": 3,
+      "spans": 12637
+    },
+    "fast_cache_duration_skips": 8,
+    "exact_native_task_and_span_join": true,
+    "proof": {
+      "sha256": "b7dd532fdf580a88bc592fe9715f5764f45c52dc5c6a155b17ad2b1e8dae8b08",
+      "bytes": 1852
+    }
+  },
+  "limitations": {
+    "execution_cards": "MISSED during harness usage-limit interruption; not backfilled as contemporaneous",
+    "native_campaign_observations_continued": true,
+    "terminal_card_lateness_seconds": 18127.35184621811,
+    "no_current_provider_or_savings_claim": true
+  },
+  "financial_credit": false
+}
