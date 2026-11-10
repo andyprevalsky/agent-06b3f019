@@ -442,6 +442,7 @@ GATES = (
         "cloudbench-fixture-process-cleanup",
         ("python3", "scripts/tests/cloudbench-fixture-process-cleanup.test.py"),
     ),
+    Gate("cloudbench-pid-identity", ("bash", "scripts/tests/cloudbench-pid-identity.test.sh")),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),

@@ -2061,7 +2061,19 @@ cloudbench_pid_birth_state() {  # <pid> <expected-start> -> live|absent|unknown
 }
 
 cloudbench_pid_matches_start() {
-  [ "$(cloudbench_pid_birth_state "$1" "$2")" = "live" ]
+  local observation
+  case "$2" in
+    proc-start:*)
+      # A boolean birth match needs one native observation, not the nested
+      # command substitutions used to classify absent versus unknown owners.
+      # Both classifications are non-matches here; keep their richer API intact.
+      case "$1" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$1" -gt 1 ] && [ -r /proc/self/stat ] || return 1
+      observation="$(cloudbench_proc_pid_observation "$1")" || return 1
+      [ "${observation%%$'\t'*}" = "$2" ]
+      ;;
+    *) [ "$(cloudbench_pid_birth_state "$1" "$2")" = "live" ] ;;
+  esac
 }
 
 # Teardown calls these from EXIT traps, where a bare `return` reports the
@@ -2264,6 +2276,37 @@ for pid, start in ordered:
     live=0
     for ((i = 0; i < ${#targets[@]}; i++)); do
       if cloudbench_pid_matches_start "${targets[$i]}" "${target_starts[$i]}"; then
+        # An exact single-thread Linux zombie cannot execute during TERM grace.
+        # Keep the shared birth matcher unchanged: ownership is not liveness.
+        observation="$(cloudbench_pid_observation_like "${targets[$i]}" "${target_starts[$i]}")" || observation=""
+        actual_start="${observation%$'\t'*}"
+        process_stat="${observation##*$'\t'}"
+        if [ "$actual_start" = "${target_starts[$i]}" ] && [[ "$process_stat" = Z* ]] \
+            && [ -d "/proc/${targets[$i]}/task" ]; then
+          # Read the kernel directory directly; caller glob options cannot
+          # hide a live peer. Failed enumeration remains nonterminal here.
+          if python3 - "${targets[$i]}" <<'PY_SINGLETON_ZOMBIE'
+import os
+import sys
+try:
+    directory = os.open('/proc/' + sys.argv[1] + '/task',
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        singleton = os.listdir(directory) == [sys.argv[1]]
+    finally:
+        os.close(directory)
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(0 if singleton else 1)
+PY_SINGLETON_ZOMBIE
+          then
+            observation="$(cloudbench_pid_observation_like "${targets[$i]}" "${target_starts[$i]}")" || observation=""
+            if [ "${observation%$'\t'*}" = "${target_starts[$i]}" ] \
+                && [[ "${observation##*$'\t'}" = Z* ]]; then
+              continue
+            fi
+          fi
+        fi
         live=1
         break
       fi
