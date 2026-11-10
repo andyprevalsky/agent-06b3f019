@@ -2582,10 +2582,219 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
         return 2
 
 
+def settlement_native(request: dict, result: dict, root: Path) -> dict:
+    """Read-only replay of existing cloud cleanup and current namespace ownership guards."""
+    from deploy_test_cloud import collect_campaign
+    from deploy_test_historical_custody import native_closure
+    from deploy_test_interrupted_cleanup import namespace_quiet, no_holders, groups_absent
+    namespace = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    campaign = namespace / 'campaigns' / ('deploy-' + namespace.name)
+    if (result.get('fleet_directory') != str(campaign)
+            or result.get('runner_log') != str(namespace / 'cli.log')
+            or not _finite(result.get('started_at')) or not _finite(result.get('finished_at'))
+            or result['started_at'] > result['finished_at']):
+        raise ValueError('settlement: native namespace/clocks changed')
+    process_path = namespace / 'cli.log.process.json'
+    process = bounded_read(process_path, 'settlement native process')
+    if (process.get('quiescent') is not True or process.get('remaining') != []
+            or process.get('orphaned_children') is not False or process.get('error') is not None
+            or any(process.get(k) is not False for k in ('cancelled', 'timed_out'))
+            or type(process.get('native_exit')) is not int or process['native_exit'] not in (0, 1)
+            or result.get('native_exit') != process['native_exit']):
+        raise ValueError('settlement: native process cleanup unknown')
+    groups_absent([process['supervisor_pid'], process['child_pid']])
+    namespace_quiet(namespace, set())
+    no_holders([namespace / 'cli.log'])
+    summary = bounded_read(campaign / 'summary.json', 'settlement campaign')
+    cases, details, cleaned, _ = collect_campaign(request, root, namespace / 'runs', campaign,
+        result['started_at'], process['native_exit'], summary['concurrency'])
+    if not cleaned or 'UNVERIFIED' in cases.values():
+        raise ValueError('settlement: partial native collection/cleanup')
+    # Includes the separately owned canary. Original grades remain in native files;
+    # quarantine does not turn the native exit into the outer adapter exit.
+    fleets = sorted((namespace / 'runs').glob('*/_batch/lifecycle.json'))
+    if not fleets:
+        raise ValueError('settlement: native lifecycle inventory missing')
+    closures = {str(path): native_closure(path, root) for path in fleets}
+    for evidence in details.values():
+        path = Path(evidence['path'])
+        if sha_file(path) != evidence['sha256']:
+            raise ValueError('settlement: native evidence changed')
+    return {'process_sha256': sha_file(process_path), 'summary_sha256': sha_file(campaign / 'summary.json'),
+            'native_cases': cases, 'native_evidence': details, 'closures': closures,
+            'native_child_exit': process['native_exit']}
+
+
+def recover_round(plan: dict, directory: Path, root: Path, proof: dict) -> None:
+    """Negative-only settlement of a frozen orphan round, under the normal exclusive lock.
+
+    --proof is an independently reviewed binding, never a source retarget. Replay
+    reconstructs the proposal from the immutable original snapshot before publishing.
+    """
+    def need(value, reason):
+        if not value:
+            raise ValueError('settlement: ' + reason)
+
+    def sealed(path):
+        path = Path(path)
+        info = path.lstat()
+        need(path.is_absolute() and path.resolve(strict=True) == path and stat.S_ISREG(info.st_mode)
+             and info.st_uid == os.getuid() and not info.st_mode & 0o022, 'unsafe artifact')
+        need(info.st_size <= MAX_RECEIPT_BYTES, 'oversize artifact')
+        return path.read_bytes()
+
+    state_path = directory / 'cycle.json'
+    round_number = proof.get('round')
+    need(type(round_number) is int and round_number > 0, 'invalid original round')
+    journal_path = directory / f'settlement-round{round_number}-journal.json'
+    marker = directory / f'settlement-round{round_number}-committed.json'
+    journal = json.loads(sealed(journal_path)) if journal_path.exists() else None
+    original_raw = sealed(state_path) if journal is None else bytes.fromhex(journal['original_state_hex'])
+    need(hashlib.sha256(original_raw).hexdigest() == proof.get('state_sha256'), 'original state changed')
+    original = json.loads(original_raw)
+    need(proof.get('kind') == 'interrupted-round-settlement-v1'
+         and proof.get('source') == original['source'] == plan['source']
+         and proof.get('plan_digest') == original['plan_digest'] == digest(plan)
+         and original.get('plan') == plan and proof.get('phase') == original['phase']
+         and original['round'] == round_number, 'frozen source/plan/round mismatch')
+    need(original['phase'] in {'initial', 'focused', 'failed-gates', 'final'}
+         and original.get('ready') is False and 'live_failures' in original
+         and not original.get('running') and not original.get('resume_phase')
+         and not CANCEL.is_set(), 'not an orphan executable boundary')
+    files = proof.get('files')
+    need(isinstance(files, dict) and files, 'reviewed original file hashes required')
+    for name, expected in files.items():
+        need(hashlib.sha256(sealed(Path(name))).hexdigest() == expected, 'original artifact changed: ' + name)
+    phase_dir = directory / 'attempts' / str(round_number) / original['phase']
+    selected = records(plan, original)
+    prerequisite = cloud_smoke_prerequisite(plan, original, selected)
+    if prerequisite is not None and all(g['name'] != prerequisite['name'] for g in selected):
+        selected = [*selected, prerequisite]  # match run_phase's original prerequisite admission
+    need({p.name for p in phase_dir.iterdir()} == {g['name'] for g in selected}, 'round request inventory changed')
+    from deploy_test_interrupted_cleanup import namespace_quiet
+    namespace_quiet(phase_dir, set())
+    results, publications, tokens = [], {}, set()
+    from deploy_test_process import scan_same_user_processes
+    for gate in selected:
+        name = gate['name']
+        folder = phase_dir / name
+        request_path, result_path = folder / 'request.json', folder / 'result.json'
+        for path in (request_path, result_path):
+            need(str(path) in files, 'missing original binding: ' + str(path))
+        request, result = (json.loads(sealed(path)) for path in (request_path, result_path))
+        token = request.get('token')
+        need(isinstance(token, str) and token and token not in tokens, 'missing/duplicate token')
+        tokens.add(token)
+        if 'custody_state' in request:
+            from deploy_test_historical_custody import state_identity
+            need(request['custody_state'] == str(state_path)
+                 and request.get('custody_state_sha256') == state_identity(original),
+                 'original custody locator changed')
+        def inspect_owner(process):
+            environment = (process / 'environ').read_bytes().split(b'\0')
+            need(not any(item in environment for item in (
+                os.fsencode('DEPLOY_GATE_TOKEN=' + token),
+                os.fsencode('DEPLOY_GATE_REQUEST=' + str(request_path)),
+                os.fsencode('DEPLOY_GATE_RESULT=' + str(result_path)))), 'original adapter still active')
+        scan_same_user_processes(inspect_owner,
+            lambda pid: need(False, 'current process ownership unverifiable: ' + str(pid)))
+        need(request.get('source') == original['source'] and request.get('gate') == name
+             and request.get('phase') == original['phase']
+             and set(request.get('checks', [])) | set(request.get('skips', {})) == set(gate['checks'])
+             and all(result.get(k) == request.get(k) for k in ('source', 'gate', 'token')),
+             'original request/result identity changed')
+        need(result.get('cleanup_complete') is True and not result.get('cleanup_owner')
+             and result.get('reused', False) is False, 'missing current cleanup')
+        receipt_path = folder / 'receipt.json'
+        if str(receipt_path) in files:
+            receipt = json.loads(sealed(receipt_path))
+            need(all(receipt.get(k) == request[k] for k in ('token', 'source', 'gate'))
+                 and receipt.get('command') == gate['command']
+                 and receipt.get('log') == str(folder / 'output.log')
+                 and receipt.get('execution_binding') == {
+                     'input_fingerprint': original['input_fingerprints'][name],
+                     'environment': original['environment'], 'contract_digest': digest(gate)}
+                 and not receipt_owner(name, receipt), 'existing outer receipt changed or owned')
+            need(type(receipt.get('native_exit')) is int
+                 and all(receipt.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group'))
+                 and receipt.get('worker_result') == str(result_path), 'outer process coverage unknown')
+            cases, complete = validate_result(result, request, receipt['native_exit'], invalid_process=False)
+            expected_cases = {**cases, **dict.fromkeys(request.get('skips', {}), 'SKIP')}
+            need(receipt.get('cases') == expected_cases and receipt.get('complete') is complete
+                 and receipt.get('status') == ('PASS' if all(v in TERMINAL_OK for v in expected_cases.values()) else 'FAIL'),
+                 'outer receipt differs from ordinary worker validation')
+            if receipt['status'] == 'PASS':
+                witness = copy.deepcopy(original)
+                witness['attempts'].append({'phase': original['phase'], 'results': [receipt]})
+                need(full_pass_binding(witness, gate, root=root) is not None,
+                     'existing PASS fails ordinary full-pass validation')
+            results.append(receipt)  # preserve genuine PASS, FAIL, clocks and native exit exactly
+            continue
+        need(gate.get('native_cloud') is True, 'missing outer receipt requires supported native cloud closure')
+        need(result.get('complete') is True and set(result.get('cases', {})) == set(request['checks'])
+             and all(v in {'PASS', 'FAIL'} for v in result['cases'].values()), 'partial adapter result')
+        native = settlement_native(request, result, root)
+        need(proof.get('native', {}).get(name) == native, 'reviewed native closure changed')
+        row = {'kind': 'recovered-native-execution-v1', 'gate': name, 'token': token,
+               'source': original['source'], 'status': 'FAIL', 'complete': False, 'executed': True,
+               'cases': {case: 'SKIP' if case in request.get('skips', {}) else 'UNVERIFIED'
+                         for case in gate['checks']}, 'native_exit': None,
+               'case_complete': dict.fromkeys(gate['checks'], False),
+               'current_execution': dict.fromkeys(request.get('skips', {}), 'UNVERIFIED'),
+               'custody_skips': {case: copy.deepcopy(meta) for case, meta in request.get('skips', {}).items()
+                                 if meta.get('disposition') == 'NO_RETRY_CUSTODY'},
+               'positive_credit': False, 'timed_out': None, 'cancelled': None, 'lingering_group': False,
+               'original_coordinator': {'timed_out': 'UNVERIFIED', 'cancelled': 'UNVERIFIED',
+                                        'native_exit': 'UNVERIFIED', 'finished_at': 'UNVERIFIED'},
+               'command': gate['command'], 'log': str(folder / 'output.log'),
+               'worker_result': str(result_path), 'reason': 'outer observation lost; fresh execution required',
+               'recovery_evidence': {'files': files, 'native': native},
+               'execution_binding': {'input_fingerprint': original['input_fingerprints'][name],
+                                     'environment': original['environment'], 'contract_digest': digest(gate)}}
+        if receipt_path.exists() or receipt_path.is_symlink():
+            need(journal is not None and json.loads(sealed(receipt_path)) == row, 'unbound outer receipt exists')
+        publications[str(receipt_path)] = row
+        results.append(row)
+    need(publications, 'no missing outer receipt to recover')
+    after = copy.deepcopy(original)
+    fresh = failed_cases(after, results)
+    # Reuse already-published live occurrences; never duplicate or erase the structural failure.
+    for failure in fresh:
+        match = [f for f in original['live_failures'] if f['check'] == failure['check']
+                 and f['native_result'] == failure['native_result'] and f['source'] == failure['source']]
+        if match:
+            need(len(match) == 1, 'ambiguous live occurrence')
+            failure.clear(); failure.update(copy.deepcopy(match[0]))
+        else:
+            failure['id'] = digest({'proof': digest(proof), 'check': failure['check']})[:32]
+    for live in original['live_failures']:
+        need(any(f == live for f in fresh), 'live failure cannot be preserved exactly')
+    after.pop('live_failures')
+    advance(after, results, fresh)
+    after['ready'] = False
+    after['attempts'][-1].update(round=round_number, recovered=True, positive_credit=False)
+    proposed = {'kind': 'native-settlement-journal-v1', 'round': round_number, 'positive_credit': False,
+                'proof_digest': digest(proof), 'original_state_hex': original_raw.hex(),
+                'after_state': after, 'receipts': publications}
+    for name, expected in files.items():
+        need(hashlib.sha256(sealed(Path(name))).hexdigest() == expected, 'artifact changed during admission')
+    namespace_quiet(phase_dir, set())
+    if journal is not None:
+        need(journal == proposed, 'journal/proof/evidence changed')
+        need(read(state_path) in (original, after), 'canonical state changed during recovery')
+    else:
+        need(sealed(state_path) == original_raw, 'canonical state changed before admission')
+        write(journal_path, proposed)  # durable original snapshot precedes every canonical/receipt write
+    for name, row in publications.items():
+        write(Path(name), row)
+    write(state_path, after)
+    write(marker, {'journal_sha256': sha_file(journal_path)})
+
+
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "attribute-flaky"])
+    parser.add_argument("action", choices=["recover-round", "init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "attribute-flaky"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -2634,9 +2843,23 @@ def main(argv: list[str] | None = None) -> int:
                     if type(metadata.get('round')) is not int or metadata['round'] != int(match[1]):
                         raise ValueError('invalid round-bound settlement journal')
                     committed = directory / ('settlement-round' + match[1] + '-committed.json')
+                if args.action == 'recover-round' and args.proof is not None:
+                    recovery_proof = read(args.proof)
+                    if journal.name == f"settlement-round{recovery_proof.get('round')}-journal.json":
+                        metadata = bounded_read(journal, 'settlement journal')
+                        if (metadata.get('kind') != 'native-settlement-journal-v1'
+                                or metadata.get('positive_credit') is not False
+                                or metadata.get('proof_digest') != digest(recovery_proof)):
+                            raise ValueError('recovery must resume its exact typed round journal')
+                        continue
                 if (committed.is_symlink() or not committed.is_file()
                         or read(committed) != {'journal_sha256': sha_file(journal)}):
                     raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
+            if args.action == 'recover-round':
+                if args.proof is None:
+                    raise ValueError('--proof reviewed frozen round binding required')
+                recover_round(plan, directory, args.root.resolve(), read(args.proof))
+                return 0
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
             if args.action == "init" and state_path.exists():

@@ -130,6 +130,18 @@ roots are historical candidate evidence. Fresh native acceptance on the final
 combined source is mandatory and pending. Full deployment and independent
 additional-gate attribution remain in progress.
 
+Latest source-bound acceptance on cc11dc60c2db1b1a2869425bd2f07ce0a7662831:
+unchanged native chat-mode passed in 15.6 seconds, root
+013465d1-2a9d-47c9-b1ac-1dab8e7d06b4. The normal full publisher exited0,
+verified eight frontend messages in a fresh browser and recovered three authentic
+complete encrypted BASEs with all three call sites. Independent audit verified
+seven runtime files and cached encrypted/plaintext/materialized hashes. Five real
+startup EventLoopStall diagnostics preceded the task; no request handler/provider
+error was recorded. Native chat controller exit0 and cleanup are verified. The
+full campaign separately had thirteen PASS and one mass FAIL, with all task/canary
+cleanup verified. This pair does not cover later source changes or completed
+deployment. Original capture-time environment/context gaps remain open.
+
 ## Human feedback
 
 Preserve original chat PASS and publisher FAIL, strict checks, complete authentic

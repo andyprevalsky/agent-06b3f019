@@ -5881,22 +5881,30 @@ class Cycle(unittest.TestCase):
     def test_cleanup_review_retired_pid_reuse_and_exact_live_identity(self):
         """A reused real PID/PGID is distinct from its authenticated original birth."""
         import deploy_test_native_cleanup as native
-        self._cleanup_review_pid = os.getpid()
-        old_birth = 'proc-start:00000000-0000-0000-0000-000000000000:123'
-        state, occurrence, proof, prior, fleet = self.cleanup_review_retirement_state(old_birth)
-        receipt = state['attempts'][0]['results'][0]
-        self.assertFalse(native.still_bound(prior, receipt, prior['owner']), 'ACTIVE isolation must retain live PID checks')
-        c.reconcile(state, occurrence['id'], proof)
-        self.assertEqual([], c.isolated_admissions(state, occurrence['gate']))
-        # Make an independently authenticated original with the actual current birth.
-        self.tearDown(); self.setUp()
-        self._cleanup_review_pid = os.getpid()
-        start = Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19]
-        birth = 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + start
-        state, occurrence, proof, prior, fleet = self.cleanup_review_retirement_state(birth)
-        before = copy.deepcopy(state)
-        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
-        self.assertEqual(before, state)
+        helper = subprocess.Popen([sys.executable, '-B', '-c', 'import sys;sys.stdin.read()'],
+                                  stdin=subprocess.PIPE, start_new_session=True)
+        try:
+            self.assertEqual(helper.pid, os.getpgid(helper.pid))
+            self.assertNotEqual(os.getpgrp(), os.getpgid(helper.pid))
+            self._cleanup_review_pid = helper.pid
+            old_birth = 'proc-start:00000000-0000-0000-0000-000000000000:123'
+            state, occurrence, proof, prior, fleet = self.cleanup_review_retirement_state(old_birth)
+            receipt = state['attempts'][0]['results'][0]
+            self.assertFalse(native.still_bound(prior, receipt, prior['owner']), 'ACTIVE isolation must retain live PID checks')
+            c.reconcile(state, occurrence['id'], proof)
+            self.assertEqual([], c.isolated_admissions(state, occurrence['gate']))
+            # Make an independently authenticated original with the actual current birth.
+            self.tearDown(); self.setUp()
+            self._cleanup_review_pid = helper.pid
+            start = Path('/proc', str(helper.pid), 'stat').read_text().rsplit(') ',1)[1].split()[19]
+            birth = 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + start
+            state, occurrence, proof, prior, fleet = self.cleanup_review_retirement_state(birth)
+            before = copy.deepcopy(state)
+            with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+            self.assertEqual(before, state)
+        finally:
+            helper.stdin.close()
+            self.assertEqual(0, helper.wait(timeout=10))
 
     def normal_failed_canary_state(self, zero=False):
         import hashlib, shutil
@@ -9994,6 +10002,244 @@ class RecoveredNativeReceiptGuard(unittest.TestCase):
                    'native_evidence': {'cancelled': False, 'timed_out': False}}
         self.assertIsNone(self.admit(receipt))
 
+
+
+class InterruptedRoundSettlement(unittest.TestCase):
+    """Offline files model a lost coordinator; no native execution is fabricated."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir='/tmp')
+        self.addCleanup(self.temp.cleanup)
+        self.folder = Path(self.temp.name).resolve()
+        self.gate = {'name': 'smoke', 'native_cloud': True, 'checks': ['case'], 'command': ['offline']}
+        self.plan = {'source': {'head': 'original', 'digest': 'original'}, 'gates': [self.gate]}
+        self.state = {'source': self.plan['source'], 'plan': self.plan, 'plan_digest': c.digest(self.plan),
+                      'round': 20, 'phase': 'focused', 'ready': False, 'attempts': [],
+                      'failures': [], 'live_failures': [], 'repair_gates': ['smoke'],
+                      'focused': {'smoke': {'command': ['offline'], 'checks': ['case']}},
+                      'input_fingerprints': {'smoke': 'original'}, 'environment': 'original', 'skips': {}}
+        self.native = self.folder / 'native'
+        self.native.mkdir()
+        self.gdir = self.folder / 'attempts/20/focused/smoke'
+        self.request = {'token': 'offline-original-token', 'source': self.plan['source'], 'gate': 'smoke',
+                        'phase': 'focused', 'checks': ['case'], 'skips': {}}
+        self.result = {**self.request, 'cases': {'case': 'PASS'}, 'complete': True,
+                       'cleanup_complete': True, 'reused': False}
+        c.write(self.gdir / 'request.json', self.request)
+        c.write(self.gdir / 'result.json', self.result)
+        c.write(self.folder / 'cycle.json', self.state)
+        c.write(self.folder / 'plan.json', self.plan)
+        self.proof = {'kind': 'interrupted-round-settlement-v1', 'source': self.state['source'],
+                      'round': 20, 'phase': 'focused', 'state_sha256': c.sha_file(self.folder / 'cycle.json'),
+                      'plan_digest': c.digest(self.plan), 'native': {'smoke': {'offline': 'native closure fixture'}},
+                      'files': {str(p): c.sha_file(p) for p in
+                          [self.gdir / 'request.json', self.gdir / 'result.json']}}
+        # Native collector is a separate existing contract. This fixture proves only admission.
+        self.native_guard = getattr(c, 'settlement_native', None)
+        mock = patch.object(c, 'settlement_native', create=True, return_value={'offline': 'native closure fixture'})
+        mock.start(); self.addCleanup(mock.stop)
+
+    def recover(self):
+        c.write(self.folder / 'proof.json', self.proof)
+        return c.main(['recover-round', '--plan', str(self.folder / 'plan.json'), '--state-dir',
+                       str(self.folder), '--proof', str(self.folder / 'proof.json'), '--root', str(self.folder)])
+
+    def test_lost_outer_receipt_settles_negative_only_and_replays_exactly(self):
+        self.assertEqual(self.recover(), 0)
+        state = c.read(self.folder / 'cycle.json')
+        row = state['attempts'][-1]['results'][0]
+        self.assertEqual(state['phase'], 'triage')
+        self.assertFalse(state['ready'])
+        self.assertEqual(row['kind'], 'recovered-native-execution-v1')
+        self.assertEqual(row['cases'], {'case': 'UNVERIFIED'})
+        self.assertIsNone(row['native_exit'])
+        self.assertFalse(row['positive_credit'])
+        self.assertIsNone(c.full_pass_binding(state, self.gate))
+        before = (self.folder / 'cycle.json').read_bytes()
+        self.assertEqual(self.recover(), 0)
+        self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+        self.assertEqual(c.read(self.gdir / 'result.json'), self.result)
+
+    def test_integrity_refusals_leave_canonical_state_unchanged(self):
+        before = (self.folder / 'cycle.json').read_bytes()
+        for key, value in [('round', 21), ('source', {}), ('state_sha256', 'tampered'), ('phase', 'final')]:
+            with self.subTest(key=key):
+                original = self.proof[key]; self.proof[key] = value
+                self.assertEqual(self.recover(), 2)
+                self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+                self.proof[key] = original
+        for key, value in [('token', 'changed'), ('source', {}), ('cleanup_complete', False)]:
+            with self.subTest(result=key):
+                altered = {**self.result, key: value}; c.write(self.gdir / 'result.json', altered)
+                self.proof['files'][str(self.gdir / 'result.json')] = c.sha_file(self.gdir / 'result.json')
+                self.assertEqual(self.recover(), 2)
+                self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+                c.write(self.gdir / 'result.json', self.result)
+                self.proof['files'][str(self.gdir / 'result.json')] = c.sha_file(self.gdir / 'result.json')
+
+    def test_tampered_hashes_native_binding_and_foreign_round_are_atomic(self):
+        before = (self.folder / 'cycle.json').read_bytes()
+        path = self.gdir / 'result.json'
+        c.write(path, {**self.result, 'extra': 'changed after review'})
+        self.assertEqual(self.recover(), 2)
+        c.write(path, self.result)
+        self.proof['native']['smoke'] = {'different': 'closure'}
+        self.assertEqual(self.recover(), 2)
+        self.proof['native']['smoke'] = {'offline': 'native closure fixture'}
+        (self.gdir.parent / 'foreign-request').mkdir()
+        self.assertEqual(self.recover(), 2)
+        self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+
+    def test_exclusive_live_coordinator_lock_refuses(self):
+        import fcntl
+        with (self.folder / 'lock').open('a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.recover(), 2)
+        self.assertEqual(c.read(self.folder / 'cycle.json'), self.state)
+
+
+    def test_missing_and_live_ownership_refuse(self):
+        before = (self.folder / 'cycle.json').read_bytes()
+        with patch.object(c, 'settlement_native', side_effect=ValueError('live original owner')):
+            self.assertEqual(self.recover(), 2)
+        (self.gdir / 'result.json').unlink()
+        self.assertEqual(self.recover(), 2)
+        self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+
+
+    def test_real_live_adapter_environment_is_refused_without_signalling(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import sys;print("ready",flush=True);sys.stdin.read()'],
+            cwd='/tmp', env={**os.environ, 'DEPLOY_GATE_TOKEN': self.request['token']},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            before = (self.folder / 'cycle.json').read_bytes()
+            self.assertEqual(self.recover(), 2)
+            self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+        finally:
+            child.stdin.close(); child.wait(timeout=10); child.stdout.close()
+
+    def test_durable_journal_recovers_partial_publication(self):
+        real_write = c.write
+        def interrupted(path, value):
+            if path == self.folder / 'cycle.json':
+                raise OSError('offline publication interruption')
+            return real_write(path, value)
+        with patch.object(c, 'write', side_effect=interrupted):
+            self.assertEqual(self.recover(), 2)
+        self.assertEqual(c.read(self.folder / 'cycle.json'), self.state)
+        self.assertTrue((self.gdir / 'receipt.json').is_file())
+        self.assertEqual(self.recover(), 0)
+        self.assertEqual(self.recover(), 0)
+        self.assertEqual(len(c.read(self.folder / 'cycle.json')['attempts']), 1)
+
+    def test_other_round_committed_journal_is_allowed_but_pending_refuses(self):
+        journal = self.folder / 'settlement-round19-journal.json'
+        c.write(journal, {'kind': 'native-settlement-journal-v1', 'round': 19})
+        self.assertEqual(self.recover(), 2)
+        c.write(self.folder / 'settlement-round19-committed.json', {'journal_sha256': c.sha_file(journal)})
+        self.assertEqual(self.recover(), 0)
+        self.assertEqual(self.recover(), 0)
+
+    def test_same_round_legacy_journal_must_be_committed(self):
+        journal = self.folder / 'settlement-journal.json'
+        c.write(journal, {'kind': 'native-settlement-journal-v1', 'round': 20})
+        before = (self.folder / 'cycle.json').read_bytes()
+        original_journal = journal.read_bytes()
+        self.assertEqual(self.recover(), 2)
+        self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+        self.assertEqual(journal.read_bytes(), original_journal)
+        c.write(self.folder / 'settlement-committed.json', {'journal_sha256': c.sha_file(journal)})
+        self.assertEqual(self.recover(), 0)
+        self.assertEqual(self.recover(), 0)
+
+    def test_no_retry_exclusion_remains_skip_without_execution_or_financial_credit(self):
+        excluded = 'agent-payment-abandonment'
+        metadata = {'disposition': 'NO_RETRY_CUSTODY', 'financial_cleanup_credit': False}
+        self.gate['checks'].append(excluded)
+        self.state['focused']['smoke']['checks'].append(excluded)
+        self.request['skips'][excluded] = metadata
+        self.state['plan_digest'] = self.proof['plan_digest'] = c.digest(self.plan)
+        for path, value in [(self.folder / 'plan.json', self.plan),
+                            (self.folder / 'cycle.json', self.state),
+                            (self.gdir / 'request.json', self.request)]:
+            c.write(path, value)
+        self.proof['state_sha256'] = c.sha_file(self.folder / 'cycle.json')
+        self.proof['files'][str(self.gdir / 'request.json')] = c.sha_file(self.gdir / 'request.json')
+        self.assertEqual(self.recover(), 0)
+        state = c.read(self.folder / 'cycle.json')
+        row = state['attempts'][-1]['results'][0]
+        self.assertEqual(row['cases'], {'case': 'UNVERIFIED', excluded: 'SKIP'})
+        self.assertEqual(row['current_execution'], {excluded: 'UNVERIFIED'})
+        self.assertFalse(row['case_complete'][excluded])
+        self.assertEqual(row['custody_skips'], {excluded: metadata})
+        self.assertFalse(row['custody_skips'][excluded]['financial_cleanup_credit'])
+        self.assertFalse(row['positive_credit'])
+        self.assertEqual([f['check'] for f in state['failures']], ['smoke/case'])
+        self.assertIsNone(c.full_pass_binding(state, self.gate))
+        self.assertEqual(self.recover(), 0)
+
+    def test_native_process_partial_and_unknown_cleanup_refuse_offline(self):
+        import hashlib
+        namespace = self.folder / '.context/deploy-cloud' / hashlib.sha256(self.request['token'].encode()).hexdigest()
+        campaign = namespace / 'campaigns' / ('deploy-' + namespace.name)
+        result = {**self.result, 'fleet_directory': str(campaign), 'runner_log': str(namespace / 'cli.log'),
+                  'started_at': 100, 'finished_at': 200, 'native_exit': 1}
+        for flags in [{'quiescent': False}, {'quiescent': True, 'remaining': [], 'orphaned_children': False,
+                       'error': None, 'cancelled': False, 'timed_out': None, 'native_exit': 1}]:
+            c.write(namespace / 'cli.log.process.json', flags)
+            # Call the real helper, bypassing only the admission fixture's explicit mock.
+            with self.assertRaisesRegex(ValueError, 'process cleanup unknown'):
+                self.native_guard(self.request, result, self.folder)
+
+
+    def test_recorded_pass_and_live_structural_failure_are_preserved(self):
+        for name, verdict in [('peer', 'PASS'), ('structural', 'UNVERIFIED'), ('cloudbench-controller', 'PASS')]:
+            gate = {'name': name, 'checks': ['case'], 'command': ['offline']}
+            self.plan['gates'].append(gate)
+            if name != 'cloudbench-controller':
+                self.state['repair_gates'].append(name)
+            else:
+                gate['category'] = name
+                self.gate['category'] = 'smoke'
+            self.state['focused'][name] = {'command': ['offline'], 'checks': ['case']}
+            self.state['input_fingerprints'][name] = 'original'
+            folder = self.gdir.parent / name
+            req = {**self.request, 'gate': name, 'token': 'offline-' + name}
+            result = {**self.result, **req, 'cases': {'case': verdict}, 'complete': verdict == 'PASS'}
+            receipt = {**req, 'status': 'PASS' if verdict == 'PASS' else 'FAIL',
+                       'cases': result['cases'], 'complete': result['complete'], 'executed': True,
+                       'command': gate['command'], 'log': str(folder / 'output.log'),
+                       'worker_result': str(folder / 'result.json'), 'native_exit': 0 if verdict == 'PASS' else 1,
+                       'cancelled': False, 'timed_out': False, 'lingering_group': False,
+                       'started_at': 100, 'finished_at': 200,
+                       'execution_binding': {'input_fingerprint': 'original', 'environment': 'original',
+                                             'contract_digest': c.digest(gate)}}
+            for filename, value in [('request.json', req), ('result.json', result), ('receipt.json', receipt)]:
+                path = folder / filename; c.write(path, value); self.proof['files'][str(path)] = c.sha_file(path)
+            if name == 'structural':
+                self.state['live_failures'] = c.failed_cases(self.state, [receipt])
+            elif name == 'peer':
+                expected_pass = copy.deepcopy(receipt)
+        self.state['plan_digest'] = self.proof['plan_digest'] = c.digest(self.plan)
+        c.write(self.folder / 'plan.json', self.plan); c.write(self.folder / 'cycle.json', self.state)
+        self.proof['state_sha256'] = c.sha_file(self.folder / 'cycle.json')
+        peer_path = self.gdir.parent / 'peer/receipt.json'
+        before = (self.folder / 'cycle.json').read_bytes()
+        for field, value in [('cases', {'case': 'FAIL'}), ('complete', False),
+                             ('native_exit', 1), ('cancelled', None),
+                             ('cleanup_owner', {'unknown': True})]:
+            with self.subTest(outer_receipt=field):
+                c.write(peer_path, {**expected_pass, field: value})
+                self.proof['files'][str(peer_path)] = c.sha_file(peer_path)
+                self.assertEqual(self.recover(), 2)
+                self.assertEqual((self.folder / 'cycle.json').read_bytes(), before)
+        c.write(peer_path, expected_pass)
+        self.proof['files'][str(peer_path)] = c.sha_file(peer_path)
+        self.assertEqual(self.recover(), 0)
+        state = c.read(self.folder / 'cycle.json')
+        self.assertEqual(next(r for r in state['attempts'][-1]['results'] if r['gate'] == 'peer'), expected_pass)
+        self.assertIn(self.state['live_failures'][0], state['failures'])
+        self.assertIn(self.state['live_failures'][0]['id'], state['pending'])
 
 
 class PendingSettlementJournalGuard(unittest.TestCase):

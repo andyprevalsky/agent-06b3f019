@@ -383,6 +383,15 @@ If pending execution ownership prevents another isolated lane from starting,
 report that exact unsupported transition and continue supported independent work;
 do not infer live execution from an owner label or infer cleanup from a dead PID.
 
+When the coordinator itself disappears before writing its round receipt, preserve
+that observation gap separately from terminal native worker results. After independent
+review of the original state and artifact hashes, `recover-round --proof <proof.json>`
+uses the same `--plan` and `--state-dir` arguments to settle the orphan round negatively.
+It rechecks current ownership and native cleanup, journals the original state, preserves
+valid existing outer receipts and exclusions, and records missing outer coverage as
+UNVERIFIED with no invented exit or positive reuse credit. Normal execution recovery
+and fresh affected gates remain required. Other uncommitted journals still block.
+
 The coordinator handles TERM/INT by stopping only the process groups it started
 and recording `interrupted`, never PASS or a provider waiver. Use `resume` only
 after the worker's teardown is verified. A worker that leaves descendants behind
