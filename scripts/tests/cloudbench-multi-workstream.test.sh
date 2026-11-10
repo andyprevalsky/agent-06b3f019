@@ -2654,7 +2654,7 @@ PY_COMPILE_FAKE_FLY
 
 cat > "$FAKE_BIN/flyctl" <<SH
 #!/usr/bin/env bash
-exec python3 -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("flyctl",run_name="__main__",alter_sys=True)' "$FAKE_DIR" "\$@"
+exec python3 -c 'import runpy,sys; sys.path[0]=sys.argv.pop(1); runpy.run_module("flyctl",run_name="__main__",alter_sys=True)' "$FAKE_DIR" "\$@"
 SH
 chmod +x "$FAKE_BIN/flyctl"
 

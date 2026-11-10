@@ -52,6 +52,13 @@ The two regressions in the existing directly registered process-cleanup suite fa
 
 The candidate is not deployed, and the original complete native five-run acceptance is PENDING. The case remains open. These local reductions do not grant native gate PASS, resource cleanup, financial clearance or final deployment credit. Golden reference: not applicable to this fixture-only proposal; no approval-gated agent behavior or production API is changed.
 
+
+### Pre-push import-path correction
+
+Independent PR1916 review caught a regression in the intermediate module wrapper before it was pushed or given native gate credit. In frozen local c9c331399d4713c827f3e9d9966238808c7cae1d, inserting the fake helper path at index0 retained the `-c` current-directory entry. A foreign working-directory `ipaddress.py` was therefore imported: the original direct-script invocation returned0, the intermediate wrapper returned1 with `RuntimeError: foreign cwd shadow imported`, and replacing path entry0 returned0. This is an introduced fixture-wrapper defect, separate from any original provider failure.
+
+The correction replaces the implicit current-directory entry with the helper directory, retaining the original script's import-search behavior, explicit PYTHONPATH startup hooks, checked-hash cache invalidation and arguments. The foreign-CWD assertion was added to the existing compilation control; it failed on the intermediate source and passed five unchanged repetitions after correction. The complete small owning suite passed again. All work remained outside Git until parent review; no intermediate push, new full native pass or historical timeout repair is claimed. Full unchanged native five-run acceptance remains pending.
+
 ## Human feedback
 
 The parent required preserving1200 seconds, five repetitions, eight load slots, every scenario and all original assertions. It rejected blanket fast failure on missing or unsealed evidence because a valid producer may still publish later. It required standard source-invalidating Python cache semantics and preservation of sitecustomize, child behavior, state locking and errors. The parent selected the strengthened cache-use regression variant as the final review candidate; the earlier770af implementation basis remains historical. The selected variant directly counts source compilation at the standard loader, showing zero repeated compilations and one after a source change.

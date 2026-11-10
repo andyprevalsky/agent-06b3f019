@@ -264,6 +264,15 @@ def check_fake_provider_compilation(source: Path) -> None:
             'machines list --json', 'machines list --json', 'machines list --json',
             'secrets set EXACT_FAKE=value', 'secrets list', 'apps list -a navi-whisper-lux']
         assert marker_file.read_text().count('loaded\n') >= 6
+        # Direct script startup omits the working directory from its import
+        # search path. Module startup must not retain -c's empty cwd entry.
+        foreign = root / 'foreign-cwd'
+        foreign.mkdir()
+        (foreign / 'ipaddress.py').write_text('raise RuntimeError("foreign cwd shadow imported")\n')
+        shadowed = subprocess.run([str(wrapper), 'apps', 'list'], cwd=foreign,
+                                  env=environment, capture_output=True, text=True)
+        assert shadowed.returncode == 0, shadowed.stderr
+        assert 'foreign cwd shadow' not in shadowed.stderr
         assert cache.read_bytes() == before, 'ordinary calls rewrote compiled bytecode'
         assert (root / 'compilations').read_text() == '', 'ordinary CLI calls recompiled source'
         # CHECKED_HASH must refuse stale bytecode even with inherited -B.
