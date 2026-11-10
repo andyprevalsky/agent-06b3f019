@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import runpy
 import subprocess
 import sys
@@ -174,6 +175,18 @@ class NativeLifecycle(unittest.TestCase):
 
     def handle(self,method,path,body,nonce):
         own='/machines/'+self.mid
+        if path=='/_test_ssh':
+            args=body['args']
+            if args[:6]!=['ssh','console','-a','navi-whisper-lux-bench','--machine',self.mid] or args[6]!='-C':return 403,{}
+            argv=shlex.split(args[7])
+            if argv[:3]!=['timeout','--signal=TERM','5s'] or self.lease_version!=self.machine['instance_id'] or not self.nonce:return 409,{}
+            if self.fault=='ssh-failed':return 503,{}
+            status,answer=self.handle('POST',own+'/exec',dict(command=argv[3:],timeout=5),self.nonce)
+            self.volume['bytes_used']=self.volume.get('bytes_used',0)+1024
+            self.machine['events']=[{'type':'fixture-observation','sequence':self.foreign_changes}]
+            self.machine['updated_at']=str(self.foreign_changes)
+            if self.fault=='ssh-mount-drift':self.machine['config']['mounts'][0]['volume']='vol_foreign'
+            return status,answer
         self.foreign_changes+=1  # Peers change on every read/write; no app-wide equality required.
         if method=='GET':
             if path==own: return 200,self.transition_reads.pop(0) if self.transition_reads else self.machine
@@ -233,7 +246,18 @@ class NativeLifecycle(unittest.TestCase):
         self.write('request.json',self.request)
         env=dict(os.environ,FLY_API_TOKEN='fixture-private',FLY_API_HOSTNAME=f'http://127.0.0.1:{self.server.server_port}')
         # Existing raw API resolves a flyctl binary even with a bearer credential.
-        binary=self.root/'flyctl';binary.write_text('#!/bin/sh\nexit 97\n');binary.chmod(0o700)
+        binary=self.root/'flyctl'
+        binary.write_text('''#!/usr/bin/env python3
+import json,os,sys,urllib.request
+args=sys.argv[1:]
+assert len(args)==8 and args[:2]==['ssh','console']
+assert max(len(a.encode()) for a in args)<32768
+request=urllib.request.Request(os.environ['FLY_API_HOSTNAME']+'/v1/apps/navi-whisper-lux-bench/_test_ssh',data=json.dumps({'args':args}).encode(),headers={'Content-Type':'application/json'})
+try:
+ with urllib.request.urlopen(request,timeout=10) as response:value=json.load(response)
+except Exception:sys.exit(71)
+sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr',''));sys.exit(value.get('exit_code',1))
+''');binary.chmod(0o700)
         env['PATH']=str(self.root)+os.pathsep+env['PATH']
         return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'--request',str(self.root/'request.json'),
                                '--output',str(self.root/'output')],env=env,capture_output=True,text=True,timeout=35)
@@ -248,6 +272,46 @@ class NativeLifecycle(unittest.TestCase):
         self.assertGreater(self.foreign_changes,10)
         self.assertTrue(all(self.m['allowed_call'](method,path,self.mid,self.vid,(self.shared['id'],))
                             for method,path,body,nonce in self.calls))
+
+    def test_ssh_cli_full_chain_and_typed_receipts_refuse_target_nonce_or_output_tamper(self):
+        self.request['guest_transport']='cloudbench-ssh-guest-v1';self.enforce_exec_version=True
+        result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
+        path=self.root/'output/result.json';receipt=self.m['load'](path)
+        def verify():return self.m['verify_prepared_source'](self.root/'request.json',path,self.root/'output/source-manifest.json',
+            source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        verify()
+        self.assertFalse(any(method=='POST' and p.endswith('/exec') for method,p,body,nonce in self.calls))
+        target=next((self.root/'output/ssh').glob('*/request.json'));raw=target.read_bytes()
+        answer_path=target.parent/'result.json';answer_raw=answer_path.read_bytes()
+        for field in ('target','nonce','instance','mount'):
+            wrong=json.loads(raw)
+            if field=='target':wrong['argv'][5]='ffffffffffffff'
+            elif field=='nonce':wrong['nonce']='foreign'
+            elif field=='instance':wrong['instance_id']='UNKNOWN'
+            else:wrong['before']['config']['mounts'][0]['volume']='vol_foreign'
+            target.write_text(json.dumps(wrong))
+            answer=json.loads(answer_raw);answer['request']=self.m['descriptor'](target);answer_path.write_text(json.dumps(answer))
+            altered=copy.deepcopy(receipt);altered['ssh']=self.m['journal_index'](self.root/'output/ssh');path.write_text(json.dumps(altered))
+            with self.assertRaises(ValueError):verify()
+        target.write_bytes(raw);answer_path.write_bytes(answer_raw);path.write_text(json.dumps(receipt))
+        answer=self.m['load'](target.parent/'result.json');log=Path(answer['stdout']['path']);log.write_text('forged-output')
+        answer['stdout']=self.m['descriptor'](log);answer_path.write_text(json.dumps(answer))
+        receipt['ssh']=self.m['journal_index'](self.root/'output/ssh');path.write_text(json.dumps(receipt))
+        with self.assertRaises(ValueError):verify()
+
+    def test_ssh_native_mount_drift_refuses_and_never_publishes(self):
+        self.request['guest_transport']='cloudbench-ssh-guest-v1';self.fault='ssh-mount-drift'
+        result=self.invoke();self.assertNotEqual(result.returncode,0)
+        self.assertFalse((self.root/'output/source-manifest.json').exists())
+
+    def test_ssh_failed_command_is_not_retried_and_owned_source_is_parked(self):
+        self.request['guest_transport']='cloudbench-ssh-guest-v1';self.fault='ssh-failed'
+        result=self.invoke();self.assertNotEqual(result.returncode,0)
+        self.assertEqual(sum(path=='/_test_ssh' for method,path,body,nonce in self.calls),1)
+        self.assertEqual(self.machine['state'],'stopped');self.assertIsNone(self.nonce)
+        self.assertEqual(self.machine['config']['guest']['memory_mb'],2048)
+        receipt=self.m['load'](self.root/'output/result.json')
+        self.assertFalse(receipt['qualified']);self.assertTrue(receipt['stopped_verified'])
 
     def test_real_http_known_cas_predecessor_replacing_waits_before_start(self):
         self.fault='transition'

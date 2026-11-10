@@ -144,6 +144,18 @@ binding. The historical failure fixture now embeds the exact old producer
 bytes with dependency hashes, independent of the current HEAD. Independent
 review, live protocol validation and full deployment remain open.
 
+The e5f8d22f native checkpoint proved that same-nonce lease renewal can return
+the acknowledged new version without releasing the lease. Nevertheless, the
+first exec on that version returned the same retained HTTP 409. This disproves
+stale lease version as a sufficient explanation. Stop, park, version renewal
+and release were again acknowledged, leaving the exact owned source stopped
+at 1 CPU/2048 MiB. Its result remains false. No further API exec retry is
+planned. The next repair uses the existing bounded, exact-Machine SSH transport
+while retaining native lease/version and before/after identity proofs, with
+separate SSH execution receipts rather than invented HTTP acknowledgements.
+That transport and its qualification verifier require independent review and
+actual native validation before this RCA can close.
+
 ## Human feedback
 
 The user explicitly authorized this separate pre-parent-merge repair and full

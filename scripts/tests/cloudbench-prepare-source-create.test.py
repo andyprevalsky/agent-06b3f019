@@ -10,6 +10,7 @@ import json
 import os
 import runpy
 import re
+import shlex
 import signal
 import shutil
 import time
@@ -736,6 +737,11 @@ class Boundary(unittest.TestCase):
         self.recover_before_prepare = True
         self.test_real_creator_preparer_and_authenticated_successor_retirement()
 
+    def test_historical_failure_recovery_fresh_ssh_prepare_and_retirement(self):
+        self.fresh_prepare_ssh = True
+        self.recover_before_prepare = True
+        self.test_real_creator_preparer_and_authenticated_successor_retirement()
+
     def test_reconciled_machine_stdout_never_discloses_inventory_environment(self):
         self.make_ambiguous_machine()
         self.machines['33333333333333'] = dict(id='33333333333333', name='foreign',
@@ -1337,6 +1343,14 @@ class Boundary(unittest.TestCase):
     def prepare_response(self, method, path, body):
         mid = '22222222222222'
         target = '/machines/' + mid
+        if path == '/_test_ssh':
+            args=body.get('args')
+            if not isinstance(args,list) or len(args)!=8 or args[:7]!=['ssh','console','-a',APP,'--machine',mid,'-C']:
+                return 403,{}
+            argv=shlex.split(args[7])
+            if argv[:3]!=['timeout','--signal=TERM','5s'] or not self.lease_nonce or self.lease_version!=self.machines[mid]['instance_id']:
+                return 409,{}
+            return self.prepare_response('POST',target+'/exec',dict(command=argv[3:],timeout=5))
         if method == 'GET' and path == target and getattr(self, 'stale_after_ack', False):
             self.stale_reads += 1
             # The first replacing predecessor triggers the old producer's
@@ -1480,10 +1494,32 @@ class Boundary(unittest.TestCase):
                     env_sha256=helper['sha'](helper['canonical'](authority['machine']['config'].get('env') or {}))))
             request=self.root/'fresh-prepare-request.json';private_write(request,self.preparation_request)
             output=self.root/'fresh-prepared'
+        if getattr(self, 'fresh_prepare_ssh', False):
+            self.preparation_request['guest_transport']='cloudbench-ssh-guest-v1'
+            private_write(request,self.preparation_request)
+            binary=self.root/'flyctl'
+            binary.write_text('''#!/usr/bin/env python3
+import json,os,sys,urllib.request
+args=sys.argv[1:]
+assert len(args)==8 and args[:2]==['ssh','console']
+assert max(len(a.encode()) for a in args)<32768
+request=urllib.request.Request(os.environ['FLY_API_HOSTNAME']+'/v1/apps/navi-whisper-lux-bench/_test_ssh',data=json.dumps({'args':args}).encode(),headers={'Content-Type':'application/json'})
+try:
+ with urllib.request.urlopen(request,timeout=10) as response:value=json.load(response)
+except Exception:sys.exit(71)
+sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr',''));sys.exit(value.get('exit_code',1))
+''');binary.chmod(0o700)
+        fresh_calls=len(self.calls)
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/cloudbench-prepare-source.py'),
                                 '--request', str(request), '--output', str(output)],
                                 env=env, capture_output=True, text=True, timeout=35)
         self.assertEqual(result.returncode, 0, result.stderr)
+        if getattr(self, 'fresh_prepare_ssh', False):
+            self.assertFalse(any(method=='POST' and path.endswith('/exec') for method,path,_ in self.calls[fresh_calls:]))
+            self.assertTrue(any(path.endswith('/_test_ssh') for _,path,_ in self.calls[fresh_calls:]))
+            prepared=helper['load'](output/'result.json')
+            self.assertIn('ssh',prepared)
+            self.assertGreaterEqual(len(list((output/'ssh').glob('*/result.json'))),3)
         cleanup_args = ['cleanup', *self.args[1:], '--prepared-request', str(request),
                         '--prepared-result', str(output / 'result.json'),
                         '--prepared-manifest', str(output / 'source-manifest.json')]

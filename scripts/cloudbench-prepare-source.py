@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import runpy
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
@@ -123,7 +124,9 @@ def read_request(path):
     need(value.get('schema') == REQUEST, 'request schema')
     fields = {'schema', 'nonce', 'source_ref', 'node_fingerprint', 'python_fingerprint', 'image_ref',
               'source_root', 'native', 'guest_env_sha256', 'protected_resources', 'scripts', 'build'}
-    base_fields = set(value) - {'transport'}
+    base_fields = set(value) - {'transport', 'guest_transport'}
+    need(value.get('guest_transport', 'native-exec-v1') in ('native-exec-v1','cloudbench-ssh-guest-v1'),
+         'unsupported guest execution transport')
     need(base_fields == fields | {'ownership'}, 'fresh unpublished creator authority required; published sources are immutable')
     for key, pattern in [('nonce', '[a-f0-9]{32}'), ('source_ref', '[a-f0-9]{40}'),
                          ('node_fingerprint', '[a-f0-9]{64}'), ('python_fingerprint', '[a-f0-9]{64}')]:
@@ -440,17 +443,48 @@ def job_launcher(path):
                 'boot=pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip())))')
 
 
+def ssh_argv(app, mid, command):
+    return ['ssh','console','-a',app,'--machine',mid,'-C',shlex.join(['timeout','--signal=TERM','5s',*command])]
+
+
+def guest_command(api, request, command):
+    if request.get('guest_transport','native-exec-v1') != 'cloudbench-ssh-guest-v1':
+        return api.request('POST','/machines/'+request['native']['machine_id']+'/exec',dict(command=command,timeout=5))
+    need(api.nonce and not api.lost and api.lease_version==api.target_version and api.target_version,
+         'SSH requires continuously held current-version lease')
+    context=api.guest_context
+    directory=api.journal.parent/'ssh'/str(len(list((api.journal.parent/'ssh').glob('*'))) if (api.journal.parent/'ssh').exists() else 0)
+    directory.mkdir(parents=True,mode=0o700)
+    before,volume=exact_machine(api,request,context['predecessor'],context['config'],state='started',instance=api.target_version)
+    argv=ssh_argv(context['predecessor']['app'],api.mid,command)
+    sent=dict(schema='cloudbench-ssh-command-v1',argv=argv,command=command,timeout=20,guest_timeout=5,
+              nonce=api.nonce,instance_id=api.target_version,before=before,volume_before=volume,started=time.monotonic_ns())
+    save(directory/'request.json',sent)
+    rc,stdout,stderr=api.api.flyctl(20,*argv)
+    need(len(stdout.encode())<=1024*1024 and len(stderr.encode())<=1024*1024,'SSH output exceeds bounded receipt size')
+    for name,data in (('stdout.private.log',stdout),('stderr.private.log',stderr)):
+        fd=os.open(directory/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as stream:stream.write(data);stream.flush();os.fsync(stream.fileno())
+    finished=time.monotonic_ns()
+    need(rc==0,'SSH command outcome failed/ambiguous; no retry')
+    after,volume_after=exact_machine(api,request,context['predecessor'],context['config'],state='started',instance=sent['instance_id'])
+    answer=dict(schema='cloudbench-ssh-result-v1',request=descriptor(directory/'request.json'),exit_code=rc,
+                stdout=descriptor(directory/'stdout.private.log'),stderr=descriptor(directory/'stderr.private.log'),
+                finished=finished,after=after,volume_after=volume_after)
+    save(directory/'result.json',answer)
+    return dict(exit_code=rc,stdout=stdout)
+
+
 def guest_job(api, request, deadline):
     mid = request['native']['machine_id']
     directory = '/tmp/cloudbench-prepare-delivery-' + request['nonce']
     for command, expected in delivery_commands(guest_program(request).encode(), directory):
         need(time.monotonic() < deadline, 'guest delivery deadline')
-        ack = api.request('POST', '/machines/' + mid + '/exec', dict(command=command, timeout=5))
+        ack = guest_command(api,request,command)
         need(ack.get('exit_code') == 0 and ack.get('stdout', '').strip() == expected, 'guest delivery acknowledgement')
     # Explicit fork: the API exec itself exits quickly; the job has one immutable nonce path.
     launcher = job_launcher(Path(directory) / 'worker.py')
-    ack = api.request('POST', '/machines/' + mid + '/exec',
-                      dict(command=['python3', '-c', launcher], timeout=5))
+    ack = guest_command(api,request,['python3','-c',launcher])
     need(ack.get('exit_code') == 0, 'guest job launch not acknowledged')
     job = json.loads(ack.get('stdout', ''))
     need(type(job.get('pid')) is int and job['pid'] > 1, 'guest job PID absent')
@@ -458,8 +492,7 @@ def guest_job(api, request, deadline):
     probe = ('import pathlib; p=pathlib.Path(' + repr(result_path) + '); '
              'print(p.read_text() if p.is_file() else "PENDING")')
     while time.monotonic() < deadline:
-        value = api.request('POST', '/machines/' + mid + '/exec',
-                            dict(command=['python3', '-c', probe], timeout=5))
+        value = guest_command(api,request,['python3','-c',probe])
         need(value.get('exit_code') == 0, 'guest job observation failed')
         output = value.get('stdout', '').strip()
         if output != 'PENDING':
@@ -479,7 +512,7 @@ def journal_index(directory):
 
 
 def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=None, guest=None, successor=None, prestart=None,
-                   allow_pending_prestart_stop=False, allow_rejected_bootstrap=False, versioned=False):
+                   allow_pending_prestart_stop=False, allow_rejected_bootstrap=False, versioned=False, ssh=None):
     actual = journal_index(value['path'])
     need(actual == value, 'native journal changed')
     rows = []
@@ -562,6 +595,9 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
         stops = [row for row in rows if row['method'] == 'POST' and row['path'] == own + '/stop']
         snapshots = [row for row in rows if row['method'] == 'POST' and row['path'] == '/volumes/' + vid + '/snapshots']
         execs = [row for row in rows if row['method'] == 'POST' and row['path'] == own + '/exec']
+        if request.get('guest_transport','native-exec-v1')=='cloudbench-ssh-guest-v1':
+            need(not execs and ssh is not None,'SSH transport must not fabricate native EXEC')
+            execs=verify_ssh_journal(ssh,rows,request,prestart)
         need(len(starts) == len(stops) == len(snapshots) == 1 and len(execs) >= 2,
              'native lifecycle chain incomplete')
         need(update['finished'] <= starts[0]['started'] <= execs[0]['started'] <= execs[-1]['started']
@@ -579,10 +615,55 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
         need(launch['body'] == dict(command=['python3', '-c', job_launcher('/tmp/cloudbench-prepare-delivery-' + request['nonce'] + '/worker.py')], timeout=5)
              and launch['response'].get('exit_code') == 0
              and json.loads(launch['response']['stdout']) == guest['job'], 'original launched guest identity')
+        if request.get('guest_transport')=='cloudbench-ssh-guest-v1':
+            result_path='/tmp/cloudbench-prepare-source-'+request['nonce']+'/result.json'
+            probe=('import pathlib; p=pathlib.Path('+repr(result_path)+'); '
+                   'print(p.read_text() if p.is_file() else "PENDING")')
+            for poll in execs[len(commands)+1:]:
+                need(poll['body']==dict(command=['python3','-c',probe],timeout=5)
+                     and poll['response'].get('exit_code')==0,'SSH exact guest observation command')
         final_reads = [row['response'] for row in rows if row['method'] == 'GET' and row['path'] == own
                        and row['started'] > snapshots[0]['finished']]
         need(final_reads and final_reads[-1] == after, 'final native state original response')
     return rows
+
+
+def verify_ssh_journal(value,native,request,prestart):
+    need(journal_index(value['path'])==value,'SSH journal changed')
+    root=Path(value['path']);records=[];mid=request['native']['machine_id'];own='/machines/'+mid
+    for path in sorted(root.glob('*/request.json'),key=lambda p:int(p.parent.name)):
+        sent=load(path);answer=load(path.parent/'result.json')
+        need(sent.get('schema')=='cloudbench-ssh-command-v1' and answer.get('schema')=='cloudbench-ssh-result-v1'
+             and answer['request']==descriptor(path) and sent['timeout']==20 and sent['guest_timeout']==5
+             and sent['argv']==ssh_argv('navi-whisper-lux-bench',mid,sent['command'])
+             and answer['exit_code']==0 and sent['started']<=answer['finished']<=sent['started']+20_000_000_000
+             and sent['instance_id']==prestart['instance_id'],'typed SSH command/result contract')
+        before,after=sent['before'],answer['after']
+        machine_fields=('id','name','region','instance_id','state','config','image_ref')
+        volume_fields=('id','name','region','size_gb','encrypted','state','attached_machine_id','attached_alloc_id')
+        need(all(before.get(k)==after.get(k) for k in machine_fields) and before['id']==mid and before['state']=='started'
+             and before['instance_id']==prestart['instance_id'] and before['config']==prestart['config']
+             and all(sent['volume_before'].get(k)==answer['volume_after'].get(k) for k in volume_fields)
+             and answer['volume_after']['id']==request['native']['volume_id']
+             and answer['volume_after']['attached_machine_id']==mid,'SSH native ownership witnesses')
+        prior=[r for r in native if r['finished']<=sent['started']]
+        leases=[r for r in prior if r['method']=='POST' and r['path']==own+'/lease']
+        need(leases and leases[-1]['response']['data']['nonce']==sent['nonce']
+             and leases[-1]['response']['data']['version']==sent['instance_id']
+             and answer['finished']<leases[-1]['started']+180_000_000_000
+             and not any(r['method']=='DELETE' or r['method']=='POST' and r['path']==own
+                         for r in native if sent['started']<r['started']<answer['finished']), 'SSH continuous lease/version proof')
+        for endpoint,first,last in ((own,before,after),('/volumes/'+request['native']['volume_id'],sent['volume_before'],answer['volume_after'])):
+            observations=[r for r in native if r['method']=='GET' and r['path']==endpoint]
+            need(any(r['response']==first and r['finished']<=sent['started'] for r in observations)
+                 and any(r['response']==last and r['started']>=answer['finished'] for r in observations),'SSH original native readback wire')
+        stdout=IO['read'](Path(answer['stdout']['path']));stderr=IO['read'](Path(answer['stderr']['path']))
+        need(descriptor(answer['stdout']['path'])==answer['stdout'] and descriptor(answer['stderr']['path'])==answer['stderr'],
+             'SSH output evidence changed')
+        records.append(dict(transport='ssh-v1',body=dict(command=sent['command'],timeout=5),
+                            response=dict(exit_code=0,stdout=stdout.decode()),started=sent['started'],finished=answer['finished']))
+    need(records,'SSH command chain absent')
+    return records
 
 
 def prepare(request_path, output, api_factory=None, *, before_effects=None):
@@ -676,6 +757,7 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             save(output / 'prestart.json', prestart)
             api.request('POST', '/machines/' + predecessor['machine_id'] + '/start', {})
             wait_state(api, request, predecessor, config, 'started', instance, time.monotonic() + 120)
+            api.guest_context=dict(predecessor=predecessor,config=copy.deepcopy(config))
             guest = guest_job(api, request, time.monotonic() + 2160)
             save(output / 'guest.json', guest)
             api.request('POST', '/machines/' + predecessor['machine_id'] + '/stop', {})
@@ -713,6 +795,7 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
                       after=descriptor(output / 'after.json'), guest=descriptor(output / 'guest.json'),
                       prestart=descriptor(output / 'prestart.json'),
                       inventory=descriptor(output / 'final-inventory.json'), manifest=descriptor(output / 'source-manifest.json'))
+        if request.get('guest_transport')=='cloudbench-ssh-guest-v1':result['ssh']=journal_index(output/'ssh')
     except BaseException as error:
         # A failed lease or ambiguous native update never grants guessed cleanup rights.
         result.update(error=type(error).__name__)
@@ -770,7 +853,7 @@ def verify_prepared_source(request_path, result_path, manifest_path, *, source_r
          and successor['verified_at'] == guest['finished_epoch'], 'preparation chronology')
     SOURCE['verify'](successor, described(result['inventory']), parked_memory=2048)
     verify_journal(result['journal'], successor['machine_id'], successor['volume_id'], (successor['shared_machine_id'],),
-                   request=request, before=before, after=after, guest=guest, successor=successor, prestart=prestart)
+                   request=request, before=before, after=after, guest=guest, successor=successor, prestart=prestart,ssh=result.get('ssh'))
     return successor
 
 
@@ -851,7 +934,7 @@ def prestart_failure(request_path, result_path):
                  and observation.get('region') == before['region']
                  and any(observation.get('instance_id')==item['instance_id'] and observation.get('config')==item['config']
                          for item in candidates)
-                 and observation.get('state') in ('created','stopped','replacing','started')
+                 and observation.get('state') in ('created','stopped','replacing','started','stopping')
                  and (execs or observation.get('state')!='started'), 'unknown original preparation observation')
     return request, predecessor, authority, before, candidates[-1]
 
@@ -976,6 +1059,7 @@ def build_request(ownership, build, source_root, source_ref, guest_env_contract,
     fingerprints = subprocess.check_output(['bash', '-euc', command, 'prepare-source-request', str(root)], text=True, timeout=20).splitlines()
     need(len(fingerprints) == 2, 'source fingerprints unavailable')
     value = dict(schema=REQUEST, nonce=transport_value['token'] if transport_value else secrets.token_hex(16), source_root=str(root), source_ref=source_ref,
+                 guest_transport='cloudbench-ssh-guest-v1',
                  image_ref=load(build)['image_ref'], node_fingerprint=fingerprints[0], python_fingerprint=fingerprints[1],
                  ownership=descriptor(ownership), build=descriptor(build),
                  native=dict(machine_id=machine['id'], volume_id=authority['volume']['id'], instance_id=machine['instance_id'],
