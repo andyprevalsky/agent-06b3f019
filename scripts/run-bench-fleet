@@ -9813,8 +9813,9 @@ PY
     return "$status"
 }
 
-cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
+cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir> [failed-runtime-output]
     local registry="${1%/}" owner="${1%/}" recovered=0 failed=0 recovery_index
+    local failed_runtime_output="${2:-}" runtime_recovery=0
     local bench clone_name machine_id machine_state guest_run_token proxy_port output
     local runner_status_code
     local receipt runner_evidence quiescence_evidence run_evidence backend_evidence
@@ -9848,6 +9849,37 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         guest_run_token="${recovery_guest_tokens[$recovery_index]}"
         proxy_port="${recovery_proxy_ports[$recovery_index]}"
         output="${recovery_outputs[$recovery_index]}"
+        runtime_recovery=0
+        if [ -n "$failed_runtime_output" ]; then
+            [ "$output" = "$failed_runtime_output" ] || continue
+            # This mode is reached only after the normal sealed transfer failed.
+            # The normal owner/plan/config checks remain upstream; bind this
+            # unfinished transfer before entering existing exact session cleanup.
+            if ! python3 - "$output" "$machine_id" "$guest_run_token" <<'PYRUNTIME'
+import json, os, stat, sys
+from pathlib import Path
+out, machine, token = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+def read(name):
+    path = out / name
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 65536
+        value = stream.read(65537)
+    assert len(value) <= 65536
+    return value
+identity = {"version": 1, "machine_id": machine, "run_token": token}
+assert json.loads(read("runtime-evidence.owner.json")) == identity
+assert json.loads(read("runtime-evidence.pending")) == identity
+assert read("post-config-start.accepted") == (machine + "\n").encode()
+assert not (out / "remote-logs/runtime-evidence").exists()
+assert not (out / "remote-logs/runtime-evidence").is_symlink()
+PYRUNTIME
+            then
+                echo "❌ [$bench] failed runtime transfer identity is unsafe" >&2
+                return 1
+            fi
+            runtime_recovery=1
+        fi
         receipt="$output/guest-cleanup.recovery-receipt.json"
         runner_evidence="$output/guest-cleanup.runner.status"
         quiescence_evidence="$output/guest-cleanup.quiescence.json"
@@ -9897,10 +9929,11 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             if [ -f "$output/guest-shutdown.confirmed" ] \
                 && [ ! -L "$output/guest-shutdown.confirmed" ] \
                 && [ "$(cat "$output/guest-shutdown.confirmed" 2>/dev/null)" = "$RUN_ID" ]; then
-                recovered=$((recovered + 1))
-                continue
-            fi
-            if ! cloudbench_archive_bound_child_shutdown_confirmation \
+                if [ "$runtime_recovery" -eq 0 ]; then
+                    recovered=$((recovered + 1))
+                    continue
+                fi
+            elif ! cloudbench_archive_bound_child_shutdown_confirmation \
                     "$registry" "$bench" "$machine_id" "$output" "$guest_run_token"; then
                 echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
                 failed=1
@@ -9926,7 +9959,7 @@ PY
                 continue
             }
             if [ "$receipt_kind" = runner-cleanup ] \
-                && { [ "$machine_state" != started ] \
+                && { [ "$runtime_recovery" -eq 1 ] || [ "$machine_state" != started ] \
                     || [ "$(cloudbench_guest_shutdown_status "$proxy_port")" != 204 ]; }; then
                 # A clean benchmark root receipt does not prove that run.sh
                 # stopped its workers or sealed browser recordings. Retain the
@@ -9975,7 +10008,7 @@ PY
                 }
                 case "$runner_lifecycle" in
                     clean)
-                        if [ "$machine_state" = started ] \
+                        if [ "$runtime_recovery" -eq 0 ] && [ "$machine_state" = started ] \
                             && [ "$(cloudbench_guest_shutdown_status "$proxy_port")" = 204 ]; then
                             if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
                                     recover-runner-receipt "${identity_args[@]}" \
@@ -10110,10 +10143,11 @@ PY
         }
         IFS=$'\t' read -r state_kind state_driver state_descendants state_reason \
             <<< "$state_summary"
-        if [ "$quiescence_status" -ne 0 ]; then
+        if [ "$quiescence_status" -ne 0 ] || [ "$runtime_recovery" -eq 1 ]; then
             if [ "$state_kind" = "active" ] \
                 || [ "$state_kind" = "exited-no-run" ] \
-                || [ "$state_kind" = "exited" ]; then
+                || [ "$state_kind" = "exited" ] \
+                || { [ "$runtime_recovery" -eq 1 ] && [ "$state_kind" = "quiesced" ]; }; then
                 cloudbench_fetch_guest_evidence status_code \
                     "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
                     "/repo/.context/cloudbench/logs/backend.log" \
@@ -10258,7 +10292,11 @@ PY
         failed=1
     done
 
-    [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
+    if [ -n "$failed_runtime_output" ]; then
+        [ "$failed" -eq 0 ] && [ "$recovered" -eq 1 ]
+    else
+        [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
+    fi
 }
 
 fleet_preconfig_recovery_plan() {  # exact whole-owner fresh/no-admission cohort, local only
@@ -10943,8 +10981,12 @@ PY
             proxy_port="${recovery_proxy_ports[$recovery_index]}"
             if [ -z "$proxy_port" ] \
                 || [ ! -f "$RUNTIME_EVIDENCE_RECOVERY_HELPER" ] \
-                || ! mkdir -p "$output/remote-logs" \
-                || ! python3 "$RUNTIME_EVIDENCE_RECOVERY_HELPER" \
+                || ! mkdir -p "$output/remote-logs"; then
+                echo "❌ [${recovery_benches[$recovery_index]}] runtime capture prerequisites unavailable; retaining ownership" >&2
+                shutdown_status=1
+                continue
+            fi
+            if ! python3 "$RUNTIME_EVIDENCE_RECOVERY_HELPER" \
                     "$output/remote-logs" "$proxy_port" \
                     "${recovery_guest_tokens[$recovery_index]}" \
                     "${recovery_machine_ids[$recovery_index]}" \
@@ -10965,6 +11007,13 @@ PY
                         mv "$output/failed-startup-runtime-archive" \
                             "$output/failed-startup-runtime-archive.rejected.$(date +%s).$$" || shutdown_status=1
                     fi
+                fi
+                # An ACK proves guest cleanup, not a sealable runtime bundle.
+                # Reuse authenticated exact session cleanup for this failed
+                # transfer only. It may stop the owned guest, but cannot clear
+                # the runtime latch or grant archive/teardown credit.
+                if cloudbench_recover_guest_cleanup_receipts "$registry" "$output"; then
+                    echo "🧭 [${recovery_benches[$recovery_index]}] exact cleanup completed; original-volume runtime archive remains required"
                 fi
                 echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
                 shutdown_status=1

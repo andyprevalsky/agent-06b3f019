@@ -37313,3 +37313,151 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost_readiness_regr
         text=True, capture_output=True, check=False, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+@pytest.mark.parametrize("fault", ["none", "ordinary", "sealed", "foreign-pending", "symlink-pending", "manifest-refused", "state-unknown", "wrong-state-token", "wrong-ack", "forged-seal", "hardlink-pending", "hardlink-owner", "hardlink-start"])
+def test_guest_shutdown_child_confirmation_failed_runtime_requires_exact_session_stop(tmp_path: Path, fault: str) -> None:
+    """A failed runtime transfer needs authenticated cleanup, never an ACK-only stop."""
+    owner, machine, run_id = "a" * 32, "deadbeef000001", "fixture-run"
+    token = owner + "-0"
+    output = tmp_path / "output"
+    output.mkdir()
+    ack = output / "guest-shutdown.confirmed"
+    ack.write_text(("foreign-run" if fault == "wrong-ack" else run_id) + "\n")
+    original_ack = ack.read_bytes()
+    neighbor = tmp_path / "neighbor"
+    neighbor.mkdir()
+    (neighbor / "guest-shutdown.confirmed").write_text(run_id + "\n")
+    (neighbor / "runtime-evidence.pending").write_text("neighbor debt\n")
+    record = {"version": 1, "machine_id": machine, "run_token": "b" * 32 + "-0" if fault == "foreign-pending" else token}
+    for name in ("runtime-evidence.owner.json", "runtime-evidence.pending"):
+        (output / name).write_text(json.dumps(record))
+    (output / "post-config-start.accepted").write_text(machine + "\n")
+    if fault == "symlink-pending":
+        (output / "runtime-evidence.pending").unlink()
+        (output / "runtime-evidence.pending").symlink_to(output / "runtime-evidence.owner.json")
+    aliases = {"hardlink-pending": "runtime-evidence.pending",
+               "hardlink-owner": "runtime-evidence.owner.json",
+               "hardlink-start": "post-config-start.accepted"}
+    if fault in aliases:
+        os.link(output / aliases[fault], tmp_path / "authority-alias")
+    state = {"schema_version": "cloudbench-guest-state-v1", "version": 1,
+             "machine_id": machine, "guest_run_token": token, "state": "exited",
+             "driver_state": "exited", "driver_pid": None, "driver_descendants": [],
+             "services_status": "stopped", "live_service_pids": [], "backend_closed": True,
+             "run_json": {"exists": False, "symlink": False}}
+    if fault == "wrong-state-token":
+        state["guest_run_token"] = "b" * 32 + "-0"
+    if fault in ("sealed", "forged-seal"):
+        (output / "remote-logs/runtime-evidence").mkdir(parents=True)
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    (tmp_path / "backend.log").write_text("[Server] Server started\n[Server] SIGTERM received, closing server...\n")
+    calls = tmp_path / "calls"
+    helper = tmp_path / "helper.py"
+    helper.write_text("""import sys,os,runpy,urllib.request
+with open(os.environ['CALLS'],'a') as f:f.write(sys.argv[1]+'\\n')
+if sys.argv[1]=='classify-runner-receipt':
+ print('failed');raise SystemExit(0)
+if os.environ['FAULT']=='manifest-refused' and sys.argv[1]=='build-active-provider-manifest':raise SystemExit(1)
+def no_network(*args,**kwargs):raise AssertionError('offline regression attempted provider network')
+urllib.request.urlopen=no_network
+runpy.run_path(os.environ['REAL_HELPER'],run_name='__main__')
+""")
+    guest = tmp_path / "guest.py"
+    guest.write_text("import os\nprint('unknown\\texited\\t0\\tbad' if os.environ['FAULT']=='state-unknown' else 'exited\\texited\\t0\\tstopped')\n")
+    fleet = fleet_source_text()
+    functions = "\n".join(_extract_fleet_function(fleet, s) for s in (
+        "cloudbench_recover_guest_cleanup_receipts() {", "cloudbench_publish_guest_shutdown_confirmation() {"))
+    script = f'''set -uo pipefail
+APP=fixture
+ROOT_DIR=/unused
+RUN_ID={run_id}
+CLOUDBENCH_BARRIER_TOKEN=fixture
+EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(helper))}
+GUEST_RECOVERY_HELPER={shlex.quote(str(guest))}
+export CALLS={shlex.quote(str(calls))} FAULT={fault} MACHINE={machine} TOKEN={token} REAL_HELPER={shlex.quote(str(EXACT_SESSION_CLEANUP_SCRIPT))}
+recovery_benches=(fixture neighbor)
+recovery_clone_names=(cloudbench-fixture cloudbench-neighbor)
+recovery_machine_ids=({machine} deadbeef000002)
+recovery_machine_states=(started started)
+recovery_guest_tokens=({token} '{owner}-1')
+recovery_proxy_ports=(12345 12346)
+recovery_outputs=({shlex.quote(str(output))} {shlex.quote(str(neighbor))})
+cloudbench_archive_bound_child_shutdown_confirmation() {{ return 1; }}
+cloudbench_fetch_guest_evidence() {{
+ case "$4" in
+  */backend.log) cp {shlex.quote(str(tmp_path/'backend.log'))} "$5" ;;
+  *) cp {shlex.quote(str(tmp_path/'state.json'))} "$5" ;;
+ esac
+ printf -v "$1" '%s' 200
+}}
+FLY() {{
+ printf 'fly:%s\\n' "$*" >> "$CALLS"
+ if [ "$1 $2" = 'machine stop' ]; then [ -f {shlex.quote(str(output/'guest-cleanup.provider-manifest.json'))} ] || return 90; return 0; fi
+ return 1
+}}
+machine_status_exact_read() {{ printf 'Machine ID: {machine}\\nState: stopped\\nVM\\n ID = {machine}\\n State = stopped\\n Name = cloudbench-fixture\\n'; }}
+cloudbench_seal_guest_evidence_file() {{ mv "$1" "$2"; }}
+{functions}
+cloudbench_recover_guest_cleanup_receipts {shlex.quote(str(tmp_path/owner))} {'' if fault in ('ordinary', 'sealed') else shlex.quote(str(output))}
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    events = calls.read_text().splitlines() if calls.exists() else []
+    assert ack.read_bytes() == original_ack, "original ACK was changed"
+    assert (neighbor / "guest-shutdown.confirmed").read_text() == run_id + "\n"
+    assert (neighbor / "runtime-evidence.pending").read_text() == "neighbor debt\n"
+    assert (output / "runtime-evidence.pending").exists(), "runtime evidence debt was cleared"
+    if fault == "none":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "build-active-provider-manifest" in events, "valid ACK bypassed original session evidence"
+        stop = f"fly:machine stop {machine} -a fixture"
+        assert events.index("build-active-provider-manifest") < events.index(stop)
+        assert events.index(stop) < events.index("publish-stopped-machine-proof") < events.index("cleanup-sealed-provider-sessions") < events.index("validate-recovery-receipt")
+    elif fault in ("ordinary", "sealed"):
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not events, "ordinary acknowledged guest changed"
+    else:
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert not any(e.startswith("fly:machine stop") for e in events), "unproved guest reached stop"
+
+
+@pytest.mark.parametrize("fault", ["failed-transfer", "missing-helper", "empty-proxy", "mkdir-failed"])
+def test_guest_shutdown_child_confirmation_failed_runtime_enters_only_exact_cleanup(tmp_path: Path, fault: str) -> None:
+    fleet = fleet_source_text()
+    start = fleet.index('            proxy_port="${recovery_proxy_ports[$recovery_index]}"', fleet.index('            # Exact recovery may have stopped this guest'))
+    end = fleet.index('        done\n    elif [ "$shutdown_status"', start)
+    actual = fleet[start:end]
+    output = tmp_path / "out"
+    output.mkdir()
+    (output / "post-config-start.accepted").write_text("deadbeef000001\n")
+    calls = tmp_path / "calls"
+    fail = tmp_path / "fail.py"
+    attempted = tmp_path / "collector-attempted"
+    fail.write_text(f"from pathlib import Path\nPath({str(attempted)!r}).touch()\nraise SystemExit(1)\n")
+    script = f'''set -uo pipefail
+output={shlex.quote(str(output))}
+registry={shlex.quote(str(tmp_path/'owner'))}
+recovery_index=0
+recovery_proxy_ports=({shlex.quote('' if fault == 'empty-proxy' else '12345')})
+recovery_guest_tokens=('{'a'*32}-0')
+recovery_machine_ids=(deadbeef000001)
+recovery_benches=(fixture)
+RUNTIME_EVIDENCE_RECOVERY_HELPER={shlex.quote(str(tmp_path/'absent.py' if fault == 'missing-helper' else fail))}
+shutdown_status=0
+{('mkdir() { return 1; }' if fault == 'mkdir-failed' else '')}
+fleet_recovery_capture_startup_failure() {{ return 1; }}
+cloudbench_recover_guest_cleanup_receipts() {{ printf '%s\\n' "$@" > {shlex.quote(str(calls))}; return 0; }}
+for recovery_index in 0; do
+{actual}
+done
+printf 'status=%s\\n' "$shutdown_status"
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "status=1" in result.stdout, "cleanup must not grant runtime or teardown credit"
+    if fault == "failed-transfer":
+        assert attempted.exists(), "collector did not actually run"
+        assert calls.is_file(), "failed capture never entered exact guest cleanup"
+        assert calls.read_text().splitlines() == [str(tmp_path/'owner'), str(output)]
+    else:
+        assert not attempted.exists(), "collector ran without its prerequisites"
+        assert not calls.exists(), "unavailable capture input authorized exact cleanup"
