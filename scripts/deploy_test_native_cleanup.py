@@ -1093,6 +1093,11 @@ def validate(receipt, owner, proof):
         return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
+    if layout == 'campaign-partial-zero-allocation38-v1':
+        from deploy_test_native_partial_admission38 import validate_partial
+        result = validate_partial(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)
+        need(used == set(bindings), 'partial38 proof file closure')
+        return result
     if layout == 'campaign-partial-zero-allocation-v1':
         from deploy_test_native_partial_admission import validate_partial
         result = validate_partial(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)

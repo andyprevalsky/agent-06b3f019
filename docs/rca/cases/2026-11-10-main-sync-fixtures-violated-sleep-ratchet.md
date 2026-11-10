@@ -161,6 +161,82 @@ The new frozen-source17-gate native cycle, five-loaded-run stability and
 production verification still require their own actual receipts. Original
 FAIL/SKIP/UNVERIFIED and cleanup/financial debts retain their native values.
 
+### Native38 recurrence: scope readiness replaced the full survival window
+
+At frozen2390845cf087491b96e4d8ea83d16188f80f64bd (digest50294f07e9b4952dc3a9b4b8501c9ed05cc6a30f10ed68a820fe6b7769a82ebe),
+actual structural38 executed all429 DTC tests successfully in112.764s (unitexit0,
+112.95s). The outer gate remained FAIL/UNVERIFIED: its separate durable-service
+fixture failed the original5-test invocation and its owning1-test retry at the
+new1s caller_scope_inactive wait (9checks,lastvalueFalse).
+
+Gate: INTRODUCED by this fixture adaptation between1c47 and2390845. The added
+systemctl state translator rejected real systemd255's(4,inactive) result for a
+collected scope. A never-created unique-name read-only query returned that tuple;
+the exact predicate and canonical wait reproduced the same1s/9check timeout.
+The initial one-pair V1 correction then passed the unchanged real owning test,
+but coordinator review found the deeper contract error: the ancestor1c47 fixture
+slept one full second after hard_dispose before its durable-PID survival assertion.
+A manager-readiness predicate could return immediately and shorten that negative
+endurance window, even after accepting the correct collected-unit response.
+V1 is retained as causal proof and is superseded, not the final repair.
+
+Step6a simplification deletes the unnecessary manager-state translator entirely.
+Use the fixture's existing canonical wait_for(lambda: not pid_alive(main_pid),1),
+then its original unchanged assertTrue(pid_alive(main_pid)). A healthy controller
+is observed for the complete original1s; a dead controller reaches the original
+failure assertion as soon as its death is observed. No OS-state enum, generic
+nonzero-exit admission, extra timer proxy, assertion or timeout change is needed.
+
+Actual local systemd owning validation used source-hash-controlled external
+fixture copies with the native ROOT bound read-only to canonical2390845 and the
+actual unchanged run-bench launcher; it created/disposed only the existing test's
+own unique temporary scopes/services and fake controllers. Original239 owning
+method:1FAIL/0errors/0skips4.555s at the same WaitTimeout. V2 same method:1PASS,
+0skips4.350s. Measured hard_dispose return to the original survival assertion is
+1.000420203s with the PID alive. The complete original5-test V2 suite passes in
+8.224s with zero skips, including the live setsid-control death case and three
+fake-systemd contracts. All39 assertion ASTs and original timing/producer behavior
+remain unchanged.
+
+Meaningful negative control releases only this test's actual fake controller at
++0.500459s while it is still alive. The unchanged survival assertion rejects its
+actual death at+0.812430s with the original durable-controller-died message. This
+proves the full observation catches delayed failure. The existing registered live
+owning test is the permanent regression; a duplicate implementation-shaped mock
+test would add no coverage. Independent review also observes an alive child for
+1.000622s and catches a child death after0.5s at the unchanged assertion; unexpected
+non-timeout failures still propagate.
+
+Fresh targeted readback after all consumers finish verifies all11 unique owned
+units inactive with MainPID0/emptycgroup and all14 original PID births absent.
+No foreign units/processes, paid benchmark/provider or production database were
+actioned, and shared source was not modified by this preparation. Artifacts and
+proofs remain in /var/tmp/deploy-mf1108/rca-durable38/: candidate-v2.patch,
+proof-v2.json, live-current-owning.log, live-v2-owning.log, live-v2-full.log,
+live-v2-delayed-exit-negative.log and fresh-owned-closure-v2.json. Independent review:
+/var/tmp/deploy-mf1108/rca-durable38-independent/review.json.
+
+The full local owning-test gap is closed. Keep this external recurrence OPEN
+until parent integrates the exact reviewed V2 bytes at quiescence and records
+actual applied-source validation; parent owns normal fix/freeze workflow and
+required native failed-gate/current-head revalidation. Original native38FAIL,
+its retry, V1 causal history, prior421-test1c47 result and cleanup/financial
+no-credit obligations remain unchanged. No whole-gate or future-source PASS is
+inferred from local owning tests or the separate actual429-test DTC unit.
+
+### Applied V2 verification on the actual deploy checkout
+
+The parent applied the exact independently reviewed V2 patch to the quiescent
+2390845 checkout after the native38 workers finished. The unchanged full owning
+command `python3 scripts/tests/run-bench-durable-service.test.py` passes all five
+tests with zero skips in8.301s, including both live systemd tests. The real primary
+sleep guard against actual upstreamf8c825 passes861 literal sleeps in274files;
+its Git-tracked baseline is unchanged. This closes the local fixture repair.
+The original native38 outerFAIL/UNVERIFIED remains immutable, and fresh native
+full-gate verification on the next frozen source is still required. Evidence:
+private actual-applied.json, actual-applied-owning-full.log and
+actual-applied-sleep-guard.log under the durable38 evidence directory.
+
 ## Human feedback
 
 The user requested completion of /deploy. No incident-specific human correction

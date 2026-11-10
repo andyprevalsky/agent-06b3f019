@@ -311,15 +311,9 @@ class DurableLaunchSurvivesSessionScopeKill(DurableLaunchBase):
         self.assertEqual(receipt["cgroup"], f"0::/system.slice/{unit}.service")
         self.assertEqual((receipt["knob"], receipt["secret"]), ("7", None))
         self.hard_dispose(scope)
-        # Observe completion of the killed caller scope, rather than assuming
-        # one elapsed second means systemd has finished disposing it.
-        def caller_scope_inactive():
-            result = self.root("systemctl", "is-active", scope, check=False)
-            return (result.returncode, result.stdout.strip()) in {
-                (3, "inactive"), (3, "failed"), (4, "unknown"),
-            }
-
-        wait_until(caller_scope_inactive, timeout=1, description="disposed caller scope inactive")
+        # Observe the durable process for the original full one-second window;
+        # an early death must reach the unchanged survival assertion immediately.
+        wait_for(lambda: not pid_alive(main_pid), 1)
         self.assertTrue(pid_alive(main_pid), "durable controller died with the caller's session scope")
         self.root("systemctl", "stop", unit)  # TERM reaches the controller's own trap
         self.assertTrue(wait_for(lambda: (self.state / f"controller-{main_pid}.term").exists(), 15))
