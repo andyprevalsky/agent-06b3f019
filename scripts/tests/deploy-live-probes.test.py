@@ -303,8 +303,24 @@ class DeployLiveProbeTests(unittest.TestCase):
         with patch.object(planner.subprocess, "run", return_value=type("Result", (), {"stdout": json.dumps(lanes)})()):
             gate = next(g for g in planner.standard_template()["gates"] if g["name"] == "live-probes")
         self.assertEqual(gate["checks"], ["live-probes", "credential-health", "amplitude-live",
-                                          "chat-router-failover-live", "migration-preflight"])
+                                          "chat-router-failover-live", "browser-provider-live",
+                                          "report-bug-storage-live", "migration-preflight"])
         self.assertTrue(gate["case_protocol"])
+        # Both incoming live probes retain their exact commands and serial setup chain.
+        expected_live = {
+            "browser-provider-live": ("BROWSER_PROVIDER_LIVE=1", "browser-provider", "chat-router-failover-live"),
+            "report-bug-storage-live": ("REPORT_BUG_STORAGE_LIVE=1", "report-bug", "browser-provider-live"),
+        }
+        for root in (ROOT, Path("/portable/other-workspace")):
+            with patch.object(module, "workspace_tsx", return_value=str(root / "node_modules/.bin/tsx")):
+                portable = module.recipe(root)["cases"]
+            self.assertEqual(list(portable), gate["checks"])
+            for name, (flag, domain, after) in expected_live.items():
+                self.assertEqual(portable[name], {
+                    "command": ["bash", "../scripts/run-deploy-stage", name, "--", "env", flag,
+                                "BLACKBOX_TEST_CONCURRENCY=1", "bash", "scripts/run-blackbox-tests.sh", domain],
+                    "cwd": "back-end", "after": after,
+                })
         inventory = {"live-probes": dict(transport="github-actions", worker_root="/home/runner/_work/rose/rose",
                      id="live-worker", runner="blacksmith-2vcpu-ubuntu-2404", timeout_seconds=14400)}
         binding = generate({"gates": [gate]}, inventory, ROOT)["live-probes"]

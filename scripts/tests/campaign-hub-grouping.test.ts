@@ -8,6 +8,10 @@ import {
   chmodSync,
   createWriteStream,
   renameSync,
+  openSync,
+  writeSync,
+  closeSync,
+  constants,
 } from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
@@ -24,6 +28,9 @@ const project =
 const require = createRequire(path.join(project, "back-end/package.json"));
 const ts: typeof TypeScript = require("typescript");
 const express = require("express");
+const { waitFor: waitForCondition } = require(
+  path.join(project, "back-end/src/tests/helpers/waitFor.ts"),
+);
 const { coalesceHubRunPuts } = require(
   path.join(project, "back-end/src/providers/benchmarkHubInFlight.ts"),
 );
@@ -454,16 +461,19 @@ function fixtureRoot(name: string) {
 }
 
 async function waitFor(check: () => boolean, child: ReturnType<typeof spawn>) {
-  const deadline = Date.now() + 60_000;
-  while (!check()) {
-    assert.equal(
-      child.exitCode,
-      null,
-      "owning campaign exited before the fixture boundary",
-    );
-    assert.ok(Date.now() < deadline, "fixture boundary was not reached");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  await waitForCondition(
+    "campaign fixture boundary",
+    () => {
+      if (check()) return true;
+      assert.equal(
+        child.exitCode,
+        null,
+        "owning campaign exited before the fixture boundary",
+      );
+      return false;
+    },
+    { timeoutMs: 60_000 },
+  );
 }
 
 function metadata(group: string, member: string, run = 1, total = 2) {
@@ -781,19 +791,14 @@ test(
     });
     const healthy = ["r001-j0001", "r002-j0004", "r001-j0002", "r002-j0005"];
     try {
-      const deadline = Date.now() + 60_000;
-      while (
-        !healthy.every((job) =>
-          existsSync(path.join(receipts, `evaluated-${job}`)),
-        ) ||
-        shardRuns[2].child.exitCode === null
-      ) {
-        assert.ok(
-          Date.now() < deadline,
-          "sharded fixture boundary was not reached",
-        );
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitForCondition(
+        "healthy shards evaluated and invalid shard exited",
+        () =>
+          healthy.every((job) =>
+            existsSync(path.join(receipts, `evaluated-${job}`)),
+          ) && shardRuns[2].child.exitCode !== null,
+        { timeoutMs: 60_000 },
+      );
       assert.notEqual(
         shardRuns[2].child.exitCode,
         0,
@@ -2533,6 +2538,14 @@ for bench in "\${BENCHES[@]}"; do
     CHILD_PIDS+=("$!"); CHILD_OUT+=("$out")
     CHILD_STARTS+=("$(fleet_pid_start_time "\${CHILD_PIDS[\${#CHILD_PIDS[@]}-1]}")")
 done
+mkfifo "$WORK/poll-permit"
+poll_count=0
+sleep() {
+    poll_count=$((poll_count + 1))
+    printf '%s\n' "$poll_count" > "$WORK/poll-count.tmp"
+    mv "$WORK/poll-count.tmp" "$WORK/poll-count"
+    IFS= read -r permit < "$WORK/poll-permit"
+}
 : > "$WORK/driver.ready"
 fleet_wait_children_for_infra_stop
 for pid in "\${CHILD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
@@ -2561,96 +2574,141 @@ echo "COMPLETED"
     run.stdout!.on("data", (chunk) => (stdout += chunk.toString()));
     run.stderr!.on("data", (chunk) => (stderr += chunk.toString()));
     const closed = once(run, "close");
-    const sleep = (ms: number) =>
-      new Promise((resolve) => setTimeout(resolve, ms));
-    for (
-      let i = 0;
-      i < 300 && !existsSync(path.join(work, "driver.ready"));
-      i++
-    )
-      await sleep(50);
-    assert.ok(existsSync(path.join(work, "driver.ready")), stderr);
-    const finish = (bench: string, code: string, status?: string) => {
-      const out = path.join(fleetDir, bench);
-      if (status) {
+    const pollCount = () =>
+      existsSync(path.join(work, "poll-count"))
+        ? Number(readFileSync(path.join(work, "poll-count"), "utf8"))
+        : 0;
+    const permitPoll = () =>
+      waitForCondition(
+        "watcher is reading its poll permit",
+        () => {
+          assert.equal(
+            run.exitCode,
+            null,
+            "controller exited before poll permit",
+          );
+          let fd: number;
+          try {
+            fd = openSync(
+              path.join(work, "poll-permit"),
+              constants.O_WRONLY | constants.O_NONBLOCK,
+            );
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENXIO") return false;
+            throw error;
+          }
+          try {
+            writeSync(fd, "next\n");
+          } finally {
+            closeSync(fd);
+          }
+          return true;
+        },
+        { timeoutMs: 15_000 },
+      );
+    try {
+      await waitForCondition(
+        "driver entered first watcher poll",
+        () => pollCount() >= 1,
+        { timeoutMs: 15_000 },
+      );
+      assert.ok(existsSync(path.join(work, "driver.ready")), stderr);
+      const finish = (bench: string, code: string, status?: string) => {
+        const out = path.join(fleetDir, bench);
+        if (status) {
+          writeFileSync(
+            path.join(out, "cloudbench-run.json"),
+            JSON.stringify({
+              tasks: [{ name: bench, status, passed: status === "PASSED" }],
+            }),
+          );
+        }
         writeFileSync(
-          path.join(out, "cloudbench-run.json"),
-          JSON.stringify({
-            tasks: [{ name: bench, status, passed: status === "PASSED" }],
-          }),
+          path.join(out, "benchmark-child.finished.tmp"),
+          `${code}\n`,
+        );
+        // Publish atomically, as run_fleet_child_supervised does.
+        renameSync(
+          path.join(out, "benchmark-child.finished.tmp"),
+          path.join(out, "benchmark-child.finished"),
+        );
+      };
+      finish("b00", "1", "INFRA_ERROR");
+      finish("b01", "0", "PASSED");
+      finish("b02", "1", "FAILED");
+      finish("b03", "143");
+      mkdirSync(path.join(fleetDir, "b04", "host-replaced-m1"));
+      writeFileSync(
+        path.join(
+          fleetDir,
+          "b04",
+          "host-replaced-m1",
+          "benchmark-child.finished",
+        ),
+        "1\n",
+      );
+      await permitPoll();
+      await waitForCondition(
+        "watcher completed below-threshold scan",
+        () => pollCount() >= 2,
+        { timeoutMs: 15_000 },
+      );
+      assert.equal(
+        run.exitCode,
+        null,
+        `1/40 infra must not stop the fleet:\n${stderr}`,
+      );
+      assert.ok(
+        !existsSync(path.join(fleetDir, "infra-stop.json")),
+        "no breach receipt at 1/40",
+      );
+      assert.ok(
+        !existsSync(path.join(work, "terminated-b05")),
+        "no child cancelled at 1/40",
+      );
+      finish("b05", "1");
+      await permitPoll();
+      await waitForCondition(
+        "fleet exits through threshold TERM",
+        () => run.exitCode !== null,
+        { timeoutMs: 60_000 },
+      );
+      await closed;
+      assert.equal(run.exitCode, 143, stdout + stderr);
+      assert.doesNotMatch(stdout, /COMPLETED/);
+      assert.match(
+        stderr,
+        /INFRA STOP: 2\/40 scheduled jobs confirmed INFRA \(b00, b05\)/,
+      );
+      assert.match(stdout + stderr, /controller received TERM/);
+      const receipt = JSON.parse(
+        readFileSync(path.join(fleetDir, "infra-stop.json"), "utf8"),
+      );
+      assert.equal(receipt.schema, "fleet-infra-stop-v1");
+      assert.equal(receipt.infra_jobs, 2);
+      assert.equal(receipt.scheduled_total, 40);
+      assert.deepEqual(receipt.infra_job_ids, ["b00", "b05"]);
+      const b04 = receipt.jobs.find(
+        (job: { job_id: string }) => job.job_id === "b04",
+      );
+      assert.deepEqual(
+        b04.attempts.map((attempt: { status: string }) => attempt.status),
+        ["replaced", "running"],
+      );
+      for (let i = 0; i < 40; i++) {
+        const bench = `b${String(i).padStart(2, "0")}`;
+        const finished = ["b00", "b01", "b02", "b03", "b05"].includes(bench);
+        assert.equal(
+          existsSync(path.join(work, `terminated-${bench}`)),
+          !finished,
+          `${bench} must ${finished ? "keep its own outcome" : "be cancelled by the controller's cleanup"}`,
         );
       }
-      writeFileSync(
-        path.join(out, "benchmark-child.finished.tmp"),
-        `${code}\n`,
-      );
-      // Publish atomically, as run_fleet_child_supervised does.
-      renameSync(
-        path.join(out, "benchmark-child.finished.tmp"),
-        path.join(out, "benchmark-child.finished"),
-      );
-    };
-    finish("b00", "1", "INFRA_ERROR");
-    finish("b01", "0", "PASSED");
-    finish("b02", "1", "FAILED");
-    finish("b03", "143");
-    mkdirSync(path.join(fleetDir, "b04", "host-replaced-m1"));
-    writeFileSync(
-      path.join(
-        fleetDir,
-        "b04",
-        "host-replaced-m1",
-        "benchmark-child.finished",
-      ),
-      "1\n",
-    );
-    await sleep(2_000);
-    assert.equal(
-      run.exitCode,
-      null,
-      `1/40 infra must not stop the fleet:\n${stderr}`,
-    );
-    assert.ok(
-      !existsSync(path.join(fleetDir, "infra-stop.json")),
-      "no breach receipt at 1/40",
-    );
-    assert.ok(
-      !existsSync(path.join(work, "terminated-b05")),
-      "no child cancelled at 1/40",
-    );
-    finish("b05", "1");
-    const timeout = setTimeout(() => run.kill("SIGKILL"), 60_000);
-    await closed;
-    clearTimeout(timeout);
-    assert.equal(run.exitCode, 143, stdout + stderr);
-    assert.doesNotMatch(stdout, /COMPLETED/);
-    assert.match(
-      stderr,
-      /INFRA STOP: 2\/40 scheduled jobs confirmed INFRA \(b00, b05\)/,
-    );
-    assert.match(stdout + stderr, /controller received TERM/);
-    const receipt = JSON.parse(
-      readFileSync(path.join(fleetDir, "infra-stop.json"), "utf8"),
-    );
-    assert.equal(receipt.schema, "fleet-infra-stop-v1");
-    assert.equal(receipt.infra_jobs, 2);
-    assert.equal(receipt.scheduled_total, 40);
-    assert.deepEqual(receipt.infra_job_ids, ["b00", "b05"]);
-    const b04 = receipt.jobs.find(
-      (job: { job_id: string }) => job.job_id === "b04",
-    );
-    assert.deepEqual(
-      b04.attempts.map((attempt: { status: string }) => attempt.status),
-      ["replaced", "running"],
-    );
-    for (let i = 0; i < 40; i++) {
-      const bench = `b${String(i).padStart(2, "0")}`;
-      const finished = ["b00", "b01", "b02", "b03", "b05"].includes(bench);
-      assert.equal(
-        existsSync(path.join(work, `terminated-${bench}`)),
-        !finished,
-        `${bench} must ${finished ? "keep its own outcome" : "be cancelled by the controller's cleanup"}`,
-      );
+    } finally {
+      if (run.exitCode === null) {
+        run.kill("SIGTERM");
+        await closed;
+      }
     }
   },
 );

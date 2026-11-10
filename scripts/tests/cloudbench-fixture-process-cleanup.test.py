@@ -137,3 +137,63 @@ def check_failed_fixture_dumps_task_bench_log(source: Path) -> None:
 
 
 check_failed_fixture_dumps_task_bench_log(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
+
+
+def check_cleanup_selftest_does_not_repeat_prerequisites(source: Path) -> None:
+    """Only the internal cleanup-exit probe skips prerequisites; normal errors remain hard."""
+    import shlex
+    text = source.read_text()
+    begin = text.index('export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=')
+    end = text.index('# Resolve the fleet APP', begin)
+    prerequisite_block = text[begin:end]
+    expected = [
+        'cloudbench-worker-readiness-publication.test.py',
+        'cloudbench-fixture-port-allocation.test.py',
+        'cloudbench-fixture-process-cleanup.test.py',
+        'cloudbench-fixture-catalog.test.py',
+        'cloudbench-hub-reaping.test.py',
+        'cloudbench-fake-volume-contract.test.py',
+        'cloudbench-undelivered-native-stop-capture.test.py',
+        'cloudbench-runtime-evidence-collector.test.py',
+        'cloudbench-failed-runtime-evidence.test.py',
+        'cloudbench-bench-log-backlog.test.py',
+    ]
+    with tempfile.TemporaryDirectory(prefix='cleanup-prerequisite-control-') as folder:
+        folder = Path(folder)
+        for mode, failure, wanted_status, wanted in (
+            ('1', '', 0, []),
+            ('0', '', 0, expected),
+            ('', '', 0, expected),
+            ('0', expected[3], 1, expected[:4]),
+        ):
+            record = folder / 'calls'
+            record.write_text('')
+            prefix = ('ROOT_DIR=/fixture\nCALL_RECORD=' + shlex.quote(str(record)) +
+                      '\nFAIL_NAME=' + shlex.quote(failure) +
+                      '\nCLOUDBENCH_TEST_CLEANUP_EXIT_SELF_TEST=' + shlex.quote(mode) +
+                      '\npython3() { local name="${1##*/}"; printf "%s\\n" "$name" >> "$CALL_RECORD"; '
+                      '[ "$name" != "$FAIL_NAME" ]; }\n')
+            result = subprocess.run(['bash', '-c', prefix + prerequisite_block], capture_output=True, text=True)
+            actual = record.read_text().splitlines()
+            assert result.returncode == wanted_status, (mode, failure, result.returncode, result.stderr)
+            assert actual == wanted, (mode, failure, actual, wanted)
+
+
+check_cleanup_selftest_does_not_repeat_prerequisites(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
+
+
+def check_cleanup_fixture_registration(root: Path) -> None:
+    """The cleanup regression must have exactly one direct native structural recipe."""
+    import ast
+    tree = ast.parse((root / 'scripts/run-deploy-structural-gates.py').read_text())
+    name = 'cloudbench-fixture-process-cleanup'
+    commands = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'Gate' and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Constant) and node.args[0].value == name):
+            commands.append(ast.literal_eval(node.args[1]))
+    assert commands == [('python3', 'scripts/tests/cloudbench-fixture-process-cleanup.test.py')], commands
+
+
+check_cleanup_fixture_registration(ROOT)

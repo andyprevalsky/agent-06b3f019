@@ -17,6 +17,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
+from condition_wait import wait_until
+
 from benchmarks.claude_md_replay import driver, observer, report, sandbox
 from benchmarks.claude_md_replay.manifest import PILOT_MANIFEST, ManifestError, Task, load_manifest
 from benchmarks.claude_md_replay.sandbox import RunPaths, SandboxError
@@ -245,10 +248,7 @@ def test_honeypot_logs_a_postgres_startup(tmp_path):
             body = (196608).to_bytes(4, "big") + b"user\x00prisma\x00database\x00postgres\x00\x00"
             conn.sendall((len(body) + 4).to_bytes(4, "big") + body)
             conn.recv(1)
-        for _ in range(50):
-            if pot.connections():
-                break
-            asyncio.run(asyncio.sleep(0.05))
+        wait_until(pot.connections, timeout=2.5, description="honeypot startup record")
     finally:
         pot.stop()
     rows = pot.connections()

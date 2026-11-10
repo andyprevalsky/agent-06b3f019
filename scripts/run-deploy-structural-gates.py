@@ -438,6 +438,10 @@ GATES = (
         "cloudbench-controller-linux",
         ("python3", "scripts/tests/cloudbench-controller-linux.test.py"),
     ),
+    Gate(
+        "cloudbench-fixture-process-cleanup",
+        ("python3", "scripts/tests/cloudbench-fixture-process-cleanup.test.py"),
+    ),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
@@ -498,6 +502,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
     ),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
+    Gate(
+        "claude-md-replay-cli",
+        ("python3", "-m", "pytest", "-q", "agents/benchmarks/claude_md_replay/replay_cli_test.py"),
+    ),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
     Gate(

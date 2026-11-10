@@ -201,7 +201,7 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "scripts/run-blackbox-tests.sh",
                 "browser-provider",
             ),
-            ROOT / "back-end",
+            root / "back-end",
             after="chat-router-failover-live",
         ),
         Command(
@@ -218,7 +218,7 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "scripts/run-blackbox-tests.sh",
                 "report-bug",
             ),
-            ROOT / "back-end",
+            root / "back-end",
             after="browser-provider-live",
         ),
         # Read-only: EXPLAINs and counts every migration production has not applied
@@ -239,7 +239,7 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
 
 
 def recipe(root: Path = ROOT, aggregate: dict | None = None) -> dict:
-    """The same four probes, with portable paths and their original dependency."""
+    """The same six probes, with portable paths and their original dependencies."""
     cases = {"live-probes": aggregate if aggregate is not None else {
         "command": ["python3", "scripts/run_deploy_live_probes.py"], "cwd": ".", "env": {}, "aggregate": True}}
     for probe in deploy_commands(root):

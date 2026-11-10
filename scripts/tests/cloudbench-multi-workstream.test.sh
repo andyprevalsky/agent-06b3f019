@@ -39,20 +39,24 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 # ownership and release with the minimum real allocation; the focused reserve
 # tests cover sizing and low-space behavior separately.
 export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
-python3 "$ROOT_DIR/scripts/tests/cloudbench-worker-readiness-publication.test.py" || exit 1
-python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-port-allocation.test.py" || exit 1
-python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-process-cleanup.test.py" || exit 1
-python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-catalog.test.py" || exit 1
-python3 "$ROOT_DIR/scripts/tests/cloudbench-hub-reaping.test.py" || exit 1
-python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" || exit 1
-# A quarantined owner whose natively stopped guest never received its shutdown
-# is recoverable only through the exact undelivered native-stop capture (K12).
-python3 "$ROOT_DIR/scripts/tests/cloudbench-undelivered-native-stop-capture.test.py" || exit 1
-python3 "$ROOT_DIR/scripts/tests/cloudbench-runtime-evidence-collector.test.py" || exit 1
-# A failed stack teardown keeps its worker/stack logs as diagnostic-only evidence (P8).
-python3 "$ROOT_DIR/scripts/tests/cloudbench-failed-runtime-evidence.test.py" || exit 1
-# Terminal bench.log bursts drain by bytes; runaway and stuck backlogs fail closed (P8).
-python3 "$ROOT_DIR/scripts/tests/cloudbench-bench-log-backlog.test.py" || exit 1
+# The recursive cleanup-exit probe exercises only cleanup(); the parent has
+# already run every prerequisite, so do not execute those suites a second time.
+if [ "${CLOUDBENCH_TEST_CLEANUP_EXIT_SELF_TEST:-0}" != "1" ]; then
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-worker-readiness-publication.test.py" || exit 1
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-port-allocation.test.py" || exit 1
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-process-cleanup.test.py" || exit 1
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-catalog.test.py" || exit 1
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-hub-reaping.test.py" || exit 1
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" || exit 1
+    # A quarantined owner whose natively stopped guest never received its shutdown
+    # is recoverable only through the exact undelivered native-stop capture (K12).
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-undelivered-native-stop-capture.test.py" || exit 1
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-runtime-evidence-collector.test.py" || exit 1
+    # A failed stack teardown keeps its worker/stack logs as diagnostic-only evidence (P8).
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-failed-runtime-evidence.test.py" || exit 1
+    # Terminal bench.log bursts drain by bytes; runaway and stuck backlogs fail closed (P8).
+    python3 "$ROOT_DIR/scripts/tests/cloudbench-bench-log-backlog.test.py" || exit 1
+fi
 
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).

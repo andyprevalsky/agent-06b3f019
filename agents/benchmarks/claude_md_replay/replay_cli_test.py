@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import signal
 import subprocess
-import time
+import sys
 from pathlib import Path
 
 import pytest
 
 from benchmarks.claude_md_replay import fixtures, sandbox
 from benchmarks.claude_md_replay.manifest import load_manifest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "lib"))
+from condition_wait import wait_until
 
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "skill_manifests" / "benchmark.json"
@@ -82,12 +86,7 @@ def rows(repo: Path, name: str = "run-bench.jsonl") -> list[dict]:
 
 
 def wait_for(predicate, seconds: float = 10.0) -> bool:
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.1)
-    return predicate()
+    return wait_until(predicate, timeout=seconds, description="replay controller condition")
 
 
 def test_install_hides_stub_and_strips_provenance(repo: Path) -> None:
@@ -206,3 +205,17 @@ def test_benchmark_manifest_fixtures_resolve() -> None:
         fixtures.resolve_fixture(task.fixture)
         scenario = json.loads(fixtures.scenario_path(task.fixture.split(":", 1)[1]).read_text())
         assert scenario["provenance"]["recorded"] and scenario["provenance"]["synthesized"]
+
+
+def test_deploy_structural_registers_replay_cli() -> None:
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "replay_cli_structural_registry", root / "scripts/run-deploy-structural-gates.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    matches = [gate.command for gate in module.GATES if gate.name == "claude-md-replay-cli"]
+    assert matches == [
+        ("python3", "-m", "pytest", "-q", "agents/benchmarks/claude_md_replay/replay_cli_test.py")
+    ]
