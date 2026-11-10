@@ -14,8 +14,8 @@
  * signed-out stock website keeps Research, Careers and Download.
  *
  * LEFT OFFSET (md+): Rose Desktop with a left bar (sidebarWidthCollapsed > 0)
- * pads every view by --rose-bar-offset — the bar's width while it is pinned or
- * dragged open (the chat is pushed, not covered), else 64px. Layouts without a
+ * pads every view by the fixed 64px rail. Expanded, pinned and resized bars
+ * overlay the trajectory without moving or narrowing it. Layouts without a
  * bar (SharedBenchmarkLayout passes 0) get no offset. The stock sidebar keeps
  * --browse-sidebar-offset on full-width views only.
  */
@@ -76,9 +76,7 @@ export function MainContent(props: MainContentProps) {
       data-testid="terminal-main-content"
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
-        roseBar
-          ? 'md:pl-[var(--rose-bar-offset,64px)]'
-          : fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
+        roseBar ? 'md:pl-[64px]' : fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
       )}
       style={{
         height: 'var(--app-height, 100dvh)',

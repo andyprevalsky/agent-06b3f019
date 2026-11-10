@@ -13,11 +13,44 @@
 import { Router } from 'express';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { codeAgentsQuerySchema, listCodeAgents } from './agentCodeAgentsService';
+import {
+  codeAgentsQuerySchema,
+  listCodeAgents,
+  renameCodeAgentForUser,
+} from './agentCodeAgentsService';
 import { handleRouteError } from './routes.helpers';
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
+
+// Caller → hybrid auth → owner-scoped task update → persisted sidebar title.
+router.patch(
+  '/code-agents/:taskId',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const userId = req.userId;
+      if (userId === undefined || userId === '') {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const body = req.body as { title?: unknown } | null;
+      const title = typeof body?.title === 'string' ? body.title.trim() : '';
+      if (title.length === 0 || title.length > 80) {
+        res.status(400).json({ error: 'title must contain 1-80 characters' });
+        return;
+      }
+      const renamed = await renameCodeAgentForUser(userId, req.params.taskId, title);
+      if (renamed === null) {
+        res.status(404).json({ error: 'Code agent not found' });
+        return;
+      }
+      res.json(renamed);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to rename code agent');
+    }
+  })
+);
 
 router.get(
   '/code-agents',
