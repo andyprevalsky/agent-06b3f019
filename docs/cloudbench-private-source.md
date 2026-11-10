@@ -201,3 +201,13 @@ behavior. Every owned runner replaces its original shell through the capsule
 loader before decoding environment files or starting work; reentry checks the
 effective values again. Missing files, changed bindings or cleared markers
 cannot fall back to ambient app secrets.
+
+If a completed guest and parked resource have an accepted snapshot
+acknowledgement but the original operation failed before publication,
+`cloudbench-prepare-source.py finalize-snapshot --request ORIGINAL_REQUEST
+--failed-result ORIGINAL_RESULT --output NEW_DIRECTORY` can verify that exact
+transaction under a new native lease. It performs only resource/readiness GETs
+and lease operations. It cannot start a guest, create another snapshot or adopt
+a caller-supplied snapshot ID. It publishes a distinct finalized authority only
+after strict completion and release checks. The old failed result remains false
+and grants no historical task credit.

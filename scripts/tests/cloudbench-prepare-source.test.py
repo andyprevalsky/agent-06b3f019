@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline owning checks for private-source preparation; never contact providers."""
 import copy
+import base64
 import ast
 from datetime import datetime, timezone
 import http.server
@@ -41,6 +42,13 @@ class Preparation(unittest.TestCase):
                              ('POST', '/machines/owned/metadata/x'),
                              ('POST', '/machines/owned/exec?escape=1')]:
             self.assertFalse(allowed(method, path, 'owned', 'vol_owned'))
+
+    def test_snapshot_ack_strict_supported_shapes(self):
+        decode=self.m['snapshot_ack_id'];nested={'Msg':{'backup':{'graph_id':'vs_expected','id':'45721','state':'prepare'}}}
+        self.assertEqual(decode(nested),'vs_expected');self.assertEqual(decode({'id':'vs_expected'}),'vs_expected')
+        for wrong in ({},{'graph_id':'vs_expected'},{'id':False},{'id':1},{'id':'45721'},{'Msg':None},
+                      {'Msg':{'backup':{'graph_id':False}}},{'id':'vs_other',**nested},{'id':'vs_expected','graph_id':'vs_other'}):
+            with self.assertRaises(ValueError,msg=repr(wrong)):decode(wrong)
 
     def test_guest_observation_must_match_installed_dependencies(self):
         request = dict(nonce='a'*32, source_ref='b'*40, node_fingerprint='c'*64,
@@ -301,10 +309,12 @@ class NativeLifecycle(unittest.TestCase):
             return 200,{'exit_code':0,'stdout':json.dumps(guest)}
         if method=='POST' and path=='/volumes/'+self.vid+'/snapshots':
             row=dict(id='vs_new',status='created',size=101,digest='2'*64,created_at=datetime.now(timezone.utc).isoformat())
-            self.snapshots.append(row);return 201,row
+            self.snapshots.append(row)
+            if self.fault=='snapshot-msg':return 201,{'Msg':{'backup':{'graph_id':row['id'],'id':'45721','state':'prepare'}}}
+            return 201,row
         return 403,{}
 
-    def invoke(self,request_name='request.json',output_name='output'):
+    def invoke(self,request_name='request.json',output_name='output',helper_path=None):
         self.write(request_name,self.request)
         env=dict(os.environ,FLY_API_TOKEN='fixture-private',FLY_API_HOSTNAME=f'http://127.0.0.1:{self.server.server_port}')
         # Existing raw API resolves a flyctl binary even with a bearer credential.
@@ -321,7 +331,7 @@ except Exception:sys.exit(71)
 sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr',''));sys.exit(value.get('exit_code',1))
 ''');binary.chmod(0o700)
         env['PATH']=str(self.root)+os.pathsep+env['PATH']
-        return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'--request',str(self.root/request_name),
+        return subprocess.run([sys.executable,str(helper_path or HERE/'cloudbench-prepare-source.py'),'--request',str(self.root/request_name),
                                '--output',str(self.root/output_name)],env=env,capture_output=True,text=True,timeout=35)
 
     def test_request_builder_fingerprints_oversized_git_pinned_helper_with_real_bash(self):
@@ -463,6 +473,99 @@ FRAGMENT
         self.assertEqual(self.machine['config']['guest']['memory_mb'],2048)
         receipt=self.m['load'](self.root/'output/result.json')
         self.assertFalse(receipt['qualified']);self.assertTrue(receipt['stopped_verified'])
+
+    def test_completed_guest_old_msg_ack_failure_get_only_finalization(self):
+        self.volume.update(name='cbs_'+self.owner[:26],encrypted=True)
+        self.request['guest_transport']='cloudbench-ssh-guest-v1';self.fault='snapshot-msg'
+        old=self.root/'historical-producer';old.mkdir()
+        ref=self.request['source_ref']
+        for member in ('cloudbench-prepare-source.py',*self.m['DEPENDENCIES']):
+            (old/member).write_bytes(self.m['source_bytes'](HERE.parent,ref,member))
+        failed=self.invoke(helper_path=old/'cloudbench-prepare-source.py')
+        self.assertNotEqual(failed.returncode,0)
+        original={path:path.read_bytes() for path in (self.root/'output').rglob('*') if path.is_file()}
+        self.assertFalse(self.m['load'](self.root/'output/result.json')['qualified'])
+        self.assertEqual(len(self.snapshots),2)
+        env=dict(os.environ,FLY_API_TOKEN='fixture-private',FLY_API_HOSTNAME=f'http://127.0.0.1:{self.server.server_port}',PATH=str(self.root)+os.pathsep+os.environ['PATH'])
+        def finalize(name):
+            return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'finalize-snapshot',
+                '--request',str(self.root/'request.json'),'--failed-result',str(self.root/'output/result.json'),
+                '--output',str(self.root/name)],env=env,capture_output=True,text=True,timeout=35)
+        current=copy.deepcopy(self.machine)
+        for kind in ('version','config','claim','volume'):
+            self.machine=copy.deepcopy(current)
+            if kind=='version':self.machine['instance_id']='UNKNOWN'
+            elif kind=='config':self.machine['config']['env']['FOREIGN']='changed'
+            elif kind=='claim':self.machine['config']['metadata']['cloudbench_source_consumer_'+'a'*32]='open'
+            else:self.volume['encrypted']=False
+            self.assertNotEqual(finalize('refuse-'+kind).returncode,0,kind)
+            self.volume['encrypted']=True
+        self.machine=copy.deepcopy(current);start=len(self.calls)
+        answer=finalize('finalized');self.assertEqual(answer.returncode,0,answer.stderr)
+        self.assertTrue(all(method=='GET' or path=='/machines/'+self.mid+'/lease' for method,path,body,nonce in self.calls[start:]))
+        manifest=self.m['verify_prepared_source'](self.root/'request.json',self.root/'finalized/result.json',self.root/'finalized/source-manifest.json',
+            source_ref=ref,image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        self.assertEqual(manifest['snapshot_id'],'vs_new')
+        creator=runpy.run_path(str(HERE/'cloudbench-prepare-source-create.py'));journal=self.root/'create'
+        admitted=creator['retirement_successor'](SimpleNamespace(prepared_request=self.root/'request.json',
+            prepared_result=self.root/'finalized/result.json',prepared_manifest=self.root/'finalized/source-manifest.json'),
+            journal,creator['read'](journal/'intent.json'))
+        self.assertEqual(admitted['instance_id'],manifest['instance_id'])
+        self.assertEqual(sum(method=='POST' and path=='/volumes/'+self.vid+'/snapshots' for method,path,body,nonce in self.calls),1)
+        self.assertEqual(sum(method=='POST' and path=='/machines/'+self.mid+'/start' for method,path,body,nonce in self.calls),1)
+        result_path=self.root/'finalized/result.json';result=result_path.read_bytes()
+        inventory_path=self.root/'finalized/final-inventory.json';inventory=inventory_path.read_bytes()
+        for kind in ('incomplete','snapshot','guest'):
+            value=json.loads(inventory)
+            if kind=='incomplete':value['snapshots'][-1]['status']='running'
+            elif kind=='snapshot':value['snapshots'][-1]['id']='vs_foreign'
+            else:
+                value=json.loads(result);value['guest']=value['before'];result_path.write_text(json.dumps(value))
+            if kind!='guest':
+                inventory_path.write_text(json.dumps(value));changed=json.loads(result);changed['inventory']=self.m['descriptor'](inventory_path);result_path.write_text(json.dumps(changed))
+            with self.assertRaises(ValueError,msg=kind):
+                self.m['verify_prepared_source'](self.root/'request.json',result_path,self.root/'finalized/source-manifest.json',
+                    source_ref=ref,image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+            result_path.write_bytes(result);inventory_path.write_bytes(inventory)
+        for path,raw in original.items():self.assertEqual(path.read_bytes(),raw,str(path))
+
+    def test_finalized_snapshot_resealed_digest_and_original_origin_refuse(self):
+        self.test_completed_guest_old_msg_ack_failure_get_only_finalization()
+        case=self;m=self.m;request=self.root/'request.json';rp=self.root/'finalized/result.json';mp=self.root/'finalized/source-manifest.json'
+        result=m['load'](rp)
+        def verify():return m['verify_prepared_source'](request,rp,mp,source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        saved={p:p.read_bytes() for base in (case.root/'finalized',case.root/'output') for p in base.rglob('*') if p.is_file()}
+        with self.subTest(control='completed snapshot with empty digest must refuse'):
+         inventory_path=Path(result['inventory']['path']);inventory=m['load'](inventory_path)
+         for row in inventory['snapshots']:
+          if row['id']=='vs_new':row['digest']=''
+         inventory_path.write_text(json.dumps(inventory))
+         for req in (case.root/'finalized/native').glob('*/request.json'):
+          sent=m['load'](req)
+          if sent['method']!='GET' or sent['path']!='/volumes/'+case.vid+'/snapshots':continue
+          parsed=req.parent/'result.json';records=m['load'](parsed)
+          for row in records:
+           if row['id']=='vs_new':row['digest']=''
+          parsed.write_text(json.dumps(records))
+          wire=next(req.parent.glob('*-wire.json'));raw=m['load'](wire);body=json.dumps(records).encode();raw.update(body_b64=base64.b64encode(body).decode(),sha256=m['sha'](body));wire.write_text(json.dumps(raw))
+         changed=copy.deepcopy(result);changed['inventory']=m['descriptor'](inventory_path);changed['journal']=m['journal_index'](case.root/'finalized/native');rp.write_text(json.dumps(changed))
+         with self.assertRaises(ValueError):verify()
+        for p,raw in saved.items():p.write_bytes(raw)
+        with self.subTest(control='original origin missing schema and producer must refuse'):
+         failed_path=Path(result['failed_result']['path']);failed=m['load'](failed_path);origin_path=Path(failed['origin']['path']);origin=m['load'](origin_path);origin.pop('schema');origin.pop('producer');origin_path.write_text(json.dumps(origin));failed['origin']=m['descriptor'](origin_path);failed_path.write_text(json.dumps(failed))
+         intent_path=Path(result['intent']['path']);intent=m['load'](intent_path);intent['failed_result']=m['descriptor'](failed_path);intent_path.write_text(json.dumps(intent))
+         changed=copy.deepcopy(result);changed['failed_result']=m['descriptor'](failed_path);changed['intent']=m['descriptor'](intent_path);rp.write_text(json.dumps(changed))
+         with self.assertRaises(ValueError):verify()
+        for p,raw in saved.items():p.write_bytes(raw)
+
+    def test_normal_prepare_accepts_nested_snapshot_ack_without_rewriting_wire(self):
+        self.fault='snapshot-msg';result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
+        manifest=self.m['verify_prepared_source'](self.root/'request.json',self.root/'output/result.json',self.root/'output/source-manifest.json',
+            source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        self.assertEqual(manifest['snapshot_id'],'vs_new')
+        rows=self.m['verify_journal'](self.m['load'](self.root/'output/result.json')['journal'],self.mid,self.vid,(self.shared['id'],))
+        ack=next(row['response'] for row in rows if row['method']=='POST' and row['path']=='/volumes/'+self.vid+'/snapshots')
+        self.assertEqual(ack,{'Msg':{'backup':{'graph_id':'vs_new','id':'45721','state':'prepare'}}})
 
     def owned_capsule_request(self,variant=None):
         self.volume.update(name='cbs_'+self.owner[:26],encrypted=True)

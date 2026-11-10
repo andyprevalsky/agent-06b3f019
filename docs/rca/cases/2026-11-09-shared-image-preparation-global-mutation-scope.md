@@ -224,6 +224,22 @@ Safe failure metadata and a private durable log copy preserve a future error
 before cleanup. This repair still requires a new native outcome; it does not
 retroactively identify or qualify the original f44 failure.
 
+The 5affa guest then completed successfully, including its exact checkout,
+installed and image dependency fingerprints, owned capsule and approved
+environment contract. Stop and park succeeded. The accepted native snapshot
+response used `Msg.backup.graph_id`, while the controller required a top-level
+`id`; that deterministic decoding error prevented publication. The original
+result remains false. Its single acknowledged snapshot was confirmed by GET
+on the exact owned volume and was still incomplete at the recorded checks.
+
+A strict decoder now supports the observed and legacy acknowledgement shapes.
+A separate GET-only finalization operation can verify the original complete
+transaction, current exact parked identity, strict snapshot readiness and lease
+release before publishing new authority. Independent adversarial review found
+and fixed weak snapshot-completion and original-producer checks. No snapshot
+POST or guest attempt is repeated; native finalization and the remaining full
+deployment/parallel campaign validation are still required.
+
 The user explicitly authorized this separate pre-parent-merge repair and full
 deploy. They require genuine parallel independent smoke campaigns, no app-wide
 quiet window, original unchanged receipts, exact source/image/volume ownership,

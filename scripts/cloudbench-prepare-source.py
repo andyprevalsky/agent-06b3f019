@@ -35,6 +35,7 @@ CAPTURE = runpy.run_path(str(HERE / 'cloudbench-original-volume-capture.py'))
 REQUEST = 'cloudbench-prepare-source-request-v1'
 RESULT = 'cloudbench-prepared-source-v1'
 RECOVERY = 'cloudbench-recovered-bootstrap-v1'
+FINALIZED = 'cloudbench-finalized-snapshot-v1'
 _RESOLVING = set()
 PROTECTED = frozenset({'683e47df5094d8', '811d632f2650e8'})
 PROTECTED_RESOURCES = {'683e47df5094d8': 'vol_vwnym366kn7k8mmv',
@@ -90,6 +91,20 @@ def need(value, reason):
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+
+
+def snapshot_ack_id(value):
+    need(isinstance(value,dict),'snapshot acknowledgement object')
+    need('id' in value or 'Msg' in value,'unsupported snapshot acknowledgement shape')
+    ids=[]
+    if 'id' in value:ids.append(value['id'])
+    if 'Msg' in value:
+        msg=value['Msg'];need(isinstance(msg,dict) and isinstance(msg.get('backup'),dict),'snapshot backup acknowledgement')
+        backup=msg['backup'];need('graph_id' in backup,'snapshot graph handle absent');ids.append(backup['graph_id'])
+    if 'graph_id' in value:ids.append(value['graph_id'])
+    need(ids and all(isinstance(item,str) and re.fullmatch('vs_[A-Za-z0-9]+',item) for item in ids)
+         and len(set(ids))==1,'exact unambiguous snapshot acknowledgement ID')
+    return ids[0]
 
 
 def sha(raw):
@@ -729,7 +744,7 @@ def journal_index(directory):
 
 
 def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=None, guest=None, successor=None, prestart=None,
-                   allow_pending_prestart_stop=False, allow_rejected_bootstrap=False, versioned=False, ssh=None, capsule_ssh=None,capsule_sftp=None):
+                   allow_pending_prestart_stop=False, allow_rejected_bootstrap=False, versioned=False, ssh=None, capsule_ssh=None,capsule_sftp=None,payload_builders=None):
     actual = journal_index(value['path'])
     need(actual == value, 'native journal changed')
     rows = []
@@ -816,23 +831,24 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
             need(not execs and ssh is not None,'SSH transport must not fabricate native EXEC')
             execs=verify_ssh_journal(ssh,rows,request,prestart)
         if request.get('guest_env_mode')==OWNED_MODE:
-            verify_capsule_transport(capsule_ssh,capsule_sftp,rows,request,prestart,execs[0]['started'])
+            verify_capsule_transport(capsule_ssh,capsule_sftp,rows,request,prestart,execs[0]['started'],builders=payload_builders)
         else:need(capsule_ssh is None and capsule_sftp is None,'unexpected capsule transport evidence')
         need(len(starts) == len(stops) == len(snapshots) == 1 and len(execs) >= 2,
              'native lifecycle chain incomplete')
         need(update['finished'] <= starts[0]['started'] <= execs[0]['started'] <= execs[-1]['started']
              <= stops[0]['started'] <= park['started'] <= snapshots[0]['started'], 'native lifecycle order')
-        need(snapshots[0]['response']['id'] == successor['snapshot_id'], 'created snapshot acknowledgement')
+        need(snapshot_ack_id(snapshots[0]['response']) == successor['snapshot_id'], 'created snapshot acknowledgement')
         need(execs[-1]['response'].get('exit_code') == 0
              and json.loads(execs[-1]['response']['stdout']) == guest, 'guest observation original response')
-        commands = list(delivery_commands(guest_program(request).encode(), '/tmp/cloudbench-prepare-delivery-' + request['nonce']))
+        builders=payload_builders or globals()
+        commands = list(builders['delivery_commands'](builders['guest_program'](request).encode(), '/tmp/cloudbench-prepare-delivery-' + request['nonce']))
         need(len(execs) >= len(commands) + 2, 'guest delivery original responses absent')
         for row, (command, expected) in zip(execs, commands):
             need(row['body'] == dict(command=command, timeout=5)
                  and row['response'].get('exit_code') == 0 and row['response']['stdout'].strip() == expected,
                  'guest delivery command/ACK changed')
         launch = execs[len(commands)]
-        need(launch['body'] == dict(command=['python3', '-c', job_launcher('/tmp/cloudbench-prepare-delivery-' + request['nonce'] + '/worker.py')], timeout=5)
+        need(launch['body'] == dict(command=['python3', '-c', builders['job_launcher']('/tmp/cloudbench-prepare-delivery-' + request['nonce'] + '/worker.py')], timeout=5)
              and launch['response'].get('exit_code') == 0
              and json.loads(launch['response']['stdout']) == guest['job'], 'original launched guest identity')
         if request.get('guest_transport')=='cloudbench-ssh-guest-v1':
@@ -934,22 +950,24 @@ def verify_failed_capsule_staging(result,rows,request,prestart,stop_started,buil
     else:need(not transfers or transfers[0].get('pending') is True,'completed capsule upload lacks seal attempt')
 
 
-def verify_capsule_transport(ssh,sftp,native,request,prestart,guest_started):
+def verify_capsule_transport(ssh,sftp,native,request,prestart,guest_started,*,builders=None):
+    builders=builders or globals()
     need(ssh is not None and sftp is not None,'owned capsule requires distinct transport proof')
     commands=verify_ssh_journal(ssh,native,request,prestart)
-    transfers=verify_ssh_journal(sftp,native,request,prestart,sftp=True)
+    transfers=verify_ssh_journal(sftp,native,request,prestart,sftp=True,capsule_builders=builders)
     need(len(commands)==2 and len(transfers)==1,'exact capsule staging/upload/seal sequence')
     bootstrap,seal=commands;transfer=transfers[0]
-    need(bootstrap['body']==dict(command=capsule_bootstrap(request),timeout=5),'capsule directory bootstrap command')
+    need(bootstrap['body']==dict(command=builders['capsule_bootstrap'](request),timeout=5),'capsule directory bootstrap command')
     stage=json.loads(bootstrap['response']['stdout'])
-    need(stage.get('schema')=='cloudbench-capsule-directory-stage-v2' and stage.get('path')==capsule_paths(request)[0]
+    stage_schema='cloudbench-capsule-directory-stage-v2' if builders['capsule_paths'](request)[0].endswith('/capsule.json') else 'cloudbench-capsule-stage-v1'
+    need(stage.get('schema')==stage_schema and stage.get('path')==builders['capsule_paths'](request)[0]
          and type(stage.get('inode')) is int and stage['inode']>0 and type(stage.get('device')) is int,
          'capsule exclusive staging inode proof')
     need(transfer['body']['capsule']==request['guest_env_capsule'] and transfer['body']['stage']==stage
-         and seal['body']==dict(command=capsule_seal(request,stage),timeout=5),'capsule SFTP source/inode/seal binding')
+         and seal['body']==dict(command=builders['capsule_seal'](request,stage),timeout=5),'capsule SFTP source/inode/seal binding')
     module=runpy.run_path(str(HERE/'cloudbench-source-env.py'))
     raw=module['descriptor'](request['guest_env_capsule'],private=True)
-    need(json.loads(seal['response']['stdout'])==dict(schema='cloudbench-capsule-published-v1',path=capsule_paths(request)[1],
+    need(json.loads(seal['response']['stdout'])==dict(schema='cloudbench-capsule-published-v1',path=builders['capsule_paths'](request)[1],
          sha256=request['guest_env_capsule']['sha256'],size=len(raw),uid=0,mode=0o600),'capsule immutable final hash/mode proof')
     starts=[r for r in native if r['method']=='POST' and r['path']=='/machines/'+request['native']['machine_id']+'/start']
     need(len(starts)==1 and starts[0]['finished']<=bootstrap['started']<=bootstrap['finished']
@@ -1064,8 +1082,7 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             known_versions.add(instance)
             after, volume = wait_state(api, request, predecessor, config, 'stopped', instance, time.monotonic() + 120, prior=after)
             snapshot_ack = api.request('POST', '/volumes/' + predecessor['volume_id'] + '/snapshots', {})
-            snapshot_id = snapshot_ack.get('id')
-            need(isinstance(snapshot_id, str) and re.fullmatch('vs_[A-Za-z0-9]+', snapshot_id), 'exact created snapshot ID')
+            snapshot_id = snapshot_ack_id(snapshot_ack)
             successor = dict(predecessor, instance_id=after['instance_id'], image_digest=request['image_ref'].rsplit('@', 1)[1],
                              snapshot_id=snapshot_id, verified_at=guest['finished_epoch'],
                              node_fingerprint=request['node_fingerprint'], python_fingerprint=request['python_fingerprint'],
@@ -1108,11 +1125,160 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
     return result
 
 
+def snapshot_successor(request,predecessor,after,guest,snapshot_id):
+    value=dict(predecessor,instance_id=after['instance_id'],image_digest=request['image_ref'].rsplit('@',1)[1],
+               snapshot_id=snapshot_id,verified_at=guest['finished_epoch'],node_fingerprint=request['node_fingerprint'],
+               python_fingerprint=request['python_fingerprint'],guest_env_sha256=copy.deepcopy(guest['guest_env_sha256']))
+    if request.get('guest_env_mode')==OWNED_MODE:
+        owned=owned_manifest(request,predecessor);value.update({key:owned[key] for key in OWNED_FIELDS})
+    return SOURCE['manifest'](canonical(value))
+
+
+def completed_snapshot_operation(request_path,failed_path):
+    request,predecessor=read_request(request_path);failed=load(failed_path);directory=Path(failed_path).absolute().parent
+    need(failed.get('schema')==RESULT and failed.get('qualified') is False and failed.get('credit_granted') is False
+         and failed.get('cleanup_complete') is False and failed.get('stopped_verified') is True
+         and described(failed['request'])==request,'unpublished stopped snapshot operation required')
+    need(not (directory/'source-manifest.json').exists() and not (directory/'after.json').exists(),'old source already published')
+    origin=described(failed['origin'])
+    producer=origin.get('producer',{})
+    need(origin.get('schema')=='cloudbench-prepare-source-origin-v1' and isinstance(producer,dict)
+         and type(producer.get('pid')) is int and producer['pid']>1 and producer.get('birth')
+         and isinstance(producer.get('argv_sha256'),str) and re.fullmatch('[a-f0-9]{64}',producer['argv_sha256'])
+         and origin['source_ref']==request['source_ref'] and origin['nonce']==request['nonce']
+         and origin['output']==str(directory) and described(origin['request'])==request,'original snapshot producer binding')
+    verify_producer(origin,Path(request['source_root']),request.get('transport',{}).get('replayed_tree',request['source_ref']))
+    authority=resolve_bootstrap_ownership(request['ownership']['path'])
+    before=load(directory/'before.json');prestart=load(directory/'prestart.json');guest=load(directory/'guest.json');verify_guest(request,guest)
+    need(before['config']==authority['machine']['config'] and before['instance_id']==predecessor['instance_id']
+         and sha(canonical(before['config']))==request['native']['config_sha256'],'original snapshot creator authority')
+    mid=predecessor['machine_id'];vid=predecessor['volume_id'];own='/machines/'+mid
+    rows=verify_journal(failed['journal'],mid,vid,(predecessor['shared_machine_id'],),versioned=True)
+    snapshots=[row for row in rows if row['method']=='POST' and row['path']=='/volumes/'+vid+'/snapshots']
+    updates=[row for row in rows if row['method']=='POST' and row['path']==own]
+    need(len(snapshots)==1 and len(updates)==2,'one acknowledged snapshot and exact two CAS required')
+    snapshot_id=snapshot_ack_id(snapshots[0]['response']);park=updates[-1]['response']
+    reads=[row for row in rows if row['method']=='GET' and row['path']==own and row['started']>updates[-1]['finished']]
+    observed_park=False
+    for row in reads:
+        value=row['response']
+        if value['instance_id']==park['instance_id'] and value['config']==park['config'] and value['state']=='stopped':observed_park=True
+        else:need(not observed_park and value['instance_id']==prestart['instance_id'] and value['config']==prestart['config']
+                  and value['state'] in ('replacing','created','stopped'),'original final parked epoch changed')
+    need(observed_park,'original final parked readback absent')
+    after=reads[-1]['response'];successor=snapshot_successor(request,predecessor,after,guest,snapshot_id)
+    need(not any(key.startswith(('cloudbench_source_consumer_','cloudbench_source_retiring')) for key in after['config']['metadata']),
+         'snapshot source has consumer/retirement claims')
+    verify_journal(failed['journal'],mid,vid,(predecessor['shared_machine_id'],),request=request,before=before,after=after,
+        prestart=prestart,guest=guest,successor=successor,ssh=failed.get('ssh'),capsule_ssh=failed.get('capsule_ssh'),
+        capsule_sftp=failed.get('capsule_sftp'),payload_builders=historical_guest_functions(origin,request))
+    shared=[row['response'] for row in rows if row['method']=='GET' and row['path']=='/machines/'+predecessor['shared_machine_id']]
+    need(len(shared)==1,'original protected shared source observation')
+    return request,predecessor,authority,before,prestart,guest,after,successor,shared[0]
+
+
+def finalize_snapshot(request_path,failed_path,output,api_factory=None):
+    request,predecessor,authority,before,prestart,guest,parked,successor,shared=completed_snapshot_operation(request_path,failed_path)
+    output=Path(output).absolute();output.mkdir(mode=0o700);need(output.resolve()==output,'physical finalization directory')
+    nonce=secrets.token_hex(16)
+    intent=dict(schema='cloudbench-snapshot-finalization-intent-v1',nonce=nonce,request=descriptor(request_path),
+                failed_result=descriptor(failed_path),snapshot_id=successor['snapshot_id'],attested_source_ref=request['source_ref'])
+    save(output/'intent.json',intent)
+    origin=dict(schema='cloudbench-snapshot-finalization-origin-v1',nonce=nonce,output=str(output),
+        source_ref=subprocess.check_output(['git','-C',str(HERE.parent),'rev-parse','HEAD'],text=True).strip(),
+        attested_source_ref=request['source_ref'],helper_sha256=sha((HERE/'cloudbench-prepare-source.py').read_bytes()),
+        dependencies=dependency_seals(),producer=dict(pid=os.getpid(),birth=runpy.run_path(str(HERE/'process-identity.py'))['linux_identity'](os.getpid()),
+        argv_sha256=sha(Path('/proc/self/cmdline').read_bytes())))
+    save(output/'origin.json',origin)
+    result=dict(schema=FINALIZED,qualified=False,credit_granted=False,cleanup_complete=False,nonce=nonce,
+        request=descriptor(request_path),failed_result=descriptor(failed_path),intent=descriptor(output/'intent.json'),origin=descriptor(output/'origin.json'),
+        source_ref=request['source_ref'],image_ref=request['image_ref'],predecessor=request['ownership'],build=request['build'])
+    api=None
+    try:
+        if api_factory is None:
+            need(os.environ.get('FLY_API_TOKEN'),'FLY_API_TOKEN required')
+            api=ScopedNative(CAPTURE['Fly'](predecessor['app'],os.environ['FLY_API_TOKEN']),output/'native',request,predecessor)
+        else:api=api_factory(output/'native',request,predecessor)
+        with api.lease():
+            after,volume=recovery_machine(api,request,predecessor,(parked,),authority['intent']['volume_request'])
+            need(after['state']=='stopped' and api.lease_version==after['instance_id'],'snapshot finalization requires stopped current-version lease')
+            deadline=time.monotonic()+120
+            while True:
+                snapshots=api.request('GET','/volumes/'+predecessor['volume_id']+'/snapshots')
+                if runpy.run_path(str(HERE/'cloudbench-select-snapshot.py'))['available_snapshot'](snapshots,successor['snapshot_id']) is not None:break
+                need(time.monotonic()<deadline,'snapshot completion deadline');time.sleep(2)
+            after,volume=recovery_machine(api,request,predecessor,(parked,),authority['intent']['volume_request'])
+            inventory=dict(machines=[after,shared],volumes=[volume],snapshots=snapshots)
+            SOURCE['verify'](successor,inventory,parked_memory=2048)
+            save(output/'after.json',after);save(output/'final-inventory.json',inventory)
+        save(output/'source-manifest.json',successor)
+        old=Path(failed_path).absolute().parent
+        result.update(qualified=True,manifest=descriptor(output/'source-manifest.json'),after=descriptor(output/'after.json'),
+            inventory=descriptor(output/'final-inventory.json'),before=descriptor(old/'before.json'),prestart=descriptor(old/'prestart.json'),guest=descriptor(old/'guest.json'))
+    finally:
+        if api is not None:result['journal']=journal_index(output/'native')
+        save(output/'result.json',result)
+    verify_finalized_snapshot(request_path,output/'result.json',output/'source-manifest.json',source_ref=request['source_ref'],
+        image_ref=request['image_ref'],node_fingerprint=request['node_fingerprint'],python_fingerprint=request['python_fingerprint'])
+    return result
+
+
+def verify_finalized_snapshot(request_path,result_path,manifest_path,**expected):
+    result=load(result_path)
+    need(result.get('schema')==FINALIZED and result.get('qualified') is True and result.get('credit_granted') is False
+         and result.get('cleanup_complete') is False,'new snapshot finalization qualification')
+    need(result['request']==descriptor(request_path),'finalization original request')
+    described(result['failed_result'])
+    request,predecessor,authority,before,prestart,guest,parked,successor,shared=completed_snapshot_operation(request_path,result['failed_result']['path'])
+    need(all(request[key]==value for key,value in expected.items()) and result['source_ref']==request['source_ref']
+         and result['image_ref']==request['image_ref'] and result['predecessor']==request['ownership'] and result['build']==request['build'],
+         'finalization requested source/image/dependencies')
+    need(re.fullmatch('[a-f0-9]{32}',result['nonce']) and result['nonce']!=request['nonce'],'new finalization nonce')
+    intent=described(result['intent']);need(intent==dict(schema='cloudbench-snapshot-finalization-intent-v1',nonce=result['nonce'],
+        request=result['request'],failed_result=result['failed_result'],snapshot_id=successor['snapshot_id'],attested_source_ref=request['source_ref']), 'finalization intent custody')
+    origin=described(result['origin'])
+    need(origin['schema']=='cloudbench-snapshot-finalization-origin-v1' and origin['nonce']==result['nonce']
+         and origin['attested_source_ref']==request['source_ref'] and origin['output']==str(Path(result_path).absolute().parent)
+         and origin['helper_sha256']==sha((HERE/'cloudbench-prepare-source.py').read_bytes()) and origin['dependencies']==dependency_seals()
+         and re.fullmatch('[a-f0-9]{40}',origin['source_ref']) and re.fullmatch('[a-f0-9]{64}',origin['producer']['argv_sha256'])
+         and type(origin['producer']['pid']) is int and origin['producer']['pid']>1 and origin['producer']['birth'], 'finalization current producer')
+    need(described(result['before'])==before and described(result['prestart'])==prestart and described(result['guest'])==guest,
+         'original successful guest custody')
+    need(load(manifest_path)==successor and result['manifest']==descriptor(manifest_path),'finalized manifest derived from original guest/ACK')
+    inventory=described(result['inventory']);after=described(result['after']);volume=SOURCE['exact'](inventory['volumes'],predecessor['volume_id'],'volume')
+    need(after==SOURCE['exact'](inventory['machines'],predecessor['machine_id'],'machine') and after['config']==parked['config']
+         and after['instance_id']==parked['instance_id'] and after['state']=='stopped'
+         and volume.get('encrypted') is True and volume['name']==authority['intent']['volume_request']['name']
+         and volume['size_gb']==authority['intent']['volume_request']['size_gb'],'finalization unchanged exact source/Volume')
+    need(SOURCE['exact'](inventory['machines'],predecessor['shared_machine_id'],'shared machine')==shared,'original protected shared witness')
+    need(not any(k.startswith(('cloudbench_source_consumer_','cloudbench_source_retiring')) for k in after['config']['metadata']), 'finalization consumer claim')
+    SOURCE['verify'](successor,inventory,parked_memory=2048)
+    need(runpy.run_path(str(HERE/'cloudbench-select-snapshot.py'))['available_snapshot'](
+         inventory['snapshots'],successor['snapshot_id']) is not None,'finalized snapshot strict completion proof')
+    rows=verify_journal(result['journal'],predecessor['machine_id'],predecessor['volume_id'],(),versioned=True)
+    own='/machines/'+predecessor['machine_id'];vol='/volumes/'+predecessor['volume_id']
+    need(all(row['method']=='GET' and row['path'] in (own,vol,vol+'/snapshots') or row['path']==own+'/lease' for row in rows), 'finalization GET-only scope')
+    need(all(row['response']['data']['version']==after['instance_id'] for row in rows if row['method']=='POST' and row['path']==own+'/lease'),
+         'finalization exact parked lease version')
+    machines=[row['response'] for row in rows if row['method']=='GET' and row['path']==own]
+    volumes=[row['response'] for row in rows if row['method']=='GET' and row['path']==vol]
+    lists=[row['response'] for row in rows if row['method']=='GET' and row['path']==vol+'/snapshots']
+    fields=('id','name','region','size_gb','encrypted','state','attached_machine_id')
+    need(machines and volumes and lists and machines[-1]==after and volumes[-1]==volume and lists[-1]==inventory['snapshots']
+         and all(all(v.get(k)==volume.get(k) for k in fields) for v in volumes)
+         and all(m['id']==after['id'] and m['name']==after['name'] and m['region']==after['region'] and m['config']==after['config']
+             and m['instance_id']==after['instance_id'] and m['state']=='stopped' for m in machines),'finalization original native observations')
+    return successor
+
+
 def verify_prepared_source(request_path, result_path, manifest_path, *, source_ref, image_ref,
                            node_fingerprint, python_fingerprint):
     """Read-only parent seam. Original failed receipts and debts are never modified."""
     request, predecessor = read_request(request_path)
     result = load(result_path)
+    if result.get('schema')==FINALIZED:
+        return verify_finalized_snapshot(request_path,result_path,manifest_path,source_ref=source_ref,image_ref=image_ref,
+            node_fingerprint=node_fingerprint,python_fingerprint=python_fingerprint)
     need(result.get('schema') == RESULT and result.get('qualified') is True
          and result.get('credit_granted') is False and result.get('cleanup_complete') is False, 'result qualification')
     need(described(result['request']) == request and result['predecessor'] == request.get('predecessor', request.get('ownership'))
@@ -1532,6 +1698,16 @@ def main():
         raise InterruptedError('preparation/recovery interrupted')
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, interrupted)
+    if len(sys.argv)>1 and sys.argv[1]=='finalize-snapshot':
+        parser=argparse.ArgumentParser(description='Finalize only an original acknowledged snapshot after a successful guest; no task credit.')
+        parser.add_argument('--request',type=Path,required=True)
+        parser.add_argument('--failed-result',type=Path,required=True)
+        parser.add_argument('--output',type=Path,required=True)
+        args=parser.parse_args(sys.argv[2:]);os.umask(0o077)
+        try:finalize_snapshot(args.request,args.failed_result,args.output)
+        except BaseException as error:
+            print('snapshot finalization failed: '+type(error).__name__,file=sys.stderr);return 1
+        print(str(args.output/'result.json'));return 0
     if len(sys.argv)>1 and sys.argv[1]=='recover-bootstrap':
         parser=argparse.ArgumentParser(description='Repark only a proven accepted-CAS prestart failure; no task credit.')
         parser.add_argument('--request',type=Path,required=True)
