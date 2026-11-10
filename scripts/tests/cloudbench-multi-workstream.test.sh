@@ -1702,6 +1702,11 @@ def native_destroy(target):
 def machine_api_row(machine):
     """Native Machines API row; each config generation is a new instance."""
     row = json.loads(json.dumps(machine))
+    # Native provider rows include inherited image/lifecycle/mount identity.
+    row.setdefault("image_ref", {"digest": "sha256:" + "f" * 64})
+    row.setdefault("config", {}).setdefault("restart", {"policy": "no"})
+    for mount in row["config"].get("mounts", []):
+        mount.setdefault("path", "/data")
     if not row.get("instance_id"):
         digest = hashlib.sha256(
             json.dumps([row["id"], row.get("config") or {}], sort_keys=True).encode()
@@ -1763,6 +1768,11 @@ def serve_machines_api(port_file):
                 with open(os.path.join(FAKE_DIR, "volume-creates.log"), "a") as fh:
                     fh.write(json.dumps(request, sort_keys=True) + "\n")
                 return self.reply(200, volume)
+            if (segments[:2] == ["v1", "apps"] and len(segments) == 5
+                    and segments[2] == BENCH_APP and segments[3] == "volumes" and self.command == "GET"):
+                with locked_state() as state:
+                    volume = next((v for v in state["volumes"] if v["id"] == segments[4]), None)
+                    return self.reply(404, {"error": "volume not found"}) if volume is None else self.reply(200, volume)
             if segments[:2] != ["v1", "apps"] or len(segments) < 4 or segments[3] != "machines":
                 return self.reply(501, {"error": "route not modeled by fixture"})
             app, rest = segments[2], segments[4:]
@@ -1851,6 +1861,12 @@ if args[:1] == ["__machines_api__"]:
     serve_machines_api(args[1])
     sys.exit(0)
 if args[:1] == ["__fake_driver__"]:
+    mdir = args[1]
+    rb = open(os.path.join(mdir, "tmp", "rb.sh")).read()
+    Path(mdir, "driver-owner.json").write_text(json.dumps({
+        "pid": os.getpid(), "birth": Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(") ", 1)[1].split()[19],
+        "run_token": rb_export(rb, "CLOUDBENCH_RUN_TOKEN"),
+    }))
     run_fake_driver(args[1])
     sys.exit(0)
 if args[:1] == ["__release_worker_after_child__"]:
@@ -2029,6 +2045,47 @@ elif args[:2] == ["machine", "clone"]:
             os.unlink(pool_ledger)
         os.mkdir(pool_ledger)
     print(f"cloned machine {machine_id}")
+elif args[:2] == ["machine", "exec"]:
+    # Model only the existing source/nonce-bound idle billing probe. No ACK is
+    # produced for a running/reused driver or an unrecognized guest program.
+    import runpy
+    mid, command = args[2:4]
+    parts = shlex.split(command)
+    assert parts[:5] == ["python3", "-I", "-S", "-B", "-c"] and len(parts) == 6
+    code = parts[5]
+    nonce = re.search(r"'nonce':(['\"])([0-9a-f]{32})\1", code)
+    assert nonce is not None
+    helper = runpy.run_path(os.path.join(FAKE_DIR, "..", "repo", "scripts", "cloudbench-original-volume-capture.py"))
+    assert code == helper["BILLING_GUEST"].replace("TARGET", repr(mid)).replace("NONCE", repr(nonce[2]))
+    mdir = machine_dir(mid)
+    owner_path = Path(mdir, "driver-owner.json")
+    if owner_path.exists():
+        owner = json.loads(owner_path.read_text())
+        rb = open(os.path.join(mdir, "tmp", "rb.sh")).read()
+        assert owner["run_token"] == rb_export(rb, "CLOUDBENCH_RUN_TOKEN")
+        stat_path = Path(f"/proc/{owner['pid']}/stat")
+        if stat_path.exists():
+            current = stat_path.read_text().rsplit(") ", 1)[1].split()
+            assert current[19] != owner["birth"] or current[0] == "Z", "driver is still live"
+    else:
+        # A rejected worker launch never spawned a driver or supervisor.
+        # Positive exact rejection + inert init is required; absence alone
+        # cannot acknowledge an unknown or potentially running guest.
+        assert Path(MARKERS, "worker-launch-rejected-" + mid).is_file()
+        assert not Path(MARKERS, "worker-launch-succeeded-" + mid).exists()
+        assert not Path(mdir, "driver.started").exists()
+        with locked_state() as state:
+            inert_worker = find_machine(state, mid)
+            assert inert_worker is not None
+            assert inert_worker["config"]["init"] == {"cmd": ["sleep", "infinity"]}
+        assert not list(Path(mdir).glob("**/cloudbench-worker-evidence/owner.json"))
+    with locked_state() as state:
+        machine = find_machine(state, mid)
+        assert machine is not None and machine["state"] == "started" and mid != "aaaa0000000001"
+    ack = {"kind": "exact-inert-quiescence-v1", "machine": mid, "nonce": nonce[2],
+           "boot": str(uuid.uuid5(uuid.NAMESPACE_URL, "fixture-boot:" + mid)), "unknown": [],
+           "inert_sleepers": [{"pid": 1, "role": "fixture-native-init-sleep"}]}
+    print(json.dumps({"stdout": json.dumps(ack), "stderr": "", "exit_code": 0}))
 elif args[:2] == ["machine", "status"]:
     with locked_state() as state:
         found = find_machine(state, args[2])
@@ -2794,7 +2851,7 @@ os.execvp(sys.argv[1], sys.argv[1:])')
     env -u CLOUDBENCH_SNAPSHOT_ID -u CLOUDBENCH_FLEET_ROOT \
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
-        -u FLY_API_TOKEN -u FLY_ACCESS_TOKEN \
+        -u FLY_API_TOKEN -u FLY_ACCESS_TOKEN -u GITHUB_TOKEN \
         PATH="$FIXTURE_STORAGE:$FAKE_BIN:$PATH" \
         PYTHONPATH="$FIXTURE_STORAGE${PYTHONPATH:+:$PYTHONPATH}" \
         CLOUDBENCH_TEST_STORAGE_SCOPE="$TMP_ROOT" \
@@ -2997,11 +3054,11 @@ for reservation in (temporary / "capacity-reservations/reservations").glob(regis
 PY_RESET
 }
 
-# Disposable lifecycle (60e18e354): a failed run whose runtime evidence is
-# incomplete keeps its failed result, owner and evidence-gap latch, while its
-# disposable Machines and Volumes are destroyed and verified absent.
+# An unsealed failed run keeps original Machines stopped with their Volumes
+# attached. Normally sealed siblings may already have retired; preserve both
+# native histories and reset only this test fixture after exact assertions.
 assert_and_reset_disposable_failed_owner() {  # <registry> <controller-log> [failed|passed task verdict]
-    grep -qxF "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" "$2" ||
+    grep -qxF "❌ runtime evidence is incomplete; retaining original fleet Machines and attached volumes" "$2" ||
         { echo "missing disposable runtime-evidence gap record in $2" >&2; return 1; }
     python3 - "$1" "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR" "$TMP_ROOT" "${3:-failed}" <<'PY_DISPOSED'
 import json
@@ -3035,20 +3092,41 @@ allocated = [row for path in (audit / "fresh").iterdir() if (row := fields(path)
 assert allocated
 state_path = fake / "state.json"
 state = json.loads(state_path.read_text())
-calls = [shlex.split(line) for line in (fake / "journal.log").read_text().splitlines()]
+calls = [shlex.split(line) for line in (fake / "journal.log").read_text().splitlines()
+         if line.startswith(("machine destroy ", "volumes destroy "))]
+retained_machines, retained_volumes = set(), set()
 for row in allocated:
     machine, volume = row["machine_id"], row["volume_id"]
-    assert row["disposition"] in ("destroyed-verified-absent", "destroyed-provider-retained"), row
     assert machine != "aaaa0000000001" and volume != "vol_aaaa0001", row
-    assert not any(item["id"] == machine for item in state["machines"]), row
-    assert all(item["state"] in ("pending_destroy", "destroyed") for item in state["volumes"] if item["id"] == volume), row
-    assert any(call[:2] == ["machine", "destroy"] and machine in call[2:] for call in calls), row
-    assert any(call[:2] == ["volumes", "destroy"] and volume in call[2:] for call in calls), row
+    if row["disposition"] in ("destroyed-verified-absent", "destroyed-provider-retained"):
+        # Complete normal sealed captures may have retired before the mixed gap.
+        assert not any(item["id"] == machine for item in state["machines"]), row
+        assert all(item["state"] in ("pending_destroy", "destroyed") for item in state["volumes"] if item["id"] == volume), row
+        assert any(call[:2] == ["machine", "destroy"] and machine in call[2:] for call in calls), row
+        assert any(call[:2] == ["volumes", "destroy"] and volume in call[2:] for call in calls), row
+        continue
+    assert row["disposition"] == "owned", row
+    record = fields(registry / "clones" / row["clone_name"])
+    assert record["id"] == machine and record["volume_id"] == volume, record
+    originals = [item for item in state["machines"] if item["id"] == machine]
+    assert len(originals) == 1 and originals[0]["state"] == "stopped", [(item["id"], item["state"]) for item in originals]
+    assert originals[0]["config"]["mounts"][0]["volume"] == volume, originals
+    volumes = [item for item in state["volumes"] if item["id"] == volume]
+    assert len(volumes) == 1 and volumes[0]["state"] not in ("pending_destroy", "destroyed"), volumes
+    assert not any(call[:2] == ["machine", "destroy"] and machine in call[2:] for call in calls), row
+    assert not any(call[:2] == ["volumes", "destroy"] and volume in call[2:] for call in calls), row
+    retained_machines.add(machine); retained_volumes.add(volume)
+assert retained_machines, "an unsealed run must retain its original evidence sources"
 assert any(item["id"] == "aaaa0000000001" for item in state["machines"])
 assert any(item["id"] == "vol_aaaa0001" for item in state["volumes"])
 archive = temporary / "retained-fixture-ownership" / registry.name
 archive.parent.mkdir(exist_ok=True)
 shutil.copytree(registry, archive)
+(archive / "fake-state-before-reset.json").write_bytes(state_path.read_bytes())
+# Test-only isolation follows positive preservation assertions and archived bytes.
+state["machines"] = [item for item in state["machines"] if item["id"] not in retained_machines]
+state["volumes"] = [item for item in state["volumes"] if item["id"] not in retained_volumes]
+state_path.write_text(json.dumps(state))
 shutil.rmtree(registry)
 for reservation in (temporary / "capacity-reservations/reservations").glob(registry.name + "-*"):
     assert reservation.is_file() and not reservation.is_symlink()
@@ -4356,7 +4434,7 @@ if grep -Fq "status data-plane proxy did not become ready" "$autoscaler_out/flee
     fail "metrics failure fixture may not fail at primary status admission"
 fi
 assert_and_reset_disposable_failed_benchmark autoscaler-must-start "$TMP_ROOT/controller-autoscaler-required.log" ||
-    fail "autoscaler-must-start: missing runtime evidence must retain the failed result while retiring disposable resources"
+    fail "autoscaler-must-start: missing runtime evidence must retain the failed result while retaining original evidence sources"
 rm -f "$FAKE_DIR/fail-metrics-proxy" "$FAKE_DIR/delay-status-proxy"
 echo "PASS: scenario 2b — a fleet fails closed when mandatory autoscaling cannot attach"
 }
@@ -5174,9 +5252,25 @@ PY
     else
         [ -s "$output/guest-shutdown.confirmed" ] ||
             fail "$bench: the delivered guest shutdown was not acknowledged"
-        if grep -qE "^machine stop " "$FAKE_DIR/journal.log"; then
-            fail "$bench: a guest that acknowledged its delivered shutdown was also stopped natively"
-        fi
+        # The guest completed its delivered shutdown before the billing-only
+        # stop. Unsealed runtime still requires retaining the exact native pair.
+        [ ! -e "$output/guest-native-stop.json" ] ||
+            fail "$bench: acknowledged guest cleanup was replaced by native guest-stop authority"
+        python3 - "$output" "$machine" "$FAKE_DIR/journal.log" <<'PY_BILLING' ||
+import json
+from pathlib import Path
+import shlex
+import sys
+output, machine, journal = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+receipt = json.loads((output.parent / "_batch/billing-stop-retain" / machine / "result.private.json").read_text())
+assert receipt["machine"] == machine and receipt["status"] == "STOPPED_RETAINED", receipt
+assert receipt["stop_issued"] is True and receipt["all_config_and_volume_retained"] is True, receipt
+assert receipt["native_release"] is False and receipt["evidence_or_task_credit"] is False, receipt
+assert receipt["quiescence_sha256"] and receipt["configured_source_sha256"], receipt
+stops = [shlex.split(line)[2] for line in journal.read_text().splitlines() if line.startswith("machine stop ")]
+assert stops == [machine], stops
+PY_BILLING
+            fail "$bench: retained acknowledged guest lacks its exact zero-credit billing-stop receipt"
         # The runner's own EXIT cleanup delivered the stop: its run-scoped
         # delivery receipt exists. A runner that ignored the forwarded signal
         # leaves delivery entirely to the controller and never writes one.
@@ -5202,7 +5296,7 @@ PY
     rm -f "$FAKE_DIR/throttle-first-machine-stop"
     assert_no_fixture_processes "$bench ($signal_name)"
     SESSION_CONTROLLERS=()
-    echo "PASS: scenario 2-group-term ($bench, $signal_name) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group $signal_name (budget ${budget}s); failed result and evidence gap retained, disposable resources destroyed"
+    echo "PASS: scenario 2-group-term ($bench, $signal_name) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group $signal_name (budget ${budget}s); failed result and evidence gap retained, original Machines stopped and Volumes attached"
 }
 
 # A guest whose stop WAS delivered must drain undisturbed even when every
@@ -5675,7 +5769,7 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_FAKE_INVALID_METRICS=1 \
 grep -qF "mandatory autoscaler startup timed out" "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
     fail "invalid mandatory-autoscaler metrics must produce an explicit startup failure"
 assert_and_reset_disposable_failed_benchmark autoscaler-metrics-required "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
-    fail "autoscaler-metrics-required: missing runtime evidence must retain the failed result while retiring disposable resources"
+    fail "autoscaler-metrics-required: missing runtime evidence must retain the failed result while retaining original evidence sources"
 rm -f "$FAKE_DIR/invalid-metrics"
 echo "PASS: scenario 2c — a live proxy without valid metrics fails closed"
 
@@ -5735,10 +5829,10 @@ if find "$FAKE_DIR/machines" -path '*/cloudbench-worker-evidence/owner.json' -ty
     fail "pre-supervisor launch failure unexpectedly admitted a worker supervisor"
 fi
 # The task itself finished (PASS stays published); the launched worker's
-# missing evidence fails the run while disposable resources are retired.
+# missing evidence fails the run while original evidence sources remain retained.
 assert_and_reset_disposable_failed_benchmark autoscaler-worker-required \
     "$TMP_ROOT/controller-autoscaler-worker-required.log" passed ||
-    fail "pre-supervisor failure did not retain its failed run while retiring disposable resources"
+    fail "pre-supervisor failure did not retain its original evidence sources"
 rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/fail-worker-launch"
 echo "PASS: scenario 2d — failed autoscaled-worker launch fails the fleet closed"
 

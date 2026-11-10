@@ -83,6 +83,78 @@ mkdir -p "$CASE/out"
   r,v,_=self.run_case('POOL_REUSE_ONLY=1;provision_primary_machine bench "$CASE/out"',disposable=False);self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(v['out/.cid'],'pool existing\n');self.assertEqual(v['creates'],'')
  def test_failed_evidence_still_retires_exact_disposable(self):
   r,v,records=self.run_case('reap_registry_clones "$FLEET_REGISTRY_DIR" current',missing=True);self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture','volumes destroy vol_owned -a fixture --yes']);self.assertEqual(records,[])
+ def runtime_collection_branch(self):
+  source=SOURCE.read_text();start=source.index('    if ! cloudbench_collect_remaining_runtime_evidence; then',source.index('cleanup() {'))
+  return source[start:source.index('    if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then',start+9)]
+ def worker_cleanup_case(self, *, disposable=True, preserved=False, unlaunched=False):
+  with tempfile.TemporaryDirectory()as directory:
+   out=Path(directory);wid='abcd1234'
+   (out/'worker-clones.ids').write_text(wid+'\n');(out/'worker-ready.ids').write_text(wid+'\n')
+   (out/f'worker-{wid}.pending').touch();(out/f'worker-{wid}.launch-attempted').touch()
+   evidence=out/'worker-runtime-evidence'/wid;evidence.mkdir(parents=True);(evidence/'owner.json').write_text('{}')
+   script='set -uo pipefail\n'+function('cleanup_failed_worker')+'\n'+r'''
+out="$1";wid=abcd1234;FLEET_REGISTRY_DIR=fixture;POOL_REUSE_ONLY=0
+worker_ledger_lock_acquire(){ return 0; };worker_ledger_lock_release(){ return 0; }
+fleet_current_disposable_registry(){ return DISPOSABLE_STATUS; }
+fleet_registry_volume_for_id(){ printf vol_owned; }
+cloudbench_preserve_unlaunched_worker(){ return UNLAUNCHED_STATUS; }
+cloudbench_capture_worker_runtime_evidence(){ return CAPTURE_STATUS; }
+reap_machine(){ printf 'reap %s %s\n' "$1" "$3" >> "$out/calls"; }
+fleet_audit_update_fresh_clone_by_id(){ printf 'audit %s\n' "$1" >> "$out/calls"; }
+fleet_registry_release_id(){ printf 'release %s\n' "$1" >> "$out/calls"; }
+cleanup_failed_worker "$out" "$wid"
+'''.replace('DISPOSABLE_STATUS','0'if disposable else'1').replace('UNLAUNCHED_STATUS','0'if unlaunched else'1').replace('CAPTURE_STATUS','0'if preserved else'1')
+   result=subprocess.run(['bash','-c',script,'fixture',str(out)],capture_output=True,text=True,timeout=10)
+   return result,{'calls':(out/'calls').read_text()if(out/'calls').exists()else'',
+                 'tracked':(out/'worker-clones.ids').read_text(),
+                 'pending':(out/f'worker-{wid}.pending').exists(),
+                 'failure':(out/f'worker-{wid}.cleanup-failed').read_text()if(out/f'worker-{wid}.cleanup-failed').exists()else''}
+ def test_unsealed_disposable_worker_retains_original_and_teardown_tracking(self):
+  result,row=self.worker_cleanup_case()
+  self.assertNotEqual(result.returncode,0,result.stderr);self.assertEqual(row['calls'],'')
+  self.assertEqual(row['tracked'],'abcd1234\n');self.assertTrue(row['pending'])
+  self.assertIn('could not be staged and launched',row['failure'])
+ def test_unsealed_legacy_worker_still_retains(self):
+  result,row=self.worker_cleanup_case(disposable=False)
+  self.assertNotEqual(result.returncode,0,result.stderr);self.assertEqual(row['calls'],'')
+  self.assertEqual(row['tracked'],'abcd1234\n');self.assertTrue(row['pending'])
+ def test_worker_with_preserved_runtime_still_retires_normally(self):
+  result,row=self.worker_cleanup_case(preserved=True)
+  self.assertEqual(result.returncode,0,result.stderr)
+  self.assertEqual(row['calls'],'reap abcd1234 vol_owned\naudit abcd1234\nrelease abcd1234\n')
+  self.assertEqual(row['tracked'],'');self.assertFalse(row['pending'])
+ def test_positively_preserved_unlaunched_worker_still_retires_normally(self):
+  result,row=self.worker_cleanup_case(unlaunched=True)
+  self.assertEqual(result.returncode,0,result.stderr)
+  self.assertEqual(row['calls'],'reap abcd1234 vol_owned\naudit abcd1234\nrelease abcd1234\n')
+  self.assertEqual(row['tracked'],'');self.assertFalse(row['pending'])
+ def test_final_unsealed_evidence_retains_disposable_originals_after_guest_ack(self):
+  for guest_ack in (0,1):
+   body='cloudbench_collect_remaining_runtime_evidence(){ return 1; };ec=0;teardown_failed=0;runtime_evidence_failed=0\n'
+   body+='touch "$FLEET_DIR/task/runtime-evidence.pending"\n'
+   if not guest_ack:body+='rm "$FLEET_DIR/task/guest-shutdown.confirmed"\n'
+   body+=self.runtime_collection_branch()
+   body+='if [ "$KEEP_CLONES" != 1 ];then reap_registry_clones "$FLEET_REGISTRY_DIR" current;fi\n'
+   body+='printf "FLAGS %s %s %s %s\\n" "$KEEP_CLONES" "$runtime_evidence_failed" "$ec" "$teardown_failed" >&2\n'
+   r,v,records=self.run_case(body,missing=True)
+   with self.subTest(guest_ack=guest_ack):
+    self.assertEqual(r.returncode,0,r.stderr);self.assertIn('FLAGS 1 1 1 1',r.stderr)
+    self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
+ def test_final_sealed_evidence_keeps_normal_disposable_retirement(self):
+  body='cloudbench_collect_remaining_runtime_evidence(){ return 0; };ec=0;teardown_failed=0;runtime_evidence_failed=0\n'+self.runtime_collection_branch()
+  body+='if [ "$KEEP_CLONES" != 1 ];then reap_registry_clones "$FLEET_REGISTRY_DIR" current;fi\n'
+  r,v,records=self.run_case(body)
+  self.assertEqual(r.returncode,0,r.stderr)
+  self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture','volumes destroy vol_owned -a fixture --yes'])
+  self.assertEqual(records,[])
+ def test_mixed_retired_history_does_not_release_unsealed_original(self):
+  body='cloudbench_collect_remaining_runtime_evidence(){ return 1; };ec=0;teardown_failed=0;runtime_evidence_failed=0\n'
+  body+='printf "sealed-normal-history" > "$CASE/audit/sealed-history";touch "$FLEET_DIR/task/runtime-evidence.pending"\n'
+  body+=self.runtime_collection_branch()
+  body+='if [ "$KEEP_CLONES" != 1 ];then reap_registry_clones "$FLEET_REGISTRY_DIR" current;fi\n'
+  body+='test "$(cat "$CASE/audit/sealed-history")" = sealed-normal-history\n'
+  r,v,records=self.run_case(body,missing=True)
+  self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
  def test_legacy_missing_evidence_retains(self):
   r,v,records=self.run_case('reap_registry_clones "$FLEET_REGISTRY_DIR" current',missing=True,disposable=False);self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
  def test_foreign_registry_marker_not_disposable(self):

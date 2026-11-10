@@ -1037,12 +1037,20 @@ def validate(receipt, owner, proof):
     need(proof['receipt_sha256'] == receipt_sha and proof['worker_result_sha256'] == adapter_sha, 'original bytes changed')
     need(all(adapter.get(k) == receipt.get(k) for k in ('token', 'source', 'gate')), 'adapter identity')
     reference = owner['native_cleanup_reference']
+    observation_loss = proof.get('layout') == 'campaign-observation-loss-mixed42-v1'
+    observation_boundary = None
+    if observation_loss:
+        from deploy_test_native_observation_loss42 import admit
+        observation_boundary = admit(receipt, owner, proof, adapter, root)
+        from deploy_test_native_observation_loss42 import require_current_owner_release
+        require_current_owner_release(root, adapter)
     need(receipt.get('lifecycle') == 'native-producer' and receipt.get('complete') is False
-         and receipt.get('timed_out') is False and receipt.get('cancelled') is False
+         and (observation_loss or receipt.get('timed_out') is False and receipt.get('cancelled') is False)
          and reference == receipt.get('native_cleanup_reference') and reference['result'] == str(adapter_path)
          and reference['result_sha256'] == adapter_sha, 'native cleanup reference')
     confirmed = proof['confirmed_at']
-    need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
+    need(finite(confirmed) and finite(observation_boundary if observation_loss else receipt['finished_at'])
+         and (observation_boundary if observation_loss else receipt['finished_at']) <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
     run_artifacts = set()
@@ -1087,6 +1095,9 @@ def validate(receipt, owner, proof):
                     digest.update(value)
         return digest.hexdigest()
 
+    if observation_loss:
+        from deploy_test_native_observation_loss42 import consume_settlement
+        consume_settlement(root, proof, bound, document)
     request = document(folder / 'request.json')
     need(all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate')), 'request document')
     runs = root / '.context/deploy-cloud' / hashlib.sha256(token.encode()).hexdigest() / 'runs'
@@ -1221,7 +1232,7 @@ def validate(receipt, owner, proof):
     mixed = layout == 'campaign-mixed-preallocation-v1'
     staged_preallocation = preallocation or mixed or partial
     supervision = None
-    if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1'}:
+    if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1', 'campaign-observation-loss-mixed42-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and (reference.get('native_directory') == str(campaign) or preallocation
@@ -1235,7 +1246,10 @@ def validate(receipt, owner, proof):
              and summary['retry_infra'] == 0 and summary['task_count'] == len(checks)
              and summary['total_jobs'] == len(checks) == len(jobs)
              and summary['status'] in {'passed', 'failed', 'cancelled'}, 'campaign inventory')
-        if partial:
+        if observation_loss:
+            from deploy_test_native_observation_loss42 import mixed_jobs
+            unstarted_jobs = mixed_jobs(root, campaign, request, receipt, adapter, summary, proof)
+        elif partial:
             unstarted_jobs = partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, proof)
         else:
             need(len({j['job_id'] for j in jobs}) == len(jobs)
@@ -1247,7 +1261,7 @@ def validate(receipt, owner, proof):
         from datetime import datetime
         start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
         need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
-             <= receipt['finished_at'] <= confirmed, 'campaign terminal clocks')
+             <= (observation_boundary if observation_loss else receipt['finished_at']) <= confirmed, 'campaign terminal clocks')
         pending_hubs = summary.get('shared_transport_cleanup_pending')
         need(not any(summary.get(key) for key in ('cleanup_ticket_failure', 'shared_inventory_failed'))
              and (not pending_hubs or staged_preallocation and pending_hubs is True
@@ -1311,7 +1325,7 @@ def validate(receipt, owner, proof):
                 need(not proof.get('current_hub_retirement'), 'unexpected current Hub retirement proof')
         handles = []
         for job in jobs:
-            if partial and job['job_id'] in unstarted_jobs:
+            if (partial or observation_loss) and job['job_id'] in unstarted_jobs:
                 continue  # Positive native never-started rows retain NULLs and no execution credit.
             need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']), 'campaign job id')
             log = campaign / (job['job_id'] + '.log')
@@ -1384,7 +1398,7 @@ def validate(receipt, owner, proof):
     retained, audit_seals, recovered, excluded = {}, {}, {}, {}
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
-    need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    need(isinstance(recovery, dict) and (not recovery or layout in {'campaign-v1', 'campaign-observation-loss-mixed42-v1'}), 'recovery scope')
     admission_parents = frozenset()
     if layout == 'campaign-admission-rejected-v1':
         from deploy_test_native_admission import validate_campaign
@@ -1570,7 +1584,7 @@ def validate(receipt, owner, proof):
              'preallocation unexpected supervised termination')
         for value in retained.values():
             retired_local_process(dict(pid=int(value['owner']['pid']),birth=value['owner']['pid_start']))
-    if partial:
+    if partial or observation_loss:
         native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
         for hub in sorted((runs/'_hub').glob('agent-link-server.*.owner')):
             value = fields(bound(hub))
@@ -1610,6 +1624,10 @@ def validate(receipt, owner, proof):
     if partial:
         result.update(unstarted_campaign_verified=True, financial_cleanup_credit=False,
                       original_outcomes_preserved=True)
+    if observation_loss:
+        result.update(observation_loss_verified=True, mixed_terminal_campaign_verified=True,
+                      original_outcomes_preserved=True, financial_cleanup_credit=False,
+                      coordinator_process_flags='UNKNOWN', cleanup_complete=True)
     if staged_preallocation:
         result['preallocation_source_authorities']={str(k):v['source_authority'] for k,v in preallocation_links.items()
                                                      if preallocation or k in zero_parents}
@@ -1803,6 +1821,84 @@ def reconciliation_occurrence(state, entry, receipt):
          and receipt['cases'].get(case) == 'UNVERIFIED', 'reconciliation occurrence binding')
 
 
+def reconciled_observation_loss42_isolated_successor(state, prior, original, successor):
+    """Launch-only renewal after strict typed42 closure; UNKNOWN outer facts stay immutable."""
+    from deploy_test_cycle import bounded_read, receipt_owner, sha_file
+    from deploy_test_native_observation_loss42 import CAPTURE, LAYOUT, admit
+    need(prior.get('token') == original.get('token') == '6428b1b8c79c47fbb0422465fec357e1'
+         and prior.get('purpose') == 'isolated-validation' and prior.get('cleanup_complete') is False
+         and prior.get('credit_granted') is False and prior.get('obligations_preserved') is True
+         and prior.get('gate') == 'smoke' and successor.get('token') == CAPTURE['token']
+         and successor.get('source') == CAPTURE['source'], 'typed42 original obligation/source')
+    entries = [(key, entry) for key, entry in state.get('reconciled_owners', {}).items()
+               if entry.get('token') == successor['token']]
+    need(len(entries) == 1, 'typed42 strict reconciliation required')
+    key, entry = entries[0]
+    proof = entry.get('proof', {})
+    need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
+         and entry.get('purpose') is None and proof.get('purpose') is None
+         and proof.get('layout') == LAYOUT and key == proof.get('receipt_sha256') == CAPTURE['receipt_sha256']
+         and entry.get('observation_loss_verified') is True and entry.get('mixed_terminal_campaign_verified') is True
+         and entry.get('original_outcomes_preserved') is True and entry.get('cleanup_complete') is True
+         and entry.get('coordinator_process_flags') == 'UNKNOWN' and entry.get('credit_granted') is False
+         and entry.get('financial_cleanup_credit') is False, 'typed42 strict zero-credit closure')
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    rows = [(attempt, row) for attempt in state['attempts'] for row in attempt.get('results', []) if row is successor]
+    need(len(rows) == 1 and rows[0][0].get('phase') == 'focused'
+         and rows[0][0].get('source') == CAPTURE['source']
+         and not rows[0][0].get('interrupted') and not rows[0][0].get('stale')
+         and rows[0][0].get('settlement') == dict(kind='native-settlement-journal-v1', round=42,
+              missing_outer_nonpass_only=True, original_receipts_unchanged=True, positive_credit=False)
+         and type(rows[0][0]['settlement'].get('round')) is int
+         and all(type(rows[0][0]['settlement'].get(k)) is bool for k in
+                 ('missing_outer_nonpass_only', 'original_receipts_unchanged', 'positive_credit'))
+         and successor.get('command') == gate['command'], 'typed42 settled full attempt')
+    folder = Path(successor['log']).parent
+    need(bounded_read(folder/'receipt.json', 'typed42 original receipt') == successor
+         and key == sha_file(folder/'receipt.json')
+         and successor.get('worker_result') == str(folder/'result.json'), 'typed42 original receipt binding')
+    request = bounded_read(folder/'request.json', 'typed42 original request')
+    adapter = bounded_read(folder/'result.json', 'typed42 original adapter')
+    need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
+         and request.get('phase') == 'focused' and request.get('worker_recipe') == gate.get('worker_recipe'),
+         'typed42 full request identity')
+    checks, skips = request['checks'], request['skips']
+    need(isinstance(checks, list) and len(checks) == len(set(checks)) == 17 and isinstance(skips, dict)
+         and not set(checks) & set(skips) and set(checks) | set(skips) == set(gate['checks'])
+         and set(successor.get('cases', {})) == set(gate['checks'])
+         and set(successor.get('case_complete', {})) == set(gate['checks'])
+         and all(value is False for value in successor['case_complete'].values()), 'typed42 full inventory')
+    binding = successor.get('execution_binding', {})
+    need(isinstance(binding, dict) and set(binding) == {'contract_digest', 'environment', 'input_fingerprint'}
+         and all(isinstance(v, str) and re.fullmatch('[0-9a-f]{64}', v) for v in binding.values()),
+         'typed42 historical execution binding')
+    owner = receipt_owner(prior['gate'], successor)
+    need(isinstance(owner, dict) and owner.get('worker_root') == prior['owner']['worker_root']
+         and entry.get('owner') == proof.get('owner') == owner, 'typed42 exact original owner')
+    root = Path(owner['worker_root'])
+    native_root = root/'.context/deploy-cloud'/hashlib.sha256(successor['token'].encode()).hexdigest()
+    expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'], original_request_token=prior['token'],
+        new_request_token=successor['token'], source=successor['source'], new_native_root=str(native_root),
+        excluded_resources=prior['excluded_resources'], credit_granted=False)
+    admissions = request.get('isolated_validation')
+    need(isinstance(admissions, list) and all(isinstance(v, dict) for v in admissions)
+         and admissions == successor.get('isolated_validation')
+         and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
+         'typed42 original isolation binding')
+    # admit authenticates the immutable receipt/request/adapter, typed false credits and producer clocks.
+    # still_bound replays the SAME full validator including exact settlement/current process absence,
+    # all13 owners, native audits/runtime/provenance/provider/Hub/relay/publication/file closure.
+    admit(successor, owner, proof, adapter, root)
+    need(entry.get('occurrence') != successor['token'], 'typed42 diagnosed occurrence required')
+    reconciliation_occurrence(state, entry, successor)
+    need(still_bound(entry, successor, owner), 'typed42 strict proof no longer bound')
+    isolated_successor_custody(state, gate, successor, request, root)
+    need(finite(original.get('finished_at')) and finite(adapter.get('started_at'))
+         and finite(adapter.get('finished_at'))
+         and original['finished_at'] <= adapter['started_at'] <= adapter['finished_at'],
+         'typed42 producer chronology distinct from UNKNOWN outer clocks')
+
+
 def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     """Launch-only authority from an immutable full failed cohort's strict normal reconciliation."""
     from deploy_test_cycle import bounded_read, receipt_owner, sha_file
@@ -1901,7 +1997,9 @@ def renew_isolated_validation(state, request_token, proof):
     reconciliation_occurrence(state, prior, receipt)
     latest = isolated_renewal_successor(state, prior, receipt)
     if latest != receipt:
-        if latest is not None and latest.get('complete') is False:
+        if latest is not None and latest.get('kind') == 'recovered-native-execution-v1':
+            reconciled_observation_loss42_isolated_successor(state, prior, receipt, latest)
+        elif latest is not None and latest.get('complete') is False:
             reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
         else:
             clean_isolated_successor(state, prior, receipt, latest)
@@ -1924,6 +2022,16 @@ def reconcile(state, occurrence_id, proof):
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
+        # An accepted isolated debt is a renewal through either supported identity.
+        # The historical failure-ID path must not bypass latest-successor custody.
+        if proof.get('purpose') == 'isolated-validation':
+            previous = [entry for entry in state.get('reconciled_owners', {}).values()
+                        if entry.get('token') == proof.get('request_token')]
+            if previous:
+                need(len(previous) == 1 and previous[0].get('purpose') == 'isolated-validation'
+                     and occurrence_id in (previous[0]['token'], previous[0].get('occurrence')),
+                     'original isolated renewal occurrence/token')
+                return renew_isolated_validation(state, previous[0]['token'], proof)
         if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
                 and proof.get('purpose') == 'isolated-validation'):
             return renew_isolated_validation(state, occurrence_id, proof)

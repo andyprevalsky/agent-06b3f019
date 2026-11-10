@@ -15623,13 +15623,9 @@ cleanup() {
     # historical worker captures are verified, including workers scaled down
     # before the benchmark finished.
     if ! cloudbench_collect_remaining_runtime_evidence; then
-        if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" && [ "${KEEP_CLONES:-0}" != 1 ]; then
-            echo "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" >&2
-        else
-            echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
-        fi
+        echo "❌ runtime evidence is incomplete; retaining original fleet Machines and attached volumes" >&2
         runtime_evidence_failed=1
-        fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || KEEP_CLONES=1
+        KEEP_CLONES=1
         ec=1
         teardown_failed=1
     fi
@@ -18057,7 +18053,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         && ! cloudbench_capture_worker_runtime_evidence "$cleanup_out" "$cleanup_wid"; then
         echo "❌ worker $cleanup_wid runtime evidence was not preserved" >&2
         runtime_missing=1
-        [ "$DISPOSABLE_REAP" = 1 ] || rc=1
+        rc=1  # Unsealed worker originals are retained for every lifecycle policy.
         # Every cleanup path (cancelled provisioner, scale-down or controller)
         # publishes the same stable run-failure reason for the final verdict.
         local failure_reason="worker $cleanup_wid runtime evidence was not preserved"
