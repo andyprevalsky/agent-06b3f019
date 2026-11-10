@@ -74,10 +74,14 @@ def join_native_hubs(root, campaign):
     if os.environ.get('DEPLOY_NATIVE_HUB_JOIN') != '1':
         return True
     runs = Path(os.environ.get('CLOUDBENCH_RUNS_ROOT', ''))
+    # deploy_test_cloud.launch owns <request>/ (first attempt) and <request>/rerun/ (its single rerun).
+    base = runs.parent
+    rerun = base.name == 'rerun'
+    request = base.parent if rerun else base
     if (not runs.is_absolute() or runs.resolve() != runs
-            or not re.fullmatch('[0-9a-f]{64}', runs.parent.name)
-            or runs != root/'.context/deploy-cloud'/runs.parent.name/'runs'
-            or campaign != runs.parent/'campaigns'/('deploy-'+runs.parent.name)):
+            or not re.fullmatch('[0-9a-f]{64}', request.name)
+            or request != root/'.context/deploy-cloud'/request.name or runs != base/'runs'
+            or campaign != base/'campaigns'/('deploy-'+request.name+('-rerun' if rerun else ''))):
         raise ValueError('native Hub join root is not request-owned')
     hub = runs/'_hub'
     if hub.is_symlink():

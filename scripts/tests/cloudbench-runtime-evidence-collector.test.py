@@ -18,6 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 
+# Deliberate truncated-body transport fixture: outlive urllib's six-second read
+# budget without changing that production deadline or using a delay as synchronization.
+STALLED_BODY_TRANSFER_SECONDS = 6.5
+
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "scripts/run-bench-cloud").read_text()
 MATCH = re.search(r"(?ms)^cloudbench_collect_runtime_evidence\(\).*?^}\n", SOURCE)
@@ -167,7 +171,7 @@ def exercise(
                         self.wfile.write(data[:100_000])
                         self.wfile.flush()
                         if file_fault == "stall":
-                            time.sleep(6.5)
+                            time.sleep(STALLED_BODY_TRANSFER_SECONDS)
                         self.close_connection = True
                         try:
                             self.connection.shutdown(socket.SHUT_RDWR)

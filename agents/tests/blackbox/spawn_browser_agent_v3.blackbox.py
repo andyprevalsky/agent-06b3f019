@@ -17988,12 +17988,17 @@ async def test_hard_recover_frozen_renderer_keeps_session_browser_context():
     the session cookie.
     """
     import socket
+    import importlib.util
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     from playwright.async_api import async_playwright
 
     from domains.spawn_browser_agent_v3.handler import _hard_recover_frozen_renderer_page
     from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    wait_spec = importlib.util.spec_from_file_location("condition_wait", Path(__file__).resolve().parents[3] / "scripts/lib/condition_wait.py")
+    condition_wait = importlib.util.module_from_spec(wait_spec)
+    wait_spec.loader.exec_module(condition_wait)
 
     seen: list = []
 
@@ -18026,12 +18031,15 @@ async def test_hard_recover_frozen_renderer_keeps_session_browser_context():
         launched = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={debug_port}"])
         browser = None
         try:
-            for _ in range(50):
-                try:
-                    browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
-                    break
-                except Exception:
-                    await asyncio.sleep(0.1)
+            async def connect_session_browser():
+                nonlocal browser
+                browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+                return browser
+
+            await condition_wait.async_wait_until(
+                connect_session_browser, timeout=5.0, initial_interval=0.1, max_interval=0.1,
+                description="Chromium session CDP endpoint reachable", ignore_exceptions=(Exception,),
+            )
             assert browser is not None, "Chromium CDP endpoint never became reachable"
             session_context = browser.contexts[0]
             await session_context.add_cookies([{"name": "session_token", "value": "local-owned", "url": origin}])
@@ -18040,15 +18048,24 @@ async def test_hard_recover_frozen_renderer_keeps_session_browser_context():
             assert seen[-1] == ("/store", ["session_token"]), seen
 
             cdp = await session_context.new_cdp_session(page)
+            freeze_started = asyncio.Event()
+            freeze_marker = "__fixture_renderer_freeze_started__"
+
+            def observe_freeze_marker(event):
+                if any(arg.get("value") == freeze_marker for arg in event.get("args", [])):
+                    freeze_started.set()
+
+            cdp.on("Runtime.consoleAPICalled", observe_freeze_marker)
+            await cdp.send("Runtime.enable")
             await cdp.send(
                 "Runtime.evaluate",
                 {
-                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "expression": f"setTimeout(() => {{ console.debug('{freeze_marker}'); while (true) {{}} }}, 0)",
                     "returnByValue": True,
                     "awaitPromise": False,
                 },
             )
-            await asyncio.sleep(0.25)
+            await asyncio.wait_for(freeze_started.wait(), timeout=0.25)
             stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5)
             assert stalled["verdict"] == "renderer_main_thread_blocked"
 
@@ -39029,6 +39046,8 @@ async def run_all_tests():
     await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
     await r.record_async("native_phone_auth_cancellation_preserves_exact_pending_request", test_native_phone_auth_cancellation_preserves_exact_pending_request)
     await r.record_async("phone_supervisor_preserves_unknown_and_cancellation", test_phone_supervisor_preserves_unknown_and_cancellation)
+    await r.record_async("phone_setup_window_rejection_feedback_and_latest_observation", test_phone_setup_window_rejection_feedback_and_latest_observation)
+    await r.record_async("phone_setup_window_feedback_never_reflects_untrusted_errors", test_phone_setup_window_feedback_never_reflects_untrusted_errors)
     return r.all_passed
 
 
@@ -40157,3 +40176,64 @@ async def test_phone_task_availability_is_authoritative():
         assert calls == []
         assert await observe_phone(config, 'user', 'task-owned', client=client) == {'enabled': False}
         assert len(calls) == 1
+
+
+async def test_phone_setup_window_rejection_feedback_and_latest_observation():
+    """The captured [12,14] rejection must teach the agent how to form fresh evidence."""
+    teardown_mock()
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 14,
+                "setup": {"attemptId": "attempt", "revision": 2}}}
+    posts = []
+    def backend(request):
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={"enabled": True, "source": "bootstrap"})
+        assert request.method == "POST" and request.url.path.endswith("/setup")
+        body = json.loads(request.content); posts.append(body)
+        assert body["expectedCursor"] == 14 and body["expectedRevision"] == 2
+        if body["evidenceOperationIds"] == ["read-12", "read-14"]:
+            return httpx.Response(409, json={"error": "Setup observations must be the current uninterrupted cursor window"})
+        assert body["evidenceOperationIds"] == ["read-14"]
+        return httpx.Response(200, json={"operation": {"id": body["requestKey"], "status": "SUCCEEDED"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task",
+                      snapshot=snapshot, client=client)
+        params = {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock"}
+        rejected = await execute_phone({**params, "evidenceOperationIds": ["read-12", "read-14"]},
+                                       **common, decision_id="bad-window")
+        assert rejected["success"] is False and rejected["_httpStatus"] == 409
+        assert rejected.get("errorCode") == "phone_setup_observation_window", rejected
+        assert "latest" in rejected["error"] and "Do not replay" in rejected["error"]
+        assert len(posts) == 1, "rejection must not automatically retry or mutate the evidence"
+        accepted = await execute_phone({**params, "evidenceOperationIds": ["read-14"]},
+                                       **common, decision_id="fresh-window")
+        assert accepted["success"] is True and len(posts) == 2
+
+
+async def test_phone_setup_window_feedback_never_reflects_untrusted_errors():
+    teardown_mock()
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import _request
+    literal = "Setup observations must be the current uninterrupted cursor window"
+    deeply_nested = b"[" * 1100 + b"]" * 1100
+    assert len(deeply_nested) == 2200
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(409, content=deeply_nested))) as client:
+        result = await _request(client, _fake_config(), "user", "POST", "interactions/task/setup", {})
+    assert result == {"_httpStatus": 409}, "deep malformed JSON must stay an opaque rejection"
+    for status, path, body in (
+        (409, "interactions/task/setup", {"error": "CANARY-PRIVATE-ERROR"}),
+        (403, "interactions/task/setup", {"error": literal}),
+        (409, "leases/lease/operations", {"error": literal}),
+        (409, "interactions/task/setup", {"error": literal + " CANARY-PRIVATE-ERROR"}),
+        (409, "interactions/task/setup", {"error": {"private": "CANARY-PRIVATE-ERROR"}}),
+        (409, "interactions/task/setup", {"error": literal, "padding": "x" * 4096}),
+    ):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(status, json=body))) as client:
+            result = await _request(client, _fake_config(), "user", "POST", path, {})
+        assert result == {"_httpStatus": status}, result
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(409, json={"error": literal, "private": "CANARY-PRIVATE-ERROR"}))) as client:
+        result = await _request(client, _fake_config(), "user", "POST", "interactions/task/setup", {})
+    assert result["errorCode"] == "phone_setup_observation_window"
+    assert "CANARY" not in json.dumps(result)

@@ -3040,6 +3040,7 @@ fi
 # boundary read as one second older than the request, so it was not reused.)
 peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-mtime-ns>
     local since="$1" s_node="" s_py="" s_epoch="" s_snap="" written="" vol=""
+    [[ "$since" =~ ^[0-9]+$ ]] || return 1
     [ -f "$WARM_DEPS_STATE_FILE" ] || return 1
     written="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
     [ "${written:-0}" -ge "$since" ] || return 1

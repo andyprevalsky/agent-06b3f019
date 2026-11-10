@@ -482,11 +482,15 @@ async def test_loop_lag_attributes_stall_to_cpu_starvation_window():
     fields = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal", "guest", "guest_nice")
     SysTimes = namedtuple("scputimes", fields)
     calls = {"n": 0}
+    monitor_sampled = asyncio.Event()
+    stall_observed = asyncio.Event()
 
     def fake_cpu_times(percpu=False):
         # Every sample advances 1 s user + 3 s steal (+ guest time psutil already
         # folds into user): a 75% hypervisor-steal share of all guest vCPU time.
         n = calls["n"] = calls["n"] + 1
+        if n >= 2:
+            monitor_sampled.set()
         return SysTimes(float(n), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0 * n, 5.0 * n, 0.0)
 
     events: list[dict] = []
@@ -494,15 +498,17 @@ async def test_loop_lag_attributes_stall_to_cpu_starvation_window():
     class _Recorder:
         def warning(self, **kw):
             events.append(kw)
+            if kw.get("event") == "loop.lag" and kw["lag_s"] >= 0.5:
+                stall_observed.set()
 
         def info(self, **kw):
             events.append(kw)
 
     with patch.object(worker, "logger", _Recorder()), patch("worker.psutil.cpu_times", fake_cpu_times):
         monitor = asyncio.create_task(worker.monitor_event_loop_lag(interval_s=0.05, warn_threshold_s=0.25))
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(monitor_sampled.wait(), timeout=0.2)
         _time.sleep(0.6)  # blocks the loop without using CPU, like a descheduled guest
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(stall_observed.wait(), timeout=0.2)
         monitor.cancel()
         try:
             await monitor

@@ -27,11 +27,13 @@ const BUSY_PAGE = `<!doctype html><title>Fresh Groceries</title><body><h1>Shop</
 // A static block page: goes network-idle immediately.
 const STATIC_BLOCK_PAGE = `<!doctype html><title>Attention Required!</title><body>Blocked</body>`;
 
+const beaconResponseLatencyMs = 120; // Simulate slow in-flight analytics work.
+
 async function startServer(): Promise<{ server: Server; base: string }> {
   const server = createServer((req, res) => {
     if ((req.url ?? '').startsWith('/beacon')) {
       // Each beacon stays in flight briefly, like a real analytics call.
-      setTimeout(() => res.end('ok'), 120);
+      setTimeout(() => res.end('ok'), beaconResponseLatencyMs);
       return;
     }
     res.setHeader('content-type', 'text/html');

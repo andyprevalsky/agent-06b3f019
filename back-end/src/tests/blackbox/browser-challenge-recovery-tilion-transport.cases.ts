@@ -1,5 +1,6 @@
 /** Tilion residential tunnel-failure recovery cases (tilion_direct egress). Registered by browser-challenge-recovery.blackbox.ts. */
 import { randomUUID } from 'node:crypto';
+import { waitFor } from '../helpers/waitFor';
 import type { Browser } from 'playwright';
 import { prisma } from '../../providers/database';
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
@@ -158,6 +159,7 @@ export function registerTilionTransportCases(test: RegisterTest): void {
         }),
     };
     const started = Date.now();
+    const callerReadDeadlineMs = 10_000; // The original caller deadline fuse, not synchronization.
     try {
       const outcome = await withEnv(TILION_DEFAULT_ENV, async () =>
         Promise.race([
@@ -175,7 +177,9 @@ export function registerTilionTransportCases(test: RegisterTest): void {
             () => 'promoted',
             (error: unknown) => (error instanceof Error ? error.message : String(error))
           ),
-          new Promise<string>((resolve) => setTimeout(() => resolve('still searching'), 10_000)),
+          new Promise<string>((resolve) =>
+            setTimeout(() => resolve('still searching'), callerReadDeadlineMs)
+          ),
         ])
       );
       assert(
@@ -183,7 +187,11 @@ export function registerTilionTransportCases(test: RegisterTest): void {
         `search must end inside its caller's deadline: ${outcome} after ${Date.now() - started} ms`
       );
       assert(scripted.createdKeys.length > 0, 'no candidate was probed');
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await waitFor(
+        'all timed-out candidate sessions released',
+        () => scripted.released.length >= scripted.createdKeys.length,
+        50
+      );
       assert(
         scripted.released.length >= scripted.createdKeys.length,
         `candidates still rented after the deadline: ${JSON.stringify(scripted)}`

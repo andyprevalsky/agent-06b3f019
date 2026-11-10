@@ -6,8 +6,8 @@
  *  - setup progress fills by completed steps; each step is listed on the phone;
  *    ready stops the fast /connection polling
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -88,7 +88,10 @@ const leaseOrQueueRequests = () =>
   capturedRequests.filter((r) => /\/(leases|interactions)\//.test(new URL(r.url).pathname));
 
 beforeEach(() => mockTerminalHookSession());
-afterEach(() => localStorage.clear());
+afterEach(() => {
+  vi.useRealTimers();
+  localStorage.clear();
+});
 
 describe('iPhone connection in normal Integrations', () => {
   it.each([false, true])(
@@ -167,6 +170,7 @@ describe('iPhone connection in normal Integrations', () => {
   });
 
   it('fills the setup bar by completed steps, lists each step on the phone, and stops fast polling when ready', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const state = backend('setting_up');
     state.setupAgentId = AGENT;
     state.steps = steps(1);
@@ -187,6 +191,9 @@ describe('iPhone connection in normal Integrations', () => {
     for (const [, label] of STEPS) expect(card).toHaveTextContent(label);
 
     state.steps = steps(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
     await waitFor(
       () => expect(within(card).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '43'),
       { timeout: 5000 },
@@ -196,6 +203,9 @@ describe('iPhone connection in normal Integrations', () => {
 
     state.status = 'ready';
     state.steps = steps(STEPS.length);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
     await waitFor(() => expect(within(row).getByText('Connected')).toBeInTheDocument(), {
       timeout: 5000,
     });
@@ -203,7 +213,9 @@ describe('iPhone connection in normal Integrations', () => {
     expect(step('passcode')).toHaveAttribute('data-status', 'done');
     expect(within(row).queryByRole('progressbar')).toBeNull();
     const reads = state.reads;
-    await new Promise((resolve) => setTimeout(resolve, 3200));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3200);
+    });
     expect(state.reads).toBe(reads);
   }, 20_000);
 

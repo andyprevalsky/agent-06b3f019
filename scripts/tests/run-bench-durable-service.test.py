@@ -24,6 +24,9 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts/lib"))
+from condition_wait import WaitTimeout, wait_until
+
 RUN_BENCH = ROOT / "scripts/run-bench"
 TASK = "anti-bot-reddit-thread"
 LAUNCH = re.compile(r"unit=(\S+) main_pid=(\d+) log=(\S+)")
@@ -121,13 +124,10 @@ def pid_alive(pid: int) -> bool:
 
 
 def wait_for(predicate, seconds: float = 30.0):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.1)
-    return predicate()
+    try:
+        return wait_until(predicate, timeout=seconds, description="durable fixture condition")
+    except WaitTimeout:
+        return predicate()
 
 
 class DurableLaunchBase(unittest.TestCase):
@@ -311,7 +311,15 @@ class DurableLaunchSurvivesSessionScopeKill(DurableLaunchBase):
         self.assertEqual(receipt["cgroup"], f"0::/system.slice/{unit}.service")
         self.assertEqual((receipt["knob"], receipt["secret"]), ("7", None))
         self.hard_dispose(scope)
-        time.sleep(1)
+        # Observe completion of the killed caller scope, rather than assuming
+        # one elapsed second means systemd has finished disposing it.
+        def caller_scope_inactive():
+            result = self.root("systemctl", "is-active", scope, check=False)
+            return (result.returncode, result.stdout.strip()) in {
+                (3, "inactive"), (3, "failed"), (4, "unknown"),
+            }
+
+        wait_until(caller_scope_inactive, timeout=1, description="disposed caller scope inactive")
         self.assertTrue(pid_alive(main_pid), "durable controller died with the caller's session scope")
         self.root("systemctl", "stop", unit)  # TERM reaches the controller's own trap
         self.assertTrue(wait_for(lambda: (self.state / f"controller-{main_pid}.term").exists(), 15))

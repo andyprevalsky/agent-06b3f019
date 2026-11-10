@@ -86,3 +86,120 @@ The user explicitly requested `/rca` then `/push`.
 ## Reusable lesson
 
 Center the art independently of adjacent caption dimensions, using breakpoint-scoped containing blocks to preserve mobile positioning.
+
+
+## Recurrence — November 10, signed-in horizontal alignment
+
+User: "its still off center, fix, validate, then /push", with a dark-mode
+screenshot showing art right of the large tile. The earlier signed-out vertical
+proof was valid but incomplete coverage of signed-in layouts.
+
+Runtime evidence from the deploy coordinator and our independent local real
+Terminal render agrees: at 1440x900 with the signed-in RoseDesktop 64px rail,
+art center was [752,360], tile center [720,360]. The background SVG owns
+viewport-centered geometry, whereas TerminalMainContent adds sidebar padding
+to its chat column. The absolute opening loader inherited that inset, moving
+its center by half the rail width. This is a separate horizontal boundary
+missed by the original reproduction; retain the original vertical fix/proof.
+
+Our unchanged local command `node .context/ascii-centering/horizontal.cjs`
+failed before with `art horizontally centered in tile`, then passed at
+art=[720,360], tile=[720,360], padding=64px. This renders the actual app with a
+synthetic local signed-in session; it proves layout, not authentication.
+The permanent opening-layout blackbox extension failed before because md:fixed
+was absent. The owning fix adds md:fixed to the opening loader so its desktop
+containing block agrees with the grid, independent of sidebar width; mobile
+remains absolute. No pixel compensation or duplicated sidebar state is added.
+The existing desktop Playwright regression now injects the supplied semantic
+session and measures against the actual SVG tile rather than a second formula.
+
+Archive searches: `ASCII desktop center` and `sidebar viewport horizontal offset`.
+This is a recurrence of the reported visual symptom with a newly proven
+horizontal cause, recorded here to preserve the prior evidence and its gap.
+
+Final recurrence validation: full frontend coverage passed 324 files,
+4,718 tests passed / one skipped, thresholds met (87.38% statements,
+81.78% branches, 87.70% functions, 89.63% lines). Changed-file ESLint passed.
+The final strengthened blackbox explicitly renders a signed-in account and
+asserts the sidebar-inset main before asserting the viewport-anchored loader.
+That exact final file failed on original source and passed on the fix.
+The exact final signed-in browser test failed with measured error 32px on
+original source and passed after restoring the fix, with the 2px bound unchanged.
+Commands: `cd front-end && npx vitest run src/tests/blackbox/opening-layout.blackbox.tsx`
+and `FRONTEND_URL=http://127.0.0.1:4102 SEMANTIC_SESSION=<local-layout-fixture>
+npx playwright test tests-e2e/mobile-layout.spec.ts -g 'desktop opening ASCII'`.
+The synthetic session is only a local layout fixture, never an auth validity claim.
+
+Independent managed review found no blocking implementation objection or
+ancestor containing-block trap. Existing pointer-events-none, z18 loader,
+z20 messages, dimming and transcript tests remain intact; no claim of a new
+end-to-end chat screenshot is made. The 24-case local geometry matrix passed
+six sizes, two rail offsets, and both themes, including the 767/768px boundary.
+
+## Recurrence — November 10, restore historical caption placement
+
+User: "the text is still too low" and requested last week's layout as a
+pixel-perfect reference, then /push. This supersedes any assumption that
+centering the art alone also approved moving its caption down. Preserve the
+independently corrected horizontal/vertical art centering and mobile layout.
+
+Recovered the actual November 3 frontend from commit
+0784fff6cc1663a7c6069b2a09acdab4df33749c with git archive into an ignored
+reference directory and ran it on Vite 4104 alongside current Vite 4102.
+OpeningMessageDisplay is byte-identical across the revisions. Real historical
+Chromium caption boxes at height900: width1440 (420,518,600,32), width1280
+(339.9921875,500.515625,600,28.4453125), width768
+(84,470.578125,600,22.3984375). Current pre-fix y was546,525.40625,490.171875.
+The unchanged comparison command `node .context/ascii-lastweek/compare.cjs`
+failed with `caption matches historical y at1440`, then passed after the fix.
+
+The November9 out-of-flow fix retained the whole old sibling gap while moving
+the art down by half the old gap+caption height. That inadvertently moved the
+caption down by the same amount (28px at16px rem), although the user asked for
+centering rather than a caption redesign. With art independently centered,
+the original caption center equals tileCenterY + artHeight/2 + halfGap.
+Restore that relation using desktop margin3 (half the old6 gap) and translating
+the caption up by half its own height. Keep mobile absolute offsets untouched.
+This is derived from the historical layout and responds to font/caption size;
+there is no fixed28px compensation or viewport-specific conditional.
+
+The permanent blackbox adds a caption-position contract; it failed before the
+production edit. The existing browser suite adds frozen November3 box
+assertions at all three widths with a0.1CSSpx tolerance; it also failed before.
+The historical renderer was used to obtain expected values, never the repaired
+code. Reference source/screenshots/measurements remain private under
+.context/ascii-lastweek. Caption text is normalized to Hello! and reveal/fade
+visual effects disabled only in the isolated screenshot comparison, identically
+for both sources, so animation phase cannot masquerade as a geometry change.
+Archive searches `ASCII caption too low` and `opening caption position desktop`
+returned this case; this is appended as a recurrence of incomplete visual
+acceptance coverage. Golden reference: not applicable (ordinary UI layout).
+
+The isolated Hello! screenshot crops have zero differing RGB channels at
+1440,1280,768 widths (57,600 / 52,287 / 41,400 channels compared). This is
+caption-only raster proof, not a claim that the entire animated page matches.
+One initial permanent browser check failed0.1015625px at768: its frozen numbers
+came from the shared Chromium instead of the pinned Playwright browser.
+Running the same test against the unmodified November3 site in Playwright
+also failed0.109375px. Captured historical native boxes were1440
+(420,518,600,32),1280(339.984375,500.515625,600,28.4375),768
+(83.984375,470.6875,600,22.390625). The permanent fixture now uses those actual
+historical measurements from its own browser; the0.1px bound is unchanged.
+No production offset was changed to fit a test-browser difference.
+
+Final caption validation: full frontend gate passed324files,4,719 tests passed
+and one skipped, with all coverage thresholds met. Formatting and changed-file
+ESLint passed. Historical native reference and new signed-in app both pass
+identical frozen geometry checks at1440/1280/768. The existing art-centering
+browser regression and24-case sidebar/theme/mobile matrix still pass.
+Adversarial review accepted the fix and native reference correction; no bound
+was relaxed. Final permanent caption blackbox and browser tests were replayed
+unchanged on pre-fix source (failed) and restored source (passed).
+
+Main advanced during this repair with sidebar overlay work. Integrated that
+source, preserving its fixed64px rail assertions, and reran full frontend
+coverage on merged7dfca4a36:324files,4,733passed/one skipped; all thresholds
+met (87.43% statements,81.88% branches,87.76% functions,89.69% lines).
+Signed-in art+caption browser tests passed on the integrated snapshot and the
+three isolated caption crops again had zero differing RGB channels. These
+integrated results supersede the earlier smaller-snapshot counts above.

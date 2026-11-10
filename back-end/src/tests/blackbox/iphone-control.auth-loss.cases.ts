@@ -51,12 +51,16 @@ function screen(h: Harness, f: Awaited<ReturnType<typeof prepared>>, id = random
   });
 }
 async function within<T>(promise: Promise<T>) {
+  const fixtureEntryDeadlineMs = 5000;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Semantic fixture did not enter')), 5000);
+        timer = setTimeout(
+          () => reject(new Error('Semantic fixture did not enter')),
+          fixtureEntryDeadlineMs
+        );
       }),
     ]);
   } finally {

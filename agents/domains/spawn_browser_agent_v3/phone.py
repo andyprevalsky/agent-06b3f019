@@ -127,7 +127,13 @@ all required settings. Inspect existing signed-in state without signing out or
 resetting it. Configure authorized required settings autonomously within this
 same original task, honoring user restrictions and protected authentication.
 After fresh observations, use mode=setup, action=verify with evidenceOperationIds
-containing 1..8 successful current broker observation IDs and verificationTarget:
+containing 1..8 successful current broker screen.text observation IDs and verificationTarget.
+After any navigation or mutation, obtain a fresh screen.text observation and normally
+submit only its latest operation ID with the current setup revision. If multiple
+IDs are needed, they must be consecutive screen.text operations ending at the
+current cursor, with no intervening tap, scroll, app launch, or other operation.
+Never combine an earlier screen with a later screen across an intervening action.
+Supported verification targets:
 apple_account (the default when omitted), icloud_messages, icloud_keychain,
 icloud_contacts,
 imessage, receive_address, portrait_lock, device_passcode, gmail, or runtime. Verify iCloud Messages sync and iCloud
@@ -284,6 +290,17 @@ def _identity(*parts: Any) -> str:
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+_SETUP_WINDOW_REJECTION = "Setup observations must be the current uninterrupted cursor window"
+_SETUP_WINDOW_FEEDBACK = {
+    "errorCode": "phone_setup_observation_window",
+    "error": (
+        "Setup evidence must be the current uninterrupted screen.text window. "
+        "After navigation, read screen.text again and normally verify only its latest "
+        "operation ID with the current setup revision. Do not replay a phone input."
+    ),
+}
+
+
 async def _request(client, config, user_id, method, path, payload=None):
     response = await client.request(
         method,
@@ -293,7 +310,15 @@ async def _request(client, config, user_id, method, path, payload=None):
         timeout=105.0 if path.endswith(("/operations", "/setup")) else 10.0,
     )
     if not response.is_success:
-        # Never include response text, URL, headers, input, or exception strings.
+        # Only this exact backend setup rejection maps to local constant feedback.
+        # Never reflect response text, URL, headers, input, or exception strings.
+        if response.status_code == 409 and path.endswith("/setup") and len(response.content) <= 4096:
+            try:
+                body = response.json()
+            except (ValueError, RecursionError):
+                body = None
+            if isinstance(body, dict) and body.get("error") == _SETUP_WINDOW_REJECTION:
+                return {"_httpStatus": 409, **_SETUP_WINDOW_FEEDBACK}
         return {"_httpStatus": response.status_code}
     data = response.json()
     return data if isinstance(data, dict) else {"_httpStatus": 502}

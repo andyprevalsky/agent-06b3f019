@@ -541,6 +541,8 @@ def test_external_cancel_joins_archive_and_poll_at_actual_backstop_boundary(monk
 
 @pytest.mark.parametrize("cancel_phase", ["running", "deadline-drain"])
 def test_external_cancel_preserves_slow_sibling_finalizer_at_backstop_boundary(monkeypatch, cancel_phase):
+    slow_poll_finalizer_seconds = 0.05  # Simulate slow cleanup work, not synchronization.
+
     async def case():
         entered = {name: asyncio.Event() for name in ("archive", "poll")}
         retired, children = set(), {}
@@ -558,7 +560,7 @@ def test_external_cancel_preserves_slow_sibling_finalizer_at_backstop_boundary(m
             finally:
                 finalizing.set()
                 if name == "poll":
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(slow_poll_finalizer_seconds)
                 retired.add(name)
 
         async def archive(*args):
@@ -578,7 +580,7 @@ def test_external_cancel_preserves_slow_sibling_finalizer_at_backstop_boundary(m
                     await asyncio.wait_for(finalizing.wait(), 1)
                 owner.cancel()
                 if cancel_phase == "deadline-drain":
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0)  # Yield to the cancellation owner before cancelling it again.
                     owner.cancel()  # Repeated cancellation must not abandon or restart the drain.
                 with pytest.raises(asyncio.CancelledError):
                     await owner

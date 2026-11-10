@@ -236,21 +236,56 @@ test('desktop opening ASCII stays centered on the large grid tile', async ({ pag
     { width: 768, height: 813 },
   ]) {
     await page.setViewportSize(viewport);
+    if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+    if (HAS_INJECTED_SESSION) {
+      await expect(page.getByTestId('terminal-main-content')).toHaveClass(/md:pl-\[64px\]/);
+    }
     const frame = page.locator('pre[data-ascii-layer="frame"]').first();
     await expect(frame).toBeVisible();
+    const tile = page.locator('[data-testid="terminal-grid-background-layer"] rect[width="429"]');
     await expect
       .poll(
         async () => {
           const box = await frame.boundingBox();
-          if (!box || box.height === 0) return Infinity;
+          const grid = await tile.boundingBox();
+          if (!box || !grid || box.height === 0) return Infinity;
           return Math.max(
-            Math.abs(box.x + box.width / 2 - viewport.width / 2),
-            Math.abs(box.y + box.height / 2 - viewport.height * 0.4),
+            Math.abs(box.x + box.width / 2 - (grid.x + grid.width / 2)),
+            Math.abs(box.y + box.height / 2 - (grid.y + grid.height / 2)),
           );
         },
         { message: 'ASCII center must match the large grid tile, independently of caption height' },
       )
       .toBeLessThan(2);
+  }
+});
+
+// Frozen from the November 3 render (0784fff6) in the pinned Playwright browser.
+test('desktop opening caption matches the November 3 reference geometry', async ({ page }) => {
+  for (const reference of [
+    { width: 1440, height: 900, x: 420, y: 518, captionHeight: 32 },
+    { width: 1280, height: 900, x: 339.984375, y: 500.515625, captionHeight: 28.4375 },
+    { width: 768, height: 900, x: 83.984375, y: 470.6875, captionHeight: 22.390625 },
+  ]) {
+    await page.setViewportSize({ width: reference.width, height: reference.height });
+    if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
+    await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+    const caption = page.getByTestId('opening-message-display');
+    await expect
+      .poll(
+        async () => {
+          const box = await caption.boundingBox();
+          if (!box) return Infinity;
+          return Math.max(
+            Math.abs(box.x - reference.x),
+            Math.abs(box.y - reference.y),
+            Math.abs(box.width - 600),
+            Math.abs(box.height - reference.captionHeight),
+          );
+        },
+        { message: 'Caption must match the historical rendered box within a tenth of a CSS pixel' },
+      )
+      .toBeLessThan(0.1);
   }
 });

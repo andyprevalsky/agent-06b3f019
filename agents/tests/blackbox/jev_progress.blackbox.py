@@ -285,14 +285,18 @@ async def test_prefix_build_runs_off_event_loop():
     jev.request(long_browser_snapshot(20), {"scope": "", "progress": "", "eta": ""})  # warm tiktoken outside the measurement
     worst = 0.0
     done = False
+    ticker_started = asyncio.Event()
+    # Deliberate heartbeat workload: preserve the measured 2ms probe cadence.
+    EVENT_LOOP_PROBE_INTERVAL_SECONDS = 0.002
     async def ticker():
         nonlocal worst
         while not done:
             start = time.perf_counter()
-            await asyncio.sleep(0.002)
+            ticker_started.set()
+            await asyncio.sleep(EVENT_LOOP_PROBE_INTERVAL_SECONDS)
             worst = max(worst, time.perf_counter() - start - 0.002)
     tick = asyncio.create_task(ticker())
-    await asyncio.sleep(0.01)
+    await asyncio.wait_for(ticker_started.wait(), timeout=0.01)
     with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}), patch.object(jev, "get_http_client", return_value=status_client(200)), \
             patch.object(jev, "request", timed_request), capture_logs():
         await jev.predict_jev_progress(long_browser_snapshot(130))

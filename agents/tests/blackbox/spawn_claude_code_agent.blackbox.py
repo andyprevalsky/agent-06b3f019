@@ -2784,7 +2784,9 @@ async def test_spawn_activity_does_not_fetch_claude_credential_for_codex():
 
 
 async def test_spawn_activity_requires_output_schema():
-    """Missing output_schema raises ValueError before any sandbox work."""
+    """A missing contract fails once, before sandbox work, even with unlimited crash retries."""
+    from temporalio.exceptions import ApplicationError
+
     from domains.spawn_claude_code_agent import service
 
     try:
@@ -2796,8 +2798,10 @@ async def test_spawn_activity_requires_output_schema():
             output_schema=None,
         )
         raise AssertionError("should raise")
-    except ValueError as e:
+    except ApplicationError as e:
         assert "output_schema is required" in str(e)
+        assert e.non_retryable is True
+        assert e.type == "CODE_AGENT_OUTPUT_SCHEMA_REQUIRED"
 
 
 async def test_spawn_activity_happy_path_end_to_end():
@@ -7192,6 +7196,14 @@ async def test_native_codex_active_goal_outlives_a_completed_turn():
 
     for final_status in ("complete", "budgetLimited", "cleared"):
         finished = False
+        first_turn_ended = asyncio.Event()
+        continuation_allowed = asyncio.Event()
+        real_sleep = asyncio.sleep
+
+        async def release_continuation_after_monitor_poll(_seconds):
+            if first_turn_ended.is_set():
+                continuation_allowed.set()
+            await real_sleep(0)
 
         class GoalTurns(_FakeWsClient):
             async def listen(self):
@@ -7200,7 +7212,8 @@ async def test_native_codex_active_goal_outlives_a_completed_turn():
                 await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "t1"})
                 await self.on_event({"provider": "codex", "type": "goal", "status": "active"})
                 await self.on_event({**ended, "turn_id": "t1"})
-                await asyncio.sleep(0.2)  # the goal runtime's continuation gap
+                first_turn_ended.set()
+                await continuation_allowed.wait()
                 await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "t2"})
                 await self.on_event({"provider": "codex", "type": "goal", "status": final_status})
                 finished = True
@@ -7212,6 +7225,7 @@ async def test_native_codex_active_goal_outlives_a_completed_turn():
             patch.object(service, "ClaudeCodeWsClient", GoalTurns),
             patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch("temporalio.activity.heartbeat"),
+            patch.object(service.asyncio, "sleep", new=release_continuation_after_monitor_poll),
         ):
             result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=2.0)
         assert finished and result[0] == 0, (final_status, finished, result[0])

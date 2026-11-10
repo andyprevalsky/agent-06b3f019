@@ -7592,6 +7592,12 @@ cleanup() {{
   exit "$status"
 }}
 trap cleanup EXIT
+# Trace the production clock (Bash SECONDS) out of band: retry eligibility is
+# judged from the ticks the deadline arithmetic actually saw.
+exec 9>"$FAKE/native-clock.trace"
+BASH_XTRACEFD=9
+PS4='+TRACE seconds=$SECONDS fn=${{FUNCNAME[0]:-top}}: '
+set -x
 exit 143
 """
     started = time.monotonic()
@@ -7641,12 +7647,63 @@ exit 143
         "elapsed_seconds": elapsed,
     }
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
-    if case == "stop-always-fails":
-        # The owning deadline uses Bash SECONDS, whose integer ticks can reach
-        # six before Python observes six full monotonic seconds. Check that
-        # clock for exhaustion; the independent wall-clock bound above stays strict.
-        native_seconds = int(result.stdout.removeprefix("native_stop_seconds=").strip())
-        assert len(stops) == 3 or native_seconds >= 6, (stops, native_seconds, elapsed)
+    if case == "stop-always-fails" and len(stops) < 3:
+        # Under load the shared whole-second deadline can expire before the
+        # third request's backoff tick. Only the production clock trace may
+        # excuse it: the deadline was refused and no retry check before it was
+        # eligible. The independent wall-clock bound above stays strict.
+        trace = (fake / "native-clock.trace").read_text()
+        assert _native_stop_retry_unreachable_before_deadline(trace, len(stops)), trace
+
+
+def _native_stop_retry_unreachable_before_deadline(trace: str, sent: int) -> bool:
+    """Prove from the production clock trace that a further retry could not run.
+
+    After the last request the verifier schedules the next one on a backoff
+    tick. Fewer than the capped requests are acceptable only when that
+    schedule is the production backoff, the shared deadline was refused, and
+    no retry check at or after the scheduled tick happened before the deadline.
+    """
+    prefix = r"\++TRACE seconds=(\d+) fn=fleet_native_stop_"
+    deadlines = [int(m[2]) for line in trace.splitlines()
+                 if (m := re.fullmatch(prefix + r"undelivered_guests: deadline=(\d+)", line))]
+    if len(deadlines) != 1 or not _native_stop_last_tick_exhausted(trace, deadlines[0]):
+        return False
+    deadline = deadlines[0]
+    scheduled_at = next_request = requests = None
+    checks: list[tuple[int, int]] = []
+    for line in trace.splitlines():
+        if m := re.fullmatch(prefix + r"verify_guest: next_request=(\d+)", line):
+            scheduled_at, next_request, checks = int(m[1]), int(m[2]), []
+        elif m := re.fullmatch(prefix + r"verify_guest: requests=(\d+)", line):
+            requests = int(m[2])
+        elif m := re.fullmatch(prefix + r"verify_guest: '\[' (\d+) -ge (\d+) '\]'", line):
+            checks.append((int(m[2]), int(m[3])))
+    if next_request is None or scheduled_at is None:
+        return False
+    if sent >= 2:
+        # The PS4 clock is read just after the assignment's own SECONDS read.
+        if requests != sent or next_request - (1 << (sent - 1)) not in {scheduled_at - 1, scheduled_at}:
+            return False
+    return all(target == next_request and not (next_request <= now < deadline) for now, target in checks)
+
+
+def test_native_stop_retry_unreachable_observer_rejects_eligible_or_unscheduled_retry() -> None:
+    head = ("+TRACE seconds=0 fn=fleet_native_stop_undelivered_guests: deadline=6\n"
+            "++TRACE seconds=1 fn=fleet_native_stop_verify_guest: requests=2\n"
+            "++TRACE seconds=3 fn=fleet_native_stop_verify_guest: next_request=5\n")
+    tail = ("++TRACE seconds=6 fn=fleet_native_stop_verify_guest: '[' 6 -lt 6 ']'\n"
+            "++TRACE seconds=6 fn=fleet_native_stop_verify_guest: break\n")
+    early = "++TRACE seconds=4 fn=fleet_native_stop_verify_guest: '[' 4 -ge 5 ']'\n"
+    assert _native_stop_retry_unreachable_before_deadline(head + early + tail, 2)
+    assert _native_stop_retry_unreachable_before_deadline(
+        head + "++TRACE seconds=6 fn=fleet_native_stop_verify_guest: '[' 6 -ge 5 ']'\n" + tail, 2)
+    eligible = "++TRACE seconds=5 fn=fleet_native_stop_verify_guest: '[' 5 -ge 5 ']'\n"
+    for trace, sent in ((head + eligible + tail, 2), (head + early, 2),
+                        (head.replace("next_request=5", "next_request=9") + early + tail, 2),
+                        (head + early + tail, 3), (head.replace("deadline=6", "deadline=7") + early + tail, 2),
+                        (early + tail, 2)):
+        assert not _native_stop_retry_unreachable_before_deadline(trace, sent), trace
 
 
 def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:
@@ -34735,6 +34792,76 @@ registry_owner_alive() { return 1; }
     finally:
         resume.set();thread.join(10)
         second.release();first.release()
+
+
+def test_concurrent_jobs_skip_stale_registry_a_live_peer_is_recovering(tmp_path: Path) -> None:
+    """One live recoverer must not time out every concurrent job's startup.
+
+    Deploy smoke (2026-11-08, campaign 000fb47a): 15 non-strict jobs each ran
+    the full stale-registry scan. j0011 held badf40d0's recovery guard for ~54 s
+    while destroying its two clones; 13 peers spun the 30-tick wait, printed
+    "timed out waiting for stale fleet recovery lock" and exited before
+    provisioning, so the campaign counted them as INFRA. A peer under live,
+    kernel-held recovery is owned exactly like a live controller: skip it,
+    keep recovering the other dead registries, and refresh provider state.
+    """
+    import fcntl
+
+    root = tmp_path / "git-common"
+    ownership = root / "cloudbench-fleet-ownership"
+    busy, idle = ownership / ("b" * 32), ownership / ("d" * 32)
+    for registry in (busy, idle):
+        (registry / "clones").mkdir(parents=True)
+        (registry / "meta").write_text("version=2\napp=fixture-app\nhost=fixture\npid=99999999\n"
+                                       "pid_start=dead\ncleanup_policy=reap\n")
+    guards = root / "cloudbench-fleet-recovery-locks"
+    guards.mkdir(mode=0o700)
+    peer_guard = (guards / busy.name).open("a+")
+    fcntl.flock(peer_guard, fcntl.LOCK_EX)  # the live peer's teardown holds this inode
+    fleet = fleet_source_text()
+    functions = "\n".join(_extract_fleet_function(fleet, name + "() {") for name in (
+        "acquire_registry_recovery_lock", "release_registry_recovery_guard",
+        "release_registry_recovery_lock", "reconcile_stale_fleet_registries_full"))
+    recovered = tmp_path / "recovered"
+    script = """set -u
+APP=fixture-app
+FLEET_OWNER_HOST=fixture
+FLEET_OWNER_PID_START=fixture-birth
+FLEET_OWNERSHIP_ROOT="$1"
+FLEET_REGISTRY_DIR="$1/self"
+sleep() { :; }
+registry_meta_value() { sed -n "s/^$2=//p" "$1" 2>/dev/null; }
+registry_owner_alive() { [ "$(registry_meta_value "$1" pid_start)" = dead ] && return 1; return 0; }
+fleet_registry_cleanup_state() { echo reap; }
+release_cleanup_disk_reserve() { :; }
+recover_registry_audit_only_fresh() { :; }
+stale_registry_only_waits_for_provider_detach() { return 1; }
+reap_registry_clones() { echo "${1##*/}" >> "$2"; }
+recover_exact_pool_claims() { :; }
+fleet_audit_finalize_recovered_registry() { :; }
+fleet_registry_remove_if_empty() { rm -rf "$1"; }
+""".replace('"$2"; }\nrecover_exact', '"$RECOVERED"; }\nrecover_exact') + functions + """
+reconcile_stale_fleet_registries_full; result=$?
+echo "RECONCILE_RESULT=$result MUTATED=$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED"
+"""
+    try:
+        shell = subprocess.run(["bash", "-c", script, "_", str(ownership)], text=True, capture_output=True,
+                               timeout=60, env={**os.environ, "RECOVERED": str(recovered)})
+        output = shell.stdout + shell.stderr
+        assert "timed out waiting for stale fleet recovery lock" not in output, output
+        assert "RECONCILE_RESULT=0 MUTATED=1" in shell.stdout, output
+        assert "being recovered by a live peer" in output, output
+        # The independent dead registry is still recovered; the busy one stays the peer's.
+        assert recovered.read_text().split() == [idle.name], output
+        assert not idle.exists() and (busy / "meta").exists() and not (busy / "recovery-lock").exists()
+    finally:
+        fcntl.flock(peer_guard, fcntl.LOCK_UN)
+        peer_guard.close()
+    # Once the peer is gone, the same scan recovers the registry itself.
+    shell = subprocess.run(["bash", "-c", script, "_", str(ownership)], text=True, capture_output=True,
+                           timeout=60, env={**os.environ, "RECOVERED": str(recovered)})
+    assert "RECONCILE_RESULT=0 MUTATED=1" in shell.stdout, shell.stdout + shell.stderr
+    assert recovered.read_text().split() == [idle.name, busy.name] and not busy.exists()
 
 
 @pytest.mark.parametrize("caller", ["1", "foreign", "unknown-parent"])

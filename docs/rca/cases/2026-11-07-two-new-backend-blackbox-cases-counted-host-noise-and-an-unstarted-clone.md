@@ -39,3 +39,49 @@ None; found by the staged deploy cycle of PR #1744.
 ## Reusable lesson
 
 A fixture that counts requests on a real listener must count only what the system under test can send, and an interrupt must follow an observed effect, not an announced state.
+
+
+## Recurrence — November 10, live-clone budget started before the listener
+
+A subsequent full sharded coverage run passed 252/253 domains but failed the
+code-sessions case `a finished clone is reused on resume, and the readiness
+waits tell a dead server from a busy one`: `typed as cloning, not unreachable`,
+actual `[false, down]`, expected `[false, cloning]`. The live-clone subcase
+started the 400ms dead-listener budget directly after spawning Node; under
+load the process had not bound yet. Production's down classification was
+correct for that actual state. This is another missing fixture-precondition
+barrier, not a production readiness timeout defect.
+
+The permanent fixture now deterministically delays this server launch by
+1000ms, then waits via existing `until` / `probeWsServer` until it reports
+cloning before measuring the original live-clone assertion. Its clone release
+file stays absent, so it cannot finish and accidentally satisfy a ready check.
+The 400ms down budget, 1500ms clone budget and expected result are unchanged.
+No production code, timeout, or evaluator bound was changed.
+
+Executed the same owning-domain command before and after:
+`cd back-end && ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 CONDUCTOR_WORKSPACE_NAME=ws-fixture-rca CONDUCTOR_PORT=58300 bash scripts/run-blackbox-tests.sh code-sessions`.
+Before: deterministic down-versus-cloning failure, 96/97.
+After: 97/97, full domain completed in 47.409s. TypeScript, ESLint and Prettier
+passed. The parent reruns the full gate on the frozen fixture. This new proof
+does not retrospectively close the original interrupted-clone observability
+gap recorded above or relabel the earlier mitigation.
+
+10k impact: test fixture only; no production request, query or channel changes.
+No new human feedback was recorded for this test-only recurrence.
+
+
+## Final combined validation — November 10
+
+Source: commit 7fb7d7d91069e4461dd9365ad40b289ce99b7265. Full frontend coverage passed 324 files,
+4,732 tests passed and one skipped; line coverage 89.69%, branch coverage
+81.87%. Full backend failed-first sharded coverage passed all 253 selected
+blackbox domains and all 391 unit files (including the separately scheduled
+browser-performance probe), with line/statement coverage 90.26%, functions
+93.13% and branches 82.95%. Configured thresholds passed; backend teardown
+checks also passed. The coverage runner intentionally excludes the separate
+live credential-health domain. No production rollout or live account probe
+is implied by these local validation results.
+
+Commands: `cd front-end && npm run test:coverage`;
+`cd back-end && bash scripts/run-coverage-sharded.sh --failed-first 2 && bash ../scripts/tests/blackbox-backend-teardown.test.sh`.

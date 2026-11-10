@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { respondFakePhoneUpstream } from '../../domains/vapi/fakePhoneUpstreamResponder';
+import { waitFor as canonicalWaitFor } from '../helpers/waitFor';
 
 type Json = Record<string, unknown>;
 
@@ -262,18 +263,19 @@ export class TwilioMediaStreamClient {
   }
 }
 
-export async function waitFor<T>(
+/**
+ * The canonical condition wait at this suite's original fixed 25 ms cadence:
+ * some probes (for example "exactly one 200 ms batch") must observe a state
+ * before the next periodic event replaces it, so the interval does not back off.
+ */
+export function waitFor<T>(
   description: string,
   probe: () => Promise<T | undefined | null | false> | T | undefined | null | false,
   timeoutMs = 5_000
 ): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  const poll = async (): Promise<T> => {
-    const value = await probe();
-    if (value !== undefined && value !== null && value !== false) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${description}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    return poll();
-  };
-  return poll();
+  return canonicalWaitFor(description, probe, {
+    timeoutMs,
+    initialIntervalMs: 25,
+    maxIntervalMs: 25,
+  });
 }

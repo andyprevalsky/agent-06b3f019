@@ -3,15 +3,20 @@
  *
  *   worker finishes a test ──> onTestCaseResult ──failed──> FAIL row, scope "test",
  *                                                           unit "<file> > <full test name>"
+ *                                              └─passed after a retry─> FLAKY row (attempts =
+ *                                                retries + 1) + TEST_FLAKY stdout line
  *   worker finishes a file ──> onTestModuleEnd ──> PASS|FAIL row, scope "file", unit "<file>"
  *                                                  (FAIL also covers a file that never collected)
  *
  * vitest.config.ts adds `gateProgressVitestPlugin()` only when DEPLOY_GATE_PROGRESS is set. The
  * plugin appends this reporter to the reporters Vitest already resolved (the default/agent and
  * github-actions defaults, or any CLI --reporter), so the gate's console output is unchanged.
+ * The same condition sets `test.retry` to 1 there: a failed test reruns once in its worker, and
+ * a pass on that rerun is FLAKY (not a free pass: the deploy requires /RCA attribution).
+ * Quarantined tests (./quarantine.ts) never throw, so they are never retried here.
  */
 import { stripVTControlCharacters } from 'node:util';
-import { reportGateProgress } from './gateProgress.ts';
+import { reportGateProgress, reportVisibleGateProgress } from './gateProgress.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -28,6 +33,7 @@ export interface VitestTestCase {
   fullName: string;
   module: { relativeModuleId: string };
   result(): { state: string; errors?: ReadonlyArray<SerializedError> };
+  diagnostic(): { retryCount: number; flaky: boolean } | undefined;
 }
 export interface VitestTestModule {
   relativeModuleId: string;
@@ -60,12 +66,32 @@ function describeErrors(errors: ReadonlyArray<SerializedError> | undefined): str
 export class GateProgressVitestReporter {
   private readonly env: Env;
 
-  constructor(options: { env?: Env } = {}) {
+  private readonly write: ((line: string) => void) | undefined;
+
+  constructor(options: { env?: Env; write?: (line: string) => void } = {}) {
     this.env = options.env ?? process.env;
+    this.write = options.write;
   }
 
   onTestCaseResult(testCase: VitestTestCase): void {
     const result = testCase.result();
+    if (result.state === 'passed') {
+      const diagnostic = testCase.diagnostic();
+      if (!diagnostic?.flaky) return;
+      // Earlier attempts' errors stay on the passing result: they are what /RCA must explain.
+      reportVisibleGateProgress(
+        `${testCase.module.relativeModuleId} > ${testCase.fullName}`,
+        'FLAKY',
+        {
+          scope: 'test',
+          detail: describeErrors(result.errors),
+          attempts: diagnostic.retryCount + 1,
+        },
+        this.env,
+        this.write,
+      );
+      return;
+    }
     if (result.state !== 'failed') return;
     reportGateProgress(
       `${testCase.module.relativeModuleId} > ${testCase.fullName}`,

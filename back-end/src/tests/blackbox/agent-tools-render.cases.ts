@@ -29,6 +29,7 @@ import { createServer } from 'http';
 import type { AddressInfo } from 'net';
 import { createRequire } from 'module';
 import { dirname, join, resolve, sep } from 'path';
+import { waitFor } from '../helpers/waitFor';
 import { userUiAssetsDir } from '../../providers/userUi/seed';
 import { threeCdnPage } from './agent-tools-display.cases';
 import {
@@ -311,10 +312,16 @@ async function svgBeaconHits(
       const img = document.getElementById('i') as HTMLImageElement | null;
       return img !== null && img.complete && img.naturalWidth > 0;
     });
-    await page.waitForTimeout(1500);
+    // Preserve the full original no-script observation window; an illegal beacon ends it early.
+    const imageObservationDeadline = Date.now() + 1500;
+    await waitFor(
+      'SVG image no-script observation window',
+      () => hits.length > 0 || Date.now() >= imageObservationDeadline,
+      1500
+    );
     const image = [...hits];
     await page.goto(`${origin}/chart.svg`);
-    await page.waitForTimeout(1500);
+    await waitFor('SVG document positive-control beacon', () => hits.length > image.length, 1500);
     return { image, document: hits.slice(image.length) };
   } finally {
     await browser.close();

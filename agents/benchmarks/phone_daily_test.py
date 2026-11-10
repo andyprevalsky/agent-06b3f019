@@ -130,7 +130,13 @@ def test_existing_catalog_rows_unchanged():
     root = Path(__file__).resolve().parents[2]
     old = json.loads(subprocess.check_output(['git', 'show', '52b7cc41f091286ce1c5d21d87aa7523f65b6814:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
-    # Retain every row from the approved integration snapshot; later phone tasks append only.
+    # Quarantine is validated deploy metadata, not an executable task change.
+    from benchmarks.long_horizon import validate_task_quarantine
+    for rows in (old, current):
+        for row in rows:
+            validate_task_quarantine(row, row['name'])
+            row.pop('quarantine', None)
+    # Retain every executable row from the approved integration snapshot; validated quarantine is metadata.
     assert current[:len(old)] == old
 
 
