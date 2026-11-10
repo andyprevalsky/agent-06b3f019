@@ -6,6 +6,7 @@ import time
 import zipfile
 
 KIND = 'github-terminal-cleanup-v1'
+RETIREMENT_KIND = 'github-runner-retirement-v1'
 REPO = 'Rose-Ai-Labs/rose'
 FILES = ('request.json', 'result.json', 'receipt.json', 'output.log.process.json')
 
@@ -44,8 +45,12 @@ def validate(state, receipt, owner, proof):
     """Authenticate original custody and fresh remote terminal proof, with no PASS adoption."""
     import deploy_test_cycle as c
     from deploy_test_github import ARTIFACT, REMOTE_ROOT, tag_name
-    need(set(proof) == {'kind', 'token', 'receipt_sha256', 'original_files', 'artifact', 'remote'}, 'proof fields')
-    need(proof['kind'] == KIND and proof['token'] == receipt.get('token'), 'proof token')
+    retirement = proof.get('kind') == RETIREMENT_KIND
+    fields = {'kind', 'token', 'receipt_sha256', 'original_files', 'artifact', 'remote'}
+    if retirement:
+        fields |= {'execution_gate', 'job_logs'}
+    need(set(proof) == fields, 'proof fields')
+    need(proof['kind'] in (KIND, RETIREMENT_KIND) and proof['token'] == receipt.get('token'), 'proof token')
     need(c.latest_receipts(state).get(receipt['gate']) == receipt, 'latest receipt')
     need(receipt.get('complete') is False and set(receipt.get('cases', {}).values()) == {'UNVERIFIED'}, 'original incomplete outcome')
     need(isinstance(owner, dict) and set(owner) == {'transport', 'run_id', 'url'}
@@ -113,11 +118,19 @@ def validate(state, receipt, owner, proof):
     need(c.sha_file(path) == remote['artifact_sha256'], 'artifact bytes')
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
-        need(len(names) == len(set(names)) and all(n in names for n in ('request.json', 'result.json', 'timing.json')), 'artifact controls')
+        controls = ('request.json', 'timing.json') if retirement else ('request.json', 'result.json', 'timing.json')
+        need(len(names) == len(set(names)) and all(n in names for n in controls), 'artifact controls')
+        if retirement:
+            need('result.json' not in names, 'present native result requires the normal cleanup proof')
         docs = {}
-        for n in ('request.json', 'result.json', 'timing.json'):
+        for n in controls:
             need(z.getinfo(n).file_size <= 64 * 1024 * 1024, 'artifact control bound')
             docs[n] = json.loads(z.read(n))
+    if retirement:
+        need(docs['request.json'] == request and request.get('worker_root') == REMOTE_ROOT, 'original native request')
+        from deploy_test_github_retirement import validate as validate_retirement
+        validate_retirement(receipt, proof, docs, run, rows)
+        return proof['receipt_sha256']
     audit = docs['result.json']
     need(docs['request.json'] == request and all(audit.get(k) == request.get(k) for k in ('token', 'source', 'gate'))
          and audit.get('worker_root') == request.get('worker_root') == REMOTE_ROOT
@@ -141,8 +154,11 @@ def reconcile(state, occurrence, proof):
     need(receipt is not None, 'receipt absent')
     owner = c.receipt_owner(receipt['gate'], receipt)
     key = validate(state, receipt, owner, proof)
-    entry = {'kind': KIND, 'gate': receipt['gate'], 'token': receipt['token'], 'owner': owner,
+    entry = {'kind': proof['kind'], 'gate': receipt['gate'], 'token': receipt['token'], 'owner': owner,
              'worker_result_sha256': c.sha_file(receipt['worker_result']), 'proof': proof, 'credit_granted': False}
+    if proof['kind'] == RETIREMENT_KIND:
+        entry.update(runtime_retired=True, native_cleanup_verified=False,
+                     retirement_scope='cancelled ephemeral CI runner; original worker result remains unavailable')
     previous = state.setdefault('reconciled_owners', {}).get(key)
     need(previous is None or previous == entry, 'conflicting certificate')
     state['reconciled_owners'][key] = entry
@@ -152,6 +168,10 @@ def still_bound(state, receipt, owner, entry):
     """Return false for stale evidence so the caller retains and names the owned gate."""
     try:
         need(isinstance(entry, dict), 'certificate shape')
+        need(entry.get('kind') == entry.get('proof', {}).get('kind'), 'certificate kind changed')
+        if entry.get('kind') == RETIREMENT_KIND:
+            need(entry.get('runtime_retired') is True and entry.get('native_cleanup_verified') is False,
+                 'runtime retirement cannot become native cleanup credit')
         need(entry.get('credit_granted') is False and entry.get('token') == receipt.get('token')
              and entry.get('owner') == owner, 'certificate identity')
         validate(state, receipt, owner, entry['proof'])

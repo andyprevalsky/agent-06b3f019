@@ -1278,7 +1278,7 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
-        if entry and entry.get('kind') == 'github-terminal-cleanup-v1':
+        if entry and entry.get('kind') in ('github-terminal-cleanup-v1', 'github-runner-retirement-v1'):
             from deploy_test_github_cleanup import still_bound
             return still_bound(state, receipt, owner, entry)
         if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
@@ -1375,7 +1375,7 @@ def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> 
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
-    if proof.get('kind') == 'github-terminal-cleanup-v1':
+    if proof.get('kind') in ('github-terminal-cleanup-v1', 'github-runner-retirement-v1'):
         from deploy_test_github_cleanup import reconcile as reconcile_github
         reconcile_github(state, occurrence_id, proof)
         return
