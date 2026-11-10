@@ -21,6 +21,7 @@ tags:
 sources:
   - plan:back-end/src/domains/claude-code/directChatResume.ts
   - agent 91cd1296-4fff-46a8-9e1f-fd67e0aaabbf
+  - commit aa2cc1d1ab320268c1ca5e73a8ac1f0dc19ecd4d
 repro: back-end/src/tests/blackbox/claude-code-direct-chat.blackbox.ts ("a message to a stopped code agent resumes it instead of failing"); agents/tests/blackbox/agent_control.blackbox.py (user_message_resumes_completed_code_task); front-end/src/tests/blackbox/code-agent-resume-on-message.blackbox.tsx
 status: fixed
 ---
