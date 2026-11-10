@@ -26,7 +26,8 @@
   },
   "documentary_gaps": [
     "Five competing a035 startup Hub records have absent PIDs and no terminal receipts. Actual used shared Hub has verified termination.",
-    "Official native campaign CLI lacks source/lifecycle linkage despite source-bound native gate and fleet audits."
+    "Official native campaign CLI lacks source/lifecycle linkage despite source-bound native gate and fleet audits.",
+    "Production AgentCard Hub292117b3-4f11-45c9-8fdc-693b6dd69b5f registered with task queued/completed0 before billing preflight refusal. No task root/card/payment created; log streams stopped. Original queued metadata retained without a fabricated terminal record."
   ],
   "freedom": "Protected installation, services, configuration and instructions preserved unchanged."
 }
