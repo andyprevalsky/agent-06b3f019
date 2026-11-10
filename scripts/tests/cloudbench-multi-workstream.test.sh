@@ -2971,66 +2971,33 @@ for reservation in (temporary / "capacity-reservations/reservations").glob(regis
 PY_RESET
 }
 
-# Disposable lifecycle (60e18e354): a failed run whose runtime evidence is
-# incomplete keeps its failed result, owner and evidence-gap latch, while its
-# disposable Machines and Volumes are destroyed and verified absent.
-assert_and_reset_disposable_failed_owner() {  # <registry> <controller-log> [failed|passed task verdict]
-    grep -qxF "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" "$2" ||
-        { echo "missing disposable runtime-evidence gap record in $2" >&2; return 1; }
-    python3 - "$1" "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR" "$TMP_ROOT" "${3:-failed}" <<'PY_DISPOSED'
+# Deliberately incomplete runtime evidence retains every exact resource while
+# preserving the published task verdict and failed controller lifecycle.
+assert_and_reset_unsealed_failed_owner() {  # <registry> <controller-log> [task verdict]
+    grep -qxF "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" "$2" ||
+        { echo "missing unsealed runtime-evidence retention record in $2" >&2; return 1; }
+    python3 - "$1" "${3:-failed}" <<'PY_UNSEALED'
 import json
 from pathlib import Path
-import re
-import shlex
-import shutil
 import sys
-registry, ownership, fake, temporary = map(Path, sys.argv[1:5])
-verdict = sys.argv[5]
-assert registry.parent == ownership and re.fullmatch(r"[0-9a-f]{32}", registry.name)
-assert registry.resolve() == registry and (registry / "runtime-evidence-unconfirmed").is_file()
-def fields(path):
-    return dict(line.split("=", 1) for line in path.read_text().splitlines())
-meta = fields(registry / "meta")
-assert meta["fleet_owner_token"] == registry.name
+registry = Path(sys.argv[1])
+meta = dict(line.split("=", 1) for line in (registry / "meta").read_text().splitlines())
 assert (registry / "disposable-resources-v1").read_text().strip() == registry.name + "\n" + meta["app"]
 run = Path(meta["runs_root"]) / meta["run_id"]
-# The evaluated task verdict stays exactly as published; the run is failed.
 result = json.loads((run / "_batch/run.json").read_text())["summary"]
-if verdict == "failed":
+if sys.argv[2] == "failed":
     assert result["failed"] >= 1 and result["passed"] == 0, result
 else:
-    assert verdict == "passed" and result["passed"] >= 1 and result["failed"] == 0, result
+    assert sys.argv[2] == "passed" and result["passed"] >= 1 and result["failed"] == 0, result
 lifecycle = json.loads((run / "_batch/lifecycle.json").read_text())
 assert lifecycle["status"] == "failed" and lifecycle["controller_exit_code"] != 0, lifecycle
 assert lifecycle["fleet_owner_token"] == registry.name, lifecycle
-audit = ownership.parent / "cloudbench-fleet-audits" / registry.name
-assert Path(meta["audit_dir"]) == audit and audit.resolve() == audit
-allocated = [row for path in (audit / "fresh").iterdir() if (row := fields(path)).get("machine_id")]
-assert allocated
-state_path = fake / "state.json"
-state = json.loads(state_path.read_text())
-calls = [shlex.split(line) for line in (fake / "journal.log").read_text().splitlines()]
-for row in allocated:
-    machine, volume = row["machine_id"], row["volume_id"]
-    assert row["disposition"] in ("destroyed-verified-absent", "destroyed-provider-retained"), row
-    assert machine != "aaaa0000000001" and volume != "vol_aaaa0001", row
-    assert not any(item["id"] == machine for item in state["machines"]), row
-    assert all(item["state"] in ("pending_destroy", "destroyed") for item in state["volumes"] if item["id"] == volume), row
-    assert any(call[:2] == ["machine", "destroy"] and machine in call[2:] for call in calls), row
-    assert any(call[:2] == ["volumes", "destroy"] and volume in call[2:] for call in calls), row
-assert any(item["id"] == "aaaa0000000001" for item in state["machines"])
-assert any(item["id"] == "vol_aaaa0001" for item in state["volumes"])
-archive = temporary / "retained-fixture-ownership" / registry.name
-archive.parent.mkdir(exist_ok=True)
-shutil.copytree(registry, archive)
-shutil.rmtree(registry)
-for reservation in (temporary / "capacity-reservations/reservations").glob(registry.name + "-*"):
-    assert reservation.is_file() and not reservation.is_symlink()
-    reservation.unlink()
-PY_DISPOSED
+PY_UNSEALED
+    [ "$?" -eq 0 ] || return 1
+    assert_and_reset_retained_fake_owner "$1"
 }
 
-assert_and_reset_disposable_failed_benchmark() {  # <bench> <controller-log> [task-verdict]
+assert_and_reset_unsealed_failed_benchmark() {  # <bench> <controller-log> [task-verdict]
     local bench="$1" registry selected=""
     for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
         [ -f "$registry/meta" ] || continue
@@ -3042,7 +3009,7 @@ assert_and_reset_disposable_failed_benchmark() {  # <bench> <controller-log> [ta
         selected="$registry"
     done
     [ -n "$selected" ] || return 1
-    assert_and_reset_disposable_failed_owner "$selected" "$2" "${3:-failed}"
+    assert_and_reset_unsealed_failed_owner "$selected" "$2" "${3:-failed}"
 }
 
 assert_and_reset_retained_fake_benchmark() {
@@ -4329,8 +4296,8 @@ grep -Fq "injected metrics data-plane failure" "$autoscaler_out/autoscaler-metri
 if grep -Fq "status data-plane proxy did not become ready" "$autoscaler_out/fleet-child.log"; then
     fail "metrics failure fixture may not fail at primary status admission"
 fi
-assert_and_reset_disposable_failed_benchmark autoscaler-must-start "$TMP_ROOT/controller-autoscaler-required.log" ||
-    fail "autoscaler-must-start: missing runtime evidence must retain the failed result while retiring disposable resources"
+assert_and_reset_unsealed_failed_benchmark autoscaler-must-start "$TMP_ROOT/controller-autoscaler-required.log" ||
+    fail "autoscaler-must-start: missing runtime evidence must retain the failed result and exact resources"
 rm -f "$FAKE_DIR/fail-metrics-proxy" "$FAKE_DIR/delay-status-proxy"
 echo "PASS: scenario 2b — a fleet fails closed when mandatory autoscaling cannot attach"
 }
@@ -5171,12 +5138,12 @@ PY
     fi
     grep -E "guest cleanup|guest shutdown|natively" "$log" || true
     [ -s "$output/fleet-child.log" ] || fail "$bench: the original guest log was not preserved"
-    assert_and_reset_disposable_failed_owner "$registry" "$log" ||
-        fail "$bench: the failed group-$signal_name run did not retain its result while retiring disposable resources"
+    assert_and_reset_unsealed_failed_owner "$registry" "$log" ||
+        fail "$bench: the unsealed group-$signal_name run did not retain its result and exact resources"
     rm -f "$FAKE_DIR/throttle-first-machine-stop"
     assert_no_fixture_processes "$bench ($signal_name)"
     SESSION_CONTROLLERS=()
-    echo "PASS: scenario 2-group-term ($bench, $signal_name) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group $signal_name (budget ${budget}s); failed result and evidence gap retained, disposable resources destroyed"
+    echo "PASS: scenario 2-group-term ($bench, $signal_name) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group $signal_name (budget ${budget}s); failed result, evidence gap and exact resources retained"
 }
 
 # A guest whose stop WAS delivered must drain undisturbed even when every
@@ -5648,8 +5615,8 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_FAKE_INVALID_METRICS=1 \
     fail "a fleet must fail when mandatory autoscaler metrics stay invalid"
 grep -qF "mandatory autoscaler startup timed out" "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
     fail "invalid mandatory-autoscaler metrics must produce an explicit startup failure"
-assert_and_reset_disposable_failed_benchmark autoscaler-metrics-required "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
-    fail "autoscaler-metrics-required: missing runtime evidence must retain the failed result while retiring disposable resources"
+assert_and_reset_unsealed_failed_benchmark autoscaler-metrics-required "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
+    fail "autoscaler-metrics-required: missing runtime evidence must retain the failed result and exact resources"
 rm -f "$FAKE_DIR/invalid-metrics"
 echo "PASS: scenario 2c — a live proxy without valid metrics fails closed"
 
@@ -5709,10 +5676,10 @@ if find "$FAKE_DIR/machines" -path '*/cloudbench-worker-evidence/owner.json' -ty
     fail "pre-supervisor launch failure unexpectedly admitted a worker supervisor"
 fi
 # The task itself finished (PASS stays published); the launched worker's
-# missing evidence fails the run while disposable resources are retired.
-assert_and_reset_disposable_failed_benchmark autoscaler-worker-required \
+# missing evidence fails the run while exact resources stay retained.
+assert_and_reset_unsealed_failed_benchmark autoscaler-worker-required \
     "$TMP_ROOT/controller-autoscaler-worker-required.log" passed ||
-    fail "pre-supervisor failure did not retain its failed run while retiring disposable resources"
+    fail "pre-supervisor failure did not retain its failed run and exact resources"
 rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/fail-worker-launch"
 echo "PASS: scenario 2d — failed autoscaled-worker launch fails the fleet closed"
 
@@ -5781,7 +5748,7 @@ for failure_boundary in before-supervisor after-supervisor; do
     if [ "$failure_boundary" = before-supervisor ]; then
         [ "$oscillation_status" -ne 0 ] ||
             fail "lower demand must not accept missing worker runtime evidence"
-        assert_and_reset_disposable_failed_benchmark autoscaler-worker-oscillation \
+        assert_and_reset_unsealed_failed_benchmark autoscaler-worker-oscillation \
             "$TMP_ROOT/controller-autoscaler-worker-oscillation-$failure_boundary.log" passed ||
             fail "lower demand did not retain the failed run of uncaptured pre-supervisor evidence"
     else
