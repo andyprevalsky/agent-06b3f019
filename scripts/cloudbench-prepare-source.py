@@ -33,6 +33,7 @@ CAPTURE = runpy.run_path(str(HERE / 'cloudbench-original-volume-capture.py'))
 REQUEST = 'cloudbench-prepare-source-request-v1'
 RESULT = 'cloudbench-prepared-source-v1'
 RECOVERY = 'cloudbench-recovered-bootstrap-v1'
+_RESOLVING = set()
 PROTECTED = frozenset({'683e47df5094d8', '811d632f2650e8'})
 PROTECTED_RESOURCES = {'683e47df5094d8': 'vol_vwnym366kn7k8mmv',
                        '811d632f2650e8': 'vol_r1jde9donnx2mn9r'}
@@ -88,7 +89,11 @@ def described(value):
 def resolve_bootstrap_ownership(path):
     """Resolve original creation or an independently sealed, credit-free recovery."""
     if load(path).get('schema') == RECOVERY:
-        return verify_recovered_bootstrap(path)
+        key=str(Path(path).absolute())
+        need(key not in _RESOLVING and len(_RESOLVING)<8, 'cyclic/excessive bootstrap recovery chain')
+        _RESOLVING.add(key)
+        try:return verify_recovered_bootstrap(path)
+        finally:_RESOLVING.remove(key)
     return runpy.run_path(str(HERE / 'cloudbench-prepare-source-create.py'))['verify_created_source'](Path(path))
 
 
@@ -233,6 +238,8 @@ class ScopedNative(REUSE['NativeAdapter']):
         self.shared = (predecessor['shared_machine_id'],)
         self.lost = False
         self.on_failure = None
+        self.lease_version = None
+        self.target_version = None
         need(self.mid not in PROTECTED and self.vid not in request['protected_resources'].values(), 'protected native scope')
 
     def wire(self, method, url, body=None, timeout=30, headers=None, *, direct=False):
@@ -247,6 +254,9 @@ class ScopedNative(REUSE['NativeAdapter']):
                                         {'ttl': 180, 'description': 'private source preparation'},
                                         {'fly-machine-lease-nonce': self.nonce})
             need(response.get('data', {}).get('nonce') == self.nonce, 'renewal nonce changed')
+            need(response.get('data', {}).get('version') == self.target_version and self.target_version,
+                 'renewal did not bind acknowledged native version')
+            self.lease_version = self.target_version
             self.lease_end = time.monotonic() + 150
         except BaseException:
             self.lost = True
@@ -255,7 +265,19 @@ class ScopedNative(REUSE['NativeAdapter']):
     def request(self, method, url, body=None, *, timeout=20, direct=False):
         if self.nonce and time.monotonic() + timeout + 55 >= self.lease_end:
             self.renew()
-        return super().request(method, url, body, timeout=timeout, direct=direct)
+        if method == 'POST' and url == '/machines/' + self.mid + '/exec':
+            need(self.lease_version == self.target_version and self.target_version, 'EXEC lease version is stale')
+        if method == 'POST' and url == '/machines/' + self.mid and self.lease_version != body.get('current_version'):
+            self.bind_version(body['current_version'])
+        result = super().request(method, url, body, timeout=timeout, direct=direct)
+        if method == 'POST' and url == '/machines/' + self.mid:
+            self.target_version = result.get('instance_id')
+        return result
+
+    def bind_version(self, instance):
+        need(isinstance(instance, str) and instance, 'known native version required')
+        self.target_version = instance
+        self.renew()  # SAME nonce; no release/reacquire window and no EXEC retry.
 
     @contextmanager
     def lease(self):
@@ -263,6 +285,9 @@ class ScopedNative(REUSE['NativeAdapter']):
                                     {'ttl': 180, 'description': 'private source preparation'})
         self.nonce = response.get('data', {}).get('nonce')
         need(isinstance(self.nonce, str) and self.nonce, 'lease nonce absent')
+        self.lease_version = response.get('data', {}).get('version')
+        need(isinstance(self.lease_version, str) and self.lease_version, 'lease native version absent')
+        self.target_version = self.lease_version
         self.lease_end = time.monotonic() + 150
         try:
             yield
@@ -310,6 +335,8 @@ def wait_state(api, request, predecessor, config, state, instance, deadline, *, 
                      'unknown native replacement epoch/config')
         machine, volume = exact_machine(api, request, predecessor, observed_config, instance=observed_instance, observation=row)
         if machine.get('state') == state and machine['instance_id'] == instance and machine['config'] == config:
+            if prior is not None:
+                api.bind_version(instance)
             return machine, volume
         time.sleep(1)
     raise ValueError('private source preparation: native state deadline')
@@ -452,7 +479,7 @@ def journal_index(directory):
 
 
 def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=None, guest=None, successor=None, prestart=None,
-                   allow_pending_prestart_stop=False):
+                   allow_pending_prestart_stop=False, allow_rejected_bootstrap=False, versioned=False):
     actual = journal_index(value['path'])
     need(actual == value, 'native journal changed')
     rows = []
@@ -462,6 +489,17 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
             sent = load(path)
             need(sent['app'] == 'navi-whisper-lux-bench', 'native app escaped scope')
             raw_paths = list(path.parent.glob('*-wire.json'))
+            if allow_rejected_bootstrap and not (path.parent/'result.json').exists() and len(raw_paths)==1:
+                wire=load(raw_paths[0]);raw=base64.b64decode(wire['body_b64'],validate=True)
+                need(wire['sha256']==sha(raw) and wire['method']==sent['method'] and wire['path']==sent['path']
+                     and wire['status']==409 and sent['method']=='POST' and sent['path']=='/machines/'+mid+'/exec',
+                     'only explicit bootstrap EXEC conflict may recover')
+                response=json.loads(raw)
+                need(isinstance(response.get('error'),str) and 'lease currently held' in response['error'],
+                     'bootstrap EXEC rejection lacks lease evidence')
+                rows.append(dict(sent,response=response,started=load(path.parent/'transport-start.json')['monotonic_ns'],
+                                 finished=wire['monotonic_ns'],rejected=True))
+                continue
             if not (path.parent / 'result.json').is_file():
                 need(allow_pending_prestart_stop and not raw_paths and sent['method'] == 'POST'
                      and sent['path'] == '/machines/' + mid + '/stop' and sent['body'] == {},
@@ -480,7 +518,8 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
             rows.append(dict(sent, response=response, started=started, finished=wire['monotonic_ns']))
     rows.sort(key=lambda row: row['started'])
     verify_scope(rows, mid, vid, shared)
-    nonce = None; expiry = 0; released = False
+    nonce = None; expiry = 0; released = False; lease_version=None; target_version=None
+    strict_versions=versioned or request is not None
     for row in rows:
         need(not released and row['started'] <= row['finished'], 'native call order after release')
         sent_nonce = row['headers'].get('fly-machine-lease-nonce')
@@ -490,10 +529,20 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
             need(isinstance(acquired, str) and acquired and (nonce is None or acquired == nonce), 'lease response nonce')
             need(sent_nonce == nonce and (nonce is None or row['finished'] < expiry), 'lease renewal ownership/expiry')
             nonce = acquired; expiry = row['started'] + 180_000_000_000
+            observed_version=row['response'].get('data',{}).get('version')
+            if strict_versions:
+                need(isinstance(observed_version,str) and observed_version
+                     and (target_version is None or observed_version==target_version), 'lease native version proof')
+            lease_version=observed_version
         elif row['method'] != 'GET':
             need(nonce and sent_nonce == nonce and row['finished'] < expiry, 'native effect without valid lease')
             if row['method'] == 'DELETE':
                 released = True
+            elif row['path']=='/machines/'+mid:
+                if strict_versions:need(lease_version==row['body']['current_version'],'CAS lease version proof')
+                target_version=row['response'].get('instance_id')
+            elif row['path']=='/machines/'+mid+'/exec' and strict_versions:
+                need(lease_version==target_version and target_version, 'EXEC current-version lease proof')
     need(released, 'native lease not released')
     if request is not None:
         own = '/machines/' + mid
@@ -738,14 +787,13 @@ def verify_producer(origin, root, tree):
 def prestart_failure(request_path, result_path):
     """Only accepted preparation CAS with no start, guest execution or snapshot."""
     request, predecessor = read_request(request_path)
-    need(load(request['ownership']['path']).get('schema') != RECOVERY, 'nested bootstrap recovery is not supported')
     authority = resolve_bootstrap_ownership(request['ownership']['path'])
     result = load(result_path); directory = Path(result_path).absolute().parent
     need(result.get('schema') == RESULT and result.get('qualified') is False
          and result.get('credit_granted') is False and result.get('cleanup_complete') is False
          and described(result['request']) == request, 'original failed preparation required')
     need(not any((directory / name).exists() for name in
-                 ('prestart.json', 'guest.json', 'after.json', 'source-manifest.json')), 'failure passed prestart boundary')
+                 ('guest.json', 'after.json', 'source-manifest.json')), 'failure has guest/publication evidence')
     origin = described(result['origin'])
     need(origin.get('schema') == 'cloudbench-prepare-source-origin-v1'
          and described(origin['request']) == request and origin['nonce'] == request['nonce']
@@ -756,26 +804,56 @@ def prestart_failure(request_path, result_path):
          and before['config'] == authority['machine']['config']
          and sha(canonical(before['config'])) == request['native']['config_sha256'], 'original before authority')
     rows = verify_journal(result['journal'], predecessor['machine_id'], predecessor['volume_id'],
-                          (predecessor['shared_machine_id'],), allow_pending_prestart_stop=True)
+                          (predecessor['shared_machine_id'],), allow_pending_prestart_stop=True,
+                          allow_rejected_bootstrap=True)
     own = '/machines/' + predecessor['machine_id']
     updates = [row for row in rows if row['method'] == 'POST' and row['path'] == own]
-    need(len(updates) == 1 and all(row['method'] == 'GET' or row['path'] in (own, own+'/lease', own+'/stop')
-                                 for row in rows), 'only original prestart CAS/cleanup evidence permitted')
+    execs=[row for row in rows if row['method']=='POST' and row['path']==own+'/exec']
+    starts=[row for row in rows if row['method']=='POST' and row['path']==own+'/start']
+    stops=[row for row in rows if row['method']=='POST' and row['path']==own+'/stop']
     target = copy.deepcopy(before['config']); target['image'] = request['image_ref']
     target['guest'] = dict(target['guest'], cpus=4, memory_mb=8192)
+    need(updates, 'original preparation CAS absent')
     update = updates[0]; ack = update['response']
     need(update['body'] == dict(config=target, current_version=before['instance_id'], skip_launch=True)
          and ack.get('id') == before['id'] and ack.get('config') == target
          and ack.get('instance_id') and ack['instance_id'] != before['instance_id'], 'original accepted preparation CAS')
+    candidates=[before,ack]
+    if execs:
+        need(len(execs)==len(starts)==len(stops)==1 and len(updates)==2 and result.get('stopped_verified') is True,
+             'only one rejected bootstrap followed by verified parking may recover')
+        command=next(delivery_commands(b'', '/tmp/cloudbench-prepare-delivery-'+request['nonce']))[0]
+        need(execs[0].get('rejected') is True and execs[0]['body']==dict(command=command,timeout=5)
+             and not stops[0].get('pending'), 'bootstrap rejection is not a proven first command')
+        prestart=load(directory/'prestart.json')
+        need(prestart['instance_id']==ack['instance_id'] and prestart['config']==target and prestart['state']=='stopped'
+             and any(row['method']=='GET' and row['path']==own and row['response']==prestart
+                     and update['finished']<=row['started']<=starts[0]['started'] for row in rows), 'original prestart wire')
+        parked=copy.deepcopy(target);parked['guest']=copy.deepcopy(before['config']['guest'])
+        park=updates[1]
+        need(park['body']==dict(config=parked,current_version=ack['instance_id'],skip_launch=True)
+             and park['response'].get('config')==parked and park['response'].get('id')==before['id']
+             and park['response'].get('instance_id')
+             and update['finished']<=starts[0]['started']<=execs[0]['started']<=stops[0]['started']<=park['started'],
+             'original rejected-bootstrap cleanup CAS')
+        candidates.append(park['response'])
+        reads=[row['response'] for row in rows if row['method']=='GET' and row['path']==own and row['started']>park['finished']]
+        need(reads and reads[-1]['state']=='stopped' and reads[-1]['config']==parked
+             and reads[-1]['instance_id']==park['response']['instance_id'], 'original cleanup parked readback')
+    else:
+        need(len(updates)==1 and not starts and not (directory/'prestart.json').exists(), 'failure passed prestart boundary')
+    need(all(row['method']=='GET' or row['path'] in (own,own+'/lease',own+'/stop',own+'/start',own+'/exec')
+             for row in rows), 'failure journal has guest/snapshot or foreign effects')
     for row in rows:
         if row['method'] == 'GET' and row['path'] == own:
             observation = row['response']
             need(observation.get('id') == before['id'] and observation.get('name') == before['name']
                  and observation.get('region') == before['region']
-                 and (observation.get('instance_id'), observation.get('config')) in
-                     ((before['instance_id'], before['config']), (ack['instance_id'], target))
-                 and observation.get('state') in ('created', 'stopped', 'replacing'), 'unknown original prestart observation')
-    return request, predecessor, authority, before, ack
+                 and any(observation.get('instance_id')==item['instance_id'] and observation.get('config')==item['config']
+                         for item in candidates)
+                 and observation.get('state') in ('created','stopped','replacing','started')
+                 and (execs or observation.get('state')!='started'), 'unknown original preparation observation')
+    return request, predecessor, authority, before, candidates[-1]
 
 
 def recovery_machine(api, request, predecessor, candidates, owned_volume):
@@ -798,7 +876,7 @@ def recover_bootstrap(request_path, failed_result_path, output, api_factory=None
     output = Path(output).absolute(); output.mkdir(mode=0o700)
     nonce = secrets.token_hex(16)
     result = dict(schema=RECOVERY, nonce=nonce, qualified=False, credit_granted=False, cleanup_complete=False,
-                  recovered=False, original_creator=descriptor(request['ownership']['path']),
+                  recovered=False, original_creator=authority.get('original_creator',descriptor(request['ownership']['path'])),
                   original_request=descriptor(request_path), failed_result=descriptor(failed_result_path))
     origin = dict(schema='cloudbench-recovery-origin-v1', nonce=nonce, output=str(output),
                   helper_sha256=sha((HERE/'cloudbench-prepare-source.py').read_bytes()), dependencies=dependency_seals(),
@@ -842,7 +920,7 @@ def verify_recovered_bootstrap(result_path):
     request_path=result['original_request']['path']; failed_path=result['failed_result']['path']
     described(result['original_request']); described(result['failed_result'])
     request, predecessor, authority, original, ack=prestart_failure(request_path,failed_path)
-    need(result['original_creator']==descriptor(request['ownership']['path']) and result['nonce'] != request['nonce'],
+    need(result['original_creator']==authority.get('original_creator',descriptor(request['ownership']['path'])) and result['nonce'] != request['nonce'],
          'original creator recovery link/new nonce')
     origin=described(result['origin'])
     need(origin.get('schema')=='cloudbench-recovery-origin-v1' and origin['nonce']==result['nonce']
@@ -866,7 +944,7 @@ def verify_recovered_bootstrap(result_path):
          and volume['size_gb']==authority['intent']['donor']['size_gb'], 'recovered parked identity')
     need(not any(key.startswith(('cloudbench_source_consumer_','cloudbench_source_retiring')) for key in parked['metadata']),
          'recovered source was published/retiring')
-    rows=verify_journal(result['journal'],predecessor['machine_id'],predecessor['volume_id'],())
+    rows=verify_journal(result['journal'],predecessor['machine_id'],predecessor['volume_id'],(),versioned=True)
     own='/machines/'+predecessor['machine_id']
     need(all(row['method']=='GET' and row['path'] in (own,'/volumes/'+predecessor['volume_id'])
              or row['path']==own+'/lease' or row['method']=='POST' and row['path']==own for row in rows),

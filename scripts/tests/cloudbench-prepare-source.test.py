@@ -140,6 +140,8 @@ class NativeLifecycle(unittest.TestCase):
         self.request['native']['config_sha256']=self.m['sha'](self.m['canonical'](self.config))
         self.calls=[];self.nonce=None;self.fault=None;self.foreign_changes=0
         self.transition_reads=[]
+        self.lease_version=None
+        self.enforce_exec_version=False
         outer=self
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args): pass
@@ -182,7 +184,9 @@ class NativeLifecycle(unittest.TestCase):
         if path==own+'/lease':
             if method=='POST':
                 if self.nonce is not None and nonce!=self.nonce:return 409,{}
-                self.nonce='lease-private';return 201,{'data':{'nonce':self.nonce}}
+                self.nonce='lease-private';self.lease_version=self.machine['instance_id']
+                version='wrong-version' if self.fault=='lease-version-wrong' and nonce else self.lease_version
+                return 201,{'data':{'nonce':self.nonce,'version':version}}
             if method=='DELETE' and nonce==self.nonce:
                 self.nonce=None;return 200,{}
             return 409,{}
@@ -201,6 +205,10 @@ class NativeLifecycle(unittest.TestCase):
         if method=='POST' and path in (own+'/start',own+'/stop'):
             self.machine['state']='started' if path.endswith('/start') else 'stopped';return 200,{}
         if method=='POST' and path==own+'/exec':
+            if not isinstance(body.get('command'),list) or not all(isinstance(v,str) for v in body['command']):return 400,{}
+            if self.enforce_exec_version and self.lease_version!=self.machine['instance_id']:
+                return 409,{'error':'aborted: machine lease currently held by fixture-token'}
+            if self.fault=='first-exec-409':return 409,{'error':'aborted: machine lease currently held by fixture-token'}
             job=dict(pid=42,birth='123',boot='a'*36)
             delivery=re.search(r'CLOUDBENCH-DELIVERY:[0-9]+',body['command'][-1])
             if delivery:return 200,{'exit_code':0,'stdout':delivery.group(0)+'\n'}
@@ -245,6 +253,16 @@ class NativeLifecycle(unittest.TestCase):
         self.fault='transition'
         result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.machine['state'],'stopped')
+
+    def test_exec_requires_supported_argv_and_lease_bound_to_current_cas_epoch(self):
+        self.enforce_exec_version=True
+        result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(any(path.endswith('/exec') for method,path,body,nonce in self.calls))
+
+    def test_refresh_wrong_version_refuses_before_start_or_exec(self):
+        self.fault='lease-version-wrong';result=self.invoke()
+        self.assertNotEqual(result.returncode,0)
+        self.assertFalse(any(method=='POST' and path.endswith(('/start','/exec')) for method,path,body,nonce in self.calls))
 
     def test_unknown_replacement_instance_never_starts(self):
         self.fault='third-instance';result=self.invoke();self.assertNotEqual(result.returncode,0)
@@ -345,6 +363,38 @@ class NativeLifecycle(unittest.TestCase):
         start=len(self.calls);result=self.invoke_recovery(env)
         self.assertNotEqual(result.returncode,0)
         self.assertTrue(all(path.endswith('/lease') or method=='GET' for method,path,body,nonce in self.calls[start:]))
+
+    def test_nested_recovery_after_first_exec_rejected_and_cleanly_parked(self):
+        env=self.failed_prestart();self.assertEqual(self.invoke_recovery(env).returncode,0)
+        path=self.root/'recovery/result.json';authority=self.m['resolve_bootstrap_ownership'](path)
+        original_creator=authority['original_creator']
+        self.request=dict(self.request,nonce='e'*32,ownership=self.m['descriptor'](path),
+            native=dict(self.request['native'],instance_id=authority['machine']['instance_id'],
+                        config_sha256=self.m['sha'](self.m['canonical'](authority['machine']['config']))))
+        self.fault='first-exec-409';failed=self.invoke();self.assertNotEqual(failed.returncode,0)
+        old=self.root/'output/result.json';oldraw=old.read_bytes()
+        self.assertTrue(self.m['load'](old)['stopped_verified'])
+        execs=[row for row in self.calls if row[0]=='POST' and row[1].endswith('/exec')]
+        self.assertEqual(len(execs),1)
+        self.fault=None
+        result=subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'recover-bootstrap',
+            '--request',str(self.root/'request.json'),'--failed-result',str(old),'--output',str(self.root/'recovery52')],
+            env=dict(os.environ,**env),capture_output=True,text=True,timeout=35)
+        self.assertEqual(result.returncode,0,result.stderr)
+        value=self.m['resolve_bootstrap_ownership'](self.root/'recovery52/result.json')
+        self.assertEqual(value['original_creator'],original_creator)
+        self.assertEqual(old.read_bytes(),oldraw)
+        self.assertFalse(self.m['load'](self.root/'recovery52/result.json')['qualified'])
+
+    def test_exec_rejection_recovery_refuses_nonbootstrap_command(self):
+        self.fault='first-exec-409';result=self.invoke();self.assertNotEqual(result.returncode,0)
+        failed=self.root/'output/result.json';receipt=self.m['load'](failed)
+        for p in (self.root/'output/native').glob('*/request.json'):
+            row=self.m['load'](p)
+            if row['path'].endswith('/exec'):
+                row['body']['command']=['echo','not-the-bootstrap'];p.write_text(json.dumps(row))
+        receipt['journal']=self.m['journal_index'](self.root/'output/native');failed.write_text(json.dumps(receipt))
+        with self.assertRaises(ValueError):self.m['prestart_failure'](self.root/'request.json',failed)
 
     def test_resealed_manifest_cannot_change_prepared_guest_environment(self):
         result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)

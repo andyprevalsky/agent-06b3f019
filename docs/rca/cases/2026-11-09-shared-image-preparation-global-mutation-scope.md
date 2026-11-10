@@ -118,6 +118,32 @@ recovery publishes neither a source manifest nor benchmark credit. Local HTTP
 failure/recovery/fresh-preparation/retirement controls pass. Independent review
 and the actual recovered-source outcome are pending.
 
+On the next frozen source, 52c2e26b739b36edf3a5416ffd288291c2d5d3e6,
+the known-predecessor wait succeeded through START. The first guest-delivery
+exec received a retained HTTP 409 saying the Machine lease was held by the
+same token identity. Its request carried the acquired nonce. The acquisition
+response named the pre-update instance; the exec targeted the acknowledged
+new instance. This is evidence of a lease/exec boundary failure, not proof of
+its precise cause. Current OpenAPI supports both command arrays and the legacy
+cmd string, so SDK serialization differences alone do not explain the 409.
+The failed exec has no parsed success response, and no guest job was launched.
+STOP, park CAS/readback and lease release subsequently succeeded; the target
+is verified stopped at 1 CPU/2048 MiB. The new result remains qualified false
+and cleanup false, with stopped verification true. Version-bound lease/exec
+behavior and safe reuse of that exact parked successor remain under RCA.
+
+The repair now refreshes the same native lease nonce after the acknowledged
+CAS version reaches its expected state and requires the renewal response to
+name that version before exec. It retains the command-array API contract.
+A version-aware HTTP boundary regression fails on the old implementation and
+passes on the repair; this is a controller contract proof, not a claim to know
+Fly's internal rejection cause. A distinct recovery path is limited to the
+exact first bootstrap exec lease rejection plus fully acknowledged stop/park
+cleanup. It preserves both failed results and the ultimate original creator
+binding. The historical failure fixture now embeds the exact old producer
+bytes with dependency hashes, independent of the current HEAD. Independent
+review, live protocol validation and full deployment remain open.
+
 ## Human feedback
 
 The user explicitly authorized this separate pre-parent-merge repair and full
