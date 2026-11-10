@@ -61,3 +61,41 @@ assertions pass, as does the unchanged positive control that explicitly enables
 custody and loads the guard in a real Node child. Full deployment qualification
 remains separate. Evidence: the original PR1910 deployment gate receipts and
 `.context/rca-3a0-hermetic-tests/report.json`.
+
+## November 10 recurrence: three extracted fixtures omitted controller dependencies
+
+The full controller log for frozen `5690b07270b16e82c1cf024207a915be9c2925cc`
+records **3 failed, 516 passed** in the same 519-case selection that previously
+recorded **9 failed, 510 passed** on
+`3a0e4877008c337f1ab345c74cf6225305f54935`. Reading both complete failure lists
+confirmed that the current three were already among the original nine; the six
+prior release/projection failures no longer occurred. The worker recipe and
+selected runner source were unchanged. This is another fixture-bootstrap
+recurrence, not evidence of a native Source lease or provider cleanup defect.
+
+- `test_migrated_registry_reaps_seals_audit_and_retires_lock_directory[0]`
+  and `[143]` extracted the real cleanup function without its new
+  `finish_private_source_lease` dependency. The missing command changed cleanup
+  status to 1 instead of preserving 0 or 143. The repair extracts the actual
+  helper and retains its ordinary no-holder branch.
+- `test_autoscaled_worker_failure_publishes_durable_failure_marker` omitted
+  the five ordinary private-source capture defaults used by the real worker
+  wrapper. Its first storage-mode failure masked a second missing input,
+  `EXECUTION_PROVENANCE_FILE`, in the upload modes. The repair initializes the
+  ordinary defaults and uses the existing real `_make_execution_provenance`
+  constructor; it adds no permission stub or empty provenance substitute.
+
+**Gate: INTRODUCED.** The unchanged four-case reproduction passed on baseline
+`8046dcbc3a67e7d4241d8eb6171b5c1652b85f71` (4 PASS, 4.29s), failed on frozen
+5690 (3 FAIL/1 PASS, 3.48s), and passed with ignored candidate `717e6260`
+(4 PASS, 7.45s). This includes the migration's no-cleanup control and every one
+of the worker fixture's eight storage/upload/readiness modes. All original
+assertions, test names and timeout expressions remain identical. Root's
+independent source review cleared patch `334c42cf` before its application as a
+quiescent batch; this focused proof does not grant a full native gate pass.
+
+Evidence: `.context/rca-5690-three-fixtures/report.json`,
+`current-native-failures.json`, `candidate-seals.json`, and
+`root-independent-review.json` in that directory. The complete current remote
+log has SHA256 `c84fd1103ec11e377821dfa5e7b67d08a5052b5a337fa9413f888ac529e2fe84`;
+the report retains its exact path and the baseline, failed and candidate logs.

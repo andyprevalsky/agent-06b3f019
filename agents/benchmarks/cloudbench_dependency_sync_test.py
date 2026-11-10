@@ -4604,6 +4604,7 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     (root / "scripts/cloudbench-worker.sh").write_text("#!/usr/bin/env bash\n")
     patch_file = tmp_path / "workspace.patch"
     patch_file.write_text("patch\n")
+    _, _, execution_provenance = _make_execution_provenance(tmp_path)
 
     for mode in (
         "storage-not-ready",
@@ -4624,6 +4625,13 @@ CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(root / "scripts"))}
 APP=test-app
 # This fixture owns ordinary test-app clones, never a disposable registry.
 DISPOSABLE_LIFECYCLE=0
+# Match the ordinary controller source capture defaults before staging workers.
+PRIVATE_SOURCE_FILE=""
+PRIVATE_SOURCE_SHA256=none
+PRIVATE_SOURCE_LEASE_PROTOCOL=none
+PRIVATE_SOURCE_GUEST_ENV_MODE=none
+PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256=none
+EXECUTION_PROVENANCE_FILE={shlex.quote(str(execution_provenance))}
 # Use the production initializer instead of inheriting ambient WMH fields.
 WMH_ENGINE=experiential
 unset WMH_MODEL_NAME WMH_EXECUTION_POLICY WMH_ROSE_POOL
@@ -28785,6 +28793,7 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(
             "fleet_release_cleanup_capacity() {",
             "fleet_billing_stop_retained_idle() {",
             "fleet_registry_release_verified() {",
+            "finish_private_source_lease() {",
         )
     )
     workspace = tmp_path / "workspace"
