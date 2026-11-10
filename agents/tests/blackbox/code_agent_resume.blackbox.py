@@ -257,7 +257,10 @@ async def test_user_turn_resumes_through_the_real_code_activity():
                 "input_cents_per_1k": 0, "output_cents_per_1k": 0,
             })),
         ):
-            result = await _run(_fakes(spawn, posted), _request(code_provider=provider))
+            result = await _run(_fakes(spawn, posted), _request(code_provider=provider, attachments=[{
+                "storage_path": "user-1/new.txt", "original_filename": "new.txt",
+                "mime_type": "text/plain", "size_bytes": 10,
+            }]))
         assert not isinstance(result, Exception), f"{provider}: {result}"
         created.assert_awaited_once()
         request = created.call_args.kwargs
@@ -270,6 +273,9 @@ async def test_user_turn_resumes_through_the_real_code_activity():
         assert request["target"] == ORIGINAL_SPAWN_ARGS["target"]
         assert request["cli_settings"] == ORIGINAL_SETTINGS
         assert request["attachments"][0]["id"] == POINTER["id"]
+        assert len(request["attachments"]) == 2
+        assert request["attachments"][1]["storage_path"] == "user-1/new.txt"
+        assert "id" in request["attachments"][1] and "created_at" in request["attachments"][1]
         assert request["fast_mode_cache_enabled"] is True
         assert any(row[3].get("action_type") == "task_complete" and row[3].get("success") for row in posted)
 

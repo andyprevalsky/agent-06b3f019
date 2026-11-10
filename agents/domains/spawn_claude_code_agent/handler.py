@@ -46,7 +46,7 @@ from domains.spawn_claude_code_agent.service_target import (
     resolve_code_agent_target_activity,
 )
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED
-from helpers.attachments import extract_attachments_from_context
+from helpers.attachments import FilePointer, extract_attachments_from_context
 from helpers.generation_handoff import GenerationHandoffRequested, park_pending_tool, take_tool_resume
 from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
@@ -438,7 +438,11 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         )
         # Files the owner attached to the typed turn that resumes this code agent
         # (backend directChatResume.ts; set only by a user resume, never by the model).
-        attachments += [item for item in tool_call.get("_user_attachments") or [] if isinstance(item, dict)]
+        attachments += [
+            {**FilePointer.from_dict(item).to_dict(), **item}
+            for item in tool_call.get("_user_attachments") or []
+            if isinstance(item, dict)
+        ]
         attachments = list({
             (item.get("id"), item.get("storage_path"), item.get("original_filename")): item
             for item in attachments
