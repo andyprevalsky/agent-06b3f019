@@ -12,6 +12,7 @@ symptoms:
   - "409 CODE_SESSION_CLOSED POST /api/claude-code-session/:taskId/turns"
   - message to a paused / completed code agent errors in the code-agent view composer
   - "completed browser and code agents cannot be messaged"
+  - "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
 tags:
   - code-agent
   - direct-chat
@@ -19,6 +20,8 @@ tags:
   - resume
 sources:
   - plan:back-end/src/domains/claude-code/directChatResume.ts
+  - agent 91cd1296-4fff-46a8-9e1f-fd67e0aaabbf
+  - commit aa2cc1d1ab320268c1ca5e73a8ac1f0dc19ecd4d
 repro: back-end/src/tests/blackbox/claude-code-direct-chat.blackbox.ts ("a message to a stopped code agent resumes it instead of failing"); agents/tests/blackbox/agent_control.blackbox.py (user_message_resumes_completed_code_task); front-end/src/tests/blackbox/code-agent-resume-on-message.blackbox.tsx
 status: fixed
 ---
@@ -103,3 +106,93 @@ the user message next to the timestamp)".
 When a resource is persistent and resumable, a user action against its stopped
 state must route through the existing resume path rather than refusing as if it
 were destroyed; check for a resume mechanism that only another caller type uses.
+
+## Recurrence — November 10, 2026: accepted resume never reached session creation
+
+The user reported that agent `91cd1296-4fff-46a8-9e1f-fd67e0aaabbf`
+did not unpause when messaged and required user messages to unpause by default,
+then explicitly requested `/rca` followed by `/push`.
+
+The root bug-report lookup returned HTTP 200 with no report. Captured runtime
+evidence distinguishes two paths:
+
+- Earlier diagnostic root messages were internal USER rows marked
+  `metadata.agentMessage=true`. Those are agent notifications and correctly
+  preserve an explicit user pause. Genuine person-authored root messages
+  already route through `deliverUserMessageToWorkflow`, including regular
+  internal-key USER sends; workflow-authored writes remain negative controls.
+- A direct user turn to stopped code task
+  `e8869bd9-8496-45f6-8709-a1f05b751639` was accepted as queued/resuming.
+  Workflow `code-resume:91cd1296-4fff-46a8-9e1f-fd67e0aaabbf:69aecaa2-dbae-80d1-97c0-ae14021e9bcb`
+  reached activity attempt 9 with the literal missing-schema error above.
+  No new diagnostic task was created. The diagnostic workflow was canceled;
+  the original user workload was left paused.
+
+### First bad boundary and why the earlier fix missed it
+
+`agents/workflows/code_agent_resume.py:resume_tool_call` created a code spawn
+without its required `output_schema`. The real spawn activity rejected those
+arguments before its bounded error handler, while the Temporal retry policy
+allowed unlimited crash retries. The request could therefore acknowledge
+resumption while retrying the same invalid arguments indefinitely. This is
+`logical-inconsistency-in-harness-contracts`, not an environment/credential or
+model-intelligence failure.
+
+The earlier workflow tests used a permissive fake spawn activity. They proved
+the supervisor lifecycle but never exercised the actual activity's contract.
+The new permanent case in `agents/tests/blackbox/code_agent_resume.blackbox.py`
+executes the real Temporal workflow, spawn manager and spawn activity, mocking
+only external session/provider effects. It checks session acquisition with the
+same persistent session ID and user turn for both Claude and Codex, the actual
+standard handoff schema, and a successful terminal tool row.
+
+### Identical local reproduction: red to green
+
+From `agents/`:
+
+```bash
+BLACKBOX_CASE_FUNCTIONS=test_user_turn_resumes_through_the_real_code_activity,test_spawn_activity_requires_output_schema venv/bin/python scripts/run_blackbox_tests.py code-agent-resume spawn-claude-code-agent
+```
+
+On buggy main `1ff6eacaa68f4e6fbff26a641f61cb5d8bf5487f`, the selected
+cases failed in 2.4 seconds: session create was awaited zero times, and missing
+schema raised a retryable `ValueError`. After the fix, the unchanged command
+passed both selected cases in 1.5 seconds. This is a partial case-filtered
+causal reproduction; full-suite verification is recorded separately.
+
+The backend `agents` blackbox domain also passed all 334 cases, including
+person-authored and regular internal-key messages resuming PAUSED roots and
+workflow-authored USER rows preserving the pause. A supplemental local Temporal
+probe executed the real activity with absent schema and unlimited retry policy:
+one activity attempt, typed nonretryable failure, no sandbox allocation.
+
+### Fix and reference comparison
+
+Supervised user turns explicitly declare `output_schema={"fields":[]}`: they
+have no planner requesting additional custom fields, and their results are
+UI-only. The existing handoff builder still requires the complete standard
+`rose_handoff` object (status, summary, branch, commit, PR URL and merged state).
+Owner-driven background wakes retain their existing planner-defined schemas.
+Missing-schema validation now raises typed nonretryable
+`CODE_AGENT_OUTPUT_SCHEMA_REQUIRED` before installing heartbeat state or
+allocating a sandbox. Transient crash/deploy retry behavior remains intact.
+
+Golden references inspected: `codex/codex-rs/core/src/session/turn.rs:1586`
+and `codex/codex-rs/core/src/client.rs:1036` explicitly carry the result schema
+into the request; `openclaw/packages/retry/src/index.ts:397` classifies and
+bounds retry attempts. This repair converges on explicit execution contracts
+and nonretryable deterministic validation. Reference paths refer to the
+local reference repositories, not shipped Rose code.
+
+Archive searches used `user message paused agent resume agentMessage` and
+`output_schema required code agent resume`; the independent reviewer also
+searched `output_schema is required CodeAgentResumeWorkflow` and
+`user message paused resume userControlPaused`. The stopped-code case is a
+recurrence; the October 1 SMS pause case reinforces preserving the distinction
+between genuine user input and workflow-authored USER rows.
+
+### Human feedback for the recurrence
+
+User: "we need to make sure that any user message unpauses by default" and
+"/rca then /push". The repair addresses the missing stopped-code execution
+boundary without treating automatic agent notifications as a new user intent.

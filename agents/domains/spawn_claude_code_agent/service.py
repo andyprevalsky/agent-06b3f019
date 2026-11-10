@@ -3362,6 +3362,15 @@ async def spawn_claude_code_activity(
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
     """
+    if not output_schema:
+        # Invalid scheduled arguments cannot heal on a worker/crash retry. Fail
+        # before installing heartbeat context or allocating a sandbox.
+        raise ApplicationError(
+            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call",
+            type="CODE_AGENT_OUTPUT_SCHEMA_REQUIRED",
+            non_retryable=True,
+        )
+
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
     from helpers.model_pricing import get_model_pricing_with_fallback
@@ -3398,11 +3407,6 @@ async def spawn_claude_code_activity(
     action_summary: list[str] = []
     code_events: list[Dict[str, Any]] = []
     terminal_output_persisted_box = [False]
-
-    if not output_schema:
-        raise ValueError(
-            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
-        )
 
     if isinstance(attached, dict) and attached.get("target") == "local":
         target = "local"
