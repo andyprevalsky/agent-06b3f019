@@ -22,6 +22,9 @@ sources:
   - plan:back-end/src/domains/claude-code/directChatResume.ts
   - agent 91cd1296-4fff-46a8-9e1f-fd67e0aaabbf
   - commit aa2cc1d1ab320268c1ca5e73a8ac1f0dc19ecd4d
+  - commit 655005b770
+  - commit 707e048ae8
+  - commit f9f10e7bf0
 repro: back-end/src/tests/blackbox/claude-code-direct-chat.blackbox.ts ("a message to a stopped code agent resumes it instead of failing"); agents/tests/blackbox/agent_control.blackbox.py (user_message_resumes_completed_code_task); front-end/src/tests/blackbox/code-agent-resume-on-message.blackbox.tsx
 status: fixed
 ---
@@ -275,3 +278,22 @@ it now checks the complete wrapper-to-tier call chain. No model, timeout,
 coverage threshold or production assertion was relaxed. The first full
 backend run passed all 254 API domains and 390 of 391 unit files; that failed
 run remains a failure until the complete required coverage gate passes.
+
+Final follow-up validation on source `f9f10e7bf0` passed all 254 backend API
+domains and all 391 unit files. Native coverage is 90.25% statements/lines,
+82.9% branches and 93.11% functions, above the unchanged thresholds. Agent
+product source `707e048ae8` passed all 132 domains without flakes, 214 demo-cache
+and 207 unit cases, with 85% coverage. The final backend TypeScript check,
+changed-file lint/format checks and 2,228 structural assertions also passed.
+The earlier failed attempts remain retained as failures, rather than being
+relabelled by the clean runs.
+
+The deterministic coverage runner excludes live credential health by design.
+A separate unchanged live integration-health command completed with six
+passes, one warning and no hard failures or overrides. E2B, Steel, Parallel,
+OpenRouter/auth/balance and Supabase probes passed. Anthropic's completion
+probe reported exhausted account credits. This funding limitation is distinct
+from env-file availability or missing shell exports, and is not repaired by
+parameter restoration. No benchmark was started and the original Rose root's
+explicit pause was preserved. Production availability remains a separate
+worker/backend rollout verification after the authorized push.
