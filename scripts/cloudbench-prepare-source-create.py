@@ -838,15 +838,45 @@ def retirement_successor(args, journal, intent):
     need('ownership' in request, 'prepared successor must derive from original create authority')
     authority = journal / 'result.json'
     descriptor = request['ownership']
-    need(Path(descriptor['path']) == authority and descriptor['sha256'] == hashlib.sha256(authority.read_bytes()).hexdigest(),
-         'prepared ownership does not bind original creator result')
+    original_descriptor = dict(path=str(authority), sha256=raw_sha(authority))
+    bootstrap = verify_created_source(authority)
+    if Path(descriptor['path']) == authority:
+        need(descriptor == original_descriptor, 'prepared ownership does not bind original creator result')
+    else:
+        path = Path(descriptor['path'])
+        need(path.is_absolute() and path.resolve() == path and raw_sha(path) == descriptor['sha256'],
+             'recovered bootstrap descriptor changed')
+        recovered = read(path)
+        resolver = helper.get('resolve_bootstrap_ownership')
+        need(recovered.get('schema') == 'cloudbench-recovered-bootstrap-v1'
+             and recovered.get('qualified') is False and recovered.get('credit_granted') is False
+             and callable(resolver), 'pure recovered bootstrap authority required')
+        resolved = resolver(path)
+        need(resolved.get('original_creator') == original_descriptor
+             and Path(resolved['journal']) == journal
+             and canonical(resolved['intent']) == canonical(intent), 'recovered original creator custody changed')
+        before, volume = resolved['machine'], resolved['volume']
+        prior = bootstrap['machine']
+        need(before.get('id') == prior['id'] and volume.get('id') == bootstrap['volume']['id']
+             and before.get('name') == prior['name'] and before.get('region') == prior['region']
+             and before.get('state') == 'stopped' and isinstance(before.get('instance_id'), str)
+             and before['instance_id'] and volume.get('attached_machine_id') == prior['id'],
+             'recovered owned resource identity changed')
+        expected = json.loads(json.dumps(prior['config']))
+        expected['image'] = before['config']['image']
+        need(canonical(normalized_config(before['config'], intent, volume['id']))
+             == canonical(normalized_config(expected, intent, volume['id'])),
+             'recovered bootstrap changed original parked configuration')
+        bootstrap = resolved
     successor = helper['verify_prepared_source'](args.prepared_request, args.prepared_result, args.prepared_manifest,
         source_ref=request['source_ref'], image_ref=request['image_ref'],
         node_fingerprint=request['node_fingerprint'], python_fingerprint=request['python_fingerprint'])
-    need(successor['owner_token'] == intent['binding']['owner_token'], 'prepared successor owner changed')
+    need(successor['owner_token'] == intent['binding']['owner_token']
+         and successor['machine_id'] == bootstrap['machine']['id']
+         and successor['volume_id'] == bootstrap['volume']['id'], 'prepared successor owner/resource changed')
     prepared = read(args.prepared_result.absolute())
     after = helper['described'](prepared['after'])
-    original = json.loads(json.dumps(verify_created_source(authority)['machine']['config']))
+    original = json.loads(json.dumps(bootstrap['machine']['config']))
     original['image'] = request['image_ref']
     need(after['id'] == successor['machine_id'] and after['config'] == original
          and after['state'] == 'stopped' and after['instance_id'] == successor['instance_id'],

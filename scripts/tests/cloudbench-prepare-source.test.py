@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parents[1]
 
@@ -137,6 +139,7 @@ class NativeLifecycle(unittest.TestCase):
         self.request['ownership']=self.m['descriptor'](journal/'result.json')
         self.request['native']['config_sha256']=self.m['sha'](self.m['canonical'](self.config))
         self.calls=[];self.nonce=None;self.fault=None;self.foreign_changes=0
+        self.transition_reads=[]
         outer=self
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args): pass
@@ -171,7 +174,7 @@ class NativeLifecycle(unittest.TestCase):
         own='/machines/'+self.mid
         self.foreign_changes+=1  # Peers change on every read/write; no app-wide equality required.
         if method=='GET':
-            if path==own: return 200,self.machine
+            if path==own: return 200,self.transition_reads.pop(0) if self.transition_reads else self.machine
             if path=='/machines/'+self.shared['id']: return 200,self.shared
             if path=='/volumes/'+self.vid: return 200,self.volume
             if path=='/volumes/'+self.vid+'/snapshots': return 200,self.snapshots
@@ -186,8 +189,14 @@ class NativeLifecycle(unittest.TestCase):
         if nonce!=self.nonce or nonce is None:return 409,{}
         if method=='POST' and path==own:
             if body['current_version']!=self.machine['instance_id'] or self.fault=='cas':return 409,{}
+            old=copy.deepcopy(self.machine)
             self.machine['config']=copy.deepcopy(body['config']);self.machine['instance_id']='NEW'+str(sum(1 for method,path,body,nonce in self.calls if method=='POST' and path==own))
             self.machine['image_ref']['digest']=body['config']['image'].rsplit('@',1)[1]
+            if self.fault in ('transition','third-instance','third-config'):
+                prior=dict(old,state='replacing')
+                if self.fault=='third-instance':prior['instance_id']='UNKNOWN3'
+                if self.fault=='third-config':prior['config']['env']['FOREIGN']='unknown'
+                self.transition_reads=[prior]
             return 200,self.machine
         if method=='POST' and path in (own+'/start',own+'/stop'):
             self.machine['state']='started' if path.endswith('/start') else 'stopped';return 200,{}
@@ -231,6 +240,111 @@ class NativeLifecycle(unittest.TestCase):
         self.assertGreater(self.foreign_changes,10)
         self.assertTrue(all(self.m['allowed_call'](method,path,self.mid,self.vid,(self.shared['id'],))
                             for method,path,body,nonce in self.calls))
+
+    def test_real_http_known_cas_predecessor_replacing_waits_before_start(self):
+        self.fault='transition'
+        result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.machine['state'],'stopped')
+
+    def test_unknown_replacement_instance_never_starts(self):
+        self.fault='third-instance';result=self.invoke();self.assertNotEqual(result.returncode,0)
+        self.assertFalse(any(method=='POST' and path.endswith('/start') for method,path,body,nonce in self.calls))
+
+    def test_unknown_replacement_config_never_starts(self):
+        self.fault='third-config';result=self.invoke();self.assertNotEqual(result.returncode,0)
+        self.assertFalse(any(method=='POST' and path.endswith('/start') for method,path,body,nonce in self.calls))
+
+    def test_known_predecessor_cannot_extend_absolute_transition_deadline(self):
+        row=copy.deepcopy(self.machine);row['state']='replacing'
+        calls=[]
+        def request(method,path):
+            calls.append((method,path))
+            return row if '/machines/' in path else self.volume
+        clock=iter((0,60,120))
+        with patch.dict(self.m['wait_state'].__globals__,time=SimpleNamespace(monotonic=lambda:next(clock),sleep=lambda _:None)):
+            with self.assertRaisesRegex(ValueError,'deadline'):
+                self.m['wait_state'](SimpleNamespace(request=request),self.request,self.manifest,
+                    dict(self.config,image=self.image), 'stopped','ACK2',120,prior=self.machine)
+        self.assertEqual(len(calls),4)
+        self.assertTrue(all(method=='GET' for method,path in calls))
+
+    def failed_prestart(self):
+        self.volume.update(name='cbs_'+self.owner[:26],encrypted=True)
+        self.write('failed-request.json',self.request)
+        binary=self.root/'flyctl';binary.write_text('#!/bin/sh\nexit 97\n');binary.chmod(0o700)
+        env=dict(FLY_API_TOKEN='fixture-private',FLY_API_HOSTNAME=f'http://127.0.0.1:{self.server.server_port}',
+                 PATH=str(self.root)+os.pathsep+os.environ['PATH'])
+        def fail(*args,**kwargs):raise ValueError('injected acknowledged-CAS prestart failure')
+        with patch.dict(os.environ,env),patch.dict(self.m['prepare'].__globals__,wait_state=fail):
+            with self.assertRaises(ValueError):self.m['prepare'](self.root/'failed-request.json',self.root/'failed')
+        return env
+
+    def invoke_recovery(self,env,output='recovery'):
+        return subprocess.run([sys.executable,str(HERE/'cloudbench-prepare-source.py'),'recover-bootstrap',
+            '--request',str(self.root/'failed-request.json'),'--failed-result',str(self.root/'failed/result.json'),
+            '--output',str(self.root/output)],env=dict(os.environ,**env),capture_output=True,text=True,timeout=35)
+
+    def test_real_http_failed_cas_recovery_fresh_prepare_preserves_old_false(self):
+        env=self.failed_prestart()
+        originals={p:p.read_bytes() for p in (self.root/'failed').rglob('*') if p.is_file()}
+        originals[self.root/'failed-request.json']=(self.root/'failed-request.json').read_bytes()
+        result=self.invoke_recovery(env);self.assertEqual(result.returncode,0,result.stderr)
+        path=self.root/'recovery/result.json';receipt=self.m['load'](path)
+        self.assertFalse(receipt['qualified']);self.assertFalse(receipt['credit_granted'])
+        authority=self.m['resolve_bootstrap_ownership'](path)
+        self.assertEqual(authority['machine']['config']['guest']['memory_mb'],2048)
+        self.assertEqual(authority['machine']['config']['guest']['cpus'],1)
+        self.assertEqual(authority['original_creator'],self.request['ownership'])
+        self.request=dict(self.request,nonce='e'*32,ownership=self.m['descriptor'](path),
+            native=dict(self.request['native'],instance_id=authority['machine']['instance_id'],
+                        config_sha256=self.m['sha'](self.m['canonical'](authority['machine']['config']))))
+        prepared=self.invoke();self.assertEqual(prepared.returncode,0,prepared.stderr)
+        self.m['verify_prepared_source'](self.root/'request.json',self.root/'output/result.json',self.root/'output/source-manifest.json',
+            source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        for p,raw in originals.items():self.assertEqual(p.read_bytes(),raw)
+        self.assertFalse(self.m['load'](self.root/'failed/result.json')['qualified'])
+
+    def test_recovery_unknown_epoch_refuses_without_parking_or_guest(self):
+        env=self.failed_prestart();self.machine['instance_id']='UNKNOWN3'
+        start=len(self.calls);result=self.invoke_recovery(env)
+        self.assertNotEqual(result.returncode,0)
+        self.assertTrue(all(path.endswith('/lease') or method=='GET' for method,path,body,nonce in self.calls[start:]))
+
+    def test_recovery_result_and_original_authority_tamper_refuse(self):
+        env=self.failed_prestart();result=self.invoke_recovery(env)
+        self.assertEqual(result.returncode,0,result.stderr)
+        path=self.root/'recovery/result.json';raw=path.read_bytes()
+        for field,value in [('qualified',True),('credit_granted',True),('nonce','d'*32)]:
+            changed=json.loads(raw);changed[field]=value;path.write_text(json.dumps(changed))
+            with self.assertRaises(ValueError):self.m['verify_recovered_bootstrap'](path)
+        path.write_bytes(raw)
+        failed=self.root/'failed/result.json';original=failed.read_bytes()
+        changed=json.loads(original);changed['qualified']=True;failed.write_text(json.dumps(changed))
+        with self.assertRaises(ValueError):self.m['verify_recovered_bootstrap'](path)
+
+    def test_recovery_resealed_lease_and_cas_version_tamper_refuse(self):
+        env=self.failed_prestart();result=self.invoke_recovery(env)
+        self.assertEqual(result.returncode,0,result.stderr)
+        path=self.root/'recovery/result.json';original=path.read_bytes()
+        for member in (self.root/'recovery/native').glob('*/request.json'):
+            request=self.m['load'](member)
+            if request['method']=='POST' and request['path']=='/machines/'+self.mid:
+                raw=member.read_bytes()
+                for field in ('lease','version'):
+                    wrong=copy.deepcopy(request)
+                    if field=='lease':wrong['headers']['fly-machine-lease-nonce']='foreign-lease'
+                    else:wrong['body']['current_version']='UNKNOWN3'
+                    member.write_text(json.dumps(wrong))
+                    receipt=json.loads(original);receipt['journal']=self.m['journal_index'](self.root/'recovery/native')
+                    path.write_text(json.dumps(receipt))
+                    with self.assertRaises(ValueError):self.m['verify_recovered_bootstrap'](path)
+                member.write_bytes(raw);path.write_bytes(original)
+
+    def test_recovery_published_claim_refuses_before_parking(self):
+        env=self.failed_prestart();self.machine['config']['metadata']['cloudbench_source_consumer_'+'f'*32]='claim'
+        start=len(self.calls);result=self.invoke_recovery(env)
+        self.assertNotEqual(result.returncode,0)
+        self.assertTrue(all(path.endswith('/lease') or method=='GET' for method,path,body,nonce in self.calls[start:]))
 
     def test_resealed_manifest_cannot_change_prepared_guest_environment(self):
         result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)

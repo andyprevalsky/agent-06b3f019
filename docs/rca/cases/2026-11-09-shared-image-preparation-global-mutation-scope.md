@@ -94,6 +94,30 @@ Full raw native evidence stays private; public reconciliation output is bounded
 to identities and receipt hashes. Preparation and benchmark outcome proof remain
 pending; these allocation records grant no benchmark or historical task credit.
 
+The first live preparation on stabilization source
+81ef70b1cb23a0fee892296b70cf90cdee35433d failed before START. A full native
+200 response acknowledged the owned Machine CAS to the pinned image and
+4-CPU/8192-MiB preparation shape, with a new instance ID. The next GET exposed
+the exact predecessor configuration and instance in state `replacing`.
+`wait_state` called the strict final-identity verifier before checking whether
+that known replacement had completed. Cleanup also failed, and the original
+receipt remains qualified false and cleanup false. Its stop transport has no
+retained response; no successful STOP acknowledgement is inferred. No guest
+execution, START, snapshot or task admission occurred.
+
+The unchanged HTTP transition regression fails against the old wait boundary
+and passes when only the exact acknowledged CAS predecessor is tolerated
+within the original deadline. Unknown instance IDs/configurations still refuse;
+START requires the acknowledged version in the requested state. The same rule
+covers the image update, final park and cleanup park. A separate, credit-free
+bootstrap recovery verifies the failed request, historical producer source,
+original wire responses, original creator authority and exact current known
+version under a new native lease. It reparks the same owned Machine without
+starting it. A new request/nonce and successful preparation remain mandatory;
+recovery publishes neither a source manifest nor benchmark credit. Local HTTP
+failure/recovery/fresh-preparation/retirement controls pass. Independent review
+and the actual recovered-source outcome are pending.
+
 ## Human feedback
 
 The user explicitly authorized this separate pre-parent-merge repair and full

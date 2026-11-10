@@ -32,6 +32,7 @@ IO = runpy.run_path(str(HERE / 'cloudbench-disposable-controller.py'))
 CAPTURE = runpy.run_path(str(HERE / 'cloudbench-original-volume-capture.py'))
 REQUEST = 'cloudbench-prepare-source-request-v1'
 RESULT = 'cloudbench-prepared-source-v1'
+RECOVERY = 'cloudbench-recovered-bootstrap-v1'
 PROTECTED = frozenset({'683e47df5094d8', '811d632f2650e8'})
 PROTECTED_RESOURCES = {'683e47df5094d8': 'vol_vwnym366kn7k8mmv',
                        '811d632f2650e8': 'vol_r1jde9donnx2mn9r'}
@@ -84,6 +85,13 @@ def described(value):
     return json.loads(raw, object_pairs_hook=SOURCE['storage']['unique_object'])
 
 
+def resolve_bootstrap_ownership(path):
+    """Resolve original creation or an independently sealed, credit-free recovery."""
+    if load(path).get('schema') == RECOVERY:
+        return verify_recovered_bootstrap(path)
+    return runpy.run_path(str(HERE / 'cloudbench-prepare-source-create.py'))['verify_created_source'](Path(path))
+
+
 def allowed_call(method, path, mid, vid, shared=()):
     if method == 'GET':
         return path in ({'/machines/' + identity for identity in (mid, *shared)}
@@ -122,8 +130,7 @@ def read_request(path):
                       value.get('image_ref', '')), 'immutable app image')
     if 'ownership' in value:
         described(value['ownership'])
-        creator = runpy.run_path(str(HERE / 'cloudbench-prepare-source-create.py'))
-        authority = creator['verify_created_source'](Path(value['ownership']['path']))
+        authority = resolve_bootstrap_ownership(Path(value['ownership']['path']))
         machine, donor = authority['machine'], authority['donor']
         proof = donor['dependency_proof']
         need(machine['config']['metadata'].get('cloudbench_source_protocol') == 'cloudbench-source-lease-v1'
@@ -272,8 +279,8 @@ class ScopedNative(REUSE['NativeAdapter']):
                 need(False, 'lease release unresolved; no successor publication')
 
 
-def exact_machine(api, request, predecessor, config, *, state=None, instance=None):
-    value = api.request('GET', '/machines/' + request['native']['machine_id'])
+def exact_machine(api, request, predecessor, config, *, state=None, instance=None, observation=None):
+    value = observation if observation is not None else api.request('GET', '/machines/' + request['native']['machine_id'])
     need(value.get('id') == predecessor['machine_id'] and value.get('name') == predecessor['machine_name']
          and value.get('region') == predecessor['region'] and value.get('instance_id')
          and value.get('config') == config, 'native source identity/config changed')
@@ -287,10 +294,22 @@ def exact_machine(api, request, predecessor, config, *, state=None, instance=Non
     return value, volume
 
 
-def wait_state(api, request, predecessor, config, state, instance, deadline):
+def wait_state(api, request, predecessor, config, state, instance, deadline, *, prior=None):
     while time.monotonic() < deadline:
-        machine, volume = exact_machine(api, request, predecessor, config, instance=instance)
-        if machine.get('state') == state:
+        observed_config, observed_instance = config, instance
+        row = None
+        if prior is not None:
+            # A known CAS may still expose its exact predecessor during replacement.
+            # This exception is scoped to the acknowledged update, never admission.
+            row = api.request('GET', '/machines/' + request['native']['machine_id'])
+            if row.get('instance_id') == prior['instance_id'] and row.get('config') == prior['config']:
+                need(row.get('state') in ('replacing', 'created', 'stopped'), 'invalid predecessor transition state')
+                observed_config, observed_instance = prior['config'], prior['instance_id']
+            else:
+                need(row.get('instance_id') == instance and row.get('config') == config,
+                     'unknown native replacement epoch/config')
+        machine, volume = exact_machine(api, request, predecessor, observed_config, instance=observed_instance, observation=row)
+        if machine.get('state') == state and machine['instance_id'] == instance and machine['config'] == config:
             return machine, volume
         time.sleep(1)
     raise ValueError('private source preparation: native state deadline')
@@ -432,7 +451,8 @@ def journal_index(directory):
     return dict(path=str(directory), sha256=sha(canonical(files)), files=files)
 
 
-def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=None, guest=None, successor=None, prestart=None):
+def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=None, guest=None, successor=None, prestart=None,
+                   allow_pending_prestart_stop=False):
     actual = journal_index(value['path'])
     need(actual == value, 'native journal changed')
     rows = []
@@ -440,9 +460,15 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
         if member.endswith('/request.json'):
             path = Path(value['path']) / member
             sent = load(path)
-            need((path.parent / 'result.json').is_file(), 'native call has unknown outcome')
             need(sent['app'] == 'navi-whisper-lux-bench', 'native app escaped scope')
             raw_paths = list(path.parent.glob('*-wire.json'))
+            if not (path.parent / 'result.json').is_file():
+                need(allow_pending_prestart_stop and not raw_paths and sent['method'] == 'POST'
+                     and sent['path'] == '/machines/' + mid + '/stop' and sent['body'] == {},
+                     'native call has unknown outcome')
+                started = load(path.parent / 'transport-start.json')['monotonic_ns']
+                rows.append(dict(sent, response=None, started=started, finished=started, pending=True))
+                continue  # Retained unresolved cleanup, never a successful STOP receipt.
             need(len(raw_paths) == 1, 'exact original native response required')
             wire = load(raw_paths[0]); raw = base64.b64decode(wire['body_b64'], validate=True)
             need(wire['sha256'] == sha(raw) and wire['method'] == sent['method']
@@ -533,6 +559,7 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
     config = None
     armed = False
     original_config = None
+    known_versions = set()
     def cleanup():
         if not armed:
             return
@@ -540,7 +567,9 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             current = api.request('GET', '/machines/' + predecessor['machine_id'])
             need(current.get('id') == predecessor['machine_id']
                  and current.get('name') == predecessor['machine_name']
+                 and current.get('instance_id') in known_versions
                  and current.get('config') in (original_config, config), 'cleanup native identity changed')
+            need(current.get('state') in ('created', 'stopped', 'started'), 'cleanup replacement is not inactive/owned running state')
             active_config = current['config']
             if current.get('state') != 'stopped':
                 api.request('POST', '/machines/' + predecessor['machine_id'] + '/stop', {})
@@ -550,7 +579,7 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             if parked_config != active_config:
                 parked = api.request('POST', '/machines/' + predecessor['machine_id'],
                                      dict(config=parked_config, current_version=current['instance_id'], skip_launch=True))
-                wait_state(api, request, predecessor, parked_config, 'stopped', parked['instance_id'], time.monotonic() + 60)
+                wait_state(api, request, predecessor, parked_config, 'stopped', parked['instance_id'], time.monotonic() + 60, prior=current)
             result['stopped_verified'] = True
         except BaseException as cleanup_error:
             result.update(stopped_verified=False, cleanup_error=type(cleanup_error).__name__)
@@ -584,14 +613,17 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
             else:
                 need(config['metadata'].get('cloudbench_source_owner') == predecessor['owner_token'], 'created source owner')
             save(output / 'before.json', before)
+            known_versions.add(before['instance_id'])
             armed = True
             config['image'] = request['image_ref']
             config['guest'] = dict(config['guest'], cpus=4, memory_mb=8192)
             ack = api.request('POST', '/machines/' + predecessor['machine_id'],
                               dict(config=config, current_version=before['instance_id'], skip_launch=True))
             instance = ack.get('instance_id')
-            need(instance, 'native update version acknowledgement absent')
-            prestart, _ = wait_state(api, request, predecessor, config, 'stopped', instance, time.monotonic() + 120)
+            need(instance and ack.get('config') == config and ack.get('id') == predecessor['machine_id'],
+                 'native update version/config acknowledgement absent')
+            known_versions.add(instance)
+            prestart, _ = wait_state(api, request, predecessor, config, 'stopped', instance, time.monotonic() + 120, prior=before)
             save(output / 'prestart.json', prestart)
             api.request('POST', '/machines/' + predecessor['machine_id'] + '/start', {})
             wait_state(api, request, predecessor, config, 'started', instance, time.monotonic() + 120)
@@ -604,7 +636,8 @@ def prepare(request_path, output, api_factory=None, *, before_effects=None):
                                  dict(config=config, current_version=instance, skip_launch=True))
             instance = parked.get('instance_id')
             need(instance, 'park version acknowledgement absent')
-            after, volume = wait_state(api, request, predecessor, config, 'stopped', instance, time.monotonic() + 120)
+            known_versions.add(instance)
+            after, volume = wait_state(api, request, predecessor, config, 'stopped', instance, time.monotonic() + 120, prior=after)
             snapshot_ack = api.request('POST', '/volumes/' + predecessor['volume_id'] + '/snapshots', {})
             snapshot_id = snapshot_ack.get('id')
             need(isinstance(snapshot_id, str) and re.fullmatch('vs_[A-Za-z0-9]+', snapshot_id), 'exact created snapshot ID')
@@ -692,10 +725,167 @@ def verify_prepared_source(request_path, result_path, manifest_path, *, source_r
     return successor
 
 
+def verify_producer(origin, root, tree):
+    need(set(origin['dependencies']) == set(DEPENDENCIES), 'producer dependency closure')
+    if (origin['helper_sha256'] == sha((HERE / 'cloudbench-prepare-source.py').read_bytes())
+            and origin['dependencies'] == dependency_seals()):
+        return
+    need(origin['helper_sha256'] == sha(source_bytes(root, tree, 'cloudbench-prepare-source.py'))
+         and all(value == sha(source_bytes(root, tree, member)) for member, value in origin['dependencies'].items()),
+         'historical producer source/dependency proof')
+
+
+def prestart_failure(request_path, result_path):
+    """Only accepted preparation CAS with no start, guest execution or snapshot."""
+    request, predecessor = read_request(request_path)
+    need(load(request['ownership']['path']).get('schema') != RECOVERY, 'nested bootstrap recovery is not supported')
+    authority = resolve_bootstrap_ownership(request['ownership']['path'])
+    result = load(result_path); directory = Path(result_path).absolute().parent
+    need(result.get('schema') == RESULT and result.get('qualified') is False
+         and result.get('credit_granted') is False and result.get('cleanup_complete') is False
+         and described(result['request']) == request, 'original failed preparation required')
+    need(not any((directory / name).exists() for name in
+                 ('prestart.json', 'guest.json', 'after.json', 'source-manifest.json')), 'failure passed prestart boundary')
+    origin = described(result['origin'])
+    need(origin.get('schema') == 'cloudbench-prepare-source-origin-v1'
+         and described(origin['request']) == request and origin['nonce'] == request['nonce']
+         and origin['source_ref'] == request['source_ref'] and origin['output'] == str(directory), 'failed producer binding')
+    verify_producer(origin, Path(request['source_root']), request.get('transport', {}).get('replayed_tree', request['source_ref']))
+    before = load(directory / 'before.json')
+    need(before['id'] == predecessor['machine_id'] and before['instance_id'] == request['native']['instance_id']
+         and before['config'] == authority['machine']['config']
+         and sha(canonical(before['config'])) == request['native']['config_sha256'], 'original before authority')
+    rows = verify_journal(result['journal'], predecessor['machine_id'], predecessor['volume_id'],
+                          (predecessor['shared_machine_id'],), allow_pending_prestart_stop=True)
+    own = '/machines/' + predecessor['machine_id']
+    updates = [row for row in rows if row['method'] == 'POST' and row['path'] == own]
+    need(len(updates) == 1 and all(row['method'] == 'GET' or row['path'] in (own, own+'/lease', own+'/stop')
+                                 for row in rows), 'only original prestart CAS/cleanup evidence permitted')
+    target = copy.deepcopy(before['config']); target['image'] = request['image_ref']
+    target['guest'] = dict(target['guest'], cpus=4, memory_mb=8192)
+    update = updates[0]; ack = update['response']
+    need(update['body'] == dict(config=target, current_version=before['instance_id'], skip_launch=True)
+         and ack.get('id') == before['id'] and ack.get('config') == target
+         and ack.get('instance_id') and ack['instance_id'] != before['instance_id'], 'original accepted preparation CAS')
+    for row in rows:
+        if row['method'] == 'GET' and row['path'] == own:
+            observation = row['response']
+            need(observation.get('id') == before['id'] and observation.get('name') == before['name']
+                 and observation.get('region') == before['region']
+                 and (observation.get('instance_id'), observation.get('config')) in
+                     ((before['instance_id'], before['config']), (ack['instance_id'], target))
+                 and observation.get('state') in ('created', 'stopped', 'replacing'), 'unknown original prestart observation')
+    return request, predecessor, authority, before, ack
+
+
+def recovery_machine(api, request, predecessor, candidates, owned_volume):
+    row = api.request('GET', '/machines/' + predecessor['machine_id'])
+    need(any(row.get('instance_id') == item['instance_id'] and row.get('config') == item['config'] for item in candidates),
+         'recovery native epoch/config is not original or acknowledged')
+    need(row.get('state') in ('created', 'stopped'), 'recovery requires inactive source')
+    metadata = row.get('config', {}).get('metadata', {})
+    need(not any(key.startswith(('cloudbench_source_consumer_', 'cloudbench_source_retiring')) for key in metadata),
+         'published/retiring source cannot recover bootstrap')
+    row, volume = exact_machine(api, request, predecessor, row['config'], instance=row['instance_id'], observation=row)
+    need(volume.get('name') == owned_volume['name'] and type(volume.get('size_gb')) is int
+         and volume['size_gb'] == owned_volume['size_gb'] and volume.get('encrypted') is True
+         and volume.get('state') == 'created', 'recovery owned Volume changed')
+    return row, volume
+
+
+def recover_bootstrap(request_path, failed_result_path, output, api_factory=None):
+    request, predecessor, authority, original, ack = prestart_failure(request_path, failed_result_path)
+    output = Path(output).absolute(); output.mkdir(mode=0o700)
+    nonce = secrets.token_hex(16)
+    result = dict(schema=RECOVERY, nonce=nonce, qualified=False, credit_granted=False, cleanup_complete=False,
+                  recovered=False, original_creator=descriptor(request['ownership']['path']),
+                  original_request=descriptor(request_path), failed_result=descriptor(failed_result_path))
+    origin = dict(schema='cloudbench-recovery-origin-v1', nonce=nonce, output=str(output),
+                  helper_sha256=sha((HERE/'cloudbench-prepare-source.py').read_bytes()), dependencies=dependency_seals(),
+                  source_ref=subprocess.check_output(['git','-C',str(HERE.parent),'rev-parse','HEAD'],text=True).strip(),
+                  producer=dict(pid=os.getpid(), birth=runpy.run_path(str(HERE/'process-identity.py'))['linux_identity'](os.getpid()),
+                                argv_sha256=sha(Path('/proc/self/cmdline').read_bytes())))
+    save(output/'origin.json', origin); result['origin']=descriptor(output/'origin.json')
+    try:
+        if api_factory is None:
+            need(os.environ.get('FLY_API_TOKEN'), 'FLY_API_TOKEN required')
+            api = ScopedNative(CAPTURE['Fly'](predecessor['app'], os.environ['FLY_API_TOKEN']), output/'native', request, predecessor)
+        else:
+            api = api_factory(output/'native', request, predecessor)
+        with api.lease():
+            before, volume = recovery_machine(api, request, predecessor, (original, ack), authority['intent']['volume_request'])
+            save(output/'before.json',before)
+            parked = copy.deepcopy(before['config']); parked['guest'] = copy.deepcopy(original['config']['guest'])
+            answer = api.request('POST','/machines/'+predecessor['machine_id'],
+                                 dict(config=parked,current_version=before['instance_id'],skip_launch=True))
+            need(answer.get('id') == before['id'] and answer.get('config') == parked
+                 and answer.get('instance_id'), 'recovery parking CAS acknowledgement')
+            after, volume = wait_state(api, request, predecessor, parked, 'stopped', answer['instance_id'],
+                                       time.monotonic()+120, prior=before)
+            after, volume = recovery_machine(api, request, predecessor, (after,), authority['intent']['volume_request'])
+            save(output/'after.json',after); save(output/'volume.json',volume)
+        result.update(recovered=True, before=descriptor(output/'before.json'), after=descriptor(output/'after.json'),
+                      volume=descriptor(output/'volume.json'))
+    finally:
+        result['journal']=journal_index(output/'native')
+        save(output/'result.json',result)
+    verify_recovered_bootstrap(output/'result.json')
+    return result
+
+
+def verify_recovered_bootstrap(result_path):
+    """Pure authority for a fresh preparation; never benchmark qualification."""
+    result=load(result_path)
+    need(result.get('schema')==RECOVERY and result.get('recovered') is True and result.get('qualified') is False
+         and result.get('credit_granted') is False and result.get('cleanup_complete') is False
+         and re.fullmatch('[a-f0-9]{32}',result.get('nonce','')), 'recovered bootstrap receipt required')
+    request_path=result['original_request']['path']; failed_path=result['failed_result']['path']
+    described(result['original_request']); described(result['failed_result'])
+    request, predecessor, authority, original, ack=prestart_failure(request_path,failed_path)
+    need(result['original_creator']==descriptor(request['ownership']['path']) and result['nonce'] != request['nonce'],
+         'original creator recovery link/new nonce')
+    origin=described(result['origin'])
+    need(origin.get('schema')=='cloudbench-recovery-origin-v1' and origin['nonce']==result['nonce']
+         and origin['output']==str(Path(result_path).absolute().parent)
+         and type(origin['producer']['pid']) is int and origin['producer']['pid'] > 1
+         and origin['producer']['birth'] and re.fullmatch('[a-f0-9]{64}', origin['producer']['argv_sha256']),
+         'recovery producer origin')
+    verify_producer(origin,HERE.parent,origin['source_ref'])
+    before,after,volume=(described(result[key]) for key in ('before','after','volume'))
+    need(any(before['instance_id']==item['instance_id'] and before['config']==item['config'] for item in (original,ack)),
+         'recovery before version')
+    need(before['id']==original['id'] and before['name']==original['name'] and before['region']==original['region']
+         and before['state'] in ('created','stopped'), 'recovery inactive before identity')
+    parked=copy.deepcopy(before['config']);parked['guest']=copy.deepcopy(original['config']['guest'])
+    need(after['id']==before['id']==predecessor['machine_id'] and after['name']==original['name']
+         and after['region']==original['region'] and after['state']=='stopped' and after['config']==parked
+         and volume['id']==predecessor['volume_id'] and volume['attached_machine_id']==after['id']
+         and volume['state']=='created' and volume.get('encrypted') is True
+         and volume.get('name')==authority['intent']['volume_request']['name']
+         and volume.get('region')==original['region'] and type(volume.get('size_gb')) is int
+         and volume['size_gb']==authority['intent']['donor']['size_gb'], 'recovered parked identity')
+    need(not any(key.startswith(('cloudbench_source_consumer_','cloudbench_source_retiring')) for key in parked['metadata']),
+         'recovered source was published/retiring')
+    rows=verify_journal(result['journal'],predecessor['machine_id'],predecessor['volume_id'],())
+    own='/machines/'+predecessor['machine_id']
+    need(all(row['method']=='GET' and row['path'] in (own,'/volumes/'+predecessor['volume_id'])
+             or row['path']==own+'/lease' or row['method']=='POST' and row['path']==own for row in rows),
+         'recovery journal escaped parking-only scope')
+    updates=[row for row in rows if row['method']=='POST' and row['path']==own]
+    need(len(updates)==1 and updates[0]['body']==dict(config=parked,current_version=before['instance_id'],skip_launch=True)
+         and updates[0]['response']['config']==parked and updates[0]['response']['instance_id']==after['instance_id'],
+         'recovery original parking CAS wire')
+    reads=[row for row in rows if row['method']=='GET' and row['path']==own]
+    volumes=[row for row in rows if row['method']=='GET' and row['path']=='/volumes/'+predecessor['volume_id']]
+    need(reads and reads[0]['response']==before and reads[-1]['response']==after
+         and volumes and volumes[-1]['response']==volume, 'recovery original readback wire')
+    value=copy.deepcopy(authority);value.update(machine=after,volume=volume,original_creator=result['original_creator'])
+    return value
+
+
 def build_request(ownership, build, source_root, source_ref, guest_env_contract, protected_resources, output, transport=None):
     """Canonical mutation-free request producer from creator authority and explicit env expectations."""
-    creator = runpy.run_path(str(HERE / 'cloudbench-prepare-source-create.py'))
-    authority = creator['verify_created_source'](Path(ownership))
+    authority = resolve_bootstrap_ownership(Path(ownership))
     machine = authority['machine']; config = machine['config']
     root = Path(source_root).absolute()
     need(subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True, timeout=10).strip() == source_ref,
@@ -723,6 +913,20 @@ def build_request(ownership, build, source_root, source_ref, guest_env_contract,
 
 
 def main():
+    def interrupted(signum, _frame):
+        raise InterruptedError('preparation/recovery interrupted')
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, interrupted)
+    if len(sys.argv)>1 and sys.argv[1]=='recover-bootstrap':
+        parser=argparse.ArgumentParser(description='Repark only a proven accepted-CAS prestart failure; no task credit.')
+        parser.add_argument('--request',type=Path,required=True)
+        parser.add_argument('--failed-result',type=Path,required=True)
+        parser.add_argument('--output',type=Path,required=True)
+        args=parser.parse_args(sys.argv[2:]);os.umask(0o077)
+        try:recover_bootstrap(args.request,args.failed_result,args.output)
+        except BaseException as error:
+            print('private source recovery failed: '+type(error).__name__,file=sys.stderr);return 1
+        print(str(args.output/'result.json'));return 0
     if len(sys.argv) > 1 and sys.argv[1] == 'request':
         parser = argparse.ArgumentParser(description=build_request.__doc__)
         for name in ('ownership', 'build', 'source-root', 'guest-env-contract', 'protected-resources', 'output'):

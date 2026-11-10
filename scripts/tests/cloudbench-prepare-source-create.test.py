@@ -9,6 +9,7 @@ import os
 import runpy
 import re
 import signal
+import shutil
 import time
 from pathlib import Path
 import subprocess
@@ -16,6 +17,8 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / 'scripts/cloudbench-prepare-source-create.py'
@@ -261,6 +264,10 @@ class Boundary(unittest.TestCase):
         self.machine_reconcile_before_prepare = True
         self.test_real_creator_preparer_and_authenticated_successor_retirement()
 
+    def test_failed_prestart_recovery_fresh_prepare_and_authenticated_retirement(self):
+        self.recover_before_prepare = True
+        self.test_real_creator_preparer_and_authenticated_successor_retirement()
+
     def test_reconciled_machine_stdout_never_discloses_inventory_environment(self):
         self.make_ambiguous_machine()
         self.machines['33333333333333'] = dict(id='33333333333333', name='foreign',
@@ -346,6 +353,64 @@ class Boundary(unittest.TestCase):
         self.assertFalse((journal/'machine.created.json').exists())
         self.assertNotEqual(self.run_cli().returncode,0)
         self.assertEqual(len(self.writes()),2)
+
+    def test_recovered_retirement_checks_original_custody_before_successor_verifier(self):
+        """Creator trust boundary; recovery and successful-prepare verifiers are explicit doubles."""
+        self.assertEqual(self.run_cli().returncode, 0)
+        creator=runpy.run_path(str(CLI));journal=self.root/'journal'
+        intent=creator['read'](journal/'intent.json')
+        original=creator['verify_created_source'](journal/'result.json')
+        recovered=copy.deepcopy(original)
+        recovered['original_creator']=dict(path=str(journal/'result.json'),sha256=creator['raw_sha'](journal/'result.json'))
+        recovered['machine'].update(state='stopped',instance_id='recovered')
+        recovered['machine']['config']['image']='registry.fly.io/navi-whisper-lux-bench@sha256:'+'d'*64
+        recovered['volume']=copy.deepcopy(self.volumes['vol_owned'])
+        recovery_path=self.root/'recovered-bootstrap.json'
+        creator['save'](recovery_path,dict(schema='cloudbench-recovered-bootstrap-v1',qualified=False,credit_granted=False))
+        request_path=self.root/'new-request.json';result_path=self.root/'new-result.json';manifest_path=self.root/'new-manifest.json'
+        image='registry.fly.io/navi-whisper-lux-bench@sha256:'+'f'*64
+        request=dict(ownership=dict(path=str(recovery_path),sha256=creator['raw_sha'](recovery_path)),
+                     image_ref=image,source_ref='b'*40,node_fingerprint='a'*64,python_fingerprint='b'*64)
+        creator['save'](request_path,request)
+        after=copy.deepcopy(recovered['machine']);after['instance_id']='new-success';after['config']['image']=image
+        after_path=self.root/'new-after.json';creator['save'](after_path,after)
+        creator['save'](result_path,dict(after=dict(path=str(after_path),sha256=creator['raw_sha'](after_path))))
+        creator['save'](manifest_path,{})
+        verified=Mock(return_value=dict(owner_token=OWNER,machine_id='22222222222222',volume_id='vol_owned',instance_id='new-success'))
+        helper=dict(resolve_bootstrap_ownership=lambda path:copy.deepcopy(recovered),verify_prepared_source=verified,
+                    described=lambda descriptor:creator['read'](Path(descriptor['path'])))
+        actual=runpy.run_path
+        def load(path,*args,**kwargs):
+            if Path(path)==ROOT/'scripts/cloudbench-prepare-source.py':return helper
+            return actual(path,*args,**kwargs)
+        args=SimpleNamespace(prepared_request=request_path,prepared_result=result_path,prepared_manifest=manifest_path)
+        baseline=copy.deepcopy(recovered)
+        mutations=['original-path','original-sha','journal','intent','machine','volume','mount','owner','nonce','claim','shape','state','version']
+        before=len(self.writes())
+        with patch.object(runpy,'run_path',side_effect=load):
+            for mutation in mutations:
+                recovered.clear();recovered.update(copy.deepcopy(baseline))
+                if mutation=='original-path':recovered['original_creator']['path']=str(self.root/'foreign-result.json')
+                elif mutation=='original-sha':recovered['original_creator']['sha256']='0'*64
+                elif mutation=='journal':recovered['journal']=str(self.root/'foreign-journal')
+                elif mutation=='intent':recovered['intent']['nonce']='0'*32
+                elif mutation=='machine':recovered['machine']['id']=DONOR
+                elif mutation=='volume':recovered['volume']['id']=VOL
+                elif mutation=='mount':recovered['machine']['config']['mounts'][0]['volume']=VOL
+                elif mutation=='owner':recovered['machine']['config']['metadata']['cloudbench_source_owner']='f'*32
+                elif mutation=='nonce':recovered['machine']['config']['metadata']['cloudbench_source_create_nonce']='f'*32
+                elif mutation=='claim':recovered['machine']['config']['metadata']['cloudbench_source_consumer_'+'f'*32]='open'
+                elif mutation=='shape':recovered['machine']['config']['guest']['cpus']=4
+                elif mutation=='state':recovered['machine']['state']='started'
+                elif mutation=='version':recovered['machine']['instance_id']=''
+                with self.subTest(mutation=mutation),self.assertRaises(ValueError):
+                    creator['retirement_successor'](args,journal,intent)
+                verified.assert_not_called()
+                self.assertFalse((journal/'retirement.admission.json').exists())
+            recovered.clear();recovered.update(copy.deepcopy(baseline))
+            self.assertEqual(creator['retirement_successor'](args,journal,intent),after)
+            verified.assert_called_once()
+        self.assertEqual(len(self.writes()),before)
 
     def test_ready_native_get_shape_is_authoritative_and_sealed(self):
         self.machines[DONOR]['config']['env'] = {}
@@ -804,6 +869,12 @@ class Boundary(unittest.TestCase):
     def prepare_response(self, method, path, body):
         mid = '22222222222222'
         target = '/machines/' + mid
+        if method == 'GET' and path == target and getattr(self, 'stale_after_ack', False):
+            self.stale_reads += 1
+            # The first replacing predecessor triggers the old producer's
+            # immediate failure. Further exact predecessor reads let its old
+            # cleanup terminate without inventing a successful new-version park.
+            return 200, dict(copy.deepcopy(self.stale_original), state='replacing' if self.stale_reads == 1 else 'stopped')
         if path == target + '/lease':
             return (201, {'data': {'nonce': 'lease-owned'}}) if method == 'POST' else (200, {})
         if method == 'POST' and path == target:
@@ -811,6 +882,7 @@ class Boundary(unittest.TestCase):
             self.machines[mid]['instance_id'] = self.machines[mid]['instance_id'] + 'next'
             self.machines[mid]['state'] = 'stopped'
             self.machines[mid]['image_ref']['digest'] = body['config']['image'].rsplit('@', 1)[1]
+            if getattr(self, 'force_prestart_failure', False): self.stale_after_ack = True; self.stale_reads = 0
             return 200, self.machines[mid]
         if method == 'POST' and path in (target + '/start', target + '/stop'):
             self.machines[mid]['state'] = 'started' if path.endswith('/start') else 'stopped'
@@ -869,6 +941,49 @@ class Boundary(unittest.TestCase):
         private_write(request, self.preparation_request)
         output = self.root / 'prepared'
         env = dict(self.env, FLY_API_HOSTNAME=self.env['FLY_FLAPS_BASE_URL'])
+        originals = {}
+        if getattr(self, 'recover_before_prepare', False):
+            # Execute the exact old producer against a real HTTP accepted CAS /
+            # replacing predecessor readback. Preserve its genuine false result.
+            capsule=self.root/'old-producer';capsule.mkdir()
+            for path in (ROOT/'scripts').glob('*.py'):shutil.copy2(path,capsule/path.name)
+            old_source=subprocess.check_output(['git','-C',str(ROOT),'show',ref+':scripts/cloudbench-prepare-source.py'])
+            (capsule/'cloudbench-prepare-source.py').write_bytes(old_source)
+            old=runpy.run_path(str(capsule/'cloudbench-prepare-source.py'))
+            for member in old['DEPENDENCIES']:
+                (capsule/member).write_bytes(subprocess.check_output(['git','-C',str(ROOT),'show',ref+':scripts/'+member]))
+            self.stale_original=copy.deepcopy(self.machines['22222222222222'])
+            self.force_prestart_failure=True
+            before=len(self.calls)
+            failed=subprocess.run([sys.executable,str(capsule/'cloudbench-prepare-source.py'),
+                '--request',str(request),'--output',str(output)],env=env,capture_output=True,text=True,timeout=35)
+            self.assertNotEqual(failed.returncode,0)
+            old_failure=helper['load'](output/'result.json')
+            self.assertIs(old_failure['qualified'],False)
+            self.assertFalse(any(method=='POST' and path.endswith('/start') for method,path,_ in self.calls[before:]))
+            self.assertEqual(self.machines['22222222222222']['config']['guest']['cpus'],4)
+            self.assertIsNone(self.lease_nonce)
+            self.force_prestart_failure=False;self.stale_after_ack=False
+            originals={path:path.read_bytes() for base in (self.root/'journal',output) for path in base.rglob('*') if path.is_file()}
+            originals[request]=request.read_bytes()
+            recovery=self.root/'recovered'
+            result=subprocess.run([sys.executable,str(ROOT/'scripts/cloudbench-prepare-source.py'),
+                'recover-bootstrap','--request',str(request),'--failed-result',str(output/'result.json'),
+                '--output',str(recovery)],env=env,capture_output=True,text=True,timeout=35)
+            self.assertEqual(result.returncode,0,result.stderr)
+            authority=helper['resolve_bootstrap_ownership'](recovery/'result.json')
+            self.assertEqual(authority['original_creator'],helper['descriptor'](self.root/'journal/result.json'))
+            recovered=helper['load'](recovery/'result.json')
+            self.assertIs(recovered['qualified'],False);self.assertIs(recovered['credit_granted'],False)
+            self.assertEqual(authority['machine']['state'],'stopped')
+            self.assertEqual(authority['machine']['config']['guest']['cpus'],1)
+            self.preparation_request=copy.deepcopy(self.preparation_request)
+            self.preparation_request.update(nonce='d'*32,ownership=helper['descriptor'](recovery/'result.json'),
+                native=dict(machine_id=authority['machine']['id'],volume_id=authority['volume']['id'],
+                    instance_id=authority['machine']['instance_id'],config_sha256=helper['sha'](helper['canonical'](authority['machine']['config'])),
+                    env_sha256=helper['sha'](helper['canonical'](authority['machine']['config'].get('env') or {}))))
+            request=self.root/'fresh-prepare-request.json';private_write(request,self.preparation_request)
+            output=self.root/'fresh-prepared'
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/cloudbench-prepare-source.py'),
                                 '--request', str(request), '--output', str(output)],
                                 env=env, capture_output=True, text=True, timeout=35)
@@ -876,10 +991,18 @@ class Boundary(unittest.TestCase):
         cleanup_args = ['cleanup', *self.args[1:], '--prepared-request', str(request),
                         '--prepared-result', str(output / 'result.json'),
                         '--prepared-manifest', str(output / 'source-manifest.json')]
+        if getattr(self, 'recover_before_prepare', False):
+            claim='cloudbench_source_consumer_'+'f'*32
+            self.machines['22222222222222']['config']['metadata'][claim]='durable-open-claim'
+            before=len([call for call in self.calls if call[0]=='DELETE' and not call[1].endswith('/lease')])
+            refused=self.run_cli(cleanup_args);self.assertNotEqual(refused.returncode,0)
+            self.assertEqual(len([call for call in self.calls if call[0]=='DELETE' and not call[1].endswith('/lease')]),before)
+            del self.machines['22222222222222']['config']['metadata'][claim]
         result = self.run_cli(cleanup_args)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(set(self.machines), {DONOR})
         self.assertEqual(set(self.volumes), {VOL})
+        for path,raw in originals.items():self.assertEqual(path.read_bytes(),raw,str(path))
 
 
 if __name__ == '__main__': unittest.main()
