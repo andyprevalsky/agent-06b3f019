@@ -101,6 +101,23 @@ export const CODE_AGENT_LIST_MAX_ROOTS = 50;
 /** Newest code agents listed per requested root (so at most 50 x 50 rows). */
 export const CODE_AGENT_LIST_PER_ROOT = 50;
 
+/** Rename one task atomically with its owning user's scope; never alter the CLI session. */
+export async function renameCodeAgentForUser(
+  userId: string,
+  taskId: string,
+  title: string
+): Promise<{ code_agent_id: string; title: string } | null> {
+  const rows = await prisma.$queryRaw<Array<{ code_agent_id: string; title: string }>>`
+    UPDATE "ClaudeCodeSession" c
+    SET "taskName" = ${title}
+    FROM "Agent" a
+    WHERE c.id = ${taskId} AND a.id = c."agentId"
+      AND a."userId" = ${userId} AND a."deletedAt" IS NULL
+    RETURNING c.id AS code_agent_id, c."taskName" AS title
+  `;
+  return rows[0] ?? null;
+}
+
 export interface RootCodeAgentRow extends GraphCodeSessionRow {
   rootAgentId: string;
   codeSessionId: string | null;

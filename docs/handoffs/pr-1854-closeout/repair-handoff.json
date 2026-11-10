@@ -1,0 +1,16 @@
+{
+  "originating_pr": 1854,
+  "originating_merge": "8263a39d8e847f105765479fda6a9c84d7229de2",
+  "occurrence": "b2be041030b840a68535a65d2ee57560",
+  "test": "test-mass-agent-run-0",
+  "native_result": "FLAKY: first native FAILED, single automatic retry PASS",
+  "attribution": "NOT_INTRODUCED",
+  "scope": "source/input attribution only; original historical lock/socket cause unproven",
+  "repair": "https://boxes.dev/thread/thr_640c279c6b994dee83eed29581e18e5f",
+  "separate_devbox": "092d6a3a-cbc0-4f56-a08f-80fc75ea38b6",
+  "folder": "Bugs",
+  "effective_settings": "Codex gpt-6.1-sol / high / standard, existing matched active repair goal",
+  "delivery": "Postmerge full goal and complete private evidence delivered; native pending resolved and complete guard passed. Repair completion not required by originating deploy.",
+  "no_duplicate_repair_created": true,
+  "later_native_result": "Final fb87 smoke mass QUARANTINED_PASS; no claim the inherited issue is fixed"
+}

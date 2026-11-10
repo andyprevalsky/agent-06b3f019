@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -145,8 +146,45 @@ exit "$status"
 
 class AdapterPassesGateDeadline(unittest.TestCase):
     def setUp(self):
+        # This disposable fixture owns its request; the parent deploy owns its own.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         import deploy_test_cloud
         self.adapter = deploy_test_cloud
+
+
+    def test_outer_request_does_not_rebind_fixture_custody(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            request.parent.mkdir(parents=True)
+            request.write_text('{}')
+            env = dict(os.environ, DEPLOY_GATE_REQUEST=str(request))
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
+                'AdapterPassesGateDeadline.test_execute_hands_the_deadline_to_the_native_cli'], env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Ran 1 test', result.stdout)
+
+    def test_fixture_restores_request_and_native_owner_guard(self):
+        import deploy_test_historical_custody as custody
+        before = dict(os.environ)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(request)}):
+                fixture = type(self)('test_execute_hands_the_deadline_to_the_native_cli')
+                try:
+                    fixture.setUp()
+                    self.assertFalse('DEPLOY_GATE_REQUEST' in os.environ)
+                finally:
+                    fixture.doCleanups()
+                self.assertEqual(os.environ['DEPLOY_GATE_REQUEST'], str(request))
+                for value in ({}, {'custody_state': str(root / '.context/foreign/cycle.json')}):
+                    with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                        custody.admission(value, root)
+        self.assertEqual(dict(os.environ), before)
 
     def test_gate_deadline_is_an_explicit_admission_input(self):
         from deploy_gates import GATE_DEADLINE_SECONDS
@@ -159,7 +197,10 @@ class AdapterPassesGateDeadline(unittest.TestCase):
 
     def test_execute_hands_the_deadline_to_the_native_cli(self):
         code = ADAPTER.read_text()
-        function = next(n for n in ast.parse(code).body if isinstance(n, ast.FunctionDef) and n.name == "execute")
+        # execute() and the campaign helpers it calls (launch, rerun_candidates, emit, RERUN_OUTCOMES).
+        function = [n for n in ast.parse(code).body
+                    if isinstance(n, ast.FunctionDef) and n.name in {"execute", "launch", "rerun_candidates", "emit"}
+                    or isinstance(n, ast.Assign) and any(getattr(t, "id", None) == "RERUN_OUTCOMES" for t in n.targets)]
         calls = []
         requested = {"checks": ["browser-smoke"], "skips": {}, "token": "owned",
                      "source": {"head": "a" * 40}, "gate": "smoke"}
@@ -170,10 +211,10 @@ class AdapterPassesGateDeadline(unittest.TestCase):
                 cancellation_handlers=contextlib.nullcontext, write=lambda *_a: None,
                 shared_canary_env=lambda _r: {}, capacity_admission_env=self.adapter.capacity_admission_env,
                 # The adapter refuses an unpushed source first (9b9a4771b0); this fixture's head is pushed.
-                origin_fetchable=lambda *_a: True,
+                origin_fetchable=lambda *_a: True, catalog_quarantines=lambda _r, _c: {}, Path=Path,
                 run_command=lambda *a, **k: (calls.append((a, k)) or (1, False, False, False)),
                 collect_campaign=lambda *_a: ({"browser-smoke": "UNVERIFIED"}, {}, False, "fixture"))
-            exec(compile(ast.Module(body=[function], type_ignores=[]), str(ADAPTER), "exec"), namespace)
+            exec(compile(ast.Module(body=function, type_ignores=[]), str(ADAPTER), "exec"), namespace)
             before = time.time()
             namespace["execute"](requested, Path(base))
         self.assertEqual(len(calls), 1)

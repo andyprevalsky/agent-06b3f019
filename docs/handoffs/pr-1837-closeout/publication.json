@@ -1,0 +1,36 @@
+{
+  "format": "PR1837_SOURCE_BOUND_CLOSEOUT_PUBLICATION_V1",
+  "application_pr": 1837,
+  "application_merge": "b7c77bdde14badd0f957e86375f177f6ef686fc3",
+  "reviewed_code_head": "b7a69ec4ef61d5612ea3534e2e00c7d7cfc9d50c",
+  "physical_native_execution_source": "06b65bc6c7339277a76719a5a2560dccf293db9e",
+  "physical_native_checks": "255/255 PASS, native0 complete/cleanuptrue; units/FPS/coverage threshold/teardown PASS",
+  "reviewed_code_qualification": "12 heavy gates under owning identical-input/full-contract protocol plus four fresh quick gates; native source unchanged in original receipts",
+  "application_production": {
+    "status": "PASS",
+    "exact_merge": "b7c77bdde14badd0f957e86375f177f6ef686fc3",
+    "native_exit": 0,
+    "terminal_proof": "proofs/actual-production-pass.json"
+  },
+  "main_private_cut": {
+    "receipt": "receipts/final-closeout.json",
+    "proof": "proofs/final-forensic-preservation.json",
+    "status": "VERIFIED"
+  },
+  "finite_later_private_records": {
+    "receipt": "receipts/receipt-tail.json",
+    "proof": "proofs/finite-receipt-tail.json",
+    "status": "VERIFIED"
+  },
+  "additional_failures": "proofs/postmerge-additional-failure-routing.json",
+  "scope": "Public-safe records plus broader CodeRabbit closeout review coverage; no runtime changes",
+  "source_binding": "Application release, original native execution, reviewed qualification and later records-only merge are separate facts. No older PASS is relabeled for a different source.",
+  "self_reference_boundary": {
+    "records_review_and_merge": "Actual source-bound review and merge events are durable in this PR discussion and linked from application PR1837. This snapshot cannot contain its own later merge event.",
+    "deletion_readiness": "The owning committed deletion-readiness.json and post-merge native CLI exit0/clean-record evidence in the PR discussion are both required. JSON ready:true alone is not CLI completion.",
+    "final_card": "The published deploy-summary-v2 visual uses the actual latest related workspace merge and original run clock.",
+    "later_metadata": "Controlled nonsecret validation/transfer/review/merge/scorecard metadata has finite durable remoteGit/GitHub/visual closure; no infinite future-context archival claim."
+  },
+  "deployed_pr_handoff_comment": "https://github.com/Rose-Ai-Labs/rose/pull/1837#issuecomment-6729381002",
+  "financial_duties": "Two separate historical sandbox obligations4396c each and historical LIVE100c remain execution/financialUNVERIFIED; no refund/release/retry/mint credit or remint."
+}

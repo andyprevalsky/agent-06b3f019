@@ -100,21 +100,33 @@ function releaseClone(fx: Fixture): void {
   writeFileSync(fx.release, '');
 }
 
-function startServer(fx: Fixture, port: number): ChildProcess {
-  return spawn('node', [wsServerPath], {
-    cwd: fx.home,
-    detached: true,
-    env: {
-      PATH: `${fx.binDir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
-      HOME: fx.home,
-      PORT: String(port),
-      CLAUDE_CODE_GOAL: 'Report the repo status',
-      CLAUDE_CODE_MODEL: 'stub',
-      ANTHROPIC_API_KEY: 'stub-key',
-      GITHUB_REPO_URL: 'https://github.com/example/startup-fixture',
-    },
-    stdio: 'ignore',
-  });
+function startServer(fx: Fixture, port: number, launchDelayMs = 0): ChildProcess {
+  return spawn(
+    launchDelayMs > 0 ? 'bash' : 'node',
+    launchDelayMs > 0
+      ? [
+          '-c',
+          'sleep "$1"; exec node "$2"',
+          'ws-startup',
+          String(launchDelayMs / 1000),
+          wsServerPath,
+        ]
+      : [wsServerPath],
+    {
+      cwd: fx.home,
+      detached: true,
+      env: {
+        PATH: `${fx.binDir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+        HOME: fx.home,
+        PORT: String(port),
+        CLAUDE_CODE_GOAL: 'Report the repo status',
+        CLAUDE_CODE_MODEL: 'stub',
+        ANTHROPIC_API_KEY: 'stub-key',
+        GITHUB_REPO_URL: 'https://github.com/example/startup-fixture',
+      },
+      stdio: 'ignore',
+    }
+  );
 }
 
 function stopServer(child: ChildProcess): void {
@@ -419,9 +431,17 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
     // A server that is up but still cloning outlives timeoutMs, and is bounded by the startup budget.
     const slow = fixture(ctx.fixtureDir);
     const slowPort = await freePort();
-    const slowChild = startServer(slow, slowPort);
+    // Reproduce a loaded host where Node has not bound within the dead-server budget.
+    const slowChild = startServer(slow, slowPort, 1_000);
     try {
-      const budgeted = await waitForSandboxWsServer(hostSandbox(slow.home), {
+      const slowSandbox = hostSandbox(slow.home);
+      // Measure the live-clone budget only after the fixture is actually cloning.
+      // Its release file stays absent, so the clone cannot finish during this check.
+      await until(
+        'the slow server to report cloning',
+        async () => (await probeWsServer(slowSandbox, slowPort)).state === 'cloning'
+      );
+      const budgeted = await waitForSandboxWsServer(slowSandbox, {
         port: slowPort,
         timeoutMs: 400,
         pollMs: 50,

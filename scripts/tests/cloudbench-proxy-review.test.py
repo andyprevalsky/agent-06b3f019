@@ -22,12 +22,75 @@ clock=0; echo 0 > "$D/clock"
 date() { case "$*" in *+%s*) cat "$D/clock";; *) echo replay;; esac; }
 '''+body
    return subprocess.run(['bash','-c',script,'replay',str(ROOT/'scripts/lib/cloudbench-env.sh'),temp],env=self.native_fixture(temp,flyctl),capture_output=True,text=True,timeout=10)
- def test_collision_reported_after_initial_scan_returns_rotation(self):
+ def late_collision(self,before_call='',delay='.04'):
   r=self.replay('''sleep() { local n; n=$(cat "$D/clock"); echo $((n+1)) > "$D/clock"; case "$1" in 0.5) command sleep .01;; *) command sleep .10;; esac; }
+mkfifo "$D/collision-release"
+exec {COLLISION_FD}<>"$D/collision-release"
+collision_cleanup() {
+ local primary=$? child child_status
+ trap - EXIT
+ # Capture this private replay shell's own job identities in the parent shell.
+ jobs -p > "$D/owned-jobs"
+ printf 'release\n' >&"$COLLISION_FD"
+ while IFS= read -r child; do
+  child_status=0
+  wait "$child" 2>/dev/null || child_status=$?
+  printf 'collision cleanup joined=%s status=%s\n' "$child" "$child_status" >&2
+ done < "$D/owned-jobs"
+ exec {COLLISION_FD}>&-
+ printf 'collision cleanup complete primary=%s\n' "$primary" >&2
+ exit "$primary"
+}
+trap collision_cleanup EXIT
+tail() {
+ local status=0 arg is_proxy_log=0
+ for arg in "$@"; do [ "$arg" != "$D/proxy.log" ] || is_proxy_log=1; done
+ command tail "$@" || status=$?
+ if [ "$is_proxy_log" = 1 ] && [ "$status" = 0 ]; then printf 'scan\n' >> "$D/events"; fi
+ return "$status"
+}
+flyctl() { command sleep .04; IFS= read -r release <&"$COLLISION_FD"; echo 'listen tcp: bind: address already in use'; printf 'publication\n' >> "$D/events"; return 1; }
 curl() { return 0; }
+eval "$(declare -f cloudbench_charge_bounded_step | sed '1s/cloudbench_charge_bounded_step/original_charge/')"
+cloudbench_charge_bounded_step() {
+ # This original phase follows the initial log scan and post-probe settle.
+ # Publish then join this exact fake child before the unchanged post-reap scan.
+ case "$6" in 'backend proxy attempt '*)
+  case "$6" in *retire|*wait) ;; *)
+   PHASE_CHILD="$pid"
+   printf 'release\n' >> "$D/events"
+   printf 'release\n' >&"$COLLISION_FD"
+   wait "$pid" 2>/dev/null || true
+   printf 'join\n' >> "$D/events"
+   touch "$D/released-after-first-scan"
+  ;; esac
+ ;; esac
+ original_charge "$@"
+}
+'''+before_call+'''
 rc=0; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log" result backend 6 || rc=$?
+[ -f "$D/released-after-first-scan" ] || { echo 'late collision phase was not exercised'; exit 92; }
+[ "$(head -n 4 "$D/events")" = "$(printf 'scan\nrelease\npublication\njoin')" ] || { cat "$D/events"; echo 'late collision event order violated'; exit 93; }
 [ "$rc" = 98 ] || { cat "$D/proxy.log"; echo "expected rotation98 got$rc"; exit 1; }
-''',flyctl="sleep .04; echo 'listen tcp: bind: address already in use'; exit 1");self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+''',flyctl="command sleep "+delay+'; IFS= read -r release < "$D/collision-release"; echo "listen tcp: bind: address already in use"; printf "publication\\n" >> "$D/events"; exit 1')
+  return r
+ def test_collision_reported_after_initial_scan_returns_rotation(self):
+  r=self.late_collision();self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+ def test_missing_phase_releases_and_joins_exact_child(self):
+  r=self.late_collision('''cloudbench_start_data_plane_proxy() {
+ flyctl proxy >> "$D/proxy.log" 2>&1 &
+ return 0
+}
+''')
+  self.assertEqual(r.returncode,92,r.stdout+r.stderr)
+  self.assertIn('late collision phase was not exercised',r.stdout)
+  self.assertIn('collision cleanup joined=',r.stderr)
+  self.assertIn('status=1',r.stderr)
+  self.assertIn('collision cleanup complete primary=92',r.stderr)
+ def test_delayed_collision_is_joined_after_initial_scan(self):
+  r=self.late_collision(delay='.39')
+  self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
  def test_last_budget_step_stall_gets_one_fresh_observation(self):
   r=self.replay('''sleep() { local n increment=1; n=$(cat "$D/clock"); [ "$1" != 3 ] || increment=2; echo $((n+increment)) > "$D/clock"; command sleep .01; }
 curl() {

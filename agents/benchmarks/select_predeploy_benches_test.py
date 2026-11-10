@@ -53,7 +53,7 @@ def _write_attempts(
 
 
 def _smoke_names(catalog: Path) -> set[str]:
-    return {task["name"] for task in json.loads(catalog.read_text()) if "smoke" in (task.get("tags") or [])}
+    return {task["name"] for task in json.loads(catalog.read_text()) if "smoke" in (task.get("tags") or []) and not task.get("deploy_quarantine")}
 
 
 def test_default_cap_and_pass_streak() -> None:
@@ -170,7 +170,8 @@ def test_smoke_always_selected_canaries_need_last_three_passes() -> None:
     smoke = _smoke_names(CATALOG)
     assert selection.selected
     # Existing smoke always runs — even without a 3-pass streak.
-    assert "test-mass-agent-run-0" in selection.selected
+    assert "test-mass-agent-run-0" not in selection.selected
+    assert "test-mass-agent-run-0" in selection.deploy_quarantined
     assert "browser-biometrics-webdecoy" in selection.selected
     assert "test-mass-agent-run-0" not in selection.skipped_history
     assert "browser-biometrics-webdecoy" not in selection.skipped_history
@@ -973,9 +974,9 @@ def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    combined = result.stdout + result.stderr
-    assert "HARD CAP HIT" in combined or "HARD CAP" in combined
-    assert "DROPPED" in combined
+    for stream in (result.stdout, result.stderr):
+        assert "HARD CAP HIT" in stream or "HARD CAP" in stream
+        assert "DROPPED" in stream
 
 
 def test_cli_cap_clamps_above_default(tmp_path: Path) -> None:
@@ -1082,3 +1083,145 @@ def test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixt
             "agent-payment-abandonment|agent-payment-setup-resume)"
         )
         assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver[case : driver.index(";;", case)]
+
+
+@pytest.mark.parametrize("output_format", ["names", "json"])
+@pytest.mark.parametrize("drop_extra", [False, True])
+def test_cli_machine_formats_keep_cap_warning_on_stderr(
+    tmp_path: Path, output_format: str, drop_extra: bool,
+) -> None:
+    """A full selection remains machine-readable, with the complete warning on stderr."""
+    catalog, attempts = tmp_path / "tasks.json", tmp_path / "attempts.jsonl"
+    tasks = [
+        {"name": "smoke", "tags": ["smoke"]},
+        {"name": "payment", "tags": ["payment"], "deploy_canary": True},
+    ]
+    if drop_extra:
+        tasks.append({"name": "payment-extra", "tags": ["payment"]})
+    catalog.write_text(json.dumps(tasks))
+    _write_attempts(attempts, [(task["name"], True) for task in tasks for _ in range(3)])
+    result = subprocess.run(
+        [sys.executable, str(SELECTOR), "--catalog", str(catalog),
+         "--attempts-file", str(attempts), "--surface", "cloud", "--cap", "2",
+         "--changed-file", "back-end/src/domains/agentcard/service.ts",
+         "--repo-root", str(ROOT), "--format", output_format],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    if output_format == "names":
+        assert result.stdout.splitlines() == ["smoke", "payment"]
+    else:
+        payload = json.loads(result.stdout)
+        assert payload["selected"] == ["smoke", "payment"]
+        assert payload["cap"] == 2 and payload["total"] == 2
+        assert payload["cap_hit"] is drop_extra
+        assert payload["dropped"] == (["payment-extra"] if drop_extra else [])
+    warning = "PREDEPLOY BENCH HARD CAP HIT" if drop_extra else "PREDEPLOY BENCH COUNT AT HARD CAP"
+    assert warning in result.stderr
+    if drop_extra:
+        assert "payment-extra" in result.stderr and "DROPPED" in result.stderr
+
+
+@pytest.mark.parametrize("output_format", ["names", "json"])
+def test_machine_readable_cap_output_keeps_warnings_on_stderr(tmp_path: Path, output_format: str) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    tasks = [{"name": f"smoke-{i}", "tags": ["smoke"], "timeout_seconds": 60,
+              "deploy_category": "harness"} for i in range(DEFAULT_CAP)]
+    catalog.write_text(json.dumps(tasks))
+    attempts.write_text("")
+    result = subprocess.run([sys.executable, str(SELECTOR), "--catalog", str(catalog),
+        "--attempts-file", str(attempts), "--format", output_format, "--cap", str(DEFAULT_CAP),
+        "--repo-root", str(tmp_path)], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    selected = json.loads(result.stdout)["selected"] if output_format == "json" else result.stdout.splitlines()
+    assert set(selected) == {task["name"] for task in tasks}
+    assert len(selected) == DEFAULT_CAP
+    assert "HARD CAP" in result.stderr
+
+
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+@pytest.mark.parametrize("changed", [["README.md"], ["agents/benchmarks/run_benchmark.py", "agents/worker.py", "back-end/src/server.ts"]])
+def test_mass_deploy_quarantine_cannot_reenter_through_floor_or_paths(tmp_path, surface, changed):
+    from .select_predeploy_benches import load_tasks, _eligible
+
+    attempts = tmp_path / "attempts.jsonl"
+    _write_attempts(attempts, [("test-mass-agent-run-0", True)] * 5)
+    selection = select_predeploy_benches(
+        catalog=CATALOG, changed_files=changed, surface=surface, cap=10000,
+        repo_root=ROOT, attempts_file=attempts, pass_streak=1,
+    )
+    assert "test-mass-agent-run-0" not in selection.selected
+    assert "test-mass-agent-run-0" not in selection.dropped
+    assert "Deploy quarantine (not run): test-mass-agent-run-0" in format_report(selection)
+    task = next(t for t in load_tasks(CATALOG) if t.name == "test-mass-agent-run-0")
+    assert not _eligible(task, surface)
+    # The executable task, smoke tag, prompt and evaluators remain in the catalog.
+    assert task.is_smoke and task.eligible_status
+    from .benchmark_tasks import get_task_by_name
+    assert get_task_by_name(task.name).name == task.name
+
+
+def test_deploy_quarantine_does_not_disable_ordinary_failure_quarantine(tmp_path):
+    catalog = tmp_path / "tasks.json"
+    catalog.write_text(json.dumps([
+        {"name": "disabled", "tags": ["smoke"], "deploy_quarantine": "user instruction"},
+        {"name": "still-run", "tags": ["smoke"], "quarantine": {"since": "2026-11-10", "repair": "issue", "error": "flaky", "evidence": "receipt"}},
+    ]))
+    selection = select_predeploy_benches(catalog=catalog, changed_files=[], repo_root=ROOT)
+    assert selection.selected == ["still-run"]
+    assert selection.deploy_quarantined == {"disabled": "user instruction"}
+
+
+def test_stale_cloud_deploy_plan_cannot_admit_quarantined_mass(tmp_path, monkeypatch):
+    # A saved pre-quarantine plan must refuse before network or native admission.
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    import deploy_test_cloud as cloud
+    from unittest.mock import Mock
+    catalog = tmp_path / "agents/benchmarks/tasks.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_bytes(CATALOG.read_bytes())
+    source = {"head": "frozen"}
+    monkeypatch.setattr(cloud, "source", lambda root: source)
+    fetch = Mock(side_effect=AssertionError("must refuse before fetching or admission"))
+    launch = Mock(side_effect=AssertionError("must never launch the quarantined task"))
+    monkeypatch.setattr(cloud, "origin_fetchable", fetch)
+    monkeypatch.setattr(cloud, "launch", launch)
+    with pytest.raises(cloud.SourceRefusal, match="regenerate selection: test-mass-agent-run-0"):
+        cloud.execute({"checks": ["test-mass-agent-run-0"], "token": "fixture", "source": source}, tmp_path)
+    fetch.assert_not_called()
+    launch.assert_not_called()
+
+
+def test_refresh_omits_only_explicit_deploy_quarantines(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    import deploy_test_quarantine as quarantine
+    from copy import deepcopy
+    catalog = tmp_path / "agents/benchmarks/tasks.json"
+    catalog.parent.mkdir(parents=True)
+    rows = [
+        {"name": "mass", "deploy_quarantine": "Explicit user exclusion"},
+        {"name": "ordinary", "quarantine": {"error": "Still runs"}},
+        {"name": "peer"},
+    ]
+    catalog.write_text(json.dumps(rows))
+    before = {"category": "smoke", "native_cloud": True, "checks": ["mass", "ordinary", "peer"]}
+    original = deepcopy(before)
+    after = {**before, "checks": ["ordinary", "peer"]}
+    assert quarantine.deploy_selection_omissions(tmp_path, before, after) == {"mass": "Explicit user exclusion"}
+    assert before == original
+    for checks in (["peer"], ["mass", "peer"], ["ordinary"]):
+        with pytest.raises(ValueError):
+            quarantine.deploy_selection_omissions(tmp_path, before, {**after, "checks": checks})
+    for bad in (False, 1, "", {}, None):
+        rows[0]["deploy_quarantine"] = bad
+        catalog.write_text(json.dumps(rows))
+        with pytest.raises(ValueError):
+            quarantine.deploy_selection_omissions(tmp_path, before, after)
+    rows[0]["deploy_quarantine"] = "Explicit user exclusion"
+    catalog.write_text(json.dumps(rows + [rows[0]]))
+    with pytest.raises(ValueError):
+        quarantine.deploy_selection_omissions(tmp_path, before, after)
+    catalog.write_text(json.dumps(rows))
+    with pytest.raises(ValueError):
+        quarantine.deploy_selection_omissions(tmp_path, {**before, "category": "backend"}, after)

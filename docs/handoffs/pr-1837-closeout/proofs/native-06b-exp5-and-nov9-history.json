@@ -1,0 +1,65 @@
+{
+  "experiment": 5,
+  "physical_native_source": {
+    "head": "06b65bc6c7339277a76719a5a2560dccf293db9e",
+    "digest": "83e8e46db6843f154be93497d347e6324a594e644363002231e2384b4fa5e91d"
+  },
+  "native_exit": 0,
+  "passed": 11,
+  "scheduled": 11,
+  "complete": true,
+  "cleanup_complete": true,
+  "original_clocks": {
+    "started_at": "2026-11-08T23:27:56.243356+00:00",
+    "finished_at": "2026-11-08T23:55:43.927579+00:00",
+    "wall_clock_seconds": 1667.628,
+    "e2e_started_at_epoch": 1794180476.2294514,
+    "e2e_wall_clock_seconds": 1667.698,
+    "e2e_timeout_seconds": null,
+    "e2e_timeout_exceeded": false
+  },
+  "closure": {
+    "fleets_verified": 12,
+    "primary_fleets": 11,
+    "nested_preflight_fleets": 1,
+    "fresh_resource_rows": 14,
+    "retired_hub_owners": 9,
+    "all_hub_owners_retired": true,
+    "unchanged_native_guard": "scripts/deploy_test_historical_custody.py:native_closure",
+    "proof_sha256": "d7a35be2ddb150ef48f3429bc06684523a412cd5cabb07830be7bdb67fea5c09"
+  },
+  "native_monitor_receipt": {
+    "sha256": "442900ddadd22f89de5a117884aba6821859716447dbc6487588b9cdc84a95a0",
+    "bytes": 53626
+  },
+  "authorized_nov9_history": {
+    "status": "COMPLETE_AUTHORIZED_APPEND_VERIFIED_PUBLISHED",
+    "actual_deltas": {
+      "attempt_rows": 11,
+      "duration_rows": 3,
+      "span_rows": 13533
+    },
+    "cached_duration_skips": 8,
+    "exactly11_unique_native_runs": true,
+    "exact_native_status_time_cost_cache_join": true,
+    "exact_native_span_ownership_join": true,
+    "old232_ledger_prefixes_unchanged": true,
+    "old353_monitor_files_unchanged": true,
+    "native_source_runtime_hashes_unchanged": true,
+    "original_nov8_proposal_unchanged": true,
+    "api": "BenchmarkRun.load/_record_history only",
+    "native_save_upload_rewrite": false,
+    "new_benchmark_or_observer_restart": false,
+    "final_packet": {
+      "sha256": "6e735ce8d714ca004a980fb55ce7d9faf590b55c5c881e0135b397fc1d0c05c7",
+      "bytes": 2009
+    },
+    "verification": {
+      "sha256": "175b8d8e0253e3d277092282fadbcb17fff119e38a94816e55837af7d9d6d592",
+      "bytes": 1980
+    }
+  },
+  "preserved_earlier_exp4_gap": "Missed execution cards during harness usage-limit interruption remain historical; no backfilled contemporaneous claim.",
+  "financial_and_execution_credit_for_omissions": false,
+  "limits": "Distinct from prior EXP4 12637 spans; no native result relabeled as b7 or production. No current provider-state/savings inference."
+}

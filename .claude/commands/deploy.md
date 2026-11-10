@@ -55,6 +55,19 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - An explicitly elected legacy AgentCard gate stays SKIPPED, never PASS or settled funds, across integration; the current CLI's ordinary smoke selection remains unchanged. Preserve historical no-retry custody rather than minting replacement cards.
 - Prepared worker bindings, temp-directory corrections and backend coverage collection are explicit guarded runner operations, not permission to mutate running workers or the cycle during source integration.
 
+### Mass-agent deploy quarantine
+
+`test-mass-agent-run-0` is indefinitely excluded from every deploy by its
+`deploy_quarantine` catalog marker (explicit user instruction, 2026-11-10).
+Both local and cloud deploy selection honor this marker before the smoke floor,
+path triggers and history eligibility. Do not add it back through a custom deploy
+selection or require cache repairs for it. The test remains available for explicit
+manual benchmark runs; historical failures remain failures and exclusion grants
+no PASS credit. A source refresh records catalog-approved omissions without deleting
+prior attempts; every other previously selected check remains required.
+Other required deploy checks remain enabled. Removing this
+quarantine requires an explicit user instruction.
+
 ### Execution
 
 - Keep going until **Done** or a **Stopping condition**; a blocking result is work to resolve, not a reason to pause.
@@ -69,6 +82,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Never merge an unwaived blocking failure, and never invent a PASS.
 - A skip, waiver, exception or override is never PASS; keep the native result visible.
 - An override must name the gate explicitly; never infer one, never re-confirm it, keep it narrow, and list its risk in the PR.
+- Apply a user-elected harness override by exporting `DEPLOY_GATE_OVERRIDES=<gate>` in the one environment that runs `gates` and `merge`; Blacksmith gates receive it through their request.
 - On any stop, run `scripts/deploy finish --outcome blocked` before ending the turn.
 
 ### Approvals
@@ -121,6 +135,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Keep a per-step test report (step, status, summary) and put it in the commit message and PR body.
 - The PR body lists every override with its risk and the user's approval, every `GROUNDED` line, and "merged unreviewed" after a quota skip.
 - Never push while a review cycle is open; batch every review and gate fix and push once with `review-next`.
+- Narrow exception: after `deploy_review_cycle.py retarget-unexecuted` proves that the sole approved fifth slot never executed and atomically preserves its old entry/evidence, publish that slot's exact retargeted HEAD and request the already-authorized single full review. Keep the same open slot; do not start another cycle, infer a review result, or repeat the retarget. Delivered reviews are never eligible.
 - Never push an unreviewed commit before merge.
 - Move the related `docs/plans/active/` plan to `docs/plans/completed/` in the stabilization batch before the final review cycle.
 
@@ -175,10 +190,22 @@ Never skip for an unexplained failure, an auth failure our own configuration cau
 8. Import the attributions: `python3 scripts/deploy_test_cycle.py triage --input report.json`.
 9. After a fix: `focus --input focused.json` then `run` (failing tests plus regressions), then the full failed gates, then every selected gate on the final source.
 10. A failure in the final sweep goes back to step 2; a focused pass is never a deploy pass.
-11. Never rerun blind: the staged runner requests `/RCA` on the first failure of every round, so each rerun follows a repro, a fix and its regression.
+11. Runners rerun a failed unit once on the same source (FLAKY if it passes, FAIL if not); never rerun anything else blind: each further rerun follows a repro, a fix and its regression.
 12. After merge, dispatch each NOT_INTRODUCED packet as a `/goal` on a new devbox in the Bugs folder at high effort and standard speed.
 
 Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.md`.
+
+### Quarantined and flaky tests
+
+- `QUARANTINED_FAIL` / `QUARANTINED_PASS`: the test carries a quarantine marker in its own definition (`@quarantine(since=, repair=, error=, evidence=)` from `scripts/lib/test_quarantine.py`, `quarantine(meta, fn)` in TypeScript). It ran; its failure never blocks and is the only accepted non-blocking test failure.
+- `FLAKY` (`TEST_FLAKY ... attribution=REQUIRED`): a unit failed and passed its one rerun. The gate passes, the cycle opens an `/RCA` request, and `scripts/deploy merge` refuses until its attribution is recorded with `python3 scripts/deploy_test_cycle.py attribute-flaky --occurrence <id> --input <attribution.json> --plan <plan> --state-dir <dir>`:
+  - INTRODUCED: fix it in this deploy, no marker: `{"attribution": "INTRODUCED", "evidence": "<RCA>", "fix_commit": "<sha>"}`.
+  - NOT_INTRODUCED: add the marker with `repair` set to `pending-handoff:<occurrence id>`, the verbatim first error line, the failure evidence and today's date, then record `{"attribution": "NOT_INTRODUCED", "evidence": "<RCA>", "marker": "<test file>", "post_merge": {<the failed-test packet>}}`. The packet carries this attribution. After merge, step 13 dispatches it like every NOT_INTRODUCED packet, then `python3 scripts/test_quarantine.py link-repair --occurrence <id> --repair <thread URL>` replaces the pending reference in the records follow-up PR. A repair is never dispatched before merge.
+  - UNKNOWN keeps the merge blocked.
+- Smoke benchmark tasks: the marker is a `"quarantine": {"since", "repair", "error", "evidence"}` object on the task's `agents/benchmarks/tasks.json` entry (same rules; never change its prompt, evaluators, timeouts or pass criteria). Smoke still runs it once and reports `QUARANTINED_FAIL` / `QUARANTINED_PASS` (unit = task name). A non-quarantined task that natively FAILED/ERRORed is rerun once alone on the same ref (`FLAKY` on pass, else FAIL); SKIPPED (resource) and INFRA_ERROR outcomes keep their existing `/RCA` handling. NOT_INTRODUCED attribution names `agents/benchmarks/tasks.json` as `marker`.
+- Never add a marker to get green, or for a test without a NOT_INTRODUCED attribution.
+- Release: `python3 scripts/test_quarantine.py report` lists every marker with its consecutive passes from recorded results; any quarantined failure resets the count. At 5 it reads `ready to release`: remove that marker in this deploy.
+- Scorecard: copy the lines `python3 scripts/deploy_test_cycle.py report` prints, `Tests skipped (quarantined): N — F failed (non-blocking), P passed` and, when present, `Flaky (passed on rerun): ...`.
 
 ## Review
 
@@ -190,6 +217,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 - If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; fix security or prod-impacting ones, then ask the user how the fix is reviewed (the ledger refuses a 4th cycle).
 - A false-green or bot-posted request gets one `@coderabbitai full review` from the user's account.
 - Over 150 files: add the canonical path filters in a later stabilized commit; never weaken the review.
+- `open-pr`/`review-next` request nothing for a HEAD whose changed paths the `.coderabbit.yaml` path filters all exclude: the ledger records `no-reviewable-paths` (no cycle spent), carrying only a clean prior result.
 - Main moved after a clean final review: `deploy_review_cycle.py inherit-sync --head "$(git rev-parse HEAD)" --base origin/main`.
 - The Claude fallback review is disabled.
 

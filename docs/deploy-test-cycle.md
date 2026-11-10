@@ -59,6 +59,13 @@ checkout, database, ports and teardown. It must validate the requested source
 before executing and return results. The orchestrator launches every selected
 worker concurrently; it does not add dependencies between coverage, semantics,
 smoke, AgentCard, live probes or E2B. Existing worker safety and cleanup remain.
+The native cloud adapter accepts `DEPLOY_CLOUD_CONCURRENCY` as a positive
+integer to reduce campaign fanout when observed shared Fly headroom cannot
+admit the default width. Bind it in the smoke gate's explicit environment and
+record the capacity evidence. It never raises the provider cap or drops tasks,
+runs, assertions, cleanup requirements or timeouts. This controls work within
+the one smoke campaign; independent categories still launch concurrently.
+
 Independent worker roots launch concurrently, including while an unrelated
 failure awaits RCA. There is no host-wide admission queue or capacity-driven
 serial fallback. An active operation on the same isolation root is refused
@@ -117,6 +124,18 @@ local workers. It preserves pending failures and original receipts, records the
 interruption, and returns to QUICK with TRIAGE next. Ordinary `resume` remains
 strict; unknown ownership or changed contracts still refuse the refresh.
 
+At a quiescent `needs-focused-plan` boundary, `repair-independent` observes
+missing complete local categories while required repairs remain in the same plan.
+Use `--include-repair-local` to include complete original local repair contracts.
+Both modes admit only `local-isolated` workers, exclude native and legacy cloud
+smoke, honor actual leased-root exclusions, and retain `ready=false`. New failures
+enter normal TRIAGE. Cloud smoke still requires its fresh native admission.
+
+```bash
+python3 scripts/deploy_test_cycle.py repair-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --include-repair-local
+```
+
 At quiescent TRIAGE, run missing independent full gates without disposing of the
 original failures:
 
@@ -128,9 +147,13 @@ python3 scripts/deploy_test_cycle.py triage-independent --plan "$PLAN" \
 For changed source, the existing `refresh --input <old-plan>` also accepts
 quiescent TRIAGE: original pending occurrences, source identities and cleanup
 obligations stay recorded. New-source quick checks return to TRIAGE, where this
-action can observe independent full gates. Source/contract/input equivalence is
-still required to carry a full PASS; absent declared input scopes remain `*`, so
-actual source edits conservatively invalidate reuse rather than relabel old runs.
+action can observe independent full gates. Contract and environment equivalence
+is still required to carry a full PASS. Absent declared input scopes remain `*`:
+identical inputs carry, and changed inputs carry only when the affected-test graph
+(`deploy_test_plan.select` on the delta from the gate's native execution) selects
+no lane of that gate. Unknown impact reruns it: run_all or unmapped files, runtime
+configuration or plan changes, selector errors, pending failures and qualified
+cases.
 An old-source nonblocking diagnosis remains historical: it cannot create a
 new-source skip. The existing current-source renewal occurrence must be
 adjudicated explicitly; source-bound resource qualifications require current
@@ -413,9 +436,13 @@ artifacts before merge. An identical full run already completed in a repair
 phase can also satisfy final coverage; a narrowed focused run cannot.
 
 A gate without declared `input_paths` conservatively depends on all source
-files. Such a gate can carry through a history-only or tree-identical sync,
-but an ordinary source change still requires a rerun. Legacy receipts missing
-the execution bindings also rerun. Never invent a narrow scope to obtain reuse.
+files. Such a gate carries through a history-only or tree-identical sync. After
+an ordinary source change it carries only with the basis `affected-test graph:
+delta selects no lane of this gate`, recording the delta files and selector
+result; the native fingerprint must reproduce from that delta, so any other
+input change reruns it. Legacy receipts missing the execution bindings also
+rerun. Final complete-source verification still rechecks every carried receipt.
+Never invent a narrow scope to obtain reuse.
 Do not invalidate all passing tests just because a conflict-free sync changed
 HEAD: compare each gate's actual inputs, preserve valid receipts, and execute
 only affected or unknown gates. A clean Git merge is not a test-dependency proof.

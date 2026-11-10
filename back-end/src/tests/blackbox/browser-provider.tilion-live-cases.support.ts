@@ -71,6 +71,11 @@ async function createTilionPinnedFixture(label: string) {
  * must be drivable and carry that state; the replaced Tilion session must end.
  */
 export async function runLiveTilionChallengeRecovery(): Promise<void> {
+  const { withBrowserProviderServer } = await import('./browser-provider.fixture-server.support');
+  await withBrowserProviderServer('tilion', runConfiguredTilionChallengeRecovery);
+}
+
+async function runConfiguredTilionChallengeRecovery(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.BACKEND_API_KEY?.trim();
   if (!baseUrl || !apiKey) return;

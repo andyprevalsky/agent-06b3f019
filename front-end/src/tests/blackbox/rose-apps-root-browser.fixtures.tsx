@@ -59,6 +59,7 @@ export function agentContext(agentId: string): AgentContextValue {
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => false),
+    stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
   };
 }
 

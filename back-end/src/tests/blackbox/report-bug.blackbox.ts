@@ -525,10 +525,17 @@ async function main(): Promise<void> {
     runTest('POST /report-bug/screenshots -- no auth -> 401', testScreenshotNoAuth),
     runTest('POST /report-bug/screenshots -- non-admin -> 403', testScreenshotNonAdminForbidden),
     runTest('POST /report-bug/screenshots -- non-image -> 400', testScreenshotRejectsNonImage),
-    runTest(
-      'POST /report-bug/screenshots -- signed URL serves the image',
-      testScreenshotSignedUrlServesImage
-    ),
+    // Uploads to and reads back from the real Supabase Storage project: runs in
+    // the deploy live-probe stage report-bug-storage-live. The coverage gate
+    // keeps the hermetic store/sign contract (unit report-bug, storage-boundary).
+    ...(process.env.REPORT_BUG_STORAGE_LIVE === '1'
+      ? [
+          runTest(
+            'POST /report-bug/screenshots -- signed URL serves the image',
+            testScreenshotSignedUrlServesImage
+          ),
+        ]
+      : []),
     ...reportBugDiagnosticCases.map(([name, fn]) => runTest(name, fn)),
   ]);
   results.push(

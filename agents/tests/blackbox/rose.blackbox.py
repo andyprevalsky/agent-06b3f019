@@ -7786,11 +7786,11 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     attempted = []
 
     def handler(req):
-        url = str(req.url)
-        if "a-4989-resource.openai.azure.com" in url:
+        host = req.url.host
+        if host == "a-4989-resource.openai.azure.com":
             attempted.append("foundry")
             return httpx.Response(500, text="upstream unavailable")
-        if "openrouter.ai" in url:
+        if host == "openrouter.ai":
             attempted.append("openrouter")
             return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected route")
@@ -7799,6 +7799,7 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     with patch.dict(
         os.environ,
         {
+            "BACKEND_API_KEY": "",  # Provider-only fixture; shared authority has its own regression.
             "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
             "AZURE_FOUNDRY_API_KEY": "test-key",
             "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
@@ -7818,6 +7819,40 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert attempted == ["foundry", "openrouter"]
     assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "openai/gpt-6.1-sol"
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
+async def test_client_foundry_server_error_fixture_isolates_authority_state():
+    """The provider failure fixture must exercise the data plane in every cache state."""
+    import providers.rose.foundry as foundry
+
+    host = "a-4989-resource.openai.azure.com"
+    key = (f"https://{host}", "gpt-6.1-sol")
+    original_set_handler = set_mock_handler
+    for age in (None, 0, foundry._SHARED_RECHECK_S + 1):
+        calls = []
+
+        def record_handler(handler):
+            def observe(request):
+                response = handler(request)
+                calls.append((request.method, request.url.host, request.url.path, response.status_code))
+                return response
+
+            original_set_handler(observe)
+
+        checked = {} if age is None else {key: time.monotonic() - age}
+        with (
+            patch.dict(os.environ, {"BACKEND_API_URL": "https://authority.example.test", "BACKEND_API_KEY": "fixture"}),
+            patch.object(foundry, "_shared_checked_at", checked),
+            patch.object(foundry, "_shared_reads", {}),
+            patch.object(foundry, "_cooldown_until", {}),
+            patch.object(foundry, "_auth_cooldown_until", {}),
+            patch.dict(globals(), {"set_mock_handler": record_handler}),
+        ):
+            await test_client_foundry_server_error_falls_through_to_openrouter()
+        assert calls == [
+            ("POST", host, "/openai/v1/responses", 500),
+            ("POST", "openrouter.ai", "/api/v1/chat/completions", 200),
+        ], (age, calls)
 
 
 async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
@@ -13553,6 +13588,10 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
         test_client_foundry_server_error_falls_through_to_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_server_error_fixture_isolates_authority_state",
+        test_client_foundry_server_error_fixture_isolates_authority_state,
     )
     await r.record_async(
         "client_foundry_region_rate_limit_fails_over_before_openrouter",

@@ -24,6 +24,12 @@ vi.mock('@/lib/realtime', () => ({
   extractRecord: realtimeMocks.extractRecord,
 }));
 
+import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
+import { props as fullscreenProps } from './fixtures/phone-attention.fixture';
+vi.mock(
+  '@/features/terminal-component-group/components/browser-status-bar/BrowserTaskProgressPanel',
+  () => ({ TaskProgressSidebar: () => <div>Task progress</div> }),
+);
 import BrowserCursorOverlay from '@/features/terminal-component-group/components/BrowserCursorOverlay';
 import { useRefreshedAuthAssistanceUrl } from '@/features/terminal-component-group/components/browser-status-bar/useRefreshedAuthAssistanceUrl';
 import type { PendingAuthAssistance } from '@/features/terminal-component-group/components/browser-status-bar/types';
@@ -366,4 +372,53 @@ describe('browser auth URL isolation', () => {
     finishAgentA();
     await waitFor(() => expect(screen.getByTestId('auth-url')).toHaveTextContent('request-b'));
   });
+});
+
+// Exercise the actual compatibility wrapper: provider geometry and terminal state must survive it.
+describe('compatibility fullscreen browser contract', () => {
+  it.each(['kernel', 'tilion'] as const)(
+    'forwards %s stream geometry to the real cursor',
+    (provider) => {
+      const truth = PROVIDER_TRUTH[provider];
+      const point = { x: 1000, y: 400 };
+      render(
+        <BrowserStatusBarFullscreen
+          {...fullscreenProps()}
+          agentId={null}
+          taskId="task-1"
+          browserUrl={truth.url}
+          messages={[makeMessageWithCoords(point.x, point.y)]}
+          isWaitingForAuthAssistance={false}
+        />,
+      );
+      const box = computeLiveViewLetterbox(800, 600, truth.display.w, truth.display.h);
+      const actual = overlayTipPixel(800, 600, truth.display);
+      const expected = truth.paint(box, point.x, point.y);
+      expect(actual.x).toBeCloseTo(expected.x, 5);
+      expect(actual.y).toBeCloseTo(expected.y, 5);
+    },
+  );
+  it.each([false, true])(
+    'preserves the finished=%s browser state without a live session',
+    (ended) => {
+      const state = { ...fullscreenProps(), browserLive: false, browserEnded: ended };
+      render(
+        <BrowserStatusBarFullscreen
+          {...state}
+          agentId={null}
+          messages={[]}
+          isWaitingForAuthAssistance={false}
+        />,
+      );
+      expect(screen.queryByTitle('Browser')).toBeNull();
+      if (ended) {
+        expect(screen.getByRole('status', { name: 'Browser session ended' })).toBeVisible();
+        expect(screen.queryByRole('status', { name: 'Connecting to browser' })).toBeNull();
+        expect(screen.queryByTestId('browser-cursor-overlay')).toBeNull();
+      } else {
+        expect(screen.getByRole('status', { name: 'Connecting to browser' })).toBeVisible();
+        expect(screen.queryByRole('status', { name: 'Browser session ended' })).toBeNull();
+      }
+    },
+  );
 });

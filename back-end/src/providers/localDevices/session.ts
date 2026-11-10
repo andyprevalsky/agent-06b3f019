@@ -19,7 +19,11 @@ import {
   type CodeAgentSettings,
   codeAgentSettingsForAgent,
   codexCodeSettingsEnvs,
+  cliSettingsEnvOverrides,
+  type CodeCliSettingsOverride,
 } from '../codeAgentModels';
+import { compatibleResumeCliSettings, type CodeAgentResumeConfig } from '../codeAgentResumeConfig';
+import { persistCodeResumeConfig, resumeLaunchCliSettings } from '../codeAgentResumeConfigStore';
 import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import {
   LocalSessionStartError,
@@ -205,6 +209,9 @@ export async function createLocalDeviceCodeSession(
     deviceId?: string;
     /** The spawn's task_name, stored on the task row (the agents list title). */
     taskName?: string | null;
+    cliSettings?: CodeCliSettingsOverride;
+    resumeConfig?: CodeAgentResumeConfig;
+    leaseOwner?: string;
   },
   hub: LocalDeviceHub = localDeviceHub()
 ): Promise<LocalDeviceSessionResult> {
@@ -227,6 +234,31 @@ export async function createLocalDeviceCodeSession(
     settings: await codeAgentSettingsForAgent(params.agentId),
   });
   const taskId = randomUUID();
+  Object.assign(
+    envs,
+    cliSettingsEnvOverrides(
+      params.provider,
+      await resumeLaunchCliSettings(
+        params.agentId,
+        params.provider,
+        params.leaseOwner,
+        compatibleResumeCliSettings(
+          params.provider,
+          params.resumeConfig?.source_code_provider,
+          params.cliSettings
+        )
+      )
+    )
+  );
+  await persistCodeResumeConfig({
+    agentId: params.agentId,
+    taskId,
+    provider: params.provider,
+    envs,
+    resumeConfig: params.resumeConfig,
+    leaseOwner: params.leaseOwner,
+    execution: { github_repo_link: null, target: 'local', code_session_id: null },
+  });
   const sandboxId = localDeviceSandboxId(target.deviceId, taskId);
   log.info(`Starting local ${params.provider} session on ${target.deviceName}`, {
     agent_id: params.agentId,
@@ -307,6 +339,9 @@ export async function createLocalCodeSessionResponse(params: {
   expectedUserId?: string;
   deviceId?: string;
   taskName?: string | null;
+  cliSettings?: CodeCliSettingsOverride;
+  resumeConfig?: CodeAgentResumeConfig;
+  leaseOwner?: string;
 }): Promise<{
   task_id: string;
   sandbox_id: string;

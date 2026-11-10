@@ -119,14 +119,21 @@ const hubDirFor = (suffix: string, inherited?: string) =>
     },
   });
 const hubDirs = ['-shard1', '-shard2', '-units', '-units-probe'].map((suffix) => hubDirFor(suffix));
-assert.deepEqual(hubDirs, [
-  '/repo/.context/benchmark-hub-shard1',
-  '/repo/.context/benchmark-hub-shard2',
-  '/repo/.context/benchmark-hub-units',
-  '/repo/.context/benchmark-hub-units-probe',
-]);
-assert.equal(hubDirFor(''), '/repo/.context/benchmark-hub');
-assert.equal(hubDirFor('-shard1', '/explicit/hub'), '/explicit/hub');
+for (const [index, suffix] of ['-shard1', '-shard2', '-units', '-units-probe'].entries()) {
+  assert.match(
+    hubDirs[index],
+    new RegExp(`^/repo/\\.context/test-runs/backend-coverage-hub${suffix}-[0-9]+-[0-9]+$`)
+  );
+}
+assert.equal(new Set(hubDirs).size, hubDirs.length, 'each coverage lane owns its Hub');
+const unshardedHub = hubDirFor('');
+assert.match(unshardedHub, /^\/repo\/\.context\/test-runs\/backend-coverage-hub-[0-9]+-[0-9]+$/);
+assert.notEqual(hubDirFor(''), unshardedHub, 'each invocation owns a new Hub');
+for (const inherited of ['/repo/.context/benchmark-hub', '/explicit/hub']) {
+  const isolated = hubDirFor('', inherited);
+  assert.match(isolated, /^\/repo\/\.context\/test-runs\/backend-coverage-hub-[0-9]+-[0-9]+$/);
+  assert.notEqual(isolated, inherited, 'coverage must override inherited developer Hub storage');
+}
 assert.match(
   blackboxScript,
   /^export BENCHMARK_HUB_LOCAL_DIR="\$\{BENCHMARK_HUB_LOCAL_DIR:-\$ARTIFACT_DIR\/benchmark-hub\}"$/m,

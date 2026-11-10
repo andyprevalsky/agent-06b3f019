@@ -562,6 +562,7 @@ test("agent turns held during a direct chat survive a hold retaken mid-release a
     const heldAgentTurns=[],startupTurnQueue=[],events=[],written=[],eventBuffer=[];
     const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000,MAX_STARTUP_TURNS=20,MAX_HELD_AGENT_TURNS=50;
     const tokenMatches=()=>true,turnAck=(id,status,reason)=>({type:"user_turn_ack",id,status,...(reason?{reason}:{})});
+    const agentTurnText=(text)=>text,markGoalDelivered=()=>{},goalHandoffWritten=()=>false;
     const nativeInitialization=null,taskPromptReady=Promise.resolve(),effectiveSettings={model:"test"};
     const cliChild={stdin:{write(line,cb){written.push(line);cb();},end(){}}};
     let releaseSettings;const settingsGate=new Promise(r=>{releaseSettings=r;});
@@ -641,6 +642,7 @@ test("a release whose held agent turns are all refused still closes stdin", asyn
     const heldAgentTurns=[],startupTurnQueue=[],events=[],written=[],eventBuffer=[];
     const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000,MAX_STARTUP_TURNS=20,MAX_HELD_AGENT_TURNS=50;
     const tokenMatches=()=>true,turnAck=(id,status,reason)=>({type:"user_turn_ack",id,status,...(reason?{reason}:{})});
+    const agentTurnText=(text)=>text,markGoalDelivered=()=>{},goalHandoffWritten=()=>false;
     const nativeInitialization=null,taskPromptReady=Promise.resolve(),effectiveSettings={model:"test"};
     const cliChild={stdin:{write(line,cb){written.push(line);cb();},end(){ended=true;}}};
     const applyTurnSettings=async(settings)=>{if(settings&&settings.reject)throw new Error("unsupported_settings");};
@@ -697,6 +699,7 @@ test("a result arriving before a released held agent turn is written keeps stdin
     const heldAgentTurns=[],startupTurnQueue=[],events=[],written=[],eventBuffer=[];
     const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000,MAX_STARTUP_TURNS=20,MAX_HELD_AGENT_TURNS=50,DIRECT_HOLD_IDLE_MS=60000;
     const tokenMatches=()=>true,turnAck=(id,status,reason)=>({type:"user_turn_ack",id,status,...(reason?{reason}:{})});
+    const agentTurnText=(text)=>text,markGoalDelivered=()=>{},goalHandoffWritten=()=>false;
     const nativeInitialization=null,taskPromptReady=Promise.resolve(),effectiveSettings={model:"test"};
     const cliChild={stdin:{write(line,cb){written.push(line);cb();},end(){ended=true;}}};
     // The spawn's goal changes settings: it waits on the CLI's control response.

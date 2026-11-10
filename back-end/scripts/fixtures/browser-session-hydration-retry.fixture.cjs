@@ -531,20 +531,27 @@ async function run() {
   // Live hydration has no completion acknowledgement; a second caller must not adopt.
   const active = await fixture();
   failGoto = false;
-  let release, entered;
+  let release;
   pendingGoto = new Promise((r) => (release = r));
   const enteredPromise = new Promise((r) => (entered = r));
   onGotoBlocked = entered;
+  const gotoBeforeActive = gotocalls;
   const work = resumeBrowserSession(active.id);
   try {
     // Navigation is suspended only after hydration target provenance commits.
     // Expiring the earlier phase write races that later provenance write.
     await enteredPromise;
+    assert.equal(
+      gotocalls,
+      gotoBeforeActive + 1,
+      'fixture must hold actual navigation before expiring custody'
+    );
     const held = await prisma.toolSideEffect.findUniqueOrThrow({
       where: { operationKey: key(active.id) },
     });
     assert.equal(held.response, null);
     assert.equal(held.request.phase, 'hydrating');
+    assert(held.request.hydrationTargets?.length > 0, 'Held goto must have durable provenance');
     const before = creates; // The active owner retains its original immutable request.
     await prisma.toolSideEffect.update({
       where: { id: held.id },

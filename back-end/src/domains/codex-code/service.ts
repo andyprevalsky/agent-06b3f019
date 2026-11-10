@@ -159,6 +159,8 @@ export async function createSession(params: CreateSessionParams) {
           projectWorkspace,
           taskName: params.task_name ?? null,
           cliSettings: params.cli_settings ?? null,
+          resumeConfig: params.resume_config,
+          leaseOwner: params.lease_owner,
         },
         codeSession
       )

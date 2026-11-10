@@ -1,3 +1,8 @@
+import {
+  phoneSmsTarget,
+  initializePhoneChallenge,
+  acknowledgePhoneChallenge,
+} from './servicePhoneSms';
 /**
  * The sign-in methods beyond password and emailed code. Each one appends to the
  * same attempt log the evaluator reads.
@@ -29,7 +34,7 @@ import {
   secretsEqual,
   startSession,
 } from './serviceSignIn';
-import type { AuthTestSite, CodeVerifyResult, SiteAccount } from './types';
+import type { AuthTestSite, CodeVerifyResult, SiteAccount, IssuedCode } from './types';
 
 export function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D+/g, '');
@@ -109,7 +114,7 @@ export function openSignInLink(
 }
 
 export async function requestSmsCode(site: AuthTestSite, rawPhone: string): Promise<void> {
-  const account = accountByPhone(site, rawPhone);
+  const account = accountByPhone(site, phoneSmsTarget(site, rawPhone));
   if (account === undefined || account.phone === null) {
     recordAttempt(
       site,
@@ -121,16 +126,19 @@ export async function requestSmsCode(site: AuthTestSite, rawPhone: string): Prom
     return;
   }
   const code = String(randomBytes(4).readUInt32BE(0) % 1_000_000).padStart(6, '0');
-  site.codes.push({
+  const issued: IssuedCode = {
     email: account.email,
     code,
-    purpose: 'sms',
+    purpose: 'sms' as const,
     expiresAtMs: Date.now() + SIGN_IN_CODE_TTL_MS,
     consumed: false,
-  });
-  const body = `Your ${AUTH_TEST_SITE_NAME} sign-in code is ${code}`;
+  };
+  initializePhoneChallenge(site, issued);
+  site.codes.push(issued);
+  const body = `Your ${AUTH_TEST_SITE_NAME} sign-in code is ${code}${issued.phoneChallenge ? ` (request ${issued.phoneChallenge.challengeId})` : ''}`;
   const sent = await sendSms(account.phone, body, { archiveContext: { source: 'auth-test-site' } });
-  if (isLocalBenchmarkAgentPhoneMockEnabled()) {
+  acknowledgePhoneChallenge(site, issued, sent.success);
+  if (site.scenario !== 'phone_sms_otp' && isLocalBenchmarkAgentPhoneMockEnabled()) {
     await repo.deliverTextToMockPhone({
       userId: site.userId,
       externalId: `rose-shop-${randomBytes(12).toString('hex')}`,
@@ -143,7 +151,9 @@ export async function requestSmsCode(site: AuthTestSite, rawPhone: string): Prom
     site,
     'sms_request',
     account.email,
-    sent.success || isLocalBenchmarkAgentPhoneMockEnabled() ? 'code_sent' : 'code_delivery_failed',
+    sent.success || (site.scenario !== 'phone_sms_otp' && isLocalBenchmarkAgentPhoneMockEnabled())
+      ? 'code_sent'
+      : 'code_delivery_failed',
     null
   );
 }
@@ -153,13 +163,25 @@ export function verifySmsCode(
   rawPhone: string,
   rawCode: string
 ): CodeVerifyResult {
-  const account = accountByPhone(site, rawPhone);
+  const account = accountByPhone(site, phoneSmsTarget(site, rawPhone));
   const email = account?.email ?? normalizePhone(rawPhone);
+  // Capture the exact eligible challenge before consumeCode changes its consumed flag.
+  const issued =
+    site.scenario === 'phone_sms_otp'
+      ? site.codes.find(
+          (c) =>
+            c.email === email &&
+            c.purpose === 'sms' &&
+            !c.consumed &&
+            secretsEqual(c.code, rawCode.replace(/\D+/g, ''))
+        )
+      : undefined;
   const result = account === undefined ? 'invalid_code' : consumeCode(site, email, rawCode, 'sms');
   if (result !== 'ok') {
     recordAttempt(site, 'sms_verify', email, 'rejected', result);
     return { ok: false, reason: result };
   }
+  if (issued?.phoneChallenge) issued.phoneChallenge.consumedAt = new Date().toISOString();
   recordAttempt(site, 'sms_verify', email, 'signed_in', null);
   return { ok: true, token: startSession(site, email, 'sms_code') };
 }

@@ -75,9 +75,9 @@ describe('Rose Desktop integrations: one account per integration', () => {
       'Messages',
       'Compute',
       'Banks & Financial Accounts',
-      'Meetings',
       'Socials',
       'File System',
+      'Other',
     ]);
     expect(within(list).queryByText(/manage/i)).not.toBeInTheDocument();
     expect(within(list).queryByText(/\bof \d+ connected/i)).not.toBeInTheDocument();

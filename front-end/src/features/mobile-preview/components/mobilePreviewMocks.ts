@@ -131,6 +131,7 @@ export const PREVIEW_AGENT_CONTEXT = {
   stagePendingAgentCreation: noop,
   reconcilePendingAgentCreation: async () => {},
   rollbackPendingAgentCreation: () => false,
+  stageUserMessage: () => ({ confirm: () => {}, drop: () => {} }),
   messages: MOCK_BROWSER_MESSAGES,
   streamingBubbles: new Map(),
   streamingPlan: null,

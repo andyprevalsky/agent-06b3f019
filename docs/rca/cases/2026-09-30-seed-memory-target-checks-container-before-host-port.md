@@ -87,3 +87,29 @@ cause is not established for this occurrence, and the four samples remain a
 failed gate. Original output and independent review are private under
 `.context/deploy-runs/pr1410-finalize-20261005/`. A fresh five-run validation is
 required; a passing retry does not retroactively resolve the original cause.
+
+
+## November 9 canonical seed publication recurrence
+
+The normal PG15 canonical-seed migration on `726dfa7e1` failed at the first
+host TCP `psql` connection after its socket-default `docker exec pg_isready`
+returned success. The installed image entrypoint starts a temporary initialization
+server with an empty `listen_addresses`. A separately owned scratch reproduction
+observed Unix readiness exit 0 while TCP readiness exited 2, then a successful
+TCP `SELECT 1` after final startup. This proves a temporary-server readiness
+mismatch; it does not establish the historical September host-forwarding cause.
+
+The canonical migration script now checks explicit container TCP
+`127.0.0.1:5432`, and refuses clients/publication if the same 60 one-second
+polls are exhausted. Migration SQL, validation, dump/restore roundtrip and
+remote GET/cmp remain unchanged. The registered hermetic actual-CLI suite
+`python3 scripts/tests/migrate-canonical-seed.test.py` failed both tests against
+the original and passed both with the fix. It covers Unix-ready/TCP-not-ready
+and exhaustion without real database or provider calls. The ordinary publication
+retry and whole-source gates remain separately required.
+
+The original failure, installed entrypoint, owned scratch observations and
+supervisor closure are retained privately under
+`.context/rca-google400/seed-readiness-rca/`. Two earlier scratch mount-permission
+setup failures remain preparation errors, not evidence for the original failure.
+Protected database fixture 21535 was untouched. No new human feedback.

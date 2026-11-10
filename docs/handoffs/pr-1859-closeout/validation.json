@@ -1,0 +1,83 @@
+{
+  "format": "PR1859-VALIDATION-RECORD-V1",
+  "source": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+  "runtime_golden": {
+    "snapshot": "QUESTION-CONTINUATION-20261108-V2",
+    "verdict": "GROUNDED",
+    "reviewer": "ph7a71n5yccdwwk6nxtew35xws8hvfya",
+    "completed_at": "2026-11-08T22:49:04.510011+00:00",
+    "runtime_sha256": {
+      "agents/domains/send_message_to_user/handler.py": "5a6938539532482b23c9a6421d516158ae11527013c0b95e4590fa1bd81d59dc",
+      "agents/helpers/wait_wake.py": "be6f48a8a4a61b764ac6dee0559ffae8c492cde1e92cf02b7ecbfeb421918d7c",
+      "agents/workflows/background_agents.py": "47ee884d125737fee504ba896918353cacb3fa914fdba2ec222e91685d965ea5"
+    },
+    "previous_verdict": "V1 NOT_GROUNDED; reset wake sequence and bounded-event eviction corrected"
+  },
+  "legacy_recovery": {
+    "verdict": "PASS",
+    "reviewer": "ph7377wz4jbzw6dwcmv3w7g12d8htygs",
+    "patch_sha256": "d5e2a29c5afc852e00dbbe327484f821a8fe17a143cbb5c476bd5e6863d1228e",
+    "completed_at": "2026-11-08 23:39:45 UTC",
+    "blockers": [],
+    "real_reconcile": {
+      "changed_keys": [
+        "reconciled_owners"
+      ],
+      "original_files_unchanged": true,
+      "original_cases": {
+        "test-mass-agent-run-0": "UNVERIFIED",
+        "chat-mode": "UNVERIFIED",
+        "spawn-sub-agents": "UNVERIFIED",
+        "parallel-tool-calls": "UNVERIFIED",
+        "background-agent-message-smoke": "UNVERIFIED",
+        "claude-code-agent": "UNVERIFIED",
+        "browser-smoke": "UNVERIFIED",
+        "agent-payment-test-shop": "UNVERIFIED",
+        "agent-payment-setup-resume": "UNVERIFIED",
+        "agent-payment-idempotent-abandonment": "UNVERIFIED",
+        "agent-payment-abandonment": "UNVERIFIED",
+        "browser-biometrics-webdecoy": "UNVERIFIED",
+        "agent-payment-new-user-journey": "UNVERIFIED"
+      },
+      "entries": 1,
+      "phase": "needs-focused-plan"
+    },
+    "credit_granted": false,
+    "financial_cleanup_credit": false
+  },
+  "focused_tests": [
+    {
+      "name": "question owning domain",
+      "status": "PASS",
+      "checks": 28
+    },
+    {
+      "name": "real Temporal two-worker cutover",
+      "status": "PASS",
+      "seconds": 12.16
+    },
+    {
+      "name": "legacy full Cycle class",
+      "status": "PASS",
+      "tests": 189,
+      "seconds": 271.269,
+      "scope": "Original base plus frozen v4 legacy patch; final combined source validated separately."
+    },
+    {
+      "name": "combined future and legacy custody",
+      "status": "PASS",
+      "tests": 12,
+      "seconds": 28.063
+    },
+    {
+      "name": "combined cloud adapter",
+      "status": "PASS",
+      "tests": 11,
+      "seconds": 0.855
+    }
+  ],
+  "final_gates": "14 nativePASS/1 preserved nativeFAIL, qualified NOT_INTRODUCED and post-merge goal delivered; nativecomplete no pending handoffs",
+  "production": "Exact mergedFlyPASS,semanticPASS; workflowmigrationnative42PASS3FAIL/45 qualifiedNOT_INTRODUCED and fullgoal+evidence deliveredindependentBugsrepair. NativeFAIL retained.",
+  "preservation": "Verified final authenticated archives and separate restores; nativeREADY receipt committed. Its publication condition is satisfied by the recordsPR merge and originalPR link, checked again after publication.",
+  "merged_sha": "4e28dab648a66e70f513979cb11b59e614866424"
+}

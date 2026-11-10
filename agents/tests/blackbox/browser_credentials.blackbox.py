@@ -982,6 +982,27 @@ async def test_prepare_browser_auth_uses_unified_realm_endpoint() -> None:
     assert call["requestHeaders"]["x-user-id"] == "user-1"
 
 
+async def test_prepare_browser_auth_inventory_preserves_active_flow() -> None:
+    from domains.spawn_browser_agent_v3.repo import prepare_browser_auth
+
+    setup_mock({"/api/browser-session/session-1/prepare-auth": {
+        "status": 200,
+        "json": {"auth_realm": "example.com", "auth_options": {"realm": "example.com"},
+                 "passwords": [], "passkeys": []},
+    }})
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.example.com", api_key="internal-key"))
+    result = await prepare_browser_auth(
+        config, user_id="user-1", session_id="session-1",
+        target_url="https://example.com/authorize", restore_browser_state=False,
+    )
+    assert result["auth_realm"] == "example.com"
+    assert_captured_call(
+        url_contains="/api/browser-session/session-1/prepare-auth", method="POST",
+        body_contains={"target_url": "https://example.com/authorize", "restore_browser_state": False},
+        header_present="x-user-id",
+    )
+
+
 def test_password_use_is_sign_in_evidence_for_world_state_merge() -> None:
     """Only a typed saved/minted password marks a site as signed in (plan A6).
 
@@ -1954,6 +1975,10 @@ async def run_all_tests():
     await runner.record_async(
         "prepare_browser_auth_uses_unified_realm_endpoint",
         test_prepare_browser_auth_uses_unified_realm_endpoint,
+    )
+    await runner.record_async(
+        "prepare_browser_auth_inventory_preserves_active_flow",
+        test_prepare_browser_auth_inventory_preserves_active_flow,
     )
     runner.record(
         "password_use_is_sign_in_evidence_for_world_state_merge",

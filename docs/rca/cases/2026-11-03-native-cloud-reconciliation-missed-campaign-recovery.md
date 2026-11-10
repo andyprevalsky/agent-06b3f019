@@ -252,6 +252,37 @@ Review stabilization records immutable controller commands in the initial campai
 A subsequent zero-allocation smoke attempt exposed several already-dead starting Hub owners alongside the live shared Hub. The live-only terminator correctly refused those stale entries, but the new campaign join treated them as pending cleanup. A real failed-bind owner plus live Hub reproduces this boundary. The join now recognizes only a structurally exact, same-boot owner with both PID and process group wholly absent; live/reused identities still use the original strict protocol. The typed current-Hub retirement proof accounts for the complete original owner inventory with a clean original supervisor sidecar, preserves original pending/UNVERIFIED records and grants no execution credit. The original nine-controller proof validates and reconciles through the public entrypoint.
 
 
+## November 7 recurrence: diagnosed repair boundary and reconciled failed successor
+
+PR1708 reproduced the public next-source renewal refusal on source4a062337:
+`a quiescent interrupted operation token is required`. Source refresh and quick
+validation had legitimately reached `needs-focused-plan`. The original isolated
+proof was recorded against a failure occurrence rather than an interruption
+token, and its later complete-inventory successor retained FAILED/UNVERIFIED
+results even after strict normal cleanup reconciliation succeeded.
+
+The repair admits only quiescent repair phases and distinguishes original
+failure identity from request-token identity. Existing clean-successor and public
+native proof validation remain unchanged. A separate failed-successor route
+requires exact historical receipt/request/result and execution-binding seals,
+full inventory and original isolation admission, the same physical owner root,
+and exactly one replayed strict normal campaign reconciliation. Historical
+source/environment hashes remain bound to their original receipt, without
+claiming current-source carryover. Only the old proof's `validation_source` may
+change, and that target must equal the current state, plan and physical checkout.
+
+Four new owning controls passed with all193 existing tests (197 total) in private
+preparation. They cover the actual before/after CLI boundary, idempotence, changed
+target environment, strict negative/tamper controls and preserved obligations.
+The combined coordinator candidate subsequently passed202 and203 owning tests.
+A parent-added resume-marker restriction was rejected by existing valid recovery
+fixtures and removed; historical markers alone are not live execution evidence.
+Actual current-source canonical renewal remains a separate operation after the
+final source/environment refresh. No old result, exclusion, failure, retained Hub
+or financial record is rewritten, and no execution or cleanup PASS is granted.
+Evidence: `.context/rca-browser-4f77/isolated-renewal-refusal-4a062/` and
+`.context/rca-browser-4f77/isolated-renewal-rca-4a062/`.
+
 ## November 8 recurrence: mixed graded and preallocation-failed parents
 
 PR #1770's round-17 smoke request on source

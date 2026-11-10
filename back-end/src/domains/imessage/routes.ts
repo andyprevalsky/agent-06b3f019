@@ -15,8 +15,11 @@ import {
   QueueEntryNotFoundError,
   StaleQueueClaimError,
   ValidationError,
+  bindCloudMessage,
+  CloudMessageBindingConflictError,
 } from './service';
 import { MessageChannel } from './types';
+import { cloudMessageReceipt } from './cloudMessage';
 
 const log = createLogger('iMessage');
 const router = Router();
@@ -50,6 +53,10 @@ router.post(
         message,
         idempotency_key
       );
+      if (entry.transport === 'phone_harness') {
+        res.json(cloudMessageReceipt(entry));
+        return;
+      }
       res.json({
         success: true,
         queue_id: entry.id,
@@ -69,6 +76,30 @@ router.post(
         error: error instanceof Error ? error.message : String(error),
       });
       res.status(500).json({ error: 'Failed to queue iMessage' });
+    }
+  })
+);
+
+/** Bind an approved cloud intent to its one owned browser task. No caller verdict is accepted. */
+router.post(
+  '/queue/:id/phone-bind',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    const userId = req.isInternal === true ? req.body.user_id : req.userId;
+    const taskId = req.body.browser_task_id;
+    if (typeof userId !== 'string' || userId.length === 0) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if (typeof taskId !== 'string' || !taskId) {
+      res.status(400).json({ error: 'browser_task_id is required' });
+      return;
+    }
+    try {
+      res.json(cloudMessageReceipt(await bindCloudMessage(userId, req.params.id, taskId)));
+    } catch (error) {
+      if (!(error instanceof CloudMessageBindingConflictError)) throw error;
+      res.status(409).json({ error: 'Cloud message task binding rejected' });
     }
   })
 );
@@ -163,6 +194,9 @@ router.get(
       const status = await getDeliveryStatus(userId, req.params.id);
       res.json({
         success: true,
+        ...('provider' in status
+          ? { provider: status.provider, browser_task_id: status.browserTaskId }
+          : {}),
         status: status.status,
         sent_at: status.sentAt?.toISOString() ?? null,
         failed_at: status.failedAt?.toISOString() ?? null,

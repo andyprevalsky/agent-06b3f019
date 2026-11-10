@@ -35,9 +35,9 @@
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
  *   calm dark background. Stock accounts and shared views never leave light.
  * HEADER FRAME (Rose Desktop): the header sits in a zero-height box spanning
- *   the content area (left = --rose-bar-offset, the pinned left bar's width,
- *   else 0), so the desktop pill's left-1/2 centres beside a pinned bar while
- *   its stock classes stay frozen. Mobile headers are fixed and unaffected.
+ *   the content area beyond the fixed 64px rail. Sidebar expansion and resize
+ *   overlay the trajectory without shifting the header or content. Mobile
+ *   headers are fixed and unaffected.
  * DOCUMENT SCROLL: mounted → html.rose-app-shell locks page scroll/overscroll
  *   (panes scroll internally; the mobile query box stays put); unmounted →
  *   class removed so other routes scroll normally.
@@ -193,7 +193,7 @@ function ContentAreaHeaderFrame({ children }: { children: ReactNode }) {
   return (
     <div
       data-testid="terminal-header-frame"
-      className="absolute inset-x-0 top-0 h-0 md:left-[var(--rose-bar-offset,0px)]"
+      className="absolute inset-x-0 top-0 h-0 md:left-[64px]"
     >
       {children}
     </div>

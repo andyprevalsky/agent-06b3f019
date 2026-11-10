@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import signal
 import time
 
 KIND = 'local-supervisor-cleanup-v1'
@@ -167,11 +168,26 @@ def quiet(root):
         scan_same_user_processes(inspect, lambda pid: need(False, f'worker root process {pid} is unverifiable'))
 
 
+def structural_original_gate(original, current):
+    """Authenticate only a selection-explanation change, never an execution change."""
+    from deploy_test_cycle import digest
+    need(isinstance(original, dict) and set(original) == set(current)
+         and all(isinstance(gate.get('selection_evidence'), list)
+                 and all(isinstance(item, str) for item in gate['selection_evidence'])
+                 for gate in (original, current)), 'structural original contract shape')
+    need(digest({k: v for k, v in original.items() if k != 'selection_evidence'}) ==
+         digest({k: v for k, v in current.items() if k != 'selection_evidence'}),
+         'structural execution contract changed')
+
+
 def structural_cleanup(state, receipt, proof):
     """A fully reaped failed structural suite may launch again, without test credit."""
     import hashlib
     from deploy_test_cycle import ROOT, bounded_read, digest, sha_file
     gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    if 'original_gate' in proof:
+        structural_original_gate(proof['original_gate'], gate)
+        gate = proof['original_gate']
     root = Path(gate['worker_root']).resolve(strict=True)
     name = gate['name']
     file_adapter = gate.get('result_transport') == 'file'
@@ -186,7 +202,8 @@ def structural_cleanup(state, receipt, proof):
              and isinstance(command[0], str)
              and Path(command[0]).is_absolute()
              and Path(command[0]).resolve(strict=True) == Path(sys.executable).resolve(strict=True)
-             and command[1:] == [str(ROOT / 'scripts/deploy_test_worker.py'), '--root', str(root)]
+             and command[1:] in ([str(ROOT / 'scripts/deploy_test_worker.py'), '--root', str(root)],
+                                 [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root)])
              and receipt.get('command') == command, 'native structural file command')
     else:
         need(receipt.get('command') == command and len(command) == 5
@@ -200,7 +217,7 @@ def structural_cleanup(state, receipt, proof):
          'structural execution/admission contract changed')
     need(receipt.get('lifecycle') == 'owned' and receipt.get('executed') is True
          and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
-         and type(receipt.get('native_exit')) is int and receipt['native_exit'] == 1
+         and type(receipt.get('native_exit')) is int and receipt['native_exit'] in (0, 1)
          and receipt.get('lingering_group') is True and not receipt.get('cleanup_owner')
          and receipt.get('native_cleanup_reference') is None
          and all(receipt.get(k) is False for k in ('timed_out', 'cancelled')), 'failed structural receipt required')
@@ -220,24 +237,34 @@ def structural_cleanup(state, receipt, proof):
     need(request.get('worker_root') == result.get('worker_root') == str(root)
          and request.get('worker_recipe') == gate.get('worker_recipe')
          and result.get('recipe_digest') == digest(request['worker_recipe']), 'structural root/recipe mismatch')
+    native_exit = receipt['native_exit']
+    inner_status = 'PASS' if native_exit == 0 else 'UNVERIFIED'
     need(request.get('checks') == gate['checks'] == [name] and request.get('skips') == {}
-         and receipt.get('cases') == result.get('cases') == {name: 'UNVERIFIED'}
-         and result.get('complete') is False and result.get('cleanup_complete') is True
+         and receipt.get('cases') == {name: 'UNVERIFIED'}
+         and result.get('cases') == {name: inner_status}
+         and result.get('complete') is (native_exit == 0) and result.get('cleanup_complete') is True
          and result.get('reused') is False and not result.get('cleanup_owner'), 'structural result incomplete cleanup')
     recipe = request['worker_recipe']
+    service_recipe = (recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
+        'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
+        and recipe['cleanup'].get('cwd', '.') == '.')
+    structural_case = recipe.get('cases', {}).get(name, {})
+    cases_only = (set(recipe) == {'cases'}
+                  and set(structural_case) == {'command', 'cwd', 'env', 'aggregate'}
+                  and structural_case.get('command') == [
+                      'python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5']
+                  and structural_case.get('cwd') == '.')
     if file_adapter:
-        need(recipe == {'cases': {name: {
-            'command': ['python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5'],
-            'cwd': '.', 'env': {}, 'aggregate': True}}}, 'native structural file recipe')
-    else:
-        need(recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
-            'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
-             and recipe['cleanup'].get('cwd', '.') == '.' and set(recipe['cases']) == {name}
-             and recipe['cases'][name].get('aggregate') is True, 'native structural cleanup recipe')
+        coordinator_file = command[1] == str(ROOT / 'scripts/deploy_test_worker.py')
+        need((cases_only and structural_case.get('env') == {}) if coordinator_file else service_recipe,
+             'native structural file command/recipe pairing')
+    need((service_recipe or cases_only) and set(recipe['cases']) == {name}
+         and structural_case.get('aggregate') is True, 'native structural cleanup recipe')
     case = result['evidence'][name]
     native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
     log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
-    need(case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] == 1
+    need(case.get('status') == inner_status and type(case.get('native_exit')) is int
+         and case['native_exit'] == native_exit
          and case.get('command') == recipe['cases'][name]['command'] and case.get('log') == str(log)
          and log.resolve(strict=True) == log and sha_file(log) == case.get('sha256')
          and all(case.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group'))
@@ -246,21 +273,27 @@ def structural_cleanup(state, receipt, proof):
     need(type(process.get('native_exit')) is int and process['native_exit'] == receipt['native_exit']
          and process.get('quiescent') is True and process.get('orphaned_children') is True
          and all(process.get(k) is False for k in ('cancelled', 'timed_out'))
-         and process.get('remaining') == [] and process.get('kill_sent') == []
+         and process.get('remaining') == []
          and process.get('error') is None, 'structural supervisor closure incomplete')
     child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
-    rows, terms = process.get('reaped'), process.get('term_sent')
+    rows, terms, kills = (process.get(key) for key in ('reaped', 'term_sent', 'kill_sent'))
     need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
          and isinstance(rows, list) and len(rows) > 1 and isinstance(terms, list) and terms
+         and isinstance(kills, list)
          and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
                  and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
                  and type(row['status']) is int and 0 <= row['status'] <= 65535
                  and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
          'unknown structural descendant wait records')
     reaped = {row['pid']: row['status'] for row in rows}
-    need(len(reaped) == len(rows) and reaped.get(child) == 256
-         and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms)
-         and len(set(terms)) == len(terms), 'structural owned descendants not all reaped')
+    need(len(reaped) == len(rows) and reaped.get(child) == native_exit << 8
+         and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms + kills)
+         and len(set(terms)) == len(terms) and len(set(kills)) == len(kills)
+         and set(kills) <= set(terms)
+         # kill_sent records accepted requests, not which signal won an exit race.
+         and all(os.WIFSIGNALED(reaped[pid])
+                 and os.WTERMSIG(reaped[pid]) in (signal.SIGTERM, signal.SIGKILL)
+                 for pid in kills), 'structural owned descendants not all reaped')
     quiet(root)
     return gate
 
@@ -703,7 +736,11 @@ def cancelled_log_supplement(receipt, proof, case, expected_log):
 
 
 def interrupted_worker(state, receipt, proof):
-    """Account fully reaped interrupted custody; a missing adapter earns no credit."""
+    """Account fully reaped interrupted custody; a missing adapter earns no credit.
+
+    A KILL escalation (-9) and a coordinator TERM cancellation (-15) are both supported. A TERM'd
+    supervisor that exited before writing its receipt has no wait records: then only the
+    coordinator's own token-bound clean teardown record plus root/port quiescence can release it."""
     from deploy_test_cycle import ROOT, bounded_read, digest, sha_file
     import sys
     gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
@@ -726,7 +763,7 @@ def interrupted_worker(state, receipt, proof):
          and native_command and receipt.get('command') == command, 'interrupted native local worker binding')
     need(receipt.get('lifecycle') == 'owned' and receipt.get('executed') is True
          and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
-         and type(receipt.get('native_exit')) is int and receipt['native_exit'] == (1 if returned else -9)
+         and type(receipt.get('native_exit')) is int and (receipt['native_exit'] == 1 if returned else receipt['native_exit'] in (-9, -15))
          and receipt.get('cancelled') is True and receipt.get('timed_out') is False
          and (type(receipt.get('lingering_group')) is bool if returned else receipt.get('lingering_group') is True)
          and not receipt.get('cleanup_owner')
@@ -740,8 +777,17 @@ def interrupted_worker(state, receipt, proof):
          and receipt['host_admission'].get('lock') == str(root / '.context/native-worker-admission.lock'),
          'interrupted execution/admission contract changed')
     folder = Path(receipt['log']).parent
-    names = {'request.json', 'receipt.json', 'output.log.process.json'}
+    signal = -receipt['native_exit']
+    sidecar = folder / 'output.log.process.json'
+    attempt = folder.parent.parent.name  # attempts/<round>/<phase>/<gate>: stable across later rounds
+    need(attempt.isdigit(), 'interrupted attempt identity')
+    teardown = f"teardown/attempt-{attempt}-{receipt['gate']}.json"
+    supervised = sidecar.exists() or sidecar.is_symlink()
+    names = ({'request.json', 'receipt.json', 'output.log.process.json'} if supervised
+             else {'request.json', 'receipt.json', teardown})
+    need(supervised or signal == 15, 'a KILLed supervisor must leave its wait records')
     if returned:
+        need(supervised, 'returned adapter requires its supervisor receipt')
         names.add('result.json')
     need(Path(receipt['log']) == folder / 'output.log' and folder.resolve(strict=True) == folder
          and isinstance(proof['files'], dict) and set(proof['files']) == names
@@ -754,58 +800,90 @@ def interrupted_worker(state, receipt, proof):
         need(not path.is_symlink() and path.resolve(strict=True) == path
              and sha_file(path) == proof['files'][name], 'interrupted artifact changed: ' + name)
         docs[name] = bounded_read(path, 'interrupted cleanup ' + name)
-    request, recorded, process = (docs[n] for n in ('request.json', 'receipt.json', 'output.log.process.json'))
+    request, recorded = docs['request.json'], docs['receipt.json']
     need(recorded == receipt and all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_root') == str(root) and request.get('worker_recipe') == gate.get('worker_recipe')
          and isinstance(request.get('skips'), dict) and set(request['skips']) <= set(gate['checks'])
          and request.get('checks') == [case for case in gate['checks'] if case not in request['skips']]
          and request['checks'] and receipt.get('cases') == {case: 'SKIP' if case in request['skips'] else 'UNVERIFIED'
                                                          for case in gate['checks']}, 'interrupted request identity/inventory')
-    need(type(process.get('native_exit')) is int and process['native_exit'] == (1 if returned else -9)
-         and process.get('cancelled') is True and process.get('timed_out') is False
-         and process.get('quiescent') is True and process.get('remaining') == []
-         and type(process.get('orphaned_children')) is bool and process.get('error') is None,
-         'interrupted supervisor closure unknown')
-    child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
-    rows, terms, kills = (process.get(k) for k in ('reaped', 'term_sent', 'kill_sent'))
-    need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
-         and isinstance(rows, list) and rows and isinstance(terms, list) and isinstance(kills, list) and (returned or kills)
-         and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
-                 and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
-                 and type(row['status']) is int and 0 <= row['status'] <= 65535
-                 and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
-         'interrupted wait records unknown')
-    reaped = {r['pid']: r['status'] for r in rows}
-    need(len(reaped) == len(rows) and reaped.get(child) == (256 if returned else 9) and (child not in kills if returned else child in kills)
-         and all(type(pid) is int and pid > 1 and pid in reaped for pid in terms + kills)
-         and len(set(terms)) == len(terms) and len(set(kills)) == len(kills) and set(kills) <= set(terms),
-         'interrupted owned targets were not all reaped')
     if returned:
-        result = docs['result.json']
-        need(all(result.get(k) == request.get(k) for k in ('token', 'source', 'gate', 'worker_root'))
-             and result.get('recipe_digest') == digest(request['worker_recipe'])
-             and result.get('cases') == receipt.get('cases')
-             and result.get('complete') is False and result.get('reused') is False
-             and result.get('cleanup_complete') is True and not result.get('cleanup_owner'),
-             'interrupted returned result identity/cleanup')
-        case = result.get('evidence', {}).get(gate['name'], {})
-        expected_log = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest() / (hashlib.sha256(gate['name'].encode()).hexdigest() + '.log')
-        expected = {
-            'deploy-command-structural': {'command': ['python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5'], 'cwd': '.', 'env': {}, 'aggregate': True},
-            'frontend-coverage-blackbox': {'command': ['npm', 'run', 'test:coverage', '--', '--maxWorkers=1'], 'cwd': 'front-end', 'env': {}, 'aggregate': True},
-            'agents-coverage-blackbox': {'command': ['bash', 'scripts/run-coverage.sh'], 'cwd': 'agents', 'env': {'AGENTS_COVERAGE_CONCURRENCY': '2'}, 'aggregate': True},
-        }[gate['name']]
-        need(gate['worker_recipe'] == {'cases': {gate['name']: expected}}
-             and case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] in {-15, 143}
-             and case.get('cancelled') is True and case.get('timed_out') is False and type(case.get('lingering_group')) is bool
-             and case.get('command') == gate['worker_recipe']['cases'][gate['name']]['command']
-             and case.get('log') == str(expected_log) and not expected_log.is_symlink()
-             and receipt['started_at'] <= case['started_at'] <= case['finished_at'] <= receipt['finished_at'],
-             'interrupted returned case boundary')
-        if proof['kind'] == SUPPLEMENT_KIND:
-            cancelled_log_supplement(receipt, proof, case, expected_log)
+        process = docs['output.log.process.json']
+        need(type(process.get('native_exit')) is int and process['native_exit'] == (1 if returned else -9)
+             and process.get('cancelled') is True and process.get('timed_out') is False
+             and process.get('quiescent') is True and process.get('remaining') == []
+             and type(process.get('orphaned_children')) is bool and process.get('error') is None,
+             'interrupted supervisor closure unknown')
+        child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
+        rows, terms, kills = (process.get(k) for k in ('reaped', 'term_sent', 'kill_sent'))
+        need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
+             and isinstance(rows, list) and rows and isinstance(terms, list) and isinstance(kills, list) and (returned or kills)
+             and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
+                     and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
+                     and type(row['status']) is int and 0 <= row['status'] <= 65535
+                     and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
+             'interrupted wait records unknown')
+        reaped = {r['pid']: r['status'] for r in rows}
+        need(len(reaped) == len(rows) and reaped.get(child) == (256 if returned else 9) and (child not in kills if returned else child in kills)
+             and all(type(pid) is int and pid > 1 and pid in reaped for pid in terms + kills)
+             and len(set(terms)) == len(terms) and len(set(kills)) == len(kills) and set(kills) <= set(terms),
+             'interrupted owned targets were not all reaped')
+        if returned:
+            result = docs['result.json']
+            need(all(result.get(k) == request.get(k) for k in ('token', 'source', 'gate', 'worker_root'))
+                 and result.get('recipe_digest') == digest(request['worker_recipe'])
+                 and result.get('cases') == receipt.get('cases')
+                 and result.get('complete') is False and result.get('reused') is False
+                 and result.get('cleanup_complete') is True and not result.get('cleanup_owner'),
+                 'interrupted returned result identity/cleanup')
+            case = result.get('evidence', {}).get(gate['name'], {})
+            expected_log = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest() / (hashlib.sha256(gate['name'].encode()).hexdigest() + '.log')
+            expected = {
+                'deploy-command-structural': {'command': ['python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5'], 'cwd': '.', 'env': {}, 'aggregate': True},
+                'frontend-coverage-blackbox': {'command': ['npm', 'run', 'test:coverage', '--', '--maxWorkers=1'], 'cwd': 'front-end', 'env': {}, 'aggregate': True},
+                'agents-coverage-blackbox': {'command': ['bash', 'scripts/run-coverage.sh'], 'cwd': 'agents', 'env': {'AGENTS_COVERAGE_CONCURRENCY': '2'}, 'aggregate': True},
+            }[gate['name']]
+            need(gate['worker_recipe'] == {'cases': {gate['name']: expected}}
+                 and case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] in {-15, 143}
+                 and case.get('cancelled') is True and case.get('timed_out') is False and type(case.get('lingering_group')) is bool
+                 and case.get('command') == gate['worker_recipe']['cases'][gate['name']]['command']
+                 and case.get('log') == str(expected_log) and not expected_log.is_symlink()
+                 and receipt['started_at'] <= case['started_at'] <= case['finished_at'] <= receipt['finished_at'],
+                 'interrupted returned case boundary')
+            if proof['kind'] == SUPPLEMENT_KIND:
+                cancelled_log_supplement(receipt, proof, case, expected_log)
+            else:
+                need(sha_file(expected_log) == case.get('sha256'), 'interrupted returned log changed')
+    else:
+        if supervised:
+            process = docs['output.log.process.json']
+            need(type(process.get('native_exit')) is int and process['native_exit'] == -signal
+                 and process.get('cancelled') is True and process.get('timed_out') is False
+                 and process.get('quiescent') is True and process.get('remaining') == []
+                 and type(process.get('orphaned_children')) is bool and process.get('error') is None,
+                 'interrupted supervisor closure unknown')
+            child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
+            rows, terms, kills = (process.get(k) for k in ('reaped', 'term_sent', 'kill_sent'))
+            need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
+                 and isinstance(rows, list) and rows and isinstance(terms, list) and isinstance(kills, list)
+                 and (bool(kills) if signal == 9 else kills == [])
+                 and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
+                         and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
+                         and type(row['status']) is int and 0 <= row['status'] <= 65535
+                         and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
+                 'interrupted wait records unknown')
+            reaped = {r['pid']: r['status'] for r in rows}
+            need(len(reaped) == len(rows) and reaped.get(child) == signal and child in (kills if signal == 9 else terms)
+                 and all(type(pid) is int and pid > 1 and pid in reaped for pid in terms + kills)
+                 and len(set(terms)) == len(terms) and len(set(kills)) == len(kills) and set(kills) <= set(terms),
+                 'interrupted owned targets were not all reaped')
         else:
-            need(sha_file(expected_log) == case.get('sha256'), 'interrupted returned log changed')
+            # The coordinator's own token-bound teardown observed this lane after the TERM.
+            record = docs[teardown]
+            need(record.get('token') == receipt['token'] and record.get('lane') == receipt['gate']
+                 and record.get('attempt') == int(attempt) and record.get('outcome') == 'clean'
+                 and all(record.get(k) == [] for k in ('survivors', 'lingering', 'owned', 'foreign')),
+                 'interrupted teardown did not observe a clean lane')
     from deploy_test_isolation import _ports
     port = gate.get('env', {}).get('CONDUCTOR_PORT')
     need(isinstance(port, str) and port.isdigit(), 'interrupted port identity')
@@ -825,9 +903,19 @@ def interrupted_worker(state, receipt, proof):
 
 
 def validate(state, receipt, proof):
+    if proof.get('layout') == 'nativebackend-post-execution-cleanup-v1':
+        from deploy_test_backend_post_cleanup import validate as validate_post_execution
+        return validate_post_execution(state, receipt, proof)
+    if proof.get('layout') == 'backend-prisma-preflight-v1':
+        from deploy_test_backend_preflight_cleanup import validate as validate_preflight
+        return validate_preflight(state, receipt, proof)
     from deploy_test_cycle import bounded_read, digest, sha_file
     supplemented = proof.get('kind') == SUPPLEMENT_KIND
     fields = {'kind', 'files', 'confirmed_at', 'observed_by'} | ({'final_log'} if supplemented else set())
+    if (receipt.get('gate') == 'deploy-command-structural'
+            and receipt.get('cancelled') is False and receipt.get('lifecycle') == 'owned'
+            and 'original_gate' in proof):
+        fields.add('original_gate')
     need(set(proof) == fields and proof['kind'] in (KIND, SUPPLEMENT_KIND), 'proof fields')
     if supplemented:
         need(receipt.get('gate') == 'agents-coverage-blackbox' and receipt.get('cancelled') is True
@@ -955,7 +1043,7 @@ def tmpdir_transition_gate(state, execution, current):
     from deploy_test_isolation import external_tmpdir
     try:
         preserve_contract(execution, current)
-        return  # No runtime transition is needed for this original receipt.
+        return execution  # No runtime transition is needed for this original receipt.
     except ValueError:
         pass
     cursor = execution
@@ -994,9 +1082,11 @@ def tmpdir_transition_gate(state, execution, current):
         need(expected == after_plan, 'TMPDIR transition changed another contract')
         cursor = after
     preserve_contract(cursor, current)
+    return cursor
 
 
 def still_bound(state, receipt, entry):
+    from deploy_test_cycle import digest
     need(entry.get('kind') in (KIND, SUPPLEMENT_KIND) and entry.get('kind') == entry.get('proof', {}).get('kind')
          and entry.get('gate') == receipt['gate']
          and entry.get('token') == receipt['token'] and entry.get('credit_granted') is False, 'reconciliation changed')
@@ -1005,10 +1095,20 @@ def still_bound(state, receipt, entry):
     gate = entry.get('execution_gate')
     original = {**state, 'plan': {'gates': [gate]}} if gate is not None else state
     try:
+        if 'original_gate' in entry['proof']:
+            need(entry['gate'] == 'deploy-command-structural'
+                 and isinstance(gate, dict) and digest(gate) == digest(entry['proof']['original_gate']),
+                 'original structural witness changed')
         if gate is not None:
             from deploy_test_result import preserve_contract
             current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
-            tmpdir_transition_gate(state, gate, current)
+            comparison = tmpdir_transition_gate(state, gate, current)
+            if 'original_gate' in entry['proof']:
+                structural_original_gate(comparison, current)
+            if entry['proof'].get('layout') == 'nativebackend-post-execution-cleanup-v1':
+                from deploy_test_backend_post_cleanup import current_gate
+                current_gate(comparison, current)
+            preserve_contract(comparison, current)
             need(set(gate['checks']) <= set(current['checks']), 'original checks removed')
         validate(original, receipt, entry['proof'])
     except (OSError, KeyError, TypeError) as error:

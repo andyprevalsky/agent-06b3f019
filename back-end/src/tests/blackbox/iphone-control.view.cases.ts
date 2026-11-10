@@ -1,3 +1,4 @@
+import { syntheticConfiguration } from './iphone-control.synthetic-setup';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -8,8 +9,10 @@ import { Harness, PNG } from './iphone-control.fixtures';
 
 async function task(h: Harness) {
   const f = await h.fixture();
-  const context = await prisma.browserContext.create({
-    data: { userId: f.userId, contextId: randomUUID() },
+  const context = await prisma.browserContext.upsert({
+    where: { userId: f.userId },
+    create: { userId: f.userId, contextId: randomUUID() },
+    update: {},
   });
   const browser = await prisma.browserSession.create({
     data: { contextId: context.id, agentId: f.agentId, sessionId: randomUUID() },
@@ -18,6 +21,7 @@ async function task(h: Harness) {
     where: { id: f.leaseId },
     data: { browserTaskId: browser.id },
   });
+  await syntheticConfiguration(f.userId, f.leaseId);
   return { ...f, taskId: browser.id };
 }
 function user() {
@@ -180,9 +184,10 @@ export const viewCases: Case[] = [
         ).status,
         200
       );
+      // Expired agent heartbeat, still inside the bounded user-control grace.
       await prisma.iPhoneLease.update({
         where: { id: f.leaseId },
-        data: { leaseExpiresAt: new Date(0) },
+        data: { leaseExpiresAt: new Date(Date.now() - 60_000) },
       });
       const heartbeat = await h.request(f.userId, `/leases/${f.leaseId}/heartbeat`, {
         method: 'POST',

@@ -41,6 +41,7 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     stagePendingAgentCreation: () => {},
     reconcilePendingAgentCreation: async () => {},
     rollbackPendingAgentCreation: () => false,
+    stageUserMessage: () => ({ confirm: () => {}, drop: () => {} }),
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],

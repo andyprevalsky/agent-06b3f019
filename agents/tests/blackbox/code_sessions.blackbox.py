@@ -71,6 +71,10 @@ with (gate / "runs.jsonl").open("a") as runs:
                            "head": git("rev-parse", "HEAD")}) + "\n")
 
 def emit(message):
+    if message.get("type") == "result" and message.get("subtype") == "success" and not message.get("is_error"):
+        # A code agent's goal ends with its result handoff (ws-server goalTurnText).
+        (home / ".rose").mkdir(parents=True, exist_ok=True)
+        (home / ".rose" / "handoff.json").write_text("{}")
     print(json.dumps(message), flush=True)
 
 resume = argv[argv.index("--resume") + 1] if "--resume" in argv else None
@@ -2191,7 +2195,7 @@ async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(
         assert len(session_home.runs()) == 1, f"one CLI process, never restarted: {session_home.runs()}"
         merged = json.loads((session_home.tmp / "merged_turns.json").read_text())
         assert [ack.get("status") for ack in backend.attach_acks] == ["delivered", "delivered"], backend.attach_acks
-        assert len(merged) == 2 and merged[0].startswith("Task:\nWrite answer.txt with the answer"), merged
+        assert len(merged) == 2 and merged[0].startswith("/goal Task:\nWrite answer.txt with the answer"), merged
         assert merged[1] == "ping from the parent", merged
         results = [e.get("text") or e.get("result") for e in backend.verified_events[-1] if e.get("type") == "result"]
         assert any(f"answer is {lines} lines" in str(text) for text in results) or any(

@@ -1,0 +1,458 @@
+{
+  "selected_gate_count": 16,
+  "native_full_pass_gates": 15,
+  "qualified_smoke_gate": 1,
+  "native_smoke": {
+    "PASS": 11,
+    "FAIL": 1,
+    "SKIPPED": 1,
+    "original_total": 13,
+    "infra": 0,
+    "original_started_at": "2026-11-09T19:17:42.465225+00:00",
+    "original_finished_at": "2026-11-09T19:47:35.512650+00:00"
+  },
+  "staged_verifier": "PASS on exact reviewed source; qualifications retained, not 16 unqualified PASS",
+  "original_zero_job_failures": "Two native completed/failure workflows with zero jobs/assertions were UNVERIFIED, never waived; supported unchanged reexecution produced complete PASS receipts. Provider rejection cause remains unrecorded.",
+  "attempts": [
+    {
+      "attempt": 1,
+      "phase": "quick",
+      "gate": "format",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248717.9575353,
+      "finished_epoch": 1794248718.7975178,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 1,
+      "phase": "quick",
+      "gate": "eslint",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248717.9542835,
+      "finished_epoch": 1794248720.7380307,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 1,
+      "phase": "quick",
+      "gate": "typescript",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248717.9563882,
+      "finished_epoch": 1794248724.0486763,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 1,
+      "phase": "quick",
+      "gate": "backend-structural",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248717.9577324,
+      "finished_epoch": 1794248749.8338478,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "seed-cache-decision",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2160132,
+      "finished_epoch": 1794248817.0690424,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "e2b-smoke",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2239194,
+      "finished_epoch": 1794248852.700194,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "seed-memory-ratchet",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2259781,
+      "finished_epoch": 1794248853.629905,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "live-probes",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2182028,
+      "finished_epoch": 1794248928.8396957,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "deploy-command-structural",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2202096,
+      "finished_epoch": 1794249357.5705843,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "canonical-seed-whatsapp-content",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "FAIL",
+      "native_exit": 1,
+      "complete": false,
+      "executed": true,
+      "started_epoch": 1794248755.2172725,
+      "finished_epoch": 1794249403.0483441,
+      "case_counts": {
+        "PASS": 0,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "cloudbench-controller",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "FAIL",
+      "native_exit": 1,
+      "complete": false,
+      "executed": true,
+      "started_epoch": 1794248755.224763,
+      "finished_epoch": 1794249405.347694,
+      "case_counts": {
+        "PASS": 0,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "frontend-coverage-blackbox",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2219746,
+      "finished_epoch": 1794249466.774322,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "agents-coverage-blackbox",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2210188,
+      "finished_epoch": 1794249602.6717558,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "backend-coverage-blackbox",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2097142,
+      "finished_epoch": 1794249729.3946176,
+      "case_counts": {
+        "PASS": 257,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 2,
+      "phase": "initial",
+      "gate": "semantic-stack",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794248755.2229896,
+      "finished_epoch": 1794249798.0460384,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 3,
+      "phase": "focused",
+      "gate": "canonical-seed-whatsapp-content",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794249970.7786863,
+      "finished_epoch": 1794250047.6918154,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 3,
+      "phase": "focused",
+      "gate": "cloudbench-controller",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794249970.7783494,
+      "finished_epoch": 1794251810.329883,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 5,
+      "phase": "quick",
+      "gate": "format",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794251821.0766857,
+      "finished_epoch": 1794251821.5975873,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 5,
+      "phase": "quick",
+      "gate": "eslint",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794251821.0758376,
+      "finished_epoch": 1794251823.4886825,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 5,
+      "phase": "quick",
+      "gate": "typescript",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794251821.0744584,
+      "finished_epoch": 1794251826.8179772,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 5,
+      "phase": "quick",
+      "gate": "backend-structural",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794251821.0765963,
+      "finished_epoch": 1794251852.205098,
+      "case_counts": {
+        "PASS": 1,
+        "FAIL": 0,
+        "SKIP": 0
+      }
+    },
+    {
+      "attempt": 6,
+      "phase": "final",
+      "gate": "smoke",
+      "source": {
+        "head": "d792e59539b453753d052fd9fb00a497f98ed930",
+        "digest": "7984f65e9ecb927fd154180313c40909911949f5e30c8639f32ee90c29dc510a"
+      },
+      "status": "FAIL",
+      "native_exit": 1,
+      "complete": true,
+      "executed": true,
+      "started_epoch": 1794251857.2501926,
+      "finished_epoch": 1794253662.534018,
+      "case_counts": {
+        "PASS": 11,
+        "FAIL": 2,
+        "SKIP": 0
+      }
+    }
+  ]
+}

@@ -918,6 +918,9 @@ async def _run_agentic_loop(
     user_turns_seen = 0
     sdk_results_seen = 0
     native_codex_terminal: dict[str, Any] | None = None
+    # The native Codex thread goal (ws-server `goal` events). While it is active
+    # Codex starts continuation turns itself, so a completed turn is not the end.
+    codex_goal_status: str | None = None
     # Agent turns the ws-server accepted (`queued`) and lost when the session
     # ended (`user_turn_undelivered`): their senders are told once (the backend
     # is idempotent per turn; this set only skips repeats within one attach).
@@ -968,9 +971,11 @@ async def _run_agentic_loop(
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns
         nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen, native_codex_terminal
+        nonlocal codex_goal_status
         code_events.clear()
         latest_partials.clear()
         native_codex_terminal = None
+        codex_goal_status = None
         direct_chat_active = False
         user_turns_seen = 0
         sdk_results_seen = 0
@@ -989,6 +994,7 @@ async def _run_agentic_loop(
         nonlocal completed_codex_turns, last_output_time
         nonlocal sdk_result_at, logged_events
         nonlocal direct_chat_active, user_turns_seen, sdk_results_seen, native_codex_terminal
+        nonlocal codex_goal_status
         last_output_time = safe_time()
         code_events.append(event)
         event_index = len(code_events) - 1
@@ -1014,6 +1020,8 @@ async def _run_agentic_loop(
                 transcript_pending[record["id"]] = record
         _supersede_partial_snapshot(code_events, latest_partials, event_index)
         if event.get("provider") == "codex":
+            if event.get("type") == "goal":
+                codex_goal_status = event.get("status") if isinstance(event.get("status"), str) else None
             if event.get("type") == "turn_started":
                 native_codex_terminal = None
             elif event.get("type") == "user_turn" and (
@@ -1202,7 +1210,12 @@ async def _run_agentic_loop(
             # Its terminal lifecycle, rather than process exit or a silence
             # timeout, completes this attachment. A later start invalidates it;
             # a direct-chat hold keeps the attachment open until hand-back.
-            if code_provider == "codex" and native_codex_terminal is not None and not direct_chat_active:
+            if (
+                code_provider == "codex"
+                and native_codex_terminal is not None
+                and not direct_chat_active
+                and codex_goal_status != "active"
+            ):
                 outcome = native_codex_terminal.get("turn_outcome", native_codex_terminal.get("status"))
                 exit_code = 0 if outcome == "completed" else 1
                 action_summary.append(f"Codex native turn ended: {outcome}")
@@ -1894,13 +1907,62 @@ def _structured_response_from_code_evidence(
 # 2026-10-24); the declared output_schema fixes its structure. Keep in sync with
 # CODE_AGENT_HANDOFF_PATH in back-end/src/providers/codeAgentPrompt.ts.
 CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json"
+# The ws-server writes the result JSON Schema here from the task text, so the
+# /goal condition can name it without spending Claude's 4000-character goal cap.
+CODE_AGENT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json"
+# Standard handoff fields every code agent writes, next to the declared fields
+# (Andy, 2026-11-08): how the run ended plus its git facts. No question field:
+# code agents do not ask questions, they assume and report.
+HANDOFF_STANDARD_KEY = "rose_handoff"
+HANDOFF_COMPLETE = "complete"
+HANDOFF_STATUSES = (HANDOFF_COMPLETE, "blocked", "failed")
+HANDOFF_STANDARD_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "How this run ended. Always required.",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": list(HANDOFF_STATUSES),
+            "description": (
+                "complete: the task is done and verified. blocked: an external condition you cannot change "
+                "stops you after reasonable attempts (name it and its evidence in summary). failed: the task "
+                "cannot be done here, shown by what you tried. Never blocked or failed because the work is "
+                "hard, slow, uncertain or would benefit from clarification."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "description": "What you did, what you verified, and every assumption you made.",
+        },
+        "branch": {"type": ["string", "null"], "description": "Branch your commits are on, or null."},
+        "commit": {"type": ["string", "null"], "description": "Full SHA of your latest commit, or null."},
+        "pr_url": {"type": ["string", "null"], "description": "Pull request URL, or null."},
+        "merged": {
+            "type": ["boolean", "null"],
+            "description": "True only if your change is verified merged into its merge target.",
+        },
+    },
+    "required": ["status", "summary", "branch", "commit", "pr_url", "merged"],
+    "additionalProperties": False,
+}
 # Structure used when the parent declared no output fields.
 DEFAULT_HANDOFF_SCHEMA: Dict[str, Any] = {
     "type": "object",
-    "properties": {"summary": {"type": "string", "description": "What you did and the result."}},
-    "required": ["summary"],
+    "properties": {HANDOFF_STANDARD_KEY: HANDOFF_STANDARD_SCHEMA},
+    "required": [HANDOFF_STANDARD_KEY],
     "additionalProperties": False,
 }
+# The goal's end condition (Andy, 2026-11-08): every code-agent task is a /goal
+# whose condition ends with writing the handoff. The ws-server prefixes /goal.
+HANDOFF_END_CONDITION = (
+    f"End condition: you are done only when {CODE_AGENT_HANDOFF_PATH} holds one JSON object valid against the "
+    f"JSON Schema in {CODE_AGENT_HANDOFF_SCHEMA_PATH} (show it in this conversation by printing the written "
+    "file and validating it against that schema with a command), with "
+    f"{HANDOFF_STANDARD_KEY}.status set to complete (the task is done and verified), or to blocked or failed "
+    "only after reasonable attempts show the task cannot be finished here, never because it is hard, slow, "
+    "uncertain or would benefit from clarification. Do not ask questions: nobody answers them. Make "
+    f"reasonable assumptions, proceed, and list them in {HANDOFF_STANDARD_KEY}.summary."
+)
 # Close responses without a ``handoff`` key come from sessions outside E2B (a
 # Mac folder or the local billing fallback); they keep the session-output result.
 _NO_HANDOFF_CONTRACT = object()
@@ -1933,25 +1995,47 @@ def handoff_json_schema(output_schema: Optional[Dict[str, Any]]) -> Dict[str, An
         name = field.get("name") if isinstance(field, dict) else None
         if not isinstance(name, str) or not name:
             continue
+        if name == HANDOFF_STANDARD_KEY:
+            continue  # reserved for the standard fields
         field_schema, _open_shape = _json_schema_for_response_field(field)
         properties[name] = _with_field_descriptions(field_schema, field)
         if field.get("required", True):
             required.append(name)
     if not properties:
         return DEFAULT_HANDOFF_SCHEMA
-    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+    return {
+        "type": "object",
+        "properties": {HANDOFF_STANDARD_KEY: HANDOFF_STANDARD_SCHEMA, **properties},
+        "required": [HANDOFF_STANDARD_KEY, *required],
+        "additionalProperties": False,
+    }
 
 
 def handoff_task_text(goal: str, output_schema: Optional[Dict[str, Any]]) -> str:
-    """The task sent to the code agent: the goal plus its result schema."""
+    """The task sent to the code agent: the goal, its end condition, then its result schema.
+
+    The ws-server writes the schema after the marker to CODE_AGENT_HANDOFF_SCHEMA_PATH
+    and starts the run as ``/goal <goal + end condition>``.
+    """
     schema = json.dumps(handoff_json_schema(output_schema), sort_keys=True)
-    return f"{goal}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
+    return f"{goal}\n\n{HANDOFF_END_CONDITION}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
+
+
+def handoff_standard_fields(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The standard ``rose_handoff`` object of a parsed handoff, when present."""
+    standard = result.get(HANDOFF_STANDARD_KEY) if isinstance(result, dict) else None
+    return standard if isinstance(standard, dict) else None
 
 
 def _read_handoff(
     handoff: Optional[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Return ``(result, None)`` for a schema-valid handoff, else ``(None, reason)``."""
+    """Return ``(result, None)`` for a schema-valid handoff, else ``(None, reason)``.
+
+    A ``complete`` handoff must satisfy the whole schema. A blocked or failed one
+    reports the run truthfully: only its standard fields are required, and the
+    declared fields it does fill must still match their types.
+    """
     import jsonschema
 
     status = handoff.get("status") if isinstance(handoff, dict) else "missing"
@@ -1963,7 +2047,11 @@ def _read_handoff(
         result = json.loads(handoff["content"])
     except json.JSONDecodeError as exc:
         return None, f"The handoff file at {CODE_AGENT_HANDOFF_PATH} is not valid JSON: {exc}."
-    validator = jsonschema.Draft202012Validator(handoff_json_schema(output_schema))
+    schema = handoff_json_schema(output_schema)
+    standard = handoff_standard_fields(result)
+    if standard is not None and standard.get("status") != HANDOFF_COMPLETE:
+        schema = {**schema, "required": [HANDOFF_STANDARD_KEY]}
+    validator = jsonschema.Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(result), key=lambda error: list(error.absolute_path))
     if errors:
         problems = "; ".join(
@@ -2104,15 +2192,22 @@ async def _handoff_result(
     evidence for judges only and never enter the tool result.
     """
     result, handoff_error = _read_handoff(handoff, output_schema)
+    standard = handoff_standard_fields(result)
+    reported_status = standard.get("status") if standard is not None else None
     has_fields = bool(isinstance(output_schema, dict) and output_schema.get("fields"))
-    structured = result if has_fields else None
+    # The parent's declared fields; the standard fields stay in the reasoning.
+    structured = (
+        {key: value for key, value in result.items() if key != HANDOFF_STANDARD_KEY}
+        if has_fields and isinstance(result, dict)
+        else None
+    )
     outcome, outcome_fields = _disabled_verifier_outcome(
         output_schema,
         structured if result is not None else None,
         attempt_completion=attempt_completion,
         exit_code=exit_code,
     )
-    complete = result is not None and outcome == "complete"
+    complete = result is not None and outcome == "complete" and reported_status in (None, HANDOFF_COMPLETE)
     score = 1.0 if complete else 0.5
     header = (
         f"Code-agent verifier off (provider={code_provider}, exit_code={exit_code}, "
@@ -2120,6 +2215,8 @@ async def _handoff_result(
     )
     if outcome == "failed":
         header += " The session ended without a success signal."
+    if reported_status not in (None, HANDOFF_COMPLETE):
+        header += f" The code agent reported {HANDOFF_STANDARD_KEY}.status={reported_status}."
     if result is not None:
         reasoning = (
             f"{header} Handoff from {CODE_AGENT_HANDOFF_PATH}, validated against the declared output schema:\n\n"
@@ -2137,6 +2234,7 @@ async def _handoff_result(
         exit_code=exit_code,
         handoff_status=handoff.get("status") if isinstance(handoff, dict) else None,
         handoff_valid=result is not None,
+        handoff_reported_status=reported_status,
         outcome=outcome,
         score=score,
     )
@@ -3247,7 +3345,17 @@ async def spawn_claude_code_activity(
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
     """
+    if not output_schema:
+        # Invalid scheduled arguments cannot heal on a worker/crash retry. Fail
+        # before installing heartbeat context or allocating a sandbox.
+        raise ApplicationError(
+            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call",
+            type="CODE_AGENT_OUTPUT_SCHEMA_REQUIRED",
+            non_retryable=True,
+        )
+
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    source_code_provider = code_provider
 
     from helpers.model_pricing import get_model_pricing_with_fallback
 
@@ -3283,11 +3391,6 @@ async def spawn_claude_code_activity(
     action_summary: list[str] = []
     code_events: list[Dict[str, Any]] = []
     terminal_output_persisted_box = [False]
-
-    if not output_schema:
-        raise ValueError(
-            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
-        )
 
     if isinstance(attached, dict) and attached.get("target") == "local":
         target = "local"
@@ -3439,6 +3542,17 @@ async def spawn_claude_code_activity(
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
                 task_name=(code_session_request or {}).get("task_name"),
                 cli_settings=(code_session_request or {}).get("cli_settings"),
+                resume_config={
+                    "source_code_provider": source_code_provider,
+                    "spawn_args": {
+                        "type": "code", "goal": goal, "output_schema": output_schema,
+                        "github_repo_link": github_repo_url, "target": target, "task_name": task_name,
+                        "attachments": [item.get("original_filename") for item in attachments or []],
+                    },
+                    "attachments": attachments or [],
+                    "model": model,
+                    "fast_mode_cache_enabled": fast_mode_cache_enabled,
+                },
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)

@@ -1,3 +1,4 @@
+import { authorizeSyntheticSetup } from './iphone-control.setup-fixtures';
 import { setupVerifierCases } from './iphone-control.setup-verifier.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -15,6 +16,7 @@ export const setupCases: Case[] = [
         where: { id: f.deviceId },
         data: { setupState: 'not_started', setupEncrypted: null },
       });
+      await authorizeSyntheticSetup(f);
       const interaction = await h.request(f.userId, `/interactions/${f.taskId}`);
       const setup = interaction.data.setup as {
         required: boolean;

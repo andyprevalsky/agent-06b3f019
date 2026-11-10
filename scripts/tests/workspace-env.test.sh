@@ -20,6 +20,7 @@ unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
   CONDUCTOR_WORKSPACE_PATH \
   CONDUCTOR_PORT \
   BENCHMARK_ISOLATED_RUN \
+  ROSE_STABILITY_UNIT_IDENTITY \
   ROSE_DEPLOY_WORKTREE \
   ROSE_DEPLOY_WORKTREE_PATH \
   ROSE_DEPLOY_SOURCE_WORKSPACE \
@@ -103,6 +104,24 @@ isolated_benchmark_name=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '1p')
 isolated_benchmark_port=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '2p')
 expect_eq "$isolated_benchmark_name" "deploy-child-bench-run-123" "isolated benchmark preserves its child identity"
 expect_eq "$isolated_benchmark_port" "56220" "isolated benchmark preserves its reserved port range"
+
+stability_unit_name="$(
+  cd "$deploy_child"
+  ROSE_STABILITY_UNIT_IDENTITY=1 \
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=stab-123-0-abcdef \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$stability_unit_name" "stab-123-0-abcdef" "a stability unit keeps its own identity inside a deploy worktree"
+deploy_shell_name="$(
+  cd "$deploy_child"
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=stab-123-0-abcdef \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$deploy_shell_name" "deploy-child" "without the stability flag a deploy worktree still rehydrates its identity"
 
 cloud_workspace="$TMP_ROOT/cloud-checkout"
 mkdir -p "$cloud_workspace"

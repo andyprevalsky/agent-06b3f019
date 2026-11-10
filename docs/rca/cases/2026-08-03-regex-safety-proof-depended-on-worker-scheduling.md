@@ -70,3 +70,44 @@ None recorded.
 ## Reusable lesson
 
 Prove common safe input classes locally and reserve bounded external analysis for syntax whose safety actually requires it.
+
+## November 8 finite-literal-alternation follow-up
+
+Full55 on `42cba2eca4305fad76ceda8d9721550e8afa7833` rejected the
+public `data-google-sources` pattern `Project Sync|Lease`: HTTP400 instead of200.
+The retained server trace took1004ms before search or provider refresh. The
+specific analyzer failure (warmup, worker, unknown or throw) remains UNKNOWN;
+no host-load or disk cause is established. The original native backend result
+also contains a distinct teardown failure and coverage UNVERIFIED. Those facts
+are not repaired or credited by a pattern proof.
+
+Two archive searches used `Project Sync Lease INVALID_PATTERN` and
+`finite literal alternation safety analyzer deadline`. This case is the same
+local-proof scheduling boundary, extended to a previously excluded grammar;
+`2026-11-08-grep-regex-safety-blocked-event-loop` is related but concerns a
+synchronous analyzer, whereas this run uses the asynchronous implementation.
+The original proof deliberately left every top-level alternation analyzer-owned.
+A finite union of literal strings needs neither nested backtracking nor a
+schedulable analyzer, yet this safe family still depended on one.
+
+A new permanent owning function tests generic finite literal unions at zero
+analyzer budget, including the exact public pattern. The identical focused
+command failed on the original implementation (`false != true`) and passed
+with the conservative proof. All existing assertions remain unchanged. The
+proof scans every branch, accepts at least two nonempty literal-only branches,
+handles explicitly escaped metacharacters and pipe/backslash parity, and rejects
+any unproved branch, groups, classes, repetition, assertions or unknown escapes.
+The existing1000-character cap, explicit analyzer seam, deadline, retries and
+fail-closed fallback remain intact. The flags alphabet restriction is not a
+standalone flag-syntax validator; production constructs valid flags before safety.
+
+Exact diff, security reasoning, RED/GREEN commands and supervisor receipts are
+preserved at
+`.context/rca-google400/42cba2e-final-validation/finite-alternation-candidate/`.
+Diff SHA256 is
+`7cb6f8d70b40c5de93268c4e1a27b88915f6f120c2ca624f9425351841be889a`.
+Independent review CLEAR is scoped to that two-file change. After integration,
+the full canonical regex unit command passed, native0, with quiescent supervisor,
+no orphans or signals. The ordinary backend domain/full gate still needs a new
+normal run; this follow-up supplies no benchmark or production acceptance.
+No new human feedback specific to this follow-up was recorded.
