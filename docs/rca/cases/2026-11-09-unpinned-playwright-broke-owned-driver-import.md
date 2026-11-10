@@ -18,6 +18,7 @@ tags:
   - cloudbench
 sources:
   - PR #1905
+  - PR #1915
   - commit cb7a8ae130a179f92bb20e1a1ab848f7d76d9092
 repro: executed
 status: open
@@ -49,6 +50,34 @@ venv/bin/python tests/blackbox/browser_cleanup_receipt.blackbox.py
 ```
 
 Before repair the actual image installed 1.65 and the unchanged owner import/native cases failed. The installed 1.63 control passes the same native startup/cancellation assertions; it supplies no full task or image acceptance credit. The new image must pass its real import guard and the unchanged native browser/payment tasks at their original deadlines.
+
+## Production recurrence on November 10
+
+Agent 546485cc-45c4-48f7-80cf-1e7f3d4fb2a8 encountered three initialization
+failures before any action or navigation. The exact failed worker's stopped
+image was inspected through authenticated registry reads without restarting it.
+Its checksum-verified dependency layer contains intact Playwright 1.65.0 and
+the public `connection.py`/`transport.py` paths, matching the official wheel;
+the owner's required `_connection.py` is absent. This is an incompatible
+resolved SDK, rather than a corrupted installation, site failure or OAuth error.
+The owner bytes match the unchanged reproduction and compatible 1.63 control.
+
+The independent recurrence on agent 03f268b1-384c-5092-8ea8-8a7fbb022789
+has the same zero-action stack and actual failed-machine readback of 1.65.0.
+Its existing phone coordinator owns the eventual original-device retry.
+PR #1915 reconciled with the original repair owner and reused the exact
+three-file compatibility patch. Independent existing owning suites pass all
+55 startup/cancellation cases with 1.63; the identical owner import fails with
+the authentic 1.65 wheel. These controls do not establish a production rollout.
+Exact merged-source deployment, live installed-package/import readback and
+production browser navigation remain required for this assigned repair.
+
+The first PR #1915 cloud smoke campaign retained eleven native successes and
+two native SKIPPED non-passes: one judge capacity classification and one exact
+sandbox AgentCard release stall. Neither supplies acceptance credit or a waiver
+for the assigned SDK failure. All original controller and cleanup receipts are
+retained. A separate semantic adapter defect dropped completed retried UI
+assertion failures to UNVERIFIED; its distinct case records the reporting repair.
 
 ## Related cases
 

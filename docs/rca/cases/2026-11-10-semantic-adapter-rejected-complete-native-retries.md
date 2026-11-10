@@ -1,0 +1,112 @@
+---
+id: 2026-11-10-semantic-adapter-rejected-complete-native-retries
+date: 2026-11-10
+title: Semantic adapter discarded completed assertion failures after the canonical CI retry
+surface: harness
+component: deploy-semantic-native-result-classification
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: classify_lane accepts only one retry-zero result although the canonical semantic driver retries failures once
+symptoms:
+  - semantic-stack UNVERIFIED with complete false despite complete native failed test reports
+  - len(results) != 1
+  - 55 passed and 3 failed UI tests became 55 PASS and 3 UNVERIFIED native cases
+tags:
+  - deploy
+  - semantic
+  - playwright
+  - retry
+  - evidence
+sources:
+  - PR #1915
+  - commit 009e97401550115295b42af9ef83be37bda55055
+  - plan: .context/rca-playwright/semantic-retry/findings.json
+repro: scripts/tests/deploy-test-semantic.test.py::SemanticReports.test_complete_native_retries_preserve_terminal_assertion_failure
+status: fixed
+---
+
+## Problem
+
+The source-bound native semantic gate completed with 55 UI successes, three UI
+assertion failures and five latency successes. Every failed UI assertion ran
+both its initial attempt and the canonical single retry. The final adapter
+receipt nevertheless reported UNVERIFIED and complete=false. All before/after
+hooks completed, the stack was ready, exact source remained unchanged, native
+exit was one and cleanup was positively confirmed. The three UI defects are
+separate, evidence-matched repairs owned by PR #1916; this case owns only loss
+of their terminal failure classification.
+
+## Diagnosis
+
+The request-to-result path is canonical Playwright configuration -> native JSON
+report and lifecycle reporter -> classify_lane -> composite worker receipt ->
+deploy cycle. The first bad boundary is classify_lane's one-result/retry-zero
+assumption. The report contains 61 UI attempts (55 passes and six failures),
+with 122 successful hook-end records. Each failed test has two results and
+exactly eight complete lifecycle events, so the old guard drops it before
+examining the terminal native failure.
+
+An immutable captured-report replay asserts 55 PASS, three FAIL and five latency
+PASS. It fails against the original classifier with three UNVERIFIED cases.
+The exact same capture and assertions pass against the strict candidate. The
+classifier, native reporters, driver configuration and existing owning tests
+are byte-identical between base 145b59fe8 and repaired-SDK source 009e97401:
+Gate: NOT_INTRODUCED for this additional reporting failure. The assigned
+Playwright runtime repair remains independently owned and cannot be waived.
+
+Archive searches used semantic native retries, retry attempt complete and
+UNVERIFIED assertion failure vocabulary. Related semantic inventory/evidence
+cases do not supply this diagnosis: the actual immutable retry chain identifies
+this distinct contract mismatch. Golden reference: not applicable (code-only
+operational reporting; no approval-gated hunk).
+
+## Solution
+
+Validate each observed attempt's contiguous retry index, exact lifecycle shape,
+successful before/after hooks and matching report/event status. Require failed
+terminal chains to exhaust their declared native retry budget. Preserve every
+complete terminal assertion failure as FAIL. Missing originals or final attempts,
+gapped, duplicated, reordered or interrupted attempts, failed hooks and incomplete
+reports remain UNVERIFIED. A first-attempt pass remains PASS. Retried recovery
+remains conservatively UNVERIFIED until its existing FLAKY attribution channel
+is positively corroborated; this patch does not invent an ordinary PASS.
+
+This unifies the one-attempt and repeated-failure validation in the existing
+classifier. Deleting lifecycle checks would weaken the contract; per-attempt
+validation is required because the native driver intentionally emits retries.
+The execution recipe, retries, assertions, deadlines, inventories and native
+records are unchanged. No retained result is rewritten. The regression extends
+the existing deploy-test-semantic suite, already registered in the deploy
+structural gate, rather than adding a new validation system.
+
+The permanent existing-suite regression was executed against the original source
+and failed with UNVERIFIED instead of FAIL. After applying the reviewed code,
+the identical command passed:
+
+`TMPDIR=/tmp agents/venv/bin/python -B scripts/tests/deploy-test-semantic.test.py SemanticReports.test_complete_native_retries_preserve_terminal_assertion_failure`
+
+The full owning suite passed all twelve tests in 2.822 seconds. The immutable
+captured replay also passes against the actual repository classifier (SHA256
+ca97c9e6d191861cc9af699c6f8a48d55fc1b9b265e9c9f6612ecb81e444254a),
+retaining three native UI failures rather than reporting an aggregate PASS.
+Independent adversarial review rejected earlier drafts for missing retry-budget,
+closed-world inventory and malformed-object controls. Those objections were
+reproduced and corrected; the accepted review separately ran thirty adversarial,
+twenty supplied and eighteen general-budget controls (sets may overlap).
+
+The existing real-reporter fixture now explicitly writes its output into its
+private temporary directory: Playwright otherwise selected the nearest package
+root and emitted untracked test-results into the frozen checkout. Its assertions
+and native fixture execution remain unchanged. Local Node resolution controls
+run with TMPDIR=/tmp, outside the repository's installed dependency ancestors.
+
+Final source-bound native gate validation and deployment remain required;
+these local checks do not upgrade the original receipt or the three UI grades.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+Classify complete native retry chains using their declared attempt budget and lifecycle evidence while preserving original failure and uncertainty states.

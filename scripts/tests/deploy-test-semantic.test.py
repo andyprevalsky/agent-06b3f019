@@ -52,6 +52,65 @@ class SemanticReports(unittest.TestCase):
                 if change == 'global': r['errors'] = [{'message': 'global setup failed'}]
                 self.assertEqual(set(adapter.classify_lane('ui', [item], r, e).values()), {'UNVERIFIED'})
 
+
+    def test_complete_native_retries_preserve_terminal_assertion_failure(self):
+        item, events, report = self.fixture()
+        report['config'] = {'projects': [{'name': 'chromium', 'retries': 1}]}
+        result = report['suites'][0]['specs'][0]['tests'][0]['results'][0]
+        second = copy.deepcopy(result)
+        second['retry'] = 1
+        report['suites'][0]['specs'][0]['tests'][0]['results'].append(second)
+        retry_events = copy.deepcopy(events[1:5])
+        for event in retry_events:
+            event['retry'] = 1
+        events[5:5] = retry_events
+        self.assertEqual(adapter.classify_lane('ui', [item], report, events),
+                         {adapter.case_key('ui', item): 'FAIL'})
+        passed_events, passed_report = copy.deepcopy(events), copy.deepcopy(report)
+        first = passed_report['suites'][0]['specs'][0]['tests'][0]['results'][0]
+        first.update(status='passed', errors=[])
+        passed_report['suites'][0]['specs'][0]['tests'][0]['results'] = [first]
+        passed_events = passed_events[:5] + [passed_events[-1]]
+        passed_events[4]['status'] = passed_events[-1]['status'] = 'passed'
+        self.assertEqual(adapter.classify_lane('ui', [item], passed_report, passed_events),
+                         {adapter.case_key('ui', item): 'PASS'})
+        for defect in ('missing_original', 'missing_final', 'before', 'after', 'end', 'interrupted',
+                       'skipped', 'duplicate', 'gap', 'pass_without_flaky_receipt',
+                       'missing_project', 'missing_budget', 'duplicate_project', 'null_config',
+                       'null_project', 'null_result', 'unknown_id'):
+            with self.subTest(defect=defect):
+                e, r = copy.deepcopy(events), copy.deepcopy(report)
+                attempts = r['suites'][0]['specs'][0]['tests'][0]['results']
+                if defect == 'missing_original':
+                    attempts.pop(0)
+                    e = [event for event in e if event.get('retry') != 0]
+                if defect == 'missing_final':
+                    attempts.pop()
+                    e = [event for event in e if event.get('retry') != 1]
+                if defect in ('before', 'after'):
+                    e[6 if defect == 'before' else 7]['ok'] = False
+                if defect == 'end': e.pop(8)
+                if defect in ('interrupted', 'skipped'):
+                    attempts[1]['status'] = e[8]['status'] = defect
+                if defect in ('duplicate', 'gap'):
+                    retry = 0 if defect == 'duplicate' else 2
+                    attempts[1]['retry'] = retry
+                    for event in e[5:9]: event['retry'] = retry
+                if defect == 'pass_without_flaky_receipt':
+                    attempts[1]['status'] = e[8]['status'] = 'passed'
+                    e[-1]['status'] = 'passed'
+                if defect == 'missing_project': r['config']['projects'] = []
+                if defect == 'missing_budget': r['config']['projects'][0].pop('retries')
+                if defect == 'duplicate_project':
+                    r['config']['projects'].append({'name': 'chromium', 'retries': 2})
+                if defect == 'null_config': r['config'] = None
+                if defect == 'null_project': r['config']['projects'] = [None]
+                if defect == 'null_result': attempts[-1] = None
+                if defect == 'unknown_id':
+                    e.insert(-1, {'event': 'testBegin', 'id': 'outside-inventory', 'retry': 0})
+                self.assertEqual(set(adapter.classify_lane('ui', [item], r, e).values()),
+                                 {'UNVERIFIED'})
+
     def test_native_pass_and_timeout(self):
         item, events, report = self.fixture()
         for status, expected in [('passed', 'PASS'), ('timedOut', 'FAIL')]:
@@ -248,7 +307,8 @@ class SemanticReports(unittest.TestCase):
             env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
                    'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json')}
             proc = subprocess.run([*adapter.playwright_command(ROOT), 'test', '--reporter=json,' + str(
-                ROOT / 'scripts/deploy-semantic-reporter.cjs')], cwd=folder, env=env,
+                ROOT / 'scripts/deploy-semantic-reporter.cjs'), '--output', str(folder / 'test-results')],
+                cwd=folder, env=env,
                 capture_output=True, timeout=45)
             self.assertEqual(proc.returncode, 1, proc.stderr.decode())
             events = [json.loads(line) for line in (folder / 'events.jsonl').read_text().splitlines()]
