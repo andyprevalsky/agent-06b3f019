@@ -264,6 +264,25 @@ class NativeLifecycle(unittest.TestCase):
         self.assertNotEqual(result.returncode,0)
         self.assertFalse(any(method=='POST' and path.endswith(('/start','/exec')) for method,path,body,nonce in self.calls))
 
+    def test_resealed_start_before_lease_version_refresh_refuses(self):
+        result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
+        path=self.root/'output/result.json';receipt=self.m['load'](path)
+        rows=[]
+        for p in (self.root/'output/native').glob('*/request.json'):
+            sent=self.m['load'](p);wire=next(p.parent.glob('*-wire.json'));record=self.m['load'](wire)
+            rows.append((self.m['load'](p.parent/'transport-start.json')['monotonic_ns'],p,sent,wire,record))
+        rows.sort()
+        start=next(row for row in rows if row[2]['path'].endswith('/start'))
+        renewal=next(row for row in rows if row[2]['method']=='POST' and row[2]['path'].endswith('/lease') and row[2]['headers'])
+        self.assertLess(renewal[0],start[0])
+        stamp=self.m['load'](renewal[1].parent/'transport-start.json');stamp['monotonic_ns']=start[4]['monotonic_ns']+1
+        (renewal[1].parent/'transport-start.json').write_text(json.dumps(stamp))
+        renewal[4]['monotonic_ns']=stamp['monotonic_ns']+1;renewal[3].write_text(json.dumps(renewal[4]))
+        receipt['journal']=self.m['journal_index'](self.root/'output/native');path.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError,'version'):
+            self.m['verify_prepared_source'](self.root/'request.json',path,self.root/'output/source-manifest.json',
+                source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+
     def test_unknown_replacement_instance_never_starts(self):
         self.fault='third-instance';result=self.invoke();self.assertNotEqual(result.returncode,0)
         self.assertFalse(any(method=='POST' and path.endswith('/start') for method,path,body,nonce in self.calls))

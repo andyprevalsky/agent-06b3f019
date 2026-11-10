@@ -265,8 +265,8 @@ class ScopedNative(REUSE['NativeAdapter']):
     def request(self, method, url, body=None, *, timeout=20, direct=False):
         if self.nonce and time.monotonic() + timeout + 55 >= self.lease_end:
             self.renew()
-        if method == 'POST' and url == '/machines/' + self.mid + '/exec':
-            need(self.lease_version == self.target_version and self.target_version, 'EXEC lease version is stale')
+        if method == 'POST' and url in ('/machines/' + self.mid + '/start', '/machines/' + self.mid + '/exec'):
+            need(self.lease_version == self.target_version and self.target_version, 'START/EXEC lease version is stale')
         if method == 'POST' and url == '/machines/' + self.mid and self.lease_version != body.get('current_version'):
             self.bind_version(body['current_version'])
         result = super().request(method, url, body, timeout=timeout, direct=direct)
@@ -541,8 +541,8 @@ def verify_journal(value, mid, vid, shared, *, request=None, before=None, after=
             elif row['path']=='/machines/'+mid:
                 if strict_versions:need(lease_version==row['body']['current_version'],'CAS lease version proof')
                 target_version=row['response'].get('instance_id')
-            elif row['path']=='/machines/'+mid+'/exec' and strict_versions:
-                need(lease_version==target_version and target_version, 'EXEC current-version lease proof')
+            elif row['path'] in ('/machines/'+mid+'/start','/machines/'+mid+'/exec') and strict_versions:
+                need(lease_version==target_version and target_version, 'START/EXEC current-version lease proof')
     need(released, 'native lease not released')
     if request is not None:
         own = '/machines/' + mid
