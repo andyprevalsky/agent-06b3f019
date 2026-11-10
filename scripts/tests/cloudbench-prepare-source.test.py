@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline owning checks for private-source preparation; never contact providers."""
 import copy
+import ast
 from datetime import datetime, timezone
 import http.server
 import json
@@ -350,6 +351,67 @@ sys.stdout.write(value.get('stdout',''));sys.stderr.write(value.get('stderr','')
         self.assertEqual([value['node_fingerprint'],value['python_fingerprint']],expected)
         self.assertEqual(value['scripts']['lib/cloudbench-env.sh'],self.m['sha'](helper.read_bytes()))
         self.assertFalse(self.calls)
+
+    def test_generated_fetch_environment_uses_checkout_owner_with_real_local_git(self):
+        if shutil.which('sudo') is None or subprocess.run(['sudo','-n','true'],capture_output=True).returncode:
+            self.skipTest('local root identity fixture requires passwordless sudo')
+        root=self.root/'fetch-identity';root.mkdir(mode=0o755);self.root.chmod(0o755)
+        seed=root/'seed';seed.mkdir();git=['git','-C',str(seed)]
+        def command(args):return subprocess.check_output(args,stderr=subprocess.DEVNULL,text=True).strip()
+        command(git+['init','-q']);command(git+['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','first'])
+        origin=root/'origin.git';repo=root/'repo'
+        command(['git','clone','-q','--bare',str(seed),str(origin)]);command(['git','clone','-q',str(origin),str(repo)])
+        command(git+['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','second'])
+        target=command(git+['rev-parse','HEAD']);command(git+['push',str(origin),'HEAD:refs/heads/master'])
+        program=ast.parse(self.m['guest_program'](self.request))
+        body=next(node for node in program.body if isinstance(node,ast.Try)).body
+        start=next(i for i,node in enumerate(body) if isinstance(node,ast.Assign)
+                   and any(isinstance(t,ast.Name) and t.id in ('app_user','env') for t in node.targets))
+        end=next(i for i,node in enumerate(body) if isinstance(node,ast.With)
+                 and 'fetch.private.log' in ast.unparse(node))
+        fragment=ast.unparse(ast.Module(body=body[start:end+1],type_ignores=[])).replace('/data/repo',str(repo))
+        script=root/'cloudbench-fetch-ref.sh';script.write_bytes((HERE/'cloudbench-fetch-ref.sh').read_bytes())
+        binary=root/'bin';binary.mkdir();user=subprocess.check_output(['id','-un'],text=True).strip()
+        (binary/'gosu').write_text('#!/bin/sh\n[ "$1" = rose ] || exit 91\nshift\nexec /usr/bin/sudo -n -u '+shlex.quote(user)+' -- "$@"\n');(binary/'gosu').chmod(0o755)
+        harness='''import os,pwd,pathlib,subprocess,base64,hashlib,types
+pwd.getpwnam=lambda name:types.SimpleNamespace(pw_uid=OWNER,pw_dir='/home/rose')
+r=dict(source_ref=TARGET,transport=None,guest_env_sha256={})
+directory=pathlib.Path(ROOT);preconditions=dict(environment_contract=dict(provider_contract_verified=True))
+FRAGMENT
+'''.replace('OWNER',str(repo.stat().st_uid)).replace('TARGET',repr(target)).replace('ROOT',repr(str(root))).replace('FRAGMENT',fragment)
+        run=subprocess.run(['sudo','-n','env','-i','PATH='+str(binary)+':/usr/bin:/bin','HOME='+str(root),
+                            'python3','-c',harness],capture_output=True,text=True,timeout=20)
+        self.assertEqual(run.returncode,0,run.stderr)
+        self.assertEqual(command(['git','-C',str(repo),'rev-parse','HEAD']),target)
+        self.assertFalse(self.calls)
+
+    def test_generated_failure_diagnosis_seals_safe_auth_flags_without_secret_values(self):
+        tree=ast.parse(self.m['guest_program'](self.request))
+        function=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='failure_diagnosis')
+        function=ast.parse(ast.unparse(function).replace('/data/.cloudbench-private',str(self.root/'private-root'))).body[0]
+        raw=b'fatal: Authentication failed for https://secret-token-canary@example.invalid/private\n'
+        (self.root/'fetch.private.log').write_bytes(raw)
+        captured=[]
+        namespace=dict(os=os,pathlib=__import__('pathlib'),subprocess=subprocess,hashlib=self.m['hashlib'],time=time,directory=self.root,
+            phase='fetch',preconditions=dict(repo_uid=1001,app_uid=1001,chosen_app_user='rose',euid=0,machine_id=self.mid,data_mount=True),
+            error=subprocess.CalledProcessError(128,['secret-argv-canary']),r=dict(self.request,machine_id=self.mid),job=dict(pid=42),started=1,
+            save=lambda name,value:captured.append((name,value)))
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'<actual-generated-diagnosis>','exec'),namespace)
+        failure=next(node for node in tree.body if isinstance(node,ast.Try)).handlers[0].body
+        exec(compile(ast.Module(body=failure,type_ignores=[]),'<actual-generated-failure-result>','exec'),namespace)
+        self.assertEqual(captured[0][0],'result.json');result=captured[0][1];diagnosis=result['failure_diagnosis']
+        self.assertEqual(diagnosis['returncode'],128);self.assertEqual(diagnosis['chosen_app_user'],'rose')
+        self.assertTrue(diagnosis['error_flags']['auth_refusal']);self.assertFalse(diagnosis['error_flags']['dubious_ownership'])
+        log=diagnosis['logs']['fetch.private.log'];private=log.pop('private_copy');path=Path(private['path'])
+        self.assertEqual(path.read_bytes(),raw);self.assertEqual(path.stat().st_mode&0o777,0o600)
+        self.assertEqual(path.parent.stat().st_mode&0o777,0o700)
+        self.assertEqual(private,dict(path=str(path),sha256=self.m['sha'](raw),size=len(raw),truncated=False))
+        self.assertEqual(log,dict(size=len(raw),observed_bytes=len(raw),sha256=self.m['sha'](raw),complete=True))
+        text=json.dumps(result);self.assertNotIn('secret-token-canary',text);self.assertNotIn('secret-argv-canary',text)
+        self.assertNotIn('example.invalid',text);self.assertEqual(result['guest_exit'],1)
+        again=namespace['failure_diagnosis'](namespace['error'])
+        self.assertTrue(again['private_copy_unavailable']);self.assertNotIn('private_copy',again['logs']['fetch.private.log'])
+        self.assertEqual(path.read_bytes(),raw)
 
     def test_real_cli_bounded_transport_full_chain_with_foreign_churn(self):
         result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)

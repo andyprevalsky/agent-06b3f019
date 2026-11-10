@@ -427,7 +427,7 @@ def guest_program(request):
         authority=resolve_bootstrap_ownership(request['ownership']['path'])
         minimal['owned_manifest']=owned_manifest(request,dict(owner_token=authority['intent']['binding']['owner_token'],
                                                             creation_nonce=authority['intent']['nonce']))
-    return '''import base64,hashlib,json,os,pathlib,subprocess,time
+    return '''import base64,hashlib,json,os,pathlib,pwd,subprocess,time
 r=REQUEST
 directory=pathlib.Path('/tmp/cloudbench-prepare-source-'+r['nonce'])
 directory.mkdir(mode=0o700)
@@ -438,6 +438,36 @@ job=dict(pid=os.getpid(),birth=pathlib.Path('/proc/self/stat').read_text().rspli
 OBSERVATION_CODE
 phase='preconditions'
 preconditions=dict(euid=os.geteuid(),machine_id=os.environ.get('FLY_MACHINE_ID',''),data_mount=os.path.ismount('/data'),repo_physical=str(pathlib.Path('/data/repo').resolve()),git_dir=pathlib.Path('/data/repo/.git').is_dir(),env_present={k:bool(os.environ.get(k)) for k in r['guest_env_sha256']},guest_env_sha256={k:hashlib.sha256(os.environ.get(k,'').encode()).hexdigest() for k in r['guest_env_sha256']})
+def failure_diagnosis(error):
+ import stat
+ patterns={'dubious_ownership':(b'dubious ownership',),'missing_controller_credential':(b'controller github token is unavailable',),'auth_refusal':(b'authentication failed',b'bad credentials',b'could not read username',b'http 401',b'http 403'),'missing_ref':(b"couldn\x27t find remote ref",b'not our ref'),'disk':(b'no space left',b'insufficient volume space'),'fetch_lock':(b'another git maintenance or fetch still owns',),'network':(b'could not resolve host',b'failed to connect',b'connection timed out'),'permission':(b'permission denied',b'operation not permitted')}
+ value=dict(phase=phase,returncode=error.returncode if isinstance(error,subprocess.CalledProcessError) and type(error.returncode) is int else None,repo_uid=preconditions.get('repo_uid'),app_uid=preconditions.get('app_uid'),chosen_app_user=preconditions.get('chosen_app_user'),error_flags={key:False for key in patterns},logs={})
+ archive=None
+ if phase in ('fetch','dependencies') and preconditions.get('euid')==0 and preconditions.get('machine_id')==r['machine_id'] and preconditions.get('data_mount') is True:
+  try:
+   for parent in ('/data/.cloudbench-private','/data/.cloudbench-private/preparation-diagnostics'):
+    p=pathlib.Path(parent)
+    try:p.mkdir(mode=0o700)
+    except FileExistsError:pass
+    s=p.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid==os.geteuid() and stat.S_IMODE(s.st_mode)==0o700
+   archive=pathlib.Path('/data/.cloudbench-private/preparation-diagnostics')/r['nonce'];archive.mkdir(mode=0o700)
+  except (OSError,AssertionError):archive=None;value['private_copy_unavailable']=True
+ for name in ('fetch.private.log','sync-deps.private.log'):
+  try:
+   fd=os.open(directory/name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+   try:
+    info=os.fstat(fd);assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid()
+    with os.fdopen(fd,'rb',closefd=False) as stream:raw=stream.read(1024*1024)
+    value['logs'][name]=dict(size=info.st_size,observed_bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),complete=info.st_size==len(raw))
+    if archive is not None:
+     target=archive/name;out=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+     with os.fdopen(out,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+     value['logs'][name]['private_copy']=dict(path=str(target),sha256=hashlib.sha256(raw).hexdigest(),size=len(raw),truncated=info.st_size!=len(raw))
+     out=os.open(archive,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);os.fsync(out);os.close(out)
+    for key,needles in patterns.items():value['error_flags'][key]|=any(needle in raw.lower() for needle in needles)
+   finally:os.close(fd)
+  except (OSError,AssertionError):pass
+ return value
 try:
  assert os.geteuid()==0 and os.environ['FLY_MACHINE_ID']==r['machine_id']
  assert os.path.ismount('/data') and pathlib.Path('/data/repo').resolve()==pathlib.Path('/data/repo')
@@ -458,6 +488,9 @@ try:
   preconditions['env_present']={k:bool(os.environ.get(k)) for k in r['guest_env_sha256']}
   preconditions['guest_env_sha256']={k:hashlib.sha256(os.environ.get(k,'').encode()).hexdigest() for k in r['guest_env_sha256']}
  preconditions['environment_contract']=observe_guest_environment({k:os.environ.get(k,'') for k in r['guest_env_sha256']},directory,directory/'lib/cloudbench-env.sh')
+ app_user='rose';app=pwd.getpwnam(app_user)
+ preconditions.update(repo_uid=pathlib.Path('/data/repo').stat().st_uid,app_uid=app.pw_uid,chosen_app_user=app_user)
+ assert app.pw_uid!=0 and app.pw_dir=='/home/rose' and preconditions['repo_uid']==app.pw_uid
  env={k:os.environ[k] for k in ('PATH','HOME','GITHUB_TOKEN','AGENTS_ENV_B64','BACKEND_ENV_B64','FLY_MACHINE_ID') if k in os.environ}
  assert all(env.get(k) and hashlib.sha256(env[k].encode()).hexdigest()==v for k,v in r['guest_env_sha256'].items())
  assert preconditions['environment_contract']['provider_contract_verified']
@@ -465,9 +498,10 @@ try:
  # Use the existing inherited app credential in a process environment, never argv.
  if not env.get('CLOUDBENCH_GITHUB_TOKEN_B64') and env.get('GITHUB_TOKEN'):
   env['CLOUDBENCH_GITHUB_TOKEN_B64']=base64.b64encode(env['GITHUB_TOKEN'].encode()).decode()
+ fetch_env=dict(env,CLOUDBENCH_APP_USER=app_user,HOME=app.pw_dir)
  with open(directory/'fetch.private.log','x') as log:
   fetch_ref=r['transport']['base_sha'] if r['transport'] else r['source_ref']
-  subprocess.run(['bash',str(directory/'cloudbench-fetch-ref.sh'),'/data/repo',fetch_ref],env=env,stdout=log,stderr=log,check=True,timeout=300)
+  subprocess.run(['bash',str(directory/'cloudbench-fetch-ref.sh'),'/data/repo',fetch_ref],env=fetch_env,stdout=log,stderr=log,check=True,timeout=300)
  ref=subprocess.check_output(['git','-c','safe.directory=/data/repo','-C','/data/repo','rev-parse','HEAD'],text=True).strip()
  transport=None
  phase='source-transport'
@@ -504,7 +538,7 @@ try:
  observed['image_node_fingerprint']=image_fps[0];observed['image_python_fingerprint']=image_fps[1]
  save('result.json',observed)
 except BaseException as error:
- save('result.json',dict(schema='cloudbench-source-guest-v1',nonce=r['nonce'],guest_exit=1,error=type(error).__name__,phase=phase,job=job,preconditions=preconditions,started_epoch=started,finished_epoch=int(time.time())))
+ save('result.json',dict(schema='cloudbench-source-guest-v1',nonce=r['nonce'],guest_exit=1,error=type(error).__name__,phase=phase,job=job,preconditions=preconditions,failure_diagnosis=failure_diagnosis(error),started_epoch=started,finished_epoch=int(time.time())))
 '''.replace('REQUEST', repr(minimal), 1).replace('FILES', repr(files), 1).replace('OBSERVATION_CODE',SAFE_ENV_OBSERVER,1)
 
 

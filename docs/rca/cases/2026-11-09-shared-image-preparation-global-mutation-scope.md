@@ -207,6 +207,23 @@ stable private file metadata and bytes, and a no-replace final link. Historical
 file-based staging remains a separately pinned failure proof, never a guessed
 successful upload or retry authority.
 
+On f44ba7c, actual private SFTP and capsule sealing succeeded. The guest matched
+both approved environment hashes and passed its provider contract, then failed
+in source fetch with `CalledProcessError`. Cleanup verified stopped/parked state
+and released the lease; no snapshot or qualification was published. The original
+fetch log was on ephemeral `/tmp` and was absent after cleanup replacement, so
+its precise error remains unknown. A separate bounded read-only diagnostic
+confirmed a rose-owned checkout (UID 1001) and a present GitHub token, then
+verified stop again.
+
+An unchanged-helper offline test reproduces a concrete caller mismatch: running
+as root against the nonroot checkout fails, while the normal run-as-rose caller
+fetches the exact local ref. The preparation caller now follows that canonical
+user contract without changing Git safety settings or checkout ownership.
+Safe failure metadata and a private durable log copy preserve a future error
+before cleanup. This repair still requires a new native outcome; it does not
+retroactively identify or qualify the original f44 failure.
+
 The user explicitly authorized this separate pre-parent-merge repair and full
 deploy. They require genuine parallel independent smoke campaigns, no app-wide
 quiet window, original unchanged receipts, exact source/image/volume ownership,
