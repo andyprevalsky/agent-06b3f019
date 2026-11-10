@@ -659,6 +659,123 @@ class Cloud(unittest.TestCase):
         self.assertEqual(dict.fromkeys(names,'PASS'),result['cases'])
         self.assertTrue(result['complete'])
 
+    # --- quarantine markers and the single same-source rerun -------------------------------------
+    QMETA={'since':'2026-11-01','repair':'https://boxes.dev/thread/thr_smoke1',
+           'error':'AssertionError: no receipt','evidence':'runs/smoke-1/run.json'}
+
+    def campaign(self,verdicts,outcome='FAILED'):
+        """A collect_campaign return value: verdicts per task, native outcome for the failures."""
+        details={n:{'native_task':{'name':n,'passed':v=='PASS','benchmark_status':'PASSED' if v=='PASS' else outcome,
+                                   'status':'COMPLETED' if v=='PASS' else outcome,
+                                   'failure_reason':None if v=='PASS' else f'{n} failed'},'path':f'/runs/{n}'}
+                 for n,v in verdicts.items()}
+        return dict(verdicts),details,True,'campaign'
+
+    def run_smoke(self,collected,catalog=None):
+        """execute() with the native CLI and collector replaced; returns result, launches, rows, stdout."""
+        if catalog is not None:
+            path=self.root/'agents/benchmarks/tasks.json';path.parent.mkdir(parents=True,exist_ok=True)
+            cycle.write(path,catalog)
+        rows=self.root/'progress.jsonl';rows.unlink(missing_ok=True);out=io.StringIO()
+        with patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',return_value=(1,False,False,False)) as launch, \
+             patch.object(self.cloud,'collect_campaign',side_effect=collected) as collect, \
+             patch.dict(os.environ,{'DEPLOY_GATE_PROGRESS':str(rows)}), contextlib.redirect_stdout(out):
+            self.launch=launch
+            result=self.cloud.execute(self.request,self.root)
+        import deploy_gate_progress as progress
+        return result,launch,collect,progress.read_new(rows)[0],out.getvalue()
+
+    def test_failed_smoke_task_passing_its_single_rerun_is_flaky_and_the_gate_passes(self):
+        result,launch,collect,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                       self.campaign({'failing':'PASS'})])
+        self.assertEqual(2,launch.call_count)
+        rerun=launch.call_args_list[1].args[0]
+        self.assertEqual(['bash','scripts/run-bench','failing'],rerun[:3])  # that task only, same frozen ref
+        self.assertEqual(['--ref','a'*40],rerun[-2:])
+        self.assertNotIn('passing',rerun)
+        self.assertEqual(['failing'],collect.call_args_list[1].args[0]['checks'])
+        env=launch.call_args_list[1].kwargs['env']
+        self.assertTrue(env['RUN_BENCH_CAMPAIGN_ID'].endswith('-rerun'))
+        self.assertNotEqual(launch.call_args_list[0].kwargs['env']['CLOUDBENCH_RUNS_ROOT'],env['CLOUDBENCH_RUNS_ROOT'])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # first attempt kept
+        self.assertEqual('PASSED',result['evidence']['failing']['rerun']['native_task']['benchmark_status'])
+        self.assertEqual([('failing','FLAKY',2)],[(r['unit'],r['status'],r.get('attempts')) for r in rows])
+        self.assertIn('TEST_FLAKY unit=failing attempts=2 attribution=REQUIRED',out)
+        from deploy_test_result import validate
+        self.assertEqual((result['cases'],True),validate(result,self.request,0))  # adapter exit 0 = gate pass
+        state={'source':self.request['source'],'flaky':[],'phase':'initial','round':1}
+        opened=cycle.open_flaky(state,{'name':'smoke','checks':self.request['checks']},rows,self.root/'flaky')
+        self.assertEqual([('failing','smoke/failing')],[(o['unit'],o['check']) for o,_ in opened])
+        import deploy_test_quarantine as quarantine
+        self.assertIn('lack /RCA attribution',quarantine.attribution_block(state['flaky']))  # merge refuses
+
+    def test_failed_smoke_task_failing_its_rerun_fails_and_is_never_run_a_third_time(self):
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                 self.campaign({'failing':'FAIL'})])
+        self.assertEqual(2,launch.call_count)
+        self.assertEqual({'passing':'PASS','failing':'FAIL'},result['cases'])
+        self.assertEqual('FAIL',result['rerun']['cases']['failing'])
+        self.assertEqual([],rows);self.assertNotIn('TEST_FLAKY',out)
+        from deploy_test_result import validate
+        self.assertEqual('FAIL',validate(result,self.request,1)[0]['failing'])
+
+    def test_resource_skip_and_infra_outcomes_keep_their_rca_handling_without_a_rerun(self):
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)])
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('rerun',result)
+                self.assertEqual([],rows)
+
+    def test_unverified_first_campaign_is_never_rerun(self):
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'FAIL'})
+        result,launch,_,_,_=self.run_smoke([(verdicts,details,False,fleet)])
+        self.assertEqual(1,launch.call_count);self.assertFalse(result['complete'])
+
+    def test_quarantined_smoke_task_runs_once_and_its_failure_is_non_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)},{'name':'passing'}]
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'})],catalog)
+        self.assertEqual(1,launch.call_count)  # still runs, never rerun
+        self.assertIn('failing',launch.call_args.args[0])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases']);self.assertTrue(result['complete'])
+        self.assertEqual([('failing','QUARANTINED_FAIL',self.QMETA)],[(r['unit'],r['status'],r['quarantine']) for r in rows])
+        self.assertEqual('failing failed',rows[0]['detail'])
+        self.assertIn(f"TEST_QUARANTINE status=QUARANTINED_FAIL unit=failing since=2026-11-01 repair={self.QMETA['repair']}",out)
+        self.assertEqual(('QUARANTINED_FAIL','FAIL'),tuple(result['evidence']['failing']['quarantine'][k] for k in ('status','native_case')))
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # failure preserved
+
+    def test_quarantined_smoke_task_pass_and_unverified_outcomes(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        _,_,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'PASS'})],catalog)
+        self.assertEqual([('failing','QUARANTINED_PASS')],[(r['unit'],r['status']) for r in rows])
+        shutil.rmtree(self.root/'.context')
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'UNVERIFIED'})
+        result,_,_,rows,_=self.run_smoke([(verdicts,details,True,fleet)],catalog)
+        self.assertEqual('UNVERIFIED',result['cases']['failing']);self.assertEqual([],rows)  # unknown still blocks
+
+    def test_quarantined_smoke_task_skip_and_infra_outcomes_stay_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)],catalog)
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('quarantine',result['evidence']['failing'])
+                self.assertEqual([],rows);self.assertNotIn('TEST_QUARANTINE',out)
+
+    def test_invalid_task_quarantine_marker_is_refused_before_launch(self):
+        for bad in ({**self.QMETA,'repair':'https://example.com/x'},{k:v for k,v in self.QMETA.items() if k!='evidence'},
+                    {**self.QMETA,'since':'2026-13-01'},{**self.QMETA,'extra':'x'},'quarantined'):
+            with self.subTest(marker=bad):
+                with self.assertRaises(ValueError):
+                    self.run_smoke([],[{'name':'failing','quarantine':bad}])
+                self.launch.assert_not_called()
+                self.assertFalse((self.root/'.context/deploy-cloud').exists())  # nothing admitted
+
 
 class CloudCampaign(unittest.TestCase):
     def setUp(self):
@@ -3386,6 +3503,189 @@ class CerebrasRatchetHeadroom(unittest.TestCase):
              patch.object(self.headroom,'wait_for_cerebras',side_effect=lambda key,**kw:seen.append((key,kw['reserve'])) or False):
             self.assertEqual(1,self.headroom.main(['cerebras-wait','--timeout-seconds','5']))
         self.assertEqual([('dedicated',self.reserve)],seen)  # registry production_reserve_fraction 0.2
+
+
+class StoppedPreStackIsolation(unittest.TestCase):
+    """Versioned pre-stack receipts exercise the complete native admission consumer."""
+    DRIVER_SHA256 = '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521'
+
+    def setUp(self):
+        import base64
+        import gzip
+        import hashlib
+        import deploy_test_native_cleanup as native
+        self.native = native
+        spec = importlib.util.spec_from_file_location('native_cycle_fixtures', ROOT / 'scripts/tests/deploy-test-cycle.test.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fixture = module.Cycle()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.addCleanup(fixture.tearDown)
+        self.root = fixture.root
+        # The fixture uses the actual versioned driver, not a mock of its SHA.
+        # Driver changes require a newly reviewed before-stack contract.
+        self.driver = (ROOT / 'scripts/cloudbench-run.sh').read_bytes()
+        self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
+        target = self.root / 'scripts/cloudbench-run.sh'
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(self.driver)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'reviewed startup driver'], check=True)
+        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+        self.state, self.failure, self.paths, self.proof, self.gate, self.packet = fixture.isolated_campaign_state()
+        def replace(value):
+            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+            if isinstance(value, list): return [replace(v) for v in value]
+            return head if value == 'a' * 40 else value
+        self.state, self.proof = replace(self.state), replace(self.proof)
+        for path in (self.root / '.context').rglob('*.json'):
+            try: value = json.loads(path.read_text())
+            except ValueError: continue
+            cycle.write(path, replace(value))
+        self.fleet = Path(self.proof['campaign']).parent.parent / 'runs/20261103-080440-310001'
+        self.output = self.fleet / self.gate['name']
+        self.output.mkdir(exist_ok=True)
+        self.owner = cycle.read(self.fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        self.token = self.owner + '-0'
+        self.machine, self.volume = 'old-machine', 'old-volume'
+        (self.output / '.cid').write_text('clone ' + self.machine + '\n')
+        cycle.write(self.output / 'runtime-evidence.owner.json',
+                    dict(version=1, machine_id=self.machine, run_token=self.token))
+        self.payload = self.output / 'cloudbench-boot-payload.json.gz'
+        self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+            'cloudbench-run.sh': base64.b64encode(self.driver).decode()})).encode()))
+        self.log = self.output / 'remote-logs/cloudbench-driver.log'
+        self.log.parent.mkdir()
+        self.log.write_text(
+            f'RUNSTAMP-{self.token}\n[cloudbench] verified checkout {head}\n'
+            '[cloudbench 20:01:29] STEP git_sync\n[cloudbench 20:01:29] STEP env_decode\n'
+            '[cloudbench 20:01:30] STEP dep_sync\n'
+            '[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref\n'
+            '[cloudbench 20:01:31] FATAL: cloudbench dependency synchronization failed\n'
+            f'::CLOUDBENCH-DONE:: token={self.token} exit=1\n'
+            '[boot 20:01:31] driver cleanup evidence interrupt_status=0 cleanup_ack=1\n')
+        self.rows = cycle.read(self.packet)['rows']
+        self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+        self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+        self.raw_machine = dict(id=self.machine, state='stopped', config=dict(
+            env=dict(REF=head, CLOUDBENCH_RUN_TOKEN=self.token), mounts=[dict(volume=self.volume, path='/data')]))
+        self.raw_volume = dict(id=self.volume, state='created', attached_machine_id=self.machine)
+        self.machine_row['metadata'].update(state='stopped')
+        self.volume_row['metadata'].update(state='created', attached_machine_id=self.machine)
+        self.proof['execution_quiescence'][self.machine]['startup_rejection_log'] = str(self.log)
+        self.reseal()
+
+    def reseal(self):
+        import hashlib
+        for row, data in ((self.machine_row, self.raw_machine), (self.volume_row, self.raw_volume)):
+            path = self.root / '.context' / ('raw-' + row['kind'] + '.json')
+            cycle.write(path, data)
+            row.update(raw_response=str(path), response_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        cycle.write(self.packet, dict(endpoint_origin='https://api.machines.dev', app='fixture', rows=self.rows))
+        receipt = cycle.read(self.paths['receipt'])
+        receipt['native_cleanup_reference']['result_sha256'] = cycle.sha_file(self.paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+        cycle.write(self.paths['receipt'], receipt)
+        self.state['attempts'][-1]['results'][0] = receipt
+        self.proof.update(owner=copy.deepcopy(receipt['cleanup_owner']),
+                          receipt_sha256=cycle.sha_file(self.paths['receipt']),
+                          worker_result_sha256=cycle.sha_file(self.paths['adapter']))
+        self.proof['files'] = {str(p): cycle.sha_file(p) for base in (
+            self.fleet.parent, Path(self.proof['campaign']), self.root / '.git/cloudbench-fleet-audits',
+            self.root / '.git/cloudbench-fleet-ownership') for p in base.rglob('*') if p.is_file()}
+        for path in (self.paths['receipt'].parent / 'request.json', self.fleet.parent.parent / 'cli.log',
+                     self.packet, Path(self.machine_row['raw_response']), Path(self.volume_row['raw_response']),
+                     self.root / 'scripts/cloudbench-run.sh'):
+            self.proof['files'][str(path)] = cycle.sha_file(path)
+
+    def validate(self):
+        receipt = cycle.read(self.paths['receipt'])
+        return self.native.validate(receipt, receipt['cleanup_owner'], self.proof)
+
+    def test_stopped_pre_stack_launch_preserves_original_failures_and_cleanup_debt(self):
+        before = copy.deepcopy(self.state)
+        original = self.paths['receipt'].read_bytes()
+        cycle.reconcile(self.state, self.failure['id'], self.proof)
+        entry = next(iter(self.state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved'])
+        self.assertEqual('isolated-validation', entry['purpose'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
+        self.assertEqual({self.machine: self.volume, 'machine1': 'vol_fixture'}, entry['excluded_resources'])
+        self.assertEqual([], cycle.retained_owners(self.state, [self.gate['name']]))
+        self.assertEqual({'UNVERIFIED'}, set(cycle.read(self.paths['receipt'])['cases'].values()))
+        self.assertTrue((self.root / '.git/cloudbench-fleet-ownership' / self.owner).is_dir())
+
+    def test_stopped_pre_stack_rejects_unsafe_provider_or_current_identity(self):
+        cases = ('started', 'unknown', 'current-token', 'source', 'mount', 'forged-raw-state', 'raw-token',
+                 'detached-volume', 'wrong-volume-state', 'quarantine-missing')
+        originals = copy.deepcopy((self.rows, self.raw_machine, self.raw_volume))
+        registry = self.root / '.git/cloudbench-fleet-ownership' / self.owner
+        for case in cases:
+            with self.subTest(case=case):
+                self.rows, self.raw_machine, self.raw_volume = copy.deepcopy(originals)
+                self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+                self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+                if case in ('started', 'unknown'): self.machine_row['metadata']['state'] = case
+                if case == 'current-token': self.machine_row['metadata']['source_binding']['CLOUDBENCH_RUN_TOKEN'] = 'new-request-0'
+                if case == 'source': self.machine_row['metadata']['source_binding']['REF'] = 'f' * 40
+                if case == 'mount': self.raw_machine['config']['mounts'][0]['volume'] = 'foreign'
+                if case == 'forged-raw-state': self.raw_machine['state'] = 'started'
+                if case == 'raw-token': self.raw_machine['config']['env']['CLOUDBENCH_RUN_TOKEN'] = 'foreign'
+                if case == 'detached-volume': self.volume_row['metadata']['attached_machine_id'] = None
+                if case == 'wrong-volume-state': self.volume_row['metadata']['state'] = 'restoring'
+                if case == 'quarantine-missing': registry.rename(registry.with_name('held'))
+                self.reseal()
+                try:
+                    with self.assertRaises(ValueError): self.validate()
+                finally:
+                    if case == 'quarantine-missing': registry.with_name('held').rename(registry)
+
+    def test_stopped_pre_stack_rejects_unknown_driver_and_incomplete_terminal_receipts(self):
+        import base64
+        import gzip
+        original_log, original_payload = self.log.read_bytes(), self.payload.read_bytes()
+        driver_path = self.root / 'scripts/cloudbench-run.sh'
+        for case in ('driver-tamper', 'later-stack-step', 'missing-ack', 'missing-done', 'wrong-done-token', 'unknown-driver'):
+            with self.subTest(case=case):
+                self.log.write_bytes(original_log); self.payload.write_bytes(original_payload)
+                driver_path.write_bytes(self.driver)
+                if case in ('driver-tamper', 'unknown-driver'):
+                    changed = self.driver + b'\n# unreviewed driver\n'
+                    self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+                        'cloudbench-run.sh': base64.b64encode(changed).decode()})).encode()))
+                    if case == 'unknown-driver':
+                        driver_path.write_bytes(changed)
+                        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+                        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                                        'user.email=test@example.com', 'commit', '-qm', 'unreviewed driver'], check=True)
+                        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+                        receipt = cycle.read(self.paths['receipt'])
+                        old_head = receipt['source']['head']
+                        def replace(value):
+                            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+                            if isinstance(value, list): return [replace(v) for v in value]
+                            return head if value == old_head else value
+                        self.state, self.proof = replace(self.state), replace(self.proof)
+                        for path in (self.root / '.context').rglob('*.json'):
+                            try: value = json.loads(path.read_text())
+                            except ValueError: continue
+                            cycle.write(path, replace(value))
+                        self.raw_machine['config']['env']['REF'] = head
+                        self.machine_row['metadata']['source_binding']['REF'] = head
+                        self.log.write_bytes(original_log.replace(old_head.encode(), head.encode()))
+                if case == 'later-stack-step': self.log.write_bytes(original_log + b'[cloudbench 20:01:32] STEP stack\n')
+                if case == 'missing-ack': self.log.write_bytes(original_log.replace(b'cleanup_ack=1', b'cleanup_ack=0'))
+                if case == 'missing-done': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE::', b'not-DONE'))
+                if case == 'wrong-done-token': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE:: token=', b'::CLOUDBENCH-DONE:: token=wrong'))
+                self.reseal()
+                expected = 'unreviewed pre-stack driver' if case == 'unknown-driver' else ('driver payload changed' if case == 'driver-tamper' else 'positive terminal boundary')
+                with self.assertRaisesRegex(ValueError, expected): self.validate()
 
 
 if __name__=='__main__': unittest.main()

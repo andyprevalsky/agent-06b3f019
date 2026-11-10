@@ -1,0 +1,68 @@
+{
+  "committed_source": "dcf0af7fa5a4957b0305779af052ca9ba8c505c8",
+  "runtime_module_source": "abc0c35197600065de74bfa0c52c1fabc1af498a",
+  "qualification": "Final identical test/module bytes were committed in dcf; later changes in that commit were tests/docs only. This unit proof is not a new-source full gate.",
+  "test_sha256": "09c533f20eeac1a700d2fadca2eb1fb4bf7849a2b5ecb093a0c609656c604949",
+  "module_sha256": "e26545cceccce8c52a8634ae23a59dc6d8ec1812bf639d1bbff8c2101bed754d",
+  "red": {
+    "module_commit": "9d2c1d970a3bf97208c91f1ffb2ccee5cf503441",
+    "exit": 1,
+    "tests": 3,
+    "failures": 3,
+    "observed": "ValueError not raised for erased active/history allocation guard, altered pending wrapper, unrelated retained donor owner."
+  },
+  "paired_green": {
+    "exit": 0,
+    "tests": 3
+  },
+  "owning_green": {
+    "exit": 0,
+    "tests": 31,
+    "test_names": [
+      "Cycle.test_historical_import_fresh_cycle_retains_exact_debt_without_execution_credit",
+      "Cycle.test_historical_import_rejects_tampering_and_preserves_current_state",
+      "Cycle.test_historical_import_uses_authoritative_pending_repair_guard",
+      "Cycle.test_historical_import_persistent_guard_rejects_erased_active_history",
+      "Cycle.test_historical_import_rejects_unrelated_retained_donor_owner",
+      "Cycle.test_historical_import_retains_native_absence_and_collision_guards",
+      "Cycle.test_historical_import_rejects_removed_duties_and_mixed_authority",
+      "Cycle.test_historical_import_cli_is_atomic_and_replay_revalidates",
+      "Cycle.test_cross_goal_custody_import_preserves_fresh_selection_without_execution_credit",
+      "Cycle.test_cross_goal_custody_import_rejects_nonfresh_state_and_changed_proof_atomically",
+      "Cycle.test_cross_goal_custody_import_rejects_noncurrent_frozen_ledger_binding",
+      "Cycle.test_cross_goal_custody_import_rejects_duplicate_identity_and_changed_pending_wrapper",
+      "Cycle.test_cross_goal_custody_import_cli_keeps_donor_and_fresh_cycle_separate",
+      "Cycle.test_historical_stall_cannot_refresh_into_new_card_request_without_proof",
+      "Cycle.test_historical_custody_refresh_runs_all_peers_and_keeps_native_debt",
+      "Cycle.test_historical_custody_full_receipt_carries_across_history_only_commit",
+      "Cycle.test_historical_custody_rejects_tampering_and_missing_admission_proof",
+      "Cycle.test_historical_native_audit_rejects_corrupt_tree_and_active_owner",
+      "Cycle.test_old_source_disposition_requires_current_renewal_without_exempting_new_inputs",
+      "Cycle.test_stale_post_merge_packet_routes_current_execution_without_impossible_renewal",
+      "Cycle.test_refresh_qualified_full_retirement_preserves_new_source_renewals_and_native_debt",
+      "Cycle.test_standing_treasury_existing_source_renewal_retains_original_fail_without_rerun",
+      "Cycle.test_renewal_contract_tracks_dependencies_task_and_payment_bytes",
+      "Cycle.test_changed_source_agentcard_renewal_cli_keeps_failure_and_runs_peers",
+      "Cycle.test_renewal_accepts_absent_card_mode_without_fabrication",
+      "Cycle.test_changed_source_renewal_fail_closed",
+      "Cycle.test_resource_warning_needs_renewed_confirmation_after_changed_inputs",
+      "Cycle.test_existing_isolated_proof_can_renew_only_validation_source_after_refresh",
+      "Cycle.test_isolated_source_renewal_accepts_only_bound_clean_full_successor_without_credit",
+      "Cycle.test_isolated_successor_renewal_rejects_bad_or_tampered_successors_atomically",
+      "Cycle.test_isolated_source_renewal_refusals_are_atomic"
+    ],
+    "finished_at": "2026-11-08T15:08:16.025506+00:00"
+  },
+  "raw_proof_sha256": "c5e494cf02db5a71aff7a18a8b84e775bd94bec85f02a5d217cd347ccc320390",
+  "log_hashes": {
+    "red.log": "61cecac3944121268983216ace4a0428e067e01b5e70f6619712350972431f0d",
+    "paired-green.log": "96f19c54e85a3826979a4bd3a9d246458e0baae8f6d51ef8296f062b820f9f5e",
+    "final-owning-green.log": "102065d5c82a45ed9b4ecb94ac541296c37ed19e04f6ca68d9d7249e962c3d03"
+  },
+  "raw_logs_preserved_in_stable_archive": true,
+  "shared_admission_owner": {
+    "commit": "8e3fca1b12cdaab9636b2eae4e23e225d1261fc4",
+    "pr": 1830,
+    "contract": "Unchanged main build/adopt are authoritative; approved donor-SHA route is compatibility envelope."
+  }
+}

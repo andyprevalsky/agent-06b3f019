@@ -197,7 +197,10 @@ class AdapterPassesGateDeadline(unittest.TestCase):
 
     def test_execute_hands_the_deadline_to_the_native_cli(self):
         code = ADAPTER.read_text()
-        function = next(n for n in ast.parse(code).body if isinstance(n, ast.FunctionDef) and n.name == "execute")
+        # execute() and the campaign helpers it calls (launch, rerun_candidates, emit, RERUN_OUTCOMES).
+        function = [n for n in ast.parse(code).body
+                    if isinstance(n, ast.FunctionDef) and n.name in {"execute", "launch", "rerun_candidates", "emit"}
+                    or isinstance(n, ast.Assign) and any(getattr(t, "id", None) == "RERUN_OUTCOMES" for t in n.targets)]
         calls = []
         requested = {"checks": ["browser-smoke"], "skips": {}, "token": "owned",
                      "source": {"head": "a" * 40}, "gate": "smoke"}
@@ -208,10 +211,10 @@ class AdapterPassesGateDeadline(unittest.TestCase):
                 cancellation_handlers=contextlib.nullcontext, write=lambda *_a: None,
                 shared_canary_env=lambda _r: {}, capacity_admission_env=self.adapter.capacity_admission_env,
                 # The adapter refuses an unpushed source first (9b9a4771b0); this fixture's head is pushed.
-                origin_fetchable=lambda *_a: True,
+                origin_fetchable=lambda *_a: True, catalog_quarantines=lambda _r, _c: {}, Path=Path,
                 run_command=lambda *a, **k: (calls.append((a, k)) or (1, False, False, False)),
                 collect_campaign=lambda *_a: ({"browser-smoke": "UNVERIFIED"}, {}, False, "fixture"))
-            exec(compile(ast.Module(body=[function], type_ignores=[]), str(ADAPTER), "exec"), namespace)
+            exec(compile(ast.Module(body=function, type_ignores=[]), str(ADAPTER), "exec"), namespace)
             before = time.time()
             namespace["execute"](requested, Path(base))
         self.assertEqual(len(calls), 1)

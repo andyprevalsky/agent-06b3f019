@@ -104,7 +104,8 @@ class Fixture(unittest.TestCase):
                            ('standard_template', standard),
                            ('factory_event', lambda root, *event: self.events.append(event)),
                            ('check_capacity', lambda root, workers, proc=None: {
-                               'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0})):
+                               'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0}),
+                           ('wait_for_cpu_headroom', lambda *args, **kwargs: {'headroom': True})):
             patcher = patch.object(g, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -898,6 +899,9 @@ class Template(unittest.TestCase):
         self.assertTrue(backend[0]['native_backend'] and len(backend[0]['checks']) > 1)
         structural, = [gate for gate in cut['gates'] if gate['name'] == g.STRUCTURAL_GATE]
         self.assertEqual('2', structural['command'][structural['command'].index('--max-workers') + 1])
+        stability, = [gate for gate in cut['gates'] if gate['name'] == g.STABILITY_GATE]
+        self.assertEqual(str(g.LOCAL_STABILITY_LOAD_WORKERS),
+                         stability['command'][stability['command'].index('--load-workers') + 1])
 
 
 class Memory(unittest.TestCase):
@@ -1106,6 +1110,70 @@ class RunMemory(Fixture):
         self.assertEqual(2, code)
         self.assertEqual(['init', 'begin', 'finish'], self.sampler.events)
 
+
+
+
+class CpuHeadroom(unittest.TestCase):
+    """Host gates wait (bounded) for CPU headroom instead of starting on a saturated shared box."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name)
+        (self.proc / 'uptime').write_text('1000.0 0.0\n')
+        self.now = [0.0]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_wait(self, loads, **kwargs):
+        sequence = iter(loads)
+
+        def load(proc):
+            return next(sequence), 8
+
+        def sleep(seconds):
+            self.now[0] += seconds
+
+        out = io.StringIO()
+        with patch.object(g, 'load_per_cpu', load), redirect_stdout(out):
+            result = g.wait_for_cpu_headroom(self.proc, clock=lambda: self.now[0], sleep=sleep, **kwargs)
+        return result, out.getvalue()
+
+    def test_idle_host_starts_immediately_without_output(self):
+        result, out = self.run_wait([0.4])
+        self.assertEqual({'load_per_cpu': 0.4, 'cpus': 8, 'waited_seconds': 0.0, 'headroom': True}, result)
+        self.assertEqual('', out)
+
+    def test_saturated_host_waits_until_load_drops(self):
+        result, out = self.run_wait([2.2, 1.6, 0.9], poll=15)
+        self.assertTrue(result['headroom'])
+        self.assertEqual(30.0, result['waited_seconds'])
+        self.assertIn('DEPLOY_GATES CPU wait: load 17.6 on 8 CPUs exceeds 8', out)
+        self.assertNotIn('WARNING', out)
+
+    def test_wait_is_bounded_and_then_starts_with_a_warning(self):
+        result, out = self.run_wait([3.0] * 100, max_wait=60, poll=15)
+        self.assertFalse(result['headroom'])
+        self.assertEqual(60.0, result['waited_seconds'])
+        self.assertIn('DEPLOY_GATES CPU WARNING: load 24.0 on 8 CPUs still exceeds 8 after 60 s', out)
+
+    def write_proc(self, pid, name, cpu_ticks):
+        folder = self.proc / pid
+        folder.mkdir(exist_ok=True)
+        fields = ['S', '1'] + ['0'] * 9 + [str(cpu_ticks), '0'] + ['0'] * 6 + ['0']
+        (folder / 'stat').write_text(f'{pid} ({name}) ' + ' '.join(fields))
+        (folder / 'cmdline').write_bytes(f'{name}\0--flag'.encode())
+
+    def test_busiest_processes_ranks_by_cpu_used_during_the_sample(self):
+        ticks = os.sysconf('SC_CLK_TCK')
+        self.write_proc('11', 'repack', 0)
+        self.write_proc('12', 'daemon', 10_000 * ticks)  # huge lifetime total, idle now
+
+        def sleep(seconds):
+            self.write_proc('11', 'repack', int(1.8 * ticks * seconds))
+
+        rows = g.busiest_processes(self.proc, sleep=sleep)
+        self.assertEqual(['pid 11 180% repack --flag'], rows)
 
 if __name__ == '__main__':
     unittest.main()

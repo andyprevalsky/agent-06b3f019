@@ -1,0 +1,11 @@
+{
+  "format": "PR1885-RECOVERY-VALIDATION-V1",
+  "actual_original_archive_recovered": true,
+  "all_four_original_member_hashes_match": true,
+  "original_plaintext_sha256": "fa52acfc73223e2088098ba262d337da9f07f1aef418e76d8dc58bdd94407cb8",
+  "native_carrier_member_hash_verification": 1948,
+  "preservation_final_carrier_graph": "all final logical carrier references checked against exact native, baseline, final and recoverable-container hashes",
+  "no_live_environment_overwrite": true,
+  "raw_recovered_copies": "private derived duplicates of already archived originals; no new native test run",
+  "limits": "This small actual recovery checks the committed helper against the original archive. Other full archive parts authenticated readback at creation; each newly archived payload hash verified. No synthetic production acceptance credit."
+}

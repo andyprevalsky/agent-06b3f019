@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/report-bug-fetch-944bdbf4/additional-browser-failures-v1.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "9e8248b47000a490daeab58ea58508d601c93553f9d2b4761cb1c8186b02eb64",
+  "gzip_sha256": "0e22c3c6a467b9db8b19699c387169d7c258b9b9f989fb27f7f4d90eeb6be0bb",
+  "stored_bytes": 66235588,
+  "frames": 8,
+  "files": 3,
+  "original_bytes": 66598320,
+  "manifest_sha256": "37a7a3594ed9520acd5fa18f8a2132d36a6290f036c21331f81315b142418497",
+  "full_readback_verified": true
+}

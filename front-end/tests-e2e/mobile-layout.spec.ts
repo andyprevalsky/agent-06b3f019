@@ -227,3 +227,30 @@ test.describe('mobile-layout', () => {
     expect(hasUncaughtErrors(rec), 'Uncaught errors on mobile header check').toEqual([]);
   });
 });
+
+// Desktop uses the same opening surface but must center the art itself, rather
+// than the combined art/caption stack. Keep the real CSS geometry under test.
+test('desktop opening ASCII stays centered on the large grid tile', async ({ page }) => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 768, height: 813 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+    const frame = page.locator('pre[data-ascii-layer="frame"]').first();
+    await expect(frame).toBeVisible();
+    await expect
+      .poll(
+        async () => {
+          const box = await frame.boundingBox();
+          if (!box || box.height === 0) return Infinity;
+          return Math.max(
+            Math.abs(box.x + box.width / 2 - viewport.width / 2),
+            Math.abs(box.y + box.height / 2 - viewport.height * 0.4),
+          );
+        },
+        { message: 'ASCII center must match the large grid tile, independently of caption height' },
+      )
+      .toBeLessThan(2);
+  }
+});

@@ -67,7 +67,11 @@ pass=$((pass + 1))
 
 # The gate setup routes both GitHub Releases tools through the helper.
 setup="$ROOT/scripts/ci/deploy-gate-setup.sh"
-grep -q 'release_tool flyctl "\$HOME/.fly/bin/flyctl" install_flyctl' "$setup" || fail "setup bypasses release_tool for flyctl"
+# flyctl and ngrok are optional too: an outage costs two attempts, not the default six.
+grep -q 'RELEASE_TOOL_ATTEMPTS=2 release_tool flyctl "\$HOME/.fly/bin/flyctl" install_flyctl' "$setup" \
+  || fail "setup bypasses release_tool or the two-attempt budget for flyctl"
+grep -q 'RELEASE_TOOL_ATTEMPTS=2 release_tool ngrok /usr/local/bin/ngrok install_ngrok' "$setup" \
+  || fail "setup bypasses release_tool or the two-attempt budget for ngrok"
 grep -q 'RELEASE_TOOL_ATTEMPTS=2 release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared' "$setup" \
   || fail "setup bypasses release_tool for cloudflared"
 grep -q 'cloudflared is required for isolated benchmark public tunnels' "$ROOT/scripts/run.sh" \
@@ -87,4 +91,13 @@ assert "pip install" in fallback and " uv" in fallback and "GITHUB_PATH" in fall
 PY
 pass=$((pass + 1))
 
+# Every optional tool in Prepare runner is non-fatal: a cold-disk outage of its host must not fail
+# gates that never call it (hunt round 9: fly.io/install.sh 504s failed 10 of 11 gates).
+setup="$ROOT/scripts/ci/deploy-gate-setup.sh"
+for tool in flyctl ngrok cloudflared; do
+  grep -A3 "release_tool $tool " "$setup" | grep -q "|| echo \"⚠️ $tool unavailable" \
+    || fail "$tool install is fatal in deploy-gate-setup.sh"
+done
+bash -n "$setup" || fail "deploy-gate-setup.sh does not parse"
+pass=$((pass + 1))
 echo "RESULTS: $pass passed, 0 failed"

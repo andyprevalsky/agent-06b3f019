@@ -166,6 +166,8 @@ class StructuralGateDocumentationTests(unittest.TestCase):
             "seed-memory-ratchet": ("bash", "scripts/tests/seed-memory-ratchet.test.sh"),
             "deploy-worktree-preflight": ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
             "semantic-deploy": ("bash", "scripts/tests/semantic-deploy-gate.test.sh"),
+            "test-quarantine": ("python3", "scripts/tests/test-quarantine.test.py"),
+            "deploy-gate-progress": ("python3", "scripts/tests/deploy-gate-progress.test.py"),
         }
         for name, command in owners.items():
             registered = [g for g in gates if g.name == name or g.command == command]
@@ -435,9 +437,10 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 ):
                     result = module.run_gates(selected, max_workers=3)
                 observed = calls.read_text().splitlines()
+                # A failing owner fails its one rerun too: two executions, never three.
                 self.assertEqual(
                     sorted(observed),
-                    ["descend-command"],
+                    ["descend-command"] * (2 if failing_owner else 1),
                     output.getvalue(),
                 )
                 self.assertEqual(
@@ -509,7 +512,8 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     result = module.main()
             finally:
                 release.touch()
-            self.assertEqual(launched, [gate.command for gate in gates])
+            # Gate 10 fails, so it gets its one rerun (which fails again on its existing file).
+            self.assertEqual(launched, [gate.command for gate in gates] + [gates[10].command])
             self.assertEqual(len(list(root.glob("gate-*"))), 11)
             self.assertEqual(result, 1, "a real gate failure must remain fatal")
             with (
@@ -1619,9 +1623,10 @@ class StructuralGateProgressTests(unittest.TestCase):
             {"fails": "FAIL", "split": "FAIL", "whole-split": "PASS", "waiter": "PASS"},
         )
         self.assertIn("fails-marker-output", by_unit["fails"]["detail"])
-        self.assertTrue(by_unit["fails"]["log"].endswith("/fails.log"))
+        # Both fail their one rerun: the FAIL row points at the counted (rerun) attempt.
+        self.assertTrue(by_unit["fails"]["log"].endswith("/fails.rerun.log"))
         self.assertIn("split-shard-two-broke", by_unit["split"]["detail"])
-        self.assertTrue(by_unit["split"]["log"].endswith("/split[2-of-2].log"))
+        self.assertTrue(by_unit["split"]["log"].endswith("/split[2-of-2].rerun.log"))
         self.assertEqual((by_unit["whole-split"]["detail"], by_unit["whole-split"]["log"]), ("", ""))
         self.assertTrue(by_unit["waiter"]["log"].endswith("/waiter.log"))
 
@@ -1770,8 +1775,9 @@ class StructuralGateSchedulingTests(unittest.TestCase):
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 result = module.run_gates(gates, max_workers=2)
             self.assertEqual(result, 1, "one failing shard fails the gate")
+            # The failing shard's one rerun keeps its shard: 2/3 runs twice.
             self.assertEqual(
-                sorted(seen.read_text().split()), ["1/3", "2/3", "3/3", "whole:none"]
+                sorted(seen.read_text().split()), ["1/3", "2/3", "2/3", "3/3", "whole:none"]
             )
             self.assertIn("split[2/3]", stderr.getvalue())
             self.assertIn("== split[1/3]: exit=0", stdout.getvalue())
@@ -1803,6 +1809,7 @@ class StructuralGateSchedulingTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertLess(elapsed, 60, "the hung gate must not hold the runner")
             self.assertIn("hangs-forever (timed out)", stderr.getvalue())
+            self.assertNotIn("rerunning", stderr.getvalue(), "a timed-out job is not rerun")
             self.assertIn("TIMEOUT: deploy structural gate hangs-forever", stderr.getvalue())
             self.assertIn("== hangs-forever: exit=124", stdout.getvalue())
             self.assertIn("== quick: exit=0", stdout.getvalue())
@@ -1850,12 +1857,13 @@ class StructuralGateSchedulingTests(unittest.TestCase):
 
             Path(f"{broken}.short").touch()
             result, ran, _ = run()
-            self.assertEqual((result, ran), (1, ["long", "middle", "short"]))
+            # Each failed job gets one immediate rerun at the head of the queue.
+            self.assertEqual((result, ran), (1, ["long", "middle", "short", "short"]))
             self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
 
-            # Still broken: the retry signals within the first job and stops.
+            # Still broken: the retry stops once the first job fails its rerun too.
             result, ran, stderr = run()
-            self.assertEqual((result, ran), (1, ["short"]))
+            self.assertEqual((result, ran), (1, ["short", "short"]))
             self.assertIn("previously failed short failed again", stderr)
             self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
 
@@ -1863,7 +1871,7 @@ class StructuralGateSchedulingTests(unittest.TestCase):
             Path(f"{broken}.short").unlink()
             Path(f"{broken}.long").touch()
             result, ran, _ = run()
-            self.assertEqual((result, ran), (1, ["short", "long", "middle"]))
+            self.assertEqual((result, ran), (1, ["short", "long", "long", "middle"]))
             self.assertEqual(json.loads(state.read_text())["failed"], ["long"])
 
             # Everything fixed: only a complete sweep passes, and clears state.
@@ -1892,6 +1900,158 @@ class StructuralGateSchedulingTests(unittest.TestCase):
             self.assertEqual(module.load_previous_failures(state), set())
             module.record_failures(state, ["b", "a"])
             self.assertEqual(module.load_previous_failures(state), {"a", "b"})
+
+class StructuralGateRerunTests(unittest.TestCase):
+    """A failed job is rerun once: only its failed unittest ids when the output names them
+    all, else the whole job. Rerun pass => FLAKY (exit 0, TEST_FLAKY line, FLAKY row);
+    rerun fail => FAIL; never a third run. Quarantined rows are forwarded per suite."""
+
+    SUITE = """
+import os, sys, unittest
+from pathlib import Path
+sys.path.insert(0, {lib!r})
+from test_quarantine import quarantine
+calls = Path(os.environ["RERUN_FIXTURE_CALLS"])
+
+def attempt(name):
+    with calls.open("a") as stream:
+        stream.write(name + "\\n")
+    return calls.read_text().split().count(name)
+
+class Cases(unittest.TestCase):
+    def test_ok(self):
+        attempt("ok")
+
+    def test_flaky(self):
+        n = attempt("flaky")
+        mode = os.environ.get("RERUN_FIXTURE_MODE", "flaky")
+        self.assertTrue(mode == "flaky" and n > 1, f"attempt {{n}} failed")
+
+    @quarantine(since="2026-11-08", repair="https://boxes.dev/thread/thr_q", error="E: q", evidence="q.log")
+    def test_quarantined(self):
+        attempt("quarantined")
+        raise AssertionError("known quarantined failure")
+
+if __name__ == "__main__":
+    if os.environ.get("RERUN_FIXTURE_IGNORE_ARGV"):
+        sys.argv[1:] = []
+    unittest.main()
+"""
+
+    def _run(self, gates, root: Path, **env: str):
+        module = self.module
+        progress = root / "progress.jsonl"
+        base = {key: value for key, value in os.environ.items()
+                if not key.startswith(("DEPLOY_GATE_", "RERUN_FIXTURE_"))}
+        base.update({"DEPLOY_GATE_PROGRESS": str(progress), "DEPLOY_GATE_CASE": "structural",
+                     "RERUN_FIXTURE_CALLS": str(root / "calls")}, **env)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(os.environ, base, clear=True),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.run_gates(gates, max_workers=2, durations_state=root / "durations.json")
+        rows = [json.loads(line) for line in progress.read_text().splitlines()] if progress.exists() else []
+        calls = (root / "calls").read_text().split() if (root / "calls").exists() else []
+        return result, stdout.getvalue(), stderr.getvalue(), rows, calls
+
+    def setUp(self):
+        self.module = _load_runner("deploy_runner_rerun")
+        self.tmp = tempfile.TemporaryDirectory(prefix="deploy-runner-rerun-")
+        self.root = Path(self.tmp.name)
+        self.suite = self.root / "suite.test.py"
+        self.suite.write_text(self.SUITE.format(lib=str(ROOT / "scripts" / "lib")))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def unittest_gate(self):
+        return self.module.Gate("unit-suite", (sys.executable, str(self.suite)))
+
+    def test_failed_unittest_id_rerun_passing_is_flaky_and_the_gate_passes(self) -> None:
+        result, out, err, rows, calls = self._run((self.unittest_gate(),), self.root)
+        self.assertEqual(result, 0, out + err)
+        # The rerun ran only the failed id: test_ok and the quarantined test ran once.
+        self.assertEqual(sorted(calls), ["flaky", "flaky", "ok", "quarantined"])
+        self.assertIn("rerunning unit-suite once (1 failed test(s): Cases.test_flaky)", err)
+        self.assertIn("TEST_FLAKY unit=unit-suite attempts=2 attribution=REQUIRED", out.splitlines())
+        self.assertIn("TEST_QUARANTINE status=QUARANTINED_FAIL unit=unit-suite::Cases.test_quarantined "
+                      "since=2026-11-08 repair=https://boxes.dev/thread/thr_q", out.splitlines())
+        # The quarantined test ran only in the first attempt (the rerun named the failed id),
+        # so its row is forwarded; it never blocks.
+        self.assertEqual([(row["unit"], row["status"]) for row in rows],
+                         [("unit-suite::Cases.test_quarantined", "QUARANTINED_FAIL"), ("unit-suite", "FLAKY")])
+        self.assertEqual(rows[0]["quarantine"]["repair"], "https://boxes.dev/thread/thr_q")
+        flaky = rows[1:]
+        self.assertEqual((flaky[0]["scope"], flaky[0]["case"], flaky[0]["attempts"]), ("suite", "structural", 2))
+        self.assertIn("attempt 1 failed", flaky[0]["detail"])
+        self.assertTrue(flaky[0]["log"].endswith("/unit-suite.log"))
+        recorded = json.loads((self.root / "durations.json").read_text())
+        self.assertNotIn("unit-suite", recorded["gates"], "two attempts are not one cost observation")
+
+    def test_rerun_that_fails_again_is_a_failure_and_there_is_no_third_run(self) -> None:
+        result, out, err, rows, calls = self._run((self.unittest_gate(),), self.root,
+                                                  RERUN_FIXTURE_MODE="always")
+        self.assertEqual(result, 1)
+        self.assertEqual(calls.count("flaky"), 2)
+        self.assertNotIn("TEST_FLAKY", out)
+        self.assertEqual([(row["unit"], row["status"]) for row in rows if row["scope"] == "suite"],
+                         [("unit-suite", "FAIL")])
+        self.assertIn("attempt 2 failed", rows[-1]["detail"])
+        self.assertIn("failed deploy structural gates: unit-suite", err)
+
+    def test_rerun_must_run_exactly_the_failed_ids(self) -> None:
+        # A suite that ignores its argv reruns everything: the pass is not confirmed.
+        result, out, err, rows, calls = self._run((self.unittest_gate(),), self.root,
+                                                  RERUN_FIXTURE_IGNORE_ARGV="1")
+        self.assertEqual(result, 1, out + err)
+        self.assertEqual(calls.count("ok"), 2)
+        self.assertIn("RERUN UNCONFIRMED", out)
+        self.assertNotIn("TEST_FLAKY", out)
+        self.assertEqual(rows[-1]["status"], "FAIL")
+
+    def test_non_unittest_job_is_rerun_whole_and_keeps_its_shard(self) -> None:
+        marker = self.root / "seen"
+        gate = self.module.Gate(
+            "bash-split",
+            ("bash", "-c", f'echo "$DEPLOY_GATE_SHARD" >> {marker}; '
+                           f'[ "$DEPLOY_GATE_SHARD" != 2/2 ] || [ "$(grep -c 2/2 {marker})" -gt 1 ]'),
+            shards=2,
+        )
+        result, out, err, rows, _ = self._run((gate,), self.root)
+        self.assertEqual(result, 0, out + err)
+        self.assertEqual(sorted(marker.read_text().split()), ["1/2", "2/2", "2/2"])
+        self.assertIn("rerunning bash-split[2/2] once (whole job)", err)
+        self.assertEqual([(row["unit"], row["status"], row.get("attempts")) for row in rows],
+                         [("bash-split", "FLAKY", 2)])
+        self.assertTrue(rows[0]["log"].endswith("/bash-split[2-of-2].log"))
+
+    def test_failure_parser_names_only_complete_own_unittest_failures(self) -> None:
+        parse = self.module.failed_unittest_ids
+        python = (sys.executable, "scripts/tests/x.test.py")
+        own = ("FAIL: test_a (__main__.C.test_a)\nERROR: test_b (__main__.D.test_b)\n"
+               "Ran 5 tests in 0.1s\n\nFAILED (failures=1, errors=1, skipped=2)\n")
+        self.assertEqual(parse(python, own), ("C.test_a", "D.test_b"))
+        self.assertEqual(parse(python, own.replace("(__main__.C.test_a)", "(__main__.C)")), ("C.test_a", "D.test_b"))
+        for command, output in (
+            (("bash", "x.sh"), own),
+            ((sys.executable, "-m", "unittest"), own),
+            (python, own.replace("(__main__.C.test_a)", "(__main__.C.test_a) [case 1]")),
+            (python, own.replace("FAILED (failures=1, errors=1, skipped=2)", "FAILED (failures=2, errors=1)")),
+            (python, own.replace("test_b (__main__.D.test_b)", "setUpClass (__main__.D)")),
+            (python, own.replace("__main__.D.test_b", "fixture_module.D.test_b")),
+            (python, own + "FAILED (failures=1, unexpected successes=1)\n"),
+            (python, "Traceback: bash died\n"),
+        ):
+            with self.subTest(command=command, output=output[-60:]):
+                self.assertEqual(parse(command, output), ())
+        confirm = self.module.rerun_confirms
+        self.assertTrue(confirm(("C.test_a",), "Ran 1 test in 0.0s\n\nOK\n"))
+        self.assertFalse(confirm(("C.test_a",), "Ran 1 test in 0.0s\n\nOK (skipped=1)\n"))
+        self.assertFalse(confirm(("C.test_a", "D.test_b"), "Ran 1 test in 0.0s\n\nOK\n"))
+        self.assertFalse(confirm(("C.test_a",), "all good\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

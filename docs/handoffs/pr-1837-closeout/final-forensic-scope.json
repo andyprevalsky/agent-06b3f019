@@ -1,0 +1,19 @@
+{
+  "status": "VERIFIED_MAIN_AND_FINITE_TAIL",
+  "proof": "proofs/final-forensic-preservation.json",
+  "bounded_snapshot_source": "b7a69ec4ef61d5612ea3534e2e00c7d7cfc9d50c",
+  "new_archive_members": 82227,
+  "new_archive_original_bytes": 21304521257,
+  "regular_scope": 863912,
+  "already_authenticated_regulars": 781686,
+  "new_source_regulars": 82226,
+  "symlink_metadata_only": 117,
+  "managed_config": "Existing bytes preserved only as private forensic evidence; never overlay/reuse historical env or live claims. Protected originals untouched.",
+  "operational_scope": "All actual operational file members verified; three empty top roots and59empty audit directories retained as separately dated postcapture tail metadata.",
+  "remaining": "Own subsequent records review/merge, post-merge native deletionREADY and final visual are finite durable GitHub/visual closure records, not later private execution or recursive captures.",
+  "financial_credit": false,
+  "tail_receipt": "receipts/receipt-tail.json",
+  "tail_proof": "proofs/finite-receipt-tail.json",
+  "tail_actual_delta_regular_files": 93,
+  "tail_actual_delta_regular_bytes": 63137011
+}
