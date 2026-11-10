@@ -195,3 +195,11 @@ browser regression and24-case sidebar/theme/mobile matrix still pass.
 Adversarial review accepted the fix and native reference correction; no bound
 was relaxed. Final permanent caption blackbox and browser tests were replayed
 unchanged on pre-fix source (failed) and restored source (passed).
+
+Main advanced during this repair with sidebar overlay work. Integrated that
+source, preserving its fixed64px rail assertions, and reran full frontend
+coverage on merged7dfca4a36:324files,4,733passed/one skipped; all thresholds
+met (87.43% statements,81.88% branches,87.76% functions,89.69% lines).
+Signed-in art+caption browser tests passed on the integrated snapshot and the
+three isolated caption crops again had zero differing RGB channels. These
+integrated results supersede the earlier smaller-snapshot counts above.
