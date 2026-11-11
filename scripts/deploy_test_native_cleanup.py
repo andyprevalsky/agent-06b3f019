@@ -2325,9 +2325,8 @@ def clean_isolated_successor(state, prior, original, successor, custody_state=No
              and digest({k:v for k,v in execution_gate.items() if k != 'selection_evidence'})
                  == digest({k:v for k,v in gate.items() if k != 'selection_evidence'}),
              'successor execution contract changed')
-    need(binding.get('contract_digest') == digest(execution_gate), 'successor contract')
     checks, skips = request['checks'], request['skips']
-    if binding.get('contract_digest') != digest(gate):
+    if binding.get('contract_digest') != digest(execution_gate):
         # Authenticate the complete historical gate, not current-case coverage. Only an
         # inventory extension can be reconstructed: every other byte and old ordering
         # must still hash to the immutable successor receipt's original contract.
@@ -2341,9 +2340,10 @@ def clean_isolated_successor(state, prior, original, successor, custody_state=No
         historical_checks = set(checks) | set(skips)
         need(set(original['cases']) <= historical_checks <= set(gate['checks']),
              'successor historical inventory must preserve original debt')
-        gate = copy.deepcopy(gate)
+        gate = copy.deepcopy(execution_gate)
         gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
-    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
+        execution_gate = gate
+    need(binding.get('contract_digest') == digest(execution_gate) and binding.get('environment') == state['environment']
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)

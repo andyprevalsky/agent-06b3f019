@@ -17,6 +17,8 @@ from unittest.mock import patch
 import unittest
 
 HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE / 'lib'))
+from condition_wait import WaitTimeout, wait_until
 FIXTURE = runpy.run_path(str(HERE / 'tests/cloudbench-prepare-source-create.test.py'))
 HELPER = HERE / 'cloudbench-source-lease.py'
 OWNER = 'c' * 32
@@ -87,9 +89,11 @@ class SourceLease(unittest.TestCase):
         process = subprocess.Popen(self.command('hold'), env=self.b.env, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
         self.processes.append(process)
-        deadline = time.monotonic()+5
-        while not self.ready.exists() and process.poll() is None and time.monotonic()<deadline:
-            time.sleep(.03)
+        try:
+            wait_until(lambda: self.ready.exists() or process.poll() is not None, timeout=5,
+                       description='source lease publisher READY or exit')
+        except WaitTimeout:
+            pass  # The assertion below reports the missing READY.
         self.assertTrue(self.ready.exists(), process.communicate(timeout=5) if process.poll() is not None else 'no READY')
         self.assertEqual(self.invoke('check').returncode, 0)
         return process
@@ -317,9 +321,11 @@ class SourceLease(unittest.TestCase):
         self.processes.append(second)
         self.assertTrue(received_409.wait(3), 'second publisher did not encounter actual native lease contention')
         release_ack.set()
-        deadline = time.monotonic()+4
-        while not ready2.exists() and second.poll() is None and time.monotonic()<deadline:
-            time.sleep(.02)
+        try:
+            wait_until(lambda: ready2.exists() or second.poll() is not None, timeout=4,
+                       description='second publisher READY or exit')
+        except WaitTimeout:
+            pass  # The assertion below reports the serialized peer.
         self.assertTrue(ready2.exists(), second.communicate(timeout=3) if second.poll() is not None else 'peer serialized behind fleet lifetime')
         self.assertTrue(self.ready.exists(), 'first publisher never became READY')
         self.assertEqual(self.invoke('check').returncode, 0)
@@ -373,11 +379,11 @@ class SourceLease(unittest.TestCase):
         process = self.start()
         process.kill()
         # Do not reap before checking; matching /proc birth alone accepts a zombie.
-        deadline = time.monotonic()+3
-        while time.monotonic()<deadline:
-            state = Path('/proc/'+str(process.pid)+'/stat').read_text().rsplit(') ',1)[1].split()[0]
-            if state == 'Z': break
-            time.sleep(.01)
+        try:
+            wait_until(lambda: Path('/proc/'+str(process.pid)+'/stat').read_text().rsplit(') ',1)[1].split()[0] == 'Z',
+                       timeout=3, description='publisher process becomes a zombie')
+        except WaitTimeout:
+            pass  # The check below still observes the unexpired native lease.
         self.assertNotEqual(self.invoke('check').returncode, 0)
         process.communicate(timeout=5)
         self.b.lease_nonce = None  # Native lease expires independently of process death.
