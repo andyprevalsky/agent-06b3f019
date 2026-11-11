@@ -1579,7 +1579,32 @@ def reexecute(state: dict, occurrence_id: str) -> None:
         state["phase"] = "needs-focused-plan"
 
 
-def focused_plan(state: dict, plan: dict, payload: dict) -> None:
+def current_deploy_omissions(state: dict, gate: dict, root: Path) -> dict[str, str]:
+    """Current-source recorded omissions, rechecked against the explicit catalog policy."""
+    prefix = gate['name'] + '/'
+    recorded = {}
+    for row in state.get('deploy_selection_omissions', []):
+        if not isinstance(row, dict) or not isinstance(row.get('checks'), dict):
+            raise ValueError('invalid recorded deploy omission')
+        if row.get('source') != state['source']:
+            continue
+        if row.get('executed') is not False or row.get('credit_granted') is not False:
+            raise ValueError('deploy omission cannot claim execution or credit')
+        for check, reason in row.get('checks', {}).items():
+            if check.startswith(prefix) and check[len(prefix):] not in gate['checks']:
+                name = check[len(prefix):]
+                if name in recorded and recorded[name] != reason:
+                    raise ValueError('conflicting recorded deploy omission')
+                recorded[name] = reason
+    if recorded:
+        verified = quarantine.deploy_selection_omissions(
+            root, {**gate, 'checks': [*gate['checks'], *recorded]}, gate)
+        if verified != recorded:
+            raise ValueError('recorded deploy omission differs from current catalog')
+    return recorded
+
+
+def focused_plan(state: dict, plan: dict, payload: dict, root: Path = ROOT) -> None:
     if state["phase"] != "needs-focused-plan":
         raise ValueError("focused plan is only accepted for diagnosed failures")
     if payload.get("source") != state["source"]:
@@ -1595,7 +1620,10 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
             raise ValueError("focused check list is not in the gate inventory")
         required = {f["check"].split("/", 1)[1] for f in state["failures"]
                     if f["gate"] == gate and f.get("disposition") in {"blocking", "execution required"}}
-        if not required <= set(task["checks"]):
+        omitted = required - allowed[gate]
+        if omitted and not omitted <= current_deploy_omissions(state, original[gate], root).keys():
+            raise ValueError("focused command omits an unresolved failing check")
+        if not (required - omitted) <= set(task["checks"]):
             raise ValueError("focused command omits an unresolved failing check")
         if 'worker_recipe' in original[gate] and 'worker_recipe' not in task:
             raise ValueError('focused task must keep the bound worker recipe and transport')  # finding 4447557578
@@ -2493,6 +2521,19 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
             if any(name + '/' + check in pending_checks for check in omissions):
                 raise ValueError('adjudicate the original failure before excluding its future execution')
             selection_omissions.update({name + '/' + check: reason for check, reason in omissions.items()})
+    for gate in old_gates.values():
+        # Only exact old-source audit rows carry; revalidate their catalog reason
+        # against the new inventory before recording the current-source transition.
+        prior = current_deploy_omissions(state, gate, root)
+        if prior and gate['name'] in new_gates:
+            following = new_gates[gate['name']]
+            still_removed = {name: reason for name, reason in prior.items() if name not in following['checks']}
+            if still_removed:
+                verified = quarantine.deploy_selection_omissions(
+                    root, {**following, 'checks': [*following['checks'], *still_removed]}, following)
+                if verified != still_removed:
+                    raise ValueError('carried deploy omission differs from current catalog')
+                selection_omissions.update({gate['name'] + '/' + name: reason for name, reason in verified.items()})
     fingerprints = input_fingerprints(new, root)
     if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
             and fingerprints == state["input_fingerprints"]):
@@ -2760,7 +2801,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "focus":
                 if args.input is None:
                     raise ValueError("--input focused command plan required")
-                focused_plan(state, plan, read(args.input))
+                focused_plan(state, plan, read(args.input), args.root)
             elif args.action in {'triage-independent', 'repair-independent'}:
                 with cancellation_handlers():
                     run_phase(plan, state, directory, args.root, args.rca_launcher,

@@ -3318,6 +3318,58 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(self.state['ready'])
                 self.assertEqual({}, self.state['skips'])
 
+    def test_focus_honors_only_recorded_current_deploy_omission(self):
+        import inspect
+        def apply_focus(state, plan, payload):
+            if 'root' in inspect.signature(c.focused_plan).parameters:
+                return c.focused_plan(state, plan, payload, self.root)
+            return c.focused_plan(state, plan, payload)
+        f = self.failure()
+        c.adjudicate(self.state, self.report(f))
+        gate = self.plan['gates'][1]
+        gate.update(category='smoke', native_cloud=True, checks=['b'])
+        self.state['plan_digest'] = c.digest(self.plan)
+        reason = 'Explicit user deploy exclusion'
+        self.state['deploy_selection_omissions'] = [dict(source=copy.deepcopy(self.state['source']),
+            from_source=copy.deepcopy(self.state['source']), checks={'api/a':reason}, executed=False, credit_granted=False)]
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        c.write(catalog, [{'name':'a', 'deploy_quarantine':reason}])
+        payload = dict(source=self.state['source'], gates={'api':dict(command=['true'], checks=['b'])})
+        before = copy.deepcopy(self.state)
+        apply_focus(self.state, self.plan, payload)
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertEqual(['b'], c.records(self.plan, self.state)[0]['checks'])
+        for fault in ['no-record','stale-source','credit','executed','reason','ordinary','in-inventory','unknown-omission']:
+            candidate = copy.deepcopy(before)
+            row = candidate['deploy_selection_omissions'][0]
+            c.write(catalog, [{'name':'a', 'deploy_quarantine':reason}])
+            if fault == 'no-record': candidate.pop('deploy_selection_omissions')
+            elif fault == 'stale-source': row['source'] = dict(head='f'*40,digest='e'*64)
+            elif fault == 'credit': row['credit_granted'] = True
+            elif fault == 'executed': row['executed'] = True
+            elif fault == 'reason': row['checks']['api/a'] = 'different'
+            elif fault == 'ordinary': c.write(catalog, [{'name':'a','quarantine':{'error':'still runs'}}])
+            elif fault == 'in-inventory': candidate['failures'].append(dict(f, id='new', check='api/b'))
+            elif fault == 'unknown-omission': candidate['failures'].append(dict(f, id='new', check='api/unknown'))
+            task = copy.deepcopy(payload)
+            if fault == 'in-inventory': task['gates']['api']['checks'] = ['a']
+            unchanged = copy.deepcopy(candidate)
+            with self.assertRaises(ValueError): apply_focus(candidate, self.plan, task)
+            self.assertEqual(unchanged, candidate)
+        # A normal source refresh carries the same explicit authority, never its old results.
+        c.write(catalog, [{'name':'a', 'deploy_quarantine':reason}])
+        self.state = copy.deepcopy(before)
+        (self.root / 'code').write_text('ordinary following source')
+        new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
+        c.refresh(self.state, self.plan, new, self.root)
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(new['source'], self.state['deploy_selection_omissions'][-1]['source'])
+        self.state['phase'] = 'needs-focused-plan'
+        apply_focus(self.state, new, dict(payload, source=new['source']))
+        self.assertEqual(['b'], c.records(new, self.state)[0]['checks'])
+
     def test_focus_must_include_failed_case_not_arbitrary_green_subset(self):
         f = self.failure(); c.adjudicate(self.state, self.report(f))
         with self.assertRaises(ValueError):
