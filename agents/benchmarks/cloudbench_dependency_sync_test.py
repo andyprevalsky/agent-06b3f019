@@ -6100,6 +6100,7 @@ def test_post_config_start_rejected_ack_requires_current_guest_proof(
     post_start = post_start[: -len("\n    fi")] + "\n"
     poll = cloud.split('while :; do\n    now="$(date +%s)"', 1)[1]
     poll = poll.split("    # A later chunk", 1)[0]
+    start_helper = _extract_fleet_function(cloud, "boot_launch_start_after_config() {")
     native_calls = tmp_path / "native-start.calls"
     script = f"""set -eu
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
@@ -6131,6 +6132,7 @@ flyctl() {{
 sleep() {{ :; }}
 stage_explicit_codex_auth() {{ return 0; }}
 ensure_status_proxy() {{ kill -0 "$STATUS_PROXY_PID"; }}
+{start_helper}
 {post_start}
 now="$(date +%s)"
 {poll}
@@ -6182,9 +6184,19 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     assert "machine_state" not in post_config_start
     assert "machine_storage_ready" not in post_config_start
     assert "request_machine_start" not in post_config_start
-    assert "CLOUDBENCH_BOOT_START_ATTEMPTS" in post_config_start
-    assert "CLOUDBENCH_BOOT_START_TIMEOUT" in post_config_start
-    assert 'flyctl machine start "$mid"' in post_config_start
+    assert 'if boot_launch_start_after_config "$mid" "$_start_log"; then' in post_config_start
+    # The bounded start helper is the only post-config start path. It must not
+    # consult the shared inventory (which can still say `started`), and both
+    # its ordinary attempt budget and its Fly settle window stay bounded.
+    start_helper = _extract_fleet_function(cloud, "boot_launch_start_after_config() {")
+    assert "machine_state" not in start_helper
+    assert "machine_storage_ready" not in start_helper
+    assert "request_machine_start" not in start_helper
+    assert "CLOUDBENCH_BOOT_START_ATTEMPTS" in start_helper
+    assert "CLOUDBENCH_BOOT_START_TIMEOUT" in start_helper
+    assert "CLOUDBENCH_BOOT_START_SETTLE_SECONDS" in start_helper
+    assert 'flyctl machine start "$id"' in start_helper
+    assert 'flyctl machine wait "$id" -a "$APP" --state settled' in start_helper
     assert 'mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"' in post_config_start
     assert "post-config start accepted" in post_config_start
     claim_start = fleet.index("claim_pool_machine() {")
