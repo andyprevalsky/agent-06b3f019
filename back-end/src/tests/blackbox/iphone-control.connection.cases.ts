@@ -34,6 +34,7 @@ export const connectionCases: Case[] = [
       assert.deepEqual(
         Object.keys(initial.data).sort(),
         [
+          'accessRequested',
           'configured',
           'connectionRevision',
           'enabled',

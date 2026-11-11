@@ -6,17 +6,13 @@
  */
 
 import { z } from 'zod';
-import {
-  createStreamingCompletion,
-  markCacheable,
-  type CompletionChunk,
-  type CompletionOptions,
-} from '../rose';
+import { createStreamingCompletion, type CompletionChunk, type CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheSet } from '../demoCacheStore';
 import { goalHash } from '../demoCacheNormalizeCore';
 import { contentKey } from '../demoCacheNormalizeKeys';
-import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
+import { buildGeneratorSystemMessage } from './chatSystemContext';
+export { buildGeneratorSystemMessage } from './chatSystemContext';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { createLogger } from '../logger';
 import {
@@ -188,12 +184,9 @@ type GeneratorLlmParams = {
   providerRoute?: ChatProviderRoute;
   abortSignal?: AbortSignal;
   streamGate?: TransactionalStreamGate;
+  userProfileContext?: string;
   projectContext?: string; // `## Project` section; '' or omitted = Home
 };
-
-/** Static generator prompt (cached prefix), then the agent's project section (projectContext.ts). */
-export const buildGeneratorSystemMessage = (projectContext = '') =>
-  markCacheable(GENERATOR_SYSTEM_PROMPT, projectContext);
 
 export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
   let attention: GeneratorAttentionLifecycle | undefined;
@@ -221,7 +214,7 @@ async function callGeneratorLlmCore(
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [buildGeneratorSystemMessage(params.projectContext)];
+  }> = [buildGeneratorSystemMessage(params.projectContext, params.userProfileContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {

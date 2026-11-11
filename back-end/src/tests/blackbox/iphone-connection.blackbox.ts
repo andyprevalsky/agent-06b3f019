@@ -6,6 +6,7 @@ import { prisma } from '../../providers/database';
 import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 import { Harness } from './iphone-control.fixtures';
 import { connectionCases } from './iphone-control.connection.cases';
+import { accessRequestCases } from './iphone-control.access-request.cases';
 import { portraitCases } from './iphone-control.portrait.cases';
 
 async function main() {
@@ -24,7 +25,12 @@ async function main() {
   let h: Harness | undefined;
   try {
     h = await Harness.start();
-    for (const [name, run] of [...connectionCases, ...authLossCases, ...portraitCases]) {
+    for (const [name, run] of [
+      ...connectionCases,
+      ...accessRequestCases,
+      ...authLossCases,
+      ...portraitCases,
+    ]) {
       h.resetControls();
       const errors = h.fixtureErrors.length;
       try {
