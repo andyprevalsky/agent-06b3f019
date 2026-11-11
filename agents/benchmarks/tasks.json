@@ -9090,6 +9090,12 @@
   },
   {
     "name": "browser-biometrics-webdecoy",
+    "quarantine": {
+      "since": "2026-11-11",
+      "repair": "pending-handoff:89fc64c4339a455d8767041fdf1ff6ea",
+      "error": "Timeout after 424s (task timeout=420s)",
+      "evidence": "PR #1931 smoke FLAKY occurrence 89fc64c4339a455d8767041fdf1ff6ea"
+    },
     "title": "Browser Biometrics WebDecoy",
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
     "timeout_seconds": 420,
