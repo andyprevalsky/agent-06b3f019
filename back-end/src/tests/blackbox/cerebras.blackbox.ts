@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import { retryWithBackoff } from '../../providers/retry';
+import { quarantine } from '../helpers/quarantine';
 
 const OK_SSE = [
   'data: {"choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"brief\\",\\"response\\":\\"done\\"}"}}]}',
@@ -105,10 +106,26 @@ async function run(): Promise<void> {
 
   process.stdout.write('PASS synchronous Chat uses direct Cerebras qwen-3.8-27b exclusively\n');
 
-  // Live inventory probe: the archived GLM id must stay 404, and the configured
-  // chat model must not return model_archived. Skipped when no real key.
-  const liveKey = process.env.CEREBRAS_API_KEY;
-  if (liveKey && !liveKey.startsWith('blackbox-') && liveKey.length > 20) {
+  await liveInventoryProbe();
+}
+
+/** The live inventory probe is the only network case here, so its FLAKY unit is the domain. */
+const liveUnit = 'cerebras';
+const liveInventoryProbe = quarantine(
+  {
+    since: '2026-11-11',
+    repair: 'pending-handoff:5c8f37e286ae4ceca861e1ccbc572733',
+    error: 'AssertionError [ERR_ASSERTION]: Cerebras /models must be reachable for the live probe',
+    evidence: 'backend-coverage-blackbox rca 5c8f37e286ae4ceca861e1ccbc572733, run 43092193288',
+  },
+  async (): Promise<void> => {
+    // Live inventory probe: the archived GLM id must stay 404, and the configured
+    // chat model must not return model_archived. Skipped when no real key.
+    const liveKey = process.env.CEREBRAS_API_KEY;
+    if (!liveKey || liveKey.startsWith('blackbox-') || liveKey.length <= 20) {
+      process.stdout.write('SKIP live Cerebras inventory probe (no real CEREBRAS_API_KEY)\n');
+      return;
+    }
     const { CEREBRAS_CHAT_MODEL, ARCHIVED_CEREBRAS_CHAT_MODEL, buildCerebrasChatBody } =
       await import('../../providers/rose/cerebrasRoute');
     const archived = await fetch(CEREBRAS_API_URL.replace('/chat/completions', '/models'), {
@@ -194,10 +211,9 @@ async function run(): Promise<void> {
         `PASS live Cerebras chat model ${CEREBRAS_CHAT_MODEL} responds in ${probe.elapsedMs}ms\n`
       );
     }
-  } else {
-    process.stdout.write('SKIP live Cerebras inventory probe (no real CEREBRAS_API_KEY)\n');
-  }
-}
+  },
+  { unit: liveUnit }
+);
 
 void run().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);

@@ -6441,6 +6441,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         tasks = self._discarded_summary_accounting
         if wait and any(not task.done() for task in tasks):
             try:
+                # cutover-class: bounded — SPECULATIVE_SUMMARY_SETTLE_SECONDS cap, then proceed regardless
                 await workflow.wait_condition(
                     lambda: all(task.done() for task in tasks),
                     timeout=timedelta(seconds=SPECULATIVE_SUMMARY_SETTLE_SECONDS),
