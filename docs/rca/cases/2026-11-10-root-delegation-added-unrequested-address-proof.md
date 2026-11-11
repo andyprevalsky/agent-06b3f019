@@ -288,6 +288,28 @@ behavior. Application, after calls and native launches remain parent-owned.
 Application and the bounded dry AFTER calls are now recorded above; native
 launches and their financial, recording and cleanup qualification remain pending.
 
+
+### Native focused validation, November 11
+
+Five consecutive invocations of the unchanged
+`browser-auth-session-expires-at-checkout` task actually PASSED/COMPLETED on
+`d4b3f2fede0a45be1b25c4887f708bb7aacd016d`, with durations271.6,256.2,387.4,276.0
+and266.4seconds. Original1200second limits, evaluators and task criteria remained
+unchanged. Each original recording, exact sandbox paid card/transfer/PI chain,
+automatic every-persisted-PI custody join and token-bound cleanup was verified.
+All five databases, listeners and35 exact runtime owners retired. No operator
+Stripe GET substituted for the new automatic custody proof.
+
+Latest original recording: [verified native run](https://www.roselabs.ai/?agent-id=23ef9284-a5be-45c5-9319-006bab026b04#benchmark-share=b853da9d-ec26-43e4-aa49-cfa303a1b441.1796949561.131f4b0428e3977e33335ce1a1c19359fa7f72573ed7264c22ab837c323a190d).
+The five sealed final packets and parent hash/grade/custody audits are indexed
+by `.context/agentcard-e2e/session-expiry-repair-20261110/focused-five-final-summary.json`
+(SHA256fb2614ed9b73c695c238d34b1d602de49a09cd3097a629e6eb220b39caa3eb1c).
+This is five focused native passes, not five complete eleven-case rounds,
+production proof or a controlled causal model comparison. A complete final-source
+eleven-case regression and normal deployment/production verification remain
+pending. The historical54PASS/1FAIL remains unchanged; the ambiguous dry control
+and semantic generalization limits above are not erased by these observations.
+
 ## Human feedback
 
 Preserve the real failure, all eight rejections and the successful paid order.

@@ -239,3 +239,166 @@ def previous_route_mismatches(native, previous, machines, pointer, minimum):
             raise ValueError("Mixed or incomplete old-bank route mismatch evidence")
         mismatch_records = [{**record, "routeEvidence": proof} for record, proof in observations]
     return mismatch_records
+
+
+# Initial-exec provider plus the installed non-overwriting dotenv contract, not Python heap state.
+RUNTIME_BROWSER_PROVIDER_PROBE = r'''
+import ast, hashlib, json, os, pathlib, psutil, sys
+
+def need(value, reason):
+    if not value:
+        raise ValueError(reason)
+
+def source_contract(path):
+    data = path.read_bytes()
+    tree = ast.parse(data)
+    loaders = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and (getattr(node.func, 'id', None) == 'load_dotenv'
+                    or getattr(node.func, 'attr', None) == 'load_dotenv')]
+    need(loaders and all(any(k.arg == 'override' and isinstance(k.value, ast.Constant)
+                            and k.value.value is False for k in call.keywords) for call in loaders),
+         'Installed dotenv contract is not explicitly non-overwriting')
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.Delete)):
+            targets = getattr(node, 'targets', [getattr(node, 'target', None)])
+            for target in targets:
+                if isinstance(target, ast.Subscript) and getattr(target.value, 'attr', None) == 'environ':
+                    key = target.slice
+                    need(isinstance(key, ast.Constant) and key.value != 'BROWSER_PROVIDER',
+                         'Installed source may replace the provider')
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == 'putenv':
+                need(node.args and isinstance(node.args[0], ast.Constant)
+                     and node.args[0].value != 'BROWSER_PROVIDER', 'Installed source may replace the provider')
+            if getattr(node.func.value, 'attr', None) == 'environ':
+                need(node.func.attr not in ('update', 'clear'), 'Installed source may replace the provider')
+                if node.func.attr in ('pop', 'setdefault'):
+                    need(node.args and isinstance(node.args[0], ast.Constant)
+                         and node.args[0].value != 'BROWSER_PROVIDER', 'Installed source may replace the provider')
+    return hashlib.sha256(data).hexdigest()
+
+def snapshot():
+    workers = []
+    for process in psutil.process_iter(['cmdline']):
+        command = process.info['cmdline']
+        need(command is not None, 'Process command is unreadable')
+        if any(pathlib.Path(arg).name == 'worker.py' for arg in command[1:]):
+            workers.append(process)
+    need(len(workers) == 1, 'Running worker process is absent or ambiguous')
+    process = workers[0]
+    command = process.cmdline()
+    need(len(command) == 2 and pathlib.Path(command[0]).name in ('python', 'python3', 'python3.11')
+         and command[1] in ('worker.py', '/app/worker.py') and process.cwd() == '/app',
+         'Running process is not the canonical worker')
+    def birth():
+        fields = pathlib.Path('/proc', str(process.pid), 'stat').read_text().rsplit(') ', 1)[1].split()
+        need(fields[0] != 'Z', 'Worker is a zombie')
+        return pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + str(process.pid) + ':' + fields[19]
+    before = birth()
+    values = [item.split(b'=', 1)[1].decode() for item in pathlib.Path('/proc', str(process.pid), 'environ').read_bytes().split(b'\0')
+              if item.startswith(b'BROWSER_PROVIDER=')]
+    need(len(values) == 1, 'Worker initial-exec BROWSER_PROVIDER is missing or ambiguous')
+    row = {'pid': process.pid, 'birth': before, 'provider': values[0].strip().lower(),
+           'worker_sha256': source_contract(pathlib.Path('/app/worker.py')),
+           'config_sha256': source_contract(pathlib.Path('/app/config.py')),
+           'dotenv_nonoverwriting': True}
+    need(birth() == before, 'Worker birth changed while observing provider')
+    return row
+
+need(os.environ.get('FLY_MACHINE_ID') == sys.argv[1]
+     and os.environ.get('FLY_MACHINE_VERSION') == sys.argv[2], 'Native Machine instance mismatch')
+before = snapshot()
+after = snapshot()
+need(before == after, 'Worker identity, provider or source changed during observation')
+print(json.dumps({'machine_id': sys.argv[1], 'instance_id': sys.argv[2], 'before': [before], 'after': [after]}))
+'''
+
+
+def resolve_browser_provider(app):
+    """Read every currently started worker; never wake a stopped Machine or infer its runtime."""
+    import re
+    import subprocess
+    import time
+
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}', app):
+        raise ValueError('Invalid production app')
+    deadline = time.monotonic() + 120
+
+    def read(arguments):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('Production worker observation deadline exceeded')
+        reply = subprocess.run(['flyctl', *arguments], text=True, capture_output=True,
+                               timeout=min(20, remaining), check=False)
+        if reply.returncode:
+            raise ValueError('Production worker observation command failed')
+        return json.loads(reply.stdout)
+
+    def active():
+        inventory = read(['machines', 'list', '-a', app, '--json'])
+        if not isinstance(inventory, list) or not inventory:
+            raise ValueError('Production inventory is empty or malformed')
+        result, seen = {}, set()
+        for machine in inventory:
+            mid = machine.get('id') if isinstance(machine, dict) else None
+            if not isinstance(mid, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}', mid) or mid in seen:
+                raise ValueError('Production Machine identity is invalid or duplicated')
+            seen.add(mid)
+            if machine.get('state') not in ('started', 'stopped', 'suspended'):
+                raise ValueError('Production Machine lifecycle is uncertain')
+            if machine['state'] == 'started':
+                if not isinstance(machine.get('instance_id'), str) or not machine['instance_id'] or not isinstance(machine.get('config'), dict):
+                    raise ValueError('Production Machine instance/config is missing')
+                result[mid] = machine_identity(machine)
+        if not result:
+            raise ValueError('No already-started production worker is observable')
+        return result
+
+    before = active()
+    providers = set()
+    for mid, identity in before.items():
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            raise ValueError('Production worker observation deadline exceeded')
+        # flyctl JSON reserializes exit_code with omitempty and drops exit_signal.
+        # Keep the raw Machines response and require explicit normal completion.
+        reply = pool.Fly(app, mid).request('POST', '/exec', {
+            'command': ['python3', '-I', '-B', '-c', RUNTIME_BROWSER_PROVIDER_PROBE, mid, identity['instanceId']],
+            'timeout': min(15, int(remaining)),
+        }, timeout=min(20, remaining))
+        if (not isinstance(reply, dict) or type(reply.get('exit_code')) is not int or reply['exit_code'] != 0
+                or type(reply.get('exit_signal')) is not int or reply['exit_signal'] != 0
+                or not isinstance(reply.get('stdout'), str)):
+            raise ValueError('Running worker provider probe has no verified normal completion')
+        observation = json.loads(reply['stdout'])
+        rows = observation.get('before')
+        if (observation.get('machine_id') != mid or observation.get('instance_id') != identity['instanceId']
+                or not isinstance(rows, list) or len(rows) != 1 or rows != observation.get('after')):
+            raise ValueError('Worker or native Machine binding is missing, ambiguous or changed')
+        row = rows[0]
+        pid = row.get('pid')
+        if (type(pid) is not int or pid <= 1
+                or not isinstance(row.get('birth'), str)
+                or not re.fullmatch(r'[0-9a-f-]{36}:' + str(pid) + r':[1-9][0-9]*', row['birth'])
+                or row.get('dotenv_nonoverwriting') is not True
+                or any(not re.fullmatch(r'[0-9a-f]{64}', str(row.get(key, ''))) for key in ('worker_sha256', 'config_sha256'))
+                or row.get('provider') not in ('tilion', 'kernel', 'steel', 'browser-use')):
+            raise ValueError('Worker provider, native birth or source contract is unverified')
+        providers.add(row['provider'])
+    if active() != before:
+        raise ValueError('Active production Machine instances changed during observation')
+    if len(providers) != 1:
+        raise ValueError('Active production workers have mixed providers')
+    return next(iter(providers))
+
+
+if __name__ == '__main__':
+    import sys
+
+    try:
+        if len(sys.argv) != 3 or sys.argv[1] != '--browser-provider':
+            raise ValueError('Expected --browser-provider APP')
+        print(resolve_browser_provider(sys.argv[2]))
+    except Exception as error:
+        print('FATAL: could not read production Fly worker configuration/runtime: ' + type(error).__name__, file=sys.stderr)
+        raise SystemExit(1)
