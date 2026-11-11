@@ -1872,7 +1872,9 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     normal = entry.get('proof', {})
     need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
          and entry.get('purpose') is None and normal.get('purpose') is None
-         and normal.get('layout') == 'campaign-v1' and key == normal.get('receipt_sha256')
+         # Mixed is the same full-cohort validator with zero-allocation members (infra stop).
+         and normal.get('layout') in {'campaign-v1', 'campaign-mixed-preallocation-v1'}
+         and key == normal.get('receipt_sha256')
          and key == sha_file(folder / 'receipt.json') and entry.get('credit_granted') is False,
          'strict normal successor reconciliation required')
     reconciliation_occurrence(state, entry, successor)

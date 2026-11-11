@@ -7324,6 +7324,32 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
         self.assertEqual(same, state)
 
+    def test_reconciled_failed_successor_accepts_mixed_cohort_layout_only(self):
+        # Round 33: an infra stop left zero-allocation members, so the strict normal
+        # reconciliation used the mixed full-cohort layout. Other layouts stay refused.
+        import deploy_test_native_cleanup as native
+        state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
+        incoming = dict(proof, validation_source=state['source'])
+        normal = state['reconciled_owners'][native_proof['receipt_sha256']]
+        real = native.still_bound
+        bound = lambda entry, *a, **k: True if entry is normal else real(entry, *a, **k)
+        for layout, accepted in (('campaign-mixed-preallocation-v1', True), ('campaign-preallocation-v1', False),
+                                 ('campaign-startup-v1', False)):
+            with self.subTest(layout=layout):
+                candidate = copy.deepcopy(state)
+                normal = candidate['reconciled_owners'][native_proof['receipt_sha256']]
+                normal['proof']['layout'] = layout
+                before = copy.deepcopy(candidate)
+                with patch.object(native, 'still_bound', bound):
+                    if accepted:
+                        c.reconcile(candidate, original['token'], incoming)
+                        self.assertFalse(candidate['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+                        self.assertEqual(before['attempts'], candidate['attempts'])
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'strict normal successor reconciliation'):
+                            c.reconcile(candidate, original['token'], incoming)
+                        self.assertEqual(before, candidate)
+
     def test_failed_successor_renewal_uses_sealed_historical_environment_without_carryover(self):
         state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
         historical = copy.deepcopy(successor['execution_binding'])
