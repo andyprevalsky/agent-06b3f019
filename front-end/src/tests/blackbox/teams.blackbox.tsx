@@ -275,6 +275,24 @@ describe('Teams', () => {
     await waitFor(() => expect(checkbox).toBeChecked());
     expect(api.writes[0].path).toBe('/team-rose/projects/p-rose');
   });
+  it('reports a malformed sharing response instead of crashing its host settings', async () => {
+    mockTeams();
+    server.use(
+      http.get(TEAM_API, () => HttpResponse.json({})),
+      http.get(`${TEAM_API}/shareable-integrations`, () => HttpResponse.json({})),
+    );
+    renderWithProviders(
+      <>
+        <p>Project settings host</p>
+        <ProjectTeamSharing projectId="p-rose" />
+        <IntegrationTeamSharing />
+      </>,
+    );
+    const alerts = await screen.findAllByRole('alert');
+    for (const alert of alerts) expect(alert).toHaveTextContent('Unexpected Teams response');
+    expect(screen.getByText('Project settings host')).toBeVisible();
+    expect(screen.queryByRole('checkbox')).toBeNull();
+  });
   it('opens and closes Teams from the Rose drawer beside Biz health', async () => {
     mockTeams();
     const user = userEvent.setup();

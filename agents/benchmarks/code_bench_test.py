@@ -188,6 +188,23 @@ def test_commit_fixture_rewritten_history_fails(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_git_commits_never_start_background_maintenance(tmp_path):
+    """Commits must not spawn auto-maintenance that mutates .git while it is archived.
+
+    Newer git detaches `git maintenance run --auto` after `commit`; its
+    transient objects/maintenance.lock vanished mid-walk and failed
+    write_deterministic_tar_gz with FileNotFoundError under deploy load.
+    """
+    repo = _solve(tmp_path, COMMIT)
+    trace = tmp_path / "git-trace.log"
+    env = {**cb._git_env(repo.parent.parent), "GIT_TRACE": str(trace)}
+    (repo / "maintenance-probe.txt").write_text("probe\n")
+    cb._git(["add", "-A"], repo, env)
+    cb._git(["commit", "-q", "-m", "probe"], repo, env)
+    assert "maintenance run" not in trace.read_text()
+    assert "run_command: git gc" not in trace.read_text()
+
+
 @pytest.mark.parametrize("fixture_id", FIXTURE_IDS)
 def test_fixture_archive_is_deterministic(tmp_path, fixture_id):
     """Rose and the raw CLI get byte-identical inputs (the git index stat cache once differed per build)."""

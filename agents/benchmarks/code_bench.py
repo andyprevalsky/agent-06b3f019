@@ -200,7 +200,20 @@ def _git_env(home: Path) -> dict[str, str]:
 
 def _git(args: list[str], cwd: Path, env: dict[str, str]) -> str:
     result = subprocess.run(
-        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+        [
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            # No (possibly detached) auto-maintenance/gc: it mutates .git while
+            # the workspace is being archived (vanishing objects/maintenance.lock).
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            *args,
+        ],
         cwd=cwd,
         env=env,
         capture_output=True,

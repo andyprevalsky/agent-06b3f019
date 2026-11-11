@@ -265,6 +265,10 @@ async function main(): Promise<void> {
   const dataRepo = await import('../../domains/data/repo');
   const grepRepo = await import('../../domains/data/grepRepo');
   const contextRepo = await import('../../domains/data/messageContextRepo');
+  const { resolveMessageAccess } = await import('../../domains/data/teamAccessRepo');
+  const { parseTeamSearchScope } = await import('../../domains/data/teamAccess');
+  // Grep's production default scope (`all`): own rows plus explicit team grants.
+  const defaultAccess = (userId: string) => resolveMessageAccess(userId, parseTeamSearchScope({}));
   const imessageRepo = await import('../../domains/imessage/repo');
 
   const targetUserId = `msg-scope-target-${randomUUID()}`;
@@ -302,12 +306,14 @@ async function main(): Promise<void> {
     // Grep must be driven by the pattern, not by a scan of every message the
     // user owns: a selective literal reads a small multiple of its matches.
     const grepBudget = NEEDLE_MATCHES * 10;
+    const heavyAccess = await defaultAccess(heavyUserId);
     const grepCases: Array<[string, () => Promise<unknown>]> = [
       [
         'grep count',
         () =>
           grepRepo.countMessageGrepRows({
             userId: heavyUserId,
+            access: heavyAccess,
             pattern: NEEDLE,
             caseInsensitive: true,
           }),
@@ -317,6 +323,7 @@ async function main(): Promise<void> {
         () =>
           contextRepo.searchConversationMatchRows({
             userId: heavyUserId,
+            access: heavyAccess,
             pattern: NEEDLE,
             caseInsensitive: true,
             limit: 20,
@@ -343,12 +350,14 @@ async function main(): Promise<void> {
     }
     const count = await grepRepo.countMessageGrepRows({
       userId: heavyUserId,
+      access: heavyAccess,
       pattern: NEEDLE,
       caseInsensitive: true,
     });
     if (count !== NEEDLE_MATCHES) failures.push(`grep count ${count}, expected ${NEEDLE_MATCHES}`);
     const whaleCount = await grepRepo.countMessageGrepRows({
       userId: whaleUserId,
+      access: await defaultAccess(whaleUserId),
       pattern: NEEDLE,
       caseInsensitive: true,
     });

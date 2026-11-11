@@ -87,8 +87,17 @@ async function request<T>(
   return response.json() as Promise<T>;
 }
 const id = encodeURIComponent;
-export const fetchTeams = (signal?: AbortSignal) =>
-  request<TeamsResponse>('', 'GET', undefined, signal);
+/** Lists render inside other screens; an unexpected body is a load error, not a crash. */
+function requireArrays<T extends object>(data: T, keys: readonly (keyof T)[]): T {
+  if (!keys.every((key) => Array.isArray(data?.[key])))
+    throw new Error('Unexpected Teams response. Try again later.');
+  return data;
+}
+export const fetchTeams = async (signal?: AbortSignal) =>
+  requireArrays(await request<TeamsResponse>('', 'GET', undefined, signal), [
+    'teams',
+    'invitations',
+  ]);
 export const createTeam = (name: string) => request<Team>('', 'POST', { name });
 export const renameTeam = (teamId: string, name: string) =>
   request<Team>(`/${id(teamId)}`, 'PATCH', { name });
@@ -105,12 +114,15 @@ export const acceptTeamInvitation = (teamId: string, token: string) =>
   request<Team>(`/${id(teamId)}/accept`, 'POST', { token });
 export const removeTeamMember = (teamId: string, memberId: string) =>
   request<void>(`/${id(teamId)}/members/${id(memberId)}`, 'DELETE');
-export const fetchShareableIntegrations = (signal?: AbortSignal) =>
-  request<{ integrations: ShareableIntegration[] }>(
-    '/shareable-integrations',
-    'GET',
-    undefined,
-    signal,
+export const fetchShareableIntegrations = async (signal?: AbortSignal) =>
+  requireArrays(
+    await request<{ integrations: ShareableIntegration[] }>(
+      '/shareable-integrations',
+      'GET',
+      undefined,
+      signal,
+    ),
+    ['integrations'],
   );
 export const setTeamIntegration = (teamId: string, integrationId: string, shared: boolean) =>
   request<Team | void>(
