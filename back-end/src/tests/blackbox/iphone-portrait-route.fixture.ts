@@ -26,19 +26,24 @@ const detailRows = () => [
   text('Single-Tap', 177, 772),
 ];
 /** `production` mirrors the agent's documented wire shapes and the provider's bundle-ID launch result. */
-export type PortraitRouteShape = 'fixture' | 'production';
+export type PortraitRouteShape = 'fixture' | 'production' | 'production-cold';
 export function portraitRouteCommands(
   original: AssistiveOriginal = 'off',
   shape: PortraitRouteShape = 'fixture'
 ) {
-  const production = shape === 'production';
+  const production = shape !== 'fixture';
   const events: { operation: string; args: Record<string, unknown>; result: unknown }[] = [];
   const op = (operation: string, args: Record<string, unknown>, result: unknown) =>
     events.push({ operation, args, result });
   const read = (result: unknown) =>
     op('screen.text', production ? { min_confidence: 0.3 } : {}, result);
   const tap = (x: number, y: number) => op('input.tap', { x, y }, true);
-  if (production) op('apps.launch', { name: 'Settings', fresh: false }, 'com.apple.Preferences');
+  if (production)
+    op(
+      'apps.launch',
+      { name: 'Settings', fresh: shape === 'production-cold' },
+      'com.apple.Preferences'
+    );
   else op('apps.launch', { name: 'Settings' }, 'Settings');
   read([text('Settings', 375, 84, 150), text('Search', 250, 1230, 300)]);
   tap(250, 1230);

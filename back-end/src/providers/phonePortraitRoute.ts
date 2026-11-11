@@ -74,12 +74,12 @@ function controlCenter(rows: TextRow[]) {
   return found.length === 1 ? found[0] : null;
 }
 
-/** Settings, by name, in the documented launch shape; the provider reports its bundle ID. */
+/** Settings, by name, warm or cold (`fresh`); the provider reports its bundle ID. The root read still follows. */
 function settingsLaunch(e: PortraitRouteEvent) {
   const keys = Object.keys(e.args);
   return (
     e.args.name === 'Settings' &&
-    keys.every((k) => k === 'name' || (k === 'fresh' && e.args.fresh === false)) &&
+    keys.every((k) => k === 'name' || (k === 'fresh' && typeof e.args.fresh === 'boolean')) &&
     (e.result === 'Settings' || e.result === 'com.apple.Preferences')
   );
 }
