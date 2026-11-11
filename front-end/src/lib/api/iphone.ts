@@ -150,6 +150,7 @@ export interface IPhoneSetupProgress {
 }
 export interface IPhoneConnection {
   enabled: boolean;
+  accessRequested: boolean;
   configured: boolean;
   status: 'not_connected' | 'setting_up' | 'ready' | 'needs_reauth';
   setupAgentId: string | null;
@@ -196,6 +197,7 @@ function connection(value: unknown): IPhoneConnection {
     throw new Error('Invalid iPhone connection');
   return {
     enabled: row.enabled,
+    accessRequested: row.accessRequested === true,
     configured: row.configured,
     status: row.status as IPhoneConnection['status'],
     setupAgentId: row.setupAgentId as string | null,
@@ -227,6 +229,12 @@ async function connectionRequest(
 export const readIPhoneConnection = (signal: AbortSignal) => connectionRequest(signal);
 export const connectIPhone = (requestKey: string, expectedRevision: number, signal: AbortSignal) =>
   connectionRequest(signal, { requestKey, expectedRevision });
+
+export async function requestIPhoneAccess(signal: AbortSignal): Promise<IPhoneConnection> {
+  return bounded(signal, async (owned) =>
+    connection(await (await request('request-access', owned, {})).json()),
+  );
+}
 
 export type IPhoneProviderState = 'IDLE' | 'STARTING' | 'READY' | 'CLOSING';
 export interface IPhoneDeviceHolder {
