@@ -1,5 +1,5 @@
 import { clearsChatStallGuard, exclusiveCerebrasCompletion } from './cerebrasRoute';
-import { RosePaymentRequiredError, RoseRateLimitError } from './errors';
+import { RoseError, RosePaymentRequiredError, RoseRateLimitError, RoseStallError } from './errors';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import { hedgeStreams } from './hedgedStream';
 import { createLogger } from '../logger';
@@ -99,8 +99,11 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
  * silent, so the normal fast path still makes one provider request. The fast
  * model leads: off Cerebras the same Qwen model streams at GPU-host speed
  * (measured 1.6–7.6s to first token). The fast model's guard is sized in
- * openrouterFastRoute.ts. Structured generator responses use the first
- * completed answer as the winner.
+ * openrouterFastRoute.ts. With `latchOnComplete` (structured json_schema
+ * replies on the rate-cap path) the first cleanly completed answer wins: a
+ * decision is usable only once it closes, so a leg that streams early and then
+ * stalls, or stops at its token cap with unclosed JSON (GLM on the router after
+ * a Cerebras 429, 2026-11-11), must not lock out a leg that finishes.
  */
 export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   poolSpec: PoolSpec;
@@ -127,7 +130,11 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
             openrouterKey,
             requestId: params.requestId,
             callSite: params.callSite,
-          })
+          }),
+          {
+            requireCleanStop: params.latchOnComplete === true,
+            callerSignal: params.options.abort_signal,
+          }
         ),
     },
     hedge: {
@@ -140,7 +147,11 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
             requestId: params.requestId,
             callSite: params.callSite,
             allowProviderFallback: true,
-          })
+          }),
+          {
+            requireCleanStop: params.latchOnComplete === true,
+            callerSignal: params.options.abort_signal,
+          }
         ),
     },
     // The silent-stream path starts both together. A fast direct 429 uses a
@@ -148,8 +159,8 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
     // model that is itself capped hands off to the spill without that wait.
     hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
     hedgeOnPrimaryFailure: true,
-    // A generator answer is usable only after its final chunk. Router tool
-    // calls continue streaming at their first content chunk.
+    // A structured answer is usable only after its final chunk; plain text and
+    // tool-call streams continue at their first content chunk.
     isContent: (chunk) =>
       params.latchOnComplete ? chunk.kind === 'done' : clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
@@ -170,15 +181,43 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
 }
 
 async function* requireCompletedContent(
-  stream: AsyncIterable<RoseStreamChunk>
+  stream: AsyncIterable<RoseStreamChunk>,
+  opts: { requireCleanStop?: boolean; callerSignal?: AbortSignal } = {}
 ): AsyncIterable<RoseStreamChunk> {
   let hasContent = false;
-  for await (const chunk of stream) {
-    if (clearsChatStallGuard(chunk.kind)) hasContent = true;
-    if (chunk.kind === 'done' && !hasContent) {
-      throw new Error('OpenRouter fallback completed without content');
+  let finishReason: string | undefined;
+  try {
+    for await (const chunk of stream) {
+      if (clearsChatStallGuard(chunk.kind)) hasContent = true;
+      if (chunk.kind === 'usage') finishReason = chunk.data.finish_reason;
+      // Both failures are classified fall-through errors: when every leg fails,
+      // the caller's waterfall runs instead of the turn failing outright.
+      if (chunk.kind === 'done' && !hasContent) {
+        throw new RoseStallError('OpenRouter fallback completed without content');
+      }
+      // A structured reply is complete only when the provider reports a normal
+      // stop. One cut off at its token cap, or a body that closed without any
+      // finish_reason, is unclosed JSON: drop this leg before it can latch, so
+      // a cleanly finished leg wins the race.
+      if (chunk.kind === 'done' && opts.requireCleanStop && finishReason !== 'stop') {
+        throw new RoseStallError(
+          `OpenRouter fallback ended without a clean stop (finish_reason=${finishReason ?? 'none'})`
+        );
+      }
+      yield chunk;
     }
-    yield chunk;
+  } catch (error) {
+    // A structured leg that fails mid-stream for any other reason must still
+    // fall through to the waterfall when every leg fails, so classify it.
+    // Caller cancellation (the router deadline or a closed turn) propagates unchanged.
+    if (!opts.requireCleanStop || error instanceof RoseError || opts.callerSignal?.aborted) {
+      throw error;
+    }
+    throw new RoseStallError(
+      `OpenRouter fallback stream failed before completing: ${
+        error instanceof Error ? error.message : String(error)
+      }`.slice(0, 300)
+    );
   }
 }
 
@@ -341,8 +380,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
             requestId: params.requestId,
             callSite: params.callSite,
             hedgeDelayMs: 500,
-            latchOnComplete:
-              params.options.response_format?.json_schema?.name === 'generator_response',
+            latchOnComplete: params.options.response_format?.type === 'json_schema',
           }),
         emit,
       });
