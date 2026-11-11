@@ -487,14 +487,16 @@ def footprint_conflicts(inventory: dict) -> list[str]:
 
 
 def build_template(structural_workers: int, semantic_worker_processes: int, standard=None,
-                   executor: str = 'local') -> dict:
+                   executor: str = 'local', state_dir: Path | None = None) -> dict:
     """The standard full-suite template with this host's concurrency; nothing else changes.
 
     Under --executor blacksmith the structural and semantic gates run on their own VMs, so they keep
     the standard template's concurrency; the host cuts apply only to gates this host runs."""
     if standard is None:
         def standard():
-            return standard_template(BLACKSMITH_REFERENCE_HOST if executor == 'blacksmith' else ())
+            host = BLACKSMITH_REFERENCE_HOST if executor == 'blacksmith' else ()
+            return (standard_template(host, state_dir=state_dir) if state_dir is not None
+                    else standard_template(host))
     template, found = copy.deepcopy(standard()), set()
     if executor == 'blacksmith':  # neither cut gate is in BLACKSMITH_LOCAL_GATES
         return template
@@ -826,7 +828,8 @@ def run(args, root: Path) -> int:
         if not args.dry_run and not timing.is_file():
             raise Blocked('timing', f'no active deploy timing run ({timing} is missing); start one with '
                                     'bash scripts/run-deploy-stage --start before running gates')
-        template = build_template(args.structural_workers, args.semantic_worker_processes, executor=args.executor)
+        template = build_template(args.structural_workers, args.semantic_worker_processes,
+                                  executor=args.executor, state_dir=state_dir)
         template_path, candidate_template = state_dir / 'template.json', state_dir / 'template.candidate.json'
         if args.dry_run:  # the template goes to a scratch file; the state directory is not created
             with tempfile.TemporaryDirectory(prefix='deploy-gates-dry-run-') as scratch:

@@ -26,7 +26,7 @@ PORTS = {'backend-coverage-blackbox': 20000, 'frontend-coverage-blackbox': 20510
          'agents-coverage-blackbox': 21020, 'live-probes': 21530}
 
 
-def standard(host=()):
+def standard(host=(), *, state_dir=None):
     """Shape of deploy_test_plan.standard_template() for the gates the host cuts touch."""
     return {'gates': [
         {'name': 'format', 'category': 'format', 'command': ['python3', 'scripts/check_deploy_static.py', 'format'],

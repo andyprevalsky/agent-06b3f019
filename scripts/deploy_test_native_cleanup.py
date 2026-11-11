@@ -1917,8 +1917,11 @@ def clean_isolated_successor(state, prior, original, successor):
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
     custody = isolated_successor_custody(state, gate, successor, request, root)
+    from deploy_test_quarantine import validate_user_deploy_receipt
+    user_policy = validate_user_deploy_receipt(root, gate, successor, request)
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-         and successor.get('case_complete') == {name: name not in custody for name in gate['checks']}
+         and successor.get('case_complete') == {name: name not in custody and name not in user_policy
+                                               for name in gate['checks']}
          and all(type(value) is bool for value in successor['case_complete'].values())
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')

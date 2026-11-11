@@ -11519,4 +11519,126 @@ class NativeObservationLoss42FreshIsolation(unittest.TestCase):
         with self.assertRaises(ValueError):native.isolated_successor_resources_disjoint(prior,successor,root)
 
 
+class UserDeployQuarantine(unittest.TestCase):
+    def fixture(self):
+        import deploy_test_quarantine as q
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup);root=Path(temporary.name)
+        subprocess.run(['git','init','-q',str(root)],check=True)
+        (root/'.git/info/exclude').write_text('.context/\n')
+        catalog=root/q.CATALOG;catalog.parent.mkdir(parents=True)
+        names=[q.USER_DEPLOY_CASE,'agent-payment-abandonment',*['case-'+str(i)for i in range(16)]]
+        catalog.write_text(json.dumps([dict(name=n,**({'deploy_quarantine':q.USER_DEPLOY_REASON}if n==q.USER_DEPLOY_CASE else {}))for n in names]))
+        worker=root/'worker.py';worker.write_text("import os,json\nfrom pathlib import Path\nr=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text())\nassert 'test-mass-agent-run-0' not in r['checks']\nassert 'agent-payment-abandonment' not in r['checks']\nPath(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(dict(token=r['token'],source=r['source'],gate=r['gate'],cases=dict.fromkeys(r['checks'],'PASS'),complete=True,cleanup_complete=True,reused=False)))\n")
+        subprocess.run(['git','-C',str(root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(root),'-c','user.name=fixture','-c','user.email=fixture@example.com','commit','-qm','fixture'],check=True)
+        source=c.source(root)
+        gate=dict(name='smoke',category='smoke',quick=False,native_cloud=True,case_protocol=True,command=[sys.executable,str(worker)],
+                  checks=names,worker='owned-fake',deploy_quarantine_inventory=dict(kind='retained-user-deploy-quarantine-inventory-v1',checks={q.USER_DEPLOY_CASE:q.USER_DEPLOY_REASON},executed=False,credit_granted=False))
+        state=dict(source=source,environment=c.environment_digest(),input_fingerprints={'smoke':'a'*64},phase='focused',round=1,
+                   skips={},failures=[],attempts=[],repair_gates=['smoke'],historical_no_retry_custody=[{'fixture_only':True}],
+                   plan=dict(source=source,gates=[gate]),ready=False)
+        state['plan_digest']=c.digest(state['plan']);directory=root/'.context/deploy-pipeline'
+        custody={'agent-payment-abandonment':dict(kind='historical-fake-fixture-custody',disposition='NO_RETRY_CUSTODY',source=source,
+                    current_binding=dict(source=source,plan_digest=state['plan_digest']),
+                    credit=dict(test_execution=False,assertions=False,financial_release=False))}
+        return q,root,gate,state,directory,custody
+
+    def executed(self):
+        import deploy_test_historical_custody as h
+        q,root,gate,state,directory,custody=self.fixture()
+        with patch.object(h,'guard',return_value=custody):result=c._execute(gate,state,directory,root)
+        folder=Path(result['log']).parent;c.write(folder/'receipt.json',result)
+        state['attempts']=[dict(phase='focused',source=state['source'],results=[result])]
+        return q,root,gate,state,directory,custody,result,c.read(folder/'request.json')
+
+    def test_current18_executes16_with_separate_policy_and_financial_custody(self):
+        import deploy_test_historical_custody as h
+        q,root,gate,state,directory,custody,result,request=self.executed()
+        self.assertEqual(18,len(gate['checks']));self.assertEqual(16,len(request['checks']))
+        self.assertEqual({q.USER_DEPLOY_CASE,'agent-payment-abandonment'},set(request['skips']))
+        self.assertNotIn(q.USER_DEPLOY_CASE,request['checks']);self.assertEqual('SKIP',result['cases'][q.USER_DEPLOY_CASE])
+        self.assertFalse(result['case_complete'][q.USER_DEPLOY_CASE]);self.assertEqual({q.USER_DEPLOY_CASE:'UNVERIFIED'},result['user_deploy_quarantine_execution'])
+        self.assertEqual(custody,result['custody_skips']);self.assertEqual({'agent-payment-abandonment':'UNVERIFIED'},result['current_execution'])
+        self.assertEqual('PASS',result['status']);self.assertTrue(result['complete'])
+        with patch.object(h,'guard',return_value=custody):self.assertIsNotNone(c.full_pass_binding(state,gate,root=root))
+        saved=copy.deepcopy(result);result.pop('user_deploy_quarantine');c.write(Path(result['log']).parent/'receipt.json',result)
+        with patch.object(h,'guard',return_value=custody):self.assertIsNone(c.full_pass_binding(state,gate,root=root))
+        result.clear();result.update(saved)
+
+    def test_historical_policy_omission_credit_and_source_corruption_refuse(self):
+        q,root,gate,state,directory,custody,result,request=self.executed()
+        q.validate_user_deploy_receipt(root,gate,result,request)
+        for change in (lambda r,p:p['skips'].pop(q.USER_DEPLOY_CASE),lambda r,p:r.pop('user_deploy_quarantine'),
+                       lambda r,p:r['case_complete'].update({q.USER_DEPLOY_CASE:True}),
+                       lambda r,p:r['user_deploy_quarantine_execution'].update({q.USER_DEPLOY_CASE:'PASS'})):
+            r,p=copy.deepcopy(result),copy.deepcopy(request);change(r,p)
+            with self.assertRaises(ValueError):q.validate_user_deploy_receipt(root,gate,r,p)
+        for value in (0,True):
+            r,p=copy.deepcopy(result),copy.deepcopy(request)
+            p['skips'][q.USER_DEPLOY_CASE]['credit']['test_execution']=value;r['user_deploy_quarantine'][q.USER_DEPLOY_CASE]['credit']['test_execution']=value
+            with self.assertRaises(ValueError):q.validate_user_deploy_receipt(root,gate,r,p)
+        for field in ('extra','missing'):
+            r,p=copy.deepcopy(result),copy.deepcopy(request)
+            for row in (p['skips'][q.USER_DEPLOY_CASE],r['user_deploy_quarantine'][q.USER_DEPLOY_CASE]):
+                if field=='extra':row['credit']['extra']=False
+                else:row['credit'].pop('cleanup')
+            with self.assertRaises(ValueError):q.validate_user_deploy_receipt(root,gate,r,p)
+        bad=copy.deepcopy(result);bad['source']['head']='f'*40
+        with self.assertRaises(ValueError):q.validate_user_deploy_receipt(root,gate,bad,request)
+        old=copy.deepcopy(result);old.pop('user_deploy_quarantine');old.pop('user_deploy_quarantine_execution');req=copy.deepcopy(request);req['skips'].pop(q.USER_DEPLOY_CASE)
+        with patch.object(q,'catalog_deploy_quarantines',return_value={}),patch.object(q,'_git_ancestor',return_value=True):
+            self.assertEqual({},q.validate_user_deploy_receipt(root,gate,old,req))
+
+    def test_cloud_guard_refuses_mass_before_origin_namespace_or_provider(self):
+        import deploy_test_cloud as cloud
+        q,root,gate,state,directory,custody=self.fixture();token='e'*32
+        request=dict(token=token,source=state['source'],checks=[q.USER_DEPLOY_CASE],skips={})
+        with patch.object(cloud,'origin_fetchable',side_effect=AssertionError('origin probe crossed predispatch guard')):
+            with self.assertRaises(cloud.SourceRefusal):cloud.execute(request,root)
+        import hashlib
+        self.assertFalse((root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()).exists())
+
+    def test_new_policy_requires_exact_catalog_inventory_and_old_source_stays_neutral(self):
+        q,root,gate,state,directory,custody=self.fixture()
+        policy=q.user_deploy_exclusions(root,state['source'],gate,'a'*64,state['environment'])
+        self.assertEqual(q.USER_DEPLOY_INSTRUCTION,policy[q.USER_DEPLOY_CASE]['instruction'])
+        for invalid in (dict(gate,deploy_quarantine_inventory=None),dict(gate,category='backend'),
+                        dict(gate,deploy_quarantine_inventory=dict(gate['deploy_quarantine_inventory'],executed=0))):
+            with self.assertRaises(ValueError):q.user_deploy_exclusions(root,state['source'],invalid,'a'*64,state['environment'])
+        with patch.object(q,'catalog_deploy_quarantines',return_value={}),patch.object(q,'_git_ancestor',return_value=True):
+            self.assertEqual({},q.user_deploy_exclusions(root,state['source'],dict(gate,deploy_quarantine_inventory=None),'a'*64,state['environment']))
+        with patch.object(q,'catalog_deploy_quarantines',return_value={}),patch.object(q,'_git_ancestor',return_value=False):
+            with self.assertRaises(ValueError):q.user_deploy_exclusions(root,state['source'],gate,'a'*64,state['environment'])
+
+    def test_child_admission_recomputes_named_policy_in_same_native_request(self):
+        import deploy_test_historical_custody as h
+        q,root,gate,state,directory,custody,result,request=self.executed()
+        directory.mkdir(parents=True,exist_ok=True);c.write(directory/'cycle.json',state)
+        request.update(custody_state=str(directory/'cycle.json'),custody_state_sha256=h.state_identity(state),custody_runtime=h.runtime_identity(root),custody_child_environment=h.environment_identity(os.environ))
+        path=directory/'attempts/1/focused/smoke/request.json'
+        with patch.dict(os.environ,{'DEPLOY_GATE_REQUEST':str(path)}),patch.object(c,'validate_plan'), \
+             patch.object(c,'input_fingerprints',return_value=state['input_fingerprints']),patch.object(h,'guard',return_value=custody):
+            request['custody_child_environment']=h.environment_identity(os.environ)
+            h.admission(request,root)
+            bad=copy.deepcopy(request);bad['checks'].append(q.USER_DEPLOY_CASE);bad['skips'].pop(q.USER_DEPLOY_CASE)
+            with self.assertRaises(ValueError):h.admission(bad,root)
+
+
+    def test_clean_successor_consumes_validated_noexecution_policy_without_credit(self):
+        import deploy_test_native_cleanup as native
+        import deploy_test_quarantine as q
+        fixture=Cycle(methodName='runTest');fixture.setUp();self.addCleanup(fixture.tearDown)
+        state,paths,proof,gate,packet,original,folder,successor=fixture.clean_successor_renewal_state()
+        prior=state['reconciled_owners'][proof['receipt_sha256']]
+        name=gate['checks'][0];successor['case_complete'][name]=False;c.write(folder/'receipt.json',successor)
+        # The policy authority is tested above against real frozen catalog bytes;
+        # this oracle isolates its integration into the existing strict native successor.
+        with patch.object(q,'validate_user_deploy_receipt',return_value={name:{'validated_policy_fixture':True}}) as policy:
+            native.clean_isolated_successor(state,prior,original,successor)
+            policy.assert_called_once()
+        with patch.object(q,'validate_user_deploy_receipt',side_effect=ValueError('policy absent')):
+            with self.assertRaisesRegex(ValueError,'policy absent'):native.clean_isolated_successor(state,prior,original,successor)
+        self.assertFalse(prior['cleanup_complete']);self.assertFalse(prior['credit_granted'])
+
+
 if __name__ == '__main__': unittest.main()
