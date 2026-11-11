@@ -66,9 +66,22 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 step "postgres $PG_MAJOR"
-sudo systemctl start postgresql 2>/dev/null || sudo service postgresql start
+# Devbox parity (scripts/cloud-build.sh): backend-coverage-blackbox runs two blackbox shards beside
+# the unit pass, every process with its own Prisma pool (run-coverage.sh connection_limit=16). The
+# stock max_connections=100 refused clients mid-gate (FLAKY ae9ae00c, 2026-11-11: "sorry, too many
+# clients already"). Set it before the server (re)starts and verify the live value.
+PG_MAX_CONNECTIONS=300
+PG_CONF="/etc/postgresql/$PG_MAJOR/main/postgresql.conf"
+[ -f "$PG_CONF" ] || { echo "postgres config $PG_CONF is missing" >&2; exit 1; }
+sudo sed -i "s/^#*max_connections.*/max_connections = $PG_MAX_CONNECTIONS/" "$PG_CONF"
+sudo systemctl restart postgresql 2>/dev/null || sudo service postgresql restart
 for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
+live_max_connections=$(sudo -u postgres psql -Atc 'SHOW max_connections')
+[ "$live_max_connections" = "$PG_MAX_CONNECTIONS" ] || {
+  echo "postgres max_connections is $live_max_connections, want $PG_MAX_CONNECTIONS" >&2
+  exit 1
+}
 sudo -u postgres createdb victoria 2>/dev/null || true
 
 # Release binaries (flyctl, cloudflared) are fetched through the GitHub API with the job token,
