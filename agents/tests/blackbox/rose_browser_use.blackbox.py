@@ -3372,7 +3372,7 @@ async def test_native_autofill_control_history_matches_real_serializer():
 
 @quarantine(
     since="2026-11-11",
-    repair="pending-handoff:b39e33572bbc47348f73bafa850e2fe0",
+    repair="https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
     error="native_autofill_real_model_controls: AssertionError: ['(\\'presence\\', {\\'actual_model\\': \\'qwen/qwen3.8-27b\\', \\'mode\\': \\'waterfall\\', \\'request_id\\': \\'5a27176dbd4c\\'}",
     evidence=".context/rca-playwright/final-schema-a4dc/flaky-autofill/findings.json",
 )
