@@ -135,7 +135,7 @@ class EnvironmentIdentity(unittest.TestCase):
 
 
 class Cycle(unittest.TestCase):
-    def custody_fixture(self, top_level=None):
+    def custody_fixture(self, top_level=None, gate_name="api"):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
         mocked.start(); self.addCleanup(mocked.stop)
@@ -147,6 +147,9 @@ class Cycle(unittest.TestCase):
         subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
                         'user.email=test@example.com', 'commit', '-qm', 'catalog'], check=True)
         gate = self.plan['gates'][1]
+        if gate_name != 'api':
+            self.plan['gates'] = [g for g in self.plan['gates'] if g is gate or g['name'] != gate_name]
+            gate['name'] = gate_name
         gate.update(checks=names + ['peer-' + str(i) for i in range(13)], case_protocol=True)
         self.plan['source'] = c.source(self.root)
         self.state = c.initialize(self.plan, self.root)
@@ -180,9 +183,9 @@ class Cycle(unittest.TestCase):
             file = self.root / '.context/native' / name / 'cloudbench-run.json'; c.write(file, {'tasks': [native]})
             evidence = dict(native_task=row, path=str(file), sha256=c.sha_file(file))
             result = file.parent / 'result.json'
-            c.write(result, dict(source=self.state['source'], gate='api', complete=True, cleanup_complete=True,
+            c.write(result, dict(source=self.state['source'], gate=gate_name, complete=True, cleanup_complete=True,
                                  evidence={name: evidence}))
-            f = dict(id='failure-' + str(i), check='api/' + name, gate='api', source=self.state['source'],
+            f = dict(id='failure-' + str(i), check=gate_name + '/' + name, gate=gate_name, source=self.state['source'],
                      native_result='FAIL', complete=True, command=gate['command'], finished_at=1000,
                      worker_evidence=evidence, worker_result=str(result))
             failures.append(f)
@@ -6258,6 +6261,177 @@ class Cycle(unittest.TestCase):
         c.write(folder/'request.json', request); c.write(folder/'receipt.json', successor)
         state['attempts'].append(dict(phase='focused', results=[successor]))
         return state, paths, proof, gate, packet, original, folder, successor
+
+    def custody_clean_successor_state(self):
+        """Compose existing native-isolation and canonical offline historical fixtures."""
+        import deploy_test_historical_custody as h
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        self.plan = copy.deepcopy(self.plan)
+        self.custody_fixture(gate_name=gate['name'])
+        debts = copy.deepcopy(self.state)
+        state['failures'].extend(debts['failures'])
+        state['pending_post_merge'] = copy.deepcopy(debts.get('pending_post_merge', []))
+        gate['checks'] += ['agent-payment-abandonment', 'agent-payment-idempotent-abandonment']
+        gate.update(case_protocol=True, worker_transport='benchmark-cloud-cli')
+        state['source'] = c.source(self.root); state['plan']['source'] = state['source']
+        state['plan_digest'] = c.digest(state['plan'])
+        state['environment'] = c.environment_digest()
+        state['input_fingerprints'] = c.input_fingerprints(state['plan'], self.root)
+        rows = [h.historical(debts, f, self.root) for f in debts['failures']]
+        h.apply(state, rows, self.root)
+        request = c.read(folder/'request.json'); result = c.read(folder/'result.json')
+        request['source'] = copy.deepcopy(state['source']); result['source'] = copy.deepcopy(state['source'])
+        successor['source'] = copy.deepcopy(state['source'])
+        for metadata in request['skips'].values(): metadata['source'] = state['source']
+        qualified = h.guard(state, gate, self.root, request['skips'])
+        request['skips'].update(qualified)
+        request.update(custody_state=str(self.directory/'cycle.json'), custody_state_sha256=h.state_identity(state),
+                       custody_runtime=h.runtime_identity(self.root), custody_child_environment=c.digest('offline captured child environment'))
+        request['isolated_validation'][0]['source'] = copy.deepcopy(state['source'])
+        successor['isolated_validation'] = copy.deepcopy(request['isolated_validation'])
+        successor.update(cases={**dict.fromkeys(request['skips'], 'SKIP'), **result['cases']},
+            case_complete={k:k not in qualified for k in gate['checks']},
+            custody_skips=copy.deepcopy(qualified), current_execution=dict.fromkeys(qualified, 'UNVERIFIED'),
+            execution_binding=dict(contract_digest=c.digest(gate), environment=state['environment'],
+                                   input_fingerprint=state['input_fingerprints'][gate['name']]))
+        c.write(folder/'request.json', request); c.write(folder/'result.json', result)
+        successor['native_cleanup_reference']['result_sha256'] = c.sha_file(folder/'result.json')
+        c.write(folder/'receipt.json', successor)
+        return state, original, proof, gate, folder, successor
+
+    def test_clean_successor_qualified_custody_renews_without_credit(self):
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        before = copy.deepcopy(state)
+        files = {p:c.sha_file(p) for p in [folder/'request.json', folder/'receipt.json', folder/'result.json',
+                 *map(Path, proof['files'])]}
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        c.reconcile(state, original['token'], incoming)
+        for key in before.keys() - {'reconciled_owners', 'reconciled_owner_history'}:
+            self.assertEqual(before[key], state[key], key)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['reconciled_owners'][proof['receipt_sha256']]['proof']['files'], entry['proof']['files'])
+        self.assertIsNone(c.full_pass_binding(state, gate, root=self.root))
+        same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming); self.assertEqual(same, state)
+        self.assertEqual(files, {p:c.sha_file(p) for p in files})
+
+    def test_clean_successor_custody_authenticates_distinct_refresh_inputs(self):
+        import deploy_test_historical_custody as h
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        admitted = c.read(folder/'request.json')['skips']['agent-payment-abandonment']['current_binding']
+        (self.root/'code').write_text('new current input after sealed native execution')
+        state['source'] = c.source(self.root); state['plan']['source'] = state['source']
+        state['plan_digest'] = c.digest(state['plan'])
+        state['input_fingerprints'] = c.input_fingerprints(state['plan'], self.root)
+        h.apply(state, copy.deepcopy(state['historical_custody_history']), self.root)
+        self.assertNotEqual(admitted['source'], state['source'])
+        self.assertNotEqual(admitted['input_fingerprints'], state['input_fingerprints'])
+        before = copy.deepcopy(state)
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        c.reconcile(state, original['token'], incoming)
+        for key in before.keys() - {'reconciled_owners', 'reconciled_owner_history'}:
+            self.assertEqual(before[key], state[key], key)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['cleanup_complete']); self.assertFalse(entry['credit_granted'])
+        self.assertEqual(admitted, c.read(folder/'request.json')['skips']['agent-payment-abandonment']['current_binding'])
+        same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming); self.assertEqual(same,state)
+
+    def test_clean_successor_custody_native_pass_does_not_adopt_credit(self):
+        import deploy_test_historical_custody as h
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        result = c.read(folder/'result.json'); result['cases'] = dict.fromkeys(result['cases'], 'PASS')
+        c.write(folder/'result.json', result)
+        successor.update(native_exit=0, status='PASS')
+        successor['cases'].update(result['cases'])
+        successor['native_cleanup_reference']['result_sha256'] = c.sha_file(folder/'result.json')
+        c.write(folder/'receipt.json', successor)
+        (self.root/'code').write_text('new input still needs full current execution')
+        state['source'] = c.source(self.root); state['plan']['source'] = state['source']
+        state['plan_digest'] = c.digest(state['plan'])
+        state['input_fingerprints'] = c.input_fingerprints(state['plan'], self.root)
+        h.apply(state, copy.deepcopy(state['historical_custody_history']), self.root)
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], dict(proof, validation_source=copy.deepcopy(state['source'])))
+        self.assertIsNone(c.full_pass_binding(state, gate, root=self.root))
+        for key in before.keys() - {'reconciled_owners', 'reconciled_owner_history'}:
+            self.assertEqual(before[key],state[key],key)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']);self.assertFalse(entry['cleanup_complete'])
+
+    def test_clean_successor_custody_refuses_tampering_atomically(self):
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        case = 'agent-payment-abandonment'; active = c.read(folder/'request.json')['checks'][0]
+        mutations = [lambda s:s.pop('historical_no_retry_custody'),
+            lambda s:s['historical_custody_history'][0].update(native_sha256='changed'),
+            lambda s:s['historical_no_retry_custody'][0]['credit'].update(financial_release=True),
+            lambda s:s.update(environment=c.digest('foreign environment')),
+            lambda s:s['input_fingerprints'].update({gate['name']:c.digest('foreign input')}),
+            lambda s:s.update(running={'gate':gate['name']}), lambda s:s.update(source={'head':'a'*40,'digest':'b'*64})]
+        for mutate in mutations:
+            candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
+            with self.assertRaises(ValueError): c.reconcile(candidate, original['token'], incoming)
+            self.assertEqual(before, candidate)
+        request_path = folder/'request.json'; receipt_path = folder/'receipt.json'
+        saved = {p:p.read_bytes() for p in (request_path, receipt_path, folder/'result.json')}
+        edits = [('request', lambda r:r.pop('custody_state_sha256')),
+            ('request', lambda r:r['skips'][case].update(current_financial_state='VERIFIED')),
+            ('request', lambda r:r['skips'].update({active:dict(source=r['source'])})),
+            ('request', lambda r:r.update(custody_runtime={'changed':'runtime'})),
+            ('receipt', lambda r:r['case_complete'].update({case:True})),
+            ('receipt', lambda r:r['current_execution'].update({case:'PASS'})),
+            ('receipt', lambda r:r['case_complete'].update({active:False})),
+            ('receipt', lambda r:r['native_cleanup_reference'].update(result_sha256='0'*64)),
+            ('receipt', lambda r:r.update(native_exit=2)),
+            ('receipt', lambda r:r['isolated_validation'][0].update(credit_granted=True))]
+        for which, edit in edits:
+            candidate = copy.deepcopy(state)
+            target = candidate['attempts'][-1]['results'][0] if which == 'receipt' else c.read(request_path)
+            edit(target); c.write(receipt_path if which == 'receipt' else request_path, target)
+            before = copy.deepcopy(candidate)
+            try:
+                with self.assertRaises(ValueError): c.reconcile(candidate, original['token'], incoming)
+                self.assertEqual(before, candidate)
+            finally:
+                for p, raw in saved.items(): p.write_bytes(raw)
+        leaf = Path(c.read(folder/'result.json')['evidence'][active]['path']); raw = leaf.read_bytes()
+        try:
+            leaf.write_bytes(raw+b' '); before=copy.deepcopy(state)
+            with self.assertRaises(ValueError): c.reconcile(state, original['token'], incoming)
+            self.assertEqual(before,state)
+        finally: leaf.write_bytes(raw)
+
+    def test_clean_successor_known_custody_cannot_be_disguised_as_ordinary_skip(self):
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        request_path, receipt_path = folder/'request.json', folder/'receipt.json'
+        saved = {p:p.read_bytes() for p in (request_path,receipt_path)}
+        for variant in ('ordinary-disguise','removed-history','forged-financial-credit','malformed-skip'):
+            with self.subTest(variant=variant):
+                candidate=copy.deepcopy(state); request=c.read(request_path)
+                receipt=candidate['attempts'][-1]['results'][0]
+                protected=list(receipt['custody_skips'])
+                if variant == 'malformed-skip':
+                    request['skips'][protected[0]]=None
+                else:
+                    for name in protected:
+                        request['skips'][name]={'source':receipt['source']}
+                        receipt['case_complete'][name]=True
+                    receipt.pop('custody_skips');receipt.pop('current_execution')
+                    for field in ('custody_state','custody_state_sha256','custody_runtime','custody_child_environment'):
+                        request.pop(field,None)
+                    if variant == 'removed-history':
+                        candidate.pop('historical_no_retry_custody');candidate.pop('historical_custody_history')
+                    elif variant == 'forged-financial-credit':
+                        for row in candidate['historical_no_retry_custody']:
+                            row['current_financial_state']='VERIFIED';row['credit']['financial_release']=True
+                c.write(request_path,request);c.write(receipt_path,receipt)
+                before=copy.deepcopy(candidate)
+                try:
+                    with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],incoming)
+                    self.assertEqual(before,candidate)
+                finally:
+                    for p,raw in saved.items():p.write_bytes(raw)
 
     def negative_successor_renewal_state(self):
         """Real recover-round journal; only native collection is an explicit offline fixture."""

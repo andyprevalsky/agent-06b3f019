@@ -1646,6 +1646,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
     checks, skips = request['checks'], request['skips']
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
+         and all(isinstance(value, dict) for value in skips.values())
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
          and set(checks) | set(skips) == set(gate['checks'])
          and all(v.get('source') == successor['source'] for v in skips.values()), 'successor full inventory')
@@ -1658,12 +1659,63 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     need(isinstance(admissions, list) and admissions == successor.get('isolated_validation')
          and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
          'successor original isolation binding')
+    custody = {k: v for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY'}
+    import deploy_test_historical_custody as h
+    known = {row['check'].split('/', 1)[1] for row in h.known(state, root).values()
+             if row['gate'] == gate['name']}
+    if custody or known:
+        import deploy_test_cycle as c
+        # Discover authority from the canonical ledger, never an incoming skip label.
+        legacy_current = c.reuse_qualifications(state, gate, root=root, include_custody=False)
+        current = h.binding(state['plan'], root)
+        need(current == {k: state.get(k) for k in current}, 'successor current custody inputs')
+        qualified = h.guard(state, gate, root, legacy_current, current=current)
+        need(set(qualified) == set(custody), 'successor current custody inventory')
+    if custody:
+        legacy = {k: v for k, v in skips.items() if k not in custody}
+        bindings = [v.get('current_binding') for v in custody.values()]
+        admitted = bindings[0]
+        need(isinstance(admitted, dict) and set(admitted) == set(current)
+             and all(v == admitted for v in bindings)
+             and admitted['source'] == successor['source']
+             and binding == dict(contract_digest=digest(admitted_gate), environment=admitted['environment'],
+                                 input_fingerprint=admitted['input_fingerprints'].get(gate['name'])),
+             'successor admitted custody inputs')
+        # This is ONLY an identity-bearing projection, never a captured full snapshot.
+        # The request's recorded state identity authenticates every reconstructed field.
+        projection = {k: copy.deepcopy(state[k]) for k in
+                      ('historical_custody_history', 'historical_custody_import',
+                       'historical_custody_transfers', 'failures', 'pending_post_merge',
+                       'resource_warnings', 'superseded_resource_warnings') if k in state}
+        projection.update(copy.deepcopy(admitted))
+        projection['historical_no_retry_custody'] = [
+            {k: copy.deepcopy(v) for k, v in custody[r['original_failure']['check'].split('/', 1)[1]].items()
+             if k != 'source'} if r['original_failure']['gate'] == gate['name'] else copy.deepcopy(r)
+            for r in state.get('historical_no_retry_custody', [])]
+        need(h.state_identity(projection) == request.get('custody_state_sha256'),
+             'successor custody identity projection')
+        historical = h.guard(projection, admitted_gate, root, legacy, current=admitted)
+        need(historical == custody, 'successor admitted custody qualifications')
+        # Original authority must be identical; both independently checked input bindings stay intact.
+        def authority(values):
+            return {k: {field: value for field, value in row.items() if field != 'current_binding'}
+                    for k, row in c.qualification_identity(values).items()}
+        need(authority(qualified) == authority(custody)
+             and checks == [k for k in gate['checks'] if k not in skips]
+             and request.get('custody_runtime') == h.runtime_identity(root)
+             and isinstance(request.get('custody_child_environment'), str)
+             and re.fullmatch('[0-9a-f]{64}', request['custody_child_environment'])
+             and digest(successor.get('custody_skips')) == digest(custody)
+             and all(successor.get('case_complete', {}).get(k) is False for k in custody)
+             and all(successor.get('case_complete', {}).get(k) is True for k in checks)
+             and all(successor.get('current_execution', {}).get(k) == 'UNVERIFIED' for k in custody),
+             'successor custody authority/runtime/projection')
     result_path = folder / 'result.json'
     need(successor.get('worker_result') == str(result_path), 'successor result locator')
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-         and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
+         and successor.get('case_complete') == {k: k not in custody for k in gate['checks']}
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')
     reference = successor['native_cleanup_reference']

@@ -10,6 +10,7 @@ first_bad_boundary: renewal dispatch excluded quiescent quick and final boundari
 symptoms:
   - "native cleanup: next source/inventory binding"
   - "native cleanup: failed successor execution"
+  - "native cleanup: successor complete cases"
 tags:
   - deploy
   - cleanup
@@ -57,7 +58,7 @@ A normal refresh must expose a safe renewal boundary. Preserve prelaunch refusal
 
 ## Strict normal retirement after a newer successful cohort
 
-A later source refresh exposed a different admission gap. The latest full native cohort legitimately executes twelve eligible cases and preserves one historical financial case as SKIP with false execution completeness. Isolated successor renewal refuses its all-thirteen-complete requirement. That refusal remains correct; historical custody never becomes execution credit.
+A later source refresh exposed a different admission gap. The latest full native cohort legitimately executes twelve eligible cases and preserves one historical financial case as SKIP with false execution completeness. Isolated successor renewal refuses its all-thirteen-complete requirement. The guard preserved the no-execution distinction. This earlier original operation could instead be retired strictly as described below; historical custody never becomes execution credit.
 
 The original operation now independently satisfies the unchanged normal cleanup validator: fifteen participants and 303 authentic file bindings, versus the isolated proof's 230. Public reconciliation nevertheless selected only the latest incomplete operation, refusing both original selectors after a newer complete result. Exact same-suite public-command assertions reproduce both refusals before the repair.
 
@@ -66,3 +67,65 @@ The correction admits a separate normal campaign proof only for the unique alrea
 The new unchanged owning regression fails before the source fix and passes afterward. Full suite, independent review, canonical frozen-source retirement, fresh full native acceptance and deployment are tracked separately; this local result is not completed deployment proof.
 
 Independent adversarial review found two candidate defects before freeze: saved completion/verification selected only active isolation, and the new early-return transition missed an unsealed conflicting token entry. Existing owning controls reproduce seven failures before correction. The repair now selects obligations from active entries and archived isolated origins at launch, saved verification and completion; only active isolation retains the later full-coverage restriction. Global token/key uniqueness remains mandatory at retirement and subsequent admission. Saved-verification controls bind a legal disposable plan and establish a clean baseline before corrupting the actual archived origin. Earlier candidate suite PASS and interrupted stability results do not validate these later bytes; final full-suite, five consecutive loaded runs and follow-up review are separate evidence.
+
+
+## Complete successor with authenticated no-retry custody
+
+On November 11, the EAA original reached a different boundary. Normal source
+refresh to cf0 succeeded, then unchanged public renewal refused `successor
+complete cases`. The latest genuine 1f81 successor had fourteen native PASS,
+fifteen verified task/canary closures, native exit zero and complete=true. Its
+one protected financial exclusion was truthfully SKIP, case_complete=false and
+current_execution=UNVERIFIED. The original EAA isolation still bound 567 files,
+thirteen participants and fourteen excluded resources, with cleanup=false and
+credit=false. Strict normal retirement of this original still refuses its
+missing native audit seal. The earlier 303-file retirement proof is a different
+operation and cannot supply that authority.
+
+The actual copied-state CLI reproduced the refusal atomically. The clean
+validator's all-case completeness equality treats a protected nonexecution bit
+as missing active execution. Source 1f81 and cf0 have identical owning cleanup
+bytes; Gate: NOT_INTRODUCED for that comparison. The deploy owner still owns
+this blocking contract repair. No native result, latest attempt or historical
+financial unknown can be removed or upgraded to bypass it.
+
+The private correction reuses canonical historical custody binding, guard,
+known native history and qualification logic in the existing clean path. A
+hash-matching identity-bearing projection authenticates the old request's
+admission; it is not a captured full snapshot. Current refreshed custody and
+both input/environment/source bindings authenticate independently. Only exact
+qualified exclusions retain SKIP/false/UNVERIFIED and zero credit; ordered active
+checks stay complete, preserving supported native PASS and FAIL cleanup evidence.
+Ordinary skips, native evidence, original isolation, clocks, quiescence and
+all original still-bound/source guards remain. This grants renewal authority,
+not a current test pass or original cleanup/financial credit.
+
+Five permanent methods extend the existing Cycle suite, using the existing
+native-isolation and historical-custody fixtures with no newly mocked guard.
+The frozen tests reproduce three exact complete-cases errors before correction;
+the same tests and ten existing controls pass afterward. A fifth regression preserves four additional authority checks. Genuine parent-context
+public reconciliation with the private candidate also passes on a copied actual
+state, preserving 567 original file bindings, attempts, failures and false
+cleanup/credit; no canonical state was written. An earlier observer replay
+correctly refused a different environment and remains separate evidence.
+Independent corrected review passed; the full 449-test canonical suite, frozen-source canonical
+renewal and fresh required native acceptance remain pending at this draft.
+No missing original audit, capture, process birth or historical model payload
+was fabricated. Both unrelated timed semantic product failures remain UNKNOWN.
+
+
+Independent review found a pre-existing bypass in that first candidate: changing
+all protected labels to ordinary skips skipped custody checks, including when
+history was erased or current financial credit forged. A permanent four-variant
+regression reproduces three forbidden acceptances and one malformed-row error
+before correction. The stronger version discovers known obligations from the
+canonical ledger, authenticates the current guard with canonical legacy
+qualifications rather than incoming labels, then requires exact qualified
+inventory before historical projection checks. Malformed rows fail as typed
+evidence errors. The unchanged regression passes, as do all 15 selected owning
+tests and the 19 original adversarial controls, with no forbidden acceptance and
+all refusals atomic. Ordinary supported legacy/no-skip and native FAIL cleanup
+semantics remain. Genuine parent-context copied-state replay on these stronger
+bytes also accepts with all 567 original bindings and false cleanup/credit intact.
+Corrected independent review passed; full 449 canonical tests and normal frozen-source
+admission remain pending; no native outcome or financial fact is upgraded.
