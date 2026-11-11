@@ -12,6 +12,7 @@
 import { createLogger } from '../logger';
 import { sendSms, sendMms, getUserPhone } from '../smsQueue';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
+import { deliverNotificationCard, plannerNotificationContent } from './notificationCards';
 import { markWhatsAppReachable, markWhatsAppUnreachable } from '../whatsappReachability';
 import { ROSE_LABS_URL, SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { getSignedUrl, uploadToStorage } from '../storage';
@@ -93,6 +94,12 @@ async function deliverAcrossChannels(
       correctionBudget,
       send: (candidate) => send(channel, candidate),
     });
+    // Keep the full receipt/instructions and the transcript's original text
+    // anchor. A card is a separate Linq message, never mixed with text/media.
+    // Failure of this optional companion cannot retry an accepted notification.
+    if (result.success && channel === 'SMS' && notification.card) {
+      await deliverNotificationCard(phone, notification.card, result, options);
+    }
     if (channel === 'WHATSAPP') {
       if (result.recipientUnreachable === true) await markWhatsAppUnreachable(userId);
       else if (result.success) await markWhatsAppReachable(userId);
@@ -307,7 +314,11 @@ export async function notifyAgentStarted(
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: [url] },
+    {
+      message,
+      requiredLinks: [url],
+      card: { url, title: 'Rose is working', subtitle: agent.goal },
+    },
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'agent_started', user_id: userId },
@@ -359,7 +370,7 @@ export async function notifyPlannerMessage(
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: messageText.match(/https?:\/\/[^\s]+/g) ?? [] },
+    plannerNotificationContent(message, messageText, isQuestion),
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'planner_message', user_id: userId, is_question: isQuestion },
@@ -416,12 +427,22 @@ export async function notifyWriteLock(
   const message = formatPaymentApprovalBody(paymentCard, notification, question, agentUrl);
   const mediaUrl = getWriteLockMediaUrl(notification) ?? getPaymentCardMediaUrl(paymentCard);
   const rehostedMediaUrl = mediaUrl ? await rehostMmsAttachmentUrl(userId, mediaUrl) : null;
+  const approvalContent: NotificationContent = {
+    message,
+    requiredLinks: [agentUrl],
+    card: {
+      url: agentUrl,
+      title: paymentCard ? 'Payment approval needed' : 'Your approval is needed',
+      subtitle: question,
+      button: 'Review on RoseLabs',
+    },
+  };
 
   const result = rehostedMediaUrl
     ? await sendLifecycleMms(
         userId,
         phone,
-        { message, requiredLinks: [agentUrl] },
+        approvalContent,
         rehostedMediaUrl,
         {
           archiveRootAgentId: agent.id,
@@ -437,7 +458,7 @@ export async function notifyWriteLock(
     : await sendLifecycleSms(
         userId,
         phone,
-        { message, requiredLinks: [agentUrl] },
+        approvalContent,
         {
           archiveRootAgentId: agent.id,
           onDeliveryAttempt,
@@ -499,7 +520,11 @@ export async function notifyAuthAssistance(
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: [url] },
+    {
+      message,
+      requiredLinks: [url],
+      card: { url, title: 'Sign in to continue', subtitle: authRealm, button: 'Sign in' },
+    },
     {
       archiveRootAgentId: agent.id,
       archiveContext: {
@@ -550,7 +575,16 @@ export async function notifyAgentCardSetup(
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: [setupUrl || ROSE_LABS_URL] },
+    {
+      message,
+      requiredLinks: [setupUrl || ROSE_LABS_URL],
+      card: {
+        url: setupUrl || ROSE_LABS_URL,
+        title: 'Finish AgentCard setup',
+        subtitle: 'Complete your existing card setup so Rose can continue.',
+        button: 'Set up card',
+      },
+    },
     undefined,
     channels
   );
@@ -601,7 +635,11 @@ export async function notifyCompletion(
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: [getAgentUrl(agent.id)] },
+    {
+      message,
+      requiredLinks: [getAgentUrl(agent.id)],
+      card: { url: getAgentUrl(agent.id), title: 'Rose finished the task', subtitle: summary },
+    },
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'completion', user_id: userId },
@@ -644,17 +682,22 @@ export async function notifyCostLimit(
 
   const prefix = agent.id.substring(0, 6);
   const taskLabel = truncateText(sanitizeSmsText(agent.goal), 80);
-  const message = SMS_TEMPLATES.costLimit(
+  const agentUrl = getAgentUrl(agent.id);
+  const message = `${SMS_TEMPLATES.costLimit(
     prefix,
     taskLabel,
     agent.treeCostCents,
     agent.priceLimitCents
-  );
+  )}\n${agentUrl}`;
 
   const result = await sendLifecycleSms(
     userId,
     phone,
-    { message, requiredLinks: [] },
+    {
+      message,
+      requiredLinks: [agentUrl],
+      card: { url: agentUrl, title: 'Rose reached the task budget', subtitle: taskLabel },
+    },
     {
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'cost_limit', user_id: userId },

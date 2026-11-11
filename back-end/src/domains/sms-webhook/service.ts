@@ -10,6 +10,7 @@
  */
 
 import * as repo from './repo';
+import { startLinqTyping } from '../../providers/linq';
 import { SURGE_SIGNING_SECRET, IS_PRODUCTION } from './config';
 import {
   validateSurgeSignature,
@@ -152,6 +153,7 @@ export async function routeToSupervisor(
   // The supervisor sends its response via Surge API.
   const abortController = registerSupervisorRun(userId);
 
+  const stopTyping = await startLinqTyping(fromPhone).catch(() => async () => undefined);
   handleSmsSupervisorMessage({
     userId,
     phoneNumber: fromPhone,
@@ -175,8 +177,9 @@ export async function routeToSupervisor(
     .catch((error) =>
       handleSupervisorFailure({ userId, fromPhone, mySeq, requestStart, abortController, error })
     )
-    .finally(() => {
+    .finally(async () => {
       unregisterSupervisorRun(userId, abortController);
+      await stopTyping();
     });
 }
 
