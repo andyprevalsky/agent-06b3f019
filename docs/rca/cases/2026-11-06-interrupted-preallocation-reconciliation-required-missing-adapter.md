@@ -147,3 +147,88 @@ cases and original clocks remain unchanged. Parent owns independent review,
 normal main delivery/source integration, official CLI application and the
 original full phase/all16 gates/full9 smoke. Those runtime outcomes remain
 unverified; this case remains open until the owning validation completes.
+
+## November 11 related occurrence: allocated fresh cohort, unfinalized campaign
+
+PR1918 request `4ee3b87f768d4631ad68739dafcf7032` on original source
+`2d4c45c0da9c56e7145b2f3df8114cc5b95b7bb3` retained thirteen UNVERIFIED
+smoke results, native exit -9, cancellation, and null adapter/cleanup reference.
+Its immutable campaign summary still says running with a null finish. The
+original native supervisor positively reaped all thirteen summary controller
+PIDs with wait status 9 and reports quiescence/empty remaining; that does not
+change the original summary or grant task results. Twelve original parent
+audits were released when assigned; the thirteenth parent and its two-Machine
+nested canary were still pending. The closure is fourteen participants.
+
+Read-only replay of the exact receipt reproduces the native validator's
+`Path(None)` TypeError. Replay of the original summary through the accepted
+interrupted validator refuses `complete original campaign inventory required`.
+The source-owned `campaign_published` verifier also raises
+`fromisoformat: argument must be str` on the original running publication's
+null finish. These are observed contract boundaries, not a demonstrated fix
+or permission to relax the existing validators. Attribution to PR1918 remains
+unresolved; no pre-PR baseline comparison was performed.
+
+This is related to this case, not an invalidation of its accepted zero-allocation
+contract: the new incident allocated two fresh clones and did not finalize its
+campaign. Archive searches used `expected str bytes os.PathLike NoneType` and
+`interrupted missing adapter running campaign`; the November 3 campaign recovery
+case was also read. Existing owner searches and direct recent reads distinguished
+ph7fcc's finite control-preservation review and ph77k's controller56 observation
+from this request. Neither provides an applicable completed repair.
+
+The new `interrupted-fresh-campaign-custody-v1` module preserves these old
+contracts. It derives the exact thirteen-parent/one-canary graph from original
+logs, verifies original positive native waits and shared birth authority, checks
+all fourteen final audits, and consumes the fresh helper's source-owned
+`verify_released_fresh` contract. It preserves historical allocation ledgers,
+missing native lifecycles and absent preflight results. The original twelve
+failed no-execution run records remain independent of the outer UNVERIFIED cases.
+
+A separate recovery summary and provenance record describe cancelled controllers
+from their native waits; they do not rewrite the running original. The unchanged
+native campaign group builder and `publish_campaign_group` perform actual
+`hub_upload --upload-final` publication with their existing ACK and session drain.
+The consumer recomputes that new projection before accepting the ACK and current
+retirement. Exact stale socket/FIFO/owner retirement requires the parent's
+preserved inode manifest, original process custody, no kernel sockets/holders or
+consumers, and a durable intent with rechecks before each unlink. It is not a
+fabricated broker shutdown ACK.
+
+The permanent positive fixture uses the real fresh producer/post-release verifier
+and native publication against a local HTTP fixture. Before the tiny dispatcher
+hook it fails with `reconcile proof is missing a required field`; after the hook
+it verifies launch custody, repeat idempotence and unchanged original results.
+Negative controls cover all thirteen waits, native/source/token/volume/payload
+changes, missing audits/publication, worker ownership, foreign capabilities,
+retained consumers, original-byte changes and atomic refusal. Additional native
+control fixtures cover inode drift, open holders, a live kernel socket, read-only
+preview and interruption between unlinks. Exact commands and logs are retained in
+`.context/rca-ebb350db/cancelled-smoke-recovery/pipeline/`.
+
+Read-only actual replay verifies the thirteen-plus-one graph and twelve original
+parent audits. After the parent performed canonical nested and parent recovery,
+full-fourteen control-retirement preview also passed. Actual live retirement,
+publication/reconciliation, fresh FULL smoke and deployment remain parent-owned
+and unverified by this author. This case stays open until those results are
+recorded. All five UI failures, thirteen UNVERIFIED results, original clocks,
+older reconciliations and financial/resource debt remain unchanged; the new entry
+grants neither execution nor financial cleanup credit.
+
+### November 11 parent application result
+
+The parent applied the reviewed exact three-control retirement, preparation,
+native publication, verification and canonical cycle reconciliation; it reports
+exit 0 for each command. The saved native publication receipt records
+`published=true`, finishing at `2026-11-11T00:55:39.119060+00:00` after
+19.342 seconds. The saved post-application
+observation has no remaining smoke cleanup owner, all thirteen original cases
+still UNVERIFIED and original complete=false. Qualification retains
+credit_granted=false, financial_cleanup_credit=false and cleanup_complete=false.
+A fresh read rehashed all six preserved original request/receipt/summary/
+supervisor/group/ACK files against the pre-application manifest; all matched.
+Evidence is `pipeline/parent-postapplication.json`, `pipeline/parent-*.json`,
+`pipeline/native-publication/` and `pipeline/original-preservation-check.json`
+under the case evidence directory. No further code or native action was performed
+by this author. Fresh FULL smoke and the independently retained UI failures remain
+with the parent deployment owner.

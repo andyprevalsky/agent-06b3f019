@@ -493,9 +493,16 @@ kimi-code/        → Cloned Moonshot AI Kimi Code CLI (READ-ONLY reference,
                     Re-clone with
                     `git clone --depth 1 https://github.com/MoonshotAI/kimi-code.git`
                     if missing locally.
+openworker/       → Cloned Andrew Ng OpenWorker (READ-ONLY reference,
+                    gitignored, MIT). Desktop AI coworker built on aisuite;
+                    agent setup lives in `coworker/agent.py`, personas in
+                    `coworker/personas/`, and the separate Rust/TypeScript
+                    harness in `harness/`. Re-clone with
+                    `git clone --depth 1 https://github.com/andrewyng/openworker.git`
+                    if missing locally.
 ```
 
-> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, `prime-agent/`, and `kimi-code/` are gitignored
+> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, `prime-agent/`, `kimi-code/`, and `openworker/` are gitignored
 > (sit alongside `claude-code-src/` but are NOT committed). Treat as
 > read-only research material — do not edit them. If they're missing on a
 > fresh clone, run `bash scripts/sync-reference-repos.sh` to restore.
@@ -1055,6 +1062,23 @@ deploy lane, the tests a change can reach. Rules:
   repairs, full failed gates and the final complete selected gate set must pass
   on the frozen source. Coverage thresholds inside a selected full gate remain
   unchanged; a focused subset cannot masquerade as a full coverage pass.
+
+### Validate incrementally during implementation
+
+As each coherent change becomes testable, use the existing affected-test
+selector to run its correlated checks immediately; do not wait for all
+implementation to finish or for `/deploy` to begin. Start with cheap format,
+lint, type and focused checks, then run the affected full CI gates while
+independent work continues. Include the integration boundaries the change
+affects, not just the edited function. Batch coherent changes rather than
+launching full CI after every edit.
+
+Run checks against a recorded, stable source snapshot so concurrent edits
+cannot invalidate their evidence. Monitor results and start diagnosis as soon
+as a failure appears, keeping healthy independent checks running. Preserve
+eligible passing results through the existing source/input-bound reuse rules;
+rerun checks when their inputs change. This adds no new gate or paid benchmark
+campaign and does not replace final `/deploy` validation or its failure policy.
 
 ## Deploy command regression scheduling
 

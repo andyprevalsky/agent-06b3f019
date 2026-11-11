@@ -26,6 +26,7 @@ import {
   compactionSavedRatio,
   estimateContextTokens,
   estimateTokensForCompaction,
+  messageSummaryWeight,
 } from './contextTokens';
 import {
   COMPACTION_SUMMARY_PREFIX,
@@ -35,7 +36,7 @@ import {
   stripCompactAnalysis,
 } from './chatCompactionPrompts';
 import type { ChatMessage } from './initialContext';
-import { splitHeadMiddleTail } from './splitHeadMiddleTail';
+import { KEEP_RECENT_TOKENS, splitHeadMiddleTail } from './splitHeadMiddleTail';
 import { selectChatPhaseModels } from './phaseModels';
 
 const log = createLogger('ChatCompaction');
@@ -184,31 +185,83 @@ export async function compressChatContext(params: {
   messages: ChatMessage[];
   model: string;
   agentId: string;
+  maxContextTokens?: number;
   rootAgentId?: string;
 }): Promise<ChatMessage[]> {
-  const split = splitHeadMiddleTail(params.messages);
-  if (!split) return params.messages;
-
-  const summary = await summarizeMiddle(
-    params.messages,
-    split.middleIndices,
-    params.model,
-    params.agentId,
-    params.rootAgentId
-  );
-  const syntheticSummary: ChatMessage = {
-    role: 'USER',
-    text: summary,
-    metadata: { compactionSummary: true },
-  };
-
-  const compressed = [
-    ...split.headIndices.map((index) => structuredClone(params.messages[index])),
-    syntheticSummary,
-    ...split.tailIndices.map((index) => structuredClone(params.messages[index])),
-  ];
-
+  const maxContextTokens = params.maxContextTokens ?? CHAT_MAX_CONTEXT_TOKENS;
   const originalTokens = estimateContextTokens(params.messages);
+  // A recent result can outweigh the entire model window. Compact its body
+  // before protecting the tail; the raw DB row remains available as evidence.
+  // Preserve message order, user instructions, tool-call identity and status.
+  let compressed = params.messages;
+  if (shouldAutoCompactChat(compressed, maxContextTokens)) {
+    const oversizedTools = compressed
+      .map((message, index) => ({ index, weight: messageSummaryWeight(message) }))
+      .filter(
+        ({ index, weight }) =>
+          compressed[index].role === 'TOOL' &&
+          !compressed[index].metadata?.subAgentId &&
+          weight > KEEP_RECENT_TOKENS
+      )
+      .sort((a, b) => b.weight - a.weight);
+    for (const { index, weight } of oversizedTools) {
+      if (!shouldAutoCompactChat(compressed, maxContextTokens)) break;
+      try {
+        const summary = await summarizeMiddle(
+          compressed,
+          [index],
+          params.model,
+          params.agentId,
+          params.rootAgentId
+        );
+        const summarized: ChatMessage = {
+          ...structuredClone(compressed[index]),
+          text: summary,
+          metadata: { ...structuredClone(compressed[index].metadata), compactionSummary: true },
+        };
+        if (messageSummaryWeight(summarized) >= weight) {
+          throw new Error('Tool-result compaction did not reduce context');
+        }
+        compressed = compressed.map((message, position) =>
+          position === index ? summarized : message
+        );
+      } catch (error) {
+        log.warn('[ChatCompaction] Tool-result compaction skipped', {
+          agentId: params.agentId,
+          index,
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+        });
+      }
+    }
+  }
+
+  // Skip the ordinary pass only if pressure relief satisfies both budget and
+  // savings contracts; otherwise the final guard would discard that relief.
+  if (
+    compressed === params.messages ||
+    shouldAutoCompactChat(compressed, maxContextTokens) ||
+    compactionSavedRatio(originalTokens, estimateContextTokens(compressed)) <
+      MIN_AUTOCOMPACT_SAVINGS_RATIO
+  ) {
+    const split = splitHeadMiddleTail(compressed);
+    if (split) {
+      const summary = await summarizeMiddle(
+        compressed,
+        split.middleIndices,
+        params.model,
+        params.agentId,
+        params.rootAgentId
+      );
+      compressed = [
+        ...split.headIndices.map((index) => structuredClone(compressed[index])),
+        { role: 'USER', text: summary, metadata: { compactionSummary: true } },
+        ...split.tailIndices.map((index) => structuredClone(compressed[index])),
+      ];
+    } else if (compressed === params.messages) {
+      return params.messages;
+    }
+  }
+
   const compressedTokens = estimateContextTokens(compressed);
   if (compressedTokens >= originalTokens) {
     throw new Error(
@@ -278,6 +331,7 @@ export async function ensureChatContextWithinBudget(params: {
         messages: projected,
         model: compactionModel,
         agentId: params.agentId,
+        maxContextTokens,
         rootAgentId: params.rootAgentId,
       });
       await persistCompactionCheckpoint({

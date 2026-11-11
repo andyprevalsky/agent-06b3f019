@@ -6967,6 +6967,70 @@ class Cycle(unittest.TestCase):
         c.reconcile(state, occurrence, incoming)
         self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
 
+    def historical_clean_successor_state(self):
+        result = self.clean_successor_renewal_state()
+        state, paths, proof, gate, packet, original, folder, successor = result
+        state['attempts'][-1]['source'] = copy.deepcopy(successor['source'])
+        gate['checks'] = [*gate['checks'], 'new-current-browser-case']
+        return result
+
+    def test_clean_historical_successor_renews_after_added_inventory_without_credit(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.historical_clean_successor_state()
+        before = copy.deepcopy(state)
+        raw = {p: c.sha_file(p) for p in [*paths.values(), *folder.glob('*.json')]}
+        c.reconcile(state, original['token'], {**proof, 'validation_source': copy.deepcopy(state['source'])})
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        self.assertEqual(raw, {p:c.sha_file(p) for p in raw})
+        self.assertIsNone(c.full_pass_binding(state, gate))
+        request = dict(token='fresh-current-all-cases', source=state['source'], checks=gate['checks'], skips={})
+        self.assertEqual(original['token'], c.isolated_request(state, gate, request, self.root, {})[0]['original_request_token'])
+        with self.assertRaises(ValueError):
+            c.isolated_request(state, gate, dict(request, checks=gate['checks'][:-1]), self.root, {})
+        same = copy.deepcopy(state)
+        c.reconcile(state, original['token'], {**proof, 'validation_source':copy.deepcopy(state['source'])})
+        self.assertEqual(same, state)
+
+    def test_clean_historical_successor_refuses_noninventory_or_unbound_attempt_drift(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.historical_clean_successor_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        for mutation in ('command','recipe','environment','selection','missing-old-case','reordered-old-cases','stale-attempt','attempt-source','attempt-phase','historical-contract'):
+            candidate = copy.deepcopy(state); current = next(g for g in candidate['plan']['gates'] if g['name']==gate['name'])
+            attempt = candidate['attempts'][-1]; row = attempt['results'][0]
+            if mutation=='command': current['command']=['false']
+            if mutation=='recipe': current['worker_recipe']={'foreign':True}
+            if mutation=='environment': candidate['environment']='changed-current-environment'
+            if mutation=='selection': current['selection_evidence']={'foreign':True}
+            if mutation=='missing-old-case': current['checks']=current['checks'][1:]
+            if mutation=='reordered-old-cases': current['checks']=list(reversed(current['checks']))
+            if mutation=='stale-attempt': attempt['stale']=True
+            if mutation=='attempt-source': attempt['source']={'head':'e'*40,'digest':'f'*64}
+            if mutation=='attempt-phase': attempt['phase']='final'
+            if mutation=='historical-contract': row['execution_binding']['contract_digest']='0'*64
+            c.write(folder/'receipt.json',row); before=copy.deepcopy(candidate)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before,candidate)
+        c.write(folder/'receipt.json',successor)
+
+    def test_clean_historical_successor_keeps_native_request_result_and_new_owner_guards(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.historical_clean_successor_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        for filename in ('request.json','result.json','native-task.json'):
+            path=folder/filename;raw=path.read_bytes()
+            doc=c.read(path)
+            if filename=='request.json':doc['isolated_validation'][0]['original_request_token']='foreign'
+            elif filename=='result.json':doc['cleanup_complete']=False
+            else:doc['passed']=True
+            c.write(path,doc);before=copy.deepcopy(state)
+            with self.subTest(file=filename),self.assertRaises(ValueError):c.reconcile(state,original['token'],renewed)
+            self.assertEqual(before,state);path.write_bytes(raw)
+        candidate=copy.deepcopy(state)
+        candidate['attempts'].append(dict(phase='focused',source=state['source'],results=[dict(successor,token='newer-owned',complete=False,cleanup_owner={'new':'owner'})]))
+        before=copy.deepcopy(candidate)
+        with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],renewed)
+        self.assertEqual(before,candidate)
+
     def test_isolated_source_renewal_accepts_only_bound_clean_full_successor_without_credit(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
         before = copy.deepcopy(state)

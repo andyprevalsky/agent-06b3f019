@@ -1670,19 +1670,34 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     admitted_gate = (historical_successor_gate(renewal_witness, successor, request, gate, root)
                      if renewal_witness is not None else gate)
     binding = successor.get('execution_binding', {})
-    need(binding.get('contract_digest') == digest(admitted_gate)
-         and (renewal_witness is not None or binding.get('environment') == state['environment'])
-         and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
-    if binding.get('environment') != state['environment'] or admitted_gate['checks'] != gate['checks']:
-        import deploy_test_historical_custody as h
-        current_inputs = h.binding(state['plan'], root)
-        need(current_inputs == {k: state.get(k) for k in current_inputs}, 'successor fresh admission inputs')
-    folder = Path(successor['log']).parent
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
-    request = bounded_read(folder / 'request.json', 'successor request')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
     checks, skips = request['checks'], request['skips']
+    if renewal_witness is None and binding.get('contract_digest') != digest(gate):
+        # Authenticate the complete historical gate, not current-case coverage. Only an
+        # inventory extension can be reconstructed: every other byte and old ordering
+        # must still hash to the immutable successor receipt's original contract.
+        attempt = rows[0][0]
+        need(attempt.get('source') == successor['source'] and not attempt.get('stale')
+             and request.get('phase') == attempt['phase'], 'successor historical attempt')
+        need(isinstance(checks, list) and checks and all(isinstance(v, str) for v in checks)
+             and isinstance(skips, dict) and all(isinstance(v, str) for v in skips)
+             and len(set(checks)) == len(checks) and not set(checks) & set(skips),
+             'successor historical inventory shape')
+        historical_checks = set(checks) | set(skips)
+        need(set(original['cases']) <= historical_checks <= set(gate['checks']),
+             'successor historical inventory must preserve original debt')
+        admitted_gate = copy.deepcopy(gate)
+        admitted_gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
+    need(binding.get('contract_digest') == digest(admitted_gate)
+         and (renewal_witness is not None or binding.get('environment') == state['environment'])
+         and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
+    if renewal_witness is not None and (binding.get('environment') != state['environment']
+                                        or admitted_gate['checks'] != gate['checks']):
+        import deploy_test_historical_custody as h
+        current_inputs = h.binding(state['plan'], root)
+        need(current_inputs == {k: state.get(k) for k in current_inputs}, 'successor fresh admission inputs')
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
          and all(isinstance(value, dict) for value in skips.values())
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)

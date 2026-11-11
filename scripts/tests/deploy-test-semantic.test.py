@@ -36,6 +36,19 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.classify_lane('ui', [item], report, events),
                          {adapter.case_key('ui', item): 'FAIL'})
 
+    def test_malformed_report_objects_stay_unverified(self):
+        for shape in ('suite', 'nested_suite', 'spec', 'test'):
+            with self.subTest(shape=shape):
+                item, events, report = self.fixture()
+                if shape == 'suite': report['suites'] = ['x']
+                if shape == 'nested_suite': report['suites'][0]['suites'] = ['x']
+                if shape == 'spec': report['suites'][0]['specs'] = ['x']
+                if shape == 'test': report['suites'][0]['specs'][0]['tests'] = ['x']
+                # Typed rejection reaches the lane handler, which records the diagnostic and
+                # keeps the case UNVERIFIED (test_malformed_nested_native_report_* proves it).
+                with self.assertRaisesRegex(ValueError, 'native report'):
+                    adapter.classify_lane('ui', [item], report, events)
+
     def test_incomplete_never_gets_assertion_credit(self):
         item, events, report = self.fixture()
         for change in ('before', 'after', 'end', 'skipped', 'interrupted', 'retry', 'extra', 'global'):
@@ -217,6 +230,9 @@ class SemanticReports(unittest.TestCase):
                 self.assertEqual(captured.read_bytes(), raw_reports['ui'])
                 self.assertEqual(evidence['artifacts']['ui.json'],
                                  hashlib.sha256(raw_reports['ui']).hexdigest())
+                result_json = Path(evidence['artifact_directory']) / 'result.json'
+                self.assertEqual(json.loads(result_json.read_text())['cases'],
+                                 {'semantic-stack': 'UNVERIFIED'})
 
     def test_malformed_nested_native_report_is_unknown_with_lane_diagnostic(self):
         mutations = [
@@ -237,6 +253,10 @@ class SemanticReports(unittest.TestCase):
         for path, value in mutations:
             with self.subTest(path=path, value=value):
                 self.run_worker('malformed_report', malformed_report=(path, value))
+
+    def test_malformed_report_preserves_other_lane_and_writes_result(self):
+        self.run_worker('malformed_report',
+                        malformed_report=(('suites', 0, 'specs', 0, 'tests'), ['x']))
 
     def test_malformed_final_native_event_is_unknown_with_lane_diagnostic(self):
         for value in (1, [], 'x', None):

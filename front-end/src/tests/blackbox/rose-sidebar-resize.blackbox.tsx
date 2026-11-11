@@ -3,8 +3,8 @@
  * pins it open (useSidebarExpansion). A pinned bar survives pointer-leave, the
  * Mac right-buffer auto-close and a remount; only Back or a drag to the rail
  * unpins it. Agent titles are never cut in JS, so a wider bar shows more text.
- * A pinned (or dragged-open) bar pushes the main content right by its width via
- * --rose-bar-offset; unpinned (collapsed or hover-expanded) the offset is 64px.
+ * The main trajectory always clears the 64px rail. Expanding, pinning or
+ * resizing the bar overlays it without moving or narrowing the trajectory.
  * Full-width drawers start at that offset and right panels clamp so the chat
  * keeps CHAT_MIN_WIDTH. The drag captures the pointer and ends on pointerup,
  * lostpointercapture or window blur; only the primary button starts one.
@@ -72,12 +72,10 @@ function startDrag(clientX: number, init: { button?: number; pointerId?: number 
   });
 }
 
-/** The left offset the main column pads by (md+), resolved from the root var it reads. */
+/** The fixed trajectory inset, asserted on the real main column in every drawer state. */
 function mainOffset(): string {
-  expect(screen.getByTestId('terminal-main-content')).toHaveClass(
-    'md:pl-[var(--rose-bar-offset,64px)]',
-  );
-  return document.documentElement.style.getPropertyValue('--rose-bar-offset');
+  expect(screen.getByTestId('terminal-main-content')).toHaveClass('md:pl-[64px]');
+  return '64px';
 }
 
 function stubPlatform(platform: string, innerWidth = 1440) {
@@ -127,7 +125,7 @@ describe('Rose sidebar resize handle', () => {
     drag(560);
     first.unmount();
     renderShell();
-    expect(mainOffset()).toBe('560px');
+    expect(mainOffset()).toBe('64px');
     await userEvent.setup().click(screen.getByTestId('rose-app-integrations'));
     const panel = screen.getByTestId('rose-app-panel');
     const expected = clampDrawerWidth(defaultDrawerWidth(1200, 560), 1200, 560);
@@ -178,7 +176,7 @@ describe('Rose sidebar resize handle', () => {
   });
 
   it.each(['MacIntel', 'Linux x86_64'])(
-    'pinned width pushes the main content on %s; unpinned or hover-expanded it is 64px',
+    'sidebar hover, drag, pin and collapse leave the trajectory offset unchanged on %s',
     (platform) => {
       stubPlatform(platform);
       const view = renderShell();
@@ -196,20 +194,20 @@ describe('Rose sidebar resize handle', () => {
       act(() => {
         fireEvent.pointerMove(window, { clientX: 300 });
       });
-      expect(mainOffset()).toBe('300px');
+      expect(mainOffset()).toBe('64px');
       act(() => {
         fireEvent.pointerMove(window, { clientX: 420 });
       });
       act(() => {
         fireEvent.pointerUp(window, { clientX: 420 });
       });
-      expect(mainOffset()).toBe('420px');
+      expect(mainOffset()).toBe('64px');
 
       fireEvent.click(screen.getByRole('button', { name: 'Back' }));
       expect(mainOffset()).toBe('64px');
 
       drag(400);
-      expect(mainOffset()).toBe('400px');
+      expect(mainOffset()).toBe('64px');
       drag(40);
       expect(mainOffset()).toBe('64px');
 
@@ -218,7 +216,7 @@ describe('Rose sidebar resize handle', () => {
     },
   );
 
-  it('re-clamps the pinned width and content offset on a live window resize', () => {
+  it('re-clamps the pinned width while keeping the trajectory offset unchanged on a live window resize', () => {
     stubPlatform('Linux x86_64', 1440);
     renderShell();
     drag(540);
@@ -228,14 +226,14 @@ describe('Rose sidebar resize handle', () => {
       window.dispatchEvent(new Event('resize'));
     });
     expect(barWidth()).toBe(400);
-    expect(mainOffset()).toBe('400px');
+    expect(mainOffset()).toBe('64px');
     // The saved preference is kept, so widening the window restores it.
     act(() => {
       vi.stubGlobal('innerWidth', 1440);
       window.dispatchEvent(new Event('resize'));
     });
     expect(barWidth()).toBe(540);
-    expect(mainOffset()).toBe('540px');
+    expect(mainOffset()).toBe('64px');
   });
 
   it('pinned bar moves the full drawer left edge; right panels keep the chat minimum', async () => {
@@ -243,7 +241,7 @@ describe('Rose sidebar resize handle', () => {
     const user = userEvent.setup();
     renderShell();
     drag(560);
-    expect(mainOffset()).toBe('560px');
+    expect(mainOffset()).toBe('64px');
 
     await user.click(screen.getByTestId('rose-app-browser'));
     const full = screen.getByTestId('browser-app-drawer');
