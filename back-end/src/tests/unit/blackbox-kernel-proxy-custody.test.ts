@@ -56,7 +56,11 @@ async function main() {
         guest.proxies.create({ type: 'mobile', name: 'fixture', config: { country: 'US' } }),
         /Blackbox proxy reuse required/
       );
-      assert.equal(calls, 0, 'all-resource policy stops browser/profile/proxy creates before fetch');
+      assert.equal(
+        calls,
+        0,
+        'all-resource policy stops browser/profile/proxy creates before fetch'
+      );
     } finally {
       delete process.env.ROSE_KERNEL_ALL_RESOURCE_CUSTODY;
       installKernelProxyCustody(stub);

@@ -154,7 +154,9 @@ async function* benchmarkCardholderPages(
     const fresh = page.filter(({ id }) => !seen.has(id));
     for (const { id } of page) seen.add(id);
     if (offset > 0 && page.length > 0 && fresh.length === 0) {
-      throw new Error('AgentCard cardholder inventory pagination did not advance (made no progress)');
+      throw new Error(
+        'AgentCard cardholder inventory pagination did not advance (made no progress)'
+      );
     }
     if (raw.length === 0 && total !== undefined && offset < total) {
       throw new Error(
