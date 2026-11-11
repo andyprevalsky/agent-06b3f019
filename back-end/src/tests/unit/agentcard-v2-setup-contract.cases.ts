@@ -21,6 +21,7 @@ require('node:net').Socket.prototype.connect=()=>{throw new Error('UNEXPECTED_RE
 const never=async()=>{throw new Error('LEGACY_CARDHOLDER_OR_USER_OAUTH_FORBIDDEN');};
 put(file('agentcard/store.ts'),{getV2ConnectedUserId:async()=>process.env.SETUP_SCENARIO==='stale'?'usr_stale':undefined,
  getV2CredentialClientId:()=>process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID,getOrgManagedCardholderId:never});
+put(file('database.ts'),{prisma:{purchaseSpend:{findUnique:async()=>({id:'setup-contract',userId:'rose-setup-user',totalCents:100,stripeLivemode:false,walletFunding:{purchaseId:'setup-contract',userId:'rose-setup-user',amountCents:100,currency:'usd',metadata:{cardProviderRail:'v2'}}})}}});
 const state=new Map();
 put(file('sharedState.ts'),{getEphemeral:async(ns,key)=>state.get(ns+':'+key),
  putEphemeral:async(ns,key,value)=>{state.set(ns+':'+key,value);},withSerializedLock:async(_key,fn)=>fn()});

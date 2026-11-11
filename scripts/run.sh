@@ -2891,9 +2891,10 @@ print(os.path.abspath(sys.argv[1]))
 PY_WORLD_CONTEXT
 )"
     mkdir -p "$agentcard_world_context"
-    export BENCHMARK_AGENTCARD_WORLD_RECEIPT="$agentcard_world_context/agentcard-world.json"
-    (cd back-end && BENCHMARK_CONTEXT_DIR="$agentcard_world_context" node --import tsx scripts/setup-benchmark-agentcard-world.ts --out "$BENCHMARK_AGENTCARD_WORLD_RECEIPT") || exit 1
-    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$BENCHMARK_AGENTCARD_WORLD_RECEIPT" "${BENCHMARK_RUN_ID:-}" <<'PY_WORLD_ID'
+    unset BENCHMARK_AGENTCARD_WORLD_RECEIPT
+    agentcard_world_receipt="$agentcard_world_context/agentcard-world.json"
+    (cd back-end && BENCHMARK_CONTEXT_DIR="$agentcard_world_context" node --import tsx scripts/setup-benchmark-agentcard-world.ts --out "$agentcard_world_receipt") || exit 1
+    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$agentcard_world_receipt" "${BENCHMARK_RUN_ID:-}" <<'PY_WORLD_ID'
 import json, re, sys
 row=json.load(open(sys.argv[1]))
 assert row.get('version')==1 and row.get('worldId')==sys.argv[2]
@@ -2903,6 +2904,7 @@ print(row['providerUserId'])
 PY_WORLD_ID
 )" || exit 1
     export BENCHMARK_AGENTCARD_V2_USER_ID
+    export BENCHMARK_AGENTCARD_WORLD_RECEIPT="$agentcard_world_receipt"
 fi
 
 BACKEND_PID=""

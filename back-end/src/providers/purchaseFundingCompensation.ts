@@ -99,6 +99,7 @@ async function ensureIssuedCardIsRecorded(
     amountCents: purchase.totalCents,
     idempotencyKey: `purchase:${purchase.id}`,
     fundsSource: 'company_flow',
+    expectedLivemode: purchase.stripeLivemode,
   });
   if (minted.metadata?.staticCard === true) {
     await discardPendingPurchaseWalletCollection(purchase.id);

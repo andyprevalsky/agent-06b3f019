@@ -107,6 +107,14 @@ async function main(): Promise<void> {
       '-e',
       String.raw`
     const assert = require('node:assert/strict');
+    const Module = require('node:module');
+    const path = require('node:path');
+    const put = (rel, exports) => { const id = require.resolve(path.join(process.cwd(), 'src', rel)); const m = new Module(id); m.loaded = true; m.exports = exports; require.cache[id] = m; };
+    require('node:net').Socket.prototype.connect = () => { throw new Error('UNEXPECTED_DATABASE_OR_NETWORK'); };
+    let provenance = 'v2', legacyReads = 0, orgCardholder = 'ch-owned';
+    put('providers/agentcard/store.ts', { getOrgManagedCardholderId: async () => orgCardholder, getV2ConnectedUserId: async () => 'usr-owned' });
+    put('providers/database.ts', { prisma: { purchaseSpend: { findFirst: async () => ({ ...row, walletFunding: { purchaseId: row.id, userId: row.userId, amountCents: row.totalCents, currency: 'usd', metadata: provenance === 'v2' ? { apiVersion: 2 } : provenance === 'legacy' ? { funding_model: 'company_flow' } : {} } }) } } });
+    put('providers/card-provider/index.ts', { createCardProviderForAgent: async () => ({ getDetails: async id => { assert.equal(id, row.cardId); legacyReads++; return { pan: '4242424242422679' }; } }) });
     const reads = [];
     let card = { object: 'card', id: 'card_closed_fixture', status: 'closed', closed_reason: 'used', last4: '2679', balance_cents: 0 };
     let cardNotFound = false;
@@ -147,6 +155,20 @@ async function main(): Promise<void> {
       await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
       assert.equal(clears, 1, 'failed identity proofs must not clear');
       assert(!reads.some(p => p.endsWith('/credentials')), 'closed-card settlement must never request secrets');
+      cardNotFound = false; provenance = 'legacy';
+      const restCount = reads.length;
+      await settleRoseCardStripeCheckout(paid, deps);
+      assert.equal(legacyReads, 1, 'card_ legacy identity must use its existing provider');
+      assert.equal(reads.length, restCount, 'legacy settlement must never request REST card identity');
+      orgCardholder = undefined;
+      await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
+      assert.equal(legacyReads, 1, 'known org card with missing org binding must not use user MCP');
+      assert.equal(reads.length, restCount);
+      orgCardholder = 'ch-owned';
+      provenance = 'unknown';
+      await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
+      assert.equal(reads.length, restCount, 'unknown provenance must not guess REST');
+      assert.equal(legacyReads, 1, 'unknown provenance must not guess MCP');
       process.stdout.write('PASS closed v2 card settlement through real default getter and REST client\n');
     })().catch(error => { process.stderr.write(String(error) + '\n'); process.exitCode = 1; });
   `,

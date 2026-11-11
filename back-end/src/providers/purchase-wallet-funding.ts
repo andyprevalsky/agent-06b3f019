@@ -26,6 +26,7 @@ export async function preparePurchaseWalletCollection(purchase: PurchaseSpend, c
     amountCents: purchase.totalCents,
     currency,
     idempotencyKey: `purchase-wallet-fund:${purchase.id}`,
+    cardProviderRail: 'v2',
   });
 }
 

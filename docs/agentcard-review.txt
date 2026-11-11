@@ -78,8 +78,10 @@ Limits
 Production issuance/settlement and production webhook configuration were not
 verified by these sandbox checks. Historical credential archives were not altered.
 This review and the local tests do not constitute a production deployment or a
-claim that every past benchmark failure is fixed. Final test results are recorded
-in the task's verification receipts under .context/agentcard-review/.
+claim that every past benchmark failure is fixed. Historical component verification receipts are recoverable from the authenticated
+private archive documented in docs/handoffs/pr-1864-closeout/component-verification.md.
+That record identifies the exact archive and recovery procedure; it does not
+claim these earlier component checks ran on the deployed revision.
 
 Final verification receipts (same workspace, final combined implementation)
 41 backend AgentCard/purchase/fixture unit files: passed.
@@ -130,7 +132,9 @@ wait status is unrecorded and is not represented as a captured exit code.
 PR #1891 independently documents the separate never-charged sandbox card release
 failure across MCP and v2. It is not the paid-card accounting issue above. Do not
 mint cards or retry reclaims to manufacture release; pending/SKIP is never PASS.
-Production minting remains disabled (AGENTCARD_MINT_ENABLED=false). Live wallet
+Non-benchmark production minting remains disabled (AGENTCARD_MINT_ENABLED=false).
+Benchmark agents and benchmark-mode processes can still mint live cards when
+configured with live credentials and matching live billing. Live wallet
 company funding and webhook registration were read-only verified; the dedicated
 live fixture still needs consented v2 setup and live billing. No rollout or live
 charge/refund was performed. Managed cloud environment updates remain blocked

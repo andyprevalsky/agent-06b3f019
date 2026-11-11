@@ -1,3 +1,4 @@
+import { resolveAgentCardCardRail } from '../card-provider/agentcard-provenance';
 /**
  * Settlement for a Rose-minted card charged through a REAL Stripe merchant.
  *
@@ -107,7 +108,9 @@ async function getCardLast4(
   agentId: string | null,
   cardId: string
 ): Promise<string> {
-  if (cardId.startsWith('card_')) {
+  const rail = await resolveAgentCardCardRail(userId, cardId);
+  if (rail === 'unknown') throw new Error('Card provider is not established');
+  if (rail === 'v2') {
     // A captured single-use card may already be closed, with credentials revoked.
     // Read only its stable identity; closure itself is never evidence of capture.
     const card = await agentCardV2Request('GET', `/api/v2/cards/${encodeURIComponent(cardId)}`);

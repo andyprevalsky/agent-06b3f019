@@ -118,10 +118,14 @@ class ProviderContract(unittest.TestCase):
                 if scenario == 'birth-drift' and reads > 1:
                     self.root.joinpath('stat').write_text(stat.removesuffix('40') + '41')
             return self.root / paths[str(path)] if str(path) in paths else path
-        process = types.SimpleNamespace(pid=596, info={'cmdline': None if scenario == 'unreadable-process' else ['python', 'worker.py']},
+        process = types.SimpleNamespace(pid=596, info={'cmdline': None if scenario == 'unreadable-process' else ['python', 'worker.py'], 'status': 'sleeping'},
                                         cmdline=lambda: ['python', 'worker.py'], cwd=lambda: '/app')
         processes = [process, process] if scenario == 'ambiguous-worker' else [process]
-        psutil = types.SimpleNamespace(process_iter=lambda fields: processes)
+        zombie = types.SimpleNamespace(pid=597, info={'cmdline': None, 'status': 'zombie'})
+        if scenario == 'unrelated-zombie': processes.append(zombie)
+        if scenario == 'only-zombie': processes = [zombie]
+        if scenario == 'selected-worker-zombie': self.root.joinpath('stat').write_text(stat.replace(') S ', ') Z '))
+        psutil = types.SimpleNamespace(process_iter=lambda fields: processes, STATUS_ZOMBIE='zombie')
         output = io.StringIO()
         with patch.dict(sys.modules, {'psutil': psutil}), patch.object(pathlib, 'Path', side_effect=fake_path), \
              patch.dict(os.environ, {'FLY_MACHINE_ID': 'c001', 'FLY_MACHINE_VERSION': 'i001'}), \
@@ -136,6 +140,17 @@ class ProviderContract(unittest.TestCase):
         self.assertEqual(observed['before'], observed['after'])
         self.assertEqual(observed['before'][0]['provider'], 'tilion')
         self.assertEqual(observed['before'][0]['birth'], '11111111-1111-4111-8111-111111111111:596:40')
+
+    def test_actual_native_probe_skips_unrelated_zombie_with_unreadable_cmdline(self):
+        observed = self.probe('unrelated-zombie')
+        self.assertEqual(observed['before'], observed['after'])
+        self.assertEqual(observed['before'][0]['provider'], 'tilion')
+        self.assertEqual(observed['before'][0]['pid'], 596)
+
+    def test_actual_native_probe_never_uses_zombie_worker_or_unreadable_live_process(self):
+        for scenario in ('only-zombie', 'selected-worker-zombie', 'unreadable-process'):
+            with self.subTest(scenario=scenario), self.assertRaises(ValueError):
+                self.probe(scenario)
 
     def test_actual_native_probe_refuses_ambiguous_mutated_or_foreign_evidence(self):
         for scenario in ('missing-provider', 'birth-drift', 'dotenv-overwrite', 'provider-write', 'ambiguous-worker', 'foreign-machine', 'unreadable-process'):

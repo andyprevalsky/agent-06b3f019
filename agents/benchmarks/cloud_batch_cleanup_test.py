@@ -3231,3 +3231,90 @@ async def test_terminal_failed_setup_intent_requires_external_custody():
         fetch.return_value = {"agentId": ROOT, "stripeCustody": observations[1:]}
         with pytest.raises(RuntimeError, match="custody"):
             await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+
+
+def _native_world_receipt_fixture(scenario):
+    """Execute native provisioning, validation, manifest writer and EXIT cleanup; vendors are fake."""
+    import subprocess
+    source = (Path(__file__).resolve().parents[2] / "scripts/run.sh").read_text()
+    writer_start = source.index("write_services_manifest() {")
+    writer = source[writer_start:source.index("\n# ── World Model Harness", writer_start)]
+    cleanup_start = source.index("\ncleanup() {", writer_start) + 1
+    cleanup_end = source.index("\nrun_install_teardown_signal_traps", cleanup_start)
+    native_cleanup_and_trap = source[cleanup_start:cleanup_end]
+    provision_start = source.index('if [ "${BENCHMARK_AGENTCARD_WORLD_IDENTITY:-}" = "true" ]; then')
+    provision = source[provision_start:source.index('\nBACKEND_PID=""', provision_start)]
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "back-end").mkdir()
+        context = root / "context"
+        context.mkdir()
+        manifest = context / "services.json"
+        manifest.write_text(json.dumps({"status": "starting", "retained": "must-be-replaced"}))
+        # An inherited receipt must never publish a previous world's identity on a failed setup.
+        old_receipt = context / "old-world.json"
+        old_receipt.write_text(json.dumps({"version": 1, "worldId": "foreign-world", "providerUserId": "usr_old", "livemode": False, "fundsSource": "company_flow"}))
+        stubs = r'''
+NAMES=(); PIDS=()
+SHUTTING_DOWN=false
+SERVICE_STATUS=starting
+DB_CONTAINER=''; DB_VOLUME=''; DB_OWNED_BY_US=false; USE_SYSTEM_PG=false
+SYSTEM_DB_OWNED_BY_US=false; LOCAL_DB_NAME=owned_fixture; LOCAL_DB_ACTUAL_PORT=5432
+BENCHMARK_ISOLATED_RUN=true; BENCHMARK_MODE=true
+NGROK_CONFIG_FILE=''; FAIL_DIR=''
+run_ignore_repeated_teardown_signals() { :; }
+stop_stack_owner_watch() { :; }
+run_publish_stack_cleanup_status() { printf '%s\n' "$1" >> "$RUN_CONTEXT_DIR/cleanup-status.txt"; }
+run_drain_owned_agents() { return 0; }
+release_seed_lock_if_held() { :; }
+remove_isolated_frontend_build() { :; }
+node() {
+    printf '%s\n' "${BENCHMARK_AGENTCARD_WORLD_RECEIPT-unpublished}" > "$RUN_CONTEXT_DIR/receipt-during-provision.txt"
+    [ "$FIXTURE_SCENARIO" != setup-missing ] || return 17
+    python3 - "${@: -1}" "$FIXTURE_SCENARIO" <<'PY_FIXTURE_RECEIPT'
+import json,sys
+from pathlib import Path
+path,scenario=Path(sys.argv[1]),sys.argv[2]
+row={"version":1,"worldId":"owned-world","providerUserId":"usr_owned","livemode":False,"fundsSource":"company_flow"}
+if scenario=="wrong-world": row["worldId"]="foreign-world"
+if scenario=="wrong-mode": row["livemode"]=True
+if scenario=="legacy-alias": row["providerUserId"]="cm_legacy"
+path.write_text("{" if scenario=="malformed" else json.dumps(row))
+PY_FIXTURE_RECEIPT
+    [ "$FIXTURE_SCENARIO" != setup-written ] || return 17
+}
+'''
+        script = "set -eu\n" + stubs + writer + native_cleanup_and_trap + "\n" + provision + "\nSERVICE_STATUS=running\nwrite_services_manifest\n"
+        env = {"PATH": os.environ["PATH"], "RUN_CONTEXT_DIR": str(context),
+               "BENCHMARK_AGENTCARD_WORLD_IDENTITY": "true", "BENCHMARK_RUN_ID": "owned-world",
+               "BENCHMARK_AGENTCARD_WORLD_RECEIPT": str(old_receipt),
+               "BENCHMARK_AGENTCARD_V2_USER_ID": "usr_old", "FIXTURE_SCENARIO": scenario}
+        result = subprocess.run(["bash", "-c", script], cwd=root, env=env, capture_output=True, text=True, timeout=5)
+        return result, json.loads(manifest.read_text()), (context / "cleanup-status.txt").read_text().splitlines(), (context / "receipt-during-provision.txt").read_text().strip()
+
+
+def test_native_world_receipt_failure_still_publishes_stopped_manifest():
+    result, manifest, statuses, _ = _native_world_receipt_fixture("setup-missing")
+    assert result.returncode != 0
+    assert manifest["status"] == "stopped", result.stderr
+    assert "agentcard_world_identity" not in manifest
+    assert statuses == ["pending", "clean"]
+
+
+def test_native_world_receipt_validation_rejects_before_publication():
+    for scenario in ("setup-written", "malformed", "wrong-world", "wrong-mode", "legacy-alias"):
+        result, manifest, statuses, during = _native_world_receipt_fixture(scenario)
+        assert result.returncode != 0, scenario
+        assert manifest["status"] == "stopped", (scenario, result.stderr)
+        assert "agentcard_world_identity" not in manifest, scenario
+        assert statuses == ["pending", "clean"], scenario
+        assert during == "unpublished", scenario
+
+
+def test_native_world_receipt_success_publishes_only_validated_exact_identity():
+    result, manifest, statuses, during = _native_world_receipt_fixture("valid")
+    assert result.returncode == 0, result.stderr
+    assert during == "unpublished"
+    assert manifest["status"] == "stopped"
+    assert manifest["agentcard_world_identity"] == {"version":1,"worldId":"owned-world","providerUserId":"usr_owned","livemode":False,"fundsSource":"company_flow"}
+    assert statuses == ["pending", "clean"]

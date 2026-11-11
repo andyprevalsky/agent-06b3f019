@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { assertAgentCardProviderProvenance } from './agentcard-v2-provenance.cases';
 import path from 'node:path';
 import { assertV2SetupResumeContract } from '../unit/agentcard-v2-setup-contract.cases';
 import assert from 'node:assert/strict';
@@ -12,6 +13,7 @@ import { verifyLiveSandboxV2 } from './agentcard-v2-live-fixture';
 import { AgentCardRoutingProvider } from '../../providers/card-provider/agentcard-routing';
 
 async function main(): Promise<void> {
+  await assertAgentCardProviderProvenance();
   assertV2SetupResumeContract(path.resolve(__dirname, '../../..'));
   let tokenCalls = 0;
   let credentialCalls = 0;

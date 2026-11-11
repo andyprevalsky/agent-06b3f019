@@ -279,7 +279,9 @@ def source_contract(path):
 
 def snapshot():
     workers = []
-    for process in psutil.process_iter(['cmdline']):
+    for process in psutil.process_iter(['cmdline', 'status']):
+        if process.info['status'] == psutil.STATUS_ZOMBIE:
+            continue
         command = process.info['cmdline']
         need(command is not None, 'Process command is unreadable')
         if any(pathlib.Path(arg).name == 'worker.py' for arg in command[1:]):

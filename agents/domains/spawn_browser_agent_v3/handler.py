@@ -76,8 +76,10 @@ from helpers.user_profile import build_user_profile_sections
 from helpers.wait_condition_or_handoff import (
     live_handoff_queue,
     sleep_or_generation_handoff,
+    sleep_until_woken_or_generation_handoff,
     wait_condition_or_generation_handoff,
 )
+from helpers.worker_generation import generation_of_queue
 from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
@@ -14369,7 +14371,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             if funding_retry_deadline is None:
                                 funding_retry_deadline = workflow.now() + timedelta(minutes=10)
                             retry_seconds = _normalize_funding_retry_seconds(minted_card.get("retryAfterSeconds", 5))
-                            if retry_seconds >= (funding_retry_deadline - workflow.now()).total_seconds():
+                            # Queue generations version the workflow replay surface. Plain
+                            # histories retain their original capped timer and wake predicate.
+                            generation_scoped = generation_of_queue(getattr(workflow.info(), "task_queue", "")) is not None
+                            if not generation_scoped:
+                                retry_seconds = min(retry_seconds, 60.0)
+                                if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
+                                    return minted_card
+                            elif retry_seconds >= (funding_retry_deadline - workflow.now()).total_seconds():
                                 return minted_card
                             logger.info(
                                 "AgentCard company funding pending; resuming same purchase",
@@ -14377,7 +14386,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 task_id=result.get("task_id"),
                                 retry_seconds=retry_seconds,
                             )
-                            await sleep_or_generation_handoff(workflow_instance, retry_seconds, workflow_mod=workflow)
+                            if generation_scoped:
+                                await sleep_until_woken_or_generation_handoff(
+                                    workflow_instance,
+                                    retry_seconds,
+                                    lambda: _browser_resume_was_paused(workflow_instance, payment_pause_sequence),
+                                    workflow_mod=workflow,
+                                )
+                            else:
+                                await sleep_or_generation_handoff(workflow_instance, retry_seconds, workflow_mod=workflow)
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],

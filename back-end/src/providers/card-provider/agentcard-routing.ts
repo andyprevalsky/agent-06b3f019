@@ -1,3 +1,8 @@
+import {
+  resolveAgentCardMintRail,
+  resolveAgentCardCardRail,
+  type AgentCardRail,
+} from './agentcard-provenance';
 import { getOrgManagedCardholderId, getV2ConnectedUserId } from '../agentcard/store';
 import { startV2Onboarding } from '../agentcard/v2-onboarding';
 import { AgentCardV2Provider } from './agentcard-v2';
@@ -17,6 +22,8 @@ type RoutingDependencies = {
   startOrgOnboarding: (userId: string) => Promise<{ sessionId: string; setupUrl: string }>;
   createOrgProvider: (cardholderId: string) => CardProvider;
   createUserProvider: (userId: string) => CardProvider;
+  resolveMintRail?: (userId: string, request: CardProviderMintRequest) => Promise<AgentCardRail>;
+  resolveCardRail?: (userId: string, cardId: string) => Promise<AgentCardRail>;
   resolveV2UserId?: (userId: string) => Promise<string | undefined>;
   startV2Onboarding?: (userId: string) => Promise<{ sessionId: string; setupUrl: string }>;
   createV2Provider?: (providerUserId?: string) => CardProvider;
@@ -28,6 +35,8 @@ const defaultDependencies: RoutingDependencies = {
   createOrgProvider: (cardholderId) => new AgentCardOrgMcpProvider(cardholderId),
   createUserProvider: (userId) => new AgentCardUserMcpProvider(userId),
   resolveV2UserId: getV2ConnectedUserId,
+  resolveMintRail: resolveAgentCardMintRail,
+  resolveCardRail: resolveAgentCardCardRail,
   startV2Onboarding,
   createV2Provider: (providerUserId) => new AgentCardV2Provider(providerUserId),
 };
@@ -41,7 +50,31 @@ export class AgentCardRoutingProvider implements CardProvider {
   ) {}
 
   async mintCard(request: CardProviderMintRequest): Promise<CardProviderMintResult> {
+    const rail =
+      request.fundsSource === 'company_flow' && this.dependencies.resolveMintRail
+        ? await this.dependencies.resolveMintRail(this.userId, request)
+        : undefined;
     if (
+      rail === 'v2' &&
+      (!this.dependencies.resolveV2UserId ||
+        !this.dependencies.createV2Provider ||
+        !this.dependencies.startV2Onboarding)
+    )
+      throw new AgentCardProviderError(
+        'Purchase funding provider is unavailable',
+        409,
+        undefined,
+        'agentcard_funding_provider_unknown'
+      );
+    if (rail === 'unknown')
+      throw new AgentCardProviderError(
+        'Purchase funding provider is not established',
+        409,
+        undefined,
+        'agentcard_funding_provider_unknown'
+      );
+    if (
+      rail !== 'legacy' &&
       request.fundsSource === 'company_flow' &&
       this.dependencies.resolveV2UserId &&
       this.dependencies.createV2Provider &&
@@ -77,6 +110,13 @@ export class AgentCardRoutingProvider implements CardProvider {
     const providers = await this.providers();
     if (request.fundsSource === 'company_flow') {
       if (providers.org === undefined) {
+        if (rail === 'legacy')
+          throw new AgentCardProviderError(
+            'Original cardholder is unavailable for funding replay',
+            409,
+            undefined,
+            'agentcard_funding_provider_unknown'
+          );
         const onboarding = await this.dependencies.startOrgOnboarding(this.userId);
         throw new AgentCardProviderError(
           'One Time Agent Payment Setup is required',
@@ -98,17 +138,33 @@ export class AgentCardRoutingProvider implements CardProvider {
   }
 
   async getDetails(cardId: string): Promise<CardProviderDetailsResult> {
-    if (cardId.startsWith('card_') && this.dependencies.createV2Provider)
+    const rail = await this.cardRail(cardId);
+    if (rail === 'v2' && this.dependencies.createV2Provider)
       return this.dependencies.createV2Provider().getDetails(cardId);
     const providers = await this.providers();
     return (providers.org ?? providers.user).getDetails(cardId);
   }
 
   async closeCard(cardId: string): Promise<void> {
-    if (cardId.startsWith('card_') && this.dependencies.createV2Provider)
+    const rail = await this.cardRail(cardId);
+    if (rail === 'v2' && this.dependencies.createV2Provider)
       return this.dependencies.createV2Provider().closeCard(cardId);
     const providers = await this.providers();
     return (providers.org ?? providers.user).closeCard(cardId);
+  }
+
+  private async cardRail(cardId: string): Promise<AgentCardRail> {
+    const rail = this.dependencies.resolveCardRail
+      ? await this.dependencies.resolveCardRail(this.userId, cardId)
+      : 'legacy';
+    if (rail === 'unknown' || (rail === 'v2' && !this.dependencies.createV2Provider))
+      throw new AgentCardProviderError(
+        'Card provider is not established',
+        409,
+        undefined,
+        'agentcard_card_provider_unknown'
+      );
+    return rail;
   }
 
   private providers(): Promise<{ org?: CardProvider; user: CardProvider }> {
