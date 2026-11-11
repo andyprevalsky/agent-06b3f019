@@ -1831,6 +1831,99 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
+# The historical coordinator recorded this exception before opening output or
+# calling run_command. Authenticate its immutable producer and exact request;
+# missing output by itself never establishes an unexecuted operation.
+LEGACY_ISOLATED_REFUSAL = {
+    'source': {'head': 'e979f73b8930bedb3dd5d3dba1518520e2931d8d',
+               'digest': '9febe7d354fb883b518af2f9ce74778220088dd43816fdc748418b645ee19847'},
+    'token': '1958fbf77dd84099b9fb21a6259fca71',
+    'request_sha256': 'fa2938ec9282fc49a0a91f3f30aa763858ad250cd24023711397d6404b6f95b3',
+    'relative_request': '.context/deploy-pipeline/attempts/13/focused/smoke/request.json',
+    'phase': 'focused',
+}
+ISOLATED_REFUSAL_PRODUCERS = {
+    'scripts/deploy_test_cycle.py': 'b1d74544dce3577ac87babea109b7e4e022da453e6a7309911bb3bbc8c396f19',
+    'scripts/deploy_test_native_cleanup.py': '45fe68918105a0bb05b315fba73e1f1ababc734898b654099463a0bb12248759',
+}
+ISOLATED_REFUSAL_KIND = 'isolated-native-pre-command-refusal-v1'
+ISOLATED_REFUSAL_REASON = 'native cleanup: next source/inventory binding'
+
+
+def isolated_refusal_successor(state, prior, latest):
+    """A proved pre-command refusal adds no native operation to renew or retire."""
+    from deploy_test_cycle import bounded_read, sha_file
+    rows = [(a, r) for a in state['attempts'] for r in a.get('results', [])
+            if r.get('gate') == prior['gate']]
+    need(latest.get('pre_command_refusal') is None or isinstance(latest['pre_command_refusal'], dict),
+         'malformed pre-command refusal witness')
+    if ((latest.get('pre_command_refusal') or {}).get('kind') != ISOLATED_REFUSAL_KIND
+            and latest.get('reason') != ISOLATED_REFUSAL_REASON):
+        return latest  # Unknown or executed debt follows the original strict path.
+    need(len(rows) >= 2 and rows[-1][1] is latest, 'refusal latest identity')
+    attempt, row = rows[-1]
+    root = Path(prior['owner']['worker_root'])
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    witness = row.get('pre_command_refusal')
+    if witness is None:
+        capture = LEGACY_ISOLATED_REFUSAL
+        request_path = root / capture['relative_request']
+        need(row == dict(gate=prior['gate'], status='FAIL', complete=False,
+                         cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'),
+                         source=capture['source'], reason=ISOLATED_REFUSAL_REASON),
+             'legacy pre-command refusal shape')
+        need(attempt.get('source') == capture['source'] and attempt.get('phase') == capture['phase']
+             and not attempt.get('stale') and not attempt.get('interrupted'), 'legacy refusal attempt')
+        for relative, expected in ISOLATED_REFUSAL_PRODUCERS.items():
+            raw = subprocess.check_output(['git', '-C', str(root), 'show',
+                capture['source']['head'] + ':' + relative], timeout=30)
+            need(hashlib.sha256(raw).hexdigest() == expected, 'legacy refusal producer')
+        need(sha_file(request_path) == capture['request_sha256'], 'legacy refusal request hash')
+        token = capture['token']
+        allowed = {'request.json'}
+    else:
+        need(isinstance(witness, dict) and set(witness) == {'kind', 'request', 'request_sha256',
+             'stage', 'command_started'} and witness.get('stage') == 'isolated_request'
+             and witness.get('command_started') is False, 'typed refusal witness')
+        request_path = Path(witness['request'])
+        need(request_path.is_relative_to(root / '.context') and request_path.name == 'request.json'
+             and request_path.parent.name == prior['gate'] and request_path.parent.parent.name == attempt.get('phase')
+             and request_path.parent.parent.parent.name.isdigit()
+             and request_path.parent.parent.parent.parent.name == 'attempts', 'typed refusal locator')
+        need(sha_file(request_path) == witness['request_sha256']
+             and bounded_read(request_path.parent / 'receipt.json', 'pre-command receipt') == row,
+             'typed refusal sealed request/receipt')
+        token = row.get('token')
+        need(row == dict(gate=prior['gate'], status='FAIL', complete=False,
+                         cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=attempt.get('source'),
+                         reason=ISOLATED_REFUSAL_REASON, token=token, executed=False, native_exit=None,
+                         pre_command_refusal=witness), 'typed pre-command refusal shape')
+        allowed = {'request.json', 'receipt.json'}
+    need(request_path.resolve() == request_path and not request_path.is_symlink()
+         and {p.name for p in request_path.parent.iterdir()} == allowed
+         and all(p.is_file() and not p.is_symlink() for p in request_path.parent.iterdir()),
+         'refusal request-only namespace')
+    request = bounded_read(request_path, 'pre-command request')
+    need(isinstance(token, str) and re.fullmatch('[0-9a-f]{32}', token)
+         and request.get('token') == token and request.get('gate') == prior['gate']
+         and request.get('source') == row['source'] == attempt.get('source')
+         and request.get('phase') == attempt.get('phase')
+         and attempt.get('phase') in {'focused', 'failed-gates', 'initial', 'final', 'triage'}
+         and not attempt.get('stale') and not attempt.get('interrupted'), 'refusal request identity')
+    checks, skips = request.get('checks'), request.get('skips')
+    need(isinstance(checks, list) and all(isinstance(v, str) for v in checks)
+         and isinstance(skips, dict) and not set(checks) & set(skips)
+         and len(checks) == len(set(checks)) and set(checks) | set(skips) == set(gate['checks'])
+         and len(set(gate['checks'])) == len(gate['checks'])
+         and request.get('worker_recipe') == gate.get('worker_recipe'), 'refusal full inventory')
+    native_root = root / '.context/deploy-cloud' / hashlib.sha256(token.encode()).hexdigest()
+    need(not native_root.exists() and not native_root.is_symlink(), 'refusal native root exists')
+    # Never skip a second unknown/refused row or an admitted incomplete operation.
+    successor = rows[-2][1]
+    need(successor.get('executed') is True, 'refusal preceding executed successor required')
+    return successor
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
@@ -1849,6 +1942,8 @@ def renew_isolated_validation(state, request_token, proof):
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
     latest = latest_receipts(state).get(prior['gate'])
+    if latest is not None and latest != receipt:
+        latest = isolated_refusal_successor(state, prior, latest)
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
@@ -1873,6 +1968,15 @@ def reconcile(state, occurrence_id, proof):
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
+        # Existing isolated obligations use the same guarded renewal regardless of
+        # whether the caller supplies the original failure ID or request token.
+        registered = [entry for key, entry in state.get('reconciled_owners', {}).items()
+                      if entry.get('purpose') == 'isolated-validation'
+                      and (key == proof.get('receipt_sha256') or entry.get('token') == proof.get('request_token'))]
+        if failure is not None and registered and proof != registered[0]['proof']:
+            need(len(registered) == 1 and registered[0].get('occurrence') == occurrence_id,
+                 'existing isolated reconciliation identity')
+            return renew_isolated_validation(state, registered[0]['token'], proof)
         if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
                 and proof.get('purpose') == 'isolated-validation'):
             return renew_isolated_validation(state, occurrence_id, proof)

@@ -5891,6 +5891,167 @@ class Cycle(unittest.TestCase):
         state['attempts'].append(dict(phase='quick', results=[]))
         return state, paths, proof, gate, packet, receipt
 
+    def precommand_refusal_renewal_state(self):
+        import hashlib
+        import deploy_test_native_cleanup as n
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        state['attempts'][-1]['source'] = copy.deepcopy(successor['source'])
+        while len(gate['checks']) < 15:
+            gate['checks'].append('current-added-browser-' + str(len(gate['checks'])))
+        producers = {
+            'scripts/deploy_test_cycle.py': 'b1d74544dce3577ac87babea109b7e4e022da453e6a7309911bb3bbc8c396f19',
+            'scripts/deploy_test_native_cleanup.py': '45fe68918105a0bb05b315fba73e1f1ababc734898b654099463a0bb12248759',
+        }
+        for relative, expected in producers.items():
+            raw = subprocess.check_output(['git', '-C', str(ROOT), 'show',
+                'e979f73b8930bedb3dd5d3dba1518520e2931d8d:' + relative])
+            self.assertEqual(expected, hashlib.sha256(raw).hexdigest())
+            target = self.root / relative; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@x',
+                        'commit', '-qm', 'captured refusal producer'], check=True)
+        capture_source = c.source(self.root)
+        request_path = self.root / '.context/deploy-pipeline/attempts/13/focused/smoke/request.json'
+        token = '1958fbf77dd84099b9fb21a6259fca71'
+        request = dict(token=token, source=capture_source, gate=gate['name'], phase='focused',
+                       checks=gate['checks'][1:], skips={gate['checks'][0]: dict(source=capture_source)})
+        c.write(request_path, request)
+        capture = dict(source=capture_source, token=token, request_sha256=c.sha_file(request_path),
+                       relative_request=str(request_path.relative_to(self.root)), phase='focused')
+        for name, value in [('LEGACY_ISOLATED_REFUSAL', capture), ('ISOLATED_REFUSAL_PRODUCERS', producers)]:
+            patched = patch.object(n, name, value, create=True); patched.start(); self.addCleanup(patched.stop)
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False,
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=capture_source,
+                       reason='native cleanup: next source/inventory binding')
+        state['attempts'].append(dict(phase='focused', source=capture_source, results=[refusal]))
+        (self.root / 'next-renewal-source').write_text('next source')
+        state['source'] = c.source(self.root); state['plan']['source'] = state['source']
+        state['plan_digest'] = c.digest(state['plan'])
+        return state, paths, proof, gate, original, successor, refusal, request_path
+
+    def test_precommand_refusal_renews_only_target_after_full_historical_successor(self):
+        state, paths, proof, gate, original, successor, refusal, request_path = self.precommand_refusal_renewal_state()
+        before = copy.deepcopy(state)
+        hashes = {p:c.sha_file(p) for p in paths.values()}
+        c.reconcile(state, original['token'], dict(proof, validation_source=state['source']))
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['source'], entry['validation_source'])
+        self.assertEqual([before['reconciled_owners'][proof['receipt_sha256']]], state['reconciled_owner_history'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        self.assertEqual(before['reconciled_owners'][proof['receipt_sha256']]['excluded_resources'], entry['excluded_resources'])
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved'])
+        self.assertEqual(dict.fromkeys(gate['checks'], 'UNVERIFIED'), refusal['cases'])
+        self.assertEqual(15, len(refusal['cases'])); self.assertIsNone(c.full_pass_binding(state, gate))
+        self.assertEqual(hashes, {p:c.sha_file(p) for p in paths.values()})
+
+    def test_precommand_refusal_refuses_unknown_tampered_or_admitted_debt_atomically(self):
+        import hashlib
+        import deploy_test_native_cleanup as n
+        state, paths, proof, gate, original, successor, refusal, request_path = self.precommand_refusal_renewal_state()
+        raw = request_path.read_bytes()
+        native = self.root / '.context/deploy-cloud' / hashlib.sha256(n.LEGACY_ISOLATED_REFUSAL['token'].encode()).hexdigest()
+        mutations = [
+            ('foreign-source', lambda s:s['attempts'][-1]['results'][0]['source'].update(head='f'*40)),
+            ('foreign-phase', lambda s:s['attempts'][-1].update(phase='final')),
+            ('interrupted', lambda s:s['attempts'][-1].update(interrupted=True)),
+            ('stale', lambda s:s['attempts'][-1].update(stale=True)),
+            ('claimed-execution', lambda s:s['attempts'][-1]['results'][0].update(executed=True)),
+            ('unknown-reason', lambda s:s['attempts'][-1]['results'][0].update(reason='missing logs')),
+            ('omitted-case', lambda s:s['attempts'][-1]['results'][0]['cases'].pop(gate['checks'][-1])),
+            ('preceding-unknown', lambda s:s['attempts'][-2]['results'][0].update(executed=False)),
+            ('preceding-incomplete', lambda s:s['attempts'][-2]['results'][0].update(complete=False)),
+            ('live-marker', lambda s:s.update(live_failures=[])),
+            ('running', lambda s:s.update(running={'gate':gate['name']})),
+        ]
+        for label, mutate in mutations:
+            candidate=copy.deepcopy(state); mutate(candidate); before=copy.deepcopy(candidate)
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], dict(proof, validation_source=candidate['source']))
+            self.assertEqual(before,candidate)
+        for name in ('output.log','stderr.log','process.json','receipt.json','result.json'):
+            artifact=request_path.parent/name; artifact.write_text('{}'); candidate=copy.deepcopy(state); before=copy.deepcopy(candidate)
+            try:
+                with self.subTest(artifact=name), self.assertRaises(ValueError):
+                    c.reconcile(candidate, original['token'], dict(proof, validation_source=candidate['source']))
+                self.assertEqual(before,candidate)
+            finally: artifact.unlink()
+        for label in ('request-hash','native-root','producer-pin'):
+            candidate=copy.deepcopy(state); before=copy.deepcopy(candidate)
+            try:
+                if label=='request-hash':request_path.write_bytes(raw+b' ')
+                if label=='native-root':native.mkdir(parents=True)
+                pins = dict(n.ISOLATED_REFUSAL_PRODUCERS)
+                if label=='producer-pin':pins['scripts/deploy_test_cycle.py']='0'*64
+                with patch.object(n,'ISOLATED_REFUSAL_PRODUCERS',pins), self.subTest(label=label), self.assertRaises(ValueError):
+                    c.reconcile(candidate, original['token'], dict(proof, validation_source=candidate['source']))
+                self.assertEqual(before,candidate)
+            finally:
+                request_path.write_bytes(raw)
+                if native.exists():native.rmdir()
+        for key in ('source','excluded_resources','credit_granted','cleanup_complete'):
+            candidate=copy.deepcopy(state); incoming=dict(proof,validation_source=candidate['source'])
+            if key=='source':incoming['source']={'head':'e'*40,'digest':'f'*64}
+            elif key=='excluded_resources':candidate['reconciled_owners'][proof['receipt_sha256']][key]={}
+            else:candidate['reconciled_owners'][proof['receipt_sha256']][key]=True
+            before=copy.deepcopy(candidate)
+            with self.subTest(debt=key),self.assertRaises(ValueError):c.reconcile(candidate,original['token'],incoming)
+            self.assertEqual(before,candidate)
+
+    def test_existing_failure_id_changed_proof_uses_guarded_renewal_and_history(self):
+        state, paths, proof, gate, original, successor, refusal, request_path = self.precommand_refusal_renewal_state()
+        case=next(iter(original['cases'])); occurrence='original-failure-reconciliation'
+        state['failures'].append(dict(id=occurrence,gate=gate['name'],check=gate['name']+'/'+case,
+            native_result='UNVERIFIED',complete=False,source=original['source'],evidence=original['log'],
+            command=original['command'],worker_result=original['worker_result']))
+        state['reconciled_owners'][proof['receipt_sha256']]['occurrence']=occurrence
+        before=copy.deepcopy(state)
+        c.reconcile(state,occurrence,dict(proof,validation_source=state['source']))
+        self.assertEqual([before['reconciled_owners'][proof['receipt_sha256']]],state['reconciled_owner_history'])
+        self.assertEqual(before['attempts'],state['attempts']);self.assertEqual(before['failures'],state['failures'])
+        # Identical re-registration is idempotent, never a source-target escape hatch.
+        current=copy.deepcopy(state);c.reconcile(state,occurrence,dict(proof,validation_source=state['source']))
+        self.assertEqual(current,state)
+
+    def test_existing_failure_id_cannot_bypass_live_guard_or_changed_debt(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        case=next(iter(original['cases']));occurrence='original-failure-reconciliation'
+        state['failures'].append(dict(id=occurrence,gate=gate['name'],check=gate['name']+'/'+case,
+            native_result='UNVERIFIED',complete=False,source=original['source'],evidence=original['log'],
+            command=original['command'],worker_result=original['worker_result']))
+        state['reconciled_owners'][proof['receipt_sha256']]['occurrence']=occurrence
+        state['live_failures']=[];before=copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError,'quiescent repair boundary'):
+            c.reconcile(state,occurrence,dict(proof,validation_source=state['source']))
+        self.assertEqual(before,state)
+
+    def test_future_precommand_producer_seals_zero_execution_and_renews_without_credit(self):
+        import deploy_test_native_cleanup as n
+        state, paths, proof, gate, original, successor, refusal, request_path = self.precommand_refusal_renewal_state()
+        # Replace the historical stub with a real call of the future pre-command
+        # producer. The mocked refusal is before the command; no worker is run.
+        state['attempts'].pop()
+        working=copy.deepcopy(state);working.update(phase='focused',round=913)
+        with patch.object(c,'isolated_request',side_effect=ValueError('native cleanup: next source/inventory binding')), \
+                patch.object(c,'run_command') as command:
+            row=c._execute(gate,working,self.root/'.context/future-producer',self.root)
+        command.assert_not_called();self.assertIs(row['executed'],False);self.assertIsNone(row['native_exit'])
+        witness=row['pre_command_refusal'];folder=Path(witness['request']).parent
+        self.assertEqual({'request.json','receipt.json'},{p.name for p in folder.iterdir()})
+        state['attempts'].append(dict(phase='focused',source=row['source'],results=[row]))
+        before=copy.deepcopy(state)
+        c.reconcile(state,original['token'],dict(proof,validation_source=state['source']))
+        self.assertEqual(before['attempts'],state['attempts']);self.assertEqual(before['failures'],state['failures'])
+        entry=state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']);self.assertFalse(entry['cleanup_complete'])
+        for key,value in [('command_started',True),('stage','after_command'),('request_sha256','0'*64)]:
+            candidate=copy.deepcopy(before);candidate['attempts'][-1]['results'][0]['pre_command_refusal'][key]=value
+            c.write(folder/'receipt.json',candidate['attempts'][-1]['results'][0]);unchanged=copy.deepcopy(candidate)
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                c.reconcile(candidate,original['token'],dict(proof,validation_source=state['source']))
+            self.assertEqual(unchanged,candidate)
+        c.write(folder/'receipt.json',row)
+
     def test_existing_isolated_proof_can_renew_only_validation_source_after_refresh(self):
         state, paths, proof, gate, packet, receipt = self.renewal_state()
         key = proof['receipt_sha256']; original = copy.deepcopy(state)
