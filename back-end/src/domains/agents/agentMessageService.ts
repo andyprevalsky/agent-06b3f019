@@ -19,10 +19,14 @@ import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
 import { buildUserMessageSignalValue } from './agentMessageSignal';
+import { ownedByExternalExecution } from './agentExternalExecution';
+import { createLogger } from '../../providers/logger';
 export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
 import { findGraphRootId } from './repoGraph';
+
+const log = createLogger('AgentMessages');
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -102,6 +106,14 @@ async function routeUserMessage(
         agentForChat.status = fresh.status;
       }
     }
+  }
+
+  if (agentForChat !== null && ownedByExternalExecution(agentForChat)) {
+    // The stored row stays in the executor's trace; an external root never dispatches chat or Temporal.
+    log.info('[AgentMessages] External executor owns this root; message stored without dispatch', {
+      agentId,
+    });
+    return;
   }
 
   if (agentForChat?.temporalWorkflowId !== undefined && agentForChat?.temporalWorkflowId !== null) {

@@ -159,3 +159,7 @@ account or physical-phone actions by this repair coordinator.
 ## Reusable lesson
 
 Pin an SDK when ownership depends on its private APIs. Verify the installed adapter boundary before publishing an image; matching unbounded manifests alone does not establish runtime compatibility.
+
+## PR1920 integration provenance
+
+The sidebar repair deploy reused the published owning implementation and tests after its original source-bound cloud smoke independently reached this same boundary. This reuse does not claim the originating repair goal or whole benchmark acceptance complete. Fresh final-source deployment validation remains independently required.
