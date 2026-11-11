@@ -10627,4 +10627,208 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
 
 
+class StoppedInertAllocationIsolation(unittest.TestCase):
+    """Owning cycle admission; temporary source/provider fixtures, zero live calls."""
+    def setUp(self):
+        import hashlib
+        import deploy_test_native_cleanup as native
+        self.native = native
+        self.fx = Cycle(); self.fx.setUp()
+        self.addCleanup(self.fx.doCleanups); self.addCleanup(self.fx.tearDown)
+        self.root = self.fx.root
+        driver = self.root / 'scripts/cloudbench-run.sh'; driver.parent.mkdir()
+        driver.write_bytes((ROOT / 'scripts/cloudbench-run.sh').read_bytes())
+        subprocess.run(['git','-C',str(self.root),'add','scripts/cloudbench-run.sh'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
+                        'commit','-qm','reviewed fixture driver'],check=True)
+        head = subprocess.check_output(['git','-C',str(self.root),'rev-parse','HEAD'],text=True).strip()
+        self.state,self.failure,self.paths,self.proof,self.gate,self.packet = self.fx.isolated_campaign_state()
+        def replace(x):
+            if isinstance(x,dict): return {k:replace(v) for k,v in x.items()}
+            if isinstance(x,list): return [replace(v) for v in x]
+            return head if x=='a'*40 else x
+        self.state,self.proof = replace(self.state),replace(self.proof)
+        for file in (self.root/'.context').rglob('*.json'):
+            try: value=json.loads(file.read_text())
+            except ValueError: continue
+            c.write(file,replace(value))
+        self.fleet=Path(self.proof['campaign']).parent.parent/'runs/20261103-080440-310001'
+        self.owner=c.read(self.fleet/'_batch/lifecycle.json')['fleet_owner_token']
+        self.token=self.owner+'-0'; self.mid='845003f2609078'; self.vol='vol_inert_fixture'
+        self.clone='cloudbench-inert-fixture'; self.primary='old-machine'
+        self.audit=self.root/'.git/cloudbench-fleet-audits'/self.owner
+        self.registry=self.root/'.git/cloudbench-fleet-ownership'/self.owner
+        row=dict(version='1',fleet_owner_token=self.owner,run_id=self.fleet.name,app='fixture',
+                 source='fresh-clone',clone_name=self.clone,source_machine_id=self.primary,
+                 machine_id=self.mid,volume_id=self.vol,disposition='owned')
+        (self.audit/'fresh'/self.clone).write_text(''.join(k+'='+v+'\n' for k,v in row.items()))
+        (self.registry/'clones').mkdir()
+        (self.registry/'clones'/self.clone).write_text('name='+self.clone+'\nid='+self.mid+'\nvolume_id='+self.vol+'\n')
+        self.out=self.fleet/json.loads((self.fleet/'_batch/benches.json').read_text())[0]['name']; self.out.mkdir(exist_ok=True)
+        (self.out/'.cid').write_text('clone '+self.primary+'\n')
+        (self.out/'worker-clones.ids').write_text(self.mid+'\n'); (self.out/'worker-ready.ids').write_text('')
+        self.index=self.fleet/'.native-retirement-index'; self.index.mkdir()
+        (self.index/'retained').write_text('original allocation index\n')
+        helper=self.root/'scripts/cloudbench-original-volume-capture.py'
+        helper.write_bytes((ROOT/'scripts/cloudbench-original-volume-capture.py').read_bytes())
+        self.op=self.root/'.context/inert-stop'; self.op.mkdir()
+        self.producer=self.op/'operator.py'; cfg=dict(init=dict(cmd=['sleep','infinity']),restart=dict(policy='no'),env=dict(REF=head,CLOUDBENCH_RUN_TOKEN=self.token),mounts=[dict(volume=self.vol,path='/data')])
+        constants=dict(MID=self.mid,VOL=self.vol,OWNER=self.owner,REF=head,PRIMARY=self.primary,INSTANCE='fixture-instance',CONFIG_SHA=hashlib.sha256(json.dumps(cfg,sort_keys=True).encode()).hexdigest())
+        self.producer.write_text(''.join(k+'='+repr(v)+'\n'for k,v in constants.items()))
+        # The production pin is separately checked against the actual retained 51f69 operator.
+        self.pin=patch.object(native,'STOPPED_INERT_PRODUCER_SHA256',c.sha_file(self.producer),create=True)
+        self.pin.start();self.addCleanup(self.pin.stop)
+        self.attempt=self.op/('preflight-'+'a'*32); self.attempt.mkdir()
+        cfg=dict(init=dict(cmd=['sleep','infinity']),restart=dict(policy='no'),
+                 env=dict(REF=head,CLOUDBENCH_RUN_TOKEN=self.token),mounts=[dict(volume=self.vol,path='/data')])
+        m=dict(id=self.mid,state='started',name=self.clone,instance_id='fixture-instance',config=cfg,
+               image_ref=dict(digest='sha256:'+'c'*64))
+        v=dict(id=self.vol,state='created',attached_machine_id=self.mid)
+        self.before=dict(machine=m,volume=v); self.final=copy.deepcopy(self.before);self.final['machine']['state']='stopped'
+        for name,value in [('native-before.private.json',self.before),('native-after.private.json',self.before)]:
+            c.write(self.attempt/name,value)
+        c.write(self.op/'stopped.json',self.final)
+        now=self.proof['confirmed_at']
+        guest=dict(kind='exact-inert-quiescence-v1',machine=self.mid,nonce='a'*32,
+                   boot='11111111-1111-1111-1111-111111111111',unknown=[],inert_sleepers=[dict(pid=605,birth='45')],
+                   idle_pinned_agents=[],idle_platform_hallpass=[],observed_epoch=now-2)
+        c.write(self.attempt/'guest-proof.json',guest)
+        import ast
+        body=next(ast.literal_eval(n.value)for n in ast.parse(helper.read_text()).body
+                  if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=='BILLING_GUEST'for t in n.targets))
+        pin="'1fc252c042a279787eb1a83a15c7e19d634fc0059ad8abf4acaa9a752f5684a2'"
+        body=body.replace(pin,pin+", 'ead561de4c1c9488463aad634677d8be63d2e7d162b6b1b8f476727af4dc0310'").replace('TARGET',repr(self.mid)).replace('NONCE',repr('a'*32))
+        self.intent=dict(kind='exact-worker-stop-retain-intent-v1',machine=self.mid,volume=self.vol,
+                         owner=self.owner,source=head,primary_untouched=self.primary,attempt=str(self.attempt),
+                         script_sha256=c.sha_file(self.producer),guest_code_sha256=hashlib.sha256(body.encode()).hexdigest(),
+                         config_sha256=hashlib.sha256(json.dumps(cfg,sort_keys=True).encode()).hexdigest(),
+                         instance_id=m['instance_id'],method='POST',path='/machines/'+self.mid+'/stop',
+                         evidence_credit=False,epoch=now-1)
+        c.write(self.op/'intent.json',self.intent)
+        self.result=dict(kind='exact-worker-stop-retain-v1',status='STOPPED_RETAINED',machine=self.mid,
+                         volume=self.vol,owner=self.owner,primary_untouched=self.primary,
+                         stop_intent_sha256=c.sha_file(self.op/'intent.json'),native_stopped_sha256=c.sha_file(self.op/'stopped.json'),
+                         custody_unchanged=True,primary_sealed_evidence_unchanged=True,runtime_latch_retained=True,
+                         ledger_retained=True,task_credit=False,evidence_credit=False,cleanup_complete=False)
+        c.write(self.op/'result.json',self.result)
+        runtime=self.out/'remote-logs/runtime-evidence';runtime.mkdir(parents=True)
+        c.write(runtime/'services.json',dict(status='stopped'))
+        info=dict(bytes=(runtime/'services.json').stat().st_size,sha256=c.sha_file(runtime/'services.json'))
+        manifest=dict(version=1,machine_id=self.primary,run_token=self.token,files={'services.json':info})
+        c.write(runtime/'manifest.json',manifest)
+        def snapshot(base):
+            saved={}
+            for x in [base,*base.rglob('*')]:
+                st=x.lstat();saved[str(x)]=['directory'if x.is_dir()else'file',st.st_dev,st.st_ino,st.st_mode]
+                if x.is_file():saved[str(x)].append(c.sha_file(x))
+            return saved
+        custody={k:snapshot(base)for k,base in [('registry',self.registry),('audit',self.audit),('index',self.index)]}
+        custody['source']=c.sha_file(self.fleet/'execution-provenance.json')
+        custody['primary_seal']=dict(manifest_sha256=c.sha_file(runtime/'manifest.json'),
+                                    files={'services.json':info['sha256']},bytes=info['bytes'])
+        c.write(self.attempt/'custody.private.json',custody)
+        packet=c.read(self.packet)
+        for kind,value in self.final.items():
+            path=self.op/('raw-'+kind+'.json');c.write(path,value)
+            metadata=dict(id=value['id'],state=value['state'])
+            if kind=='machine':metadata['source_binding']=dict(REF=head,CLOUDBENCH_RUN_TOKEN=self.token)
+            else:metadata['attached_machine_id']=self.mid
+            packet['rows'].append(dict(kind=kind,id=value['id'],expected_machine=self.mid,expected_volume=self.vol,
+                                       method='GET',http_status=200,no_retry=True,observed_at=now,
+                                       response_sha256=c.sha_file(path),raw_response=str(path),metadata=metadata))
+        c.write(self.packet,packet)
+        self.proof['execution_quiescence'][self.mid]=dict(provider_pair=str(self.packet),stopped_inert_allocation={
+            'operator':str(self.producer),'result':str(self.op/'result.json'),
+            'intent':str(self.op/'intent.json'),'stopped':str(self.op/'stopped.json')})
+        self.reseal()
+
+    def reseal(self):
+        receipt=c.read(self.paths['receipt'])
+        receipt['native_cleanup_reference']['result_sha256']=c.sha_file(self.paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference']=receipt['native_cleanup_reference']
+        c.write(self.paths['receipt'],receipt)
+        self.state['attempts'][-1]['results'][0]=receipt
+        self.proof.update(owner=copy.deepcopy(receipt['cleanup_owner']),receipt_sha256=c.sha_file(self.paths['receipt']),worker_result_sha256=c.sha_file(self.paths['adapter']))
+        self.proof['files']={str(p):c.sha_file(p)for base in
+            (self.root/'.context',self.root/'.git/cloudbench-fleet-audits',
+             self.root/'.git/cloudbench-fleet-ownership',self.root/'scripts')
+            for p in base.rglob('*')if p.is_file()}
+
+    def test_inert_worker_admission_preserves_original_debt_and_exclusions(self):
+        before=copy.deepcopy(self.state);original=self.paths['receipt'].read_bytes()
+        c.reconcile(self.state,self.failure['id'],self.proof)
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted']);self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved'])
+        self.assertEqual(before['attempts'],self.state['attempts']);self.assertEqual(before['failures'],self.state['failures'])
+        self.assertEqual(original,self.paths['receipt'].read_bytes())
+        self.assertEqual(self.vol,entry['excluded_resources'][self.mid])
+        self.assertTrue((self.registry/'runtime-evidence-unconfirmed').is_file())
+
+    def test_inert_worker_rejects_rebound_or_incomplete_receipts_atomically(self):
+        mutations=('active','reused','config','missing-capture','foreign-volume','omitted-extra',
+                   'extra-custody','rebound-result','duplicate-observation','missing-latch','unknown-process','credit','coherent-config')
+        originals={p:p.read_bytes()for p in self.root.rglob('*')if p.is_file()and '.git/objects'not in str(p)}
+        baseline=copy.deepcopy(self.state)
+        for case in mutations:
+            with self.subTest(case=case):
+                added=[]
+                try:
+                    packet=c.read(self.packet)
+                    machine=next(x for x in packet['rows']if x['kind']=='machine'and x['expected_machine']==self.mid)
+                    raw=Path(machine['raw_response']);native=c.read(raw)
+                    if case=='active':native['state']=machine['metadata']['state']='started'
+                    if case=='reused':native['instance_id']='reused'
+                    if case=='config':native['config']['env']['UNREVIEWED']='changed'
+                    if case=='foreign-volume':native['config']['mounts'][0]['volume']='vol_foreign'
+                    c.write(raw,native);machine['response_sha256']=c.sha_file(raw)
+                    if case=='duplicate-observation':packet['rows'].append(copy.deepcopy(machine))
+                    c.write(self.packet,packet)
+                    if case=='missing-capture':(self.attempt/'guest-proof.json').unlink()
+                    if case=='omitted-extra':
+                        q=c.read(self.attempt/'custody.private.json');q['registry'].pop(str(self.registry/'runtime-evidence-unconfirmed'))
+                        c.write(self.attempt/'custody.private.json',q)
+                    if case=='extra-custody':
+                        x=self.registry/'unrecorded';x.write_text('extra');added.append(x)
+                    if case in ('rebound-result','credit'):
+                        q=c.read(self.op/'result.json');q['machine'if case=='rebound-result'else'task_credit']='foreign'if case=='rebound-result'else True
+                        c.write(self.op/'result.json',q)
+                    if case=='missing-latch':(self.registry/'runtime-evidence-unconfirmed').unlink()
+                    if case=='unknown-process':
+                        q=c.read(self.attempt/'guest-proof.json');q['unknown']=[dict(pid=999,birth='1')]
+                        c.write(self.attempt/'guest-proof.json',q)
+                    if case=='coherent-config':
+                        import hashlib
+                        for x in (self.attempt/'native-before.private.json',self.attempt/'native-after.private.json',self.op/'stopped.json'):
+                            q=c.read(x);q['machine']['config']['dns']={'coherent':'foreign'};c.write(x,q)
+                        q=c.read(raw);q['config']['dns']={'coherent':'foreign'};c.write(raw,q)
+                        packet=c.read(self.packet)
+                        next(x for x in packet['rows']if x['kind']=='machine'and x['expected_machine']==self.mid)['response_sha256']=c.sha_file(raw)
+                        c.write(self.packet,packet)
+                        q=c.read(self.op/'intent.json');q['config_sha256']=hashlib.sha256(json.dumps(c.read(raw)['config'],sort_keys=True).encode()).hexdigest();c.write(self.op/'intent.json',q)
+                        q=c.read(self.op/'result.json');q['native_stopped_sha256']=c.sha_file(self.op/'stopped.json');q['stop_intent_sha256']=c.sha_file(self.op/'intent.json');c.write(self.op/'result.json',q)
+                    self.reseal();candidate=copy.deepcopy(baseline)
+                    with self.assertRaises((ValueError,OSError,KeyError)):c.reconcile(candidate,self.failure['id'],self.proof)
+                    self.assertEqual(baseline,candidate)
+                finally:
+                    for x in added:x.unlink()
+                    for x,raw in originals.items():
+                        if x.exists()or x.parent.exists():x.write_bytes(raw)
+                    self.reseal()
+
+    def test_large_primary_manifest_member_keeps_its_verified_size_on_final_rehash(self):
+        runtime=self.out/'remote-logs/runtime-evidence'
+        large=runtime/'worker.log'
+        with large.open('wb')as f:f.truncate(c.MAX_RECEIPT_BYTES+1)
+        info=dict(bytes=large.stat().st_size,sha256=c.sha_file(large))
+        manifest=c.read(runtime/'manifest.json');manifest['files']['worker.log']=info
+        c.write(runtime/'manifest.json',manifest)
+        custody=c.read(self.attempt/'custody.private.json')
+        custody['primary_seal']['manifest_sha256']=c.sha_file(runtime/'manifest.json')
+        custody['primary_seal']['files']['worker.log']=info['sha256']
+        custody['primary_seal']['bytes']+=info['bytes']
+        c.write(self.attempt/'custody.private.json',custody);self.reseal()
+        self.test_inert_worker_admission_preserves_original_debt_and_exclusions()
+
+
 if __name__ == '__main__': unittest.main()

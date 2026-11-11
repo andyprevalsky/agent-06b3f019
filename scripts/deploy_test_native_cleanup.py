@@ -213,6 +213,150 @@ def stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, 
          'stopped startup positive terminal boundary')
 
 
+STOPPED_INERT_PRODUCER_SHA256 = '51f69b6cf96ca6ff4bceabb9c1b3a8b0c3da2ad5a0d5e7aa35368e4ed76685be'
+
+
+def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, pair, bound, document):
+    """Admit execution isolation for a reviewed STOP-retained inert fresh allocation only."""
+    import ast
+    spec = evidence['stopped_inert_allocation']
+    need(isinstance(spec, dict) and set(spec) == {'operator', 'result', 'intent', 'stopped'},
+         'stopped inert descriptor')
+    operator = bound(spec['operator'])
+    need(hashlib.sha256(operator).hexdigest()
+         == STOPPED_INERT_PRODUCER_SHA256,
+         'unreviewed stopped inert producer')
+    result, intent, final = (document(spec[k]) for k in ('result', 'intent', 'stopped'))
+    machine, volume, owner = row['machine_id'], row['volume_id'], row['fleet_owner_token']
+    need(result.get('kind') == 'exact-worker-stop-retain-v1' and result.get('status') == 'STOPPED_RETAINED'
+         and all(result.get(k) is False for k in ('task_credit', 'evidence_credit', 'cleanup_complete'))
+         and all(result.get(k) is True for k in ('custody_unchanged', 'primary_sealed_evidence_unchanged',
+                                                'runtime_latch_retained', 'ledger_retained')),
+         'stopped inert retention result')
+    names = {'MID', 'VOL', 'OWNER', 'REF', 'PRIMARY', 'INSTANCE', 'CONFIG_SHA'}
+    constants = {target.id: ast.literal_eval(node.value) for node in ast.parse(operator).body
+                 if isinstance(node, ast.Assign) for target in node.targets
+                 if isinstance(target, ast.Name) and target.id in names}
+    need(constants == {'MID': machine, 'VOL': volume, 'OWNER': owner, 'REF': receipt['source']['head'],
+                       'PRIMARY': result.get('primary_untouched'), 'INSTANCE': intent.get('instance_id'),
+                       'CONFIG_SHA': intent.get('config_sha256')}, 'stopped inert producer target binding')
+    need(result.get('machine') == intent.get('machine') == machine
+         and result.get('volume') == intent.get('volume') == volume
+         and result.get('owner') == intent.get('owner') == owner
+         and intent.get('kind') == 'exact-worker-stop-retain-intent-v1'
+         and intent.get('source') == receipt['source']['head']
+         and intent.get('script_sha256') == hashlib.sha256(operator).hexdigest()
+         and intent.get('method') == 'POST' and intent.get('path') == '/machines/' + machine + '/stop'
+         and intent.get('evidence_credit') is False
+         and result.get('stop_intent_sha256') == hashlib.sha256(bound(spec['intent'])).hexdigest()
+         and result.get('native_stopped_sha256') == hashlib.sha256(bound(spec['stopped'])).hexdigest(),
+         'stopped inert receipt binding')
+    attempt = Path(intent['attempt'])
+    before, after = (document(attempt / (name + '.private.json')) for name in ('native-before', 'native-after'))
+    guest, custody = document(attempt / 'guest-proof.json'), document(attempt / 'custody.private.json')
+    need(before == after and final.get('machine', {}).get('state') == 'stopped',
+         'stopped inert native capture')
+    initial, stopped = before['machine'], final['machine']
+    config = initial['config']
+    need(initial.get('id') == stopped.get('id') == machine and initial.get('state') == 'started'
+         and initial.get('instance_id') == stopped.get('instance_id') == intent.get('instance_id')
+         and isinstance(intent.get('instance_id'), str) and bool(intent['instance_id'])
+         and isinstance(initial.get('image_ref'), dict)
+         and re.fullmatch('sha256:[0-9a-f]{64}', initial['image_ref'].get('digest', ''))
+         and initial.get('image_ref') == stopped.get('image_ref')
+         and config == stopped.get('config')
+         and hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest() == intent.get('config_sha256')
+         and config.get('init') == {'cmd': ['sleep', 'infinity']} and config.get('restart') == {'policy': 'no'}
+         and not any(config.get(k) for k in ('auto_destroy', 'containers', 'processes', 'standbys', 'schedule'))
+         and config.get('env', {}).get('REF') == receipt['source']['head']
+         and config.get('env', {}).get('CLOUDBENCH_RUN_TOKEN') == token
+         and len(config.get('mounts', [])) == 1 and config['mounts'][0].get('volume') == volume
+         and config['mounts'][0].get('path') == '/data'
+         and before['volume'] == after['volume'] == final['volume']
+         and final['volume'].get('id') == volume and final['volume'].get('state') == 'created'
+         and final['volume'].get('attached_machine_id') == machine, 'stopped inert immutable native identity')
+    nonce = attempt.name.removeprefix('preflight-')
+    need(re.fullmatch('[0-9a-f]{32}', nonce) and guest.get('nonce') == nonce
+         and guest.get('kind') == 'exact-inert-quiescence-v1' and guest.get('machine') == machine
+         and re.fullmatch('[0-9a-f-]{36}', guest.get('boot', '')) and guest.get('unknown') == []
+         and isinstance(guest.get('inert_sleepers'), list) and guest['inert_sleepers']
+         and isinstance(guest.get('idle_pinned_agents'), list)
+         and isinstance(guest.get('idle_platform_hallpass'), list) and len(guest['idle_platform_hallpass']) <= 1
+         and finite(guest.get('observed_epoch')) and finite(intent.get('epoch'))
+         and receipt['finished_at'] <= guest['observed_epoch'] <= intent['epoch'] <= proof['confirmed_at'],
+         'stopped inert guest quiescence')
+    classified = guest['inert_sleepers'] + guest['idle_pinned_agents'] + guest['idle_platform_hallpass']
+    need(len(classified) <= 4096 and all(type(p.get('pid')) is int and p['pid'] > 1
+         and isinstance(p.get('birth'), str) and p['birth'].isdigit() for p in classified)
+         and len({p['pid'] for p in classified}) == len(classified), 'stopped inert process identities')
+    helper = bound(root / 'scripts/cloudbench-original-volume-capture.py')
+    need(hashlib.sha256(helper).hexdigest() == 'ddde11af81f8200c1987648ad19b10dd5aa893fbd6e05c6a25ec0c7ea8c12c58',
+         'stopped inert guest producer changed')
+    source = next(ast.literal_eval(node.value) for node in ast.parse(helper).body
+                  if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BILLING_GUEST'
+                                                         for t in node.targets))
+    old_pin = "'1fc252c042a279787eb1a83a15c7e19d634fc0059ad8abf4acaa9a752f5684a2'"
+    source = source.replace(old_pin, old_pin + ", 'ead561de4c1c9488463aad634677d8be63d2e7d162b6b1b8f476727af4dc0310'")
+    source = source.replace('TARGET', repr(machine)).replace('NONCE', repr(nonce))
+    need(hashlib.sha256(source.encode()).hexdigest() == intent.get('guest_code_sha256'),
+         'stopped inert scanner identity')
+    primary = result.get('primary_untouched')
+    benches = json.loads(bound(fleet / '_batch/benches.json'))
+    need(len(benches) == 1 and isinstance(primary, str) and primary != machine
+         and intent.get('primary_untouched') == primary and row.get('source_machine_id') == primary,
+         'stopped inert worker source')
+    out = fleet / benches[0]['name']
+    need(bound(out / '.cid') == ('clone ' + primary + '\n').encode()
+         and bound(out / 'worker-clones.ids').decode().splitlines().count(machine) == 1
+         and machine not in bound(out / 'worker-ready.ids').decode().splitlines()
+         and not (out / 'worker-runtime-evidence' / machine).exists()
+         and not list(out.glob('worker-' + machine + '*'))
+         and not (out / 'worker-borrowed' / (machine + '.json')).exists(), 'stopped inert worker staged')
+    registry, audit = fleet_ownership_root(root) / owner, fleet_audit_root(root) / owner
+    need((registry / 'runtime-evidence-unconfirmed').is_file()
+         and fields(bound(registry / 'clones' / row['clone_name']))
+             == {'name': row['clone_name'], 'id': machine, 'volume_id': volume}, 'stopped inert custody released')
+    need(not (root / '.git/cloudbench-pool-claims' / machine).exists()
+         and not (registry / 'cold-handoff-outgoing').exists(), 'stopped inert reassigned')
+    need(hashlib.sha256(bound(fleet / 'execution-provenance.json')).hexdigest() == custody.get('source'),
+         'stopped inert source custody')
+    for name, base in (('registry', registry), ('audit', audit), ('index', fleet / '.native-retirement-index')):
+        saved = custody[name]
+        need(set(saved) == {str(base), *(str(p) for p in base.rglob('*'))}, 'stopped inert custody inventory')
+        for path, value in saved.items():
+            path = Path(path); st = path.lstat()
+            need(path.resolve() == path and not path.is_symlink(), 'stopped inert custody path')
+            current = ['directory' if path.is_dir() else 'file', st.st_dev, st.st_ino, st.st_mode]
+            if path.is_file(): current.append(hashlib.sha256(bound(path)).hexdigest())
+            need(current == value, 'stopped inert custody drift')
+    seal = custody['primary_seal']; runtime = out / 'remote-logs/runtime-evidence'
+    manifest_raw = bound(runtime / 'manifest.json'); manifest = json.loads(manifest_raw)
+    need(hashlib.sha256(manifest_raw).hexdigest() == seal.get('manifest_sha256')
+         and manifest.get('machine_id') == primary and manifest.get('run_token') == token
+         and set(manifest['files']) == set(seal['files']), 'stopped inert primary seal')
+    total = 0
+    for name, info in manifest['files'].items():
+        need(Path(name).as_posix() == name and not Path(name).is_absolute() and '..' not in Path(name).parts,
+             'stopped inert primary path')
+        data = bound(runtime / name, MAX_RAW_RUN_PROOF_BYTES); total += len(data)
+        digest = hashlib.sha256(data).hexdigest()
+        need(total <= MAX_RAW_RUN_PROOF_BYTES and digest == seal['files'][name]
+             and info == {'bytes': len(data), 'sha256': digest}, 'stopped inert primary file changed')
+    need(total == seal['bytes'], 'stopped inert primary bytes')
+    for observed in pair:
+        native = json.loads(bound(observed['raw_response']))
+        expected = final[observed['kind']]
+        need(finite(observed.get('observed_at')) and intent['epoch'] <= observed['observed_at'] <= proof['confirmed_at'],
+             'stopped inert current provider clock')
+        need(native.get('id') == expected['id'] and native.get('state') == expected['state'],
+             'stopped inert provider rebound')
+        if observed['kind'] == 'machine':
+            need(native.get('instance_id') == stopped['instance_id'] and native.get('config') == config
+                 and native.get('image_ref') == stopped.get('image_ref'), 'stopped inert provider reused')
+        else:
+            need(native.get('attached_machine_id') == machine, 'stopped inert volume rebound')
+
+
 def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
     owner = life['fleet_owner_token']
@@ -263,7 +407,13 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
             stopped_startup = next(r for r in pair if r['kind'] == 'machine')['metadata'].get('state') == 'stopped'
             if stopped_startup:
                 need(registry.exists() and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
-                stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document)
+                if 'stopped_inert_allocation' in evidence:
+                    need(set(evidence) == {'provider_pair', 'stopped_inert_allocation'}, 'stopped inert evidence fields')
+                    stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, pair, bound, document)
+                else:
+                    stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document)
+            else:
+                need('stopped_inert_allocation' not in evidence, 'stopped inert allocation is not stopped')
             for observed in pair:
                 need(observed['method'] == 'GET' and observed['http_status'] == 200 and observed['no_retry'] is True
                      and observed['expected_volume'] == row['volume_id']
@@ -986,6 +1136,7 @@ def validate(receipt, owner, proof):
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
+    validated_sizes = {}
     run_artifacts = set()
     raw_remaining = [MAX_RAW_RUN_PROOF_BYTES]
     historical_sources = {}
@@ -1008,6 +1159,7 @@ def validate(receipt, owner, proof):
             raw = path.read_bytes()
         need(bindings.get(str(path)) == hashlib.sha256(raw).hexdigest(), 'file hash mismatch: ' + str(path))
         used.add(str(path))
+        validated_sizes[str(path)] = len(raw)
         if historical_head is not None:
             historical_sources[str(path)] = historical_head
         return raw
@@ -1493,7 +1645,8 @@ def validate(receipt, owner, proof):
                 read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES,
                                   raw_limit=MAX_RAW_FORENSIC_RUN_BYTES)
             else:
-                bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
+                # Rehash each exact file within the size already verified by its owning reader.
+                bound(path, max(MAX_RECEIPT_BYTES, validated_sizes.get(path, 0)))
     need(used == set(bindings), 'proof file closure')
     result = {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
