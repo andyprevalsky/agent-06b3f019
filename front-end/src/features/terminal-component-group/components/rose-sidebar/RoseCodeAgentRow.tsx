@@ -40,6 +40,7 @@ import { isCodeAgentRunning } from './codeAgentRunState';
 interface RoseCodeAgentRowProps {
   codeAgent: CodeAgentListItem;
   isExpanded: boolean;
+  mobile?: boolean;
   /** The parent agent row is itself indented (it sits under a project). */
   parentIndented: boolean;
   depth?: number;
@@ -52,6 +53,7 @@ interface RoseCodeAgentRowProps {
 export default function RoseCodeAgentRow({
   codeAgent,
   isExpanded,
+  mobile = false,
   parentIndented,
   depth = 1,
   isSelected = false,
@@ -107,6 +109,7 @@ export default function RoseCodeAgentRow({
                   <AgentStatusIndicator
                     status={{ state: 'active', label: 'Working' }}
                     seed={codeAgent.code_agent_id}
+                    mobile={mobile}
                   />
                 </span>
               )}

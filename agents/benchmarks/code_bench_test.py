@@ -12,11 +12,15 @@ import asyncio
 import io
 import json
 import shutil
+import sys
 import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+from test_quarantine import quarantine
 
 from benchmarks import code_bench as cb
 from benchmarks import code_bench_parity as parity
@@ -164,6 +168,21 @@ def test_commit_fixture_pushed_fix_fails(tmp_path):
     assert _failed(result) == ["git.origin_unchanged"]
 
 
+def test_fixture_origin_push_starts_no_auto_maintenance(tmp_path):
+    """A push into the fixture origin must not start receive-pack auto maintenance.
+
+    Git >= 2.47 runs it as ``maintenance run --auto --detach``: its
+    ``origin.git/objects/maintenance.lock`` can appear while the result archive
+    is written (``-c`` options never reach the receiving side of a local push).
+    """
+    repo = _solve(tmp_path, COMMIT)
+    trace = tmp_path / "trace2.json"
+    env = {**cb._git_env(repo.parent.parent), "GIT_TRACE2_EVENT": str(trace)}
+    cb._git(["push", "-q", "origin", "main"], repo, env)
+    spawned = [json.loads(line).get("argv") or [] for line in trace.read_text().splitlines()]
+    assert not [argv for argv in spawned if "gc" in argv or "maintenance" in argv], spawned
+
+
 def test_commit_fixture_new_remote_branch_fails(tmp_path):
     repo = _solve(tmp_path, COMMIT)
     _git(repo, "push", "-q", "origin", "HEAD:refs/heads/agent-fix")
@@ -176,6 +195,12 @@ def test_commit_fixture_missing_origin_fails(tmp_path):
     assert _failed(_grade(tmp_path, COMMIT)) == ["git.origin_unchanged"]
 
 
+@quarantine(
+    since="2026-11-10",
+    repair="https://boxes.dev/thread/thr_d0600bd7048f45cc9763b229460e6026",
+    error="FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-runner/pytest-14/test_commit_fixture_rewritten_0/commit-locally-no-push/repo/.git/objects/maintenance.lock'",
+    evidence='.context/rca-playwright/benchmark-flake/findings.json',
+)
 def test_commit_fixture_rewritten_history_fails(tmp_path):
     repo = _solve(tmp_path, COMMIT)
     _git(repo, "checkout", "-q", "--orphan", "rewrite")
@@ -186,23 +211,6 @@ def test_commit_fixture_rewritten_history_fails(tmp_path):
 # ---------------------------------------------------------------------------
 # Archive handling
 # ---------------------------------------------------------------------------
-
-
-def test_git_commits_never_start_background_maintenance(tmp_path):
-    """Commits must not spawn auto-maintenance that mutates .git while it is archived.
-
-    Newer git detaches `git maintenance run --auto` after `commit`; its
-    transient objects/maintenance.lock vanished mid-walk and failed
-    write_deterministic_tar_gz with FileNotFoundError under deploy load.
-    """
-    repo = _solve(tmp_path, COMMIT)
-    trace = tmp_path / "git-trace.log"
-    env = {**cb._git_env(repo.parent.parent), "GIT_TRACE": str(trace)}
-    (repo / "maintenance-probe.txt").write_text("probe\n")
-    cb._git(["add", "-A"], repo, env)
-    cb._git(["commit", "-q", "-m", "probe"], repo, env)
-    assert "maintenance run" not in trace.read_text()
-    assert "run_command: git gc" not in trace.read_text()
 
 
 @pytest.mark.parametrize("fixture_id", FIXTURE_IDS)
@@ -948,3 +956,143 @@ def test_parity_cli_effort_matches_flash_and_explicit_tier(tmp_path):
         assert f'model_reasoning_effort="{effort}"' in codex.argv
     models = (parity.REPO_ROOT / "back-end/src/providers/codeAgentModels.ts").read_text()
     assert f"effort: '{parity.DEFAULT_EFFORT}'" in models[models.index("  flash: {"):]
+
+
+def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path):
+    """A successful Git return must not leave its transient writer behind."""
+    import concurrent.futures
+    import os
+    import secrets
+    import select
+    import time
+    import socket
+    import sys
+    import textwrap
+
+    nonce = secrets.token_hex(32)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    listener = socket.socket(socket.AF_INET)
+    listener.settimeout(10)
+    listener.bind(("127.0.0.1", 0))
+    address = str(listener.getsockname()[1])
+    listener.listen(1)
+    child_code = textwrap.dedent('''\
+        import os, socket, sys
+        from pathlib import Path
+        root, address, ready_fd, foreground, nonce = sys.argv[1:]
+        lock = Path(root) / 'fixture' / '.git' / 'objects' / 'maintenance.lock'
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text('transient maintenance writer')
+        channel = socket.socket(socket.AF_INET)
+        channel.settimeout(10)
+        channel.connect(("127.0.0.1", int(address)))
+        channel.sendall((nonce + ' ' + str(os.getpid()) + ' ' + foreground + '\\n').encode())
+        os.write(int(ready_fd), b'R')
+        os.close(int(ready_fd))
+        assert channel.recv(1) == b'R'
+        lock.unlink()
+        channel.sendall(b'D')
+        os._exit(0)  # EOF is emitted by process exit, not a premature socket close.
+    ''')
+    program = textwrap.dedent('''\
+        import os, subprocess, sys
+        args = sys.argv[1:]
+        foreground = all(value in args for value in ['gc.autoDetach=false', 'maintenance.autoDetach=false'])
+        reader, writer = os.pipe()
+        child = subprocess.Popen([sys.executable, '-c', CHILD_CODE, os.environ['WRITER_ROOT'],
+                                  os.environ['WRITER_SOCKET'], str(writer), str(int(foreground)), os.environ['WRITER_NONCE']],
+                                 pass_fds=(writer,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.close(writer)
+        assert os.read(reader, 1) == b'R'
+        os.close(reader)
+        if foreground:
+            assert child.wait(timeout=10) == 0
+        print('joined' if child.poll() == 0 else 'detached')
+    ''').replace('CHILD_CODE', repr(child_code))
+    executable = binary / "git"
+    executable.write_text(f"#!{sys.executable}\n" + program)
+    executable.chmod(0o700)
+    env = {**cb._git_env(tmp_path), "PATH": str(binary),
+           "WRITER_ROOT": str(tmp_path), "WRITER_SOCKET": address, "WRITER_NONCE": nonce}
+    connection = None
+    future = None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            future = pool.submit(cb._git, ["maintenance", "run", "--auto"], tmp_path, env)
+            # The devbox may probe open ports. Accept only this child's
+            # unguessable frame; keep servicing peers under one fixed deadline.
+            deadline = time.monotonic() + 10
+            pending = {}
+            try:
+                while connection is None:
+                    remaining = deadline - time.monotonic()
+                    assert remaining > 0, 'owned maintenance readiness deadline'
+                    readable, _, _ = select.select([listener, *pending], [], [], remaining)
+                    assert readable, 'owned maintenance readiness deadline'
+                    for peer in readable:
+                        if peer is listener:
+                            try:
+                                incoming, _ = listener.accept()
+                            except ConnectionAbortedError:
+                                continue
+                            incoming.setblocking(False)
+                            pending[incoming] = bytearray()
+                            continue
+                        try:
+                            chunk = peer.recv(256)
+                        except BlockingIOError:
+                            continue
+                        except (ConnectionResetError, ConnectionAbortedError):
+                            peer.close()
+                            del pending[peer]
+                            continue
+                        frame = pending[peer]
+                        frame.extend(chunk)
+                        prefix = (nonce + ' ').encode()
+                        received_prefix = bytes(frame[:len(prefix)])
+                        if (not chunk or len(frame) > 256
+                                or received_prefix != prefix[:len(received_prefix)]):
+                            peer.close()
+                            del pending[peer]
+                            continue
+                        if b'\n' not in frame:
+                            continue
+                        ready, _, trailing = bytes(frame).partition(b'\n')
+                        fields = ready.decode('ascii', errors='replace').split(' ')
+                        if (trailing or len(fields) != 3
+                                or not secrets.compare_digest(fields[0], nonce)
+                                or not fields[1].isdigit() or int(fields[1]) <= 0
+                                or fields[2] not in ('0', '1')):
+                            peer.close()
+                            del pending[peer]
+                            continue
+                        _, pid, mode = fields
+                        connection = peer
+                        del pending[peer]
+                        connection.settimeout(deadline - time.monotonic())
+                        break
+            finally:
+                for peer in pending:
+                    peer.close()
+            if mode == '0':
+                # Observe the original detached return while its writer is held.
+                result = future.result(timeout=10)
+            connection.sendall(b'R')
+            assert connection.recv(1) == b'D'
+            assert connection.recv(1) == b'', 'owned writer did not exit'
+            result = future.result(timeout=10)
+            assert result == 'joined', 'Git returned while maintenance still owned the archive input'
+            assert not (tmp_path / 'fixture/.git/objects/maintenance.lock').exists()
+            archive = cb.write_deterministic_tar_gz(tmp_path, 'fixture', tmp_path / 'fixture.tar.gz')
+            with tarfile.open(archive) as tar:
+                assert not any(name.endswith('maintenance.lock') for name in tar.getnames())
+        finally:
+            if connection is not None:
+                try:
+                    connection.sendall(b'R')
+                except OSError:
+                    pass
+                assert connection.recv(1) == b'', 'owned writer cleanup failed'
+                connection.close()
+            listener.close()

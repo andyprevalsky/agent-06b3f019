@@ -45,6 +45,39 @@ The existing registered AgentCard org-runtime blackbox now exercises the real ru
 
 Private evidence is under `.context/rca-pr1916-kyc/`: captured schema/head/tail/KYC responses, immutable current read-only RED/GREEN traces, real-source offline replay, original driver snapshots, source hashes, owning regression logs and stability receipts. Raw identity/auth/log/trace content is not published. The original thirteen UNVERIFIED outcomes, cleanup debt and financial unknowns remain on record. Full current-source smoke, normal semantic acceptance and production verification are separate required gates; this local mitigation grants none of them PASS.
 
+## November 11 recurrence during PR1919
+
+The native `agent-payment-setup-resume` driver for run
+`20261111-003553-4136907`, source
+`e9a1565dc2ed4ba1391484629e23d6d0f4d9aced`, reached stack healthy at
+00:46:51 UTC and rejected `not_started` KYC at 00:47:06 UTC. Its setup,
+resolver and provider-runtime blobs match baseline
+`1f1e176a4736b2f948ba2fa5ffb2b119a7edbbc9`. This is an additional
+`Gate: NOT_INTRODUCED` setup defect encountered while deploying the chat
+profile repair; all thirteen native smoke outcomes remain UNVERIFIED.
+
+A separate current read was bound to the original guest's exact source/run
+and injected backend payload SHA256
+`5b30265216e9bd1f0f9502ae48c7e32ab76fec02bf45966735b27fa473e47a7e`.
+The actual default inventory contained 50 of 115 records. Complete offset
+reads returned 100 and 15. The unchanged resolver selected an unready row;
+the exact published pagination repair selected the existing verified preferred
+email identity outside the first page. Both actual source versions also replayed
+the same memoized response set with the same respective selections. The bounded
+status-only capture completed in 18.601 seconds with 55 unique HTTP requests.
+No identity, KYC, account, credential, card, funding or payment write occurred.
+The original historical selected-ID/raw-list trace is unavailable, so the current
+capture does not establish identical historical provider inventory.
+
+The deploy owner reused both published commits `10f8292237e44bb4507ead090edc0da6cc519310`
+and `d713a8d8c66c89238eb2e896ccbcc37147cf5668`. Before applying runtime code,
+the unchanged existing registered regression failed on current source:
+`inventory-0` instead of `inventory-100`. It passed after the exact runtime
+patch. Native smoke, cleanup and production verification remain separate gates.
+Private redacted capture and executable commands are retained under
+`.context/rca-pr1919-smoke-startup/`; owning regression logs are under
+`.context/rca-e388d514/pagination-current-{red,green}.log`.
+
 ## Human feedback
 
 The user prohibits paid AgentCard actions and production auth/environment mutation. Diagnosis used status-only tools and the existing identity; no KYC, account or money action was used as a workaround.

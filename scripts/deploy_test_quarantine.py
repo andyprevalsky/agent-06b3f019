@@ -20,6 +20,7 @@ this module has a distinct name so it never shadows the marker module
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ast
 from datetime import datetime, timezone
 import importlib.util
@@ -56,6 +57,34 @@ BOXES_THREAD = re.compile(r'https://boxes\.dev/thread/[A-Za-z0-9_-]+')
 
 
 # --- progress rows -------------------------------------------------------------------------
+
+def deploy_selection_omissions(root: Path, before: dict, after: dict) -> dict[str, str]:
+    """Omit only catalog-excluded native smoke cases during source refresh.
+
+    This grants no execution or cleanup credit. Ordinary failure quarantines
+    still run and cannot authorize removal from the deploy selection.
+    """
+    removed = set(before['checks']) - set(after['checks'])
+    if not removed:
+        return {}
+    if any(gate.get('category') != 'smoke' or gate.get('native_cloud') is not True
+           for gate in (before, after)):
+        raise ValueError('repair cannot silently remove originally selected checks')
+    rows = json.loads((root / CATALOG).read_text())
+    if not isinstance(rows, list):
+        raise ValueError('deploy quarantine catalog must be an array')
+    reasons = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get('name') not in removed:
+            continue
+        name, reason = row['name'], row.get('deploy_quarantine')
+        if name in reasons or not isinstance(reason, str) or not reason.strip():
+            raise ValueError('removed deploy check lacks an unambiguous exclusion reason')
+        reasons[name] = reason
+    if set(reasons) != removed:
+        raise ValueError('repair cannot silently remove originally selected checks')
+    return reasons
+
 
 def slim(row: dict) -> dict:
     """A bounded copy of one progress row for receipts and state (first detail line only)."""
@@ -117,7 +146,139 @@ def _git_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
                           capture_output=True).returncode == 0
 
 
-def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
+
+def native_case_binding(occurrence: dict, entry: dict, root: Path) -> tuple[dict, dict, dict]:
+    """Bind an explicit RCA definition to its original canonical native receipt and log."""
+    def need(ok, reason):
+        if not ok:
+            raise ValueError('native definition binding: ' + reason)
+
+    def raw(path):
+        need(path.is_file() and path.stat().st_size <= 64 * 1024 * 1024, 'missing or oversized native evidence')
+        return path.read_bytes()
+
+    def sha(value):
+        return hashlib.sha256(value).hexdigest()
+
+    def document(path):
+        value = json.loads(raw(path))
+        need(isinstance(value, dict), 'native document must be an object')
+        return value
+
+    try:
+        saved = entry.get('native_binding')
+        need(not (saved and entry.get('native_case')), 'ambiguous binding request')
+        selected = saved if saved else entry.get('native_case')
+        need(isinstance(selected, dict), 'explicit native case required')
+        if not saved:
+            need(set(selected) == {'definition', 'error', 'log_sha256'}, 'native case fields')
+        definition, error = selected['definition'], selected['error']
+        need(isinstance(definition, str) and re.fullmatch(r'[A-Za-z0-9_./-]+\.py::(?:[A-Za-z_]\w*::)?[A-Za-z_]\w*', definition), 'definition syntax')
+        parts = definition.split('::')
+        relative = Path(parts[0])
+        need(not relative.is_absolute() and '..' not in relative.parts and str(relative) == parts[0]
+             and entry.get('marker') == parts[0], 'definition and marker path')
+        need(type(occurrence.get('round')) is int and occurrence['round'] > 0, 'original round')
+        need(all(isinstance(occurrence.get(k), str) and re.fullmatch(r'[A-Za-z0-9_-]+', occurrence[k])
+                 for k in ('phase', 'gate')), 'original phase/gate')
+        folder = state_dir(root) / 'attempts' / str(occurrence['round']) / occurrence['phase'] / occurrence['gate']
+        need(folder.resolve().is_relative_to(root.resolve()), 'canonical receipt path')
+        receipt, request, worker = (document(folder / n) for n in ('receipt.json', 'request.json', 'result.json'))
+        need(all(d.get('source') == occurrence['source'] and d.get('gate') == occurrence['gate']
+                 and d.get('token') == receipt.get('token') for d in (receipt, request, worker))
+             and isinstance(receipt.get('token'), str) and bool(receipt['token']), 'source/gate/token mismatch')
+        need(receipt.get('complete') is True and receipt.get('executed') is True
+             and receipt.get('native_exit') == 0 and worker.get('complete') is True
+             and request.get('phase') == occurrence['phase'], 'original completed native receipt')
+        for result in (receipt, worker):
+            need(('source_unchanged' not in result or result['source_unchanged'] is True)
+                 and ('interrupted' not in result or result['interrupted'] is False)
+                 and ('cleanup_complete' not in result or result['cleanup_complete'] is True)
+                 and ('native_exit' not in result or type(result['native_exit']) is int
+                      and result['native_exit'] == 0), 'contradictory native worker state')
+        need(receipt.get('worker_result') == str(folder / 'result.json'), 'canonical worker result')
+        need(isinstance(receipt.get('flaky'), list) and all(isinstance(r, dict) for r in receipt['flaky']),
+             'native flaky rows')
+        rows = [r for r in receipt['flaky'] if r.get('unit') == occurrence['unit']]
+        need(len(rows) == 1 and rows[0].get('status') == 'FLAKY' and rows[0].get('attempts') == 2
+             and rows[0].get('log') == occurrence.get('evidence')
+             and rows[0].get('at') == occurrence.get('unit_finished_at'), 'original flaky unit/log identity')
+        worker_root = request.get('worker_root')
+        need(isinstance(worker_root, str) and Path(worker_root).is_absolute()
+             and worker.get('worker_root') == worker_root, 'worker root')
+        remote = worker.get('remote') or {}
+        need(isinstance(remote, dict), 'native remote envelope')
+        need(remote.get('transport') == 'github-actions' and remote.get('event_sha') == occurrence['source']['head'],
+             'verified remote source')
+        files = folder / 'remote-artifact' / 'files'
+
+        def localized(original):
+            need(isinstance(original, str) and str(Path(original)) == original, 'native artifact path')
+            rel = Path(original).relative_to(worker_root)
+            need('..' not in rel.parts, 'artifact traversal')
+            path = files / rel
+            need(path.resolve().is_relative_to(files.resolve()), 'localized artifact escape')
+            return path, str(rel)
+
+        log, log_relative = localized(rows[0]['log'])
+        need(isinstance(worker.get('evidence'), dict), 'native evidence envelope')
+        evidence = worker['evidence'][occurrence['gate']]
+        need(isinstance(evidence, dict), 'native gate evidence')
+        output, output_relative = localized(evidence['remote_log'])
+        need(evidence.get('log') == str(output) and evidence.get('status') == 'PASS'
+             and evidence.get('native_exit') == 0, 'localized worker output')
+        output_raw, log_raw = raw(output), raw(log)
+        need(sha(output_raw) == evidence.get('sha256'), 'worker output hash')
+        need(log_raw and log_raw in output_raw and sha(log_raw) == selected['log_sha256'], 'unbound first-attempt log/hash')
+        text = re.sub(r'\x1b\[[0-9;]*m', '', log_raw.decode('utf-8'))
+        failures = set(re.findall(r'^FAILED ([^\s]+) - (.+)$', text, re.M))
+        summaries = set(re.findall(r'^(\d+ failed(?:, [^\n]+)?) in [\d.]+s$', text, re.M))
+        need(failures == {(definition, error)} and bool(summaries)
+             and all(re.fullmatch(r'1 failed(?:, \d+ passed)?(?:, \d+ warnings?)?', row) for row in summaries)
+             and not re.search(r'^ERROR(?:\s|$)|^!+ Interrupted:', text, re.M),
+             'requires exactly one actual failed pytest definition and no other pytest errors')
+        packet = entry.get('post_merge') or {}
+        need(isinstance(packet, dict), 'native RCA packet')
+        need(packet.get('test') == definition and packet.get('error') == error
+             and packet.get('source') == occurrence['source'], 'RCA packet definition/error/source')
+        proof = {'kind':'nested-pytest-v1', 'source':occurrence['source'], 'gate':occurrence['gate'],
+                 'round':occurrence['round'], 'phase':occurrence['phase'], 'unit':occurrence['unit'],
+                 'token':receipt['token'], 'worker_root':worker_root, 'definition':definition, 'error':error,
+                 'log_relative':log_relative, 'log_sha256':sha(log_raw),
+                 'output_relative':output_relative, 'output_sha256':sha(output_raw),
+                 'receipt_sha256':sha(raw(folder/'receipt.json')), 'request_sha256':sha(raw(folder/'request.json')),
+                 'worker_result_sha256':sha(raw(folder/'result.json'))}
+        need(not saved or saved == proof, 'retained binding changed')
+        return proof, receipt, request
+    except (OSError, KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError('native definition binding: invalid or missing native evidence') from exc
+
+
+def _native_lineage(state: dict | None, occurrence: dict, receipt: dict, request: dict, *, retained: bool) -> None:
+    """Verify the original recorded attempt; a refreshed current plan may differ."""
+    def need(ok):
+        if not ok:
+            raise ValueError('native definition binding: original recorded receipt/plan mismatch')
+
+    need(isinstance(state, dict))
+    attempts = state.get('attempts')
+    need(isinstance(attempts, list) and all(isinstance(a, dict) for a in attempts))
+    need(all(isinstance(a.get('results'), list)
+             and all(isinstance(r, dict) for r in a['results']) for a in attempts))
+    recorded = [r for a in attempts
+                if a.get('source') == occurrence['source'] and a.get('phase') == occurrence['phase']
+                for r in a['results'] if r.get('gate') == occurrence['gate']
+                and r.get('token') == receipt['token']]
+    need(len(recorded) == 1 and recorded[0] == receipt)
+    if not retained:
+        plan = state.get('plan')
+        need(isinstance(plan, dict) and isinstance(plan.get('gates'), list)
+             and all(isinstance(g, dict) for g in plan['gates']))
+        gates = [g for g in plan['gates'] if g.get('name') == occurrence['gate']]
+        need(len(gates) == 1 and gates[0].get('worker_root') == request.get('worker_root'))
+
+
+def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: dict | None = None) -> dict:
     """The recorded /RCA attribution of one FLAKY occurrence, or ValueError.
 
     INTRODUCED: fixed before merge (a commit in HEAD that the flaky source lacked), never quarantined.
@@ -145,7 +306,18 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     path = entry.get('marker')
     if not isinstance(path, str) or not path.strip() or Path(path).is_absolute() or '..' in Path(path).parts:
         raise ValueError('NOT_INTRODUCED requires marker: the repo-relative test file carrying the quarantine marker')
-    found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
+    binding = None
+    if entry.get('native_case') is not None or entry.get('native_binding') is not None:
+        binding, _receipt, _request = native_case_binding(occurrence, entry, root)
+        _native_lineage(state, occurrence, _receipt, _request, retained=bool(entry.get('native_binding')))
+        parts = binding['definition'].split('::')
+        found = [m for m in markers(root, [path]) if m['name'] == parts[-1]
+                 and m.get('owner') == (parts[-2] if len(parts) == 3 else None)
+                 and m['error'] == binding['error'] and m['evidence'] == entry['evidence']]
+    else:
+        found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
+        if not found and entry.get('case') is not None:
+            found = _domain_case_markers(occurrence, entry['case'], root, path)
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
@@ -165,7 +337,37 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     # The attribution travels with the handoff: the dispatched /goal carries the /RCA gate and evidence.
     packet = {**packet, 'attribution': 'NOT_INTRODUCED', 'rca': entry['evidence'], 'occurrence': occurrence['id'],
               'unit': occurrence['unit'], 'gate': occurrence.get('gate'), 'marker': path}
-    return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet}
+    # The recorded attribution keeps its case label: merge revalidates it with attribution_block().
+    return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet,
+            **({'native_binding': binding} if binding else {}),
+            **({'case': entry['case']} if entry.get('case') is not None else {})}
+
+
+_DOMAIN_SINGLE_FAILURE = re.compile(r'\(\d+ passed, 1 failed; 1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
+
+
+def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:
+    """The marker for one recorded case of a blackbox-domain FLAKY unit (e.g. `rose-browser-use`).
+
+    A domain unit names no test function, so the attribution names the recorded case label. It binds
+    only when the flaky first attempt failed exactly that one case and the marker file records that
+    label with exactly one function that carries the quarantine marker.
+    """
+    if not isinstance(case, str) or not re.fullmatch(r'[A-Za-z_]\w*', case):
+        raise ValueError('case must be the recorded blackbox case label')
+    failed = _DOMAIN_SINGLE_FAILURE.findall(str(occurrence.get('detail') or ''))
+    if failed != [case]:
+        raise ValueError(f"case {case} is not the single failed case of FLAKY unit {occurrence['unit']}")
+    try:
+        text = (root / path).read_text(errors='replace')
+    except OSError:
+        return []
+    functions = set(re.findall(r'\brecord(?:_async)?\(\s*([\'"])' + re.escape(case) + r'\1\s*,\s*([A-Za-z_]\w*)\s*\)',
+                               text))
+    names = {name for _quote, name in functions}
+    if len(names) != 1:
+        raise ValueError(f'{path} must record case {case} with exactly one test function')
+    return [m for m in markers(root, [path]) if m['name'] in names and m.get('owner') is None]
 
 
 def link_repair(root: Path, occurrence_id: str, repair: str, paths: list[str] | None = None) -> list[str]:
@@ -192,7 +394,7 @@ def link_repair(root: Path, occurrence_id: str, repair: str, paths: list[str] | 
     return edited
 
 
-def attribution_block(flaky_occurrences: list[dict], root: Path | None = None) -> str | None:
+def attribution_block(flaky_occurrences: list[dict], root: Path | None = None, *, state: dict | None = None) -> str | None:
     """Merge refusal while any FLAKY unit lacks a recorded attribution; with root, it must still hold there."""
     missing = [f for f in flaky_occurrences if not f.get('attribution')]
     if missing:
@@ -201,7 +403,7 @@ def attribution_block(flaky_occurrences: list[dict], root: Path | None = None) -
                 'deploy_test_cycle.py attribute-flaky')
     for occurrence in flaky_occurrences if root is not None else []:
         try:
-            validate_attribution(occurrence, occurrence['attribution'], root)
+            validate_attribution(occurrence, occurrence['attribution'], root, state=state)
         except ValueError as error:
             return f"FLAKY {occurrence['gate']} :: {occurrence['unit']}: {error}"
     return None

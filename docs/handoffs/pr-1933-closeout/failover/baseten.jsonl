@@ -1,0 +1,10 @@
+{"i":1,"host":"BaseTen","ms":1323,"firstContentMs":579,"chunks":13,"contentLen":471,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":2,"host":"BaseTen","ms":1403,"firstContentMs":618,"chunks":11,"contentLen":421,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":0,"host":"BaseTen","ms":5512,"firstContentMs":2513,"chunks":12,"contentLen":461,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":4,"host":"BaseTen","ms":1377,"firstContentMs":894,"chunks":11,"contentLen":416,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":3,"host":"BaseTen","ms":1911,"firstContentMs":765,"chunks":13,"contentLen":443,"reasoningLen":15,"action":"web_search","actionIdx":1}
+{"i":5,"host":"BaseTen","ms":30004,"aborted":true,"chunks":175,"contentLen":11587,"reasoningLen":15,"head":"{\"reasoning\": \"User wants a web fact; route to web_search.\", \"action\": \"web_search\", \"queries\": [\"Parallel Search Turbo published median latency\", \"\\\"Parallel Search Turbo\\\" median latency benchmark\", \"Parallel Search Turbo latency statistics 2026\", \"Parallel Search Turbo performance median latency ","tail":" \"Parallel Search Turbo median latency published blog post 2026\", \"Parallel Search Turbo latency published median whitepaper 2026\", \"Parallel Search Turbo median latency published technical report 202"}
+{"i":7,"host":"BaseTen","ms":1864,"firstContentMs":876,"chunks":11,"contentLen":430,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":6,"host":"BaseTen","ms":1912,"firstContentMs":703,"chunks":12,"contentLen":438,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":8,"host":"BaseTen","ms":2669,"firstContentMs":870,"chunks":18,"contentLen":784,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"provider":"baseten","n":9,"over13s":1,"p50":1911,"max":30004}
