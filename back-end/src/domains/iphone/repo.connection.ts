@@ -13,6 +13,7 @@ import {
 import { setupProgress } from '../../providers/phoneSetupVerification';
 import { resumedPrivacy } from './privacy';
 import * as leases from './repo';
+import { accessRequested } from './repo.accessRequest';
 import { IPhoneError, type IPhoneDevice, type Transaction } from './types';
 
 // A paused setup agent is not driving setup (and no longer holds the phone), so it must not
@@ -37,8 +38,9 @@ async function withProgress(
   device: IPhoneDevice | null,
   state: SetupState | null
 ) {
+  const requested = await accessRequested(tx, userId);
   if (dto.status === 'not_connected' || device === null || state === null)
-    return { ...dto, setupProgress: null, setupTaskId: null };
+    return { ...dto, accessRequested: requested, setupProgress: null, setupTaskId: null };
   const task =
     dto.setupAgentId === null
       ? null
@@ -49,6 +51,7 @@ async function withProgress(
         });
   return {
     ...dto,
+    accessRequested: requested,
     setupProgress: setupProgress(connectionVerification(device, state), {
       status: dto.status,
       setupState: device.setupState,
@@ -88,9 +91,10 @@ export async function connection(userId: string) {
 }
 export async function reserve(userId: string, expectedRevision: number, requestKey: string) {
   return leases.transaction(async (tx) => {
-    const { device, enabled } = await leases.lockedDevice(tx, userId);
-    if (!enabled || !(await leases.accountPermitted(tx, userId)))
+    if (!(await leases.accountPermitted(tx, userId)))
       throw new IPhoneError(403, 'iPhone access denied');
+    const { device, enabled } = await leases.lockedDevice(tx, userId);
+    if (!enabled) throw new IPhoneError(403, 'iPhone access denied');
     const state = setupState(device.setupEncrypted);
     const owner = await tx.user.findUniqueOrThrow({ where: { userId }, select: { phone: true } });
     if (state.expectedPhone !== undefined && state.expectedPhone !== owner.phone)

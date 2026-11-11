@@ -4,7 +4,8 @@
  *   section header "IPHONE" · row: app-icon tile · "iPhone" · right-side status + action
  *
  *   [LOADING]        "Checking…" (Connect waits for the first read)
- *   [DISABLED]       account not enabled/configured → mailto copy under the row, no action
+ *   [DISABLED]       "Request access" → persists request + admin SMS → [ACCESS_REQUESTED]
+ *   [ACCESS_REQUESTED] disabled "Access requested"; survives reload until account enablement
  *   [NOT_CONNECTED]  "Connect" ──click──> POST /iphone/connect (one request key)
  *                      ok → [SETTING_UP] + opens the Phone app in DEVICE VIEW (watch boot-up)
  *                      error → inline error, stays [NOT_CONNECTED]
@@ -37,7 +38,7 @@ function AppleIcon() {
     <svg
       data-testid="iphone-apple-icon"
       aria-hidden="true"
-      viewBox="0 0 24 24"
+      viewBox="2.5 -1 24 24"
       className="fill-current"
     >
       <path d="M16.2 3.2c.7-.9 1.1-2 1-3.2-1 .1-2.3.7-3 1.6-.7.8-1.2 2-1 3.1 1.1.1 2.3-.6 3-1.5Zm3.6 9.5c0-2.4 2-3.6 2.1-3.7-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-2-1-3.3-.9-1.7 0-3.2 1-4.1 2.4-1.8 3-.5 7.6 1.2 10 .8 1.2 1.8 2.5 3.1 2.5 1.3-.1 1.7-.8 3.3-.8 1.5 0 1.9.8 3.3.8 1.4 0 2.2-1.2 3-2.4 1-1.4 1.4-2.7 1.4-2.8-.1 0-2.8-1.1-2.8-4.1Z" />
@@ -48,14 +49,14 @@ function AppleIcon() {
 const STATUS_CLASSES = 'shrink-0 text-[12px] text-muted-foreground';
 
 export default function IPhoneConnectionSection() {
-  const { status, busy, error, connect } = useIPhoneConnection();
+  const { status, busy, error, connect, requestAccess, refresh } = useIPhoneConnection();
   const launcher = usePhoneLauncher();
   const roseDesktop = useRoseDesktop();
   const phoneApp = roseDesktop && launcher !== null ? launcher : null;
   const unavailable = status !== null && (!status.enabled || !status.configured);
-  const ready = status?.status === 'ready';
-  const settingUp = status?.status === 'setting_up';
-  const reauth = status?.status === 'needs_reauth';
+  const ready = !unavailable && status?.status === 'ready';
+  const settingUp = !unavailable && status?.status === 'setting_up';
+  const reauth = !unavailable && status?.status === 'needs_reauth';
   const label =
     status === null
       ? error === null
@@ -70,7 +71,7 @@ export default function IPhoneConnectionSection() {
             : reauth
               ? 'Needs reauth'
               : null;
-  const canConnect = !ready && !settingUp && !unavailable;
+  const canConnect = status !== null && !ready && !settingUp && !unavailable;
   const onConnect = async () => {
     const started = await connect();
     if (started !== null && started.status === 'setting_up') phoneApp?.openPhoneDevice();
@@ -132,20 +133,38 @@ export default function IPhoneConnectionSection() {
               )}
             </button>
           )}
+          {unavailable && (
+            <button
+              type="button"
+              className={ACTION_CLASSES}
+              disabled={busy || status.accessRequested}
+              onClick={() => void requestAccess()}
+              aria-label={
+                status.accessRequested ? 'iPhone access requested' : 'Request iPhone access'
+              }
+            >
+              {status.accessRequested
+                ? 'Access requested'
+                : busy
+                  ? 'Requesting…'
+                  : 'Request access'}
+            </button>
+          )}
+          {status === null && error !== null && (
+            <button
+              type="button"
+              className={ACTION_CLASSES}
+              onClick={() => void refresh()}
+              aria-label="Retry iPhone connection"
+            >
+              Retry
+            </button>
+          )}
         </div>
         {settingUp && status !== null && (
           <div className="ml-[46px] mt-2">
             <IPhoneSetupProgress connection={status} variant="inline" />
           </div>
-        )}
-        {unavailable && (
-          <p className="ml-[46px] mt-1 text-xs text-muted-foreground">
-            To enable iPhone access, email{' '}
-            <a className="underline" href="mailto:andy@roselabs.ai">
-              andy@roselabs.ai
-            </a>
-            .
-          </p>
         )}
         {error && (
           <p role="alert" className="ml-[46px] mt-1 text-xs text-destructive dark:text-red-300">

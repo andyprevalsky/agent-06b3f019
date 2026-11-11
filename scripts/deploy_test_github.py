@@ -926,6 +926,35 @@ def remote_bundle(args) -> int:
         for row in (json.loads((out / 'result.json').read_text()).get('evidence') or {}).values():
             if isinstance(row, dict):
                 paths.update(v for k, v in row.items() if isinstance(v, str) and v.startswith(str(root) + '/'))
+    # The native dump producers both write <checkout>/.llm-dumps/<agent>/*.json.
+    # Retain existing dev dumps only; never enable dumping or read session configs.
+    dumps = root / '.llm-dumps'
+    if dumps.is_dir() and not dumps.is_symlink():
+        paths.update(str(p) for p in dumps.glob('*/*.json') if p.is_file())
+    # run.sh publishes actual service paths; local_worker_supervisor.py writes
+    # worker 0 there and additional streams as <stem>.<index><suffix>.
+    service_logs = {root / rel for rel in SERVICE_LOGS}
+    for manifest in (root / '.context').rglob('services.json'):
+        if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 65536:
+            continue
+        try:
+            document = json.loads(manifest.read_text())
+            logs = document.get('logs', {}) if isinstance(document, dict) else {}
+            for name in ('backend', 'frontend', 'worker'):
+                raw = logs.get(name) if isinstance(logs, dict) else None
+                if isinstance(raw, str):
+                    path = Path(raw)
+                    service_logs.add(path if path.is_absolute() else root / path)
+        except (OSError, ValueError):
+            continue
+    for path in tuple(service_logs):
+        if path.name and root in path.absolute().parents:
+            for sibling in path.parent.glob(f'{path.stem}.*{path.suffix}'):
+                index = sibling.name[len(path.stem) + 1:len(sibling.name) - len(path.suffix) or None]
+                if index.isdigit():
+                    service_logs.add(sibling)
+    paths.update(str(p) for p in service_logs if p.is_file())
+    # Existing dumps and all actual service streams outrank bulk cache JSON.
     evidence = frozenset(paths)
     # Everything a gate leaves for RCA: its .context state and logs plus the stack's service logs.
     # Caches and dependency trees stay behind; per-file and total caps bound the artifact.
@@ -939,10 +968,18 @@ def remote_bundle(args) -> int:
         if (root / rel).is_dir():
             paths.update(str(p) for p in (root / rel).rglob('*')
                          if p.is_file() and not p.is_symlink() and p.suffix in ('.log', '.json', '.txt'))
-    total, skipped = 0, []
+    total, skipped, captured = 0, [], []
     for raw in sorted(paths, key=lambda p: bundle_priority(Path(p), evidence)):
         path = Path(raw)
-        if not path.is_file() or root not in path.resolve().parents:
+        if not path.is_file() or root not in path.absolute().parents or root not in path.resolve().parents:
+            continue
+        relative = path.absolute().relative_to(root)
+        # Reject every symlink component, including aliases to in-checkout secrets.
+        if any((root.joinpath(*relative.parts[:i])).is_symlink() for i in range(1, len(relative.parts) + 1)):
+            skipped.append({'path': str(relative), 'reason': 'symlink'})
+            continue
+        if any(part in {'.rose', '.codex'} or part == '.env' or part.startswith('.env.') for part in relative.parts):
+            skipped.append({'path': str(relative), 'reason': 'private_config'})
             continue
         size = path.stat().st_size
         if size > BUNDLE_FILE_BYTES or total + size > BUNDLE_TOTAL_BYTES:
@@ -951,8 +988,10 @@ def remote_bundle(args) -> int:
         target = artifact / 'files' / path.resolve().relative_to(root)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
+        captured.append({'path': str(target.relative_to(artifact / 'files')), 'bytes': size,
+                         'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
         total += size
-    (artifact / 'bundle.json').write_text(json.dumps({'bytes': total, 'skipped': skipped}, indent=1))
+    (artifact / 'bundle.json').write_text(json.dumps({'bytes': total, 'skipped': skipped, 'captured': captured}, indent=1))
     publish_done(out, artifact)
     return 0
 

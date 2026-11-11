@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto';
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+import { quarantine } from '../src/tests/gate-progress/quarantine';
+
 import {
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
@@ -306,10 +308,25 @@ test.describe('chat full-lifecycle latency', () => {
     expect(await startedAt).toBeGreaterThanOrEqual(delayStartedAt + 200);
   });
 
+  // NOT_INTRODUCED live web-search flake (PR #1915 deploy); only the web_search instance is marked.
+  const WEB_SEARCH_TITLE =
+    'web_search: five full-lifecycle samples finish and report latency targets';
+  const quarantineWebSearch = <Context>(fn: (context: Context) => Promise<void>) =>
+    quarantine(
+      {
+        since: '2026-11-11',
+        repair: 'pending-handoff:94df2671c16646b2a03733c471396977',
+        error: 'Error: web_search sample 2 missed milestones',
+        evidence: '.context/rca-playwright/final-ddd3/latency-web-search/findings.json',
+      },
+      fn,
+      {
+        unit: `tests-e2e/chat-lifecycle-latency.spec.ts > chat full-lifecycle latency > ${WEB_SEARCH_TITLE}`,
+      },
+    );
+
   for (const path of selectedPaths()) {
-    test(`${path.id}: five full-lifecycle samples finish and report latency targets`, async ({
-      page,
-    }) => {
+    const samples = async ({ page }: { page: Page }): Promise<void> => {
       test.setTimeout(PATH_TEST_TIMEOUT_MS);
       const recorder = attachRecorder(page);
       const results: LifecycleSample[] = [];
@@ -475,6 +492,9 @@ test.describe('chat full-lifecycle latency', () => {
         }
       }
       expect(hasUncaughtErrors(recorder), 'uncaught errors during lifecycle samples').toEqual([]);
-    });
+    };
+    test(`${path.id}: five full-lifecycle samples finish and report latency targets`, async ({
+      page,
+    }) => (path.id === 'web_search' ? quarantineWebSearch(samples)({ page }) : samples({ page })));
   }
 });
