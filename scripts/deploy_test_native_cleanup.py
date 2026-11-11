@@ -1578,8 +1578,8 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
     return result
 
 
-def historical_successor_gate(witness, successor, request, current_gate):
-    """Recover the exact admitted inputs; only selection explanation may differ now."""
+def historical_successor_gate(witness, successor, request, current_gate, root=None):
+    """Authenticate old admission; current catalog omissions grant launch authority only."""
     from deploy_test_cycle import bounded_read, digest, sha_file, MAX_RECEIPT_BYTES
     from deploy_test_historical_custody import state_identity
     need(isinstance(witness, dict) and set(witness) ==
@@ -1603,18 +1603,50 @@ def historical_successor_gate(witness, successor, request, current_gate):
     candidates = [g for g in snapshot['plan']['gates'] if g.get('name') == current_gate['name']]
     need(len(candidates) == 1, 'historical successor gate identity')
     historical = candidates[0]
+    old_checks, new_checks = historical.get('checks'), current_gate.get('checks')
+    need(isinstance(old_checks, list) and isinstance(new_checks, list)
+         and all(isinstance(k, str) for k in old_checks + new_checks)
+         and len(set(old_checks)) == len(old_checks) and len(set(new_checks)) == len(new_checks),
+         'historical successor check inventory')
+    if old_checks != new_checks:
+        from deploy_test_quarantine import deploy_selection_omissions
+        need(root is not None, 'historical successor omission requires catalog')
+        removed = deploy_selection_omissions(root, historical, current_gate)
+        need(removed and new_checks == [k for k in old_checks if k not in removed],
+             'historical successor ordered catalog subset')
     need(set(historical) == set(current_gate)
          and all(isinstance(g.get('selection_evidence'), list)
              and all(isinstance(reason, str) for reason in g['selection_evidence'])
              for g in (historical, current_gate))
-         and digest({k: v for k, v in historical.items() if k != 'selection_evidence'}) ==
-             digest({k: v for k, v in current_gate.items() if k != 'selection_evidence'}),
+         and digest({k: v for k, v in historical.items() if k not in {'selection_evidence', 'checks'}}) ==
+             digest({k: v for k, v in current_gate.items() if k not in {'selection_evidence', 'checks'}}),
          'historical successor execution contract changed')
     need(successor.get('execution_binding') == {
         'contract_digest': digest(historical), 'environment': snapshot.get('environment'),
         'input_fingerprint': snapshot.get('input_fingerprints', {}).get(current_gate['name'])},
         'historical successor execution inputs changed')
     return historical
+
+
+def historical_successor_runtime(root, admitted_gate, request, binding):
+    """Bind old runtime hashes to the sealed native fingerprint, using Git's old file map."""
+    from fnmatch import fnmatchcase
+    from deploy_test_cycle import digest, native_inputs, source_files
+    runtime = request.get('custody_runtime')
+    allowed = {'.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
+               'front-end/.env', 'front-end/.env.local'}
+    need(isinstance(runtime, dict) and set(runtime) <= allowed
+         and all(isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) for value in runtime.values()),
+         'historical successor runtime identity')
+    _, files = native_inputs(root, request['source']['head'], source_files(root))
+    # Same input object as input_fingerprints(); no environment bytes are read or
+    # restored from history. A dirty historical source cannot pass this commit reconstruction.
+    fingerprint = digest({'files': {p: value for p, value in files.items()
+                           if any(fnmatchcase(p, glob) for glob in admitted_gate.get('input_paths', ['*']))},
+        'runtime_config': runtime, 'command': admitted_gate['command'], 'env': admitted_gate.get('env', {}),
+        'worker': admitted_gate.get('worker'), 'checks': admitted_gate['checks'],
+        'environment': binding['environment']})
+    need(fingerprint == binding['input_fingerprint'], 'historical successor runtime fingerprint')
 
 
 def clean_isolated_successor(state, prior, original, successor, renewal_witness=None):
@@ -1634,11 +1666,17 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
          and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
     folder = Path(successor['log']).parent
     request = bounded_read(folder / 'request.json', 'successor request')
-    admitted_gate = (historical_successor_gate(renewal_witness, successor, request, gate)
+    root = Path(prior['owner']['worker_root'])
+    admitted_gate = (historical_successor_gate(renewal_witness, successor, request, gate, root)
                      if renewal_witness is not None else gate)
     binding = successor.get('execution_binding', {})
-    need(binding.get('contract_digest') == digest(admitted_gate) and binding.get('environment') == state['environment']
+    need(binding.get('contract_digest') == digest(admitted_gate)
+         and (renewal_witness is not None or binding.get('environment') == state['environment'])
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
+    if binding.get('environment') != state['environment'] or admitted_gate['checks'] != gate['checks']:
+        import deploy_test_historical_custody as h
+        current_inputs = h.binding(state['plan'], root)
+        need(current_inputs == {k: state.get(k) for k in current_inputs}, 'successor fresh admission inputs')
     folder = Path(successor['log']).parent
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     request = bounded_read(folder / 'request.json', 'successor request')
@@ -1648,7 +1686,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
          and all(isinstance(value, dict) for value in skips.values())
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
-         and set(checks) | set(skips) == set(gate['checks'])
+         and set(checks) | set(skips) == set(admitted_gate['checks'])
          and all(v.get('source') == successor['source'] for v in skips.values()), 'successor full inventory')
     root = Path(prior['owner']['worker_root'])
     native_root = root / '.context/deploy-cloud' / hashlib.sha256(successor['token'].encode()).hexdigest()
@@ -1700,9 +1738,14 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
         def authority(values):
             return {k: {field: value for field, value in row.items() if field != 'current_binding'}
                     for k, row in c.qualification_identity(values).items()}
+        runtime_bound = request.get('custody_runtime') == h.runtime_identity(root)
+        if not runtime_bound:
+            need(renewal_witness is not None, 'historical successor runtime witness required')
+            historical_successor_runtime(root, admitted_gate, request, binding)
+            runtime_bound = True
         need(authority(qualified) == authority(custody)
-             and checks == [k for k in gate['checks'] if k not in skips]
-             and request.get('custody_runtime') == h.runtime_identity(root)
+             and checks == [k for k in admitted_gate['checks'] if k not in skips]
+             and runtime_bound
              and isinstance(request.get('custody_child_environment'), str)
              and re.fullmatch('[0-9a-f]{64}', request['custody_child_environment'])
              and digest(successor.get('custody_skips')) == digest(custody)
@@ -1715,7 +1758,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-         and successor.get('case_complete') == {k: k not in custody for k in gate['checks']}
+         and successor.get('case_complete') == {k: k not in custody for k in admitted_gate['checks']}
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')
     reference = successor['native_cleanup_reference']
@@ -1954,19 +1997,79 @@ def recovered_isolated_successor_v1(state, prior, original, successor):
         need(hashlib.sha256(sealed(path)).hexdigest() == expected, 'negative successor changed during validation')
 
 
-def isolated_successor(state, prior):
+def isolated_successor(state, prior, renewal_witness=None):
     """A known pre-dispatch source refusal is not a newer native execution.
 
     Keep that failed attempt as the latest coverage result. Only renewal may
     inspect its immediate native predecessor, whose full validation is unchanged.
-    This exact six-field row is emitted by run_phase when isolated_request fails
-    before it writes a request or starts the native adapter.
+    These exact six-field rows are emitted by run_phase for pre-dispatch
+    exceptions. The early custody refusal also requires an absent gate namespace
+    and authenticated sibling receipts; neither path creates execution credit.
     """
     rows = [(attempt, row) for attempt in state.get('attempts', [])
             for row in attempt.get('results', []) if row.get('gate') == prior['gate']]
     if not rows:
         return None
     attempt, latest = rows[-1]
+    if (set(latest) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+            and latest.get('reason') == 'historical custody: current source not frozen'):
+        from deploy_test_cycle import bounded_read, receipt_owner, validate_result
+        need(set(attempt) == {'phase', 'stale', 'results'} and attempt['stale'] is True
+             and attempt['phase'] in {'initial', 'focused', 'failed-gates', 'final'}
+             and latest['status'] == 'FAIL' and latest['complete'] is False and len(rows) >= 2,
+             'custody source refusal identity')
+        previous = rows[-2][1]
+        need(previous.get('executed') is True and previous.get('complete') is True,
+             'custody source refusal requires immediate complete native predecessor')
+        gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+        root = Path(prior['owner']['worker_root'])
+        request = bounded_read(Path(previous['log']).parent / 'request.json', 'refusal predecessor request')
+        admitted = historical_successor_gate(renewal_witness, previous, request, gate, root)
+        authorities = [prior, *state.get('reconciled_owner_history', [])]
+        need(latest['cases'] == dict.fromkeys(admitted['checks'], 'UNVERIFIED')
+             and any(e.get('token') == prior['token'] and e.get('proof', {}).get('receipt_sha256') == prior['proof']['receipt_sha256']
+                     and e.get('validation_source') == latest['source'] for e in authorities),
+             'custody source refusal inventory/source')
+        # The exception precedes UUID/folder creation. Authenticate the enclosing
+        # attempt from its retained sibling request/receipt, then require absence
+        # of this gate's namespace. A token-bearing or partial native row never enters here.
+        peers = [r for r in attempt['results'] if r is not latest]
+        need(peers and len({r.get('gate') for r in attempt['results']}) == len(attempt['results']),
+             'custody source refusal enclosing attempt')
+        phase_folders = set()
+        for peer in peers:
+            folder = Path(peer.get('log', '')).parent
+            need(folder.is_absolute() and folder.resolve() == folder and root / '.context' in folder.parents
+                 and folder.name == peer.get('gate') and folder.parent.name == attempt['phase']
+                 and folder.parent.parent.name.isdigit() and folder.parent.parent.parent.name == 'attempts'
+                 and peer.get('source') == latest['source'] and isinstance(peer.get('token'), str) and re.fullmatch('[0-9a-f]{32}', peer['token'])
+                 and peer.get('executed') is True and peer.get('complete') is True
+                 and type(peer.get('native_exit')) is int and peer['native_exit'] in (0, 1)
+                 and peer.get('cancelled') is False and peer.get('timed_out') is False
+                 and peer.get('lingering_group') is False and not peer.get('cleanup_owner')
+                 and receipt_owner(peer['gate'], peer) is None
+                 and finite(peer.get('started_at')) and finite(peer.get('finished_at'))
+                 and peer['started_at'] <= peer['finished_at']
+                 and bounded_read(folder / 'receipt.json', 'refusal sibling receipt') == peer,
+                 'custody source refusal sibling identity')
+            peer_request = bounded_read(folder / 'request.json', 'refusal sibling request')
+            need(peer_request.get('phase') == attempt['phase']
+                 and all(peer_request.get(k) == peer.get(k) for k in ('token', 'source', 'gate')),
+                 'custody source refusal sibling request')
+            result_path = folder / 'result.json'
+            need(peer.get('worker_result') == str(result_path), 'custody source refusal sibling result locator')
+            result = bounded_read(result_path, 'refusal sibling result')
+            cases, complete = validate_result(result, peer_request, peer['native_exit'], invalid_process=False)
+            need(complete and not result.get('cleanup_owner')
+                 and peer.get('cases') == {**dict.fromkeys(peer_request.get('skips', {}), 'SKIP'), **cases}
+                 and peer.get('case_complete') == dict.fromkeys(peer['cases'], True)
+                 and peer.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
+                 'custody source refusal sibling terminal result')
+            phase_folders.add(folder.parent)
+        need(len(phase_folders) == 1, 'custody source refusal attempt namespace')
+        absent = phase_folders.pop() / prior['gate']
+        need(not absent.exists() and not absent.is_symlink(), 'custody source refusal has request namespace')
+        return previous
     if (set(latest) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
             and latest.get('reason') == 'native cleanup: next source/inventory binding'):
         gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
@@ -2009,7 +2112,7 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
-    latest = isolated_successor(state, prior)
+    latest = isolated_successor(state, prior, renewal_witness)
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             need(renewal_witness is None, 'historical witness requires complete successor')
