@@ -217,7 +217,10 @@ fi
 
 # The UI stays local, but real code agents need a public backend callback.
 # Bind a run-scoped tunnel without reserving or falling back to the shared workspace name.
-BENCHMARK_SKIP_PUBLIC_TUNNEL=0 BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1 \
+# Skip trycloudflare and take run.sh's run-scoped ngrok endpoint directly: on Blacksmith
+# gate VMs no quick tunnel routed on 2026-11-11 (3 x 45 s probes + 60 s backoff = 3.5 min
+# per run), pushing the gate past its 1800 s deadline after its tests had passed.
+BENCHMARK_SKIP_PUBLIC_TUNNEL=0 BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1 CLOUDFLARE_TUNNEL_MAX_ATTEMPTS=0 \
 DISABLE_FAST_MODE_PROXY=1 BENCHMARK_PUBLIC_TUNNEL_RUN_ID="${DEPLOY_SEMANTIC_TOKEN:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}" \
 BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
     bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &

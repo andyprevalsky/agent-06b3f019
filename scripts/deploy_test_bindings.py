@@ -88,14 +88,7 @@ def generate(template, inventory, root):
             command = [sys.executable, str(root / GITHUB_LAUNCHER), *github_argv(slot['runner'], script, timeout)]
         elif mode != 'local-isolated':
             raise ValueError('inventory must name an existing local-isolated, SSH, boxes-thread or github-actions worker')
-        if gate.get('native_live_probes'):
-            from run_deploy_live_probes import recipe as live_recipe
-            original = {'command': gate['command'], 'cwd': gate.get('cwd', '.'),
-                        'env': {**gate.get('env', {}), **slot.get('env', {})}, 'aggregate': True}
-            if 'timeout_seconds' in gate:
-                original['timeout_seconds'] = gate['timeout_seconds']
-            recipe = live_recipe(root, original)
-        elif 'recipe' in slot:
+        if 'recipe' in slot:
             recipe = slot['recipe']
         else:
             if len(gate['checks']) != 1:

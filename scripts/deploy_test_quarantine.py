@@ -337,7 +337,7 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
     # The attribution travels with the handoff: the dispatched /goal carries the /RCA gate and evidence.
     packet = {**packet, 'attribution': 'NOT_INTRODUCED', 'rca': entry['evidence'], 'occurrence': occurrence['id'],
               'unit': occurrence['unit'], 'gate': occurrence.get('gate'), 'marker': path}
-    # A domain-case binding keeps its case so attribution_block can re-validate it at merge.
+    # The recorded attribution keeps its case label: merge revalidates it with attribution_block().
     return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet,
             **({'native_binding': binding} if binding else {}),
             **({'case': entry['case']} if entry.get('case') is not None else {})}

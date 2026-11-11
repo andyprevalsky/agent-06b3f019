@@ -950,6 +950,12 @@
   },
   {
     "name": "background-agent-message-smoke",
+    "quarantine": {
+      "since": "2026-11-10",
+      "repair": "pending-handoff:484cdec81d894f0899d8af1ec466e4d4",
+      "error": "Timeout after 182s (task timeout=180s) | Investigate: python agents/benchmarks/agent_latency.py e7d8ba91-c197-472a-9eea-1d7cf3a8877f | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "docs/rca/cases/2026-11-10-background-message-completion-exceeded-deadline.md; original b865 native run e7d8ba91-c197-472a-9eea-1d7cf3a8877f, full private trace and source-exclusion review retained"
+    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,

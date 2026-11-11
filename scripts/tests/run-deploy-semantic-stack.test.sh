@@ -56,6 +56,10 @@ require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BEN
 require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to the Step 5 WORKER_PROCESSES=8"
 [ "$(grep -Ec '(^|[[:space:]])WORKER_PROCESSES=' "$SCRIPT")" = 1 ] || fail "only the defaulted override may set the stack's WORKER_PROCESSES"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
+# 2026-11-11 (PR #1940): unroutable trycloudflare quick tunnels cost every Blacksmith run ~3.5 min and the
+# gate's 1800 s deadline cancelled runs whose UI and latency stages had passed. Go straight to run.sh's
+# run-scoped ngrok endpoint (zero quick-tunnel attempts), never the shared workspace domain.
+require_text "$SCRIPT" 'BENCHMARK_SKIP_PUBLIC_TUNNEL=0 BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1 CLOUDFLARE_TUNNEL_MAX_ATTEMPTS=0' "the semantic stack must not spend its gate deadline on quick-tunnel retries"
 # 2026-11-07: every deploy's gate VM derived the same reserved ngrok domain, so a
 # concurrent deploy holding it killed this stack before readiness. No semantic spec
 # uses a public origin: the stack must start without a tunnel.

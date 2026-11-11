@@ -85,7 +85,12 @@ async function startChatMode(
   // The tree's GitHub repo is created when it first starts a code session
   // (ensureAgentTreeRepo), not for every chat: most chats never write code, and
   // every create shares one account-wide GitHub rate limit.
-  handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
+  handleChatMessage({
+    agentId: agentDbId,
+    rootAgentId: agentDbId,
+    userId,
+    model: body.model,
+  }).catch((err: unknown) => {
     void recoverChatHandlerFailure({
       agentId: agentDbId,
       userId,

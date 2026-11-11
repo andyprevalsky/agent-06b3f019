@@ -166,14 +166,16 @@ def standard_template(host: tuple = ()) -> dict:
     for gate in gates:
         if gate['name'] == 'eslint':
             gate.update(command=[sys.executable, 'scripts/check_deploy_static.py', 'lint'], cwd='.')
+        if gate['name'] == 'live-probes':
+            # One case per probe (deploy_gates.live_probes_recipe): a single aggregate exit is
+            # UNVERIFIED, so one provider-side probe failure could never be attributed on its own.
+            from run_deploy_live_probes import PROBE_NAMES
+            gate.update(checks=list(PROBE_NAMES))
         if gate['name'] == 'backend-coverage-blackbox':
             from deploy_test_backend import checks_for, selection
             gate.update(checks=checks_for(selection(ROOT)[1]), native_backend=True, case_protocol=True,
                         runner_command=gate['command'], cwd='.',
                         command=[sys.executable, str(ROOT / 'scripts/deploy_test_backend.py')])
-        if gate['name'] == 'live-probes':
-            from run_deploy_live_probes import recipe
-            gate.update(checks=list(recipe()['cases']), native_live_probes=True, case_protocol=True)
         if gate['name'] == 'smoke':
             tasks = subprocess.run(['bash', 'scripts/run-predeploy-cloud', '--list'], cwd=ROOT,
                                    check=True, capture_output=True, text=True,

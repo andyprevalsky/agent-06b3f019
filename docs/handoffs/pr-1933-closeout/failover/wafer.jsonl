@@ -1,0 +1,10 @@
+{"i":2,"host":"Wafer","ms":2388,"firstContentMs":567,"chunks":41,"contentLen":398,"reasoningLen":18,"action":"web_search","actionIdx":1}
+{"i":1,"host":"Wafer","ms":2412,"firstContentMs":502,"chunks":39,"contentLen":439,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":0,"host":"Wafer","ms":2479,"firstContentMs":592,"chunks":44,"contentLen":472,"reasoningLen":21,"action":"web_search","actionIdx":1}
+{"i":4,"host":"Wafer","ms":2158,"firstContentMs":516,"chunks":32,"contentLen":309,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":3,"host":"Wafer","ms":2312,"firstContentMs":671,"chunks":35,"contentLen":395,"reasoningLen":11,"action":"web_search","actionIdx":1}
+{"i":5,"host":"Wafer","ms":3166,"firstContentMs":496,"chunks":41,"contentLen":485,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":6,"host":"Wafer","ms":2630,"firstContentMs":730,"chunks":41,"contentLen":494,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":8,"host":"Wafer","ms":2887,"firstContentMs":733,"chunks":45,"contentLen":523,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":7,"host":"Wafer","ms":30003,"aborted":true,"chunks":440,"contentLen":6884,"reasoningLen":11,"head":"{\"reasoning\": \"This needs current web information about a specific product's published metric. Single web search suffices.\", \"action\": \"web_search\", \"queries\": [\"Parallel Search Turbo published median latency\", \"\\\"Parallel Search Turbo\\\" median latency benchmark\", \"Parallel Search Turbo latency perf","tail":"urbo median latency CHATWEBSEARCH0a9278b8 firm info\", \"Parallel Search Turbo latency benchmarks web CHATWEBSEARCH0a9278b8 final\", \"Parallel Search Turbo median latency CHATWEBSEARCH0a9278b8 final word"}
+{"provider":"wafer","n":9,"over13s":1,"p50":2479,"max":30003}

@@ -4,23 +4,36 @@
 Independent probes start together. A probe with ``after`` starts once that
 probe exits, pass or fail, so two ``run-blackbox-tests.sh`` setups never race
 the same local database's schema sync and runtime SQL hooks.
+
+``--only NAME`` runs one probe by itself. The staged /deploy cycle binds each
+probe as its own case (deploy_gates.live_probes_recipe) and runs those cases
+one after another in PROBE_NAMES order, which keeps every ``after`` ordering, so
+one probe's result is recorded on its own instead of as one aggregate exit.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
-import hashlib
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
+# deploy_commands() names in an order that satisfies every ``after`` edge when run one by one.
+PROBE_NAMES = (
+    "credential-health",
+    "amplitude-live",
+    "chat-router-failover-live",
+    "browser-provider-live",
+    "report-bug-storage-live",
+    "migration-preflight",
+)
 
 
 def report_progress(probe: str, exit_code: int) -> None:
@@ -49,11 +62,11 @@ def report_progress(probe: str, exit_code: int) -> None:
         return
 
 
-def workspace_tsx(root: Path = ROOT) -> str:
+def workspace_tsx() -> str:
     """Return the installed tsx binary. Do not call through npx: the Cloud
     VM's /exec-daemon/npx (npm 11) crashes before the local binary starts.
     """
-    for candidate in (root / "node_modules/.bin/tsx", root / "back-end/node_modules/.bin/tsx"):
+    for candidate in (ROOT / "node_modules/.bin/tsx", ROOT / "back-end/node_modules/.bin/tsx"):
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     raise FileNotFoundError("tsx is not installed in node_modules/.bin")
@@ -138,7 +151,7 @@ def run_commands(commands: Sequence[Command]) -> dict[str, int]:
     return {command.name: results[command.name] for command in commands}
 
 
-def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
+def deploy_commands() -> tuple[Command, ...]:
     return (
         Command(
             "credential-health",
@@ -147,10 +160,10 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "../scripts/run-deploy-stage",
                 "credential-health",
                 "--",
-                workspace_tsx(root),
+                workspace_tsx(),
                 "src/tests/blackbox/integration-health.blackbox.ts",
             ),
-            root / "back-end",
+            ROOT / "back-end",
         ),
         Command(
             "amplitude-live",
@@ -166,7 +179,7 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "scripts/run-blackbox-tests.sh",
                 "admin-health",
             ),
-            root / "back-end",
+            ROOT / "back-end",
         ),
         Command(
             "chat-router-failover-live",
@@ -182,7 +195,7 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "scripts/run-blackbox-tests.sh",
                 "chat-router-failover",
             ),
-            root / "back-end",
+            ROOT / "back-end",
             after="amplitude-live",
         ),
         # Real-internet provider cases kept out of the hermetic coverage gate.
@@ -201,7 +214,7 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "scripts/run-blackbox-tests.sh",
                 "browser-provider",
             ),
-            root / "back-end",
+            ROOT / "back-end",
             after="chat-router-failover-live",
         ),
         Command(
@@ -218,7 +231,7 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "scripts/run-blackbox-tests.sh",
                 "report-bug",
             ),
-            root / "back-end",
+            ROOT / "back-end",
             after="browser-provider-live",
         ),
         # Read-only: EXPLAINs and counts every migration production has not applied
@@ -230,91 +243,23 @@ def deploy_commands(root: Path = ROOT) -> tuple[Command, ...]:
                 "../scripts/run-deploy-stage",
                 "migration-preflight",
                 "--",
-                workspace_tsx(root),
+                workspace_tsx(),
                 "scripts/migration-preflight.ts",
             ),
-            root / "back-end",
+            ROOT / "back-end",
         ),
     )
 
 
-def recipe(root: Path = ROOT, aggregate: dict | None = None) -> dict:
-    """The same six probes, with portable paths and their original dependencies."""
-    cases = {"live-probes": aggregate if aggregate is not None else {
-        "command": ["python3", "scripts/run_deploy_live_probes.py"], "cwd": ".", "env": {}, "aggregate": True}}
-    for probe in deploy_commands(root):
-        argv = [os.path.relpath(arg, probe.cwd) if Path(arg).is_absolute() and root in Path(arg).parents
-                else arg for arg in probe.argv]
-        cases[probe.name] = {"command": argv, "cwd": str(probe.cwd.relative_to(root))}
-        if probe.after:
-            cases[probe.name]["after"] = probe.after
-    return {"cases": cases}
-
-
-def execute(request: dict, root: Path) -> dict:
-    """Emit native per-probe receipts while preserving the concurrent live sweep."""
-    from deploy_test_cycle import digest, source, write
-    from deploy_test_process import CANCEL, cancellation_handlers
-    from deploy_test_worker import report_case, run_step
-
-    bound = request["worker_recipe"]
-    cases = bound["cases"]
-    selected, skipped = request["checks"], request.get("skips", {})
-    aggregate = cases.get("live-probes", {})
-    if (request["gate"] != "live-probes" or aggregate.get("command") != ["python3", "scripts/run_deploy_live_probes.py"]
-            or aggregate.get("cwd") != "." or aggregate.get("aggregate") is not True
-            or bound != recipe(root, aggregate)):
-        raise ValueError("live-probe recipe differs from the original probe commands")
-    if (len(set(selected)) != len(selected) or set(selected) & set(skipped)
-            or not set(selected) <= cases.keys() or not set(skipped) <= cases.keys()
-            or (request["phase"] != "focused" and set(selected) | set(skipped) != cases.keys())):
-        raise ValueError("live-probe case inventory mismatch")
-    if source(root) != request["source"] or request.get("worker_root", str(root)) != str(root.resolve()):
-        raise ValueError("live-probe source or worker root differs from requested freeze")
-    folder = root / ".context/deploy-worker" / hashlib.sha256(request["token"].encode()).hexdigest()
-    folder.mkdir(parents=True, exist_ok=False)
-    rows = {}
-    probes = [name for name in cases if name != "live-probes"]
-    pending = [name for name in probes if name in selected or ("live-probes" in selected and name not in skipped)]
-    with cancellation_handlers(), ThreadPoolExecutor(max_workers=len(probes)) as pool:
-        running = {}
-        while pending or running:
-            for name in list(pending):
-                if CANCEL.is_set():
-                    rows[name] = {"status": "UNVERIFIED", "reason": "worker interrupted before probe start"}
-                    pending.remove(name)
-                elif cases[name].get("after") not in pending and cases[name].get("after") not in running.values():
-                    spec = {**cases[name], "env": aggregate.get("env", {})}
-                    running[pool.submit(run_step, name, spec, root, folder)] = name
-                    pending.remove(name)
-            if not running:
-                break
-            finished, _ = wait(running, return_when=FIRST_COMPLETED)
-            for future in finished:
-                name = running.pop(future)
-                rows[name] = future.result()
-                report_case(name, rows[name], folder)
-    cleaned = not any(row.get("lingering_group") for row in rows.values())
-    if source(root) != request["source"] or not cleaned:
-        rows = {name: {**row, "status": "UNVERIFIED", "reason": "source changed or cleanup unverified"}
-                for name, row in rows.items()}
-    if "live-probes" in selected:
-        statuses = [rows.get(name, {}).get("status", "UNVERIFIED") for name in probes]
-        status = ("UNVERIFIED" if "UNVERIFIED" in statuses else "FAIL" if "FAIL" in statuses else "PASS")
-        rows["live-probes"] = {"status": status, "native_exit": 0 if status == "PASS" else 1,
-                               "probes": {name: rows.get(name, {}).get("status", "UNVERIFIED") for name in probes}}
-        report_case("live-probes", rows["live-probes"], folder)
-    statuses = {name: rows[name]["status"] for name in selected}
-    result = {key: request[key] for key in ("token", "source", "gate")}
-    result.update(cases=statuses, complete=all(s in ("PASS", "FAIL") for s in statuses.values()),
-                  reused=False, evidence=rows, recipe_digest=digest(bound), cleanup_complete=cleaned,
-                  worker_root=str(root.resolve()))
-    write(folder / "result.json", result)
-    return result
-
-
-def main() -> int:
-    results = run_commands(deploy_commands())
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--only", choices=PROBE_NAMES, help="run this one probe by itself")
+    args = parser.parse_args(argv)
+    commands = deploy_commands()
+    if args.only:
+        # Its predecessors ran as earlier cases (or not at all); it must not wait for them here.
+        commands = tuple(replace(command, after=None) for command in commands if command.name == args.only)
+    results = run_commands(commands)
     for name, exit_code in results.items():
         print(f"live probe {name}: exit={exit_code}")
     return 0 if all(exit_code == 0 for exit_code in results.values()) else 1

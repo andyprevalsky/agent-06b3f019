@@ -107,11 +107,6 @@ def execute(request: dict, root: Path) -> dict:
             and cases['semantic-stack'].get('aggregate') is True):
         from deploy_test_semantic import execute as execute_semantic
         return execute_semantic(request, root)
-    if (request['gate'] == 'live-probes' and 'live-probes' in cases
-            and cases['live-probes'].get('command') == ['python3', 'scripts/run_deploy_live_probes.py']
-            and cases['live-probes'].get('aggregate') is True):
-        from run_deploy_live_probes import execute as execute_live_probes
-        return execute_live_probes(request, root)
     folder = root / '.context' / 'deploy-worker' / hashlib.sha256(request['token'].encode()).hexdigest()
     folder.mkdir(parents=True, exist_ok=False)
     rows = {}
