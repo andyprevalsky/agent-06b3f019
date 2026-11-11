@@ -1,0 +1,10 @@
+{"i":1,"host":"Modal","ms":1997,"firstContentMs":609,"chunks":33,"contentLen":426,"reasoningLen":20,"action":"web_search","actionIdx":0}
+{"i":2,"host":"Modal","ms":2262,"firstContentMs":487,"chunks":34,"contentLen":430,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":0,"host":"Modal","ms":2378,"firstContentMs":508,"chunks":36,"contentLen":399,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":5,"host":"Modal","ms":2318,"firstContentMs":590,"chunks":31,"contentLen":308,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":3,"host":"Modal","ms":5131,"firstContentMs":590,"chunks":48,"contentLen":525,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":4,"host":"Modal","ms":6226,"firstContentMs":4401,"chunks":32,"contentLen":360,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":7,"host":"Modal","ms":2025,"firstContentMs":383,"chunks":30,"contentLen":349,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":8,"host":"Modal","ms":2198,"firstContentMs":386,"chunks":34,"contentLen":384,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":6,"host":"Modal","ms":3013,"firstContentMs":815,"chunks":32,"contentLen":345,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"provider":"modal","n":9,"over13s":0,"p50":2318,"max":6226}

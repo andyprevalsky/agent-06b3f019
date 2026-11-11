@@ -486,7 +486,7 @@ export async function testLanternCredentials(): Promise<void> {
     await quarantine(
       {
         since: '2026-11-11',
-        repair: 'pending-handoff:ae9ae00ce96e4ceeb75d46cc9f1fa0c2',
+        repair: 'https://boxes.dev/thread/thr_38343e19ff8443a79e76e7c86daf8cb1',
         error: 'Too many database connections opened: FATAL: sorry, too many clients already',
         evidence: '.context/rca-integrations/ae9ae00c/findings.json',
       },
