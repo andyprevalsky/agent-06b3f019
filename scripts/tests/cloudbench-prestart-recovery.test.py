@@ -181,6 +181,15 @@ class FreshPrestartRecoveryTest(PrestartRecoveryTest):
         # Historical source protocol under test; newer protocols intentionally
         # require a separately reviewed no-start authority.
         self.sha = "2d4c45c0da9c56e7145b2f3df8114cc5b95b7bb3"
+        # This fixture declares the full historical no-start protocol. Current
+        # checkout scripts can evolve without changing those original bytes.
+        original_scripts = {
+            name: subprocess.check_output([
+                "git", "--no-replace-objects", "--no-optional-locks", "-C", str(self.workspace),
+                "show", f"{self.sha}:scripts/{name}",
+            ], timeout=10)
+            for name in ("cloudbench-boot.sh", "cloudbench-run.sh")
+        }
         provenance = runpy.run_path(str(self.scripts / "cloudbench_execution_provenance.py"))
         config = provenance["build_config"]("cloudbench-fleet-config-v1", ["boot_launch=1", "requested_boot_transport=config"])
         (self.run / "execution-provenance.json").write_text(json.dumps({
@@ -202,7 +211,7 @@ class FreshPrestartRecoveryTest(PrestartRecoveryTest):
             (self.audit / "by-machine-id" / machine).write_text(clone + "\n")
             (out / "primary.ids").write_text(machine + "\n")
             (out / "primary.names").write_text("")
-            files = {"cloudbench-run.sh": base64.b64encode((self.scripts / "cloudbench-run.sh").read_bytes()).decode()}
+            files = {"cloudbench-run.sh": base64.b64encode(original_scripts["cloudbench-run.sh"]).decode()}
             payload = gzip.compress(json.dumps({"version": 1, "files": files}).encode(), mtime=0)
             (out / "cloudbench-boot-payload.json.gz").write_bytes(payload)
             native = {"id": machine, "name": clone, "state": "stopped", "version": "generation-1",
@@ -216,7 +225,7 @@ class FreshPrestartRecoveryTest(PrestartRecoveryTest):
                               "CLOUDBENCH_RUN_TOKEN": f"{self.owner}-{i}", "CLOUDBENCH_START_BARRIER": self.run_id,
                               "CLOUDBENCH_BOOT_PAYLOAD_SHA256": hashlib.sha256(payload).hexdigest()},
                           "files": [{"guest_path": name, "raw_value": base64.b64encode(data).decode()}
-                                    for name, data in [("/cloudbench-boot.sh", (self.scripts / "cloudbench-boot.sh").read_bytes()),
+                                    for name, data in [("/cloudbench-boot.sh", original_scripts["cloudbench-boot.sh"]),
                                                        ("/cloudbench-boot-payload.json.gz", payload)]]}}
             for phase in ("before", "after"):
                 (self.native / f"{machine}.{phase}.json").write_text(json.dumps(native))
@@ -324,7 +333,8 @@ class FreshPrestartRecoveryTest(PrestartRecoveryTest):
                 offset += len(line)
             raise AssertionError(name)
         names = ["fleet_registry_confirm_guest_teardown", "fleet_recovery_reconnect_guest_shutdowns",
-                 "fleet_recovery_confirm_runtime_evidence"]
+                 "fleet_has_replaced_preconfig", "fleet_recovery_prepare_replaced_preconfig",
+                 "fleet_recovery_verify_replaced_preconfig", "fleet_recovery_confirm_runtime_evidence"]
         if "fleet_recovery_confirm_fresh_prestart() {" in source:
             names.extend(("fleet_recovery_confirm_fresh_prestart", "fleet_fresh_prestart_reap_guard"))
         for name in ("fleet_prestart_machine_exact_read", "fleet_prestart_events_exact_read"):
