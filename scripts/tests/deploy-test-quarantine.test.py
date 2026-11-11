@@ -435,6 +435,8 @@ class ReleaseReport(unittest.TestCase):
         recorded = q.validate_attribution(occurrence, {**entry, 'case': 'real_model_controls'}, self.root)
         self.assertEqual(('NOT_INTRODUCED', 'dom', occurrence_id),
                          tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # The merge gate re-validates the recorded attribution itself (attribution_block).
+        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
         # An unmarked case, a case that did not fail, or several failed cases never bind.
         with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
             q.validate_attribution({**occurrence, 'detail': detail.replace('real_model_controls', 'other')},
@@ -471,6 +473,8 @@ class ReleaseReport(unittest.TestCase):
         recorded = q.validate_attribution(occurrence, {**entry, 'case': 'Observation.test_scan'}, self.root)
         self.assertEqual(('NOT_INTRODUCED', 'suite', occurrence_id),
                          tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # The merge gate re-validates the recorded attribution itself (attribution_block).
+        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
         # An unmarked case, a case that did not fail, several failures, another script or a bad label never bind.
         with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
             q.validate_attribution({**occurrence, 'detail': detail.replace('test_scan', 'test_other')},
