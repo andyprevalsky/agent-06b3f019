@@ -159,3 +159,42 @@ test('connectivity lost during the backoff waits for online without spending an 
   await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeVisible();
   expect(loads.count).toBe(2);
 });
+test('connectivity lost while revalidating the entry waits for online and charges one attempt', async ({
+  page,
+  context,
+}) => {
+  page.setDefaultTimeout(30_000);
+  await installMobileTrajectories(page);
+  const entry = await entryPath(page);
+  let requests = 0;
+  // The stale entry 404s online; the connection drops just as the recovery refetches it.
+  await page.route(
+    (url) => url.pathname === entry,
+    async (route) => {
+      requests++;
+      if (requests === 1)
+        return route.fulfill({ status: 404, contentType: 'text/plain', body: 'Not found' });
+      if (requests === 2) {
+        await context.setOffline(true);
+        return route.abort('internetdisconnected');
+      }
+      return route.continue();
+    },
+  );
+  const loads = countDocuments(page);
+  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  await expect.poll(() => requests).toBe(2);
+  // No offline navigation: the static links stay, and the one attempt is charged once.
+  await page.waitForTimeout(2_000);
+  expect(loads.count).toBe(1);
+  await expect(page.locator('#root .rose-static-links')).toBeVisible();
+  const charged = () =>
+    page.evaluate(() =>
+      Object.entries(sessionStorage).filter(([key]) => key.startsWith('rose:entry-reload:')),
+    );
+  expect((await charged()).map(([, value]) => value)).toEqual(['1']);
+  await context.setOffline(false);
+  await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeVisible();
+  expect(loads.count).toBe(2);
+  expect((await charged()).map(([, value]) => value)).toEqual(['1']);
+});

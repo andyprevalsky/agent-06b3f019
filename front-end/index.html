@@ -184,7 +184,8 @@
       // [LOADING] --entry module script loads--> [MOUNTED] (appVersion.ts owns later reloads)
       // [LOADING] --entry module graph fails (error event)--> [WAITING] 0.5s/1s/2s backoff
       // [WAITING] --timer fires online--> [REVALIDATING] (charges 1 of 3 attempts per entry URL)
-      // [REVALIDATING] --entry refetched past the HTTP cache (or 5s)--> [RELOADING]
+      // [REVALIDATING] --entry refetched past the HTTP cache (or 5s), online--> [RELOADING]
+      // [REVALIDATING] --offline after the refetch--> [OFFLINE_CHARGED] --online event--> [REVALIDATING]
       // [WAITING] --timer fires offline--> [OFFLINE] --online event--> [REVALIDATING]
       // [LOADING] --budget for this entry URL spent--> [STATIC] (links only)
       // A document can outlive its deploy (edge-cached HTML across a production alias
@@ -228,7 +229,18 @@
           } catch (_) {
             window.name += '[' + key + ']';
           }
+          revalidateAndReload(src);
+        }
+        // The attempt is already charged. If connectivity drops while revalidating, wait for
+        // online and revalidate again instead of navigating to the browser's offline page.
+        function revalidateAndReload(src) {
           revalidate(src).then(function () {
+            if (navigator.onLine === false) {
+              window.addEventListener('online', revalidateAndReload.bind(null, src), {
+                once: true,
+              });
+              return;
+            }
             location.reload();
           });
         }
