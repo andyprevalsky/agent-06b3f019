@@ -1980,7 +1980,7 @@ def validate(receipt, owner, proof):
     return result
 
 
-def clean_isolated_successor(state, prior, original, successor):
+def clean_isolated_successor(state, prior, original, successor, custody_state=None):
     """A later full native result may close execution without clearing historical debt or FAILs."""
     from deploy_test_cycle import bounded_read, digest, receipt_owner, sha_file, validate_result
     gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
@@ -1996,13 +1996,41 @@ def clean_isolated_successor(state, prior, original, successor):
          and not rows[0][0].get('interrupted')
          and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
     binding = successor.get('execution_binding', {})
-    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
+    need(binding.get('environment') == state['environment']
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     folder = Path(successor['log']).parent
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     request = bounded_read(folder / 'request.json', 'successor request')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
+    execution_gate = gate
+    if custody_state is not None:
+        from deploy_test_historical_custody import state_identity
+        need(isinstance(custody_state, dict) and set(custody_state) == {'path', 'sha256'}
+             and isinstance(custody_state['path'], str) and Path(custody_state['path']).is_absolute()
+             and isinstance(custody_state['sha256'], str)
+             and re.fullmatch('[a-f0-9]{64}', custody_state['sha256']), 'successor custody descriptor')
+        path = Path(custody_state['path'])
+        need(sha_file(path) == custody_state['sha256'], 'successor custody file changed')
+        snapshot = bounded_read(path, 'successor original custody state')
+        need(sha_file(path) == custody_state['sha256']
+             and state_identity(snapshot) == request.get('custody_state_sha256')
+             and digest(snapshot['plan']) == snapshot['plan_digest']
+             and snapshot['source'] == snapshot['plan']['source'] == successor['source']
+             and snapshot['environment'] == binding['environment']
+             and snapshot['input_fingerprints'].get(prior['gate']) == binding['input_fingerprint'],
+             'successor original custody binding')
+        gates = [g for g in snapshot['plan']['gates'] if g.get('name') == prior['gate']]
+        need(len(gates) == 1, 'successor original gate identity')
+        execution_gate = gates[0]
+        need(set(execution_gate) == set(gate)
+             and all(isinstance(g.get('selection_evidence'), list)
+                     and all(isinstance(v, str) for v in g['selection_evidence'])
+                     for g in (execution_gate, gate))
+             and digest({k:v for k,v in execution_gate.items() if k != 'selection_evidence'})
+                 == digest({k:v for k,v in gate.items() if k != 'selection_evidence'}),
+             'successor execution contract changed')
+    need(binding.get('contract_digest') == digest(execution_gate), 'successor contract')
     checks, skips = request['checks'], request['skips']
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
@@ -2132,6 +2160,8 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
+    custody_state = proof.get('successor_custody_state')
+    proof = {k:v for k,v in proof.items() if k != 'successor_custody_state'}
     need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
          and not state.get('running')
          and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
@@ -2147,11 +2177,13 @@ def renew_isolated_validation(state, request_token, proof):
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
     latest = latest_receipts(state).get(prior['gate'])
+    need(custody_state is None or latest is not None and latest != receipt
+         and latest.get('complete') is True, 'historical contract requires clean successor')
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
         else:
-            clean_isolated_successor(state, prior, receipt, latest)
+            clean_isolated_successor(state, prior, receipt, latest, custody_state)
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
     need(still_bound(prior, receipt, owner), 'prior native proof changed')

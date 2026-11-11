@@ -5796,6 +5796,84 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
 
+    def historical_clean_successor_contract_state(self):
+        from deploy_test_historical_custody import state_identity
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        gate['selection_evidence'] = ['original dependency explanation']
+        successor['execution_binding']['contract_digest'] = c.digest(gate)
+        snapshot = copy.deepcopy(state)
+        snapshot['source'] = copy.deepcopy(successor['source'])
+        snapshot['plan']['source'] = copy.deepcopy(successor['source'])
+        snapshot['plan_digest'] = c.digest(snapshot['plan'])
+        snapshot['input_fingerprints'][gate['name']] = successor['execution_binding']['input_fingerprint']
+        path = self.directory / 'original-successor-custody.json'
+        c.write(path, snapshot)
+        request = c.read(folder / 'request.json')
+        request.update(custody_state=str(self.directory / 'cycle.json'), custody_state_sha256=state_identity(snapshot))
+        c.write(folder / 'request.json', request)
+        c.write(folder / 'receipt.json', successor)
+        gate['selection_evidence'] = ['refreshed dependency explanation']
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']),
+                        successor_custody_state=dict(path=str(path), sha256=c.sha_file(path)))
+        return state, original, incoming, folder, path, successor
+
+    def test_clean_successor_renewal_authenticates_original_selection_contract(self):
+        state, original, incoming, folder, snapshot, successor = self.historical_clean_successor_contract_state()
+        before = copy.deepcopy(state)
+        files = {p:c.sha_file(p) for p in [snapshot, *folder.glob('*.json')]}
+        c.reconcile(state, original['token'], incoming)
+        entry = state['reconciled_owners'][incoming['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertNotIn('successor_custody_state', entry['proof'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        self.assertEqual(before['round'], state['round']); self.assertEqual(before['phase'], state['phase'])
+        self.assertEqual(files, {p:c.sha_file(p) for p in files})
+        self.assertIsNone(c.full_pass_binding(state, next(g for g in state['plan']['gates'] if g['name']==successor['gate'])))
+        same=copy.deepcopy(state);c.reconcile(state,original['token'],incoming);self.assertEqual(same,state)
+
+    def test_clean_successor_historical_contract_refusals_remain_atomic(self):
+        state, original, incoming, folder, path, successor = self.historical_clean_successor_contract_state()
+        original_snapshot = path.read_bytes()
+        changes = [
+            ('source',lambda d:d.update(source=dict(head='f'*40,digest='e'*64))),
+            ('environment',lambda d:d.update(environment='0'*64)),
+            ('fingerprint',lambda d:d['input_fingerprints'].update({successor['gate']:'foreign'})),
+            ('plan-digest',lambda d:d.update(plan_digest='0'*64)),
+            ('old-contract',lambda d:next(g for g in d['plan']['gates'] if g['name']==successor['gate']).update(command=['false'])),
+        ]
+        for name,change in changes:
+            with self.subTest(name=name):
+                doc=c.read(path);change(doc);c.write(path,doc)
+                proof=copy.deepcopy(incoming);proof['successor_custody_state']['sha256']=c.sha_file(path)
+                candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],proof)
+                self.assertEqual(before,candidate);path.write_bytes(original_snapshot)
+        for field,value in [('command',['false']),('checks',[]),('native_cloud',1),('worker_recipe',{'foreign':True}),('selection_evidence',[True])]:
+            with self.subTest(field=field):
+                candidate=copy.deepcopy(state);gate=next(g for g in candidate['plan']['gates'] if g['name']==successor['gate']);gate[field]=value
+                before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],incoming)
+                self.assertEqual(before,candidate)
+        request_path=folder/'request.json';request_raw=request_path.read_bytes()
+        request=c.read(request_path);request['custody_state_sha256']='0'*64;c.write(request_path,request)
+        candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+        with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],incoming)
+        self.assertEqual(before,candidate);request_path.write_bytes(request_raw)
+        # Even a resealed snapshot/request cannot choose a different old full contract.
+        from deploy_test_historical_custody import state_identity
+        snapshot=c.read(path);oldgate=next(g for g in snapshot['plan']['gates'] if g['name']==successor['gate'])
+        oldgate['selection_evidence']=['invented old explanation'];snapshot['plan_digest']=c.digest(snapshot['plan'])
+        c.write(path,snapshot);request=c.read(request_path);request['custody_state_sha256']=state_identity(snapshot);c.write(request_path,request)
+        changed=copy.deepcopy(incoming);changed['successor_custody_state']['sha256']=c.sha_file(path)
+        candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+        with self.assertRaisesRegex(ValueError,'successor contract'):c.reconcile(candidate,original['token'],changed)
+        self.assertEqual(before,candidate);request_path.write_bytes(request_raw);path.write_bytes(original_snapshot)
+        for proof in [dict(incoming,successor_custody_state=dict(path=str(path),sha256='0'*64)),
+                      {k:v for k,v in incoming.items() if k!='successor_custody_state'}]:
+            candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+            with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],proof)
+            self.assertEqual(before,candidate)
+
     def test_isolated_successor_renewal_rejects_bad_or_tampered_successors_atomically(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
         renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
