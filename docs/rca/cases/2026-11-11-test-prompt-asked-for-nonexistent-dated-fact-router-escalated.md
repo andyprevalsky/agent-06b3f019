@@ -22,6 +22,7 @@ tags:
 sources:
   - PR #1915
   - PR #1933
+  - PR #1939
   - commit ebe427a5e97f0e24f865d5befe2564d9768bf399
   - commit d986931533e435f9372e5e104487073c4b17a0f9
   - commit fc623d61915c9cb8896ddc9468d507cffbb35cd3
@@ -156,6 +157,14 @@ router applies its "not found is not a direct_answer" rule inconsistently on
 near-identical results (step 5 above).
 
 10k-agent behavior: test-only change; no runtime state, queries or channels.
+
+Follow-up in production: after this merge, prod run 43049162124 failed one
+web_search sample at the route milestone for a different cause. A Cerebras 429
+led the router's fallback race to latch a GLM leg that never closed its
+decision. Fixed in PR #1939 (merge 77a684dc6); see
+2026-11-11-router-fallback-race-latched-first-content-not-completed-decision.
+Production semantic run 43098848733 on that merge passed web_search 5/5
+(max lifecycle 2,939 ms).
 
 Golden reference: not applicable (no approval-gated hunk).
 
