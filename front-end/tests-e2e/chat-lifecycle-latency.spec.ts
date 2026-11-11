@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto';
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+import { quarantine } from '../src/tests/gate-progress/quarantine';
+
 import {
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
@@ -19,7 +21,6 @@ import {
   hasUncaughtErrors,
   waitForTemporalWorkflow,
 } from './helpers';
-import { quarantine } from '../src/tests/gate-progress/quarantine';
 
 const SAMPLE_COUNT = 5;
 const FULL_LIFECYCLE_TARGET_MS = 6_000;
@@ -307,8 +308,25 @@ test.describe('chat full-lifecycle latency', () => {
     expect(await startedAt).toBeGreaterThanOrEqual(delayStartedAt + 200);
   });
 
+  // NOT_INTRODUCED live web-search flake (PR #1915 deploy); only the web_search instance is marked.
+  const WEB_SEARCH_TITLE =
+    'web_search: five full-lifecycle samples finish and report latency targets';
+  const quarantineWebSearch = <Context>(fn: (context: Context) => Promise<void>) =>
+    quarantine(
+      {
+        since: '2026-11-11',
+        repair: 'pending-handoff:94df2671c16646b2a03733c471396977',
+        error: 'Error: web_search sample 2 missed milestones',
+        evidence: '.context/rca-playwright/final-ddd3/latency-web-search/findings.json',
+      },
+      fn,
+      {
+        unit: `tests-e2e/chat-lifecycle-latency.spec.ts > chat full-lifecycle latency > ${WEB_SEARCH_TITLE}`,
+      },
+    );
+
   for (const path of selectedPaths()) {
-    const samples = async (page: Page): Promise<void> => {
+    const samples = async ({ page }: { page: Page }): Promise<void> => {
       test.setTimeout(PATH_TEST_TIMEOUT_MS);
       const recorder = attachRecorder(page);
       const results: LifecycleSample[] = [];
@@ -477,23 +495,6 @@ test.describe('chat full-lifecycle latency', () => {
     };
     test(`${path.id}: five full-lifecycle samples finish and report latency targets`, async ({
       page,
-    }) => {
-      if (path.id !== 'web_search') return samples(page);
-      // NOT_INTRODUCED FLAKY 1de45e6a (deploy #1927): the chat router escalated sample 1 to an
-      // agent workflow, so no chat final answer rendered; it still runs and reports, non-blocking.
-      const name = 'web_search: five full-lifecycle samples finish and report latency targets';
-      await quarantine(
-        {
-          since: '2026-11-11',
-          repair: 'pending-handoff:1de45e6a373f42ec9ff1862482c293e0',
-          error: 'Error: web_search sample 1 missed milestones',
-          evidence: 'https://github.com/Rose-Ai-Labs/rose/actions/runs/43013937607',
-        },
-        () => samples(page),
-        {
-          unit: `tests-e2e/chat-lifecycle-latency.spec.ts > chat full-lifecycle latency > ${name}`,
-        },
-      )({});
-    });
+    }) => (path.id === 'web_search' ? quarantineWebSearch(samples)({ page }) : samples({ page })));
   }
 });

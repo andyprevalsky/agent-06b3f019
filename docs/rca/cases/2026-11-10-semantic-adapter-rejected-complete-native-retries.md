@@ -20,6 +20,7 @@ tags:
 sources:
   - PR #1915
   - PR #1918
+  - PR #1919
   - commit 009e97401550115295b42af9ef83be37bda55055
   - plan: .context/rca-playwright/semantic-retry/findings.json
 repro: scripts/tests/deploy-test-semantic.test.py::SemanticReports.test_complete_native_retries_preserve_terminal_assertion_failure
@@ -149,6 +150,19 @@ fallback. All fifteen owning tests then passed, including a worker case that
 writes an UNVERIFIED aggregate while preserving the other lane's result and
 cleanup evidence. Independent review also retained a native FAIL in that other
 lane; malformed evidence never receives assertion credit.
+
+### PR1919 recurrence
+
+PR #1919 independently reproduced the same boundary against its immutable
+native capture from GH run 42922686197: the original adapter yields 53 UI PASS,
+five UI UNVERIFIED and five latency PASS; the exact reviewed classifier from
+commit 9905809a46e392997e834801a3c7adce87267a10 yields 53 UI PASS, five UI FAIL
+and five latency PASS. The existing permanent retry regression fails on the
+original classifier; all thirteen owning tests pass after exact reuse. No
+original receipt, test assertion, retry budget or timeout was rewritten.
+The underlying UI failures retain their own attribution and repair requirements;
+this reporting correction grants none of them passing credit. At that point, final native
+wrapper execution on PR #1919's frozen source remained pending.
 
 ## Human feedback
 
