@@ -167,15 +167,17 @@ export async function injectSemanticSession(page: Page): Promise<void> {
 }
 
 const APP_RELOAD_RETRIES = 2;
+const LATE_RELOAD_WINDOW_MS = 5_000;
 
 /**
  * Production semantic runs start right after a deploy goes live, and later merges go live
  * while they run. The app then reloads itself once onto the newer build (AppVersion 'load'
  * check, or the index.html entry-load recovery), and an evaluate/reload that straddles that
- * navigation fails with "Execution context was destroyed". Retry `operation` only when the
- * main frame requested a new document beyond the operation's own `ownNavigations` during the
- * call, after that document is ready; at most APP_RELOAD_RETRIES times. Any other error, or
- * a third reload, still fails the test.
+ * navigation fails with "Execution context was destroyed". Retry `operation` only when a new
+ * main-frame document is involved: one requested during the call beyond the operation's own
+ * `ownNavigations` (wait for it to load), or one whose request started just before the call
+ * and that loads within LATE_RELOAD_WINDOW_MS of the failure. At most APP_RELOAD_RETRIES
+ * retries; any other error still fails the test.
  */
 export async function acrossAppReload<T>(
   page: Page,
@@ -184,6 +186,7 @@ export async function acrossAppReload<T>(
 ): Promise<T> {
   for (let retry = 0; ; retry++) {
     let documents = 0;
+    let loads = 0;
     let awaitingDocument = false;
     const onRequest = (request: Request) => {
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
@@ -192,6 +195,7 @@ export async function acrossAppReload<T>(
       }
     };
     const onLoaded = () => {
+      loads++;
       awaitingDocument = false;
     };
     page.on('request', onRequest);
@@ -199,12 +203,19 @@ export async function acrossAppReload<T>(
     try {
       return await operation();
     } catch (error) {
-      if (documents <= ownNavigations || retry >= APP_RELOAD_RETRIES) throw error;
-      // The old document's context dies before the new one is parsed: wait for the latest
-      // requested document itself, not the load state the old document already reached.
-      await expect
-        .poll(() => awaitingDocument, { message: 'reloaded document never loaded' })
-        .toBe(false);
+      if (retry >= APP_RELOAD_RETRIES) throw error;
+      if (documents > ownNavigations) {
+        // The old document's context dies before the new one is parsed: wait for the latest
+        // requested document itself, not the load state the old document already reached.
+        await expect
+          .poll(() => awaitingDocument, { message: 'reloaded document never loaded' })
+          .toBe(false);
+      } else {
+        // A reload requested just before the call is visible only once its document loads.
+        const deadline = Date.now() + LATE_RELOAD_WINDOW_MS;
+        while (loads <= ownNavigations && Date.now() < deadline) await page.waitForTimeout(100);
+        if (loads <= ownNavigations) throw error;
+      }
     } finally {
       page.off('request', onRequest);
       page.off('domcontentloaded', onLoaded);

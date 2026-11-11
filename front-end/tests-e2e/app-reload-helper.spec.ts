@@ -10,6 +10,16 @@ import { FRONTEND_URL, acrossAppReload } from './helpers';
 
 const RELOADED = 'rose-test:reloaded-once';
 
+// A route-fulfilled static page: the real app could itself version-reload mid-test whenever a
+// deploy goes live during a production run, which would make these controls nondeterministic.
+async function openStaticPage(page: Page): Promise<void> {
+  const url = `${FRONTEND_URL}/__across-app-reload-fixture`;
+  await page.route(url, (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>fixture</title>' }),
+  );
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
+}
+
 // Reloads the document the first time it runs (like the app's one-shot version reload),
 // then answers on the new document.
 function readInterruptedByOneReload(page: Page): Promise<string> {
@@ -27,7 +37,7 @@ test('a step interrupted by the app reloading onto a newer build is retried on t
   page,
 }) => {
   page.setDefaultTimeout(30_000);
-  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  await openStaticPage(page);
 
   // Control: the bare evaluate fails the way the production run did.
   const reloaded = page.waitForEvent('domcontentloaded');
@@ -39,7 +49,7 @@ test('a step interrupted by the app reloading onto a newer build is retried on t
 });
 
 test('acrossAppReload does not retry failures without a new document', async ({ page }) => {
-  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  await openStaticPage(page);
   let calls = 0;
   await expect(
     acrossAppReload(page, () => {
