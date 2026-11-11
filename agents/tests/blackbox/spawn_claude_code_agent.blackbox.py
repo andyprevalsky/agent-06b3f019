@@ -6877,11 +6877,14 @@ async def test_native_codex_terminal_event_finishes_idle_app_server():
     """The live app-server turn/completed shape is terminal even while stdio stays open."""
     from domains.spawn_claude_code_agent import service
 
-    for outcome, expected_code in (("completed", 0), ("failed", 1), ("interrupted", 1)):
+    for outcome, expected_code, turn_id in [
+        (outcome, code, value) for outcome, code in (("completed", 0), ("failed", 1), ("interrupted", 1))
+        for value in ("game-turn", "https://user:offline-sensitive@invalid.test/private?token=hidden", ["offline-sensitive"])
+    ]:
         class NativeTerminal(_FakeWsClient):
             async def listen(self):
-                await self.on_event({"version": 1, "provider": "codex", "type": "turn_started", "turn_id": "game-turn"})
-                terminal = {"version": 1, "provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "game-turn", "status": outcome, "turn_outcome": outcome, "timestamp": "2026-10-21T00:05:19.295Z"}
+                await self.on_event({"version": 1, "provider": "codex", "type": "turn_started", "turn_id": turn_id})
+                terminal = {"version": 1, "provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": turn_id, "status": outcome, "turn_outcome": outcome, "timestamp": "2026-10-21T00:05:19.295Z"}
                 await self.on_event(terminal)
                 await self.on_event({**terminal, "type": "final", "exit_code": expected_code})
                 await asyncio.Event().wait()
@@ -6906,7 +6909,8 @@ async def test_native_codex_terminal_event_finishes_idle_app_server():
         assert rows, "native monitor metadata missing"
         admitted = [row for row in rows if row["reason"] == "native_terminal_admitted"]
         assert len(admitted) == 1 and admitted[0]["completion_admissible"] is True
-        assert admitted[0]["terminal_turn_id"] == "game-turn"
+        assert admitted[0]["terminal_turn_id"] == ("game-turn" if turn_id == "game-turn" else None)
+        assert "offline-sensitive" not in json.dumps(rows) and "token=hidden" not in json.dumps(rows)
         assert admitted[0]["terminal_outcome"] == outcome
         assert admitted[0]["agent_id"] == "a" and admitted[0]["task_id"] == "t"
         teardown_mock()

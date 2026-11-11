@@ -531,7 +531,9 @@ class Launcher(unittest.TestCase):
                              for i, suffix in enumerate([''] + [f'.{i}' for i in range(1, 8)])})
             for rel, data in expected.items():
                 path = root / rel; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
-            (root / '.context/services.json').write_text(json.dumps({'logs': {'worker': str(primary)}}))
+            private = root / '.context/private/.env.secret'; private.parent.mkdir(); private.write_text('offline-secret')
+            (root / '.context/services.json').write_text(json.dumps({'logs': {'worker': str(primary),
+                'backend': str(private), 'frontend': str(Path(tmp) / 'outside.txt')}}))
             malformed = root / '.context/offline-fixture/services.json'
             malformed.parent.mkdir(); malformed.write_text('[]')
             secret = root / '.rose/tools.json'; secret.parent.mkdir(); secret.write_text('secret fixture')
@@ -559,6 +561,9 @@ class Launcher(unittest.TestCase):
                 self.assertEqual(bound[rel]['bytes'], len(data))
             self.assertTrue(any(row['path'] == str(large.relative_to(root)) for row in manifest['skipped']))
             self.assertFalse((out / 'artifact/files/.rose').exists())
+            self.assertFalse((out / 'artifact/files/.context/private/.env.secret').exists())
+            self.assertTrue(any(row['path'] == '.context/private/.env.secret'
+                                and row.get('reason') == 'private_config' for row in manifest['skipped']))
             self.assertFalse((out / 'artifact/files/.llm-dumps/offline-fixture/.env').exists())
             self.assertFalse((out / 'artifact/files/.llm-dumps/offline-fixture/alias.json').exists())
             self.assertFalse((out / 'artifact/files/agents/custom-worker.extra.txt').exists())
@@ -1539,6 +1544,150 @@ class GitHubTerminalCleanup(unittest.TestCase):
         self.c.reconcile(self.state,'failure',self.proof)
         self.seen['run']['run_attempt']=2
         self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+
+
+    def cancelled_controller_fixture(self):
+        import zipfile
+        name = 'cloudbench-controller'
+        recipe = {'cases': {name: {'command': ['python3', 'scripts/run-cloudbench-controller-local.py'],
+                  'cwd': '.', 'env': {'CONDUCTOR_WORKSPACE_NAME': 'deploy-cloudbench-controller',
+                                      'CONDUCTOR_PORT': '12000'}, 'aggregate': True}}}
+        self.tag = gh.tag_name(RUNNER, name, self.token)
+        self.request.update(gate=name, checks=[name], worker_recipe=recipe)
+        self.adapter.update(gate=name, cases={name:'UNVERIFIED'}, recipe_digest=self.c.digest(recipe))
+        self.adapter['remote'].update(tag=self.tag, stop_cause='SIGTERM',runner_name='exact-runner')
+        command=['python3','scripts/deploy_test_github.py','--runner',RUNNER,
+                 '--worker-script','deploy_test_worker.py','--worker-root',gh.REMOTE_ROOT]
+        self.receipt['command']=command
+        gate = {'name':name,'checks':[name],'worker_recipe':recipe,'command':command,
+                'worker_transport':'github-actions','worker_root':gh.REMOTE_ROOT}
+        self.state.update(source=self.source,plan={'source':self.source,'gates':[gate]},
+                          input_fingerprints={name:'c'*64},environment='d'*64)
+        self.state['failures'][0]['gate'] = name
+        self.receipt.update(gate=name, checks=[name],cases={name:'UNVERIFIED'},cancelled=True,timed_out=False,
+                            native_exit=1,execution_binding={'input_fingerprint':'c'*64,
+                            'contract_digest':self.c.digest(gate),'environment':'d'*64})
+        self.process.update(cancelled=True,timed_out=False)
+        self.seen['run'].update(head_branch=self.tag,conclusion='cancelled')
+        job=self.seen['jobs']['jobs'][0]
+        labels=[('Run gate','cancelled'),('Bundle evidence','success'),('Release dependency mounts','success'),
+                ('Run actions/upload-artifact@v4','success'),('Post Mount dependency disk','success'),
+                ('Post Mount git mirror','success'),('Complete runner','success'),('Complete job','success')]
+        job.update(conclusion='cancelled',runner_id=11,runner_name='exact-runner',steps=[
+            {'name':label,'conclusion':conclusion,'status':'completed','number':i+1,
+             'completed_at':'2026-11-09T00:00:00Z'} for i,(label,conclusion) in enumerate(labels)])
+        self.seen['artifacts']['artifacts'][0]['workflow_run']['head_branch']=self.tag
+        for n,doc in [('request.json',self.request),('result.json',self.adapter),('receipt.json',self.receipt),
+                      ('output.log.process.json',self.process)]: (self.folder/n).write_text(json.dumps(doc))
+        self.proof['receipt_sha256']=self.c.sha_file(self.folder/'receipt.json')
+        self.proof['original_files']={n:self.c.sha_file(self.folder/n) for n in self.m.FILES}
+        with zipfile.ZipFile(self.artifact,'w') as z:
+            for n,doc in [('request.json',self.request),('timing.json',{'job_started_at':100,'extracted_at':101}),
+                          ('bundle.json',{'bytes':0,'skipped':[],'captured':[]})]:z.writestr(n,json.dumps(doc))
+        self.proof['remote']['artifact_sha256']=self.c.sha_file(self.artifact)
+        self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+self.proof['remote']['artifact_sha256']
+        return name
+
+    def test_cancelled_missing_result_controller_certificate_routes_normal_reexecute_without_credit(self):
+        name=self.cancelled_controller_fixture()
+        original=copy.deepcopy(self.state)
+        files={p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()}
+        self.assertEqual(self.c.retained_owners(self.state,[name]),[name])
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.assertEqual(self.c.retained_owners(self.state,[name]),[])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.c.reexecute(self.state,'failure')
+        self.assertIn(name,self.state['repair_gates'])
+        self.assertEqual(self.state['failures'][0]['native_result'],'UNVERIFIED')
+        self.assertIs(self.state['failures'][0]['complete'],False)
+        self.assertEqual(self.state['attempts'],original['attempts'])
+        self.assertEqual({p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()},files)
+
+    def test_cancelled_missing_result_refuses_foreign_recipe_owner_job_process_and_artifact(self):
+        import zipfile
+        self.cancelled_controller_fixture()
+        pristine=copy.deepcopy((self.state,self.request,self.adapter,self.receipt,self.process,self.seen,self.proof))
+        files={p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()}
+        mutations=[lambda:self.request.update(gate='semantic-stack'),
+                   lambda:self.request['source'].update(head='f'*40),
+                   lambda:self.adapter.update(cleanup_owner={}),
+                   lambda:self.seen['jobs']['jobs'][0].update(status='in_progress'),
+                   lambda:self.seen['jobs']['jobs'][0]['steps'][2].update(conclusion='failure'),
+                   lambda:self.seen['jobs']['jobs'][0].update(runner_name='foreign'),
+                   lambda:self.process.update(child_pid=99),
+                   lambda:self.request['worker_recipe']['cases']['cloudbench-controller'].update(command=['python3','scripts/run-bench-cloud']),
+                   lambda:self.seen['artifacts']['artifacts'][0].update(digest='sha256:forged')]
+        for i,mutate in enumerate(mutations):
+            self.state,self.request,self.adapter,self.receipt,self.process,self.seen,self.proof=copy.deepcopy(pristine)
+            for name,data in files.items():(self.folder/name).write_bytes(data)
+            mutate()
+            for n,doc in [('request.json',self.request),('result.json',self.adapter),('output.log.process.json',self.process)]:
+                (self.folder/n).write_text(json.dumps(doc));self.proof['original_files'][n]=self.c.sha_file(self.folder/n)
+            before=copy.deepcopy(self.state)
+            with self.subTest(control=i),self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.assertEqual(self.state,before)
+        for control in ('contradictory_result','malformed_bundle','forged_file'):
+            self.state,self.request,self.adapter,self.receipt,self.process,self.seen,self.proof=copy.deepcopy(pristine)
+            for name,data in files.items():(self.folder/name).write_bytes(data)
+            with zipfile.ZipFile(self.artifact) as z:members={n:z.read(n) for n in z.namelist()}
+            if control=='contradictory_result':members['result.json']=json.dumps({'cleanup_complete':True}).encode()
+            elif control=='malformed_bundle':members['bundle.json']=b'[]'
+            else:members['files/unmanifested']=b'forged'
+            with zipfile.ZipFile(self.artifact,'w') as z:
+                for name,data in members.items():z.writestr(name,data)
+            self.proof['remote']['artifact_sha256']=self.c.sha_file(self.artifact)
+            self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+self.proof['remote']['artifact_sha256']
+            before=copy.deepcopy(self.state)
+            with self.subTest(control=control),self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.assertEqual(self.state,before)
+
+    def test_cancelled_missing_result_external_gate_stays_owned(self):
+        import zipfile
+        for gate in ('semantic-stack','codeagent-smoke','smoke','agentcard-lifecycle'):
+            self.cancelled_controller_fixture()
+            self.request.update(gate=gate,checks=[gate])
+            self.adapter.update(gate=gate,cases={gate:'UNVERIFIED'})
+            self.receipt.update(gate=gate,cases={gate:'UNVERIFIED'})
+            self.state['failures'][0]['gate']=gate
+            self.state['plan']['gates'][0]['name']=gate
+            self.tag=gh.tag_name(RUNNER,gate,self.token)
+            self.adapter['remote']['tag']=self.tag
+            self.seen['run']['head_branch']=self.tag
+            self.seen['artifacts']['artifacts'][0]['workflow_run']['head_branch']=self.tag
+            for n,doc in [('request.json',self.request),('result.json',self.adapter),('receipt.json',self.receipt)]:
+                (self.folder/n).write_text(json.dumps(doc))
+            self.proof['receipt_sha256']=self.c.sha_file(self.folder/'receipt.json')
+            self.proof['original_files']={n:self.c.sha_file(self.folder/n)for n in self.m.FILES}
+            with zipfile.ZipFile(self.artifact,'w') as z:
+                for n,doc in [('request.json',self.request),('timing.json',{'job_started_at':100,'extracted_at':101}),
+                              ('bundle.json',{'bytes':0,'skipped':[],'captured':[]})]:z.writestr(n,json.dumps(doc))
+            self.proof['remote']['artifact_sha256']=self.c.sha_file(self.artifact)
+            self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+self.proof['remote']['artifact_sha256']
+            before=copy.deepcopy(self.state)
+            with self.subTest(gate=gate),self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.assertEqual(self.state,before)
+
+    def test_cancelled_certificate_survives_current_source_refresh_but_not_original_contract_drift(self):
+        name = self.cancelled_controller_fixture()
+        self.state['ready'] = False
+        self.c.reconcile(self.state, 'failure', self.proof)
+        original = copy.deepcopy(self.state['attempts'])
+        self.state['source'] = {'head': '9' * 40, 'digest': '8' * 64}
+        self.state['plan']['source'] = self.state['source']
+        self.state['plan']['gates'][0]['explanation'] = 'current refreshed selection'
+        self.state['input_fingerprints'][name] = '7' * 64
+        self.state['environment'] = '6' * 64
+        self.assertEqual(self.c.retained_owners(self.state, [name]), [])
+        self.assertEqual(self.state['attempts'], original)
+        pristine = copy.deepcopy(self.state)
+        record = next(iter(self.state['reconciled_owners'].values()))
+        record['original_controller_gate']['worker_recipe']['cases'][name]['command'] = ['foreign']
+        self.assertEqual(self.c.retained_owners(self.state, [name]), [name])
+        self.state = pristine
+        self.c.reexecute(self.state, 'failure')
+        self.assertIn(name, self.state['repair_gates'])
+        self.assertEqual(self.state['attempts'], original)
+        self.assertFalse(self.state['ready'])
 
 if __name__ == '__main__':
     unittest.main()

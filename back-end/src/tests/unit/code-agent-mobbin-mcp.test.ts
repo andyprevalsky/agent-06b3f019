@@ -352,6 +352,41 @@ test('tools destination diagnostic contains actual origin and binding without UR
         `diagnostic leaked ${value === workspace.envs.ROSE_TOOLS_TOKEN ? 'token' : value}`
       );
     }
+    // Opaque or malformed destinations retain materialization without disclosing payloads.
+    const configured = process.env.ROSE_UI_PUBLISH_BASE_URL;
+    for (const base of [
+      'data:offline-sensitive?credential=hidden',
+      'offline-sensitive?credential=hidden',
+    ]) {
+      process.env.ROSE_UI_PUBLISH_BASE_URL = base;
+      const before = lines.length;
+      const opaque = withAgentTools(null, {
+        userId: 'mobbin-test-user',
+        agentId: 'mobbin-test-agent',
+        taskId: 'mobbin-codex',
+        provider: 'codex',
+        homeDir: '/home/user',
+        roseDesktop: false,
+      });
+      assert.equal(
+        opaque === null,
+        !base.startsWith('data:'),
+        'preserve opaque/malformed URL behavior'
+      );
+      if (opaque) assert.ok(opaque.envs.ROSE_TOOLS_URL.startsWith(base));
+      const diagnostic = lines
+        .slice(before)
+        .filter((line) => line.includes('agent_tools.destination'));
+      for (const line of diagnostic) {
+        assert.ok(
+          !line.includes('offline-sensitive') &&
+            !line.includes('credential') &&
+            !line.includes('hidden')
+        );
+        assert.ok(!line.includes(workspace.envs.ROSE_TOOLS_TOKEN));
+      }
+    }
+    process.env.ROSE_UI_PUBLISH_BASE_URL = configured;
     // A broken diagnostic sink does not change files, env, or the return value.
     process.stdout.write = (() => {
       throw new Error('offline diagnostic sink failure');

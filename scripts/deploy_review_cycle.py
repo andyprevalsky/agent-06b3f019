@@ -735,6 +735,8 @@ def normalize_evidence(data: object, *, source: str) -> dict[str, object]:
         "source": source,
         "captured_at": str(data.get("captured_at") or now()),
     }
+    if "prior_ledger_sha256" in data:
+        evidence["prior_ledger_sha256"] = data["prior_ledger_sha256"]
     return evidence
 
 
@@ -1128,7 +1130,7 @@ def _close_with_disposition(
             "kind": cycle.get("kind"),
             "disposition": disposition,
             "report_row": report_row,
-            "at": cycle["finished_at"],
+            "at": fields.get("disposition_at", cycle["finished_at"]),
             **fields,
         },
     )
@@ -1236,6 +1238,75 @@ def _parse_ids(raw: str) -> list[int]:
     return ids
 
 
+def _completed_findings_cycle(state, head, evidence, original_bytes):
+    """Admit only a snapshot-bound final third findings cycle; never reopen it."""
+    entries = state["cycles"]
+    if (type(state.get("schema_version")) is not int or state["schema_version"] != 1
+            or not re.fullmatch(r"[0-9a-f]{40}", head)
+            or any(not isinstance(entry, dict) for entry in entries)
+            or evidence.get("prior_ledger_sha256") != hashlib.sha256(original_bytes).hexdigest()):
+        raise ReviewCycleError("completed findings require intact schema and exact prior ledger SHA-256")
+    for entry in entries:
+        started, finished = (_publication_time(entry.get(key)) for key in ("started_at", "finished_at"))
+        if (type(entry.get("number")) is not int or entry["number"] < 1
+                or entry.get("result") not in RESULTS
+                or entry.get("status") != "completed" or entry.get("kind") not in KINDS | {SYNC_KIND}
+                or not isinstance(entry.get("head"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", entry["head"])
+                or started is None or finished is None or started > finished):
+            raise ReviewCycleError("completed findings require intact completed prefix entries")
+    cycles = budget_cycles(entries)
+    if (len(cycles) != 3 or entries[-1] is not cycles[-1]
+            or [(entry.get("number"), entry.get("kind")) for entry in cycles]
+               != [(1, "initial"), (2, "incremental"), (3, "verification")]
+            or any(type(entry.get("number")) is not int or entry.get("result") not in {"clean", "findings"}
+                   or "disposition" in entry or "skip_reason" in entry
+                   or "one_final_review_approval" in entry or "post_findings_review_approval" in entry
+                   for entry in cycles)
+            or len({entry["head"] for entry in cycles}) != 3
+            or cycles[-1].get("head") != head or cycles[-1].get("result") != "findings"):
+        raise ReviewCycleError("completed override requires same exact final third findings cycle")
+    if (not isinstance(evidence.get("source"), str) or not evidence["source"].strip()
+            or _publication_time(evidence.get("captured_at")) is None
+            or _publication_time(evidence["captured_at"]) < _publication_time(cycles[-1]["finished_at"])
+            or any(not isinstance(evidence.get(key), list)
+                   or any(not isinstance(item, dict) for item in evidence[key])
+                   for key in ("reviews", "review_comments", "check_runs"))):
+        raise ReviewCycleError("completed findings require well-formed captured review evidence")
+    approval = cycles[-1].get("verification_approval")
+    if cycles[-2]["result"] == "clean" and (not isinstance(approval, str)
+            or not re.fullmatch(r"[\w.:-]{1,128}", approval)):
+        raise ReviewCycleError("completed verification requires original explicit approval binding")
+    return cycles[-1]
+
+
+def _validate_completed_review(cycle, review, evidence):
+    """Keep exact-HEAD review/check publication and original finding identity bound."""
+    head = cycle["head"]
+    started, finished = (_publication_time(cycle[key]) for key in ("started_at", "finished_at"))
+    submitted = _publication_time(review.get("submitted_at"))
+    if (type(review.get("id")) is not int or review["id"] <= 0
+            or review.get("state") not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            or submitted is None or not started <= submitted <= finished):
+        raise ReviewCycleError("completed findings require review within original cycle interval")
+    checks = [run for run in coderabbit_check_runs(evidence["check_runs"], head)
+              if type(run.get("id")) is int and run["id"] > 0
+              and run.get("head_sha") == head and run.get("status") == "completed"
+              and run.get("conclusion") == "success" and _check_title(run) == "Finished"
+              and _publication_time(run.get("started_at")) is not None
+              and _publication_time(run.get("completed_at")) is not None
+              and started <= _publication_time(run["started_at"]) <= submitted
+                  <= _publication_time(run["completed_at"]) <= finished]
+    findings = [comment for comment in evidence["review_comments"]
+                if _is_bot(comment) and not comment.get("in_reply_to_id")
+                and comment.get("original_commit_id", comment.get("commit_id")) == head]
+    count = review_findings(review)
+    if (not checks or not findings
+            or any(comment.get("pull_request_review_id") != review.get("id") for comment in findings)
+            or (count is not None and count != len(findings))):
+        raise ReviewCycleError("completed findings require finished exact-HEAD check and review-bound findings")
+
+
 def override_cycle(
     path: Path,
     *,
@@ -1247,7 +1318,7 @@ def override_cycle(
     prior_rounds: int,
     receipts_path: Path,
 ) -> dict[str, object]:
-    """Account for an open or completed-findings cycle after three review rounds.
+    """Close the open cycle clean after three review rounds, deferring findings.
 
     Standing user pre-authorization (2026-10-18, reaffirmed 2026-10-27): after
     three review rounds the remaining findings may be deferred. Every listed
@@ -1258,26 +1329,17 @@ def override_cycle(
         raise ReviewCycleError("--deferred-to must name the follow-up PR, branch or RCA")
     if prior_rounds < 0:
         raise ReviewCycleError("--prior-rounds must not be negative")
+    original_bytes = path.read_bytes()
     state = read_state(path)
     entries = state["cycles"]
-    assert isinstance(entries, list)
-    latest = entries[-1] if entries else None
-    completed = (
-        isinstance(latest, dict)
-        and latest.get("status") == "completed"
-        and latest.get("result") == "findings"
-        and latest.get("kind") in KINDS
-        and not latest.get("disposition")
-        and not latest.get("skip_reason")
-        and not latest.get("one_final_review_approval")
-        and "post_findings_review_approval" not in latest
-    )
+    completed = bool(entries and isinstance(entries[-1], dict)
+                     and entries[-1].get("status") == "completed")
     if completed:
-        cycle = latest
-        if cycle.get("head") != head:
-            raise ReviewCycleError(f"review HEAD mismatch: cycle has {cycle.get('head')}, got {head}")
+        cycle = _completed_findings_cycle(state, head, evidence, original_bytes)
     else:
         cycle = _open_cycle(state, head)
+    entries = state["cycles"]
+    assert isinstance(entries, list)
     # Only cycles that delivered a review count: an `unavailable` cycle consumed no review budget.
     rounds = sum(
         cycle.get("disposition") != "skipped" and not cycle.get("skip_reason")
@@ -1297,6 +1359,14 @@ def override_cycle(
             "(use skip for usage exhaustion; wait for the review otherwise)"
         )
     review = substantive[-1]
+    if completed:
+        _validate_completed_review(cycle, review, evidence)
+        bound_ids = {comment.get("id") for comment in evidence["review_comments"]
+                     if _is_bot(comment) and not comment.get("in_reply_to_id")
+                     and comment.get("pull_request_review_id") == review.get("id")
+                     and comment.get("original_commit_id", comment.get("commit_id")) == head}
+        if not finding_ids or any(type(value) is not int or value not in bound_ids for value in finding_ids):
+            raise ReviewCycleError("completed override must name findings from the exact final review")
     comments = evidence["review_comments"]
     assert isinstance(comments, list)
     on_head = [
@@ -1359,18 +1429,11 @@ def override_cycle(
     if publication is not None and not SUBSTANTIVE_REVIEW.search(_body(review)):
         fields["evidence"]["review_publication"] = publication
     if completed:
-        # Retain the native findings result before changing merge accounting.
-        # A failed archive append must leave the completed cycle untouched.
-        serialized = json.dumps(cycle, sort_keys=True, separators=(",", ":"))
-        fields["completed_review"] = {
-            "snapshot": json.loads(serialized),
-            "sha256": hashlib.sha256(serialized.encode()).hexdigest(),
-            "ledger_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        }
-        _append_receipt(receipts_path, {
-            "event": "completed-findings-before-override", "pr": pr, "head": head,
-            "at": now(), "completed_review": fields["completed_review"],
-        })
+        if path.read_bytes() != original_bytes:
+            raise ReviewCycleError("review ledger changed during disposition validation")
+        fields.update({"original_result": "findings", "original_finished_at": cycle["finished_at"],
+                       "finished_at": cycle["finished_at"], "disposition_at": now(),
+                       "prior_ledger_sha256": hashlib.sha256(original_bytes).hexdigest()})
     return _close_with_disposition(
         path, receipts_path, state, cycle, pr=pr, disposition="overridden", report_row=report_row, fields=fields
     )
