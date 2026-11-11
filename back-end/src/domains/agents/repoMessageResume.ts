@@ -3,7 +3,10 @@ import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { applyResumeTotal } from '../../providers/resumeReportedSpend';
 
 export async function findAgentStatus(agentId: string) {
-  return prisma.agent.findUnique({ where: { id: agentId }, select: { status: true } });
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { status: true, workflowStartPhase: true },
+  });
 }
 
 export async function findAgentForBrowserResume(agentId: string) {

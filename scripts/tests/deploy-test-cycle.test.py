@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 # Source of the original round-37 inventory-init failure whose exact producer bytes the native validator pins.
 INVENTORY_INIT_PRODUCER_SOURCE = 'ce016428eeb484b19b503a6f65884eb92f1e3fde'
+# Native campaign fixture controller PIDs: above any pid_max, so no real process can collide.
+FIXTURE_CONTROLLER_PID_BASE = 2147480000
 # The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
 # outer deploy worker (the local executor runs this suite inside a gate) would
 # make admission() demand that outer cycle's custody locator in-process.
@@ -2622,6 +2625,79 @@ class Cycle(unittest.TestCase):
         return {'gate': gate, 'status': 'FAIL' if 'FAIL' in cases.values() else 'PASS',
                 'cases': cases, 'complete': True, 'source': self.state['source'],
                 'command': ['true'], 'log': 'original.log', 'native_exit': 1}
+
+    def carried_pending_unstarted_quick_fixture(self):
+        self.failure()
+        self.state['reconciled_owners'] = {'original': {'debt': 'unchanged native ownership'}}
+        old = copy.deepcopy(self.plan)
+        (self.root / 'code').write_text('repair before first supported triage refresh')
+        self.plan = copy.deepcopy(old); self.plan['source'] = c.source(self.root)
+        c.refresh(self.state, old, self.plan, self.root)
+        self.assertEqual(('quick', 'triage', 'refresh'),
+                         (self.state['phase'], self.state['next_after_quick'], self.state['failure_phase']))
+        exclude = self.root / '.git/info/exclude'
+        exclude.write_text(exclude.read_text() + 'back-end/.env\n')
+        runtime = self.root / 'back-end/.env'; runtime.parent.mkdir()
+        runtime.write_text('SETTING=changed-runtime-only\n')
+        self.assertEqual(self.state['source'], c.source(self.root))
+        self.assertNotEqual(self.state['input_fingerprints'], c.input_fingerprints(self.plan, self.root))
+        return copy.deepcopy(self.state)
+
+    def test_repeat_refresh_of_carried_pending_unstarted_quick_preserves_debt(self):
+        before = self.carried_pending_unstarted_quick_fixture()
+        c.refresh(self.state, self.plan, self.plan, self.root)
+        for key in ('pending', 'failures', 'attempts', 'reconciled_owners', 'round', 'source'):
+            self.assertEqual(before[key], self.state[key], key)
+        self.assertEqual(('quick', 'triage'), (self.state['phase'], self.state['next_after_quick']))
+        self.assertFalse(self.state['ready'])
+        self.assertEqual({}, self.state['carried_passes'])
+        self.assertEqual(c.input_fingerprints(self.plan, self.root), self.state['input_fingerprints'])
+        self.assertEqual({g['name'] for g in self.plan['gates'] if g.get('quick')},
+                         {g['name'] for g in c.records(self.plan, self.state)})
+        current = copy.deepcopy(self.state)
+        with self.assertRaisesRegex(ValueError, 'actual changed source or plan'):
+            c.refresh(self.state, self.plan, self.plan, self.root)
+        self.assertEqual(current, self.state)
+
+    def test_repeat_pending_quick_refresh_rejects_started_active_or_unproven_boundaries(self):
+        original = self.carried_pending_unstarted_quick_fixture()
+        variants = [
+            {'phase': 'initial'}, {'next_after_quick': 'initial'}, {'failure_phase': 'initial'},
+            {'ready': True}, {'active': False}, {'running': True}, {'running': False},
+            {'resume_phase': 'quick'}, {'resume': False}, {'live_failures': []},
+            {'pending': ['unknown-occurrence']}, {'pending': original['pending'] * 2},
+            {'attempts': [*original['attempts'], {'phase': 'quick', 'source': original['source'], 'results': []}]},
+            {'attempts': [*original['attempts'], {'phase': 'quick', 'source': original['source'], 'results': [], 'stale': True}]},
+            {'attempts': [*original['attempts'], {'phase': 'initial', 'source': {'head': 'old', 'digest': 'old'},
+                'results': [{'gate': 'static', 'source': original['source']}]}]},
+            {'attempts': [*original['attempts'], {'phase': 'initial', 'source': original['source'],
+                'results': [{'gate': 'static'}]}]},
+        ]
+        for update in variants:
+            with self.subTest(update=list(update)):
+                candidate = {**copy.deepcopy(original), **update}
+                before = copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):
+                    c.refresh(candidate, self.plan, self.plan, self.root)
+                self.assertEqual(before, candidate)
+        c.CANCEL.set()
+        try:
+            with self.assertRaises(ValueError): c.refresh(self.state, self.plan, self.plan, self.root)
+            self.assertEqual(original, self.state)
+        finally: c.CANCEL.clear()
+
+    def test_repeat_pending_quick_refresh_retains_plan_contract_and_source_guards(self):
+        original = self.carried_pending_unstarted_quick_fixture()
+        for fault in ('drop-gate', 'drop-check', 'changed-command', 'stale-source'):
+            with self.subTest(fault=fault):
+                new = copy.deepcopy(self.plan)
+                if fault == 'drop-gate': new['gates'].pop(1)
+                elif fault == 'drop-check': new['gates'][1]['checks'].pop()
+                elif fault == 'changed-command': new['gates'][1]['command'] = ['false']
+                else: new['source'] = {'head': 'foreign', 'digest': 'foreign'}
+                candidate = copy.deepcopy(original)
+                with self.assertRaises(ValueError): c.refresh(candidate, self.plan, new, self.root)
+                self.assertEqual(original, candidate)
 
     def test_refresh_unstarted_quick_preserves_history_and_refuses_active_state(self):
         old = copy.deepcopy(self.plan)
@@ -5276,7 +5352,9 @@ class Cycle(unittest.TestCase):
         campaign.mkdir(parents=True)
         parents, jobs = [], []
         for index, name in enumerate(names, 1):
-            fleet = runs / ('20261103-080440-' + str(310000 + index))
+            # Controller PIDs above pid_max (4194304): a live host process can never own one, so the
+            # 'old controller still active' check cannot flake on a loaded runner's PID/PGID reuse.
+            fleet = runs / ('20261103-080440-' + str(FIXTURE_CONTROLLER_PID_BASE + index))
             shutil.copytree(template, fleet)
             token = f'{index + getattr(self, "_renewal_campaign_offset", 10):032x}'
             audit = fleet / 'teardown-ownership'
@@ -5309,7 +5387,7 @@ class Cycle(unittest.TestCase):
             log.write_text(''.join(f'{self.root}/scripts/run-bench monitor {f}\n' for f in handles))
             jobs.append(dict(job_id=log.stem, task=name, run=1, attempt=1, attempts=[],
                 status='failed' if index == 6 else 'cancelled', controller_exit_code=1,
-                controller_pid=310000 + index, log=str(log)))
+                controller_pid=FIXTURE_CONTROLLER_PID_BASE + index, log=str(log)))
             parents.append(fleet)
         shutil.rmtree(template)
         for f in runs.glob('detached-*'): f.unlink()
@@ -5794,7 +5872,7 @@ class Cycle(unittest.TestCase):
                         from deploy_test_native_cleanup import subprocess as native_subprocess
                         actual=native_subprocess.check_output
                         def process_result(args, *a, **kw):
-                            if args[:1]==['ps']: return '999999 310001 S\n'
+                            if args[:1]==['ps']: return f'999999 {FIXTURE_CONTROLLER_PID_BASE + 1} S\n'
                             return actual(args,*a,**kw)
                         with patch.object(native_subprocess,'check_output',side_effect=process_result):
                             with self.assertRaises(ValueError): c.reconcile(state,occurrence['id'],candidate)
@@ -5953,7 +6031,7 @@ class Cycle(unittest.TestCase):
                         import deploy_test_native_cleanup as native
                         actual=native.subprocess.check_output
                         def observed(args,*a,**kw):
-                            if args[:1]==['ps']:return '999999 310001 S\n'
+                            if args[:1]==['ps']:return f'999999 {FIXTURE_CONTROLLER_PID_BASE + 1} S\n'
                             return actual(args,*a,**kw)
                         with patch.object(native.subprocess,'check_output',side_effect=observed):
                             with self.assertRaises(ValueError):c.reconcile(case_state,occurrence['id'],candidate)
@@ -6751,7 +6829,7 @@ class Cycle(unittest.TestCase):
     def test_isolated_native_validation_requires_current_os_payload_authority(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         fleet = next(p for p in Path(proof['campaign']).parent.parent.joinpath('runs').iterdir()
-                     if p.is_dir() and p.name.endswith('310001'))
+                     if p.is_dir() and p.name.endswith(str(FIXTURE_CONTROLLER_PID_BASE + 1)))
         life = c.read(fleet / '_batch/lifecycle.json')
         payloads = {}
         for key in ('run', 'backend', 'services'):
@@ -7071,6 +7149,30 @@ class Cycle(unittest.TestCase):
                 with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', 4096), patch.object(native, 'MAX_RAW_RUN_PROOF_BYTES', cap, create=True), self.assertRaises(ValueError):
                     c.reconcile(state, failure['id'], proof)
                 self.assertEqual(before, state)
+
+    def test_typed_native_run_admission_uses_shared_budget_without_case_credit(self):
+        import deploy_test_native_cleanup as native
+        state, failure, paths, original, gate, packet = self.isolated_campaign_state()
+        records = sorted(Path(p) for p in original['files'] if p.endswith('/_batch/run.json'))
+        for path in records[:2]:
+            path.write_text(json.dumps({'tasks': [{'logs': ['x' * 512] * 20}]}))
+            original['files'][str(path)] = c.sha_file(path)
+        before = copy.deepcopy(state)
+        proof = copy.deepcopy(original)
+        proof['native_run_admission'] = {'kind': 'native-isolated-shared-raw-v1', 'files': {
+            str(path): {'bytes': path.stat().st_size, 'sha256': c.sha_file(path)} for path in records}}
+        total = sum(path.stat().st_size for path in records)
+        with patch.object(native, 'MAX_RAW_FORENSIC_RUN_BYTES', 4096), \
+                patch.object(native, 'MAX_RAW_RUN_PROOF_BYTES', total):
+            with self.assertRaisesRegex(ValueError, 'raw file byte bound exceeded'):
+                c.reconcile(state, failure['id'], original)
+            self.assertEqual(before, state)
+            c.reconcile(state, failure['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['failures'], state['failures'])
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved'])
 
     def test_run_reader_default_aggregate_and_scalar_bounds_unchanged(self):
         import deploy_test_run_artifact as artifact
@@ -11130,6 +11232,109 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
 
 
+class TypedNativeRunAdmission(unittest.TestCase):
+    def setUp(self):
+        import deploy_test_native_cleanup, deploy_test_run_artifact
+        self.native=deploy_test_native_cleanup;self.artifact=deploy_test_run_artifact
+        self.tmp=tempfile.TemporaryDirectory();self.fleet=Path(self.tmp.name)/'fleet'
+        self.path=self.fleet/'_batch/run.json';self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({'tasks':[{'logs':['x'*512]*20}]}))
+        self.raw=self.path.read_bytes();self.size=len(self.raw);self.sha=hashlib.sha256(self.raw).hexdigest()
+        self.bindings={str(self.path):self.sha};self.participants={self.fleet}
+        self.proof={'layout':'campaign-v1','purpose':'isolated-validation','native_run_admission':{'kind':'native-isolated-shared-raw-v1','files':{str(self.path):{'bytes':self.size,'sha256':self.sha}}}}
+    def tearDown(self):
+        self.assertEqual(self.path.read_bytes(),self.raw)
+        self.tmp.cleanup()
+    def allocation(self,proof=None,participants=None,bindings=None):
+        return self.native.native_run_admission(proof or self.proof,participants or self.participants,bindings or self.bindings)
+    def read(self,allocation,**kw):
+        return self.artifact.read_run_artifact(self.path,self.sha,4096,raw_limit=allocation['bytes'],expected_size=allocation['bytes'],**kw)
+    def test_production_limits_unchanged(self):
+        self.assertEqual(self.native.MAX_RAW_FORENSIC_RUN_BYTES,128*1024*1024)
+        self.assertEqual(self.native.MAX_RAW_RUN_PROOF_BYTES,512*1024*1024)
+        self.assertEqual(self.artifact.MAX_RECEIPT_BYTES,64*1024*1024)
+        self.assertEqual(self.artifact.BUFFER_BYTES,64*1024)
+    def test_no_optin_retains_ordinary_refusal(self):
+        proof={k:v for k,v in self.proof.items() if k!='native_run_admission'}
+        self.assertEqual({},self.allocation(proof))
+        with self.assertRaisesRegex(ValueError,'raw file byte bound exceeded'):
+            self.artifact.read_run_artifact(self.path,self.sha,4096,raw_limit=4096,raw_remaining=[65536],raw_aggregate_limit=65536)
+    def test_explicit_allocation_streams_forensics_with_same_metadata_bound(self):
+        allocation=self.allocation()[str(self.path)];remaining=[65536]
+        result=self.read(allocation,raw_remaining=remaining,raw_aggregate_limit=65536)
+        self.assertIsInstance(result['tasks'][0]['logs'],self.artifact.ForensicValue)
+        self.assertEqual(65536-self.size,remaining[0])
+    def test_nonisolated_or_noncampaign_intent_refuses(self):
+        for field,value in [('purpose',None),('purpose','other'),('layout','campaign-preallocation-v1')]:
+            with self.subTest(field=field,value=value):
+                proof=copy.deepcopy(self.proof);proof[field]=value
+                with self.assertRaisesRegex(ValueError,'admission scope'):self.allocation(proof)
+    def test_shape_and_kind_are_exact(self):
+        for value in [None,[],{}, {'kind':'other','files':{}}, {'kind':'native-isolated-shared-raw-v1','files':{},'extra':True}]:
+            with self.subTest(value=value):
+                proof=copy.deepcopy(self.proof);proof['native_run_admission']=value
+                with self.assertRaises(ValueError):self.allocation(proof)
+    def test_participant_closure_refuses_missing_and_foreign(self):
+        for mutation in ['missing','extra','foreign']:
+            proof=copy.deepcopy(self.proof);files=proof['native_run_admission']['files']
+            if mutation=='missing':files.clear()
+            if mutation=='extra':files['/foreign/run.json']=files[str(self.path)].copy()
+            if mutation=='foreign':files['/foreign/run.json']=files.pop(str(self.path))
+            with self.subTest(mutation=mutation),self.assertRaisesRegex(ValueError,'participant closure'):self.allocation(proof)
+    def test_allocation_types_hash_and_fields_refuse(self):
+        for mutation in ['bool','float','zero','negative','huge','hash','extra','missing']:
+            proof=copy.deepcopy(self.proof);row=proof['native_run_admission']['files'][str(self.path)]
+            if mutation in ['bool','float','zero','negative','huge']:row['bytes']={'bool':True,'float':float(self.size),'zero':0,'negative':-1,'huge':self.native.RUN_RECORD_MAX_BYTES+1}[mutation]
+            if mutation=='hash':row['sha256']='0'*64
+            if mutation=='extra':row['extra']=1
+            if mutation=='missing':del row['bytes']
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.allocation(proof)
+    def test_same_production_aggregate_refuses_before_io(self):
+        other=self.fleet.parent/'other';path=str(other/'_batch/run.json')
+        proof=copy.deepcopy(self.proof);proof['native_run_admission']['files'][str(self.path)]['bytes']=300*1024*1024
+        proof['native_run_admission']['files'][path]={'bytes':300*1024*1024,'sha256':self.sha}
+        with patch.object(self.artifact.os,'open',side_effect=AssertionError('I/O before aggregate refusal')) as opened:
+            with self.assertRaisesRegex(ValueError,'aggregate raw admission bound exceeded'):
+                self.allocation(proof,{self.fleet,other},{**self.bindings,path:self.sha})
+            opened.assert_not_called()
+    def test_reader_aggregate_refuses_before_hashing(self):
+        allocation=self.allocation()[str(self.path)];remaining=[self.size-1]
+        with patch.object(self.artifact.os,'read',side_effect=AssertionError('read before aggregate refusal')) as read:
+            with self.assertRaisesRegex(ValueError,'aggregate raw admission bound exceeded'):
+                self.read(allocation,raw_remaining=remaining,raw_aggregate_limit=65536)
+            read.assert_not_called()
+        self.assertEqual(self.size-1,remaining[0])
+    def test_exact_fd_size_refuses_both_directions_without_charge(self):
+        for size in [self.size-1,self.size+1]:
+            remaining=[65536]
+            with self.subTest(size=size),self.assertRaises(ValueError):
+                self.read({'bytes':size},raw_remaining=remaining,raw_aggregate_limit=65536)
+            self.assertEqual(65536,remaining[0])
+    def test_expected_size_rejects_boolean_and_invalid_contracts_before_io(self):
+        for value in [True,False,0,-1,1.0,'1']:
+            with self.subTest(value=value),patch.object(self.artifact.os,'open',side_effect=AssertionError('opened invalid contract')) as opened:
+                with self.assertRaisesRegex(ValueError,'invalid exact-size contract'):
+                    self.artifact.read_run_artifact(self.path,self.sha,4096,raw_limit=65536,expected_size=value)
+                opened.assert_not_called()
+    def test_optin_preserves_hash_refusal(self):
+        allocation=self.allocation()[str(self.path)]
+        with self.assertRaisesRegex(ValueError,'original hash or identity changed'):
+            self.artifact.read_run_artifact(self.path,'0'*64,4096,raw_limit=allocation['bytes'],expected_size=allocation['bytes'])
+
+    def test_optin_retains_grammar_tail_duplicates_and_metadata_bounds(self):
+        payloads=[(b'{"tasks":[{"logs":["x",]}]}','missing value|invalid scalar|object key'),
+                  (self.raw+b'{}','exact JSON object'),
+                  (b'{"tasks":[{"logs":{"x":1,"\\u0078":2}}]}','duplicate object key'),
+                  (json.dumps({'unknown_metadata':'z'*5000,'tasks':[]}).encode(),'bound exceeded')]
+        for index,(raw,error) in enumerate(payloads):
+            other=self.fleet.parent/('bad'+str(index));path=other/'_batch/run.json';path.parent.mkdir(parents=True);path.write_bytes(raw)
+            digest=hashlib.sha256(raw).hexdigest();proof=copy.deepcopy(self.proof)
+            proof['native_run_admission']['files']={str(path):{'bytes':len(raw),'sha256':digest}}
+            allocation=self.allocation(proof,{other},{str(path):digest})[str(path)]
+            with self.subTest(index=index),self.assertRaisesRegex(ValueError,error):
+                self.artifact.read_run_artifact(path,digest,4096,raw_limit=allocation['bytes'],expected_size=allocation['bytes'])
+
+
 class StoppedInertAllocationIsolation(unittest.TestCase):
     """Owning cycle admission; temporary source/provider fixtures, zero live calls."""
     def setUp(self):
@@ -11155,7 +11360,7 @@ class StoppedInertAllocationIsolation(unittest.TestCase):
             try: value=json.loads(file.read_text())
             except ValueError: continue
             c.write(file,replace(value))
-        self.fleet=Path(self.proof['campaign']).parent.parent/'runs/20261103-080440-310001'
+        self.fleet=Path(self.proof['campaign']).parent.parent/'runs'/f'20261103-080440-{FIXTURE_CONTROLLER_PID_BASE + 1}'
         self.owner=c.read(self.fleet/'_batch/lifecycle.json')['fleet_owner_token']
         self.token=self.owner+'-0'; self.mid='845003f2609078'; self.vol='vol_inert_fixture'
         self.clone='cloudbench-inert-fixture'; self.primary='old-machine'

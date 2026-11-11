@@ -45,6 +45,7 @@ import { hasCreditsRemaining } from '../../providers/credits';
 import { listedBackgroundTasks } from './agentTreeBackgroundTasks';
 import { TERMINAL_STATUSES } from './statusBroadcastWorkflowId';
 import * as repo from './repoMessageResume';
+import { ownedByExternalExecution } from './agentExternalExecution';
 
 const log = createLogger('AgentMessageResume');
 const STOPPED_STATUSES = new Set([...TERMINAL_STATUSES, 'PAUSED']);
@@ -52,7 +53,9 @@ const STOPPED_STATUSES = new Set([...TERMINAL_STATUSES, 'PAUSED']);
 /** The stopped status a person's message resumes the agent from, or null when it runs. */
 export async function stoppedAgentStatus(agentId: string): Promise<string | null> {
   const agent = await repo.findAgentStatus(agentId);
-  return agent !== null && STOPPED_STATUSES.has(agent.status) ? agent.status : null;
+  // An external root never resumes through chat, so its rows never show a resume.
+  if (agent === null || ownedByExternalExecution(agent)) return null;
+  return STOPPED_STATUSES.has(agent.status) ? agent.status : null;
 }
 
 /** The spawn tool call and recorded goal / start URL of a browser task (from its first row). */
