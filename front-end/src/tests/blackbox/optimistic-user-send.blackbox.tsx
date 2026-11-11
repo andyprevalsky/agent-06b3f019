@@ -5,7 +5,7 @@
  * Every user message keeps its local send time (day-labelled once past) beneath it.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -378,6 +378,10 @@ describe('pickup through the agent provider', () => {
 });
 
 describe('user bubble meta line', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
   it('keeps the send time on every user message, with Sending to its left until pickup', () => {
     const { rerender } = render(
       <UserBubble
@@ -387,7 +391,7 @@ describe('user bubble meta line', () => {
     const meta = screen.getByTestId('user-message-meta');
     const time = formatMessageSentAt(SENT_AT);
     expect(meta.textContent).toBe(`Sending${time}`);
-    expect(meta.firstElementChild).toBe(screen.getByTestId('user-message-delivery'));
+    expect(screen.getByTestId('user-message-delivery').nextElementSibling?.tagName).toBe('TIME');
     expect(meta.querySelector('time')?.getAttribute('dateTime')).toBe(SENT_AT);
     const status = screen.getByRole('status');
     expect(status).toHaveTextContent('Sending');
@@ -403,6 +407,75 @@ describe('user bubble meta line', () => {
     expect(screen.getByTestId('user-message-meta').textContent).toBe(time);
     expect(screen.queryByRole('status')).toBeNull();
     expect(screen.getByText('helllo')).toBeInTheDocument();
+  });
+
+  it('copies the complete user text and confirms success with a checkmark and Copied', async () => {
+    const text = 'first line\nsecond line  with spaces';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const { rerender } = render(<UserBubble message={serverRow({ text })} />);
+    const button = screen.getByRole('button', { name: 'Copy message' });
+    expect(button.querySelector('.lucide-copy')).toBeInTheDocument();
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Copied' })).toHaveTextContent('Copied'),
+    );
+    expect(writeText).toHaveBeenCalledWith(text);
+    expect(button.querySelector('.lucide-check')).toBeInTheDocument();
+    expect(screen.getByTestId('user-message-meta').querySelector('time')).toHaveAttribute(
+      'dateTime',
+      SENT_AT,
+    );
+
+    rerender(<UserBubble message={serverRow({ text: 'next message', message_id: 'm-2' })} />);
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows a Copy tooltip when the copy action is hovered', async () => {
+    const user = userEvent.setup();
+    render(<UserBubble message={serverRow()} />);
+    await user.hover(screen.getByRole('button', { name: 'Copy message' }));
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Copy');
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull());
+  });
+
+  it('returns to the copy icon after the confirmation expires', async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    render(<UserBubble message={serverRow()} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy message' }));
+    });
+    expect(screen.getByRole('button', { name: 'Copied' })).toHaveTextContent('Copied');
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+    expect(screen.queryByText('Copied')).toBeNull();
+  });
+
+  it('keeps copy available after a clipboard failure without claiming success', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('permission denied'));
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    render(<UserBubble message={serverRow()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy message' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    expect(screen.queryByText('Copied')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it('offers copy on resumed messages, but not on attachment-only messages', () => {
+    const { rerender } = render(
+      <UserBubble
+        message={serverRow({ metadata: { codeAgentResume: { status: 'delivered' } } })}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument();
+    expect(screen.getByTestId('code-agent-resume-status')).toHaveTextContent('Delivered');
+    rerender(<UserBubble message={serverRow({ text: '' })} />);
+    expect(screen.queryByRole('button', { name: 'Copy message' })).toBeNull();
   });
 
   it('labels the local calendar day once the message is before today', () => {

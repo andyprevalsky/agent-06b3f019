@@ -1,0 +1,719 @@
+{
+  "bindings": {
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/10/focused/smoke/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 27360,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/10/focused/smoke/receipt.json",
+      "sha256": "d2dac1b6ca9b3c6dfedbb0a85847b1772bf8fce462a41337400d9b568db6c735"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/10/focused/smoke/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 2871,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/10/focused/smoke/request.json",
+      "sha256": "ec566a286f992a62caa396170241bca490e45993e10e9f003a695763b4364d67"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/10/focused/smoke/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 12772,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/10/focused/smoke/result.json",
+      "sha256": "38354c512094042235502267bec11c98b05dfa11e3d80a1d7c0533c6bc674ab5"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/11/failed-gates/smoke/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 27730,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/11/failed-gates/smoke/receipt.json",
+      "sha256": "a4c2cdc644a14db82536d99108aa83bac0f8cac447ef6a720ba53486d66a5f04"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/11/failed-gates/smoke/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 6102,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/11/failed-gates/smoke/request.json",
+      "sha256": "23cc6b14d034b9d812171bcf90227210c28c607fc4ba42556081e9c6f95c5dec"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/11/failed-gates/smoke/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 11254,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/11/failed-gates/smoke/result.json",
+      "sha256": "4b8967548c1370ae5e77495b3e83ac2d92695f755658f2fc0af81a79136c1f50"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 68760,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/receipt.json",
+      "sha256": "6f047877e4daf0bdc7c80d50ff138a48f71718f87f72c8860aa4e9b135da18aa"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/deploy-worker/2cc598d5c9f35add3a4ce7eb74e67b6caa04d3721f31a324ba7236589fd5f7b6/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 67177,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/deploy-worker/2cc598d5c9f35add3a4ce7eb74e67b6caa04d3721f31a324ba7236589fd5f7b6/result.json",
+      "sha256": "4b08983c02610cf92165d913684a6dbf9788d5e17cbc94fa046f0e8eb0b19d33"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-eof-ly7zxw4z/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 102,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-eof-ly7zxw4z/result.json",
+      "sha256": "bf59be9aa836e3d8c40d94f7343bc1a2c4e85eb4210e3f582a6de0072c7a87dd"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/cancel-pair/worlds/1794371336-5490-91476-worlds-0/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 88,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/cancel-pair/worlds/1794371336-5490-91476-worlds-0/fixture-result.json",
+      "sha256": "c8dcc7b7ed981710b99c1daeafec938cb995bd812989f957cf00074016e2013e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/cancel-pair/worlds/1794371336-5490-91476-worlds-1/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 87,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/cancel-pair/worlds/1794371336-5490-91476-worlds-1/fixture-result.json",
+      "sha256": "44b9e162b7a857fab2b16196d60bbe355bb56523557924cc0d65d806aa444bcf"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/cancel-pair/worlds/1794371336-5490-91476-worlds-2/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 98,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/cancel-pair/worlds/1794371336-5490-91476-worlds-2/fixture-result.json",
+      "sha256": "cf6af7e669e067d502286e9311f063d95454f97d5156e62f133a48fae0854c1d"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/exclusive-pair/worlds/1794371332-5417-91660-worlds-0/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 87,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/exclusive-pair/worlds/1794371332-5417-91660-worlds-0/fixture-result.json",
+      "sha256": "44b9e162b7a857fab2b16196d60bbe355bb56523557924cc0d65d806aa444bcf"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/exclusive-pair/worlds/1794371332-5417-91660-worlds-1/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 88,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/exclusive-pair/worlds/1794371332-5417-91660-worlds-1/fixture-result.json",
+      "sha256": "c8dcc7b7ed981710b99c1daeafec938cb995bd812989f957cf00074016e2013e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/pair/worlds/1794371334-5446-65873-worlds-0/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 88,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/pair/worlds/1794371334-5446-65873-worlds-0/fixture-result.json",
+      "sha256": "c8dcc7b7ed981710b99c1daeafec938cb995bd812989f957cf00074016e2013e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/pair/worlds/1794371334-5446-65873-worlds-1/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 87,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/pair/worlds/1794371334-5446-65873-worlds-1/fixture-result.json",
+      "sha256": "44b9e162b7a857fab2b16196d60bbe355bb56523557924cc0d65d806aa444bcf"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/pair/worlds/1794371334-5446-65873-worlds-2/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 98,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/pair/worlds/1794371334-5446-65873-worlds-2/fixture-result.json",
+      "sha256": "cf6af7e669e067d502286e9311f063d95454f97d5156e62f133a48fae0854c1d"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 34192,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/result.json",
+      "sha256": "2dadc7e46bed43a5829fd9077f7ea8335872cb290440c6f43bb0bf128314df8e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/single-control/worlds/1794371332-5403-77019/fixture-result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 88,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-fixture-worlds-l3d9123i/single-control/worlds/1794371332-5403-77019/fixture-result.json",
+      "sha256": "c8dcc7b7ed981710b99c1daeafec938cb995bd812989f957cf00074016e2013e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/int/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 73,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/int/result.json",
+      "sha256": "626fed95150d680b3c52f2bada6f952713920e91f55eca2e5316345af07fba29"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/normal/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 69,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/normal/result.json",
+      "sha256": "f4ecf935b706e8ab9778dfca4df4c4652dd60631ec42d41595366cba13c75cae"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1918,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/result.json",
+      "sha256": "a023ad25db08a55189bdcf94c83bf515af1e2a5cf9bf36c886b9ba092a2abb53"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/term/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 73,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-lifecycle-_1gi1mkt/term/result.json",
+      "sha256": "626fed95150d680b3c52f2bada6f952713920e91f55eca2e5316345af07fba29"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/missing/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 73,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/missing/result.json",
+      "sha256": "626fed95150d680b3c52f2bada6f952713920e91f55eca2e5316345af07fba29"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/pending/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 73,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/pending/result.json",
+      "sha256": "626fed95150d680b3c52f2bada6f952713920e91f55eca2e5316345af07fba29"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/repeat/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 73,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/repeat/result.json",
+      "sha256": "626fed95150d680b3c52f2bada6f952713920e91f55eca2e5316345af07fba29"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/wrong/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 73,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/files/.context/test-runs/local-receipt-rc1373ix/wrong/result.json",
+      "sha256": "626fed95150d680b3c52f2bada6f952713920e91f55eca2e5316345af07fba29"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1259,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/request.json",
+      "sha256": "b65a499d8bec03b2733bed348e9dd148125b106da8a27e5b969a4ce6122945c2"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 67177,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/remote-artifact/result.json",
+      "sha256": "4b08983c02610cf92165d913684a6dbf9788d5e17cbc94fa046f0e8eb0b19d33"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1456,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/request.json",
+      "sha256": "684f51c291b349e4592331cc0c7f22478b46309a12e1621f72db6d94425d5b37"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 68363,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/agents-coverage-blackbox/result.json",
+      "sha256": "6a8ea01ea35f0f0f56d455724f561815f194d6014350b06eb44e91099e151ceb"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 72811,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/receipt.json",
+      "sha256": "fdab177e1f1fb7a3abe86e0774de2dc8873c4c07c2939312c1c5f59745af80df"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/remote-artifact/files/.context/deploy-backend/d291d361789d4b93049e2a125a8acf14e67eaf88814e96c0301f4c2351f93dae/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 67639,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/remote-artifact/files/.context/deploy-backend/d291d361789d4b93049e2a125a8acf14e67eaf88814e96c0301f4c2351f93dae/result.json",
+      "sha256": "dacee9503e57f4b4b4b5632fc871eb65da8e1eec57d3f1649614d727c804e50a"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 76477,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/remote-artifact/request.json",
+      "sha256": "d05bc75595c45872b95886058c5fa32047cdd67a484b4085b5688a6d698a32df"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 67639,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/remote-artifact/result.json",
+      "sha256": "dacee9503e57f4b4b4b5632fc871eb65da8e1eec57d3f1649614d727c804e50a"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 109582,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/request.json",
+      "sha256": "da9332aa44c4bb072eb3ea2635db18a9986d1ebda3cddd111c2114db9fd2f761"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 69098,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/backend-coverage-blackbox/result.json",
+      "sha256": "9c471489660333abecc7c38e5830f6062ca2b40bad1782e05b3250594a1b24f0"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3705,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/receipt.json",
+      "sha256": "74bab1502be8018e6d45ea9fd2f7c8c3c4c3939851ff40e9dd716cf456de9d86"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/remote-artifact/files/.context/deploy-worker/88df7991061c314fdf4489b688333b7e79e1193c823edb66aefa3b13158366da/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 2087,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/remote-artifact/files/.context/deploy-worker/88df7991061c314fdf4489b688333b7e79e1193c823edb66aefa3b13158366da/result.json",
+      "sha256": "725d0ac6d54ffec5ad760464748ea1694d17276b033eec4c5e830111db0f069e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1276,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/remote-artifact/request.json",
+      "sha256": "c1785faa829910334b7f9aea689c20ddf20fefba9d1438e1e8c8232f5afaba13"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 2087,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/remote-artifact/result.json",
+      "sha256": "725d0ac6d54ffec5ad760464748ea1694d17276b033eec4c5e830111db0f069e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1463,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/request.json",
+      "sha256": "9d83daed3232e0f7bcb8b75b585d52eab25d0ac99783c8279834e0fa58c9be9b"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3279,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/canonical-seed-whatsapp-content/result.json",
+      "sha256": "2c5602e20b2a87cc09258f3c1504ba1cda3abc7c1e6757b95b2b1d8e1c8b2d24"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 69908,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/receipt.json",
+      "sha256": "1d79df613cf9999e8abc45e7bc2f46558ab7e1270d096e7ebddbbd84f1d69dfa"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/remote-artifact/files/.context/deploy-worker/16c11bca32e81b118a0b785230817dc8386b73620fdf034651dc23cb9da900de/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 68321,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/remote-artifact/files/.context/deploy-worker/16c11bca32e81b118a0b785230817dc8386b73620fdf034651dc23cb9da900de/result.json",
+      "sha256": "e6924f5f1813476b026ca5db7032b297dfc7a8581131dbd1248b03367d12f6e7"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1262,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/remote-artifact/request.json",
+      "sha256": "47484a2e7e0f4f659fe43fc1fc6605a1faf3283b1361effdb23d8edbae369213"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 68321,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/remote-artifact/result.json",
+      "sha256": "e6924f5f1813476b026ca5db7032b297dfc7a8581131dbd1248b03367d12f6e7"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1469,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/request.json",
+      "sha256": "fc0fa922763420bbafcfa38030213ec921f349a41503955984e90c592bd12e1f"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 69498,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/deploy-command-structural/result.json",
+      "sha256": "c7e52b1d306e51aa7f84c8b61bf5585740674e5fed9a2bde594ba04d61c209f5"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 6646,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/receipt.json",
+      "sha256": "7b2f67497f86ed07355675860854c142d758d37122216f36ea6cd1805ee4acbb"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/remote-artifact/files/.context/deploy-worker/964a21d32d43a16aebe777aa07eaed5c90b0ffa0a274519c7a7eb380b532e165/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 5141,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/remote-artifact/files/.context/deploy-worker/964a21d32d43a16aebe777aa07eaed5c90b0ffa0a274519c7a7eb380b532e165/result.json",
+      "sha256": "78d4c145114fb0fe258a590a1f9007d82ddb24392237d0ff52812e3fb00bd67a"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1191,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/remote-artifact/request.json",
+      "sha256": "09d98abbf76373c9ca3622f0fed282a559c31e288525dfde03930f47c653919c"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 5141,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/remote-artifact/result.json",
+      "sha256": "78d4c145114fb0fe258a590a1f9007d82ddb24392237d0ff52812e3fb00bd67a"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1388,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/request.json",
+      "sha256": "752dbee02a1e713255cd70d21201f4554002774cdfbcd1184093dae047b72fb4"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 6289,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/e2b-smoke/result.json",
+      "sha256": "1992958f48ca587aecb3b1d111b41702c6d606b2272aee3703d0cacca74d4156"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 69151,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/receipt.json",
+      "sha256": "b73f48adfb8d3f2b0173c6ae096e4378f22ce7a94c30bfc29fe5ae835d8d8f46"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/remote-artifact/files/.context/deploy-worker/4f463af90b834c04890f4a097aebc8bbfc197324bed15bd5748b3c751b069aa3/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 67558,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/remote-artifact/files/.context/deploy-worker/4f463af90b834c04890f4a097aebc8bbfc197324bed15bd5748b3c751b069aa3/result.json",
+      "sha256": "6f9b448492753dac5862c03d54446332a15f7c44b52653ce869b249f61a1b1f3"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1254,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/remote-artifact/request.json",
+      "sha256": "c5c7ccc379b816e543686d9414dd76f1686610054685eddc0ee408ab4d9ac66c"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 67558,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/remote-artifact/result.json",
+      "sha256": "6f9b448492753dac5862c03d54446332a15f7c44b52653ce869b249f61a1b1f3"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1471,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/request.json",
+      "sha256": "91fa7d8ee409ceb8a5a8cc7d99d7ffe564aebdab028ef440e07e124a6df36a43"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 68749,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/frontend-coverage-blackbox/result.json",
+      "sha256": "824653610ca39c2cb4e7d0212876fc17ef83afff9b18653f51a2eaa9d6e87b96"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/live-probes/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 15346,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/live-probes/receipt.json",
+      "sha256": "99c8dfbc1d6bccd9cd52cd4669b0974d2d1c407c4534fb71cb0de4558b0dfe15"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/live-probes/remote-artifact/files/.context/deploy-worker/67f89bc5548de5205e2d0f1dd1b77237c5751b37a5ddd7a9a5ac357fdbf707e0/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 13828,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/live-probes/remote-artifact/files/.context/deploy-worker/67f89bc5548de5205e2d0f1dd1b77237c5751b37a5ddd7a9a5ac357fdbf707e0/result.json",
+      "sha256": "955cbfc3bad392d040d44a62a51a72400708c2a6f3dd0a0f01f7dfccc4884893"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/live-probes/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1179,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/live-probes/remote-artifact/request.json",
+      "sha256": "4943b439dd9d3962b9e0a9151d430fbebfb803515441f9f49d321f57e81c508c"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/live-probes/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 13828,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/live-probes/remote-artifact/result.json",
+      "sha256": "955cbfc3bad392d040d44a62a51a72400708c2a6f3dd0a0f01f7dfccc4884893"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/live-probes/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1366,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/live-probes/request.json",
+      "sha256": "ce643565ef4d4817637085cc7932b97680565ec874e2c0cfebff48ffe837438b"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/live-probes/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 14978,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/live-probes/result.json",
+      "sha256": "021fec46615d7cad883f98cb91b0035d40c186e6127fdf1fd1209082558b487b"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3439,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/receipt.json",
+      "sha256": "65c62735a8c66bfd5f9c4a82684bd3a97fd4e287968f7def2c1fe3cfbb596783"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/remote-artifact/files/.context/deploy-worker/56184ff3dff42591971bd94576b73bc993b0f52442ce60c65ef0526f2c804522/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1887,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/remote-artifact/files/.context/deploy-worker/56184ff3dff42591971bd94576b73bc993b0f52442ce60c65ef0526f2c804522/result.json",
+      "sha256": "f51cbe533fca5ede2177b57f5c1efb1166651a5d55bac34c093fd7d33d8b9ed6"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1246,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/remote-artifact/request.json",
+      "sha256": "ca3bab9fe6470c865e56a22ce388df5e8b0976c567c7e537f21218efd2b15f4e"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1887,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/remote-artifact/result.json",
+      "sha256": "f51cbe533fca5ede2177b57f5c1efb1166651a5d55bac34c093fd7d33d8b9ed6"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1463,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/request.json",
+      "sha256": "2d2ff1dbc44901cceca953123f1ba9bcbcf7416db2c170e37d0f65dbe72c1ef3"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3053,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/new-test-stability/result.json",
+      "sha256": "eb2d9b7f3d5b3a1c78a57fa4c23fc4a8cf8428b2b6050aaf606f3bcdeaf85489"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 6240,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/receipt.json",
+      "sha256": "0a067a2679ea0b3ebad6473f2df3e6da8272a7190b8c19034c7f776f18993f64"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/remote-artifact/files/.context/deploy-worker/5592a62d369c179932f1f80cefddd4e8710337404829facfd40e894666f0afda/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 4682,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/remote-artifact/files/.context/deploy-worker/5592a62d369c179932f1f80cefddd4e8710337404829facfd40e894666f0afda/result.json",
+      "sha256": "154e25e687e9906276b1bd59749f9beb3be7d08b04994d083eb55c7b217574b2"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1216,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/remote-artifact/request.json",
+      "sha256": "312b0091913d2d62e496bae961258010eb16487cd0c87108d5b9c06c5868d19c"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 4682,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/remote-artifact/result.json",
+      "sha256": "154e25e687e9906276b1bd59749f9beb3be7d08b04994d083eb55c7b217574b2"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1403,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/request.json",
+      "sha256": "e93653604f7c73b4843bc88a557965c40c82428efd00df8ee713ee0086fa971b"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 5852,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-cache-decision/result.json",
+      "sha256": "a4f5073d066144488a6c0280afd1499e8320b997c1cfbb01b270f66ec01d1698"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3841,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/receipt.json",
+      "sha256": "4ad9600a6c7a7a1996ef665c44a0a61147a60002b85758b4a0e97f9509c177d6"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/remote-artifact/files/.context/deploy-worker/237345eb2ff405014a5da4b7b94c51811cd59c2abb1a7e6e5bcc7bfb2cce5560/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 2283,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/remote-artifact/files/.context/deploy-worker/237345eb2ff405014a5da4b7b94c51811cd59c2abb1a7e6e5bcc7bfb2cce5560/result.json",
+      "sha256": "dc979a7e58a735a678c717eac161c9bb574c0334ea933211eeb8aef03cad88a1"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1247,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/remote-artifact/request.json",
+      "sha256": "f07d731317d62612fc41f08ef0c06d445d9ca4964b72c8c53c1461269658c4e0"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 2283,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/remote-artifact/result.json",
+      "sha256": "dc979a7e58a735a678c717eac161c9bb574c0334ea933211eeb8aef03cad88a1"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1474,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/request.json",
+      "sha256": "e2bc4048669f1293c3ee395184886c4897e74c53d2daace666328c27bcd2e615"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3451,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/seed-memory-ratchet/result.json",
+      "sha256": "fad42bf228cff66503f546ba2b95c9a29017035182f2c36a3059662482396577"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/receipt.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 52119,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/receipt.json",
+      "sha256": "2abb1ed2ad45cdbe1b00e6fae42f921ad819c93eaa1c0d4bc0520aabc0e677f1"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/remote-artifact/files/.context/deploy-semantic/d5eb2ef4ff9a50e953e3a131811ec8731d40146d636e2c5a8ba650a1a233f48f/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 51239,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/remote-artifact/files/.context/deploy-semantic/d5eb2ef4ff9a50e953e3a131811ec8731d40146d636e2c5a8ba650a1a233f48f/result.json",
+      "sha256": "71f5b4879437f21b492c90c8a64ab8d4feea509c0db733bfc49ab9c76ce4b1a1"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/remote-artifact/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1191,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/remote-artifact/request.json",
+      "sha256": "556cfb7b7df88749b14e92cc2b318dd75228617800e49a0e20d4e0e30269ee98"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/remote-artifact/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 51239,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/remote-artifact/result.json",
+      "sha256": "71f5b4879437f21b492c90c8a64ab8d4feea509c0db733bfc49ab9c76ce4b1a1"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/request.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1378,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/request.json",
+      "sha256": "59af108ba5e5c29b5976565c972470f22a78a5714bda760c10aefa36df460ebf"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/result.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 52127,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/deploy-pipeline/attempts/13/final/semantic-stack/result.json",
+      "sha256": "c8392a9627b941f93975573f12292a1588ba8d4bea3f046e70badaa23ecc3ac1"
+    },
+    "/home/boxes/rose/.context/deploy-pipeline/production-lanes.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 5309,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/deploy-pipeline/production-lanes.json",
+      "sha256": "4bba928034c3097b9e66286f220ce505789abc832ea07574813374e3abcd4771"
+    },
+    "/home/boxes/rose/.context/deploy-runs/20261110-231347-3020855/failure-report.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 10958,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/deploy-runs/20261110-231347-3020855/failure-report.json",
+      "sha256": "d859eac548b761d803d832bada4c2535d4f55c37bee6fe35743d29c974101afe"
+    },
+    "/home/boxes/rose/.context/deploy-runs/20261110-231347-3020855/failure-report.json.lock": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 0,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/deploy-runs/20261110-231347-3020855/failure-report.json.lock",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/finish-final.log": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 1582,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/finish-final.log",
+      "sha256": "e6f9f3e239c427f80cc9aa4ce86a2a1e9f1246baa2740915fd0ddfb32187315f"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/entry-folder-verified.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 464,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/entry-folder-verified.json",
+      "sha256": "38b7de9256e0d59002b331da75054b0cdef63739e3d7e75fee80ebfbe7a278b9"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/entry-repair-goal.md": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 16791,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/entry-repair-goal.md",
+      "sha256": "6ead9626d356f05ee42662d0d270b9928e5b0a507d197899d00b556c4fc93911"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/entry-repair-report.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 424,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/entry-repair-report.json",
+      "sha256": "11784f4d7ffcf09b4426f0429345d679413c7cd0c5903dee0bc95fb60a08756f"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/entry-repair-start.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 286,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/entry-repair-start.json",
+      "sha256": "1ef50f85efd0f264324b72f124f7956b9a8ae8aa1b604d051b058ad42480fd0a"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/mass-folder-verified.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 464,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/mass-folder-verified.json",
+      "sha256": "fccfed8b2e5ea64bffe45c59bd64cd210bafd5380e91c944821ca0cecbc91d91"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/mass-judge-repair-goal.md": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 10059,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/mass-judge-repair-goal.md",
+      "sha256": "649da04fdda9cad25bec53b3e811031c502342e02424f64460e62a933c99ff2d"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/mass-judge-report.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 405,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/mass-judge-report.json",
+      "sha256": "e2a7ee663ef2984d4158a1ebb1c4cbb4cbcbf4896017b224c01dde9b42a48064"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/mass-judge-start.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 286,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/mass-judge-start.json",
+      "sha256": "43fc6992f2df84712395c01780e6ff7f102f39034e620ca7439f1a5bffaac026"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/sidebar-folder-verified.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 464,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/sidebar-folder-verified.json",
+      "sha256": "4951be3f8e358ac5eeef42a5ec933d161e6a9dd686b93b20d54d2063c4adb25f"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/sidebar-repair-goal.md": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 11461,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/sidebar-repair-goal.md",
+      "sha256": "17462626d2738345ac7b671dc3490e872f000a42388ef971993050f5e770d45e"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/handoffs/sidebar-start.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 286,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/handoffs/sidebar-start.json",
+      "sha256": "322d3aa555c48afc7070a270067429fa543bcc577b2fe17d08dde0b25afdafc8"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/investigator/router-replay-candidate-a5e1c037/REPORT.txt": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 6398,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/rca-ebb350db/investigator/router-replay-candidate-a5e1c037/REPORT.txt",
+      "sha256": "6ff9c6ab61cbb1d4fad28634622feb692debe3c1dc6a67e752d4f0b4ef59aff6"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/investigator/router-replay-raw/REPORT.txt": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 6716,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/rca-ebb350db/investigator/router-replay-raw/REPORT.txt",
+      "sha256": "a488b854e1a23d0d47ec16881c18805eca00105b840ecfbf8eb019e16873fca8"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/preservation/native-operational-state/manifest.private.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3495068,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/rca-ebb350db/preservation/native-operational-state/manifest.private.json",
+      "sha256": "eb9a92e08555eb4a3191e7b38b3acd569410365b046a29f8315a8f7820275066"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/primary-final-controls/production-lanes.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 5309,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/primary-final-controls/production-lanes.json",
+      "sha256": "4bba928034c3097b9e66286f220ce505789abc832ea07574813374e3abcd4771"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/production-qualified.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 3218,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/production-qualified.json",
+      "sha256": "8e8280a3298e5cfe0e61d5deaa471ba49ab68a0e32e66beeecaec4feeb0ac91d"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/production-rca/agentcard-billing-attribution.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 4866,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/production-rca/agentcard-billing-attribution.json",
+      "sha256": "83d7c103c22fba437065bf59d75bb9ee9312cb490c1cc786844c7c4fd1b24c13"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/production-rca/entry/failed-test-packet.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 18740,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/production-rca/entry/failed-test-packet.json",
+      "sha256": "04ae8a604c16ce8be644bf27ba1fcc54660c9a4c564cc086a08c3fa3cd0239b0"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/production-rca/sidebar/failed-test-packet.json": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 3950,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/production-rca/sidebar/failed-test-packet.json",
+      "sha256": "1064f443acde3691c81b83d5f072905552e77999a4989ea69c0d5b96f46776d3"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/review-b618-skip.log": {
+      "archive_key": "devbox-closeout-private/pr1918/supplement-20261111T055525Z-late-records.tar.gz.aesgcm",
+      "bytes": 1738,
+      "member": "rose/.context/rca-ebb350db/preservation/supplement-20261111T055525Z/payload/files/rose/.context/rca-ebb350db/review-b618-skip.log",
+      "sha256": "bb20f4a15405f233169eb9cc8f0caec2f18e7657e682bcf98ac82a4c6f93808f"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/smoke-b618-rca/abandonment-stall-proof.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 3250,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/rca-ebb350db/smoke-b618-rca/abandonment-stall-proof.json",
+      "sha256": "40f6774b6efcf0bdc9cab1e53d52280d1a6a4c98fae131202a7c8c9bdb5947df"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/smoke-b618-rca/mass-failed-gates-extract.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1202,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/rca-ebb350db/smoke-b618-rca/mass-failed-gates-extract.json",
+      "sha256": "fd50701856f692a2d2069ff0b060ba46503be493428ffca75add3c395c3d5318"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/smoke-b618-rca/mass-failure-extract.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 1400,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/rca-ebb350db/smoke-b618-rca/mass-failure-extract.json",
+      "sha256": "1b2dd6ced549d5b3a6d77b387033fc0230a81472f6c1e3a375a2946abbe0c6d6"
+    },
+    "/home/boxes/rose/.context/rca-ebb350db/smoke-b618-rca/mass-source-attribution.json": {
+      "archive_key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+      "bytes": 2334,
+      "member": "rose/.context/rca-ebb350db/preservation/capture-20261111T051301767533Z/payload/files/rose/.context/rca-ebb350db/smoke-b618-rca/mass-source-attribution.json",
+      "sha256": "8f30a687b2a7ceb9233e4e593d3265a33fe82e1cd2186a48713e5de9fe2d0dd9"
+    }
+  },
+  "format": "PR1918-PRIVATE-PROOF-INDEX-V1"
+}

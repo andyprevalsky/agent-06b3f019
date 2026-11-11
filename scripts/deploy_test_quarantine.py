@@ -50,7 +50,7 @@ STATE_DIR_ENV = 'DEPLOY_TEST_CYCLE_STATE_DIR'
 DEFAULT_STATE_DIR = Path('.context/deploy-pipeline')
 # Line order in bounded ledger detail: a failing test name is never the one dropped.
 PRIORITY = {'FAIL': 0, 'UNVERIFIED': 0, FLAKY: 1, QUARANTINED_FAIL: 2, QUARANTINED_PASS: 3}
-SCAN_EXCLUDE = ('claude-code-src/', 'openclaw/', 'hermes-agent/', 'codex/', 'prime-agent/', 'kimi-code/',
+SCAN_EXCLUDE = ('claude-code-src/', 'openclaw/', 'hermes-agent/', 'codex/', 'prime-agent/', 'kimi-code/', 'openworker/',
                 'node_modules/', 'scripts/lib/test_quarantine.py')
 BOXES_THREAD = re.compile(r'https://boxes\.dev/thread/[A-Za-z0-9_-]+')
 

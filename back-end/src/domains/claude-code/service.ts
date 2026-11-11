@@ -125,6 +125,8 @@ function sessionOptions(
     freshConversation: params.fresh_conversation === true,
     taskName: params.task_name ?? null,
     cliSettings: params.cli_settings ?? null,
+    resumeConfig: params.resume_config,
+    leaseOwner: params.lease_owner,
   };
 }
 

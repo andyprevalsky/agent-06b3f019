@@ -31,7 +31,7 @@ REPRODUCIBLE = ('node_modules/', '*/node_modules/', 'agents/venv/', '*/venv/', '
                 '*.pyc', '.pytest_cache/', '*/.pytest_cache/', '.mypy_cache/', '.ruff_cache/', '*/dist/',
                 '*/build/', '*/coverage/', 'coverage/', '*/test-results/', '*/playwright-report/',
                 '.context/tsbuildinfo/', '.context/frontend-builds/', 'openclaw/', 'hermes-agent/', 'codex/',
-                'prime-agent/', 'kimi-code/', 'htmlcov/', '*/htmlcov/', '*/.coverage', '.coverage')
+                'prime-agent/', 'kimi-code/', 'openworker/', 'htmlcov/', '*/htmlcov/', '*/.coverage', '.coverage')
 
 
 def git(*args: str, cwd: Path | None = None, check: bool = True) -> str:

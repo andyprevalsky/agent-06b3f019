@@ -86,6 +86,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Testing guide, including Blacksmith and CI: `docs/testing.md`; `bash scripts/test.sh --no-smoke [repo] [domain]` runs offline tests and `--list` lists domains.
 - `python3 scripts/run-deploy-structural-gates.py [--max-workers N]` runs the deploy structural registry; activate `agents/venv` first.
 - `python3 scripts/select_affected_tests.py` lists the tests a change reaches; when a test reaches code dynamically, add an `edges` entry to `scripts/test-map/edges.json` or name the path literally.
+- Validate incrementally: as each coherent change becomes testable, run its affected checks (cheap format/lint/type/focused first, then the affected full gates) against a recorded source snapshot while independent work continues; this adds no gate and does not replace final `/deploy` validation.
 - Staged deploy validation follows `docs/deploy-test-cycle.md`: Format, ESLint, TypeScript and application structural checks always run in the quick phase; other categories run when selected.
 - Focused reruns are repair evidence only: Coverage thresholds inside a selected full gate remain unchanged, and a focused subset cannot masquerade as a full coverage pass.
 - Activate `agents/venv` (`source venv/bin/activate`) before agent tests or gate runners; an absolute venv path leaves child `python3` on the wrong interpreter.
@@ -155,7 +156,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Layout: `front-end/` React+Vite (Vercel), `back-end/` Express+Prisma (Render), `agents/` Python Temporal workers (Fly.io), `research/gepa/` offline, `mac-app/` Electron (macOS), `docs/` Mintlify.
 - Entry points: `front-end/src/App.tsx`, `back-end/src/server.ts`, `agents/worker.py`, `agents/workflows/agent_workflow.py`; `back-end/prisma/schema.prisma` is the database source of truth.
 - Backend auth middleware lives in `back-end/src/providers/auth.ts` and `hybridAuth.ts`; there is no `src/middleware/`.
-- Reference harnesses are read-only: vendored `claude-code-src/` (lift its prompt and loop patterns liberally) and gitignored `openclaw/`, `hermes-agent/`, `codex/`, `prime-agent/`, `kimi-code/` (restore with `bash scripts/sync-reference-repos.sh`).
+- Reference harnesses are read-only: vendored `claude-code-src/` (lift its prompt and loop patterns liberally) and gitignored `openclaw/`, `hermes-agent/`, `codex/`, `prime-agent/`, `kimi-code/`, `openworker/` (restore with `bash scripts/sync-reference-repos.sh`).
 - Plans live in `docs/plans/active/` and move to `completed/` when shipped; read completed plans that touched a file before modifying it, and give every plan automated verification (rule 15).
 - Before writing feature code, include a diagram of how the change fits the system (rule 10).
 - Don't truncate context flows; truncate only to fit UI, and make bounded previews explicit with pagination for the rest (rule 13).

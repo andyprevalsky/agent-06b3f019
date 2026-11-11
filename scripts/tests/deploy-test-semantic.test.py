@@ -36,6 +36,17 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.classify_lane('ui', [item], report, events),
                          {adapter.case_key('ui', item): 'FAIL'})
 
+    def test_malformed_report_objects_stay_unverified(self):
+        for shape in ('suite', 'nested_suite', 'spec', 'test'):
+            with self.subTest(shape=shape):
+                item, events, report = self.fixture()
+                if shape == 'suite': report['suites'] = ['x']
+                if shape == 'nested_suite': report['suites'][0]['suites'] = ['x']
+                if shape == 'spec': report['suites'][0]['specs'] = ['x']
+                if shape == 'test': report['suites'][0]['specs'][0]['tests'] = ['x']
+                self.assertEqual(adapter.classify_lane('ui', [item], report, events),
+                                 {adapter.case_key('ui', item): 'UNVERIFIED'})
+
     def test_incomplete_never_gets_assertion_credit(self):
         item, events, report = self.fixture()
         for change in ('before', 'after', 'end', 'skipped', 'interrupted', 'retry', 'extra', 'global'):
@@ -52,6 +63,65 @@ class SemanticReports(unittest.TestCase):
                 if change == 'global': r['errors'] = [{'message': 'global setup failed'}]
                 self.assertEqual(set(adapter.classify_lane('ui', [item], r, e).values()), {'UNVERIFIED'})
 
+
+    def test_complete_native_retries_preserve_terminal_assertion_failure(self):
+        item, events, report = self.fixture()
+        report['config'] = {'projects': [{'name': 'chromium', 'retries': 1}]}
+        result = report['suites'][0]['specs'][0]['tests'][0]['results'][0]
+        second = copy.deepcopy(result)
+        second['retry'] = 1
+        report['suites'][0]['specs'][0]['tests'][0]['results'].append(second)
+        retry_events = copy.deepcopy(events[1:5])
+        for event in retry_events:
+            event['retry'] = 1
+        events[5:5] = retry_events
+        self.assertEqual(adapter.classify_lane('ui', [item], report, events),
+                         {adapter.case_key('ui', item): 'FAIL'})
+        passed_events, passed_report = copy.deepcopy(events), copy.deepcopy(report)
+        first = passed_report['suites'][0]['specs'][0]['tests'][0]['results'][0]
+        first.update(status='passed', errors=[])
+        passed_report['suites'][0]['specs'][0]['tests'][0]['results'] = [first]
+        passed_events = passed_events[:5] + [passed_events[-1]]
+        passed_events[4]['status'] = passed_events[-1]['status'] = 'passed'
+        self.assertEqual(adapter.classify_lane('ui', [item], passed_report, passed_events),
+                         {adapter.case_key('ui', item): 'PASS'})
+        for defect in ('missing_original', 'missing_final', 'before', 'after', 'end', 'interrupted',
+                       'skipped', 'duplicate', 'gap', 'pass_without_flaky_receipt',
+                       'missing_project', 'missing_budget', 'duplicate_project', 'null_config',
+                       'null_project', 'null_result', 'unknown_id'):
+            with self.subTest(defect=defect):
+                e, r = copy.deepcopy(events), copy.deepcopy(report)
+                attempts = r['suites'][0]['specs'][0]['tests'][0]['results']
+                if defect == 'missing_original':
+                    attempts.pop(0)
+                    e = [event for event in e if event.get('retry') != 0]
+                if defect == 'missing_final':
+                    attempts.pop()
+                    e = [event for event in e if event.get('retry') != 1]
+                if defect in ('before', 'after'):
+                    e[6 if defect == 'before' else 7]['ok'] = False
+                if defect == 'end': e.pop(8)
+                if defect in ('interrupted', 'skipped'):
+                    attempts[1]['status'] = e[8]['status'] = defect
+                if defect in ('duplicate', 'gap'):
+                    retry = 0 if defect == 'duplicate' else 2
+                    attempts[1]['retry'] = retry
+                    for event in e[5:9]: event['retry'] = retry
+                if defect == 'pass_without_flaky_receipt':
+                    attempts[1]['status'] = e[8]['status'] = 'passed'
+                    e[-1]['status'] = 'passed'
+                if defect == 'missing_project': r['config']['projects'] = []
+                if defect == 'missing_budget': r['config']['projects'][0].pop('retries')
+                if defect == 'duplicate_project':
+                    r['config']['projects'].append({'name': 'chromium', 'retries': 2})
+                if defect == 'null_config': r['config'] = None
+                if defect == 'null_project': r['config']['projects'] = [None]
+                if defect == 'null_result': attempts[-1] = None
+                if defect == 'unknown_id':
+                    e.insert(-1, {'event': 'testBegin', 'id': 'outside-inventory', 'retry': 0})
+                self.assertEqual(set(adapter.classify_lane('ui', [item], r, e).values()),
+                                 {'UNVERIFIED'})
+
     def test_native_pass_and_timeout(self):
         item, events, report = self.fixture()
         for status, expected in [('passed', 'PASS'), ('timedOut', 'FAIL')]:
@@ -64,50 +134,6 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.summary_status(['PASS', 'PASS']), 'PASS')
         self.assertEqual(adapter.summary_status(['FAIL', 'UNVERIFIED']), 'UNVERIFIED')
         self.assertEqual(adapter.summary_status([]), 'UNVERIFIED')
-
-    def retried_fixture(self, final='failed'):
-        item, events, report = self.fixture()
-        first = copy.deepcopy(events[1:-1])
-        second = [dict(row, retry=1) for row in first]
-        second[-1]['status'] = final
-        events = [events[0], *first, *second, events[-1]]
-        events[-1]['status'] = 'passed' if final == 'passed' else 'failed'
-        results = report['suites'][0]['specs'][0]['tests'][0]['results']
-        results.append(dict(copy.deepcopy(results[0]), retry=1, status=final))
-        return item, events, report
-
-    def test_one_native_retry_has_complete_attempt_evidence(self):
-        for final, expected in [('failed', 'FAIL'), ('timedOut', 'FAIL'), ('passed', 'PASS')]:
-            with self.subTest(final=final):
-                item, events, report = self.retried_fixture(final)
-                self.assertEqual(adapter.classify_lane('ui', [item], report, events),
-                                 {adapter.case_key('ui', item): expected})
-                self.assertEqual(report['suites'][0]['specs'][0]['tests'][0]['results'][0]['errors'],
-                                 [{'message': 'expect received false'}])
-
-    def test_retry_cannot_repair_missing_or_contradictory_lifecycle(self):
-        for defect in ('missing_first_hook', 'missing_retry_hook', 'first_hook_error',
-                       'retry_hook_error', 'missing_first_result', 'extra_retry', 'wrong_retry',
-                       'event_retry', 'status_mismatch', 'first_pass', 'first_skipped',
-                       'retry_interrupted', 'duplicate_event'):
-            with self.subTest(defect=defect):
-                item, events, report = self.retried_fixture('passed')
-                results = report['suites'][0]['specs'][0]['tests'][0]['results']
-                if defect == 'missing_first_hook': events.pop(2)
-                if defect == 'missing_retry_hook': events.pop(6)
-                if defect == 'first_hook_error': events[2]['ok'] = False
-                if defect == 'retry_hook_error': events[6]['ok'] = False
-                if defect == 'missing_first_result': results.pop(0)
-                if defect == 'extra_retry': results.append(dict(results[-1], retry=2))
-                if defect == 'wrong_retry': results[1]['retry'] = 2
-                if defect == 'event_retry': events[5]['retry'] = 0
-                if defect == 'status_mismatch': events[8]['status'] = 'failed'
-                if defect == 'first_pass': results[0]['status'] = events[4]['status'] = 'passed'
-                if defect == 'first_skipped': results[0]['status'] = events[4]['status'] = 'skipped'
-                if defect == 'retry_interrupted': results[1]['status'] = events[8]['status'] = 'interrupted'
-                if defect == 'duplicate_event': events.insert(5, copy.deepcopy(events[4]))
-                self.assertEqual(set(adapter.classify_lane('ui', [item], report, events).values()),
-                                 {'UNVERIFIED'})
 
     def test_actual_playwright_retry_keeps_final_failure_and_flaky_first_error(self):
         import os
@@ -137,8 +163,11 @@ class SemanticReports(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, proc.stderr.decode())
             events = [json.loads(line) for line in (folder / 'events.jsonl').read_text().splitlines()]
             report = json.loads((folder / 'report.json').read_text())
-            cases = adapter.classify_lane('ui', events[0]['tests'], report, events)
-            self.assertEqual(sorted(cases.values()), ['FAIL', 'PASS', 'UNVERIFIED'])
+            retried = []
+            cases = adapter.classify_lane('ui', events[0]['tests'], report, events, retried)
+            # The retried pass stays UNVERIFIED until its native FLAKY receipt exists.
+            self.assertEqual(sorted(cases.values()), ['FAIL', 'UNVERIFIED', 'UNVERIFIED'])
+            self.assertEqual(len(retried), 1)
             flaky = quarantine.gate_outcomes(progress)['flaky']
             self.assertEqual(len(flaky), 1)
             self.assertEqual(flaky[0]['attempts'], 2)
@@ -148,15 +177,15 @@ class SemanticReports(unittest.TestCase):
                          if json.loads(line)['status'] == 'FLAKY']
             self.assertEqual(len(raw_flaky), 1)
             self.assertIn('Expected: 1', raw_flaky[0]['detail'])
-            final_flaky = adapter.native_flaky('ui', events[0]['tests'], report, cases)
+            final_flaky = adapter.native_flaky('ui', events[0]['tests'], report, retried)
             self.assertEqual(len(final_flaky), 1)
             self.assertEqual(final_flaky[0]['unit'], raw_flaky[0]['unit'])
             self.assertEqual(final_flaky[0]['attempts'], 2)
             self.assertIn('Expected: 1', final_flaky[0]['detail'])
             progress.unlink()  # Final evidence survives loss of the advisory file.
-            self.assertEqual(adapter.native_flaky('ui', events[0]['tests'], report, cases), final_flaky)
+            self.assertEqual(adapter.native_flaky('ui', events[0]['tests'], report, retried), final_flaky)
 
-    def run_worker(self, defect=None):
+    def run_worker(self, defect=None, malformed_event=None):
         import deploy_test_worker as worker
         import deploy_test_result as result_contract
         with tempfile.TemporaryDirectory() as d:
@@ -183,6 +212,10 @@ class SemanticReports(unittest.TestCase):
                     if lane == 'latency' or defect == 'all_pass_nonzero':
                         e[4]['status'] = e[5]['status'] = 'passed'
                         r['suites'][0]['specs'][0]['tests'][0]['results'][0]['status'] = 'passed'
+                    if lane == 'ui' and defect == 'malformed_event':
+                        e.append(malformed_event)
+                    if lane == 'ui' and defect == 'malformed_report':
+                        r['suites'][0]['specs'][0]['tests'] = ['x']
                     (folder / (lane + '.json')).write_text(json.dumps(r))
                     (folder / (lane + '.jsonl')).write_text(''.join(json.dumps(x) + '\n' for x in e))
                 receipt = {'token': request['token'], 'source': freeze, 'ready': True,
@@ -211,6 +244,34 @@ class SemanticReports(unittest.TestCase):
             else:
                 self.assertEqual(result['cases'], {'semantic-stack': 'UNVERIFIED'})
                 self.assertFalse(result['complete'])
+            if defect == 'malformed_event':
+                self.assertEqual(result['evidence']['semantic-stack']['errors'], ['ui: ValueError'])
+                self.assertTrue(result['cleanup_complete'])
+                self.assertEqual(result['native_exit'], 1)
+                self.assertFalse(result['interrupted'])
+                native = result['evidence']['semantic-stack']['native_cases']
+                self.assertEqual(native[adapter.case_key('ui', selected['ui'][0])], 'UNVERIFIED')
+                self.assertEqual(native[adapter.case_key('latency', selected['latency'][0])], 'PASS')
+                captured = Path(result['evidence']['semantic-stack']['artifact_directory'])
+                self.assertEqual(adapter.events_at(captured / 'ui.jsonl')[-1], malformed_event)
+                raw = json.loads((captured / 'ui.json').read_text())
+                self.assertEqual(raw['suites'][0]['specs'][0]['tests'][0]['results'][0]['status'], 'failed')
+            if defect == 'malformed_report':
+                native = result['evidence']['semantic-stack']['native_cases']
+                self.assertEqual(native[adapter.case_key('ui', selected['ui'][0])], 'UNVERIFIED')
+                self.assertEqual(native[adapter.case_key('latency', selected['latency'][0])], 'PASS')
+                captured = Path(result['evidence']['semantic-stack']['artifact_directory'])
+                self.assertEqual(json.loads((captured / 'result.json').read_text())['cases'],
+                                 {'semantic-stack': 'UNVERIFIED'})
+                self.assertTrue(result['cleanup_complete'])
+
+    def test_malformed_report_preserves_other_lane_and_writes_result(self):
+        self.run_worker('malformed_report')
+
+    def test_malformed_final_native_event_is_unknown_with_lane_diagnostic(self):
+        for value in (1, [], 'x', None):
+            with self.subTest(value=value):
+                self.run_worker('malformed_event', malformed_event=value)
 
     def test_existing_worker_dispatch_one_sweep_original_recipe(self):
         self.run_worker()
@@ -339,7 +400,8 @@ class SemanticReports(unittest.TestCase):
             env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
                    'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json')}
             proc = subprocess.run([*adapter.playwright_command(ROOT), 'test', '--reporter=json,' + str(
-                ROOT / 'scripts/deploy-semantic-reporter.cjs')], cwd=folder, env=env,
+                ROOT / 'scripts/deploy-semantic-reporter.cjs'), '--output', str(folder / 'test-results')],
+                cwd=folder, env=env,
                 capture_output=True, timeout=45)
             self.assertEqual(proc.returncode, 1, proc.stderr.decode())
             events = [json.loads(line) for line in (folder / 'events.jsonl').read_text().splitlines()]

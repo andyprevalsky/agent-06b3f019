@@ -56,7 +56,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EDGES_FILE = ROOT / "scripts" / "test-map" / "edges.json"
 AGENTS_COVERAGE_MAP = ROOT / "scripts" / "test-map" / "agents-coverage.json"
 
-EXCLUDED_TOP = ("docs/handoffs/", "claude-code-src/", "openclaw/", "hermes-agent/", "codex/", "prime-agent/", "kimi-code/")
+EXCLUDED_TOP = ("docs/handoffs/", "claude-code-src/", "openclaw/", "hermes-agent/", "codex/", "prime-agent/", "kimi-code/", "openworker/")
 CODE_EXT = {".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".sh", ".bash"}
 TS_EXT = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx")
 TEXT_SCAN_EXT = CODE_EXT | {".rb", ""}

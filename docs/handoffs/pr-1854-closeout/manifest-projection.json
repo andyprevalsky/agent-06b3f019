@@ -1,0 +1,13 @@
+{
+  "format": "PR1854-PUBLIC-MANIFEST-PROJECTION-V1",
+  "private_certified_manifest_sha256": "a03c72b63d35fc3c3fa5c836f8dcd3760ab1a2b215e7626574b5a463b6ff6cd2",
+  "public_manifest_sha256": "c406fb92c98d09ca792424831f3cc6699147a9a879df6703c503a6eac8b3bbe2",
+  "keys_and_archive_tip_bundle_member_dispositions_unchanged": true,
+  "entry_count": 17362,
+  "changed_fields": [
+    "proposed_disposition removed from archived entries",
+    "reason updated from preparation text to actual verified outcome",
+    "verification_receipt relocated to committed byte-identical native receipt"
+  ],
+  "private_original_invariant": "Full certified manifest remains private alongside the sealed archive and bundle plan; no entries or preservation obligations removed."
+}
