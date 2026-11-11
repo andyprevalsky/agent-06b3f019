@@ -12,6 +12,7 @@ import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
+SOURCE_REFUSAL = 'private fleet source validation failed'
 ISOLATED_RENEWAL_PHASES = frozenset({'triage', 'needs-focused-plan', 'failed-gates'})
 
 # Bound raw run evidence per proof; ordinary receipts retain their existing limit.
@@ -59,6 +60,30 @@ def fields(raw):
 
 def finite(value):
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def native_run_admission(proof, participants, bindings):
+    """Explicit exact-size allocations inside the existing native proof budget."""
+    if 'native_run_admission' not in proof:
+        return {}
+    need(proof.get('layout') == 'campaign-v1' and proof.get('purpose') == 'isolated-validation',
+         'native run admission scope')
+    admission = proof['native_run_admission']
+    need(isinstance(admission, dict) and set(admission) == {'kind', 'files'}
+         and admission['kind'] == 'native-isolated-shared-raw-v1', 'native run admission shape')
+    allocations = admission['files']
+    expected = {str(fleet / '_batch/run.json') for fleet in participants}
+    need(isinstance(allocations, dict) and set(allocations) == expected,
+         'native run admission participant closure')
+    total = 0
+    for path, row in allocations.items():
+        need(isinstance(row, dict) and set(row) == {'bytes', 'sha256'}
+             and type(row['bytes']) is int and 0 < row['bytes'] <= RUN_RECORD_MAX_BYTES
+             and isinstance(row['sha256'], str) and re.fullmatch('[0-9a-f]{64}', row['sha256'])
+             and row['sha256'] == bindings.get(path), 'native run admission allocation')
+        total += row['bytes']
+    need(total <= MAX_RAW_RUN_PROOF_BYTES, 'native run aggregate raw admission bound exceeded')
+    return allocations
 
 
 def recovered_roots(path, bench, bound):
@@ -290,7 +315,9 @@ def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, p
          and isinstance(p.get('birth'), str) and p['birth'].isdigit() for p in classified)
          and len({p['pid'] for p in classified}) == len(classified), 'stopped inert process identities')
     helper = bound(root / 'scripts/cloudbench-original-volume-capture.py')
-    need(hashlib.sha256(helper).hexdigest() == 'ddde11af81f8200c1987648ad19b10dd5aa893fbd6e05c6a25ec0c7ea8c12c58',
+    # Reviewed 2026-11-11 (PR #1927): BILLING_GUEST is byte-identical to the ddde11af producer; the helper
+    # changed only in host-side capture validation (regular_bytes, verify_capture, cross_check_receipts).
+    need(hashlib.sha256(helper).hexdigest() == '7622b415d3b300219a2f17bb1dad1ea723fac037220fcab0d89519461018eb06',
          'stopped inert guest producer changed')
     source = next(ast.literal_eval(node.value) for node in ast.parse(helper).body
                   if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BILLING_GUEST'
@@ -1456,7 +1483,12 @@ def validate(receipt, owner, proof):
             need(one and one[0] not in parents and type(job.get('controller_pid')) is int
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
                  'campaign parent identity')
-            parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code']}
+            # A campaign-v1 parent whose controller refused at private fleet source validation
+            # stopped before allocation; it is held to the same zero-resource admission checks.
+            refusals = [x for x in lines if x.startswith(SOURCE_REFUSAL)]
+            parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code'],
+                               'source_refused': layout == 'campaign-v1' and job['status'] == 'failed'
+                               and job['controller_exit_code'] == 1 and len(refusals) == 1}
             handles.extend(one)
         need(len(handles) == len(set(handles)), 'duplicate campaign participant')
     else:
@@ -1487,10 +1519,13 @@ def validate(receipt, owner, proof):
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    run_admission = native_run_admission(proof, participants, bindings)
     admission_parents = frozenset()
     if layout == 'campaign-admission-rejected-v1':
         from deploy_test_native_admission import validate_campaign
         admission_parents = validate_campaign(receipt, proof, root, runs, parents, participants, bound, document)
+    if layout == 'campaign-v1':
+        admission_parents = admission_parents | frozenset(f for f, p in parents.items() if p.get('source_refused'))
     cancelled_parent_zero = frozenset()
     if 'cancelled_parent_admission' in proof:
         from deploy_test_native_cancelled_parent import cancelled_parent_admission
@@ -1508,9 +1543,12 @@ def validate(receipt, owner, proof):
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
+            allocation = run_admission.get(str(run_path))
             run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
-                                    raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
-                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES)
+                                    raw_limit=allocation['bytes'] if allocation else min(
+                                        RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
+                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES,
+                                    expected_size=allocation['bytes'] if allocation else None)
             used.add(str(run_path))
             run_artifacts.add(str(run_path))
         else:
@@ -1672,8 +1710,10 @@ def validate(receipt, owner, proof):
         for path in bindings:
             if path in run_artifacts:
                 from deploy_test_run_artifact import read_run_artifact
+                allocation = run_admission.get(path)
                 read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES,
-                                  raw_limit=MAX_RAW_FORENSIC_RUN_BYTES)
+                                  raw_limit=allocation['bytes'] if allocation else MAX_RAW_FORENSIC_RUN_BYTES,
+                                  expected_size=allocation['bytes'] if allocation else None)
             else:
                 # Rehash each exact file within the size already verified by its owning reader.
                 bound(path, max(MAX_RECEIPT_BYTES, validated_sizes.get(path, 0)))

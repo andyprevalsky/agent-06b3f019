@@ -217,10 +217,11 @@ def regular_bytes(path: Path, limit: int = 1048576) -> bytes:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as error:
         raise Refusal(f"missing or unsafe file: {path} ({error.strerror})") from None
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        os.close(fd)
+        raise Refusal(f"unsafe or oversized file: {path}")
     with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-            raise Refusal(f"unsafe or oversized file: {path}")
         data = stream.read(info.st_size + 1)
     if len(data) != info.st_size:
         raise Refusal(f"file changed during read: {path}")
@@ -949,12 +950,70 @@ def verify_capture(local: Path, inventory: dict, ident: dict) -> dict[str, bytes
     return originals
 
 
+def verified_backend_append(out: Path, ident: dict, originals: dict[str, bytes],
+                            state: dict, manifest: dict) -> str | None:
+    """Prove a complete earlier native-hashed regular log is still the prefix.
+
+    A live stat precedes the recovery copy, which can precede the final capture.
+    Size growth alone is not evidence of append-only history.
+    """
+    for receipt in (state, manifest):
+        if receipt.get("machine_id") != ident["machine_id"] or receipt.get("guest_run_token") != ident["token"]:
+            return None
+    observed = state.get("backend_log") or {}
+    digest = (manifest.get("evidence") or {}).get("backend_log_sha256")
+    current = originals.get(LOG_DIR + "backend.log")
+    size = observed.get("bytes")
+    if (observed.get("exists") is not True or observed.get("regular") is not True
+        or observed.get("symlink") is not False or observed.get("within_limit") is not True
+        or type(size) is not int or size < 0 or current is None
+        or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        return None
+    try:
+        earlier = regular_bytes(out / "guest-cleanup.backend.log", MAX_TOTAL_BYTES)
+    except Refusal:
+        return None
+    if (not earlier or not size <= len(earlier) <= len(current)
+        or size >= len(current) or sha(earlier) != digest or not current.startswith(earlier)):
+        return None
+    if appended_session_evidence(current[len(earlier):]):
+        return None  # The manifest and cleanup receipt cannot cover a later browser session.
+    return digest
+
+
+def appended_session_evidence(suffix: bytes) -> bool:
+    """True when log lines after the manifest-bound prefix may own a browser session.
+
+    Uses the cleanup helper's own session parsers, so any allocation, provider
+    response, BrowserSession mutation or Tilion create the cleanup would have to
+    release refuses the append instead of leaving that session unreleased.
+    """
+    if not suffix:
+        return False
+    helper = sibling("cloudbench-exact-session-cleanup.py")
+    try:
+        text = helper["ANSI"].sub("", suffix.decode("utf-8"))
+        sessions, allocations, mutations = helper["collect_session_evidence"](text)
+        tilion_attempts, _ = helper["tilion_create_requests"](text)
+    except (UnicodeDecodeError, helper["CleanupEvidenceError"]):
+        return True  # Unparseable session evidence fails closed.
+    return bool(allocations or mutations or tilion_attempts or any(sessions.values()))
+
+
 def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) -> dict[str, str]:
     """Bind the capture to the earlier exact recovery observation of the same guest."""
     checks: dict[str, str] = {}
     state_path = out / "guest-cleanup.state.json"
+    manifest_path = out / "guest-cleanup.provider-manifest.json"
+    manifest = json_file(manifest_path) if lexists(manifest_path) else {}
+    # A present manifest, even an empty object, must carry this guest's identity.
+    if lexists(manifest_path) and (manifest.get("machine_id") != ident["machine_id"]
+                                   or manifest.get("guest_run_token") != ident["token"]):
+        raise CaptureFailure("recovery manifest belongs to another guest")
     if lexists(state_path):
         state = json_file(state_path)
+        if state.get("machine_id") != ident["machine_id"] or state.get("guest_run_token") != ident["token"]:
+            raise CaptureFailure("recovery observation belongs to another guest")
         if state.get("machine_id") == ident["machine_id"] and state.get("guest_run_token") == ident["token"]:
             for key, name in (("services_manifest", CONTEXT + "services.json"), ("run_json", CONTEXT + "run.json"),
                               ("backend_log", LOG_DIR + "backend.log")):
@@ -964,16 +1023,19 @@ def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) ->
                 if observed.get("exists") is not (name in originals) or (
                     name in originals and observed.get("bytes") != len(originals[name])
                 ):
-                    raise CaptureFailure(f"capture contradicts the recovery observation of {name}")
+                    digest = (verified_backend_append(out, ident, originals, state, manifest)
+                              if key == "backend_log" else None)
+                    if digest is None:
+                        raise CaptureFailure(f"capture contradicts the recovery observation of {name}")
+                    checks["guest-cleanup.backend.log"] = digest
             checks["guest-cleanup.state.json"] = sha(regular_bytes(state_path))
-    manifest_path = out / "guest-cleanup.provider-manifest.json"
     if lexists(manifest_path):
-        manifest = json_file(manifest_path)
         if manifest.get("machine_id") == ident["machine_id"] and manifest.get("guest_run_token") == ident["token"]:
             evidence = manifest.get("evidence") or {}
             for key, name in (("backend_log_sha256", LOG_DIR + "backend.log"), ("run_json_sha256", CONTEXT + "run.json")):
                 if evidence.get(key) and (name not in originals or sha(originals[name]) != evidence[key]):
-                    raise CaptureFailure(f"capture contradicts the recovery manifest hash of {name}")
+                    if key != "backend_log_sha256" or checks.get("guest-cleanup.backend.log") != evidence[key]:
+                        raise CaptureFailure(f"capture contradicts the recovery manifest hash of {name}")
             checks["guest-cleanup.provider-manifest.json"] = sha(regular_bytes(manifest_path))
     return checks
 

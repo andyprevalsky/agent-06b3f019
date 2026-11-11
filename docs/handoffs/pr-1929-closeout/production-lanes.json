@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "sha": "84853969a28a17752b2edb2b868dd95a9339f0ec",
+  "pr": 1929,
+  "status": "PASS",
+  "started_at": "2026-11-11T16:08:04Z",
+  "finished_at": "2026-11-11T16:17:09Z",
+  "changed_files": 8,
+  "selected": [
+    "semantic"
+  ],
+  "lanes": {
+    "render": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent runtime or deploy-agents.yml change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "vercel": {
+      "status": "PASS",
+      "reason": "Vercel deployment 7714210119 success",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-11T15:25:17Z",
+      "finished_at": "2026-11-11T15:31:12Z",
+      "exit_code": 0,
+      "command": "/opt/devbox-tools/gh/current/bin/gh api repos/{owner}/{repo}/deployments?sha=84853969a28a17752b2edb2b868dd95a9339f0ec (vercel[bot]) + statuses",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/vercel.log",
+      "carried_forward": true
+    },
+    "mac-release": {
+      "status": "PASS",
+      "reason": "release-mac-app run 43048220685 success",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-11T16:02:27Z",
+      "finished_at": "2026-11-11T16:02:29Z",
+      "exit_code": 0,
+      "command": "/opt/devbox-tools/gh/current/bin/gh run list --workflow release-mac-app.yml --limit 30 (headSha=84853969a28a17752b2edb2b868dd95a9339f0ec, created>=2026-11-11T15:24:59Z) && /opt/devbox-tools/gh/current/bin/gh run watch 43048220685 --exit-status",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/mac-release.log",
+      "carried_forward": true
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "backend-probes": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent cutover",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "agentcard": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no AgentCard payment path change (benchmark history ledgers excluded)",
+      "applicable": false,
+      "depends_on": [
+        "vercel"
+      ],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "semantic": {
+      "status": "PASS",
+      "reason": "chat-lifecycle-ratchet run 43055259199 success",
+      "applicable": true,
+      "depends_on": [
+        "vercel"
+      ],
+      "started_at": "2026-11-11T16:08:04Z",
+      "finished_at": "2026-11-11T16:17:09Z",
+      "exit_code": 0,
+      "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 84853969a28a17752b2edb2b868dd95a9339f0ec --state-dir /home/boxes/rose/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/semantic.log"
+    }
+  }
+}

@@ -15,10 +15,10 @@ import { expandBar, mockProjectsApi, signedInUser } from './rose-sidebar.fixture
 import { renderWithProviders } from './test-wrapper';
 
 const RUNNING = { status: 'ACTIVE' as const, temporal_workflow_id: 'wf-1' };
-// Anchor fixtures to the test clock: finished agents last active over 4 days ago fold away
-// (RoseAgentGroups), so a fixed calendar date made this order test expire on 2026-11-11.
-const BASE_MS = Date.now();
-const at = (minutesAgo: number) => new Date(BASE_MS - minutesAgo * 60_000).toISOString();
+// Relative to now: finished agents last active over 4 days ago leave the bar (oldAgents.ts),
+// so a fixed calendar anchor silently aged these rows out on 2026-11-11.
+const NOW = Date.now();
+const at = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString();
 
 function renderBar(overrides: Parameters<typeof defaultProps>[0]) {
   const user = signedInUser();
