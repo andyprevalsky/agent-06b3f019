@@ -43,10 +43,10 @@ assumption. These are confirmed owning mocked regressions, not a report of
 production duplicate funding, an actual wrong-owner close, or a new native E2E
 failure. No financial/provider operation was performed in this investigation.
 
-The final private ce75 candidate is reviewed CODE_ONLY and remains unapplied at
-this record's cutoff. It has no integrated, deployment, production, or native
-repeatability credit. This case stays OPEN until parent integration and relevant
-public-source verification; historical native passes do not cover the candidate.
+The ce75 candidate was reviewed CODE_ONLY and applied in08e0666. Shared-source
+owning validation now passes as recorded below. Deployment, production and native
+repeatability credit remain separate; historical native passes are not promoted
+onto this new runtime source.
 
 ## Diagnosis
 
@@ -159,11 +159,10 @@ namespace; arbitrary historical credential rotation is not comprehensively
 proven. Explicit recorded owners are checked, not rewritten. A missing binding
 or conflicting owner stays blocked; this patch is not a migration provisioner.
 
-Shared-source public owning tests, final combined deployment gates and any
-required native verification are pending parent integration. No prior native
-result is relabeled as proof on ce75. RCA archive schema/index validation is
-also pending integration: this is an ignored canonical-format draft, not a
-tracked case or a claim of archive-validator execution.
+The shared-source owning tests and canonical RCA archive validation now pass.
+Final combined deployment gates and required native verification remain pending.
+No prior native result is relabeled as proof on ce75. The original ignored draft
+and all private RED/GREEN records remain preserved separately.
 
 ### Cleanup finding318-319 is not a safe relaxation
 

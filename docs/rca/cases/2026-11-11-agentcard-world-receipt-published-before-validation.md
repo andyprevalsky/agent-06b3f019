@@ -47,7 +47,7 @@ Proof is under `.context/agentcard-stability/review-cycle1-repairs-20261111/rece
 
 ## Open scope
 
-OPEN for deployment/runtime verification; shared application and full public owning validation including the real-PG case are recorded below. No real provisioning, financial, browser, database or native benchmark operation was performed for this proof. 
+OPEN for deployment/runtime verification; shared application and full public owning validation including the real-PG case are recorded below. The private pre-integration proof used no real provisioning, financial, browser, database or native benchmark operation.
 
 ## Human feedback
 

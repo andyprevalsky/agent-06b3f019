@@ -37,3 +37,34 @@ agents/venv/bin/python docs/handoffs/pr-1634-closeout/recover_closeout.py \
 The restore helper authenticates the stream and verifies member hashes. Receipts
 are under `rose/.context/agentcard-review/` in the restored destination. Access to
 the private archive requires the project's authorized managed credentials.
+
+## Review stabilization verification
+
+The [review1 archive receipt](review1-component-verification-archive.json) preserves
+365 settled component members (16,081,164 original bytes): accepted patches,
+registered regressions, causal RED/GREEN records, source/hash/mode manifests and
+actual shared-source validation on commit08e0666. It includes the v2/default-last4,
+27-case issued-ledger and TypeScript proof, provider19/worker40/client33 checks,
+full97-case cleanup proof with its retired disposable PostgreSQL fixture, and
+the agent fixture/funding checks. Private member maps remain encrypted.
+
+Upload with authenticated full readback, explicit verification and a new empty
+separate-process restore using the existing managed escrow all passed. All365
+restored hashes, sizes and modes matched; all originals retained their bytes,
+sizes, modes and modification times. This was recovery on the same devbox,
+not a fresh-devbox recovery demonstration.
+
+Use the recovery command above with receipt
+`docs/handoffs/pr-1864-closeout/review1-component-verification-archive.json` and a
+new empty destination such as `/home/boxes/private-agentcard-review1-recovery`.
+The restored paths retain their original `rose/.context/agentcard-stability/`
+component scopes. Full source/dependency trees are not included: use pinned Git
+and the normal dependency setup. Superseded3e97 candidate bytes were reconstructed
+at preservation time from pinned Git and its immutable patch and checked against
+the original manifest; this is not a historical snapshot or physical-mode claim.
+Earlier reused log paths without recorded historical hashes contain only their
+preserved cutoff bytes. No earlier raw version is invented.
+
+This packet excludes active deploy/image/setup, live onboarding, production and
+later control records. It supplies no native E2E, deployment or whole-devbox
+recovery/deletion-readiness credit. Those final records remain separately required.
