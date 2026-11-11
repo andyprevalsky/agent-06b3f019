@@ -526,9 +526,16 @@ kimi-code/        → Cloned Moonshot AI Kimi Code CLI (READ-ONLY reference,
                     Re-clone with
                     `git clone --depth 1 https://github.com/MoonshotAI/kimi-code.git`
                     if missing locally.
+openworker/       → Cloned Andrew Ng OpenWorker (READ-ONLY reference,
+                    gitignored, MIT). Desktop AI coworker built on aisuite;
+                    agent setup lives in `coworker/agent.py`, personas in
+                    `coworker/personas/`, and the separate Rust/TypeScript
+                    harness in `harness/`. Re-clone with
+                    `git clone --depth 1 https://github.com/andrewyng/openworker.git`
+                    if missing locally.
 ```
 
-> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, `prime-agent/`, and `kimi-code/` are gitignored
+> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, `prime-agent/`, `kimi-code/`, and `openworker/` are gitignored
 > (sit alongside `claude-code-src/` but are NOT committed). Treat as
 > read-only research material — do not edit them. If they're missing on a
 > fresh clone, run `bash scripts/sync-reference-repos.sh` to restore.

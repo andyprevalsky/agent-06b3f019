@@ -114,6 +114,7 @@ browser-agent-recordings/
 /codex/
 /prime-agent/
 /kimi-code/
+/openworker/
 
 # Prompt review tool — generated artifacts (regenerable via `bash prompt-review/run.sh`)
 prompt-review/data.json

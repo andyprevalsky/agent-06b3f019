@@ -1,0 +1,23 @@
+{
+  "observed_at": "2026-11-11T06:01:08.626743+00:00",
+  "before": {
+    "pid": 1186378,
+    "birth_ticks": "13070113",
+    "cwd": "/home/boxes/rose",
+    "argv_sha256": "b8e922f9c356512255f9f14b47ab8fe090e9c536c806e05b7b61fc8dc9f30319",
+    "snapshot_same_identity": true,
+    "fly_ssh_proxy_clients": [],
+    "owner_reason": "Started at02:12:04UTC during this deploy sole-operator canonical Claude guest recovery; same source snapshot identity. No active Fly client remains."
+  },
+  "command": "flyctl agent stop",
+  "native_exit": 0,
+  "stdout": "",
+  "stderr": "",
+  "exact_original_process_no_longer_running": true,
+  "scope": "Local task transport helper only; no remote Machine, volume, warm capacity, production or Freedom changes.",
+  "initial_readiness_failure": {
+    "native_exit": 1,
+    "error": "OPEN  live process 1186378 in this checkout: /home/boxes/.fly/bin/flyctl agent run /home/boxes/.fly/agent-logs/3367734320.log\nDEPLOY_DELETION_CHECK NOT_READY open=1 receipt=docs/handoffs/pr-1918-closeout/deletion-readiness.json",
+    "log_sha256": "3db93e93fbd78aad13de2214c23d7b749a750b400b262a18362dfdfe1d29a76c"
+  }
+}

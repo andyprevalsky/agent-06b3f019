@@ -3,16 +3,35 @@
  *
  *   [LOADING] --GET /iphone/connection--> [not_connected|setting_up|ready|needs_reauth]
  *   [not_connected|needs_reauth] --connect() POST /iphone/connect--> [setting_up]
+ *   [DISABLED] --requestAccess() POST /iphone/request-access--> [ACCESS_REQUESTED]
+ *   [ACCESS_REQUESTED] persists across reads/remounts; only account enablement permits Connect
  *   [setting_up] polls /connection every SETUP_POLL_MS (setupProgress steps fill)
  *     --server reports ready--> [ready] (fast poll stops; slow 30 s status poll only)
  *   window focus --> one fresh read. Only the server can declare readiness.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { connectIPhone, readIPhoneConnection, type IPhoneConnection } from '@/lib/api/iphone';
+import {
+  connectIPhone,
+  readIPhoneConnection,
+  requestIPhoneAccess,
+  type IPhoneConnection,
+} from '@/lib/api/iphone';
 
 /** Setup-progress cadence: cheap persisted status, never the physical provider. */
 export const IPHONE_SETUP_POLL_MS = 2_500;
 const IPHONE_STATUS_POLL_MS = 30_000;
+
+function mergeConnection(previous: IPhoneConnection | null, next: IPhoneConnection) {
+  return {
+    ...(previous !== null &&
+    previous.enabled === next.enabled &&
+    previous.configured === next.configured &&
+    previous.connectionRevision > next.connectionRevision
+      ? previous
+      : next),
+    accessRequested: previous?.accessRequested === true || next.accessRequested,
+  };
+}
 
 /** Only the server can declare readiness; ordinary Integrations never sees a provider grant. */
 export function useIPhoneConnection() {
@@ -33,11 +52,7 @@ export function useIPhoneConnection() {
       try {
         const next = await readIPhoneConnection(owned.signal);
         if (live.current && !owned.signal.aborted) {
-          setStatus((previous) =>
-            previous !== null && previous.connectionRevision > next.connectionRevision
-              ? previous
-              : next,
-          );
+          setStatus((previous) => mergeConnection(previous, next));
           setError(null);
         }
         return next;
@@ -103,11 +118,7 @@ export function useIPhoneConnection() {
         owned.signal,
       );
       if (live.current && !owned.signal.aborted) {
-        setStatus((previous) =>
-          previous !== null && previous.connectionRevision > next.connectionRevision
-            ? previous
-            : next,
-        );
+        setStatus((previous) => mergeConnection(previous, next));
         requestKey.current = null;
         return next;
       }
@@ -120,5 +131,24 @@ export function useIPhoneConnection() {
       if (live.current) setBusy(false);
     }
   }, [refresh]);
-  return { status, busy, error, connect };
+  const requestAccess = useCallback(async () => {
+    if (connecting.current || status?.accessRequested) return;
+    connecting.current = true;
+    setBusy(true);
+    setError(null);
+    const owned = new AbortController();
+    controller.current = owned;
+    try {
+      const next = await requestIPhoneAccess(owned.signal);
+      if (live.current && !owned.signal.aborted)
+        setStatus((previous) => mergeConnection(previous, next));
+    } catch {
+      if (live.current && !owned.signal.aborted)
+        setError('Unable to request iPhone access. Try again.');
+    } finally {
+      connecting.current = false;
+      if (live.current) setBusy(false);
+    }
+  }, [status?.accessRequested]);
+  return { status, busy, error, connect, requestAccess, refresh };
 }
