@@ -11450,6 +11450,124 @@ async def test_workflow_mark_complete_happy_path():
         _restore_workflow(original)
 
 
+def _speculative_summary_root():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-speculative"
+    wf.user_id = "u-spec"
+    wf.goal = "research RFCs"
+    wf.model = "rose-1-ultra"
+    wf.parent_workflow_id = None
+    wf.root_agent_id = "root-speculative"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+    tracked = []
+
+    async def track(prompt_tokens, completion_tokens, **kwargs):
+        tracked.append((kwargs.get("call_site"), prompt_tokens, completion_tokens))
+
+    wf._track_llm_cost = track
+    return wf, tracked
+
+
+def _final_summary_row(fake):
+    return next(
+        (i, args[3])
+        for i, (name, args) in enumerate(fake.activity_calls)
+        if name == "post_agent_message"
+        and len(args or []) >= 4
+        and (args[3] or {}).get("toolName") == "completion_summary"
+        and (args[3] or {}).get("toolStatus") == "FINISHED"
+    )
+
+
+async def test_workflow_root_completion_summary_overlaps_verifier():
+    """A root's completion summary runs while the verifier judges, not after it.
+
+    background-agent-message-smoke e7d8ba91: verifier 74.1 s, then a serial
+    completion summary 15.9 s, COMPLETED persisted at T+185 of a 180 s budget.
+    The summary must already be running before the verdict, be adopted only
+    after a pass, appear before mark_finished, and keep its cost accounted.
+    """
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    release = asyncio.Event()
+    fake.activity_blockers["generate_completion_summary"] = release
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Researched RFC 9110 and RFC 9111.",
+        "tool_counts": {"spawn_agent": 1},
+        "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49},
+    }
+    context = [{"role": "USER", "text": "research RFCs"}]
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await asyncio.sleep(0)
+        # Verifier still judging: the summary has already been scheduled.
+        assert [name for name, _ in fake.activity_calls] == ["generate_completion_summary"]
+        assert fake.activity_calls[0][1][3] is None, "speculative summary cannot know the verifier output"
+        await wf._settle_speculative_completion_summary(True)
+        release.set()
+        await wf._mark_complete(context=context, structured_response={"documents": [{"rfc_number": "9110"}]})
+        names = [name for name, _ in fake.activity_calls]
+        assert names.count("generate_completion_summary") == 1, names
+        row_index, row = _final_summary_row(fake)
+        assert row["completionSummary"]["summary"] == "Researched RFC 9110 and RFC 9111."
+        assert row_index < names.index("mark_finished"), "final summary must be observable before COMPLETED"
+        assert tracked.count(("completion_summary", 40, 9)) == 1, tracked
+    finally:
+        _restore_workflow(original)
+
+    # Rejected verdict: discard (still accounted), then the serial summary runs
+    # with the verified structured output exactly as before.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Done.",
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(False)
+        await wf._mark_complete(context=context, structured_response={"answer": "42"})
+        summary_args = [args for name, args in fake.activity_calls if name == "generate_completion_summary"]
+        assert len(summary_args) == 2, summary_args
+        assert summary_args[-1][3] == {"answer": "42"}
+        assert tracked.count(("completion_summary", 7, 3)) == 2, "discarded summary spend must stay accounted"
+    finally:
+        _restore_workflow(original)
+
+    # A failed speculative summary falls back to the existing serial call.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("generate_completion_summary")
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(True)
+        await asyncio.sleep(0)  # the speculative attempt runs (and fails) first
+        fake.activity_fail_for.clear()
+        fake.activity_returns["generate_completion_summary"] = {"summary": "Recovered summary.", "usage": {}}
+        await wf._mark_complete(context=context, structured_response={"answer": "42"})
+        names = [name for name, _ in fake.activity_calls]
+        assert names.count("generate_completion_summary") == 2, names
+        assert _final_summary_row(fake)[1]["completionSummary"]["summary"] == "Recovered summary."
+    finally:
+        _restore_workflow(original)
+
+    # Sub-agents keep the serial summary (no extra speculative spend per child).
+    wf, tracked = _speculative_summary_root()
+    wf.parent_workflow_id = "parent-wf"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        assert fake.activity_calls == []
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_does_not_forward_full_context():
     """Huge Fast Mode context must not ride the mark_finished Temporal payload.
 
@@ -14890,6 +15008,9 @@ async def run_all_tests():
         "wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
+    await r.record_async(
+        "wf_root_completion_summary_overlaps_verifier", test_workflow_root_completion_summary_overlaps_verifier
+    )
     await r.record_async(
         "wf_mark_complete_does_not_forward_full_context",
         test_workflow_mark_complete_does_not_forward_full_context,

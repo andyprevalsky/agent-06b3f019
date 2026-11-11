@@ -224,6 +224,11 @@ async def run_agent(
     # The workflow's DAG interrupt hook: a user / agent message cancels a running
     # attempt_completion verifier (None: verify to the end).
     verifier_interrupts: Optional[Any] = None,
+    # Execute-loop completion hooks: started(context) when an attempt_completion
+    # verifier begins, settled(passed) once its verdict is known. The root
+    # workflow overlaps its completion summary with the verifier through them.
+    on_verification_started: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
+    on_verification_settled: Optional[Callable[[bool], Awaitable[None]]] = None,
     # Environment context (helpers/environment_context.py). Before each turn's
     # poll: append the persisted <environment> row when it differs from the last
     # one in ``context`` (the poll then loads it). Per LLM call: the seed for the
@@ -2385,6 +2390,9 @@ async def run_agent(
                 verifier_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
 
                 verifier_error = None
+                speculate_completion = not is_plan_loop and on_verification_started is not None
+                if speculate_completion:
+                    await on_verification_started(context)
                 try:
                     verifier_result = await _run_verifier(
                         execute_activity=execute_activity,
@@ -2469,6 +2477,9 @@ async def run_agent(
                     v_reasoning = verifier_result.get("reasoning", "")
                     structured_response = verifier_result.get("structured_response")
 
+                if speculate_completion and verifier_error is not None and on_verification_settled is not None:
+                    await on_verification_settled(False)
+
                 # Track raised verifier errors and existing "Progress check failed" results.
                 if verifier_error is not None or v_reasoning.startswith("Progress check failed"):
                     verifier_failure_reason = (
@@ -2539,8 +2550,13 @@ async def run_agent(
                     context,
                     get_requirement_revision() if get_requirement_revision else None,
                 ):
+                    if speculate_completion and on_verification_settled is not None:
+                        await on_verification_settled(False)
                     recent_verifier_scores.pop()
                     continue
+
+                if speculate_completion and on_verification_settled is not None:
+                    await on_verification_settled(score >= 1.0)
 
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:

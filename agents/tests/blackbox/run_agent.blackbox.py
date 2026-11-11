@@ -89,6 +89,7 @@ async def _run_single_iteration(
     get_pending_background_status_override=None,
     completion_handoff_override=None,
     llm_response_text="",
+    extra_run_agent_kwargs=None,
 ):
     from loop.run_agent import run_agent
 
@@ -243,6 +244,7 @@ async def _run_single_iteration(
             check_aborted=check_aborted_override,
             gpt_token=gpt_token,
             gpt_account_id=gpt_account_id,
+            **(extra_run_agent_kwargs or {}),
         )
 
     return result, posted_messages, executed_tools
@@ -1897,6 +1899,88 @@ async def test_verifier_is_interrupted_by_a_new_user_or_agent_message():
     done = AsyncMock(return_value={"score": 1.0, "reasoning": "Hotel booked", "usage": {}})
     result = await _run_verifier(**verifier_kwargs(done, posts, interrupts))
     assert result["score"] == 1.0 and not result.get("interrupted_by_message"), result
+
+
+async def test_completion_summary_hooks_bracket_the_attempt_completion_verifier():
+    """The completion summary may start when the verifier starts, never after it returns.
+
+    background-agent-message-smoke e7d8ba91 spent 74 s in the verifier and then
+    16 s in a serial completion summary, persisting COMPLETED at T+185 of a
+    180 s budget. The execute loop must announce the attempt before awaiting
+    the verifier, and report the verdict before the loop returns or retries.
+    """
+    for score, expected_status in ((1.0, "completed"), (0.4, None)):
+        events = []
+
+        async def started(context):
+            assert any(row.get("role") == "USER" for row in context), context
+            events.append("started")
+
+        async def settled(passed):
+            events.append(("settled", passed))
+
+        async def verifier(*_args, **_kwargs):
+            assert events == ["started"], f"summary hook must fire before the verifier runs: {events}"
+            events.append("verifier")
+            return {
+                "score": score,
+                "reasoning": "verified" if score >= 1.0 else "missing fields",
+                "structured_response": {"documents": []} if score >= 1.0 else None,
+                "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+            }
+
+        result, _posted, _executed = await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "tc-done", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            verifier_override=verifier,
+            extra_run_agent_kwargs={"on_verification_started": started, "on_verification_settled": settled},
+        )
+        assert events == ["started", "verifier", ("settled", score >= 1.0)], events
+        if expected_status:
+            assert result["status"] == expected_status, result
+
+    # Verifier errors and plan-phase verification never adopt a summary.
+    events = []
+
+    async def started_err(_context):
+        events.append("started")
+
+    async def settled_err(passed):
+        events.append(("settled", passed))
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("verifier provider failed")
+
+    try:
+        await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "tc-err", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            verifier_override=broken,
+            extra_run_agent_kwargs={"on_verification_started": started_err, "on_verification_settled": settled_err},
+        )
+    except RuntimeError as exc:
+        # The retry turn's real post_agent_message heartbeats outside an activity
+        # in this harness; the verdict hooks have already fired by then.
+        assert str(exc) == "Not in activity context", exc
+    assert events == ["started", ("settled", False)], events
+
+    events = []
+    try:
+        await _run_single_iteration(
+            [{"tool": "attempt_completion"}],
+            [("attempt_completion", "tc-plan", 1.0)],
+            skip_verification=False,
+            is_plan_loop=True,
+            max_iterations=1,
+            extra_run_agent_kwargs={"on_verification_started": started_err, "on_verification_settled": settled_err},
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "Not in activity context", exc
+    assert events == [], f"plan verification must not start a completion summary: {events}"
 
 
 async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
@@ -4798,6 +4882,10 @@ async def run_all_tests():
     await r.record_async(
         "verifier_interrupted_by_new_message",
         test_verifier_is_interrupted_by_a_new_user_or_agent_message,
+    )
+    await r.record_async(
+        "completion_summary_hooks_bracket_verifier",
+        test_completion_summary_hooks_bracket_the_attempt_completion_verifier,
     )
     await r.record_async(
         "keyed_feedback_revision_versions_verdict", test_keyed_feedback_revision_supersedes_verdict_without_user_row
