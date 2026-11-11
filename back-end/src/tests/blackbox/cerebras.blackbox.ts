@@ -9,6 +9,7 @@ import { createStreamingCompletion, type CompletionChunk } from '../../providers
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import { retryWithBackoff } from '../../providers/retry';
 import { quarantine } from '../helpers/quarantine';
+import { fetchLiveCerebrasModelIds } from './cerebras.live.cases';
 
 const OK_SSE = [
   'data: {"choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"brief\\",\\"response\\":\\"done\\"}"}}]}',
@@ -112,22 +113,26 @@ async function run(): Promise<void> {
   if (liveKey && !liveKey.startsWith('blackbox-') && liveKey.length > 20) {
     const { CEREBRAS_CHAT_MODEL, ARCHIVED_CEREBRAS_CHAT_MODEL, buildCerebrasChatBody } =
       await import('../../providers/rose/cerebrasRoute');
-    const archived = await fetch(CEREBRAS_API_URL.replace('/chat/completions', '/models'), {
-      headers: { Authorization: `Bearer ${liveKey}` },
-    });
-    assert.equal(archived.ok, true, 'Cerebras /models must be reachable for the live probe');
-    const catalog = (await archived.json()) as { data?: Array<{ id?: string }> };
-    const ids = new Set((catalog.data ?? []).map((row) => row.id).filter(Boolean));
-    assert.equal(
-      ids.has(ARCHIVED_CEREBRAS_CHAT_MODEL),
-      false,
-      `archived ${ARCHIVED_CEREBRAS_CHAT_MODEL} must not reappear in Cerebras inventory`
+    const ids = await fetchLiveCerebrasModelIds(
+      CEREBRAS_API_URL.replace('/chat/completions', '/models'),
+      liveKey
     );
-    assert.equal(
-      ids.has(CEREBRAS_CHAT_MODEL),
-      true,
-      `CEREBRAS_CHAT_MODEL=${CEREBRAS_CHAT_MODEL} must be present in Cerebras /models`
-    );
+    if (ids) {
+      assert.equal(
+        ids.has(ARCHIVED_CEREBRAS_CHAT_MODEL),
+        false,
+        `archived ${ARCHIVED_CEREBRAS_CHAT_MODEL} must not reappear in Cerebras inventory`
+      );
+      assert.equal(
+        ids.has(CEREBRAS_CHAT_MODEL),
+        true,
+        `CEREBRAS_CHAT_MODEL=${CEREBRAS_CHAT_MODEL} must be present in Cerebras /models`
+      );
+    } else {
+      process.stdout.write(
+        'SKIP live Cerebras inventory assertions: /models unreachable (quarantined)\n'
+      );
+    }
 
     const probeBody = {
       ...buildCerebrasChatBody({
