@@ -9992,6 +9992,25 @@ class RelayStartupEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'stale operation identity'):
             self.validate_fixture(receipt,owner,proof)
 
+    def test_stale_full_attempt_reconciles_exact_mixed_infra_stop_without_credit(self):
+        # Round 35: a source edit staled the attempt after an infra stop; its exact mixed
+        # full-cohort cleanup proof must still release the owner, with no credit.
+        receipt,owner,proof,fleets=self.mixed_preallocation_fixture();self.stale_operation=True
+        receipt['executed']=True
+        # The source change interrupted the adapter before it bound the campaign directory.
+        adapter=c.read(Path(receipt['worker_result']))
+        adapter.update(fleet_directory=None,reason='cloud command interrupted or source changed')
+        self.save(Path(receipt['worker_result']),adapter)
+        owner['native_cleanup_reference'].update(native_directory=None,result_sha256=c.sha_file(receipt['worker_result']))
+        proof['worker_result_sha256']=owner['native_cleanup_reference']['result_sha256']
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof['receipt_sha256']=c.sha_file(Path(receipt['log']).parent/'receipt.json')
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['occurrence'],receipt['token'])
+        with self.assertRaisesRegex(ValueError,'quiescent stale startup required'):
+            self.validate_fixture(receipt,owner,{**proof,'layout':'campaign-preallocation-v1'})
+
     def test_original_fly_logs_allow_only_absent_same_boot_startup_agent(self):
         import ast,datetime,hashlib
         receipt,owner,proof=self.fixture()

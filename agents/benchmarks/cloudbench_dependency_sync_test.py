@@ -28872,7 +28872,7 @@ def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, reg
 
 
 def _private_source_preflight_fixture(
-    tmp_path: Path, *, private: bool = True, corrupt: str = "", transient_empty: int = 0
+    tmp_path: Path, *, private: bool = True, corrupt: str = "", transient_empty: int = 0, transient_fail: int = 0
 ):
     """Replay real source/stop/snapshot/dependency admission without a provider."""
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -29028,7 +29028,11 @@ RUN_BENCH_CLOUD_BIN="$FIXTURE/run-bench-cloud"
 FLY() {{
   printf '%s\\n' "$*" >> "$FIXTURE/calls"
   case "$1 $2" in
-    "machines list") cat "$FIXTURE/machines.json" ;;
+    "machines list")
+      fails=$(wc -l < "$FIXTURE/machine-reads" 2>/dev/null || echo 0)
+      echo read >> "$FIXTURE/machine-reads"
+      if [ "$fails" -lt "${{TRANSIENT_FAIL:-0}}" ]; then echo 'Error: failed to list VMs: stream error; INTERNAL_ERROR' >&2; return 1; fi
+      cat "$FIXTURE/machines.json" ;;
     "volumes list") cat "$FIXTURE/volumes.json" ;;
     "volume snapshots")
       empties=$(wc -l < "$FIXTURE/snapshot-reads" 2>/dev/null || echo 0)
@@ -29048,7 +29052,8 @@ cloudbench_manifest_fingerprint() {{ printf '%s\\n' {python}; }}
 warm_deps_preflight || exit $?
 printf 'SELECTED=%s:%s:%s\\n' "$WARM_ID" "$VOL_ID" "$SNAP_ID"
 """
-    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path), "TRANSIENT_EMPTY": str(transient_empty)}
+    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path), "TRANSIENT_EMPTY": str(transient_empty),
+           "TRANSIENT_FAIL": str(transient_fail)}
     if private:
         env["CLOUDBENCH_SOURCE_MANIFEST"] = str(tmp_path / "manifest.json")
     result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=20, check=False)
@@ -29070,6 +29075,21 @@ def test_private_fleet_source_rereads_transient_empty_snapshot_listing(
         assert result.returncode != 0 and "SELECTED=" not in result.stdout
         assert "private fleet source validation failed: snapshot identity missing or duplicate" in result.stderr
         assert reads == 6
+    assert "machine update" not in calls and "machine stop" not in calls
+
+
+@pytest.mark.parametrize("failures, admitted", [(2, True), (6, False)])
+def test_private_fleet_source_rereads_transient_failed_inventory(tmp_path: Path, failures: int, admitted: bool) -> None:
+    """Fly machines list failed with an HTTP/2 stream INTERNAL_ERROR in one job (deploy round 35)."""
+    result, calls = _private_source_preflight_fixture(tmp_path, transient_fail=failures)
+    reads = calls.count("machines list")
+    if admitted:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SELECTED=feedface000001:vol_private:vs_private" in result.stdout
+        assert reads >= failures + 1
+    else:
+        assert result.returncode != 0 and "SELECTED=" not in result.stdout
+        assert "provider inventory read failed (read 6/6)" in result.stderr
     assert "machine update" not in calls and "machine stop" not in calls
 
 

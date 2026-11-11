@@ -1218,7 +1218,7 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
     if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
-             and (reference.get('native_directory') == str(campaign) or preallocation
+             and (reference.get('native_directory') == str(campaign) or staged_preallocation
                   and reference.get('native_directory') is None and adapter.get('fleet_directory') is None
                   and adapter.get('reason') == 'cloud command interrupted or source changed')
              and str(campaign) in cli_text, 'campaign root binding')
@@ -2285,7 +2285,8 @@ def reconcile(state, occurrence_id, proof, renewal_witness=None):
             # promoted to triage. Its retained owner still requires exact proof.
             need(not state.get('running') and 'live_failures' not in state and not CANCEL.is_set()
                  and state.get('attempts') and state['attempts'][-1].get('stale') is True
-                 and proof.get('layout') in {'campaign-startup-v1', 'campaign-prelaunch-v1'}, 'quiescent stale startup required')
+                 and proof.get('layout') in {'campaign-startup-v1', 'campaign-prelaunch-v1',
+                                             'campaign-mixed-preallocation-v1'}, 'quiescent stale startup required')
             candidates = [r for r in latest_receipts(state).values()
                           if r.get('token') == occurrence_id]
             need(len(candidates) == 1, 'stale operation identity')
