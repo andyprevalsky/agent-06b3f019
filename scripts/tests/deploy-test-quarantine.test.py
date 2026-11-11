@@ -537,7 +537,10 @@ class ReleaseReport(unittest.TestCase):
         packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
         entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-cases', 'marker': 'tests/identity.cases.ts',
                  'post_merge': packet, 'case': name}
-        self.assertEqual('NOT_INTRODUCED', q.validate_attribution(occurrence, entry, self.root)['attribution'])
+        recorded = q.validate_attribution(occurrence, entry, self.root)
+        self.assertEqual('NOT_INTRODUCED', recorded['attribution'])
+        # Merge re-validates the stored attribution itself; the case must survive recording.
+        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
         with self.assertRaisesRegex(ValueError, 'single failed case'):
             q.validate_attribution({**occurrence, 'detail': detail + 'FAIL other case\n'}, entry, self.root)
         with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
