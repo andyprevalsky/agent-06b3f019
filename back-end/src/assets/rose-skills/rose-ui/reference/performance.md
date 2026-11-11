@@ -19,8 +19,9 @@ files) in headless Chromium at 1280x800 and exits 1 on any violation:
 `rose-ui perf [--entry path.html | --route /]` prints the numbers as JSON: fps
 p50/p5 (main + workers), long tasks, layout shift, bytes loaded, a GPU memory
 estimate. fps is judged on the better of two windows; on an overloaded host
-(load above 1.25 per CPU) or a host that can't render a blank page at 55 fps,
-missed fps budgets are reported as inconclusive warnings, not failures. The
+(load above 1.25 per CPU, or other processes using over half the CPU during
+every fps window) or a host that can't render a blank page at 55 fps, missed
+fps budgets are reported as inconclusive warnings, not failures. The
 sandbox has no GPU (software rendering), so GPU-heavy work measures slower
 than on the user's device: budget for that, e.g. cap shader resolution.
 
