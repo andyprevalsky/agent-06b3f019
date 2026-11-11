@@ -5533,5 +5533,14 @@
   "research/.env": {
     "disposition": "managed-env",
     "note": "authoritative copy in the boxes.dev project managed env / production env stores; secret, never archived or committed"
+  },
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "archive": "devbox-closeout-private/pr1939-websearch-latency/20261111T211047Z-stash.tar.gz.aesgcm",
+    "bundle_prerequisites": "thin bundle refs/stash --not origin/main",
+    "disposition": "archived",
+    "member": "rose/.context/closeout-pr1939/stash.bundle",
+    "member_sha256": "cde6058535add83822724033d50f23a0495a82d2d7ff9e23fd6680e711d18ce3",
+    "sha256": "36f4aea16e3f87db41261236d7eb8528a472c855358de80e38f25ffb27bb5468",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
   }
 }
