@@ -1,0 +1,16 @@
+{"i":2,"ms":1679,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":0,"ms":1714,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":1,"ms":2203,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":5,"ms":1677,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":3,"ms":1681,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":4,"ms":1837,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":6,"ms":1375,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":8,"ms":1395,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":7,"ms":1477,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":9,"ms":1378,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":11,"ms":1382,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":10,"ms":1465,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":13,"ms":1357,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":14,"ms":1360,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":12,"ms":1672,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"n":15,"ok":15,"closed":15,"over13s":0,"p50":1477,"max":2203}
