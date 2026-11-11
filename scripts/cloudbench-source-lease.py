@@ -404,7 +404,9 @@ def original_resources(audit, manifest, consumer_owner, run_id):
         fields = C['STORAGE']['fields'](path)
         need(fields.get('version') == '1' and fields.get('fleet_owner_token') == consumer_owner
              and fields.get('run_id') == run_id and fields.get('app') == C['APP']
-             and fields.get('clone_name') == path.name and fields.get('machine_id') in machines
+             and fields.get('clone_name') == path.name
+             # A clone whose Machine was never allocated (ambiguous create) owns only its Volume.
+             and (fields.get('machine_id') in machines or fields.get('machine_id') == '')
              and re.fullmatch('vol_[A-Za-z0-9]+', fields.get('volume_id', '')), 'original fresh resource ledger differs')
         volumes.add(fields['volume_id'])
     migrations = audit / 'volume-migrations'
@@ -446,7 +448,8 @@ def physical_observations(lease, audit, manifest, consumer_owner, run_id):
         observed_machines[mid] = 'absent' if row is None else row['state']
     for vid in sorted(volumes):
         row = by_volume.get(vid)
-        need(row is None or row.get('state') == 'destroyed' and not row.get('attached_machine_id'),
+        # pending_destroy/destroyed are provider-terminal deletion states (billing and attachment ended).
+        need(row is None or row.get('state') in ('pending_destroy', 'destroyed') and not row.get('attached_machine_id'),
              'original recovered Volume is not absent')
         observed_volumes[vid] = 'absent' if row is None else row['state']
     return dict(machines=observed_machines, volumes=observed_volumes)

@@ -271,6 +271,28 @@ class SourceLease(unittest.TestCase):
         self.assertEqual(receipt['native_observations'], {'machines': {'55555555555555': 'absent'},
                                                         'volumes': {'vol_original': 'absent'}})
 
+    def test_volume_only_clone_closes_only_after_its_volume_is_provider_terminal(self):
+        """PR1910 round 25: an ambiguous clone left a Volume but never a Machine (empty machine_id)."""
+        process = self.start()
+        process.terminate(); process.communicate(timeout=5)
+        audit, lifecycle = self.proof()
+        value = json.loads(lifecycle.read_text()); value.update(cleanup_verified=False, audit_sha256='')
+        self.write(lifecycle, value)
+        (self.audit/'fresh/cloudbench-volume-only').write_text('version=1\nfleet_owner_token='+OWNER+
+            '\nrun_id='+RUN+'\napp='+FIXTURE['APP']+'\nclone_name=cloudbench-volume-only\nmachine_id='
+            '\nvolume_id=vol_volumeonly\n')
+        self.seal_changed_audit(lifecycle)
+        self.b.volumes['vol_volumeonly'] = dict(id='vol_volumeonly', state='created', attached_machine_id=None)
+        result = subprocess.run(self.recovery_workspace_command(), env=self.b.env, capture_output=True, timeout=8)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(self.m['CLAIM_PREFIX']+OWNER, self.b.machines[self.mid]['config']['metadata'])
+        self.b.volumes['vol_volumeonly'] = dict(id='vol_volumeonly', state='pending_destroy', attached_machine_id=None)
+        result = subprocess.run(self.recovery_workspace_command(), env=self.b.env, capture_output=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((self.journal/'recovered-physical-closure.json').read_text())
+        self.assertEqual(receipt['native_observations'], {'machines': {}, 'volumes': {'vol_volumeonly': 'pending_destroy'}})
+        self.assertFalse(receipt['historical_task_credit'])
+
     def test_recovery_rejects_claim_custody_swap_and_caller_boolean_override(self):
         process = self.start()
         process.terminate(); process.communicate(timeout=5)
