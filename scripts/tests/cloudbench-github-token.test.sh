@@ -415,8 +415,10 @@ for _ in $(seq 1 50); do
 done
 [ -f "$ROT/port" ] || fail "rotation mock GitHub API did not start"
 ROT_API="http://127.0.0.1:$(cat "$ROT/port")/repos/Rose-Ai-Labs/rose"
-# The devbox's repository-scoped Git credential helper hands out the rotating token.
-printf '[credential]\n\thelper = "!f() { [ \\"$1\\" = get ] && printf \\"password=%%s\\\\n\\" \\"$(cat %s)\\"; }; f"\n' \
+# The devbox's repository-scoped Git credential helper hands out the rotating
+# token as a complete credential: Git >= 2.46 with credential.interactive=false
+# discards a password-only answer instead of prompting for the username.
+printf '[credential]\n\thelper = "!f() { [ \\"$1\\" = get ] && printf \\"username=x-access-token\\\\npassword=%%s\\\\n\\" \\"$(cat %s)\\"; }; f"\n' \
   "$ROT/rotating" >"$ROT/gitconfig"
 git -C "$ROT/repo" init -q
 # The App member: mints a durable installation token; records its arguments.
