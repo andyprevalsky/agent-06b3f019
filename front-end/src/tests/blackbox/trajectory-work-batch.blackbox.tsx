@@ -354,9 +354,23 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(line().querySelector('.lucide-arrow-down')).toBeNull();
     expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
   });
-  it('does not invent elapsed time for a missing timestamp', () => {
+  it('starts the clock optimistically for a missing timestamp and never jumps when it arrives', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(start + 10_000);
     const untimed = { ...activity('read_file'), timestamp: '' };
-    render(<TrajectoryWorkGroup group={group([untimed])} renderMessage={() => null} />);
-    expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('Timing unavailable');
+    const view = render(
+      <TrajectoryWorkGroup group={group([untimed])} renderMessage={() => null} />,
+    );
+    const elapsed = () => screen.getByTestId('trajectory-batch-elapsed');
+    expect(elapsed()).toHaveTextContent('0.0s');
+    act(() => vi.advanceTimersByTime(1500));
+    expect(elapsed()).toHaveTextContent('1.5s');
+    // The server start (10 s earlier by its clock) keeps the client anchor: no jump, no reset.
+    view.rerender(
+      <TrajectoryWorkGroup group={group([activity('read_file')])} renderMessage={() => null} />,
+    );
+    expect(elapsed()).toHaveTextContent('1.5s');
+    act(() => vi.advanceTimersByTime(500));
+    expect(elapsed()).toHaveTextContent('2.0s');
   });
 });
