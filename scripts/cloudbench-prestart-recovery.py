@@ -31,6 +31,11 @@ SAFE = re.compile(r"[A-Za-z0-9._-]+\Z")
 VOLUME = re.compile(r"vol_[A-Za-z0-9]+\Z")
 FRESH_SCHEMA = "cloudbench-fresh-configured-no-start-v1"
 FRESH_PROOF = "fresh-prestart-recovery.json"
+FRESH_ADMISSION_MARKERS = (
+    "status-proxy.port", "cloudbench-boot-start.log", "post-config-start.accepted", "cloudbench-run.json",
+    "worker-runtime-evidence", "worker-clones.ids", "runtime-evidence.owner.json", "runtime-evidence.pending",
+    "boot-config-unapplied", "boot-config-host-replaced", "guest-shutdown.confirmed",
+)
 # Reviewed historical startup protocol. Accepting an arbitrary Git object with
 # a few matching blocks would miss extra launch paths elsewhere in that object.
 FRESH_SOURCE_PROTOCOL = {
@@ -295,9 +300,7 @@ def validate_fresh(registry: Path, audit_root: Path, native_dir: Path, scripts: 
     total_native_bytes = 0
     for row in rows:
         out = run / row["bench"]
-        for name in ("status-proxy.port", "cloudbench-boot-start.log", "post-config-start.accepted", "cloudbench-run.json",
-                     "worker-runtime-evidence", "worker-clones.ids", "runtime-evidence.owner.json", "runtime-evidence.pending",
-                     "boot-config-unapplied", "boot-config-host-replaced", "guest-shutdown.confirmed"):
+        for name in FRESH_ADMISSION_MARKERS:
             require(absent(out / name), "fresh prestart conflicts with admission evidence")
         payload = bounded_read(out / "cloudbench-boot-payload.json.gz", 2 * 1024 * 1024)
         originals[row["bench"]] = hashlib.sha256(payload).hexdigest()
@@ -337,7 +340,7 @@ def verify_fresh(registry: Path, audit_root: Path, scripts: Path) -> set[str]:
     # provider mutation or fresh guest execution is needed by this consumer.
     import tempfile
     with tempfile.TemporaryDirectory(prefix="cloudbench-prestart-verify-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve(strict=True)
         for machine, pair in proof["native"].items():
             require(bool(MACHINE.fullmatch(machine)) and len(pair) == 2, "unsafe sealed native pair")
             for phase, value in zip(("before", "after"), pair):
@@ -420,9 +423,7 @@ def verify_released_fresh(audit: Path, run: Path, scripts: Path) -> dict:
                 and {k: v for k, v in actual.items() if k != "disposition"}
                 == {k: v for k, v in row.items() if k not in {"disposition", "bench", "ordinal"}}, "nonterminal or changed final allocation")
         out = run / row["bench"]
-        require(all(absent(out / name) for name in ("post-config-start.accepted", "cloudbench-run.json",
-                    "worker-runtime-evidence", "runtime-evidence.owner.json", "runtime-evidence.pending",
-                    "worker-clones.ids", "guest-shutdown.confirmed")), "released no-start phase changed")
+        require(all(absent(out / name) for name in FRESH_ADMISSION_MARKERS), "released no-start phase changed")
         require(bounded_read(out / ".cid", 256).decode().split() == ["clone", row["machine_id"]], "released output changed")
         receipt = json.loads(bounded_read(out / "guest-never-started.confirmed", 4096))
         require(receipt == {"version": 1, "kind": "no-guest-start", "phase": FRESH_SCHEMA, "proof_credit": 0,

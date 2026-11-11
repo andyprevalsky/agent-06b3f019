@@ -326,7 +326,7 @@ class FreshPrestartRecoveryTest(PrestartRecoveryTest):
         names = ["fleet_registry_confirm_guest_teardown", "fleet_recovery_reconnect_guest_shutdowns",
                  "fleet_recovery_confirm_runtime_evidence"]
         if "fleet_recovery_confirm_fresh_prestart() {" in source:
-            names.append("fleet_recovery_confirm_fresh_prestart")
+            names.extend(("fleet_recovery_confirm_fresh_prestart", "fleet_fresh_prestart_reap_guard"))
         for name in ("fleet_prestart_machine_exact_read", "fleet_prestart_events_exact_read"):
             if name + "() {" in source:
                 names.append(name)
@@ -369,6 +369,57 @@ fleet_recovery_confirm_runtime_evidence "$registry" || exit 72
         for bench, _, _ in self.mapping:
             self.assertFalse((self.run / bench / "guest-shutdown.confirmed").exists())
             self.assertFalse((self.run / bench / "worker-clones.ids").exists())
+
+    def symlinked_tmpdir(self):
+        real = self.native / "temporary-real"
+        real.mkdir()
+        link = self.native / "temporary-link"
+        link.symlink_to(real, target_is_directory=True)
+        nested = link / "nested"
+        nested.mkdir()
+        return nested
+
+    def test_consumer_accepts_own_temp_under_symlinked_ancestor(self):
+        MODULE.publish(self.validate())
+        with mock.patch.object(tempfile, "tempdir", str(self.symlinked_tmpdir())):
+            self.assertEqual(MODULE.verify_fresh(self.registry, self.audit_root, self.scripts),
+                             {row[0] for row in self.mapping})
+
+    def test_canonical_caller_consumer_and_reaper_with_symlinked_tmpdir(self):
+        (self.registry / "runtime-evidence-unconfirmed").write_text("")
+        temporary = self.symlinked_tmpdir()
+        script = self.consumer_script() + "\n" + "\n".join(
+            f'fleet_fresh_prestart_reap_guard "$registry" {machine} || exit 73'
+            for _, machine, _ in self.mapping)
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                timeout=20, env={**os.environ, "TMPDIR": str(temporary)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.registry / "guest-cleanup-unconfirmed").exists())
+        self.assertFalse((self.registry / "runtime-evidence-unconfirmed").exists())
+        self.assertEqual(list(temporary.iterdir()), [])
+        self.assertEqual(len(self.api_requests), 24)  # producer + consumer + two reaper fences
+        self.assertTrue(all(method == "GET" for method, _ in self.api_requests))
+
+    def test_canonical_reaper_with_symlinked_tmpdir(self):
+        MODULE.publish(self.validate())
+        temporary = self.symlinked_tmpdir()
+        setup = self.consumer_script().rsplit('fleet_recovery_reconnect_guest_shutdowns "$registry" || exit 71', 1)[0]
+        script = setup + f'fleet_fresh_prestart_reap_guard "$registry" {self.mapping[0][1]}\n'
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                timeout=20, env={**os.environ, "TMPDIR": str(temporary)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list(temporary.iterdir()), [])
+        self.assertEqual(len(self.api_requests), 4)
+        self.assertTrue(all(method == "GET" for method, _ in self.api_requests))
+
+    def test_linked_input_native_directory_still_refuses(self):
+        linked = self.native.parent / "linked-input"
+        linked.symlink_to(self.native, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "linked prestart evidence"):
+            MODULE.validate_fresh(self.registry, self.audit_root, linked, self.scripts)
+        MODULE.publish(self.validate())
+        with self.assertRaisesRegex(ValueError, "linked prestart evidence"):
+            MODULE.verify_fresh_machine(self.registry, self.mapping[0][1], linked, self.scripts)
 
     def test_config_only_wire_response_cannot_be_promoted_to_full_identity(self):
         script = self.consumer_script()
@@ -565,6 +616,18 @@ fleet_reap_registry_record_native "$registry" forced 2 0 "$registry/clones/{clon
         self.assertTrue(result["provider_teardown_verified"])
         self.assertEqual(result["proof_credit"], 0)
         self.assertEqual(len(result["machine_ids"]), 2)
+        for name in ("status-proxy.port", "cloudbench-boot-start.log", "post-config-start.accepted",
+                     "cloudbench-run.json", "worker-runtime-evidence", "worker-clones.ids",
+                     "runtime-evidence.owner.json", "runtime-evidence.pending", "boot-config-unapplied",
+                     "boot-config-host-replaced", "guest-shutdown.confirmed"):
+            with self.subTest(marker=name):
+                marker = self.run / self.mapping[0][0] / name
+                marker.write_text("late guest admission")
+                try:
+                    with self.assertRaises(ValueError):
+                        MODULE.verify_released_fresh(self.audit, self.run, self.scripts)
+                finally:
+                    marker.unlink()
         for name, expected in (("owned-clones.ids", expected_ids), ("owned-clones.names", expected_names)):
             original = (self.audit / name).read_bytes()
             for broken in ([], expected[:1], expected + expected[:1], expected + ["foreign"], ["foreign", *expected[1:]]):

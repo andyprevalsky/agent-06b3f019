@@ -10604,8 +10604,10 @@ PY
 }
 
 fleet_recovery_confirm_fresh_prestart() {  # <registry-dir>; exact reads, no guest start
-    local registry="$1" native_dir machine phase status=1
+    local registry="$1" native_dir canonical_dir machine phase status=1
     native_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-fresh-prestart.XXXXXX")" || return 1
+    canonical_dir="$(cd "$native_dir" && pwd -P)" || { rm -rf "$native_dir"; return 1; }
+    native_dir="$canonical_dir"
     chmod 700 "$native_dir" || { rm -rf "$native_dir"; return 1; }
     if python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
         --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --fresh-plan \
@@ -10631,10 +10633,12 @@ fleet_recovery_confirm_fresh_prestart() {  # <registry-dir>; exact reads, no gue
 }
 
 fleet_fresh_prestart_reap_guard() {  # <registry> <machine>; no-op for other phases
-    local registry="$1" machine="$2" proof native_dir phase status=0
+    local registry="$1" machine="$2" proof native_dir canonical_dir phase status=0
     proof="$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_batch/fresh-prestart-recovery.json"
     [ -e "$proof" ] || [ -L "$proof" ] || return 0
     native_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-prestart-reap.XXXXXX")" || return 1
+    canonical_dir="$(cd "$native_dir" && pwd -P)" || { rm -rf "$native_dir"; return 1; }
+    native_dir="$canonical_dir"
     for phase in before after; do
         fleet_prestart_machine_exact_read "$machine" > "$native_dir/$machine.$phase.json" \
             && fleet_prestart_events_exact_read "$machine" > "$native_dir/$machine.$phase.events.json" \

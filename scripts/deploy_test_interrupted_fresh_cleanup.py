@@ -19,20 +19,37 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from deploy_test_interrupted_cleanup import Evidence, finite, groups_absent, namespace_quiet, no_holders, need
+from deploy_test_interrupted_cleanup import Evidence, finite, namespace_quiet, no_holders, need
 from deploy_test_native_cleanup import fleet_audit_root, fleet_ownership_root, retired_local_process
 
 KIND = 'interrupted-fresh-campaign-custody-v1'
 RECORD = 'interrupted-fresh-campaign-recovery-v1'
+RENEWAL_KIND = 'interrupted-fresh-policy-witness-renewal-v1'
 POLICIES = ('scripts/run-bench-campaign.py', 'scripts/cloudbench-shared-relay.py',
             'scripts/cloudbench-campaign-inventory.sh', 'agents/benchmarks/hub_upload.py',
             'scripts/cloudbench_execution_provenance.py', 'scripts/cloudbench-campaign-seed.py',
             'scripts/cloudbench-port-lease.py')
+WITNESS_PATHS = {*POLICIES, *(
+    'scripts/' + name for name in ('cloudbench-prestart-recovery.py',
+    'deploy_test_interrupted_fresh_cleanup.py', 'deploy_test_interrupted_cleanup.py',
+    'deploy_test_native_cleanup.py'))}
 FIELDS = {'kind', 'root', 'files', 'confirmed_at', 'observed_by', 'recovery_directory'}
 
 
 def absent(path):
     return not path.exists() and not path.is_symlink()
+
+
+def original_groups_absent(pids, identities):
+    """Allow proven PID reuse, while retaining every original group guard."""
+    from deploy_test_interrupted_cleanup import processes
+    need(all(type(pid) is int and pid > 1 for pid in pids), 'invalid original process identity')
+    births = {row['pid']: row for row in identities}
+    for pid, group in processes():
+        need(group not in pids, 'original process/group remains')
+        if pid in pids:
+            need(pid in births, 'original process identity unknown')
+            retired_local_process(births[pid])
 
 
 def capture_files(receipt, proof, *, controls_pending=False):
@@ -296,7 +313,7 @@ def shared(root, runs, campaign, evidence, waits, *, controls_pending=False, rec
         need(native['native_hub_owner_retired'](owner, runs, root), 'retained Hub consumer')
         need(int(value['pid']) in waits, 'Hub outside original supervised custody')
         ports.add(int(value['port']))
-    groups_absent({x['pid'] for x in identities})
+    original_groups_absent({x['pid'] for x in identities}, identities)
     namespace_quiet(runs.parent, ports)
     namespace_quiet(relay, set())
     pointer = campaign / 'shared-inventory/inventory/current'
@@ -305,10 +322,10 @@ def shared(root, runs, campaign, evidence, waits, *, controls_pending=False, rec
         need(pointer.is_symlink() and re.fullmatch(r'\.generation-[A-Za-z0-9._-]+', os.readlink(pointer))
              and pointer.resolve().is_dir() and pointer.resolve().parent == pointer.parent, 'native inventory pointer')
         inventory_pointer = os.readlink(pointer)
-    return {str(p): evidence.bindings[str(p)] for p in owners}, parent['pid'], inventory_pointer
+    return {str(p): evidence.bindings[str(p)] for p in owners}, parent['pid'], inventory_pointer, identities
 
 
-def closure(state, receipt, proof, gate, *, controls_pending=False):
+def closure(state, receipt, proof, gate, *, controls_pending=False, relocations=None):
     from deploy_test_cycle import digest
     need(set(proof) == FIELDS and proof['kind'] == KIND, 'typed fresh custody fields')
     need(finite(proof['confirmed_at']) and receipt['finished_at'] <= proof['confirmed_at'] <= time.time()
@@ -327,7 +344,7 @@ def closure(state, receipt, proof, gate, *, controls_pending=False):
                                                'native_cleanup_reference': None}
          and receipt['command'] == gate['command'] and receipt['cases'] == dict.fromkeys(gate['checks'], 'UNVERIFIED')
          and receipt['execution_binding']['contract_digest'] == digest(gate), 'exact interrupted execution')
-    evidence = Evidence(proof['files'])
+    evidence = Evidence(proof['files'], relocations)
     policies(root, receipt, evidence)
     folder = Path(receipt['log']).parent
     need(folder.is_relative_to(root / '.context/deploy-pipeline/attempts') and folder.name == 'smoke'
@@ -358,7 +375,6 @@ def closure(state, receipt, proof, gate, *, controls_pending=False):
     waits = {r['pid']: r['status'] for r in rows}
     need(len(waits) == len(rows) and waits.get(supervisor['child_pid']) == 9
          and set(supervisor['kill_sent']) <= set(supervisor['term_sent']) <= set(waits), 'supervisor wait inventory')
-    groups_absent({supervisor['supervisor_pid'], supervisor['child_pid'], *waits})
     parents, probes = membership(root, runs, campaign, summary, receipt, evidence, waits)
     # This phase had no worker admission anywhere. Do not treat another claim as
     # evidence of emptiness or borrow it to complete this historical operation.
@@ -372,8 +388,9 @@ def closure(state, receipt, proof, gate, *, controls_pending=False):
     for fleet, (token, parent) in probes.items():
         need(parent in parents and waits.get(int(fleet.name.rsplit('-', 1)[-1])) == 9, 'nested original wait')
         seals.append(released(root, fleet, token, None, True, receipt, proof, evidence))
-    hubs, child_pid, inventory_pointer = shared(root, runs, campaign, evidence, waits,
+    hubs, child_pid, inventory_pointer, identities = shared(root, runs, campaign, evidence, waits,
                                                controls_pending=controls_pending, recovery=Path(proof['recovery_directory']))
+    original_groups_absent({supervisor['supervisor_pid'], supervisor['child_pid'], *waits}, identities)
     need(child_pid == supervisor['child_pid'] and all(s['hub_owner'] in hubs for s in seals), 'shared owner closure')
     no_holders([base / 'cli.log', folder / 'output.log', folder / 'stderr.log',
                 *[campaign / (j['job_id'] + '.log') for j in summary['jobs']]])
@@ -522,13 +539,13 @@ def retire_controls(state, receipt, proof, gate, manifest_path, *, dry_run=False
     return record
 
 
-def validate(state, receipt, proof, gate, *, published=True):
-    summary, record, provenance = closure(state, receipt, proof, gate)
+def validate(state, receipt, proof, gate, *, published=True, relocations=None):
+    summary, record, provenance = closure(state, receipt, proof, gate, relocations=relocations)
     recovery = Path(proof['recovery_directory'])
     need(recovery.is_absolute() and recovery.resolve() == recovery
          and not recovery.is_relative_to(Path(proof['root']) / '.context/deploy-cloud'), 'separate recovery directory')
     if published:
-        evidence = Evidence(proof['files'])
+        evidence = Evidence(proof['files'], relocations)
         need(evidence.doc(recovery / 'recovery-summary.json') == summary
              and evidence.doc(recovery / 'recovery-provenance.json') == provenance
              and evidence.doc(recovery / 'hub-group.json') == record, 'derived recovery changed')
@@ -575,14 +592,100 @@ def reconcile(state, token, proof):
     state.setdefault('reconciled_owners', {})[key] = entry
 
 
-def still_bound(state, receipt, entry):
+def policy_relocations(entry, receipt):
+    """Resolve only sealed historical policy bytes; never execute relocated code."""
+    from deploy_test_cycle import MAX_RECEIPT_BYTES, digest, sha_file
+    renewal = entry.get('policy_witness_renewal')
+    if renewal is None:
+        return {}
+    need(isinstance(renewal, dict) and set(renewal) == {'previous', 'request'}, 'renewal history')
+    previous, request = renewal['previous'], renewal['request']
+    need(isinstance(previous, dict) and isinstance(request, dict)
+         and entry == {**previous, 'policy_witness_renewal': renewal}, 'original reconciliation changed')
+    need(set(request) == {'kind', 'receipt_sha256', 'previous_entry_sha256', 'source_head', 'current_source',
+                          'relocations', 'confirmed_at', 'observed_by'}
+         and request['kind'] == RENEWAL_KIND and previous.get('kind') == KIND
+         and request['receipt_sha256'] == sha_file(Path(receipt['log']).parent / 'receipt.json')
+         and request['previous_entry_sha256'] == digest(previous)
+         and isinstance(request['current_source'], dict) and set(request['current_source']) == {'head', 'digest'}
+         and re.fullmatch('[0-9a-f]{40}', request['current_source'].get('head', ''))
+         and re.fullmatch('[0-9a-f]{64}', request['current_source'].get('digest', '')), 'exact original renewal binding')
+    proof = previous['proof']
+    previous_time = previous.get('policy_witness_renewal', {}).get('request', {}).get('confirmed_at', proof['confirmed_at'])
+    need(finite(request['confirmed_at']) and previous_time <= request['confirmed_at'] <= time.time()
+         and isinstance(request['observed_by'], str) and request['observed_by'].strip(), 'renewal clock/observer')
+    root = Path(proof['root'])
+    head = request['source_head']
+    need(isinstance(head, str) and re.fullmatch('[0-9a-f]{40}', head), 'committed witness source required')
+    git = ['git', '--no-replace-objects', '-C', str(root)]
+    need(subprocess.check_output([*git, 'cat-file', '-t', head], text=True).strip() == 'commit',
+         'committed witness source required')
+    relocations = policy_relocations(previous, receipt)
+    changes = request['relocations']
+    need(isinstance(changes, dict) and changes, 'policy witness changes required')
+    updated = dict(relocations)
+    for old, destination in changes.items():
+        need(isinstance(old, str) and isinstance(destination, str), 'policy witness paths')
+        path = Path(old)
+        need(old in proof['files'] and path in {root / name for name in WITNESS_PATHS}
+             and path.resolve(strict=True) == path and not path.is_symlink(), 'only sealed policy source may relocate')
+        blob = subprocess.check_output([*git, 'rev-parse', head + ':' + str(path.relative_to(root))], text=True).strip()
+        need(re.fullmatch('[0-9a-f]{40}', blob) and destination == 'git:' + blob, 'exact committed policy blob required')
+        size = int(subprocess.check_output([*git, 'cat-file', '-s', blob]))
+        need(0 <= size <= MAX_RECEIPT_BYTES, 'bounded original policy required')
+        raw = subprocess.check_output([*git, 'cat-file', 'blob', blob])
+        need(len(raw) == size and hashlib.sha256(raw).hexdigest() == proof['files'][old], 'original policy hash differs')
+        updated[old] = raw
+    need(updated != relocations, 'policy witness already renewed')
+    return updated
+
+
+def _bound(state, receipt, entry):
     from deploy_test_result import preserve_contract
+    current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    gate = entry['execution_gate']
+    preserve_contract(gate, current)
+    need(entry['occurrence'] == entry['token'] == receipt['token']
+         and all(gate.get(k) == current.get(k) for k in ('native_cloud', 'native_backend'))
+         and set(gate['checks']) <= set(current['checks']), 'original custody contract changed')
+    actual = validate(state, receipt, entry['proof'], gate, relocations=policy_relocations(entry, receipt))
+    need(actual == {k: v for k, v in entry.items() if k not in {'occurrence', 'policy_witness_renewal'}},
+         'original reconciliation facts changed')
+    return True
+
+
+def renew_policy_witness(state, token, request):
+    """Append a source-witness renewal after revalidating original custody in full."""
+    from deploy_test_cycle import latest_receipts, sha_file, source
+    need(state.get('phase') in {'quick', 'initial', 'focused', 'failed-gates', 'final', 'triage',
+                               'needs-focused-plan', 'ready', 'stale', 'interrupted'}
+         and not state.get('running') and 'live_failures' not in state, 'quiescent renewal boundary required')
+    receipts = [r for r in latest_receipts(state).values() if r.get('token') == token]
+    need(len(receipts) == 1, 'exact latest historical receipt required')
+    receipt = receipts[0]
+    key = sha_file(Path(receipt['log']).parent / 'receipt.json')
+    previous = state.get('reconciled_owners', {}).get(key)
+    need(isinstance(previous, dict) and previous.get('kind') == KIND
+         and previous.get('token') == token, 'original fresh reconciliation required')
+    root = Path(previous['proof']['root'])
+    # Renewal precedes normal refresh: bind the new workspace explicitly without
+    # changing the old cycle/plan source or granting new-source execution credit.
+    need(state['source'] == state['plan']['source']
+         and isinstance(request.get('current_source'), dict)
+         and source(root) == request['current_source'], 'current source binding changed')
+    if previous.get('policy_witness_renewal', {}).get('request') == request:
+        _bound(state, receipt, previous)
+        return
+    entry = {**copy.deepcopy(previous), 'policy_witness_renewal':
+             {'previous': copy.deepcopy(previous), 'request': copy.deepcopy(request)}}
+    _bound(state, receipt, entry)
+    state['reconciled_owners'][key] = entry
+
+
+def still_bound(state, receipt, entry):
     try:
-        current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
-        preserve_contract(entry['execution_gate'], current)
-        return validate(state, receipt, entry['proof'], entry['execution_gate']) == {
-            k: v for k, v in entry.items() if k != 'occurrence'} and entry['occurrence'] == receipt['token']
-    except (OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError):
+        return _bound(state, receipt, entry)
+    except (OSError, KeyError, ValueError, TypeError, IndexError, StopIteration, subprocess.SubprocessError):
         return False
 
 

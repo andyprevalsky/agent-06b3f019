@@ -1289,6 +1289,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> 
         from deploy_test_cloud_refusal import reconcile as reconcile_refusal
         reconcile_refusal(state, occurrence_id, proof)
         return
+    if proof.get('kind') == 'interrupted-fresh-policy-witness-renewal-v1':
+        from deploy_test_interrupted_fresh_cleanup import renew_policy_witness
+        renew_policy_witness(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
         from deploy_test_interrupted_cleanup import renew_policy_witness
         renew_policy_witness(state, occurrence_id, proof)

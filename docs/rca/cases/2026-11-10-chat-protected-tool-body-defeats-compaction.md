@@ -131,6 +131,16 @@ available through the original search. No raw production text or credentials are
 committed. The existing chat-compaction blackbox runner owns the regression and
 is included by backend coverage/blackbox deploy gates.
 
+Code review also exposed three edge cases in the pressure pass: it ignored a
+caller's smaller context window, aborted the ordinary pass after one rejected
+tool summary, and selected child-agent rows excluded from token accounting.
+Four additional registered cases failed before those corrections and passed
+afterwards, with all nineteen cases passing five consecutive runs. Independent
+review repeated the nineteen cases and checked that failed rows remain intact,
+successful reductions survive, and the existing savings guard still applies.
+This is controlled transport evidence; the earlier live reconstruction remains
+the separately recorded provider check.
+
 ## Human feedback
 
 The user required completing RCA and deploy, and reconciling existing bug

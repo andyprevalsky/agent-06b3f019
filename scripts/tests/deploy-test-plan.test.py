@@ -1767,6 +1767,158 @@ class InterruptedFreshRecovery(unittest.TestCase):
         self.assertTrue(c._reconciled(self.state,self.r,self.r['cleanup_owner']))
         before=copy.deepcopy(self.state);c.reconcile(self.state,self.r['token'],self.proof);self.assertEqual(self.state,before)
 
+    def test_reused_shared_pid_reconciles_and_stays_bound(self):
+        # 4532674831: exercise real closure/reconciliation, with only the
+        # read-only process observation replaced by a deterministic PID reuse.
+        import deploy_test_interrupted_cleanup as old
+        self.prepare_publication()
+        c.reconcile(self.state, self.r['token'], self.proof)
+        entry = self.state['reconciled_owners'][c.sha_file(self.folder/'receipt.json')]
+        broker = json.loads((self.relay/'broker-owner.json').read_text())
+        read_text = Path.read_text
+        def observed(path, *args, **kwargs):
+            if path == Path('/proc')/str(broker['pid'])/'stat':
+                return str(broker['pid']) + ' (unrelated) S ' + ' '.join(['0']*18 + ['987654321'])
+            return read_text(path, *args, **kwargs)
+        with patch.object(old, 'processes', return_value=[(broker['pid'], 88888888)]), \
+                patch.object(Path, 'read_text', observed):
+            self.assertTrue(self.m.still_bound(self.state, self.r, entry))
+            key, actual = self.m.reconciliation(self.state, self.r['token'], self.proof)
+            self.assertEqual(actual, entry)
+            self.assertEqual(key, c.sha_file(self.folder/'receipt.json'))
+
+    def test_pid_reuse_keeps_original_group_and_unknown_identity_guards(self):
+        import deploy_test_interrupted_cleanup as old
+        self.prepare_publication()
+        c.reconcile(self.state, self.r['token'], self.proof)
+        entry = self.state['reconciled_owners'][c.sha_file(self.folder/'receipt.json')]
+        broker = json.loads((self.relay/'broker-owner.json').read_text())
+        read_text = Path.read_text
+        scenarios = [
+            ('original birth', [(broker['pid'], 88888888)], broker['birth'].rsplit(':', 1)[1]),
+            ('original group descendant', [(88888887, broker['pid'])], '987654321'),
+            ('reused group leader remains ambiguous', [(broker['pid'], broker['pid'])], '987654321'),
+            ('unknown supervisor birth', [(self.supervisor['supervisor_pid'], 88888888)], '987654321'),
+        ]
+        for label, rows, start in scenarios:
+            def observed(path, *args, **kwargs):
+                if path == Path('/proc')/str(broker['pid'])/'stat':
+                    return str(broker['pid']) + ' (observed) S ' + ' '.join(['0']*18 + [start])
+                return read_text(path, *args, **kwargs)
+            with self.subTest(label=label), patch.object(old, 'processes', return_value=rows), \
+                    patch.object(Path, 'read_text', observed):
+                self.assertFalse(self.m.still_bound(self.state, self.r, entry))
+                with self.assertRaises(ValueError):
+                    self.m.reconciliation(self.state, self.r['token'], self.proof)
+        for guard in ('namespace_quiet', 'no_holders'):
+            with self.subTest(guard=guard), patch.object(self.m, guard, side_effect=ValueError('live consumer')):
+                self.assertFalse(self.m.still_bound(self.state, self.r, entry))
+                with self.assertRaises(ValueError):
+                    self.m.reconciliation(self.state, self.r['token'], self.proof)
+
+    def fresh_witness_renewal_fixture(self):
+        # Captured original receipt/summary, original committed consumer bytes,
+        # and real native closure/publication in the existing local fixture.
+        import hashlib
+        witness_head = '65584b8b59489aaef09334af1714a936716b0f96'
+        names = ('scripts/deploy_test_interrupted_fresh_cleanup.py',
+                 'scripts/cloudbench-prestart-recovery.py')
+        for name in names:
+            raw = subprocess.check_output(['git', '-C', str(ROOT), 'show', witness_head + ':' + name])
+            (self.root/name).write_bytes(raw)
+        self.proof['files'] = {}
+        self.proof['files'] = self.m.capture_files(self.r, self.proof, controls_pending=True)
+        native_scripts = str(ROOT/'scripts')
+        with patch.object(sys.modules[__name__], 'ROOT', self.root), \
+                patch.dict(os.environ, {'PYTHONPATH': native_scripts}):
+            self.prepare_publication()
+        c.reconcile(self.state, self.r['token'], self.proof)
+        key = c.sha_file(self.folder/'receipt.json')
+        previous = copy.deepcopy(self.state['reconciled_owners'][key])
+        for name in names:
+            (self.root/name).write_bytes((ROOT/name).read_bytes() + b'\n# current consumer revision\n')
+        self.assertFalse(self.m.still_bound(self.state, self.r, previous))
+        subprocess.run(['git', '-C', str(self.root), 'update-ref', 'HEAD', witness_head], check=True)
+        # Keep test evidence out of the current source digest, as in the real repo.
+        self.put(self.root/'.git/info/exclude', '.context/\ncontrol-originals.json\noriginal-inventory-owner\n')
+        self.state['phase'] = 'focused'
+        self.state.pop('resume_phase')
+        request = dict(kind='interrupted-fresh-policy-witness-renewal-v1', receipt_sha256=key,
+                       previous_entry_sha256=c.digest(previous), source_head=witness_head,
+                       current_source=c.source(self.root),
+                       relocations={str(self.root/name): 'git:' + subprocess.check_output(
+                           ['git', '-C', str(self.root), 'rev-parse', witness_head + ':' + name], text=True).strip()
+                           for name in names}, confirmed_at=time.time(), observed_by='owning local fixture')
+        return previous, request
+
+    def test_fresh_witness_renewal_preserves_original_and_replays(self):
+        previous, request = self.fresh_witness_renewal_fixture()
+        original = copy.deepcopy(self.state)
+        c.reconcile(self.state, self.r['token'], request)
+        entry = self.state['reconciled_owners'][request['receipt_sha256']]
+        self.assertEqual(entry['policy_witness_renewal']['previous'], previous)
+        self.assertEqual(entry['proof'], previous['proof'])
+        self.assertTrue(self.m.still_bound(self.state, self.r, entry))
+        self.assertEqual(self.state['source'], original['source'])
+        self.assertEqual(self.state['plan'], original['plan'])
+        self.assertNotEqual(self.state['source'], request['current_source'])
+        self.assertEqual(self.state['attempts'], original['attempts'])
+        self.assertEqual(self.state['failures'], original['failures'])
+        renewed = copy.deepcopy(self.state)
+        c.reconcile(self.state, self.r['token'], request)
+        self.assertEqual(self.state, renewed)
+
+    def test_fresh_witness_renewal_refuses_unbound_data_and_live_custody(self):
+        previous, request = self.fresh_witness_renewal_fixture()
+        bad_requests = []
+        for key, value in (('previous_entry_sha256', '0'*64), ('receipt_sha256', '0'*64),
+                           ('source_head', self.head), ('observed_by', ''), ('confirmed_at', 0),
+                           ('current_source', {'head': '0'*40, 'digest': '0'*64})):
+            bad = copy.deepcopy(request);bad[key] = value;bad_requests.append(bad)
+        for old, destination in ((str(self.folder/'receipt.json'), next(iter(request['relocations'].values()))),
+                                 (next(iter(request['relocations'])), 'git:'+'0'*40),
+                                 (next(iter(request['relocations'])), str(self.root/'arbitrary.py'))):
+            bad = copy.deepcopy(request);bad['relocations'] = {old: destination};bad_requests.append(bad)
+        for bad in bad_requests:
+            before = copy.deepcopy(self.state)
+            with self.subTest(request=bad), self.assertRaises((ValueError, subprocess.SubprocessError)):
+                c.reconcile(self.state, self.r['token'], bad)
+            self.assertEqual(self.state, before)
+        for mutation in ('running', 'live_failures', 'source', 'contract', 'owner', 'token'):
+            state = copy.deepcopy(self.state)
+            if mutation == 'running': state['running'] = {'pid': 123}
+            elif mutation == 'live_failures': state['live_failures'] = []
+            elif mutation == 'source': state['source'] = {'head': '0'*40, 'digest': '0'*64}
+            elif mutation == 'contract': state['plan']['gates'][0]['command'] = ['foreign-command']
+            else:
+                receipt = state['attempts'][0]['results'][0]
+                if mutation == 'owner': receipt['cleanup_owner']['request_token'] = 'foreign-owner'
+                else: receipt['token'] = 'foreign-token'
+            before = copy.deepcopy(state)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                c.reconcile(state, self.r['token'], request)
+            self.assertEqual(state, before)
+        data = Path(self.proof['recovery_directory'])/'hub-group.json'
+        original = data.read_bytes()
+        try:
+            data.write_bytes(original + b'\n')
+            with self.assertRaises(ValueError):
+                c.reconcile(self.state, self.r['token'], request)
+        finally:
+            data.write_bytes(original)
+        for guard in ('namespace_quiet', 'no_holders'):
+            with patch.object(self.m, guard, side_effect=ValueError('live consumer')), self.assertRaises(ValueError):
+                c.reconcile(self.state, self.r['token'], request)
+        import deploy_test_interrupted_cleanup as old
+        with patch.object(old, 'processes', return_value=[(88888887, self.parent_pid)]), self.assertRaises(ValueError):
+            c.reconcile(self.state, self.r['token'], request)
+        # The current verifier executes even when its historical read witness is relocated.
+        with (self.root/'scripts/cloudbench-prestart-recovery.py').open('a') as stream:
+            stream.write("\ndef verify_released_fresh(*args, **kwargs): raise ValueError('current verifier ran')\n")
+        request['current_source'] = c.source(self.root)
+        with self.assertRaisesRegex(ValueError, 'current verifier ran'):
+            c.reconcile(self.state, self.r['token'], request)
+
     def test_every_original_controller_wait_is_required_atomically(self):
         self.prepare_publication()
         original=(self.base/'cli.log.process.json').read_bytes()

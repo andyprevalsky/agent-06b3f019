@@ -142,6 +142,14 @@ and the unchanged actual-capture replay successfully. Only this existing repair
 was reused; the owner's separate SDK/runtime changes were not imported. The five
 underlying UI failures retain their own attribution and post-merge obligations.
 
+The subsequent PR review found malformed suite and test objects could still
+raise `AttributeError` outside the existing invalid-data fallback. Registered
+shape cases reproduced three errors before adding that exception to the
+fallback. All fifteen owning tests then passed, including a worker case that
+writes an UNVERIFIED aggregate while preserving the other lane's result and
+cleanup evidence. Independent review also retained a native FAIL in that other
+lane; malformed evidence never receives assertion credit.
+
 ## Human feedback
 
 None recorded.
