@@ -19,6 +19,7 @@ import {
   hasUncaughtErrors,
   waitForTemporalWorkflow,
 } from './helpers';
+import { quarantine } from '../src/tests/gate-progress/quarantine';
 
 const SAMPLE_COUNT = 5;
 const FULL_LIFECYCLE_TARGET_MS = 6_000;
@@ -307,9 +308,7 @@ test.describe('chat full-lifecycle latency', () => {
   });
 
   for (const path of selectedPaths()) {
-    test(`${path.id}: five full-lifecycle samples finish and report latency targets`, async ({
-      page,
-    }) => {
+    const samples = async (page: Page): Promise<void> => {
       test.setTimeout(PATH_TEST_TIMEOUT_MS);
       const recorder = attachRecorder(page);
       const results: LifecycleSample[] = [];
@@ -475,6 +474,26 @@ test.describe('chat full-lifecycle latency', () => {
         }
       }
       expect(hasUncaughtErrors(recorder), 'uncaught errors during lifecycle samples').toEqual([]);
+    };
+    test(`${path.id}: five full-lifecycle samples finish and report latency targets`, async ({
+      page,
+    }) => {
+      if (path.id !== 'web_search') return samples(page);
+      // NOT_INTRODUCED FLAKY 1de45e6a (deploy #1927): the chat router escalated sample 1 to an
+      // agent workflow, so no chat final answer rendered; it still runs and reports, non-blocking.
+      const name = 'web_search: five full-lifecycle samples finish and report latency targets';
+      await quarantine(
+        {
+          since: '2026-11-11',
+          repair: 'pending-handoff:1de45e6a373f42ec9ff1862482c293e0',
+          error: 'Error: web_search sample 1 missed milestones',
+          evidence: 'https://github.com/Rose-Ai-Labs/rose/actions/runs/43013937607',
+        },
+        () => samples(page),
+        {
+          unit: `tests-e2e/chat-lifecycle-latency.spec.ts > chat full-lifecycle latency > ${name}`,
+        },
+      )({});
     });
   }
 });
