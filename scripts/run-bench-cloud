@@ -2334,19 +2334,20 @@ start_machine() {  # start_machine <id>
 # precondition until a bounded settle window ends. Other errors keep the
 # original attempt budget. Starting an already-started Machine is idempotent.
 boot_launch_start_after_config() {  # boot_launch_start_after_config <id> <log>
-    local id="$1" log="$2" attempt=0 remaining wait_seconds
+    local id="$1" log="$2" ordinary_failures=0 remaining wait_seconds response start_status
     local attempts="${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"
     local start_timeout="${CLOUDBENCH_BOOT_START_TIMEOUT:-60}"
     local settle_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_START_SETTLE_SECONDS:-180}))
     local wait_cap="${CLOUDBENCH_BOOT_START_SETTLE_WAIT_SECONDS:-60}"
     while :; do
-        attempt=$((attempt + 1))
-        if _with_timeout "$start_timeout" \
-              flyctl machine start "$id" -a "$APP" >> "$log" 2>&1; then
-            return 0
-        fi
+        # Classify only this attempt's own response, then keep it in the log.
+        start_status=0
+        response="$(_with_timeout "$start_timeout" \
+            flyctl machine start "$id" -a "$APP" 2>&1)" || start_status=$?
+        [ -z "$response" ] || printf '%s\n' "$response" >> "$log"
+        [ "$start_status" -eq 0 ] && return 0
         remaining=$((settle_deadline - SECONDS))
-        if tail -n 3 "$log" 2>/dev/null | grep -q 'failed_precondition'; then
+        if printf '%s' "$response" | grep -q 'failed_precondition'; then
             [ "$remaining" -gt 0 ] || return 1
             wait_seconds="$wait_cap"
             [ "$remaining" -lt "$wait_seconds" ] && wait_seconds="$remaining"
@@ -2359,8 +2360,10 @@ boot_launch_start_after_config() {  # boot_launch_start_after_config <id> <log>
             sleep 2
             continue
         fi
-        [ "$attempt" -lt "$attempts" ] || return 1
-        sleep $(( attempt * 2 ))
+        # Settle-window refusals never consume the ordinary retry budget.
+        ordinary_failures=$((ordinary_failures + 1))
+        [ "$ordinary_failures" -lt "$attempts" ] || return 1
+        sleep $(( ordinary_failures * 2 ))
     done
 }
 

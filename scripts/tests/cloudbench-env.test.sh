@@ -3011,14 +3011,18 @@ readiness_failures=0
 # exact refusals for five starts, then accepts. The start must wait on Fly's
 # settled condition for the exact Machine and keep retrying that precondition
 # within its bounded window; ordinary errors keep the 4-attempt budget.
-boot_start_fixture() {  # boot_start_fixture <case> <refusals> <refusal-kind>
+boot_start_fixture() {  # boot_start_fixture <case> <per-call plan: P=precondition O=other A=accept>
   local dir="$TMP_ROOT/boot-start-$1"
   mkdir -p "$dir"
   printf '%s\n' 0 > "$dir/starts"
   : > "$dir/waits"
-  printf '%s\n' "$2" > "$dir/refusals"
-  printf '%s\n' "$3" > "$dir/kind"
+  printf '%s\n' "$2" > "$dir/plan"
   printf '%s' "$dir"
+}
+boot_start_plan() {  # boot_start_plan <count> <kind>
+  local i out=""
+  for i in $(seq 1 "$1"); do out="$out$2 "; done
+  printf '%s' "$out"
 }
 boot_start_fake_provider='
   _with_timeout() { shift; "$@"; }
@@ -3026,18 +3030,21 @@ boot_start_fake_provider='
   flyctl() {
     case "$1 $2" in
       "machine start")
-        local n; n=$(( $(cat "$BOOT_FIXTURE/starts") + 1 ))
+        local n kind; n=$(( $(cat "$BOOT_FIXTURE/starts") + 1 ))
         printf "%s\n" "$n" > "$BOOT_FIXTURE/starts"
-        if [ "$n" -le "$(cat "$BOOT_FIXTURE/refusals")" ]; then
-          if [ "$(cat "$BOOT_FIXTURE/kind")" = other ]; then
-            echo "Error: could not start machine $3: failed to start VM $3: unavailable: host busy" >&2
-          elif [ "$n" -eq 1 ]; then
-            echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine getting replaced, refusing to start (Request ID: 01M75DF1AATXMBN3RKN2JCREV4-sjc)" >&2
-          else
-            echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine still active, refusing to start (Request ID: 01M75DFJ4YBNMKGRDBP59HGZ1M-sjc)" >&2
-          fi
-          return 1
-        fi
+        # Hard stop for a pre-fix spin: SECONDS does not advance under the stubbed sleep.
+        [ "$n" -le 60 ] || { echo "$3 has been started"; return 0; }
+        kind="$(cut -d" " -f"$n" "$BOOT_FIXTURE/plan")"
+        case "$kind" in
+          P)
+            if [ "$n" -eq 1 ]; then
+              echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine getting replaced, refusing to start (Request ID: 01M75DF1AATXMBN3RKN2JCREV4-sjc)" >&2
+            else
+              echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine still active, refusing to start (Request ID: 01M75DFJ4YBNMKGRDBP59HGZ1M-sjc)" >&2
+            fi
+            return 1 ;;
+          O) echo "Error: could not start machine $3: failed to start VM $3: unavailable: host busy" >&2; return 1 ;;
+        esac
         echo "$3 has been started"
         ;;
       "machine wait") printf "%s\n" "$*" >> "$BOOT_FIXTURE/waits" ;;
@@ -3051,7 +3058,7 @@ boot_start_fake_provider='
   eval "$function_body"
   eval "$boot_start_fake_provider"
   APP=bench-app
-  BOOT_FIXTURE="$(boot_start_fixture replaced 5 precondition)"
+  BOOT_FIXTURE="$(boot_start_fixture replaced "$(boot_start_plan 5 P)A")"
   boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" ||
     fail "boot start must survive Fly replacing/still-active refusals after config update"
   [ "$(cat "$BOOT_FIXTURE/starts")" -eq 6 ] ||
@@ -3062,7 +3069,7 @@ boot_start_fake_provider='
     fail "boot start must retain the provider refusal diagnostics"
 
   # Bounded: an exhausted settle window stops after the refusal in hand.
-  BOOT_FIXTURE="$(boot_start_fixture window 99 precondition)"
+  BOOT_FIXTURE="$(boot_start_fixture window "$(boot_start_plan 59 P)")"
   rc=0
   CLOUDBENCH_BOOT_START_SETTLE_SECONDS=0 \
     boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
@@ -3070,11 +3077,28 @@ boot_start_fake_provider='
     fail "boot start settle retry must be bounded (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts"))"
 
   # Other provider errors keep the original 4-attempt budget and never wait.
-  BOOT_FIXTURE="$(boot_start_fixture other 99 other)"
+  BOOT_FIXTURE="$(boot_start_fixture other "$(boot_start_plan 59 O)")"
   rc=0
   boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
   [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 4 ] && [ ! -s "$BOOT_FIXTURE/waits" ] ||
     fail "non-precondition start errors must keep the 4-attempt budget (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Settle-window refusals never consume the ordinary budget: after five
+  # refusals, a transient ordinary failure still gets its own retries.
+  BOOT_FIXTURE="$(boot_start_fixture mixed-recovers "$(boot_start_plan 5 P)$(boot_start_plan 3 O)A")"
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" ||
+    fail "an ordinary failure after settle-window refusals must keep its retry budget (starts=$(cat "$BOOT_FIXTURE/starts"))"
+  [ "$(cat "$BOOT_FIXTURE/starts")" -eq 9 ] ||
+    fail "mixed refusals must reach the accepting start (starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Classify each response alone: an earlier refusal still in the log must not
+  # turn later ordinary failures into unbounded settle-window retries.
+  BOOT_FIXTURE="$(boot_start_fixture current-response "P $(boot_start_plan 58 O)")"
+  rc=0
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 5 ] &&
+    [ "$(wc -l < "$BOOT_FIXTURE/waits")" -eq 1 ] ||
+    fail "only the current start response may select a settle wait (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts") waits=$(wc -l < "$BOOT_FIXTURE/waits"))"
 ) || readiness_failures=$((readiness_failures + 1))
 boot_start_call_sites="$(grep -c '^[[:space:]]*if boot_launch_start_after_config "\$mid" "\$_start_log"; then$' \
   "$ROOT_DIR/scripts/run-bench-cloud" || true)"
