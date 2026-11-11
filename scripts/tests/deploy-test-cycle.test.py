@@ -5681,6 +5681,42 @@ class Cycle(unittest.TestCase):
         proof['files']={str(p):c.sha_file(p) for p in files if p.is_file()}
         return state,occurrence,paths,proof,parents
 
+    def test_parent_refused_at_private_source_validation_reconciles_as_zero_allocation(self):
+        """A campaign-v1 parent whose controller refused at private source validation (PR1915 round 26)
+        has no execution metadata; it reconciles only with the positive refusal and zero ownership."""
+        import time
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        campaign = Path(proof['campaign'])
+        summary = c.read(campaign / 'summary.json')
+        job = next(j for j in summary['jobs'] if j['status'] == 'failed')
+        fleet = next(f for f in parents if f.name.endswith(str(job['controller_pid'])))
+        for name in ('execution-provenance.json', 'execution-task-matrix.json'):
+            (fleet / name).unlink()
+        c.write(fleet / '_batch/run.json', dict(run_id=fleet.name, status='failed', controller_exit_code=1,
+            tasks=[dict(name=job['task'], status='INFRA_ERROR', passed=False, lifecycle_stage='released',
+                        agent_id=None, owned_roots=None, failure_reason='no current run artifact produced')]))
+        life = c.read(fleet / '_batch/lifecycle.json'); life.update(status='failed', controller_exit_code=1)
+        c.write(fleet / '_batch/lifecycle.json', life)
+        log = Path(job['log'])
+        refused = log.read_text() + 'private fleet source validation failed: snapshot identity missing or duplicate\n'
+
+        def rebind():
+            proof['files'] = {k: (c.sha_file(Path(k)) if Path(k).is_file() else v) for k, v in proof['files'].items()
+                              if Path(k).exists()}
+            for path in fleet.rglob('*'):
+                if path.is_file():
+                    proof['files'][str(path)] = c.sha_file(path)
+            proof['confirmed_at'] = time.time()
+
+        rebind()
+        with self.assertRaises(ValueError):  # no positive refusal: absent metadata proves nothing
+            c.reconcile(copy.deepcopy(state), occurrence['id'], copy.deepcopy(proof))
+        log.write_text(refused); rebind()
+        before = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state['attempts'])
+        self.assertFalse(next(iter(state['reconciled_owners'].values()))['credit_granted'])
+
     def test_admission_requires_full_source_before_git_io(self):
         from deploy_test_native_admission import validate_campaign
         for head in (None, '4f219', 'a'*39, 'g'*40, True):

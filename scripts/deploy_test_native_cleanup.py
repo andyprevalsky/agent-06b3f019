@@ -12,6 +12,7 @@ import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
+SOURCE_REFUSAL = 'private fleet source validation failed'
 ISOLATED_RENEWAL_PHASES = frozenset({'triage', 'needs-focused-plan', 'failed-gates'})
 
 # Bound raw run evidence per proof; ordinary receipts retain their existing limit.
@@ -1271,7 +1272,12 @@ def validate(receipt, owner, proof):
             need(one and one[0] not in parents and type(job.get('controller_pid')) is int
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
                  'campaign parent identity')
-            parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code']}
+            # A campaign-v1 parent whose controller refused at private fleet source validation
+            # stopped before allocation; it is held to the same zero-resource admission checks.
+            refusals = [x for x in lines if x.startswith(SOURCE_REFUSAL)]
+            parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code'],
+                               'source_refused': layout == 'campaign-v1' and job['status'] == 'failed'
+                               and job['controller_exit_code'] == 1 and len(refusals) == 1}
             handles.extend(one)
         need(len(handles) == len(set(handles)), 'duplicate campaign participant')
     else:
@@ -1306,6 +1312,8 @@ def validate(receipt, owner, proof):
     if layout == 'campaign-admission-rejected-v1':
         from deploy_test_native_admission import validate_campaign
         admission_parents = validate_campaign(receipt, proof, root, runs, parents, participants, bound, document)
+    if layout == 'campaign-v1':
+        admission_parents = admission_parents | frozenset(f for f, p in parents.items() if p.get('source_refused'))
     cancelled_parent_zero = frozenset()
     if 'cancelled_parent_admission' in proof:
         from deploy_test_native_cancelled_parent import cancelled_parent_admission
