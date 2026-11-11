@@ -2,6 +2,9 @@
  * Data domain service — business logic for grep and summary operations.
  */
 
+import { searchSharedProjectAgents } from './projectAgentSearchService';
+import { getSharedDataMap } from './teamContext';
+import { includesPrivateSources } from './teamAccess';
 import { isPostgresRegexError } from './regexSafety';
 import { formatTimeAgo } from './format.snippets';
 import { sortMatches } from './grepSort';
@@ -69,7 +72,14 @@ async function searchSource(
   source: ValidSource,
   agentId: string | undefined
 ): Promise<SourceSearchResult> {
+  if (source === 'shared_project_agents') return searchSharedProjectAgents(userId, input);
   if (isMessageFamilySource(source)) return searchMessageSource({ userId, input, source });
+  if (!includesPrivateSources(userId, input.teamScope))
+    return {
+      total: 0,
+      matches: [],
+      notice: `${source}: private source is outside this sharing scope.`,
+    };
   if (isGoogleGrepSource(source)) return searchGoogleSource({ userId, input, source });
   if (source === 'network') return searchNetworkSource({ userId, input });
   if (source === 'transactions') return searchTransactionSource(userId, input);
@@ -171,7 +181,7 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     ? sourceResults[0].hasMore === true
     : totalMatches > input.offset + matches.length;
   const summaries: GrepResult['summaries'] = {};
-  if (input.sources.includes('transactions')) {
+  if (input.sources.includes('transactions') && includesPrivateSources(userId, input.teamScope)) {
     summaries.transactions = await transactionSummaries(userId, input);
   }
 
@@ -268,6 +278,7 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
     result.sources.calendar = google.calendar;
     result.sources.drive = google.drive;
   }
+  result.teams = await getSharedDataMap(userId);
   return result;
 }
 

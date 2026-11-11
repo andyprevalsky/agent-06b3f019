@@ -34,6 +34,7 @@ const COMPOSER_COVERING_APPS: readonly string[] = [
   'browser',
   'integrations',
   'health',
+  'teams',
   'feedback',
   'benchmarks',
   'settings',

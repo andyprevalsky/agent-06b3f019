@@ -8,6 +8,7 @@
 import { Router, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { getSharedDataMap } from './teamContext';
 import { executeGrepTool } from './grepTool';
 import {
   getSnapshot,
@@ -24,6 +25,20 @@ import { createLogger } from '../../providers/logger';
 
 const log = createLogger('Data');
 const router = Router();
+
+router.get(
+  '/team-context',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId =
+      req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : req.user?.id;
+    if (userId === undefined || userId === '') {
+      res.status(401).json({ error: 'User not authenticated' });
+      return;
+    }
+    res.json(await getSharedDataMap(userId));
+  })
+);
 
 /**
  * POST /api/data/grep

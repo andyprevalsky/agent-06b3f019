@@ -192,7 +192,7 @@ async def test_grep_agent_metadata_only():
 
 
 async def test_fetch_local_data_summary():
-    """The explore agent's inventory is the backend's grep `summary` rendering, cached per user."""
+    """The explore agent's inventory is the backend's grep `summary` rendering, refreshed for revocable shares."""
     rendered = "LOCAL DATA SOURCES:\n\nmessages/ 5 threads, 120 messages\n    Alice  50 msgs"
     setup_mock({"/api/data/grep": {"status": 200, "json": {"sources": ["summary"], "message": rendered}}})
     with patch("temporalio.activity.heartbeat"):
@@ -206,7 +206,7 @@ async def test_fetch_local_data_summary():
     assert result == rendered and cached == rendered
     call = assert_captured_call(url_contains="/api/data/grep", method="POST", header_present="X-API-Key")
     assert json.loads(call["requestBody"]) == {"sources": ["summary"], "user_id": "user-42"}
-    assert len([c for c in get_captured_requests() if "/api/data/grep" in c["url"]]) == 1
+    assert len([c for c in get_captured_requests() if "/api/data/grep" in c["url"]]) == 2
 
 
 async def test_grep_empty_pattern():

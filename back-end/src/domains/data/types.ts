@@ -1,3 +1,18 @@
+import type { TransactionGrepFilters, DocumentGrepFilters } from './types.filters';
+export type { TransactionGrepFilters, DocumentGrepFilters } from './types.filters';
+import type { TeamSearchScope } from './types.team';
+import type {
+  GrepMessageRecord,
+  GrepOwnership,
+  MessageGrepFilters,
+  NetworkGrepFilters,
+} from './types.message';
+export type {
+  GrepMessageRecord,
+  GrepOwnership,
+  MessageGrepFilters,
+  NetworkGrepFilters,
+} from './types.message';
 import type {
   AgentMetadataParams,
   AgentNetworkGrepFilters,
@@ -59,6 +74,16 @@ export const DATA_SOURCE_CONFIGS = {
     searchField: 'contact fields',
     groupBy: 'personId',
     filters: ['path'] as const,
+    connector: null,
+    channel: null,
+  },
+  shared_project_agents: {
+    description:
+      'Safe agent metadata in explicitly shared projects (no goals, messages or credentials)',
+    table: 'Agent' as const,
+    searchField: 'title/status/project name',
+    groupBy: 'projectId',
+    filters: ['project_id', 'path'] as const,
     connector: null,
     channel: null,
   },
@@ -135,9 +160,8 @@ export const DEFAULT_GREP_SOURCES: ValidSource[] = ['messages', 'network', 'agen
 
 /**
  * Message-family sources all search `MessageRecord`. The channel-specific ones
- * (email/imessage/whatsapp) additionally restrict to a single
- * `MessageRecord.channel` value; the umbrella `messages` and legacy `gmail`
- * keep their existing search behavior.
+ * (email/gmail/imessage/whatsapp) additionally restrict to a single
+ * `MessageRecord.channel` value; only the umbrella `messages` includes all channels.
  *
  * There is no separate `sms` grep source: macOS SMS lives in the Messages DB
  * and is ingested as `IMESSAGE` via the iMessage connector. `MessageChannel`
@@ -190,6 +214,10 @@ export interface FormattedResult {
 }
 
 export interface GrepParams extends AgentMetadataParams {
+  scope?: 'own' | 'shared' | 'all';
+  team_id?: string;
+  owner_user_id?: string;
+  account_id?: string;
   pattern?: string;
   source?: string;
   sources?: string[];
@@ -238,16 +266,7 @@ export interface GrepMatch {
   location: GrepLocation;
   content: string;
   records?: GrepMessageRecord[];
-}
-
-export interface GrepMessageRecord {
-  message_id: string;
-  channel: string;
-  from: string;
-  to: string;
-  timestamp: string;
-  message: string;
-  relation: 'before' | 'match' | 'after';
+  ownership?: GrepOwnership;
 }
 
 export interface GrepResult {
@@ -268,31 +287,6 @@ export interface GrepResult {
   message?: string;
 }
 
-export interface TransactionGrepFilters {
-  /** Parsed from `filters.path` — addresses an institution/account/transaction subtree. */
-  pathInstitution?: string;
-  pathAccount?: string;
-  pathTransactionId?: string;
-  since?: Date;
-  until?: Date;
-  account?: string;
-  minAmount?: number;
-  maxAmount?: number;
-  status?: 'pending' | 'posted' | 'all';
-  includePendingInTotals: boolean;
-}
-
-export interface DocumentGrepFilters {
-  /** Set when `filters.path` was a path this tool printed. */
-  pathDocumentSource?: string;
-  pathRest?: string;
-  documentSource?: string;
-  since?: Date;
-  until?: Date;
-  path?: string;
-  tag?: string;
-}
-
 /**
  * `calendar` and `drive` narrowing. A date-only `since`/`until` on calendar is
  * compared with the event's own local date, so `until: 2026-10-02` includes
@@ -309,23 +303,11 @@ export interface GoogleSourceGrepFilters {
   pathPrefix?: string;
 }
 
-export interface MessageGrepFilters {
-  person?: string;
-  since?: Date;
-  /** Parsed from `filters.path` — addresses one thread, optionally one message. */
-  pathThread?: string;
-  pathMessageId?: string;
-}
-
-/** `network` narrowing. `path` addresses one contact record. */
-export interface NetworkGrepFilters {
-  pathContact?: string;
-}
-
 // Normalized, validated grep input shared by the service (validation) and the
 // formatter (snippet rendering).
 export interface ValidatedGrepInput {
   pattern: string;
+  teamScope: TeamSearchScope;
   sources: ValidSource[];
   regex: RegExp;
   dbPattern: string;
@@ -341,6 +323,7 @@ export interface ValidatedGrepInput {
   pageAfterPath?: string;
   filters: {
     messages?: MessageGrepFilters;
+    projectAgents?: { projectId?: string; agentId?: string };
     network?: NetworkGrepFilters;
     agentNetwork?: AgentNetworkGrepFilters;
     agentTrajectories?: AgentTrajectoryGrepFilters;

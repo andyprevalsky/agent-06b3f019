@@ -139,7 +139,7 @@ def _backend_grep_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
 # Local, always-available sources: no external connector, so they never gate
 # and don't need a connectivity probe.
-_LOCAL_SOURCES = {"messages", "network", "agent_network", "agent_trajectories", "summary"}
+_LOCAL_SOURCES = {"messages", "network", "agent_network", "agent_trajectories", "shared_project_agents", "summary"}
 _DOCUMENT_PROVIDER_ALIASES = {
     "chat_gpt": "chatgpt",
     "chatgpy": "chatgpt",
@@ -195,6 +195,10 @@ def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, s
     skipped until the concrete connector is resolved.
     """
     requested_sources = _extract_sources(tool_call)
+    # Team availability is authorized by the backend per account. A reader's
+    # missing personal connector must not block another member's shared inbox.
+    if tool_call.get("scope") == "shared" or tool_call.get("team_id") or tool_call.get("owner_user_id"):
+        requested_sources = [source for source in requested_sources if source not in {"email", "gmail", "imessage"}]
     document_provider = _document_provider(tool_call)
     targets: list = []
     target_to_search_sources: Dict[str, set] = {}

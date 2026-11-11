@@ -3,6 +3,8 @@
  * ReDoS safety, and normalization into ValidatedGrepInput.
  */
 
+import { parseProjectAgentFilters } from './validate.project';
+import { parseTeamSearchScope } from './teamAccess';
 import { MAX_RESULTS } from './config';
 import { InvalidGrepParamError, InvalidPatternError, SourceNotFoundError } from './errors';
 import {
@@ -57,6 +59,10 @@ import {
 } from './types';
 
 const ALLOWED_GREP_KEYS = new Set([
+  'scope',
+  'team_id',
+  'owner_user_id',
+  'account_id',
   'pattern',
   'source',
   'sources',
@@ -160,6 +166,7 @@ function resolveSourceSelection(params: GrepParams, split: SplitFilters): Resolv
   return {
     resolvedSources,
     patternOptional:
+      resolvedSources.includes('shared_project_agents') ||
       resolvedSources.includes('agent_trajectories') ||
       (resolvedSources.includes('agent_network') && searchesAnAgentTree(params, resolvedSources)) ||
       resolvedSources.every(isGoogleGrepSource),
@@ -196,6 +203,9 @@ function parseEachSourceFilters(
   const of = (source: ValidSource) => bySource.get(source) ?? {};
   const has = (source: ValidSource) => sources.includes(source);
   return {
+    projectAgents: has('shared_project_agents')
+      ? parseProjectAgentFilters(of('shared_project_agents'))
+      : undefined,
     messages: sources.some(isMessageFamilySource)
       ? parseMessageFilters(sharedFilters(bySource, 'messages'))
       : undefined,
@@ -264,6 +274,7 @@ export async function validateGrepInput(rawParams: GrepParams): Promise<Validate
 
   return {
     pattern,
+    teamScope: parseTeamSearchScope(params),
     // JS → Postgres ARE: strip named captures (we only boolean-match) and map
     // word boundaries, which ARE spells \y / \Y.
     dbPattern: databaseRegexPattern(

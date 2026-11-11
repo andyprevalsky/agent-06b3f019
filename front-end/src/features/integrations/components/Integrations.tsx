@@ -18,6 +18,8 @@
  * Pebble Index 01 (last row/card) --Connect--> PebbleIndexSetupModal (guided
  * webhook setup; state owned here, in both presentations).
  *
+ * Team sharing uses explicit per-account, per-team opt-ins, saved independently.
+ *
  * File System is a FE-only section: website is Download for Mac; Mac app
  * plus click stays [IDLE/READY] (no hook).
  *
@@ -33,6 +35,7 @@
 import { useState } from 'react';
 import { Loader2 } from 'lucide-react';
 
+import { IntegrationTeamSharing } from '@/components/teams/TeamSharing';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import {
@@ -127,6 +130,7 @@ export default function Integrations() {
         />
 
         <div className="space-y-3">
+          <IntegrationTeamSharing />
           <IPhoneConnectionSection key={user?.id ?? 'signed-out'} />
           {data.loadingIntegrations ? (
             <div className="flex items-center justify-center py-8">

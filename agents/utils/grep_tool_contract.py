@@ -8,10 +8,12 @@ and web chat read the definition generated from that model
 must be regenerated; ``tests/blackbox/grep.blackbox.py`` fails on any drift.
 """
 
-GREP_TOOL_PROMPT = """Search this user's local records and current agent tree.
+GREP_TOOL_PROMPT = """Search your records, explicitly shared team communication accounts, and current agent tree.
 
+- Default scope is `all` (own plus explicit direct team account grants). Use `scope="own"` for personal-only or `scope="shared"` for shared-only; `team_id`, `owner_user_id`, and `account_id` narrow results before counting/paging. Result ownership identifies each owner, account and team. Never infer sharing from a shared project or access another owner's credentials/iPhone.
 - `pattern` is a regex over record text. Omit it for metadata-only agent searches.
 - `sources` selects one or more sources; omitted defaults: messages, network, agent_network. `gmail` aliases email.
+- `shared_project_agents` lists/searches titles, statuses and project names in explicitly shared projects. Omit pattern to list; use filters.project_id and offset/head_limit to page. It never reads goals, trajectories, credentials or environment.
 - `agent_trajectories` contains prior user-owned chat, SMS, and Temporal runs, including R2 archives; `agent_network` contains the current tree.
 - Typed agent parameters: `role` (USER, ASSISTANT, TOOL), `record_kind` (message, llm_output, llm_context, all), `surface`, `trace_path`, `since`, `until`. Agent parameters without `sources` select agent_trajectories.
 - `trace_path` at a root or `/root/...` path spans its subtree; a child id narrows to one agent. For trajectory pages, keep the same query and set `page_after` to `next_page_after`; `order` selects newest_first or oldest_first.
@@ -30,6 +32,7 @@ GREP_SOURCE_FILTER_KEYS = {
     "imessage": ("person", "since", "path"),
     "whatsapp": ("person", "since", "path"),
     "network": ("path",),
+    "shared_project_agents": ("project_id", "path"),
     "agent_network": ("path", "role"),
     "agent_trajectories": ("path", "since", "until", "role", "surface", "record_kind"),
     "transactions": (
