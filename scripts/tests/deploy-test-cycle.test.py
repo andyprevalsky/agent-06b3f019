@@ -17,6 +17,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 # Source of the original round-37 inventory-init failure whose exact producer bytes the native validator pins.
 INVENTORY_INIT_PRODUCER_SOURCE = 'ce016428eeb484b19b503a6f65884eb92f1e3fde'
+# Native campaign fixture controller PIDs: above any pid_max, so no real process can collide.
+FIXTURE_CONTROLLER_PID_BASE = 2147480000
 # The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
 # outer deploy worker (the local executor runs this suite inside a gate) would
 # make admission() demand that outer cycle's custody locator in-process.
@@ -5044,7 +5046,9 @@ class Cycle(unittest.TestCase):
         campaign.mkdir(parents=True)
         parents, jobs = [], []
         for index, name in enumerate(names, 1):
-            fleet = runs / ('20261103-080440-' + str(310000 + index))
+            # Controller PIDs above pid_max (4194304): a live host process can never own one, so the
+            # 'old controller still active' check cannot flake on a loaded runner's PID/PGID reuse.
+            fleet = runs / ('20261103-080440-' + str(FIXTURE_CONTROLLER_PID_BASE + index))
             shutil.copytree(template, fleet)
             token = f'{index + getattr(self, "_renewal_campaign_offset", 10):032x}'
             audit = fleet / 'teardown-ownership'
@@ -5077,7 +5081,7 @@ class Cycle(unittest.TestCase):
             log.write_text(''.join(f'{self.root}/scripts/run-bench monitor {f}\n' for f in handles))
             jobs.append(dict(job_id=log.stem, task=name, run=1, attempt=1, attempts=[],
                 status='failed' if index == 6 else 'cancelled', controller_exit_code=1,
-                controller_pid=310000 + index, log=str(log)))
+                controller_pid=FIXTURE_CONTROLLER_PID_BASE + index, log=str(log)))
             parents.append(fleet)
         shutil.rmtree(template)
         for f in runs.glob('detached-*'): f.unlink()
@@ -5526,7 +5530,7 @@ class Cycle(unittest.TestCase):
                         from deploy_test_native_cleanup import subprocess as native_subprocess
                         actual=native_subprocess.check_output
                         def process_result(args, *a, **kw):
-                            if args[:1]==['ps']: return '999999 310001 S\n'
+                            if args[:1]==['ps']: return f'999999 {FIXTURE_CONTROLLER_PID_BASE + 1} S\n'
                             return actual(args,*a,**kw)
                         with patch.object(native_subprocess,'check_output',side_effect=process_result):
                             with self.assertRaises(ValueError): c.reconcile(state,occurrence['id'],candidate)
@@ -5685,7 +5689,7 @@ class Cycle(unittest.TestCase):
                         import deploy_test_native_cleanup as native
                         actual=native.subprocess.check_output
                         def observed(args,*a,**kw):
-                            if args[:1]==['ps']:return '999999 310001 S\n'
+                            if args[:1]==['ps']:return f'999999 {FIXTURE_CONTROLLER_PID_BASE + 1} S\n'
                             return actual(args,*a,**kw)
                         with patch.object(native.subprocess,'check_output',side_effect=observed):
                             with self.assertRaises(ValueError):c.reconcile(case_state,occurrence['id'],candidate)
@@ -6322,7 +6326,7 @@ class Cycle(unittest.TestCase):
     def test_isolated_native_validation_requires_current_os_payload_authority(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         fleet = next(p for p in Path(proof['campaign']).parent.parent.joinpath('runs').iterdir()
-                     if p.is_dir() and p.name.endswith('310001'))
+                     if p.is_dir() and p.name.endswith(str(FIXTURE_CONTROLLER_PID_BASE + 1)))
         life = c.read(fleet / '_batch/lifecycle.json')
         payloads = {}
         for key in ('run', 'backend', 'services'):
