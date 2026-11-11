@@ -1,4 +1,5 @@
 """Read-only, launch-only reconciliation of sealed native cloud fleet cleanup."""
+import base64
 import copy
 import hashlib
 import json
@@ -13,7 +14,7 @@ import time
 
 KIND = 'native-cloud-cleanup-v1'
 SOURCE_REFUSAL = 'private fleet source validation failed'
-ISOLATED_RENEWAL_PHASES = frozenset({'triage', 'needs-focused-plan', 'failed-gates'})
+ISOLATED_RENEWAL_PHASES = frozenset({'quick', 'final', 'triage', 'needs-focused-plan', 'failed-gates'})
 
 # Bound raw run evidence per proof; ordinary receipts retain their existing limit.
 MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
@@ -384,7 +385,7 @@ def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, p
             need(native.get('attached_machine_id') == machine, 'stopped inert volume rebound')
 
 
-def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
+def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived=None):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
     owner = life['fleet_owner_token']
     audit = fleet_audit_root(root) / owner
@@ -393,11 +394,12 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
          and meta.get('workspace_root') == str(root), 'isolated audit identity')
     tree(audit)
     registry = fleet_ownership_root(root) / owner
-    if registry.exists():
+    registry_present = registry.exists() if archived is None else str(registry / 'meta') in archived
+    if registry_present:
         registered = fields(bound(registry / 'meta'))
         need(all(registered.get(k) == meta.get(k) for k in ('fleet_owner_token', 'run_id', 'workspace_root', 'app'))
              and registered.get('cleanup_policy') in {'reap', 'retain'}
-             and any((registry / k).is_file() for k in
+             and any((registry / k).is_file() if archived is None else str(registry / k) in archived for k in
                      ('runtime-evidence-unconfirmed', 'guest-cleanup-unconfirmed', 'cold-handoff-outgoing')),
              'old resources must remain natively quarantined')
         tree(registry)
@@ -405,10 +407,31 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
         need(meta.get('status') == 'provider-teardown-verified', 'unowned unreleased fleet')
     processes = subprocess.check_output(['ps', '-ax', '-o', 'pid=,pgid=,stat='], text=True)
     pid = int(fleet.name.rsplit('-', 1)[-1])
-    need(pid > 1 and not any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
-                            for r in processes.splitlines() if not r.split()[2].startswith('Z')),
-         'old controller still active')
-    rows = [fields(bound(p)) for p in (audit / 'fresh').iterdir()] if (audit / 'fresh').exists() else []
+    collision = any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
+                    for r in processes.splitlines() if not r.split()[2].startswith('Z'))
+    need(pid > 1, 'old controller identity')
+    if collision and archived is not None:
+        # Only authenticated original registry identity distinguishes a reused PID.
+        identity = fields(bound(registry / 'meta'))
+        need(identity.get('host') == os.uname().nodename and identity.get('pid') == str(pid),
+             'archived controller host/PID identity')
+        # A surviving group without its leader has no proven replacement identity.
+        leader = Path('/proc', str(pid), 'stat')
+        need(leader.is_file(), 'archived controller group identity unproven')
+        retired_local_process(dict(pid=pid, birth=identity.get('pid_start')))
+        leader_start = int(leader.read_text().rsplit(') ', 1)[1].split()[19])
+        for row in processes.splitlines():
+            member, group, status = row.split()
+            if int(group) == pid and not status.startswith('Z'):
+                start = int(Path('/proc', member, 'stat').read_text().rsplit(') ', 1)[1].split()[19])
+                need(start >= leader_start, 'original controller group member remains')
+    else:
+        need(not collision, 'old controller still active')
+    if archived is None:
+        paths = list((audit / 'fresh').iterdir()) if (audit / 'fresh').exists() else []
+    else:
+        paths = [Path(p) for p in proof['files'] if Path(p).parent == audit / 'fresh']
+    rows = [fields(bound(p)) for p in paths]
     # Rows a fleet cancelled while cloning never owned a Machine (retired_clone_rows): no Machine
     # observation exists for them, so they are admitted only from a sealed, provider-verified release.
     machine_less = [r for r in rows if not r.get('machine_id')]
@@ -435,7 +458,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
              and row.get('source') == 'fresh-clone' and row.get('app') == meta['app'], 'old resource custody')
         evidence = observations[machine]
         if evidence == {'sealed_native_release': True}:
-            need(not registry.exists() and meta.get('status') == 'provider-teardown-verified'
+            need(not registry_present and meta.get('status') == 'provider-teardown-verified'
                  and row.get('disposition') == 'destroyed-provider-retained', 'native release not sealed')
             local = fleet / 'teardown-ownership'
             seal = tree(local)
@@ -451,7 +474,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
             need(len(pair) == 2 and {r['kind'] for r in pair} == {'machine', 'volume'}, 'provider pair closure')
             stopped_startup = next(r for r in pair if r['kind'] == 'machine')['metadata'].get('state') == 'stopped'
             if stopped_startup:
-                need(registry.exists() and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
+                need(registry_present and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
                 if 'stopped_inert_allocation' in evidence:
                     need(set(evidence) == {'provider_pair', 'stopped_inert_allocation'}, 'stopped inert evidence fields')
                     stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, pair, bound, document)
@@ -511,7 +534,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
                  'current original execution quiescence unproven')
             for key in ('run', 'backend', 'services'):
                 need(hashlib.sha256(bound(evidence[key])).hexdigest() == value[key + '_sha256'], 'OS payload binding')
-        need(registry.exists() or row.get('disposition') == 'destroyed-provider-retained', 'resource not excluded')
+        need(registry_present or row.get('disposition') == 'destroyed-provider-retained', 'resource not excluded')
     return {r['machine_id']: r['volume_id'] for r in rows}
 
 
@@ -1172,9 +1195,35 @@ def inventory_init_failure(root, runs, campaign, request, receipt, adapter, boun
         need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
 
 
-def validate(receipt, owner, proof):
+def quarantine_bytes(archive, proof, root):
+    """Authenticate original mutable audit/registry bytes against the admitted proof."""
+    from deploy_test_cycle import MAX_RECEIPT_BYTES
+    need(isinstance(archive, dict) and set(archive) == {'kind', 'receipt_sha256', 'files'}
+         and archive['kind'] == 'original-quarantine-bytes-v1'
+         and archive['receipt_sha256'] == proof['receipt_sha256']
+         and isinstance(archive['files'], dict) and archive['files'], 'quarantine archive identity')
+    runs = root / '.context/deploy-cloud' / hashlib.sha256(proof['request_token'].encode()).hexdigest() / 'runs'
+    result, total = {}, 0
+    for name, encoded in archive['files'].items():
+        path = Path(name)
+        local = path.is_relative_to(runs) and len(path.relative_to(runs).parts) >= 3 and path.relative_to(runs).parts[1] == 'teardown-ownership'
+        need(name in proof['files'] and path.is_absolute() and path.resolve() == path
+             and (local or any(path.is_relative_to(base) for base in (fleet_audit_root(root), fleet_ownership_root(root)))),
+             'quarantine archive scope')
+        need(isinstance(encoded, str) and len(encoded) <= 2 * MAX_RECEIPT_BYTES, 'quarantine archive size')
+        raw = base64.b64decode(encoded, validate=True)
+        total += len(raw)
+        need(total <= MAX_RECEIPT_BYTES and hashlib.sha256(raw).hexdigest() == proof['files'][name],
+             'quarantine archive bytes changed')
+        result[name] = raw
+    return result
+
+
+def validate(receipt, owner, proof, *, quarantine_archive=None):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
+    need(quarantine_archive is None or proof.get('purpose') == 'isolated-validation',
+         'archive overlay requires historical isolated proof')
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
     need(set(owner) == {'request_token', 'worker_root', 'native_cleanup_reference'}, 'unsupported owner shape')
     token, root = receipt['token'], Path(owner['worker_root'])
@@ -1195,6 +1244,7 @@ def validate(receipt, owner, proof):
     confirmed = proof['confirmed_at']
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
+    archived = None if quarantine_archive is None else quarantine_bytes(quarantine_archive, proof, root)
     bindings, used = proof['files'], set()
     validated_sizes = {}
     run_artifacts = set()
@@ -1203,6 +1253,7 @@ def validate(receipt, owner, proof):
     need(isinstance(bindings, dict), 'missing file bindings')
 
     def bound(path, limit=MAX_RECEIPT_BYTES, *, historical_head=None):
+        """Read original bytes and require the original admitted SHA-256 binding."""
         path = Path(path)
         historical_head = historical_head or historical_sources.get(str(path))
         need(path.is_absolute() and path.resolve() == path and not path.is_symlink(), 'noncanonical proof file')
@@ -1213,6 +1264,9 @@ def validate(receipt, owner, proof):
             need(relative.parts[0] == 'scripts', 'historical producer scope')
             raw = subprocess.check_output(['git', '-C', str(root), 'show', historical_head + ':' + relative.as_posix()])
             need(len(raw) <= min(limit, MAX_RECEIPT_BYTES), 'proof file too large')
+        elif archived is not None and str(path) in archived:
+            raw = archived[str(path)]
+            need(len(raw) <= limit, 'proof file too large')
         else:
             need(path.is_file(), 'noncanonical proof file')
             need(path.stat().st_size <= limit, 'proof file too large')
@@ -1225,11 +1279,22 @@ def validate(receipt, owner, proof):
         return raw
 
     def document(path, limit=MAX_RECEIPT_BYTES):
+        """Read a hash-bound object through the selected evidence custody path."""
         value = json.loads(bound(path, limit))
         need(isinstance(value, dict), 'expected object')
         return value
 
     def tree(path):
+        """Hash a current audit tree or its authenticated original file inventory."""
+        if archived is not None and any(Path(p).is_relative_to(path) for p in archived):
+            digest = hashlib.sha256()
+            for item in sorted((Path(p) for p in bindings if Path(p).is_relative_to(path)),
+                               key=lambda p: str(p.relative_to(path))):
+                if item.name != 'source-audit':
+                    for value in (str(item.relative_to(path)).encode(), bound(item)):
+                        digest.update(len(value).to_bytes(8, 'big'))
+                        digest.update(value)
+            return digest.hexdigest()
         need(path.resolve() == path and path.is_dir() and not path.is_symlink(), 'audit directory')
         digest = hashlib.sha256()
         for item in sorted(path.rglob('*'), key=lambda p: str(p.relative_to(path))):
@@ -1365,7 +1430,7 @@ def validate(receipt, owner, proof):
     if layout in {'campaign-v1', 'campaign-preallocation-v1', 'campaign-admission-rejected-v1', 'campaign-mixed-preallocation-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
-             and (reference.get('native_directory') == str(campaign) or (preallocation or layout == 'campaign-v1')
+             and (reference.get('native_directory') == str(campaign) or (staged_preallocation or layout == 'campaign-v1')
                   and reference.get('native_directory') is None and adapter.get('fleet_directory') is None
                   and adapter.get('reason') == 'cloud command interrupted or source changed')
              and str(campaign) in cli_text, 'campaign root binding')
@@ -1537,7 +1602,8 @@ def validate(receipt, owner, proof):
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
         life = document(fleet / '_batch/lifecycle.json')
-        failed_canary = layout in {'campaign-v1', 'campaign-mixed-preallocation-v1'} and fleet not in parents and life.get('status') == 'failed'
+        failed_canary = (layout in {'campaign-v1', 'campaign-mixed-preallocation-v1'} and fleet not in parents
+                         and life.get('status') == 'failed')
         run_path = fleet / '_batch/run.json'
         if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control
@@ -1632,7 +1698,7 @@ def validate(receipt, owner, proof):
             need(len(benches) == len(matrix['tasks'])
                  and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
         if isolated:
-            excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree))
+            excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, archived))
             continue
         audit = fleet / 'teardown-ownership'
         canonical = fleet_audit_root(root) / owner_token
@@ -1736,7 +1802,116 @@ def validate(receipt, owner, proof):
     return result
 
 
-def clean_isolated_successor(state, prior, original, successor):
+def historical_successor_gate(witness, successor, request, current_gate, root=None):
+    """Authenticate old admission; current catalog omissions grant launch authority only."""
+    from deploy_test_cycle import bounded_read, digest, sha_file, MAX_RECEIPT_BYTES
+    from deploy_test_historical_custody import state_identity
+    need(isinstance(witness, dict) and set(witness) ==
+         {'kind', 'request_token', 'receipt_sha256', 'custody_state'}
+         and witness['kind'] == 'historical-clean-successor-v1'
+         and witness['request_token'] == successor['token']
+         and witness['receipt_sha256'] == sha_file(Path(successor['log']).parent / 'receipt.json'),
+         'historical successor witness identity')
+    locator = witness['custody_state']
+    need(isinstance(locator, dict) and set(locator) == {'path', 'sha256'}
+         and isinstance(locator['path'], str), 'historical successor snapshot locator')
+    path = Path(locator['path'])
+    need(path.is_absolute() and path.resolve() == path and not path.is_symlink()
+         and path.is_file() and path.stat().st_size <= MAX_RECEIPT_BYTES
+         and sha_file(path) == locator['sha256'], 'historical successor snapshot bytes')
+    snapshot = bounded_read(path, 'historical successor admission')
+    need(snapshot.get('plan_digest') == digest(snapshot.get('plan'))
+         and state_identity(snapshot) == request.get('custody_state_sha256')
+         and snapshot.get('source') == request['source'] == successor['source']
+         and snapshot['plan'].get('source') == snapshot['source'], 'historical successor admission binding')
+    candidates = [g for g in snapshot['plan']['gates'] if g.get('name') == current_gate['name']]
+    need(len(candidates) == 1, 'historical successor gate identity')
+    historical = candidates[0]
+    old_checks, new_checks = historical.get('checks'), current_gate.get('checks')
+    need(isinstance(old_checks, list) and isinstance(new_checks, list)
+         and all(isinstance(k, str) for k in old_checks + new_checks)
+         and len(set(old_checks)) == len(old_checks) and len(set(new_checks)) == len(new_checks),
+         'historical successor check inventory')
+    if old_checks != new_checks:
+        from deploy_test_quarantine import deploy_selection_omissions
+        need(root is not None, 'historical successor omission requires catalog')
+        # Removals need catalog deploy omissions; later-selected cases only extend current
+        # coverage. The successor is still validated against the returned historical gate.
+        removed = deploy_selection_omissions(root, historical, current_gate)
+        kept = [k for k in old_checks if k not in removed]
+        need((removed or set(new_checks) - set(old_checks))
+             and [k for k in new_checks if k in set(old_checks)] == kept,
+             'historical successor ordered catalog subset')
+    need(set(historical) == set(current_gate)
+         and all(isinstance(g.get('selection_evidence'), list)
+             and all(isinstance(reason, str) for reason in g['selection_evidence'])
+             for g in (historical, current_gate))
+         and digest({k: v for k, v in historical.items() if k not in {'selection_evidence', 'checks'}}) ==
+             digest({k: v for k, v in current_gate.items() if k not in {'selection_evidence', 'checks'}}),
+         'historical successor execution contract changed')
+    need(successor.get('execution_binding') == {
+        'contract_digest': digest(historical), 'environment': snapshot.get('environment'),
+        'input_fingerprint': snapshot.get('input_fingerprints', {}).get(current_gate['name'])},
+        'historical successor execution inputs changed')
+    return historical
+
+
+def historical_successor_runtime(root, admitted_gate, request, binding):
+    """Bind old runtime hashes to the sealed native fingerprint, using Git's old file map."""
+    from fnmatch import fnmatchcase
+    from deploy_test_cycle import digest, native_inputs, source_files
+    runtime = request.get('custody_runtime')
+    allowed = {'.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
+               'front-end/.env', 'front-end/.env.local'}
+    need(isinstance(runtime, dict) and set(runtime) <= allowed
+         and all(isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) for value in runtime.values()),
+         'historical successor runtime identity')
+    _, files = native_inputs(root, request['source']['head'], source_files(root))
+    # Same input object as input_fingerprints(); no environment bytes are read or
+    # restored from history. A dirty historical source cannot pass this commit reconstruction.
+    fingerprint = digest({'files': {p: value for p, value in files.items()
+                           if any(fnmatchcase(p, glob) for glob in admitted_gate.get('input_paths', ['*']))},
+        'runtime_config': runtime, 'command': admitted_gate['command'], 'env': admitted_gate.get('env', {}),
+        'worker': admitted_gate.get('worker'), 'checks': admitted_gate['checks'],
+        'environment': binding['environment']})
+    need(fingerprint == binding['input_fingerprint'], 'historical successor runtime fingerprint')
+
+
+GATE_CONTRACT_WITNESS = 'historical-gate-contract-v1'
+
+
+def historical_gate_contract(witness, successor, gate, root, binding, state):
+    """Authenticate a successor's historical gate by its sealed contract digest.
+
+    Only explanatory selection_evidence and the check inventory may differ from the current
+    gate: removed checks need catalog deploy omissions, kept checks keep their old order, and
+    the sealed environment must equal the current one. The gate bytes are hash-bound.
+    """
+    from deploy_test_cycle import digest, sha_file
+    historical = witness.get('gate')
+    need(isinstance(witness, dict) and set(witness) == {'kind', 'request_token', 'receipt_sha256', 'gate'}
+         and witness['request_token'] == successor['token']
+         and witness['receipt_sha256'] == sha_file(Path(successor['log']).parent / 'receipt.json')
+         and isinstance(historical, dict) and digest(historical) == binding.get('contract_digest')
+         and binding.get('environment') == state['environment'], 'historical gate contract identity')
+    need(set(historical) == set(gate) and historical.get('name') == gate['name']
+         and {k: v for k, v in historical.items() if k not in {'selection_evidence', 'checks'}}
+         == {k: v for k, v in gate.items() if k not in {'selection_evidence', 'checks'}}
+         and isinstance(historical.get('selection_evidence'), list)
+         and all(isinstance(reason, str) for reason in historical['selection_evidence']),
+         'historical gate contract changed')
+    old_checks, new_checks = historical.get('checks'), gate['checks']
+    need(isinstance(old_checks, list) and all(isinstance(k, str) for k in old_checks)
+         and len(set(old_checks)) == len(old_checks), 'historical gate inventory')
+    if old_checks != new_checks:
+        from deploy_test_quarantine import deploy_selection_omissions
+        removed = deploy_selection_omissions(root, historical, gate)
+        need([k for k in new_checks if k in set(old_checks)] == [k for k in old_checks if k not in removed],
+             'historical gate ordered catalog subset')
+    return historical
+
+
+def clean_isolated_successor(state, prior, original, successor, renewal_witness=None):
     """A later full native result may close execution without clearing historical debt or FAILs."""
     from deploy_test_cycle import bounded_read, digest, receipt_owner, sha_file, validate_result
     gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
@@ -1751,14 +1926,20 @@ def clean_isolated_successor(state, prior, original, successor):
     need(len(rows) == 1 and rows[0][0].get('phase') in {'initial', 'focused', 'failed-gates', 'final', 'triage'}
          and not rows[0][0].get('interrupted')
          and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
-    binding = successor.get('execution_binding', {})
     folder = Path(successor['log']).parent
-    need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     request = bounded_read(folder / 'request.json', 'successor request')
+    root = Path(prior['owner']['worker_root'])
+    binding = successor.get('execution_binding', {})
+    if isinstance(renewal_witness, dict) and renewal_witness.get('kind') == GATE_CONTRACT_WITNESS:
+        admitted_gate = historical_gate_contract(renewal_witness, successor, gate, root, binding, state)
+    else:
+        admitted_gate = (historical_successor_gate(renewal_witness, successor, request, gate, root)
+                         if renewal_witness is not None else gate)
+    need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
     checks, skips = request['checks'], request['skips']
-    if binding.get('contract_digest') != digest(gate):
+    if renewal_witness is None and binding.get('contract_digest') != digest(gate):
         # Authenticate the complete historical gate, not current-case coverage. Only an
         # inventory extension can be reconstructed: every other byte and old ordering
         # must still hash to the immutable successor receipt's original contract.
@@ -1770,15 +1951,32 @@ def clean_isolated_successor(state, prior, original, successor):
              and len(set(checks)) == len(checks) and not set(checks) & set(skips),
              'successor historical inventory shape')
         historical_checks = set(checks) | set(skips)
-        need(set(original['cases']) <= historical_checks <= set(gate['checks']),
+        # Original debt stays mandatory unless the catalog omits a native smoke case from all
+        # future deploys; that omission grants no credit and never releases the debt itself.
+        omitted = set(original['cases']) - historical_checks
+        if omitted:
+            from deploy_test_quarantine import deploy_selection_omissions
+            try:
+                omitted -= set(deploy_selection_omissions(
+                    root, dict(gate, checks=[*gate['checks'], *sorted(omitted)]), gate))
+            except (ValueError, OSError):
+                pass
+        need(not omitted and historical_checks <= set(gate['checks']),
              'successor historical inventory must preserve original debt')
-        gate = copy.deepcopy(gate)
-        gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
-    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
+        admitted_gate = copy.deepcopy(gate)
+        admitted_gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
+    need(binding.get('contract_digest') == digest(admitted_gate)
+         and (renewal_witness is not None or binding.get('environment') == state['environment'])
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
+    if renewal_witness is not None and (binding.get('environment') != state['environment']
+                                        or admitted_gate['checks'] != gate['checks']):
+        import deploy_test_historical_custody as h
+        current_inputs = h.binding(state['plan'], root)
+        need(current_inputs == {k: state.get(k) for k in current_inputs}, 'successor fresh admission inputs')
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
+         and all(isinstance(value, dict) for value in skips.values())
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
-         and set(checks) | set(skips) == set(gate['checks'])
+         and set(checks) | set(skips) == set(admitted_gate['checks'])
          and all(v.get('source') == successor['source'] for v in skips.values()), 'successor full inventory')
     root = Path(prior['owner']['worker_root'])
     native_root = root / '.context/deploy-cloud' / hashlib.sha256(successor['token'].encode()).hexdigest()
@@ -1789,12 +1987,68 @@ def clean_isolated_successor(state, prior, original, successor):
     need(isinstance(admissions, list) and admissions == successor.get('isolated_validation')
          and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
          'successor original isolation binding')
+    custody = {k: v for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY'}
+    import deploy_test_historical_custody as h
+    known = {row['check'].split('/', 1)[1] for row in h.known(state, root).values()
+             if row['gate'] == gate['name']}
+    if custody or known:
+        import deploy_test_cycle as c
+        # Discover authority from the canonical ledger, never an incoming skip label.
+        legacy_current = c.reuse_qualifications(state, gate, root=root, include_custody=False)
+        current = h.binding(state['plan'], root)
+        need(current == {k: state.get(k) for k in current}, 'successor current custody inputs')
+        qualified = h.guard(state, gate, root, legacy_current, current=current)
+        need(set(qualified) == set(custody), 'successor current custody inventory')
+    if custody:
+        legacy = {k: v for k, v in skips.items() if k not in custody}
+        bindings = [v.get('current_binding') for v in custody.values()]
+        admitted = bindings[0]
+        need(isinstance(admitted, dict) and set(admitted) == set(current)
+             and all(v == admitted for v in bindings)
+             and admitted['source'] == successor['source']
+             and binding == dict(contract_digest=digest(admitted_gate), environment=admitted['environment'],
+                                 input_fingerprint=admitted['input_fingerprints'].get(gate['name'])),
+             'successor admitted custody inputs')
+        # This is ONLY an identity-bearing projection, never a captured full snapshot.
+        # The request's recorded state identity authenticates every reconstructed field.
+        projection = {k: copy.deepcopy(state[k]) for k in
+                      ('historical_custody_history', 'historical_custody_import',
+                       'historical_custody_transfers', 'failures', 'pending_post_merge',
+                       'resource_warnings', 'superseded_resource_warnings') if k in state}
+        projection.update(copy.deepcopy(admitted))
+        projection['historical_no_retry_custody'] = [
+            {k: copy.deepcopy(v) for k, v in custody[r['original_failure']['check'].split('/', 1)[1]].items()
+             if k != 'source'} if r['original_failure']['gate'] == gate['name'] else copy.deepcopy(r)
+            for r in state.get('historical_no_retry_custody', [])]
+        need(h.state_identity(projection) == request.get('custody_state_sha256'),
+             'successor custody identity projection')
+        historical = h.guard(projection, admitted_gate, root, legacy, current=admitted)
+        need(historical == custody, 'successor admitted custody qualifications')
+        # Original authority must be identical; both independently checked input bindings stay intact.
+        def authority(values):
+            return {k: {field: value for field, value in row.items() if field != 'current_binding'}
+                    for k, row in c.qualification_identity(values).items()}
+        runtime_bound = request.get('custody_runtime') == h.runtime_identity(root)
+        if not runtime_bound:
+            need(renewal_witness is not None, 'historical successor runtime witness required')
+            historical_successor_runtime(root, admitted_gate, request, binding)
+            runtime_bound = True
+        need(authority(qualified) == authority(custody)
+             and checks == [k for k in admitted_gate['checks'] if k not in skips]
+             and runtime_bound
+             and isinstance(request.get('custody_child_environment'), str)
+             and re.fullmatch('[0-9a-f]{64}', request['custody_child_environment'])
+             and digest(successor.get('custody_skips')) == digest(custody)
+             and all(successor.get('case_complete', {}).get(k) is False for k in custody)
+             and all(successor.get('case_complete', {}).get(k) is True for k in checks)
+             and all(successor.get('current_execution', {}).get(k) == 'UNVERIFIED' for k in custody),
+             'successor custody authority/runtime/projection')
     result_path = folder / 'result.json'
     need(successor.get('worker_result') == str(result_path), 'successor result locator')
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-         and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
+         and successor.get('case_complete') == {k: k not in custody for k in admitted_gate['checks']}
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')
     reference = successor['native_cleanup_reference']
@@ -1888,17 +2142,304 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     normal = entry.get('proof', {})
     need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
          and entry.get('purpose') is None and normal.get('purpose') is None
-         and normal.get('layout') == 'campaign-v1' and key == normal.get('receipt_sha256')
+         # Mixed is the same full-cohort validator with zero-allocation members (infra stop).
+         and normal.get('layout') in {'campaign-v1', 'campaign-mixed-preallocation-v1'}
+         and key == normal.get('receipt_sha256')
          and key == sha_file(folder / 'receipt.json') and entry.get('credit_granted') is False,
          'strict normal successor reconciliation required')
     reconciliation_occurrence(state, entry, successor)
     # Re-run the unchanged normal validator: all native file hashes, audits, retained Hub custody,
     # provider release and publication closure are required even when this result is incomplete.
-    need(still_bound(entry, successor, owner), 'strict normal successor proof changed')
+    need(still_bound(entry, successor, owner, state), 'strict normal successor proof changed')
     need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
          and finite(successor.get('finished_at'))
          and original['finished_at'] <= successor['started_at'] <= successor['finished_at'],
          'failed successor clocks')
+
+
+def recovered_isolated_successor_v1(state, prior, original, successor):
+    """Committed negative recovery grants source renewal only, never outer execution credit."""
+    import stat
+    import deploy_test_cycle as c
+    from deploy_test_historical_custody import state_identity
+    from deploy_test_interrupted_cleanup import namespace_quiet
+    from deploy_test_process import scan_same_user_processes
+
+    seals = {}
+    def sealed(path):
+        path = Path(path)
+        info = path.lstat()
+        need(path.is_absolute() and path.resolve(strict=True) == path and stat.S_ISREG(info.st_mode)
+             and info.st_uid == os.getuid() and not info.st_mode & 0o022
+             and info.st_size <= c.MAX_RECEIPT_BYTES, 'negative successor unsafe artifact')
+        raw = path.read_bytes()
+        seals[str(path)] = hashlib.sha256(raw).hexdigest()
+        return raw
+
+    def doc(path):
+        value = json.loads(sealed(path))
+        need(isinstance(value, dict), 'negative successor artifact object')
+        return value
+
+    rows = [(a, r) for a in state['attempts'] for r in a.get('results', [])
+            if r.get('gate') == prior['gate'] and r.get('token') == successor.get('token')]
+    need(len(rows) == 1 and rows[0][1] is successor and successor.get('token') != original['token'],
+         'negative successor unique attempt')
+    attempt = rows[0][0]
+    round_number = attempt.get('round')
+    need(type(round_number) is int and round_number > 0 and attempt.get('recovered') is True
+         and attempt.get('positive_credit') is False and not attempt.get('interrupted')
+         and not attempt.get('stale'), 'negative successor recovered attempt')
+    folder = Path(successor['log']).parent
+    directory = folder.parents[3]
+    need(folder == directory / 'attempts' / str(round_number) / attempt['phase'] / prior['gate']
+         and successor['log'] == str(folder / 'output.log'), 'negative successor round locator')
+    journal_path = directory / f'settlement-round{round_number}-journal.json'
+    journal = doc(journal_path)
+    need(doc(directory / f'settlement-round{round_number}-committed.json') ==
+         {'journal_sha256': seals[str(journal_path)]}
+         and set(journal) == {'kind', 'round', 'positive_credit', 'proof_digest', 'original_state_hex',
+                             'after_state', 'receipts'}
+         and journal['kind'] == 'native-settlement-journal-v1' and journal['round'] == round_number
+         and type(journal['round']) is int and journal['positive_credit'] is False,
+         'negative successor committed typed journal')
+    raw = bytes.fromhex(journal['original_state_hex'])
+    snapshot = json.loads(raw)
+    need(isinstance(snapshot, dict) and snapshot['round'] == round_number
+         and snapshot['phase'] == attempt['phase'] and snapshot['phase'] in {'initial', 'focused', 'failed-gates', 'final'}
+         and snapshot.get('ready') is False and 'live_failures' in snapshot
+         and not snapshot.get('running') and not snapshot.get('resume_phase')
+         and snapshot['source'] == snapshot['plan']['source'] == successor['source']
+         and snapshot['plan_digest'] == c.digest(snapshot['plan']), 'negative successor original snapshot')
+    after = journal['after_state']
+    need(after['attempts'] == snapshot['attempts'] + [attempt]
+         and state['attempts'][:len(after['attempts'])] == after['attempts']
+         and attempt.get('source') == snapshot['source']
+         and after['attempts'][-1] == attempt and after.get('ready') is False
+         and journal['receipts'].get(str(folder / 'receipt.json')) == successor
+         and doc(folder / 'receipt.json') == successor, 'negative successor journal projection')
+    recovery = successor['recovery_evidence']
+    need(isinstance(recovery, dict) and set(recovery) == {'files', 'native'}
+         and isinstance(recovery['files'], dict) and recovery['files'], 'negative successor recovery binding')
+    proof = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=round_number,
+        phase=snapshot['phase'], state_sha256=hashlib.sha256(raw).hexdigest(), plan_digest=snapshot['plan_digest'],
+        files=recovery['files'], native={r['gate']: r['recovery_evidence']['native']
+            for r in journal['receipts'].values()})
+    need(c.digest(proof) == journal['proof_digest'], 'negative successor reviewed recovery proof')
+    for path, expected in recovery['files'].items():
+        need(hashlib.sha256(sealed(path)).hexdigest() == expected, 'negative successor original file changed')
+    request_path, result_path = folder / 'request.json', folder / 'result.json'
+    need(all(str(p) in recovery['files'] for p in (request_path, result_path)),
+         'negative successor request/result seals')
+    request, result = doc(request_path), doc(result_path)
+    historical, = [g for g in snapshot['plan']['gates'] if g['name'] == prior['gate']]
+    checks, skips = request['checks'], request['skips']
+    need(historical.get('native_cloud') is True and historical['command'] == successor['command']
+         and request.get('worker_recipe') == historical.get('worker_recipe')
+         and successor['execution_binding'] == dict(contract_digest=c.digest(historical),
+             environment=snapshot['environment'], input_fingerprint=snapshot['input_fingerprints'][prior['gate']])
+         and all(request.get(k) == successor.get(k) == result.get(k) for k in ('gate', 'source', 'token'))
+         and request.get('phase') == snapshot['phase']
+         and request.get('custody_state') == str(directory / 'cycle.json')
+         and request.get('custody_state_sha256') == state_identity(snapshot),
+         'negative successor historical admission inputs')
+    need(isinstance(checks, list) and checks and len(set(checks)) == len(checks)
+         and isinstance(skips, dict) and not set(checks) & set(skips)
+         and set(checks) | set(skips) == set(historical['checks'])
+         and all(isinstance(v, dict) and v.get('source') == successor['source'] for v in skips.values())
+         and result.get('complete') is True and set(result['cases']) == set(checks)
+         and all(v in {'PASS', 'FAIL'} for v in result['cases'].values())
+         and result.get('cleanup_complete') is True and not result.get('cleanup_owner')
+         and result.get('reused', False) is False, 'negative successor full inventory/cleanup')
+    need(successor.get('kind') == 'recovered-native-execution-v1' and successor.get('executed') is True
+         and successor.get('status') == 'FAIL' and successor.get('complete') is False
+         and successor.get('positive_credit') is False and successor.get('lingering_group') is False
+         and all(successor.get(k) is None for k in ('native_exit', 'timed_out', 'cancelled', 'started_at', 'finished_at'))
+         and successor.get('original_coordinator') == dict(timed_out='UNVERIFIED', cancelled='UNVERIFIED',
+             native_exit='UNVERIFIED', finished_at='UNVERIFIED')
+         and successor.get('cases') == {k: 'SKIP' if k in skips else 'UNVERIFIED' for k in historical['checks']}
+         and successor.get('case_complete') == dict.fromkeys(historical['checks'], False)
+         and successor.get('current_execution') == dict.fromkeys(skips, 'UNVERIFIED')
+         and successor.get('custody_skips') == {k:v for k,v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY'}
+         and successor.get('worker_result') == str(result_path)
+         and c.receipt_owner(prior['gate'], successor) is None, 'negative successor no execution credit')
+    root = Path(prior['owner']['worker_root'])
+    native_root = root / '.context/deploy-cloud' / hashlib.sha256(successor['token'].encode()).hexdigest()
+    expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'], original_request_token=prior['token'],
+        new_request_token=successor['token'], source=successor['source'], new_native_root=str(native_root),
+        excluded_resources=prior['excluded_resources'], credit_granted=False)
+    admissions = request.get('isolated_validation')
+    need(isinstance(admissions, list) and all(isinstance(v, dict) for v in admissions)
+         and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
+         'negative successor original isolation binding')
+    need(finite(original.get('finished_at')) and finite(result.get('started_at'))
+         and finite(result.get('finished_at'))
+         and original['finished_at'] <= result['started_at'] <= result['finished_at'], 'negative successor native clocks')
+    def inspect_owner(process):
+        environment = (process / 'environ').read_bytes().split(b'\0')
+        need(not any(item in environment for item in (
+            os.fsencode('DEPLOY_GATE_TOKEN=' + successor['token']),
+            os.fsencode('DEPLOY_GATE_REQUEST=' + str(request_path)),
+            os.fsencode('DEPLOY_GATE_RESULT=' + str(result_path)))), 'negative successor live adapter')
+    scan_same_user_processes(inspect_owner,
+        lambda pid: need(False, 'negative successor owner unknown: ' + str(pid)))
+    namespace_quiet(folder.parent, set())
+    need(c.settlement_native(request, result, root) == recovery['native'], 'negative successor current native closure')
+    for path, expected in list(seals.items()):
+        need(hashlib.sha256(sealed(path)).hexdigest() == expected, 'negative successor changed during validation')
+
+
+def refusal_inventory(state, prior, attempt, latest, gate):
+    """Authenticate an untyped pre-dispatch refusal by its own sealed request.
+
+    run_phase writes request.json before isolated_request raises, so exactly one request-only
+    namespace of this gate/phase/source exists whose token no recorded row carries. Its full
+    inventory must equal the refusal's cases; the current gate may only have extended it.
+    """
+    from deploy_test_cycle import bounded_read
+    cases = latest.get('cases')
+    if (not isinstance(cases, dict) or not cases or set(cases.values()) != {'UNVERIFIED'}
+            or not set(cases) <= set(gate['checks'])):
+        return False
+    attempts_root = Path(prior['owner']['native_cleanup_reference']['result']).parents[3]
+    known = {r.get('token') for a in state.get('attempts', []) for r in a.get('results', [])}
+    matches = []
+    for path in attempts_root.glob(f"*/{attempt.get('phase')}/{gate['name']}/request.json"):
+        folder = path.parent
+        if (path.is_symlink() or folder.is_symlink() or not path.is_file()
+                or {p.name for p in folder.iterdir()} != {'request.json'}):
+            continue
+        request = bounded_read(path, 'refusal request')
+        if (request.get('gate') == gate['name'] and request.get('phase') == attempt.get('phase')
+                and request.get('source') == latest.get('source') == attempt.get('source')
+                and isinstance(request.get('token'), str) and request['token'] not in known):
+            matches.append(request)
+    if len(matches) != 1:
+        return False
+    request = matches[0]
+    return (isinstance(request.get('checks'), list) and isinstance(request.get('skips'), dict)
+            and len(set(request['checks'])) == len(request['checks'])
+            and set(request['checks']) | set(request['skips']) == set(cases))
+
+
+def stale_successor_released(state, prior, row):
+    """An executed stale row whose exact owner has a strict normal no-credit reconciliation."""
+    token = row.get('token')
+    entries = [e for e in state.get('reconciled_owners', {}).values() if e.get('token') == token]
+    return (isinstance(token, str) and token != prior['token'] and row.get('executed') is True
+            and row.get('complete') is False and len(entries) == 1
+            and entries[0].get('kind') == KIND and entries[0].get('gate') == prior['gate']
+            and entries[0].get('purpose') is None and entries[0].get('credit_granted') is False)
+
+
+def isolated_successor(state, prior, renewal_witness=None):
+    """A known pre-dispatch source refusal is not a newer native execution.
+
+    Keep that failed attempt as the latest coverage result. Only renewal may
+    inspect its immediate native predecessor, whose full validation is unchanged.
+    These exact six-field rows are emitted by run_phase for pre-dispatch
+    exceptions. The early custody refusal also requires an absent gate namespace
+    and authenticated sibling receipts; neither path creates execution credit.
+    """
+    rows = [(attempt, row) for attempt in state.get('attempts', [])
+            for row in attempt.get('results', []) if row.get('gate') == prior['gate']]
+    # A stale attempt (source changed mid-run) is superseded and never earns credit. Once its
+    # exact native owner is released by a normal no-credit reconciliation, renewal looks past it.
+    while rows and rows[-1][0].get('stale') is True and stale_successor_released(state, prior, rows[-1][1]):
+        rows.pop()
+    if not rows:
+        return None
+    attempt, latest = rows[-1]
+    if (set(latest) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+            and latest.get('reason') == 'historical custody: current source not frozen'):
+        from deploy_test_cycle import bounded_read, receipt_owner, validate_result
+        need(set(attempt) == {'phase', 'stale', 'results'} and attempt['stale'] is True
+             and attempt['phase'] in {'initial', 'focused', 'failed-gates', 'final'}
+             and latest['status'] == 'FAIL' and latest['complete'] is False and len(rows) >= 2,
+             'custody source refusal identity')
+        previous = rows[-2][1]
+        need(previous.get('executed') is True and previous.get('complete') is True,
+             'custody source refusal requires immediate complete native predecessor')
+        gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+        root = Path(prior['owner']['worker_root'])
+        request = bounded_read(Path(previous['log']).parent / 'request.json', 'refusal predecessor request')
+        admitted = historical_successor_gate(renewal_witness, previous, request, gate, root)
+        authorities = [prior, *state.get('reconciled_owner_history', [])]
+        need(latest['cases'] == dict.fromkeys(admitted['checks'], 'UNVERIFIED')
+             and any(e.get('token') == prior['token'] and e.get('proof', {}).get('receipt_sha256') == prior['proof']['receipt_sha256']
+                     and e.get('validation_source') == latest['source'] for e in authorities),
+             'custody source refusal inventory/source')
+        # The exception precedes UUID/folder creation. Authenticate the enclosing
+        # attempt from its retained sibling request/receipt, then require absence
+        # of this gate's namespace. A token-bearing or partial native row never enters here.
+        peers = [r for r in attempt['results'] if r is not latest]
+        need(peers and len({r.get('gate') for r in attempt['results']}) == len(attempt['results']),
+             'custody source refusal enclosing attempt')
+        phase_folders = set()
+        for peer in peers:
+            folder = Path(peer.get('log', '')).parent
+            need(folder.is_absolute() and folder.resolve() == folder and root / '.context' in folder.parents
+                 and folder.name == peer.get('gate') and folder.parent.name == attempt['phase']
+                 and folder.parent.parent.name.isdigit() and folder.parent.parent.parent.name == 'attempts'
+                 and peer.get('source') == latest['source'] and isinstance(peer.get('token'), str) and re.fullmatch('[0-9a-f]{32}', peer['token'])
+                 and peer.get('executed') is True and peer.get('complete') is True
+                 and type(peer.get('native_exit')) is int and peer['native_exit'] in (0, 1)
+                 and peer.get('cancelled') is False and peer.get('timed_out') is False
+                 and peer.get('lingering_group') is False and not peer.get('cleanup_owner')
+                 and receipt_owner(peer['gate'], peer) is None
+                 and finite(peer.get('started_at')) and finite(peer.get('finished_at'))
+                 and peer['started_at'] <= peer['finished_at']
+                 and bounded_read(folder / 'receipt.json', 'refusal sibling receipt') == peer,
+                 'custody source refusal sibling identity')
+            peer_request = bounded_read(folder / 'request.json', 'refusal sibling request')
+            need(peer_request.get('phase') == attempt['phase']
+                 and all(peer_request.get(k) == peer.get(k) for k in ('token', 'source', 'gate')),
+                 'custody source refusal sibling request')
+            result_path = folder / 'result.json'
+            need(peer.get('worker_result') == str(result_path), 'custody source refusal sibling result locator')
+            result = bounded_read(result_path, 'refusal sibling result')
+            cases, complete = validate_result(result, peer_request, peer['native_exit'], invalid_process=False)
+            need(complete and not result.get('cleanup_owner')
+                 and peer.get('cases') == {**dict.fromkeys(peer_request.get('skips', {}), 'SKIP'), **cases}
+                 and peer.get('case_complete') == dict.fromkeys(peer['cases'], True)
+                 and peer.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
+                 'custody source refusal sibling terminal result')
+            phase_folders.add(folder.parent)
+        need(len(phase_folders) == 1, 'custody source refusal attempt namespace')
+        absent = phase_folders.pop() / prior['gate']
+        need(not absent.exists() and not absent.is_symlink(), 'custody source refusal has request namespace')
+        return previous
+    if (set(latest) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+            and latest.get('reason') == 'native cleanup: next source/inventory binding'):
+        if latest.get('source') == LEGACY_ISOLATED_REFUSAL['source']:
+            return isolated_refusal_successor(state, prior, latest)  # pinned historical capture
+        gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+        need(latest['status'] == 'FAIL' and latest['complete'] is False
+             and refusal_inventory(state, prior, attempt, latest, gate)
+             and isinstance(latest['source'], dict) and set(latest['source']) == {'head', 'digest'}
+             and isinstance(latest['source']['head'], str)
+             and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', latest['source']['head'])
+             and isinstance(latest['source']['digest'], str)
+             and re.fullmatch(r'[0-9a-f]{64}', latest['source']['digest'])
+             and latest['source'] == attempt.get('source')
+             and (attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
+                  or attempt.get('phase') == 'triage' and attempt.get('independent_full') is True)
+             and not attempt.get('interrupted') and not attempt.get('stale')
+             and len(rows) >= 2, 'unexecuted source refusal identity')
+        # Never skip an unknown refusal, an unknown setup failure or a native attempt. The one
+        # known earlier refusal (pre-dispatch custody source refusal) is resolved by its own fully
+        # authenticated branch on the history before this attempt; it needs its own native predecessor.
+        previous = rows[-2][1]
+        if previous.get('token') == prior['token']:
+            return previous
+        if (set(previous) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+                and previous.get('reason') == 'historical custody: current source not frozen'):
+            index = next(i for i, a in enumerate(state['attempts']) if a is attempt)
+            return isolated_successor({**state, 'attempts': state['attempts'][:index]}, prior, renewal_witness)
+        need(previous.get('executed') is True and previous.get('complete') is True,
+             'source refusal requires immediate complete native predecessor')
+        return previous
+    return latest
 
 
 # The historical coordinator recorded this exception before opening output or
@@ -1994,9 +2535,9 @@ def isolated_refusal_successor(state, prior, latest):
     return successor
 
 
-def renew_isolated_validation(state, request_token, proof):
+def renew_isolated_validation(state, request_token, proof, renewal_witness=None):
     """Renew only the next source of an already verified original operation."""
-    from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
+    from deploy_test_cycle import CANCEL, receipt_owner, source
     need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
          and not state.get('running')
          and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
@@ -2011,14 +2552,20 @@ def renew_isolated_validation(state, request_token, proof):
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
-    latest = latest_receipts(state).get(prior['gate'])
+    latest = isolated_successor(state, prior, renewal_witness)
     if latest is not None and latest != receipt:
         latest = isolated_refusal_successor(state, prior, latest)
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
-            reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
+            need(renewal_witness is None, 'historical witness requires complete successor')
+            if latest.get('kind') == 'recovered-native-execution-v1':
+                recovered_isolated_successor_v1(state, prior, receipt, latest)
+            else:
+                reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
         else:
-            clean_isolated_successor(state, prior, receipt, latest)
+            clean_isolated_successor(state, prior, receipt, latest, renewal_witness)
+    else:
+        need(renewal_witness is None, 'historical witness requires successor')
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
     need(still_bound(prior, receipt, owner), 'prior native proof changed')
@@ -2031,31 +2578,100 @@ def renew_isolated_validation(state, request_token, proof):
     if entry != prior:
         state.setdefault('reconciled_owner_history', []).append(copy.deepcopy(prior))
         state['reconciled_owners'][key] = entry
+        if renewal_witness is not None:
+            state.setdefault('native_successor_renewals', []).append({
+                'original_request_token': request_token, 'validation_source': copy.deepcopy(state['source']),
+                'witness': copy.deepcopy(renewal_witness)})
 
 
-def reconcile(state, occurrence_id, proof):
+def retired_isolation_origin(state, entry):
+    """Keep the complete isolated evidence binding after a separate normal retirement."""
+    from deploy_test_cycle import digest
+    seal = entry.get('retired_isolation_sha256')
+    need(isinstance(seal, str) and re.fullmatch(r'[0-9a-f]{64}', seal), 'retired isolation seal')
+    origins = [row for row in state.get('reconciled_owner_history', []) if digest(row) == seal]
+    need(len(origins) == 1, 'one archived isolated origin required')
+    prior = origins[0]
+    need(prior.get('kind') == KIND and prior.get('purpose') == 'isolated-validation'
+         and 'retired_isolation_sha256' not in prior
+         and all(prior.get(k) == entry.get(k) for k in ('gate', 'token', 'owner', 'occurrence'))
+         and prior['proof']['receipt_sha256'] == entry['proof']['receipt_sha256'],
+         'archived isolated origin identity')
+    return prior
+
+
+def retire_known_isolation(state, occurrence_id, proof, key, prior):
+    """Admit strict normal cleanup for a known original without rewriting its result."""
+    from deploy_test_cycle import CANCEL, digest, receipt_owner, source
+    need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
+         and not state.get('running') and 'live_failures' not in state and not CANCEL.is_set(),
+         'quiescent repair boundary required')
+    need([k for k, e in state.get('reconciled_owners', {}).items()
+          if e.get('token') == prior['token']] == [key], 'token already reconciled elsewhere')
+    need(not any(k in proof for k in ('purpose', 'validation_source', 'execution_quiescence', 'excluded_resources'))
+         and proof.get('layout') == 'campaign-v1' and key == proof.get('receipt_sha256')
+         and occurrence_id in {prior['token'], prior.get('occurrence')}, 'original retirement identity')
+    need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']),
+         'native_cloud gate required')
+    receipts = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
+                if row.get('gate') == prior['gate'] and row.get('token') == prior['token']]
+    need(len(receipts) == 1, 'original receipt identity')
+    receipt = receipts[0]
+    owner = receipt_owner(prior['gate'], receipt)
+    need(state['source'] == state['plan'].get('source') == source(Path(owner['worker_root'])),
+         'current source binding')
+    reconciliation_occurrence(state, prior, receipt)
+    need(still_bound(prior, receipt, owner, state, quarantine_archive=proof.get('quarantine_archive')),
+         'prior native proof changed')
+    entry = validate(receipt, owner, proof)
+    entry['occurrence'] = prior['occurrence']
+    if 'retired_isolation_sha256' in prior:
+        need(proof == prior['proof'], 'normal retirement replay changed')
+        entry['retired_isolation_sha256'] = prior['retired_isolation_sha256']
+        need(entry == prior, 'normal retirement replay changed')
+        return
+    need(prior.get('purpose') == 'isolated-validation', 'isolated origin required')
+    seal = digest(prior)
+    need(not any(digest(row) == seal for row in state.get('reconciled_owner_history', [])),
+         'isolated origin already archived')
+    entry['retired_isolation_sha256'] = seal
+    # Publish only after every original and normal guard has passed.
+    state.setdefault('reconciled_owner_history', []).append(copy.deepcopy(prior))
+    state['reconciled_owners'][key] = entry
+
+
+def reconcile(state, occurrence_id, proof, renewal_witness=None):
     """Record verified retirement while preserving the original native result and credit."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
-        # Existing isolated obligations use the same guarded renewal regardless of
-        # whether the caller supplies the original failure ID or request token.
-        registered = [entry for key, entry in state.get('reconciled_owners', {}).items()
-                      if entry.get('purpose') == 'isolated-validation'
-                      and (key == proof.get('receipt_sha256') or entry.get('token') == proof.get('request_token'))]
-        if failure is not None and registered and proof != registered[0]['proof']:
-            need(len(registered) == 1 and registered[0].get('occurrence') == occurrence_id,
-                 'existing isolated reconciliation identity')
-            return renew_isolated_validation(state, registered[0]['token'], proof)
+        existing = [entry for entry in state.get('reconciled_owners', {}).values()
+                    if entry.get('kind') == KIND and entry.get('purpose') == 'isolated-validation'
+                    and entry.get('token') == proof.get('request_token')]
+        known = [(key, entry) for key, entry in state.get('reconciled_owners', {}).items()
+                 if entry.get('kind') == KIND and entry.get('token') == proof.get('request_token')
+                 and (entry.get('purpose') == 'isolated-validation' or 'retired_isolation_sha256' in entry)]
+        if proof.get('purpose') is None and known:
+            need(renewal_witness is None and len(known) == 1, 'one original retirement required')
+            return retire_known_isolation(state, occurrence_id, proof, *known[0])
+        if proof.get('purpose') == 'isolated-validation' and existing:
+            need(len(existing) == 1, 'one prior reconciliation required')
+            prior = existing[0]
+            need(occurrence_id in {prior['token'], prior.get('occurrence')}, 'original renewal selector')
+            if (occurrence_id == prior['token'] or proof != prior.get('proof')
+                    or renewal_witness is not None):
+                return renew_isolated_validation(state, prior['token'], proof, renewal_witness)
         if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
                 and proof.get('purpose') == 'isolated-validation'):
-            return renew_isolated_validation(state, occurrence_id, proof)
+            return renew_isolated_validation(state, occurrence_id, proof, renewal_witness)
+        need(renewal_witness is None, 'historical witness requires isolated source renewal')
         if failure is None and state.get('phase') == 'stale':
             # A source refresh can finish a full attempt before its failures are
             # promoted to triage. Its retained owner still requires exact proof.
             need(not state.get('running') and 'live_failures' not in state and not CANCEL.is_set()
                  and state.get('attempts') and state['attempts'][-1].get('stale') is True
-                 and proof.get('layout') in {'campaign-startup-v1', 'campaign-prelaunch-v1', 'campaign-v1'},
+                 and proof.get('layout') in {'campaign-startup-v1', 'campaign-prelaunch-v1',
+                                             'campaign-mixed-preallocation-v1', 'campaign-v1'},
                  'quiescent stale startup required')
             candidates = [r for r in latest_receipts(state).values()
                           if r.get('token') == occurrence_id]
@@ -2089,9 +2705,18 @@ def reconcile(state, occurrence_id, proof):
     state.setdefault('reconciled_owners', {})[key] = entry
 
 
-def still_bound(entry, receipt, owner):
+def still_bound(entry, receipt, owner, state=None, *, quarantine_archive=None):
+    """Revalidate original quarantine custody and independent current retirement proof."""
     try:
-        actual = validate(receipt, owner, entry['proof'])
-        return actual == {k: v for k, v in entry.items() if k != 'occurrence'}
+        if 'retired_isolation_sha256' in entry:
+            need(state is not None, 'retired isolation custody state required')
+            origin = retired_isolation_origin(state, entry)
+            reconciliation_occurrence(state, origin, receipt)
+            need(still_bound(origin, receipt, owner, quarantine_archive=entry['proof'].get('quarantine_archive')),
+                 'archived isolated proof changed')
+        actual = validate(receipt, owner, entry['proof'], quarantine_archive=quarantine_archive
+                          if entry.get('purpose') == 'isolated-validation' else None)
+        return actual == {k: v for k, v in entry.items()
+                          if k not in {'occurrence', 'retired_isolation_sha256'}}
     except (OSError, ValueError, KeyError, TypeError):
         return False
