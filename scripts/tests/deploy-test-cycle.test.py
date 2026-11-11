@@ -7322,6 +7322,32 @@ class Cycle(unittest.TestCase):
                 c.reconcile(candidate, original['token'], renewed)
             self.assertEqual(snapshot, candidate)
 
+    def test_isolated_renewal_accepts_successor_with_historical_no_retry_custody_case(self):
+        # PR1682: a full smoke run whose payment case stayed under NO_RETRY_CUSTODY (never executed).
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        request = c.read(folder/'request.json'); skip = next(iter(request['skips']))
+        held = dict(request['skips'][skip], disposition='NO_RETRY_CUSTODY', kind='historical-agentcard-no-retry-v1')
+        request['skips'][skip] = held; c.write(folder/'request.json', request)
+        successor.update(custody_skips={skip: copy.deepcopy(held)}, current_execution={skip: 'UNVERIFIED'})
+        successor['case_complete'][skip] = False
+        c.write(folder/'receipt.json', successor)
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        bad = [('not-custody', lambda r, q: q['skips'][skip].update(disposition='resource_skip')),
+               ('unverified-missing', lambda r, q: r.update(current_execution={})),
+               ('other-case-incomplete', lambda r, q: r['case_complete'].update({next(k for k in r['case_complete'] if k != skip): False})),
+               ('custody-not-skipped', lambda r, q: r['custody_skips'].update({'foreign-case': held}))]
+        for name, mutate in bad:
+            candidate = copy.deepcopy(state); row = candidate['attempts'][-1]['results'][0]; q = copy.deepcopy(request)
+            mutate(row, q); c.write(folder/'receipt.json', row); c.write(folder/'request.json', q)
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        c.write(folder/'receipt.json', successor); c.write(folder/'request.json', request)
+        c.reconcile(state, original['token'], renewed)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['source'], entry['validation_source']); self.assertFalse(entry['credit_granted'])
+
     def test_isolated_successor_renewal_rejects_bad_or_tampered_successors_atomically(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
         renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}

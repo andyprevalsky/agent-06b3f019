@@ -1581,8 +1581,16 @@ def clean_isolated_successor(state, prior, original, successor):
     need(successor.get('worker_result') == str(result_path), 'successor result locator')
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
+    # Historical no-retry custody cases never execute, so execute() records them incomplete and
+    # UNVERIFIED; every other case must still be complete.
+    custody = successor.get('custody_skips') or {}
+    need(isinstance(custody, dict) and set(custody) <= set(skips)
+         and all(isinstance(skips[c], dict) and skips[c].get('disposition') == 'NO_RETRY_CUSTODY'
+                 and custody[c] == skips[c] for c in custody)
+         and (successor.get('current_execution') or {}) == dict.fromkeys(custody, 'UNVERIFIED'),
+         'successor custody cases')
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-         and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
+         and successor.get('case_complete') == {c: c not in custody for c in gate['checks']}
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')
     reference = successor['native_cleanup_reference']
