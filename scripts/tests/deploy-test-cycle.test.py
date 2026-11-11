@@ -5747,7 +5747,7 @@ class Cycle(unittest.TestCase):
         ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
         with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
 
-    def normal_failed_canary_state(self, zero=False):
+    def normal_failed_canary_state(self, zero=False, machine_less=()):
         import hashlib, shutil
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
         old = parents[0].parent / 'canary'
@@ -5766,6 +5766,17 @@ class Cycle(unittest.TestCase):
                 (tree / 'owned-clones.ids').write_text('')
                 (tree / 'owned-clones.names').write_text('')
             for n in ('execution-provenance.json','execution-task-matrix.json'): (fleet / n).unlink()
+        if machine_less:  # a canary cancelled while cloning: audited rows, but no Machine ever existed
+            for tree in (audit, canonical):
+                shutil.rmtree(tree / 'fresh'); (tree / 'fresh').mkdir()
+                app = dict(l.split('=', 1) for l in (tree / 'meta').read_text().splitlines())['app']
+                for row in machine_less:
+                    values = dict(version='1', fleet_owner_token=owner, run_id=fleet.name, app=app,
+                                  source='fresh-clone', source_machine_id='donor', **row)
+                    (tree / 'fresh' / row['clone_name']).write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
+                    proof['files'][str(tree / 'fresh' / row['clone_name'])] = ''
+                (tree / 'owned-clones.ids').write_text('')
+                (tree / 'owned-clones.names').write_text(''.join(r['clone_name'] + '\n' for r in machine_less))
         h=hashlib.sha256()
         for p in sorted(audit.rglob('*'),key=lambda p:str(p.relative_to(audit))):
             if p.is_file() and p.name!='source-audit':
@@ -5787,6 +5798,22 @@ class Cycle(unittest.TestCase):
         self.assertEqual(15,len(entry['participants']));self.assertFalse(entry['credit_granted'])
         self.assertNotIn('purpose',entry);self.assertEqual(before,state['attempts'])
         self.assertTrue(c._reconciled(state,state['attempts'][-1]['results'][0],proof['owner']))
+
+    def test_failed_canary_cancelled_while_cloning_reconciles_machine_less_rows(self):
+        # PR #1928: a canary cancelled mid-clone audited one `not-allocated-verified` row and one volume-only
+        # `destroyed-provider-retained` row; no Machine existed, so owned-clones.ids stayed empty.
+        rows = (dict(clone_name='cloudbench-a', machine_id='', volume_id='', disposition='not-allocated-verified'),
+                dict(clone_name='cloudbench-b', machine_id='', volume_id='vol_b',
+                     disposition='destroyed-provider-retained'))
+        state, occurrence, paths, proof, fleet = self.normal_failed_canary_state(machine_less=rows)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        for bad in ((dict(rows[0], volume_id='vol_a'), rows[1]),   # a not-allocated row cannot own a volume
+                    (rows[0], dict(rows[1], disposition='owned'))):  # an unretired resource stays blocking
+            with self.subTest(rows=bad):
+                self.tearDown(); self.setUp()  # each fixture owns a fresh workspace root
+                state, occurrence, paths, proof, fleet = self.normal_failed_canary_state(machine_less=bad)
+                with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
 
     def test_normal_zero_failed_canary_requires_absence(self):
         state,occurrence,paths,proof,fleet=self.normal_failed_canary_state(zero=True)

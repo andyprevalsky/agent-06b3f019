@@ -470,6 +470,24 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
     return {r['machine_id']: r['volume_id'] for r in rows}
 
 
+def retired_clone_rows(ids, names, rows, owner, fleet, app, closure, disposition):
+    """Close a fleet audit's fresh-clone rows; return those that own a Machine.
+
+    A fleet cancelled while cloning records rows with no Machine: `not-allocated-verified` (nothing
+    created) or a volume-only `destroyed-provider-retained` (its volume destroyed before any Machine).
+    Only rows that own a Machine appear in owned-clones.ids; every row still needs its clone name.
+    """
+    machines = [r for r in rows if r.get('machine_id')]
+    need(len(ids) == len(set(ids)) == len(machines) and set(ids) == {r['machine_id'] for r in machines}
+         and len(names) == len(set(names)) == len(rows) and set(names) == {r['clone_name'] for r in rows}, closure)
+    need(all(r.get('fleet_owner_token') == owner and r.get('run_id') == fleet.name
+             and r.get('app') == app and r.get('source') == 'fresh-clone'
+             and (r.get('disposition') == 'destroyed-provider-retained'
+                  or r.get('disposition') == 'not-allocated-verified' and not r.get('machine_id')
+                  and not r.get('volume_id')) for r in rows), disposition)
+    return machines
+
+
 def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree):
     """A linked infra-probe may fail before producing execution provenance, never task credit."""
     need(link and link['ref'] == receipt['source']['head']
@@ -490,11 +508,8 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     ids = bound(canonical / 'owned-clones.ids').decode().splitlines()
     names = bound(canonical / 'owned-clones.names').decode().splitlines()
     rows = [fields(bound(p)) for p in (canonical / 'fresh').iterdir()] if (canonical / 'fresh').exists() else []
-    need(len(ids) == len(set(ids)) == len(rows) and set(ids) == {r['machine_id'] for r in rows}
-         and len(names) == len(set(names)) == len(rows) and set(names) == {r['clone_name'] for r in rows}, 'canary resource closure')
-    need(all(r.get('fleet_owner_token') == owner and r.get('run_id') == fleet.name
-             and r.get('app') == meta['app'] and r.get('source') == 'fresh-clone'
-             and r.get('disposition') == 'destroyed-provider-retained' for r in rows), 'canary resource not retired')
+    machines = retired_clone_rows(ids, names, rows, owner, fleet, meta['app'], 'canary resource closure',
+                                  'canary resource not retired')
     for name in ('pool', 'pool-handoffs', 'volume-migrations'):
         path = canonical / name
         need(not path.exists() or path.is_dir() and not path.is_symlink() and not any(path.iterdir()), 'canary resource class')
@@ -509,7 +524,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
          and all(t.get('status') == 'INFRA_ERROR' and t.get('passed') is False and not t.get('agent_id')
                  and not t.get('owned_roots') and t.get('lifecycle_stage') == 'released'
                  and t.get('failure_reason') == 'no current run artifact produced' for t in tasks), 'canary pre-task projection')
-    return not rows  # Missing provenance is supported only before ANY native guest allocation.
+    return not machines  # Missing provenance is supported only before ANY native guest (Machine) allocation.
 
 
 def unlaunched_relay_retired(campaign, bound, document):
@@ -1582,11 +1597,8 @@ def validate(receipt, owner, proof):
         ids = bound(audit / 'owned-clones.ids').decode().splitlines()
         names = bound(audit / 'owned-clones.names').decode().splitlines()
         rows = [fields(bound(p)) for p in (audit / 'fresh').iterdir()] if (audit / 'fresh').exists() else []
-        need(len(ids) == len(set(ids)) == len(rows) and set(ids) == {r['machine_id'] for r in rows}
-             and len(names) == len(set(names)) == len(rows) and set(names) == {r['clone_name'] for r in rows}, 'resource closure')
-        need(all(r.get('fleet_owner_token') == owner_token and r.get('run_id') == fleet.name
-                 and r.get('app') == meta['app'] and r.get('source') == 'fresh-clone'
-                 and r.get('disposition') == 'destroyed-provider-retained' for r in rows), 'unsupported resource disposition')
+        machines = retired_clone_rows(ids, names, rows, owner_token, fleet, meta['app'], 'resource closure',
+                                      'unsupported resource disposition')
         for name in ('pool', 'pool-handoffs', 'volume-migrations'):
             path = audit / name
             need(not path.exists() or path.is_dir() and not path.is_symlink() and not any(path.iterdir()),
