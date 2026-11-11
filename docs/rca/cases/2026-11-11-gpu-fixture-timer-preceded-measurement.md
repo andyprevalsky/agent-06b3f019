@@ -79,3 +79,14 @@ all selected source-bound gates must validate the final commit.
 Local contract and controlled-browser checks pass. Final native validation is
 pending; this case does not claim production acceptance or resolve the assigned
 SDK rollout.
+
+## Human feedback
+
+No new human diagnosis or approval was used for this fixture correction. The
+standing deployment instruction requires the original failure to remain visible
+and the assigned SDK repair to reach verified production acceptance.
+
+## Reusable lesson
+
+Bind measurement fixtures to the actual sampling boundary, and validate new RCA
+records against the archive schema before freezing source.
