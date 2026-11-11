@@ -179,3 +179,94 @@ they are not represented as additional direct human feedback or corrections.
 An unknown coordinator result cannot become known through resource cleanup.
 Authenticate distinct native recovery authority, and route every identity for
 an already accepted obligation through the same renewal and quiescence guards.
+
+## Follow-up: launch-only isolation after the user directed fresh volumes
+
+The coordinator relayed the user's explicit direction to finish deployment with
+new volumes rather than wait for provider recovery. This authorizes fresh,
+isolated validation; it does not certify recovery or release of the three old
+originals, three pending copies, old financial obligations or original test
+outcomes. The earlier normal full-cleanup refusal remains correct. The native
+cycle's eleven assigned-repair dispositions were imported through the supported
+API, retaining their UNVERIFIED/incomplete history and the semantic post-merge
+packet; no old execution became a pass.
+
+The new path uses existing isolated-validation purpose only for exact42.
+It retains raw UNKNOWN outer process flags and null outer clocks, authenticates
+the original request/result/settlement/source and consumes separately named
+producer clocks. The common13-participant validator and existing isolation
+body remain authoritative. Actual raw provider responses and original native
+one-shot fork intent/result/HTTP seals bind all three copies to their exact
+retained originals. No active Machine, attached copy, mismatched source/nonce,
+unknown identity, changed raw hash, extra proof field or positive credit is
+accepted. The result excludes14 old Machine/original-Volume pairs plus three
+copy-Volume-to-original-Volume links in distinct typed maps. The original6428
+flat20-resource proof body73057ff465e9d696367f5c0eaceb0a52f8f8bed10a6bfb7abeba632d58975a26
+and4396c canonical NO_REMINT/false-credit custody remain unchanged.
+
+Two actual replay boundaries required explicit native authority. The last
+participant had a positively sealed not-allocated-verified row, not an allocated
+Machine with an empty ID. Exact original row/expected-fresh intent, independent
+native audit seal and mirrored provider-verification epoch, empty native ID
+index, original terminal projection and absent allocation artifacts authenticate
+that row without inventing an excluded Machine. The pinned original producer
+checks complete native clone-name absence before publishing that seal. Unknown
+or partly allocated empty rows still refuse.
+
+The relay's37 JSON files are intentional terminal journal records:28 closed
+and9 abandoned, with zero live lease files. Native retire() removes live markers
+and joins routes but preserves JSON; there is no prune API. The old guard
+mistook retained evidence for consumers. The isolated42 branch authenticates the
+exact37-record inventory/authority seals, mirrored bytes, native broker shutdown,
+original relay-owner retirement and absent sockets. It preserves every record
+and does not signal or require retirement of an unrelated/global lease-client
+PID such as717. The ordinary full-cleanup empty-directory requirement is
+unchanged. Active, extra, malformed or mismatched records refuse.
+
+Future renewal also keeps42's outer finish null. An authenticated isolated42
+origin helper replays the accepted prior proof and uses its separate producer
+boundary for both complete and normally reconciled failed successors. Future
+native canonical and mirrored allocation audits are rehashed before checking
+that no new Machine or Volume overlaps any old original or copied Volume.
+A blank future row needs its positive native not-allocated disposition and
+expected intent; it cannot disappear through a generic empty-ID filter. No
+allocation mode, task/evaluator assertion, timeout, policy floor, concurrency
+setting or model-visible scope changed.
+
+The actual full proof, serialized to an ordinary JSON dictionary and replayed
+through the same unmodified validator, passes728 file bindings and all13
+participants. Proof SHA256 is
+b5e33f9f3fa1ec7bd03376bfad5db242bafe9287eea102138c8f1561ac5b7416.
+The result is isolated launch eligibility only: cleanup_complete=false,
+credit_granted=false, execution_credit=false, financial_cleanup_credit=false
+and obligations_preserved=true. Native state was unchanged. Normal full cleanup
+still refuses the unresolved owners; a missing lineage packet, positive financial
+credit or normalized outer clock also refuses. This is not canonical admission,
+a benchmark execution result, provider recovery or financial settlement.
+
+Frozen candidate native17c2b8d69c988b2642af2afa4076498a4399352e521b8df71951eb9a50accc97,
+protocol07b5c295be72addd1a633dee4db67863a53d1db1d1ae3d1c179fc77105e95dee and
+patch5045ae2321f16ad66f5b5bbf80dfa1d28c855c2af6876dc9ba6f146470a25b03
+passed the entire450-test owning suite in171.983s with zero failures/errors,
+using the same external exact-byte0644 observer fixture described above.
+All435 methods already present in the previous integrated suite remain
+AST-identical; six new methods cover strict isolated fields, separate clocks,
+typed successor debt, both later-successor chronology consumers, actual native
+allocation-audit disjointness and zero-allocation refusals. Additional actual
+provider/lineage and terminal-relay tamper controls independently refuse changed
+custody, active/extra records and mirror or authority corruption. Earlier
+module-import harness errors and progressively exposed real admission refusals
+are retained separately; none counts as a successful native run.
+
+Evidence: plan:/var/tmp/deploy-mf1108/isolated42-fresh/v2/FINAL-PINS.json;
+plan:/var/tmp/deploy-mf1108/isolated42-fresh/v2/full-owning.log;
+plan:/var/tmp/deploy-mf1108/isolated42-fresh-lineage/actual-isolated-proof-v2.json.preparation.json;
+plan:/var/tmp/deploy-mf1108/relay37-readonly-20261110T235358Z/COMMAND-PROPOSAL.md.
+
+Status remains OPEN pending canonical native isolated admission/target renewal,
+fresh-source required gates and deployment. No cause or fix for coordinator143,
+recovery of any missing original runtime, financial release, normal cleanup
+completion or new benchmark PASS is claimed. Golden reference remains not
+applicable to this operational native harness change. The fresh-volume direction
+is the additional human authorization; the precise external-only preparation,
+review and preservation constraints remain coordinator instructions.

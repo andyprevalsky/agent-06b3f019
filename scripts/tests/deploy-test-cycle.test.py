@@ -11371,4 +11371,152 @@ class NativeObservationLoss42Successor(unittest.TestCase):
             path.write_bytes(raw)
 
 
+class NativeObservationLoss42FreshIsolation(unittest.TestCase):
+    """Launch-only isolation preserves raw missing coordinator facts and old debts."""
+    def test_isolated_header_requires_exact_extended_fields_without_relaxing_normal(self):
+        import deploy_test_native_observation_loss42 as protocol
+        helper=NativeObservationLoss42();helper.setUp();proof=copy.deepcopy(helper.proof)
+        protocol.contract(proof)
+        isolated=dict(proof,purpose='isolated-validation',validation_source=dict(head='a'*40,digest='b'*64),
+                      execution_quiescence={},retained_volume_lineage={})
+        protocol.contract(isolated)
+        for key in ('validation_source','execution_quiescence','retained_volume_lineage'):
+            changed=copy.deepcopy(isolated);changed.pop(key)
+            with self.assertRaises(ValueError):protocol.contract(changed)
+        for value in (dict(head=True,digest='b'*64),dict(head='a'*40,digest='malformed')):
+            with self.assertRaises(ValueError):protocol.contract(dict(isolated,validation_source=value))
+        with self.assertRaises(ValueError):protocol.contract(dict(isolated,financial_cleanup_credit=False))
+        with self.assertRaises(ValueError):protocol.contract(dict(proof,execution_quiescence={}))
+        owner='59b616a74c9c41bb9ab129d1ecd7079d';name='cloudbench-372dd2aa726a4c16b781e60c'
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup);root=Path(temporary.name);(root/'.git').mkdir()
+        fleet=root/'runs/20261110-065812-151812';life=dict(fleet_owner_token=owner,audit_sha256='forged')
+        row=dict(version='1',fleet_owner_token=owner,run_id=fleet.name,app='navi-whisper-lux-bench',clone_name=name,
+                 source='fresh-clone',source_machine_id='683e47df5094d8',machine_id='',volume_id='',disposition='not-allocated-verified')
+        for bad in (dict(row,machine_id=None),dict(row,machine_id='a'*14),dict(row,volume_id='vol_allocated'),dict(row,disposition='owned')):
+            with self.assertRaises(ValueError):protocol.isolated_unallocated42(fleet,life,root,dict(source=protocol.CAPTURE['source']),isolated,bad,None,None,lambda p:'forged',100)
+        with self.assertRaisesRegex(ValueError,'mirrored native release seal'):
+            protocol.isolated_unallocated42(fleet,life,root,dict(source=protocol.CAPTURE['source']),isolated,row,None,None,lambda p:'forged',100)
+
+    def test_separate_producer_clock_admits_sealed_retained_source_without_outer_normalization(self):
+        import deploy_test_native_cleanup as native
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup);root=Path(temporary.name)
+        owner='a'*32;fleet=root/'runs/run-999999999';fleet.mkdir(parents=True)
+        audit=root/'audits'/owner;(audit/'fresh').mkdir(parents=True)
+        row=audit/'fresh/clone';row.write_text('fixture')
+        machine='a'*14;volume='vol_fixture';seal='c'*64
+        meta=dict(fleet_owner_token=owner,run_id=fleet.name,workspace_root=str(root),app='fixture',status='provider-teardown-verified')
+        resource=dict(machine_id=machine,volume_id=volume,fleet_owner_token=owner,run_id=fleet.name,source='fresh-clone',app='fixture',disposition='destroyed-provider-retained')
+        def record(value):return ''.join(k+'='+str(v)+'\n'for k,v in value.items()).encode()
+        def bound(path):
+            path=Path(path)
+            if path==audit/'meta':return record(meta)
+            if path==row:return record(resource)
+            if path==fleet/'teardown-ownership/source-audit':return record(dict(path=str(audit),sha256=seal))
+            if path==audit/'provider-teardown-verified.epoch':return b'110'
+            raise AssertionError(path)
+        receipt=dict(started_at=None,finished_at=None,source=dict(head='d'*40))
+        proof=dict(layout='campaign-observation-loss-mixed42-v1',purpose='isolated-validation',confirmed_at=200,
+                   execution_quiescence={machine:dict(sealed_native_release=True)})
+        before=copy.deepcopy(receipt);life=dict(fleet_owner_token=owner)
+        with patch.object(native,'fleet_audit_root',return_value=root/'audits'), \
+             patch.object(native,'fleet_ownership_root',return_value=root/'ownership'), \
+             patch.object(native.subprocess,'check_output',return_value=''):
+            # The ordinary contract still refuses missing outer clocks; no synthetic false/time rewrite.
+            with self.assertRaises(TypeError):native.isolated_execution(fleet,life,root,receipt,proof,bound,None,lambda p:seal)
+            actual=native.isolated_execution(fleet,life,root,receipt,proof,bound,None,lambda p:seal,execution_clock=(100,101))
+            self.assertEqual({machine:volume},actual)
+            for bad in ((True,101),(102,101)):
+                with self.assertRaises(ValueError):native.isolated_execution(fleet,life,root,receipt,proof,bound,None,lambda p:seal,execution_clock=bad)
+            with self.assertRaises(ValueError):native.isolated_execution(fleet,life,root,receipt,dict(proof,purpose=None),bound,None,lambda p:seal,execution_clock=(100,101))
+        self.assertEqual(before,receipt)
+
+    def test_6428_typed_successor_accepts_only_strict_still_bound_isolated42_entry(self):
+        native,state,prior,original,successor,entry=NativeObservationLoss42Successor.fixture(self)
+        entry.update(purpose='isolated-validation',cleanup_complete=False,obligations_preserved=True,execution_credit=False,
+                     excluded_resources=dict(machines={'machine':'volume'},copy_volumes={'copy':'volume'}))
+        entry['proof'].update(purpose='isolated-validation',validation_source=dict(head='e'*40,digest='f'*64),
+                              execution_quiescence={},retained_volume_lineage={})
+        before=copy.deepcopy((state,prior))
+        with patch.object(native,'still_bound',return_value=True):
+            native.reconciled_observation_loss42_isolated_successor(state,prior,original,successor)
+        self.assertEqual(before,(state,prior))
+        with patch.object(native,'still_bound',return_value=False):
+            with self.assertRaises(ValueError):native.reconciled_observation_loss42_isolated_successor(state,prior,original,successor)
+        for key,value in [('cleanup_complete',True),('obligations_preserved',False),('execution_credit',0),('financial_cleanup_credit',True)]:
+            saved=entry[key];entry[key]=value
+            with patch.object(native,'still_bound',return_value=True):
+                with self.assertRaises(ValueError):native.reconciled_observation_loss42_isolated_successor(state,prior,original,successor)
+            entry[key]=saved
+
+
+    def test_authenticated42_origin_uses_producer_boundary_and_preserves_null_outer(self):
+        native,state,prior,original,receipt,entry=NativeObservationLoss42Successor.fixture(self)
+        entry.update(purpose='isolated-validation',cleanup_complete=False,obligations_preserved=True,execution_credit=False,
+                     excluded_resources=dict(machines={'machine':'volume'},copy_volumes={'copy':'volume'}))
+        entry['proof'].update(purpose='isolated-validation',validation_source=dict(head='e'*40,digest='f'*64),
+                              execution_quiescence={},retained_volume_lineage={})
+        before=copy.deepcopy(receipt)
+        with patch.object(native,'still_bound',return_value=True):
+            self.assertEqual(101,native.isolated_origin_finished(entry,receipt))
+        self.assertEqual(before,receipt);self.assertIsNone(receipt['finished_at'])
+        with patch.object(native,'still_bound',return_value=False):
+            with self.assertRaises(ValueError):native.isolated_origin_finished(entry,receipt)
+        changed=copy.deepcopy(entry);changed['execution_credit']=True
+        with self.assertRaises(ValueError):native.isolated_origin_finished(changed,receipt)
+
+    def test_both_normal_successor_chronologies_consume_authenticated_origin_boundary(self):
+        import deploy_test_native_cleanup as native
+        for failed in (False,True):
+            fixture=Cycle(methodName='runTest');fixture.setUp();self.addCleanup(fixture.tearDown)
+            if failed:
+                state,original,proof,successor,native_proof=fixture.reconciled_failed_successor_renewal_state()
+            else:
+                state,paths,proof,gate,packet,original,folder,successor=fixture.clean_successor_renewal_state()
+            prior=state['reconciled_owners'][proof['receipt_sha256']]
+            old_finish=original['finished_at'];original['finished_at']=None
+            fn=native.reconciled_failed_isolated_successor_v1 if failed else native.clean_isolated_successor
+            # SYNTHETIC authenticated-origin oracle isolates the chronology consumer;
+            # exact42 header+prior verification is exercised by the preceding method.
+            with patch.object(native,'isolated_origin_finished',return_value=old_finish) as boundary:
+                fn(state,prior,original,successor)
+                boundary.assert_called_once_with(prior,original)
+            self.assertIsNone(original['finished_at'])
+
+
+    def test_successor_exclusion_checks_actual_native_audit_machine_and_copy_volume_ids(self):
+        import deploy_test_native_cleanup as native
+        import deploy_test_native_observation_loss42 as protocol
+        import hashlib,shutil
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup);root=Path(temporary.name);(root/'.git').mkdir()
+        token='f'*32;fleet=root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()/'runs/next-999999999'
+        (fleet/'_batch').mkdir(parents=True);owner='e'*32;audit=native.fleet_audit_root(root)/owner
+        (audit/'fresh').mkdir(parents=True);local=fleet/'teardown-ownership'
+        def fields(value):return ''.join(k+'='+str(v)+'\n'for k,v in value.items())
+        (audit/'meta').write_text(fields(dict(fleet_owner_token=owner,workspace_root=str(root),run_id=fleet.name)))
+        prior=dict(token=protocol.CAPTURE['token'],excluded_resources=dict(machines={'a'*14:'vol_original'},copy_volumes={'vol_copy':'vol_original'}))
+        successor=dict(token=token)
+        def install(machine,volume):
+            (audit/'fresh/clone').write_text(fields(dict(machine_id=machine,volume_id=volume,fleet_owner_token=owner,run_id=fleet.name)))
+            if local.exists():shutil.rmtree(local)
+            shutil.copytree(audit,local);digest=hashlib.sha256()
+            for path in sorted(local.rglob('*'),key=lambda p:str(p.relative_to(local))):
+                if path.is_file():
+                    for value in (str(path.relative_to(local)).encode(),path.read_bytes()):digest.update(len(value).to_bytes(8,'big'));digest.update(value)
+            seal=digest.hexdigest();(local/'source-audit').write_text(fields(dict(path=str(audit),sha256=seal)))
+            c.write(fleet/'_batch/lifecycle.json',dict(fleet_owner_token=owner,audit_sha256=seal))
+        install('b'*14,'vol_new')
+        native.isolated_successor_resources_disjoint(prior,successor,root)
+        for machine,volume in [('a'*14,'vol_new'),('b'*14,'vol_original'),('b'*14,'vol_copy')]:
+            install(machine,volume)
+            with self.assertRaisesRegex(ValueError,'overlaps retained allocation'):
+                native.isolated_successor_resources_disjoint(prior,successor,root)
+        install('','')
+        with self.assertRaisesRegex(ValueError,'unallocated native authority'):
+            native.isolated_successor_resources_disjoint(prior,successor,root)
+        install('b'*14,'')
+        with self.assertRaises(ValueError):native.isolated_successor_resources_disjoint(prior,successor,root)
+        install('b'*14,'vol_new');(audit/'fresh/clone').write_text('tampered=1\n')
+        with self.assertRaises(ValueError):native.isolated_successor_resources_disjoint(prior,successor,root)
+
+
 if __name__ == '__main__': unittest.main()

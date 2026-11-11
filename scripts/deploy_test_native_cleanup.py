@@ -213,8 +213,17 @@ def stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, 
          'stopped startup positive terminal boundary')
 
 
-def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
+def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree, *, execution_clock=None):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
+    if execution_clock is None:
+        execution_start, execution_finish = receipt['started_at'], receipt['finished_at']
+    else:
+        need(proof.get('layout') == 'campaign-observation-loss-mixed42-v1'
+             and proof.get('purpose') == 'isolated-validation'
+             and isinstance(execution_clock, tuple) and len(execution_clock) == 2
+             and all(finite(value) for value in execution_clock), 'typed42 separate execution clocks')
+        execution_start, execution_finish = execution_clock
+        need(execution_start <= execution_finish, 'typed42 execution clock order')
     owner = life['fleet_owner_token']
     audit = fleet_audit_root(root) / owner
     meta = fields(bound(audit / 'meta'))
@@ -238,6 +247,16 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
                             for r in processes.splitlines() if not r.split()[2].startswith('Z')),
          'old controller still active')
     rows = [fields(bound(p)) for p in (audit / 'fresh').iterdir()] if (audit / 'fresh').exists() else []
+    if execution_clock is not None:
+        from deploy_test_native_observation_loss42 import isolated_unallocated42
+        allocated = []
+        for row in rows:
+            if not row.get('machine_id') or not row.get('volume_id'):
+                need(isolated_unallocated42(fleet, life, root, receipt, proof, row,
+                     bound, document, tree, execution_start), 'typed42 positive unallocated authority')
+            else:
+                allocated.append(row)
+        rows = allocated
     need(len({r['machine_id'] for r in rows}) == len(rows), 'duplicate old machine')
     observations = proof['execution_quiescence']
     for row in rows:
@@ -253,7 +272,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
             need(tree(audit) == seal and fields(bound(local / 'source-audit'))
                  == {'path': str(audit), 'sha256': seal}, 'native release seal')
             release = float(bound(audit / 'provider-teardown-verified.epoch'))
-            need(finite(release) and receipt['started_at'] <= release <= proof['confirmed_at'], 'native release clock')
+            need(finite(release) and execution_start <= release <= proof['confirmed_at'], 'native release clock')
         elif 'provider_pair' in evidence:
             packet = document(evidence['provider_pair'])
             need(packet.get('endpoint_origin') == 'https://api.machines.dev' and packet.get('app') == meta['app'],
@@ -269,7 +288,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
                      and observed['expected_volume'] == row['volume_id']
                      and re.fullmatch('[0-9a-f]{64}', observed['response_sha256']), 'provider response identity')
                 value = observed['metadata']
-                if stopped_startup:
+                if stopped_startup or execution_clock is not None:
                     raw = bound(Path(observed['raw_response']))
                     need(hashlib.sha256(raw).hexdigest() == observed['response_sha256'],
                          'stopped startup provider response hash')
@@ -299,7 +318,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
             value = observed['native_result']
             from datetime import datetime
             observed_at = datetime.fromisoformat(value['observed_at']).timestamp()
-            need(finite(observed_at) and receipt['finished_at'] <= observed_at <= proof['confirmed_at'], 'OS observation clock')
+            need(finite(observed_at) and execution_finish <= observed_at <= proof['confirmed_at'], 'OS observation clock')
             need(observed.get('status') == 'TERMINAL' and observed.get('native_exit') == 0
                  and observed.get('guard_identity_status') == 'PASS'
                  and observed.get('protected_original_inputs_unchanged') is True
@@ -1043,7 +1062,8 @@ def validate(receipt, owner, proof):
         from deploy_test_native_observation_loss42 import admit
         observation_boundary = admit(receipt, owner, proof, adapter, root)
         from deploy_test_native_observation_loss42 import require_current_owner_release
-        require_current_owner_release(root, adapter)
+        if proof.get('purpose') != 'isolated-validation':
+            require_current_owner_release(root, adapter)
     need(receipt.get('lifecycle') == 'native-producer' and receipt.get('complete') is False
          and (observation_loss or receipt.get('timed_out') is False and receipt.get('cancelled') is False)
          and reference == receipt.get('native_cleanup_reference') and reference['result'] == str(adapter_path)
@@ -1394,8 +1414,13 @@ def validate(receipt, owner, proof):
     participants = {p for p in runs.iterdir() if p.is_dir() and p.name != '_hub'}
     need(set(handles) == participants and all(p.parent == runs and (p / '_batch').is_dir() for p in participants), 'participant closure')
     isolated = proof.get('purpose') == 'isolated-validation'
-    need(proof.get('purpose') in {None, 'isolated-validation'} and (not isolated or layout == 'campaign-v1'), 'proof purpose')
+    need(proof.get('purpose') in {None, 'isolated-validation'} and (not isolated or layout == 'campaign-v1' or observation_loss), 'proof purpose')
     retained, audit_seals, recovered, excluded = {}, {}, {}, {}
+    copy_volumes = {}
+    if observation_loss and isolated:
+        from deploy_test_native_observation_loss42 import validate_retained_volume_lineage
+        copy_volumes = validate_retained_volume_lineage(root, runs, receipt, adapter, proof, bound, document)
+
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout in {'campaign-v1', 'campaign-observation-loss-mixed42-v1'}), 'recovery scope')
@@ -1519,7 +1544,12 @@ def validate(receipt, owner, proof):
             if fleet in parents:
                 zero_parents.add(fleet)
         if isolated:
-            excluded.update(isolated_execution(fleet, life, root, receipt, proof, bound, document, tree))
+            current_excluded = isolated_execution(fleet, life, root, receipt, proof, bound, document, tree,
+                execution_clock=(adapter['started_at'], adapter['finished_at']) if observation_loss else None)
+            if observation_loss:
+                need(not set(current_excluded).intersection(excluded)
+                     and not set(current_excluded.values()).intersection(excluded.values()), 'typed42 resource identity overlap')
+            excluded.update(current_excluded)
             continue
         audit = fleet / 'teardown-ownership'
         canonical = fleet_audit_root(root) / owner_token
@@ -1592,13 +1622,22 @@ def validate(receipt, owner, proof):
             retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': value,
                                   'disposition': 'native-owner-retired-current-absence'}
         need(retained, 'partial campaign native Hub inventory absent')
-        location = Path(document(campaign/'shared-relay-location.json')['directory'])
-        for leases in (campaign/'shared-relay/leases',location/'leases'):
-            need(not leases.is_symlink() and (not leases.exists() or leases.is_dir() and not any(leases.iterdir())),
-                 'partial campaign relay consumers remain')
+        if observation_loss and isolated:
+            from deploy_test_native_observation_loss42 import isolated_relay_retired42
+            isolated_relay_retired42(root, campaign, receipt, proof, bound, document)
+        else:
+            location = Path(document(campaign/'shared-relay-location.json')['directory'])
+            for leases in (campaign/'shared-relay/leases',location/'leases'):
+                need(not leases.is_symlink() and (not leases.exists() or leases.is_dir() and not any(leases.iterdir())),
+                     'partial campaign relay consumers remain')
     need(isolated or set(recovered) == set(recovery), 'recovered fleet closure')
     if isolated:
         need(set(proof['execution_quiescence']) == set(excluded), 'execution observation closure')
+        if observation_loss:
+            need(copy_volumes and set(copy_volumes.values()) <= set(excluded.values())
+                 and not set(copy_volumes).intersection(excluded.values()), 'typed42 copy exclusion closure')
+            excluded = {'machines': excluded, 'copy_volumes': copy_volumes}
+
         for path in bindings:
             hub = Path(path)
             if hub.parent == runs / '_hub' and hub.name.endswith('.owner'):
@@ -1627,7 +1666,7 @@ def validate(receipt, owner, proof):
     if observation_loss:
         result.update(observation_loss_verified=True, mixed_terminal_campaign_verified=True,
                       original_outcomes_preserved=True, financial_cleanup_credit=False,
-                      coordinator_process_flags='UNKNOWN', cleanup_complete=True)
+                      coordinator_process_flags='UNKNOWN', cleanup_complete=not isolated)
     if staged_preallocation:
         result['preallocation_source_authorities']={str(k):v['source_authority'] for k,v in preallocation_links.items()
                                                      if preallocation or k in zero_parents}
@@ -1637,6 +1676,8 @@ def validate(receipt, owner, proof):
         need(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')
         result.update(purpose='isolated-validation', validation_source=proof['validation_source'], excluded_resources=excluded,
                       obligations_preserved=True, cleanup_complete=False)
+        if observation_loss:
+            result.update(execution_credit=False, financial_cleanup_credit=False)
     if recovered:
         result['recovered_release_evidence'] = recovered
     return result
@@ -1728,6 +1769,96 @@ def isolated_successor_custody(state, gate, successor, request, root):
     return custody
 
 
+def isolated_successor_resources_disjoint(prior, successor, root, *, audit_seals=None):
+    """Exact42 future fleets must allocate different native Machines and every original/copy Volume."""
+    from deploy_test_cycle import bounded_read
+    from deploy_test_native_observation_loss42 import CAPTURE
+    if prior.get('token') != CAPTURE['token']:
+        return
+    excluded = prior.get('excluded_resources', {})
+    need(set(excluded) == {'machines', 'copy_volumes'} and all(isinstance(v, dict) and v for v in excluded.values()),
+         'typed42 exclusion inventory')
+    old_machines = set(excluded['machines'])
+    old_volumes = set(excluded['machines'].values()) | set(excluded['copy_volumes'])
+    base = root/'.context/deploy-cloud'/hashlib.sha256(successor['token'].encode()).hexdigest()/'runs'
+    need(base.resolve() == base and base.is_dir() and not base.is_symlink(), 'typed42 successor native runs')
+    fleets = [p for p in base.iterdir() if p.name != '_hub']
+    need(fleets and len(fleets) <= 2048 and all(p.is_dir() and not p.is_symlink() for p in fleets), 'typed42 successor fleet inventory')
+    seen_machines, seen_volumes = set(), set()
+    remaining = [64*1024*1024]
+    def raw(path):
+        need(path.resolve() == path and path.is_file() and not path.is_symlink()
+             and path.stat().st_size <= 1024*1024 and path.stat().st_size <= remaining[0], 'typed42 successor audit bound')
+        value=path.read_bytes();remaining[0]-=len(value);return value
+    def seal(directory):
+        need(directory.resolve() == directory and directory.is_dir() and not directory.is_symlink(), 'typed42 successor audit directory')
+        digest=hashlib.sha256()
+        for item in sorted(directory.rglob('*'),key=lambda p:str(p.relative_to(directory))):
+            need(not item.is_symlink() and (item.is_dir() or item.is_file()), 'typed42 successor audit member')
+            if item.is_file() and item.name!='source-audit':
+                for value in (str(item.relative_to(directory)).encode(),raw(item)):
+                    digest.update(len(value).to_bytes(8,'big'));digest.update(value)
+        return digest.hexdigest()
+    for fleet in fleets:
+        life=bounded_read(fleet/'_batch/lifecycle.json','typed42 successor lifecycle')
+        owner=life.get('fleet_owner_token')
+        need(isinstance(owner,str) and re.fullmatch('[0-9a-f]{32}',owner), 'typed42 successor fleet owner')
+        canonical=fleet_audit_root(root)/owner;local=fleet/'teardown-ownership'
+        digest=seal(local)
+        need(seal(canonical)==digest and fields(raw(local/'source-audit'))=={'path':str(canonical),'sha256':digest}
+             and (life.get('audit_sha256')==digest or audit_seals and audit_seals.get(str(local))==digest),
+             'typed42 successor sealed allocation audit')
+        meta=fields(raw(canonical/'meta'))
+        need(meta.get('fleet_owner_token')==owner and meta.get('workspace_root')==str(root)
+             and meta.get('run_id')==fleet.name, 'typed42 successor audit identity')
+        fresh=canonical/'fresh'
+        need(fresh.is_dir() and not fresh.is_symlink(), 'typed42 successor fresh audit scope')
+        rows=list(fresh.iterdir());need(len(rows)<=2048, 'typed42 successor allocation count')
+        for path in rows:
+            row=fields(raw(path));machine,volume=row.get('machine_id'),row.get('volume_id')
+            if not machine and not volume:
+                name=row.get('clone_name')
+                need(set(row)=={'version','fleet_owner_token','run_id','app','clone_name','source',
+                                'source_machine_id','machine_id','volume_id','disposition'}
+                     and row.get('version')=='1' and row.get('source')=='fresh-clone'
+                     and row.get('disposition')=='not-allocated-verified'
+                     and row.get('fleet_owner_token')==owner and row.get('run_id')==fleet.name
+                     and row.get('app')==meta.get('app') and isinstance(name,str)
+                     and re.fullmatch('cloudbench-[A-Za-z0-9._-]+',name) and path.name==name
+                     and isinstance(row.get('source_machine_id'),str) and re.fullmatch('[0-9a-f]{14}',row['source_machine_id'])
+                     and fields(raw(canonical/'expected-fresh'/name))=={'clone_name':name,'source_machine_id':row['source_machine_id']},
+                     'typed42 successor unallocated native authority')
+                continue  # The sealed native producer verified exact-name absence before release.
+            need(isinstance(machine,str) and re.fullmatch('[0-9a-f]{14}',machine)
+                 and isinstance(volume,str) and re.fullmatch('vol_[A-Za-z0-9]+',volume)
+                 and row.get('fleet_owner_token')==owner and row.get('run_id')==fleet.name
+                 and machine not in old_machines and volume not in old_volumes
+                 and machine not in seen_machines and volume not in seen_volumes,
+                 'typed42 successor overlaps retained allocation')
+            seen_machines.add(machine);seen_volumes.add(volume)
+
+
+def isolated_origin_finished(prior, original):
+    """Keep unknown outer clocks; use only an authenticated exact42 isolated producer boundary."""
+    if original.get('kind') != 'recovered-native-execution-v1':
+        return original.get('finished_at')
+    from deploy_test_cycle import bounded_read, receipt_owner
+    from deploy_test_native_observation_loss42 import CAPTURE, LAYOUT, admit
+    need(prior.get('token') == original.get('token') == CAPTURE['token']
+         and prior.get('purpose') == prior.get('proof', {}).get('purpose') == 'isolated-validation'
+         and prior['proof'].get('layout') == LAYOUT and prior.get('cleanup_complete') is False
+         and prior.get('obligations_preserved') is True and prior.get('execution_credit') is False
+         and prior.get('financial_cleanup_credit') is False and prior.get('credit_granted') is False
+         and prior.get('observation_loss_verified') is True and prior.get('original_outcomes_preserved') is True,
+         'typed42 isolated origin authority')
+    owner = receipt_owner(prior['gate'], original)
+    need(owner == prior.get('owner') == prior['proof'].get('owner'), 'typed42 original isolated owner')
+    adapter = bounded_read(original['worker_result'], 'typed42 isolated origin adapter')
+    boundary = admit(original, owner, prior['proof'], adapter, Path(owner['worker_root']))
+    need(still_bound(prior, original, owner), 'typed42 isolated origin proof changed')
+    return boundary
+
+
 def clean_isolated_successor(state, prior, original, successor):
     """A later full native result may close execution without clearing historical debt or FAILs."""
     from deploy_test_cycle import bounded_read, digest, receipt_owner, sha_file, validate_result
@@ -1801,9 +1932,11 @@ def clean_isolated_successor(state, prior, original, successor):
     for evidence in result['evidence'].values():
         need(isinstance(evidence, dict) and isinstance(evidence.get('path'), str)
              and sha_file(evidence['path']) == evidence.get('sha256'), 'successor native evidence changed')
-    need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
+    isolated_successor_resources_disjoint(prior, successor, root)
+    origin_finished = isolated_origin_finished(prior, original)
+    need(finite(origin_finished) and finite(successor.get('started_at'))
          and finite(successor.get('finished_at'))
-         and original['finished_at'] <= successor['started_at'] <= successor['finished_at'], 'successor clocks')
+         and origin_finished <= successor['started_at'] <= successor['finished_at'], 'successor clocks')
 
 
 def reconciliation_occurrence(state, entry, receipt):
@@ -1835,11 +1968,16 @@ def reconciled_observation_loss42_isolated_successor(state, prior, original, suc
     need(len(entries) == 1, 'typed42 strict reconciliation required')
     key, entry = entries[0]
     proof = entry.get('proof', {})
+    isolated42 = (entry.get('purpose') == proof.get('purpose') == 'isolated-validation'
+                  and entry.get('cleanup_complete') is False and entry.get('obligations_preserved') is True
+                  and entry.get('execution_credit') is False and isinstance(entry.get('excluded_resources'), dict)
+                  and set(entry['excluded_resources']) == {'machines', 'copy_volumes'}
+                  and all(isinstance(value, dict) and value for value in entry['excluded_resources'].values()))
     need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
-         and entry.get('purpose') is None and proof.get('purpose') is None
+         and (isolated42 or entry.get('purpose') is None and proof.get('purpose') is None)
          and proof.get('layout') == LAYOUT and key == proof.get('receipt_sha256') == CAPTURE['receipt_sha256']
          and entry.get('observation_loss_verified') is True and entry.get('mixed_terminal_campaign_verified') is True
-         and entry.get('original_outcomes_preserved') is True and entry.get('cleanup_complete') is True
+         and entry.get('original_outcomes_preserved') is True and (isolated42 or entry.get('cleanup_complete') is True)
          and entry.get('coordinator_process_flags') == 'UNKNOWN' and entry.get('credit_granted') is False
          and entry.get('financial_cleanup_credit') is False, 'typed42 strict zero-credit closure')
     gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
@@ -1972,9 +2110,11 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     # Re-run the unchanged normal validator: all native file hashes, audits, retained Hub custody,
     # provider release and publication closure are required even when this result is incomplete.
     need(still_bound(entry, successor, owner), 'strict normal successor proof changed')
-    need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
+    isolated_successor_resources_disjoint(prior, successor, Path(owner['worker_root']), audit_seals=entry.get('native_audit_seals'))
+    origin_finished = isolated_origin_finished(prior, original)
+    need(finite(origin_finished) and finite(successor.get('started_at'))
          and finite(successor.get('finished_at'))
-         and original['finished_at'] <= successor['started_at'] <= successor['finished_at'],
+         and origin_finished <= successor['started_at'] <= successor['finished_at'],
          'failed successor clocks')
 
 
