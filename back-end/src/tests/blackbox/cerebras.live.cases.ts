@@ -18,7 +18,7 @@ export async function fetchLiveCerebrasModelIds(
   await quarantine(
     {
       since: '2026-11-11',
-      repair: 'pending-handoff:ef18929ce1bc4124a6e888131c803e65',
+      repair: 'https://boxes.dev/thread/thr_c74a9268e4b94114a727adf1dded8ed5',
       error:
         'AssertionError [ERR_ASSERTION]: Cerebras /models must be reachable for the live probe',
       evidence: '.context/rca-cerebras/ef18929c/findings.json',
