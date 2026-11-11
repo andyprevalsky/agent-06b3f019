@@ -16500,6 +16500,28 @@ except (ValueError, TypeError, OverflowError, OSError) as error:
 '
 }
 
+# Defined before warm_deps_preflight, which calls it at top level for the
+# refresh-deps token (it was previously defined after that call and never ran).
+CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
+controller_github_token_b64() {
+    local token=""
+    if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
+        # An explicit request-scoped pin from the launcher. Reuse it only when
+        # it decodes non-empty (a prior empty gh auth token produced empty b64).
+        token="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" | base64 -d 2>/dev/null || true)"
+        if [ -n "$token" ]; then
+            printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
+            return 0
+        fi
+        CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
+    fi
+    # Resolve per guest, never cached: workers are staged throughout a long run
+    # and the App token expires hourly while the devbox credential rotates.
+    token="$(cloudbench_guest_github_token "$ROOT_DIR" || true)"
+    [ -n "$token" ] || return 1
+    printf '%s' "$token" | base64 | tr -d '\n'
+}
+
 snapshot_is_complete_exact() {  # snapshot_is_complete_exact <snap_id>
     FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SNAP_ID="$1" python3 -c '
 import json, os, sys
@@ -17864,25 +17886,6 @@ mandatory_worker_health_acceptable() {  # <bench-output-dir> <bench>
     return 1
 }
 
-CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
-controller_github_token_b64() {
-    local token=""
-    if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
-        # An explicit request-scoped pin from the launcher. Reuse it only when
-        # it decodes non-empty (a prior empty gh auth token produced empty b64).
-        token="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" | base64 -d 2>/dev/null || true)"
-        if [ -n "$token" ]; then
-            printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
-            return 0
-        fi
-        CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
-    fi
-    # Resolve per guest, never cached: workers are staged throughout a long run
-    # and the App token expires hourly while the devbox credential rotates.
-    token="$(cloudbench_guest_github_token "$ROOT_DIR" 2>/dev/null || true)"
-    [ -n "$token" ] || return 1
-    printf '%s' "$token" | base64 | tr -d '\n'
-}
 
 worker_is_tracked() {  # worker_is_tracked <bench-output-dir> <worker-id>
     local out="$1" wid="$2"

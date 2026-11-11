@@ -1578,10 +1578,23 @@ cloudbench_guest_github_token_can_read_repo() {  # <token>
 cloudbench_guest_durable_github_token() {  # [workspace-root]
   local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}" token
   local min_ttl="${CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS:-2700}"
-  [ -f "$workspace_root/scripts/github_token_pool.py" ] || return 1
-  token="$(cd "$workspace_root" && timeout 60 python3 scripts/github_token_pool.py \
-    app-token --min-ttl "$min_ttl" 2>/dev/null)" || return 1
-  cloudbench_guest_github_token_can_read_repo "$token" || return 1
+  local bound=()
+  # An installation token lives one hour; a longer minimum could never be met.
+  case "$min_ttl" in ''|*[!0-9]*) min_ttl=2700 ;; esac
+  [ "$min_ttl" -le 3300 ] || min_ttl=3300
+  [ -f "$workspace_root/scripts/github_token_pool.py" ] || {
+    echo "guest GitHub App token unavailable: scripts/github_token_pool.py missing" >&2
+    return 1
+  }
+  # macOS has no GNU timeout without coreutils; the pool bounds its own HTTP calls.
+  command -v timeout >/dev/null 2>&1 && bound=(timeout 60)
+  # The pool's stderr names a failure reason and never a token value.
+  token="$(cd "$workspace_root" && ${bound[@]+"${bound[@]}"} python3 scripts/github_token_pool.py \
+    app-token --min-ttl "$min_ttl")" || return 1
+  cloudbench_guest_github_token_can_read_repo "$token" || {
+    echo "guest GitHub App token failed the repository Contents read" >&2
+    return 1
+  }
   printf '%s' "$token"
 }
 
@@ -2848,7 +2861,8 @@ cloudbench_controller_lock_release() {
 
 cloudbench_controller_github_token_b64() {
   local token
-  token="$(cloudbench_controller_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
+  # Guest-bound token: never the devbox's rotating credential when the App is available.
+  token="$(cloudbench_guest_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
   printf '%s' "$token" | base64 | tr -d '\n'
 }
 

@@ -425,7 +425,7 @@ printf 'import sys\nopen(%s, "a").write(" ".join(sys.argv[1:]) + "\\n")\nif sys.
 printf '%s' "$APP_TOKEN" >"$ROT/app-token"
 
 guest_fetch_authenticates() {  # <delivered-token>
-  [ "$(printf 'Authorization: Bearer %s\n' "$1" | curl -s -o /dev/null -w '%{http_code}' -H @- "$ROT_API")" = 200 ]
+  [ "$(printf 'Authorization: Bearer %s\n' "$1" | curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -H @- "$ROT_API")" = 200 ]
 }
 rotate_devbox_credential() {
   printf '%s' "$DEVBOX_NEW" >"$ROT/rotating"
@@ -441,23 +441,34 @@ wrapper_resolver="$(sed -n 's/^CONTROLLER_GITHUB_TOKEN="$(\([a-z_]*\)[ )].*/\1/p
   || fail "could not locate run-bench-cloud's guest token delivery sites"
 fleet_fn="$(sed -n '/^CONTROLLER_GITHUB_TOKEN_B64_CACHE=/p; /^controller_github_token_b64() {/,/^}/p' "$ROOT_DIR/scripts/run-bench-fleet")"
 [ -n "$fleet_fn" ] || fail "could not locate run-bench-fleet's worker token delivery function"
+# Warm-box git-sync (--setup clone, refresh-deps, warm-source fetch) resolves
+# through run-bench-cloud's resolve_github_token; its git ls-remote validator is
+# replaced by the mock's live-token list.
+warm_fn="$(sed -n '/^resolve_github_token() {/,/^}/p' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$warm_fn" ] || fail "could not locate run-bench-cloud's warm-box token resolver"
 deliver() {  # <site> — prints the token that site hands to a guest
-  env -u GITHUB_DISPATCH_TOKEN -u CLOUDBENCH_GITHUB_TOKEN_B64 -u CLOUDBENCH_GITHUB_TOKEN \
-    GITHUB_TOKEN="$DEVBOX_OLD" HOME="$ROT" GIT_CONFIG_GLOBAL="$ROT/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+  # A clean environment: CI runners inject Git config (GIT_CONFIG_COUNT/KEY/VALUE
+  # insteadOf credentials) that would otherwise answer for the devbox helper.
+  env -i GITHUB_TOKEN="$DEVBOX_OLD" HOME="$ROT" GIT_CONFIG_GLOBAL="$ROT/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
     CLOUDBENCH_GITHUB_REPO_API="$ROT_API" CLOUDBENCH_FLEET_ROOT="$ROT/repo" PATH="$PATH_NO_GH" \
     SITE="$1" CLOUD_RESOLVER="$cloud_resolver" WRAPPER_RESOLVER="$wrapper_resolver" FLEET_FN="$fleet_fn" \
+    WARM_FN="$warm_fn" LIVE_TOKENS="$ROT/live-tokens" \
     bash -c 'set -euo pipefail; . "$1"; cd "$2"; ROOT_DIR="$2"
       case "$SITE" in
         machine-env) "$CLOUD_RESOLVER" ;;
         wrapper) "$WRAPPER_RESOLVER" ;;
         fleet-worker) eval "$FLEET_FN"; controller_github_token_b64 | base64 -d ;;
+        warm-sync) eval "$WARM_FN"
+          github_token_can_fetch_repo() { grep -Fxq -- "$1" "$LIVE_TOKENS"; }
+          resolve_durable_github_token() { :; }
+          resolve_github_token ;;
       esac' _ "$ROOT_DIR/scripts/lib/cloudbench-env.sh" "$ROT/repo"
 }
-for site in machine-env wrapper fleet-worker; do
+for site in machine-env wrapper fleet-worker warm-sync; do
   printf '%s' "$DEVBOX_OLD" >"$ROT/rotating"
   printf '%s\n' "$DEVBOX_OLD" "$APP_TOKEN" >"$ROT/live-tokens"
   : >"$ROT/pool-calls"
-  delivered="$(deliver "$site" 2>"$ROT/deliver.err")" || fail "$site: no guest token was delivered"
+  delivered="$(deliver "$site" 2>"$ROT/deliver.err")" || { cat "$ROT/deliver.err" >&2; fail "$site: no guest token was delivered"; }
   guest_fetch_authenticates "$delivered" || fail "$site: delivered token was not valid at delivery"
   rotate_devbox_credential
   guest_fetch_authenticates "$delivered" \
@@ -479,7 +490,7 @@ printf '%s' "$APP_TOKEN" >"$ROT/app-token"
 printf '%s\n' "$DEVBOX_NEW" >"$ROT/live-tokens"  # the App token cannot read the repo
 delivered="$(deliver machine-env 2>/dev/null)" || fail "an App token without repo access must fall back"
 [ "$delivered" = "$DEVBOX_NEW" ] || fail "an App token that fails the Contents read must not be delivered"
-pinned="$(env CLOUDBENCH_GITHUB_TOKEN_B64="$(printf '%s' 'pinned-request-token' | base64 | tr -d '\n')" \
+pinned="$(env -i HOME="$ROT" CLOUDBENCH_GITHUB_TOKEN_B64="$(printf '%s' 'pinned-request-token' | base64 | tr -d '\n')" \
   CLOUDBENCH_GITHUB_REPO_API="$ROT_API" CLOUDBENCH_FLEET_ROOT="$ROT/repo" PATH="$PATH_NO_GH" \
   bash -c '. "$1"; cloudbench_guest_github_token "$2"' _ "$ROOT_DIR/scripts/lib/cloudbench-env.sh" "$ROT/repo")"
 [ "$pinned" = pinned-request-token ] || fail "an explicit CLOUDBENCH_GITHUB_TOKEN_B64 pin must still win"
