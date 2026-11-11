@@ -244,6 +244,21 @@ class Inventory(Fixture):
         for gate in ('deploy-command-structural', 'agents-coverage-blackbox', 'frontend-coverage-blackbox'):
             self.assertEqual(g.GATE_DEADLINE_SECONDS, g.remote_slot(self.root, gate)['timeout_seconds'])
 
+    def test_live_probes_slot_binds_one_case_per_probe_on_every_transport(self):
+        """An aggregate exit is UNVERIFIED and unwaivable (PR #1934: one provider-side GLM failover miss
+        blocked the whole gate); each probe is its own non-aggregate case, run in PROBE_NAMES order."""
+        from run_deploy_live_probes import PROBE_NAMES
+        values = {'CONDUCTOR_WORKSPACE_NAME': 'w', 'CONDUCTOR_PORT': '21530'}
+        for slot in (g.remote_slot(self.root, 'live-probes'),
+                     g.local_slot(self.root, 'live-probes', self.path('live-probes'), values)):
+            cases = slot['recipe']['cases']
+            self.assertEqual(list(PROBE_NAMES), list(cases))
+            for name, spec in cases.items():
+                self.assertEqual(['python3', 'scripts/run_deploy_live_probes.py', '--only', name], spec['command'])
+                self.assertIs(False, spec['aggregate'])
+                self.assertEqual(slot['env'], spec['env'])
+        self.assertNotIn('recipe', g.remote_slot(self.root, 'semantic-stack'))
+
     def test_system_pg_is_carried_only_when_prepared_and_identity_is_required(self):
         self.system_pg = False
         slots = self.provision(['live-probes', 'backend-coverage-blackbox'])
@@ -899,6 +914,9 @@ class Template(unittest.TestCase):
         self.assertTrue(backend[0]['native_backend'] and len(backend[0]['checks']) > 1)
         structural, = [gate for gate in cut['gates'] if gate['name'] == g.STRUCTURAL_GATE]
         self.assertEqual('2', structural['command'][structural['command'].index('--max-workers') + 1])
+        live, = [gate for gate in cut['gates'] if gate['name'] == g.LIVE_PROBES_GATE]
+        from run_deploy_live_probes import PROBE_NAMES
+        self.assertEqual(list(PROBE_NAMES), live['checks'])
         stability, = [gate for gate in cut['gates'] if gate['name'] == g.STABILITY_GATE]
         self.assertEqual(str(g.LOCAL_STABILITY_LOAD_WORKERS),
                          stability['command'][stability['command'].index('--load-workers') + 1])
