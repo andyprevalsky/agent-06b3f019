@@ -2326,7 +2326,7 @@ def clean_isolated_successor(state, prior, original, successor, custody_state=No
                  == digest({k:v for k,v in gate.items() if k != 'selection_evidence'}),
              'successor execution contract changed')
     checks, skips = request['checks'], request['skips']
-    if binding.get('contract_digest') != digest(execution_gate):
+    if custody_state is None and binding.get('contract_digest') != digest(execution_gate):
         # Authenticate the complete historical gate, not current-case coverage. Only an
         # inventory extension can be reconstructed: every other byte and old ordering
         # must still hash to the immutable successor receipt's original contract.
