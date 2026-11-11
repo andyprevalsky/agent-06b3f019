@@ -1048,7 +1048,8 @@ def partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, pr
         else:
             need(type(job['controller_pid']) is int and job['controller_pid'] > 1
                  and type(job['controller_exit_code']) is int and job['controller_exit_code'] in (1,143)
-                 and job['status'] == ('failed' if job['controller_exit_code'] == 1 else 'cancelled')
+                 # A job that failed on its own after the campaign declared the breach is recorded cancelled.
+                 and job['status'] in (('failed', 'cancelled') if job['controller_exit_code'] == 1 else ('cancelled',))
                  and job.get('task_status') == 'INFRA_ERROR' and job.get('infra_failure') is True,
                  'partial campaign launched terminal outcome')
             launched.append(job)
@@ -1404,7 +1405,7 @@ def validate(receipt, owner, proof):
                 need(job.get('fleet_dir') == str(one[0]) and job.get('run_id') == one[0].name
                      and job.get('fleet_owner_token') == preallocation_links[one[0]]['owner'],
                      'partial campaign original parent binding')
-                if job['status'] == 'cancelled':
+                if job['status'] == 'cancelled' and job['controller_exit_code'] == 143:
                     need(sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line)
                              is not None for line in lines) >= 1, 'partial campaign positive sibling cancellation')
             parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code']}

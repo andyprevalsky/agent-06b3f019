@@ -11016,6 +11016,21 @@ class NativeUnstartedCampaign(unittest.TestCase):
                              frozenset(['r001-j0003']))
             self.assertEqual((summary,proof),original)
 
+    def test_sibling_failing_after_the_breach_may_be_recorded_cancelled(self):
+        from deploy_test_native_cleanup import partial_campaign_jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign=Path(tmp); request,receipt,summary,proof=self.fixture(campaign)
+            summary['jobs'][1]['controller_exit_code']=1
+            self.assertEqual(partial_campaign_jobs(ROOT,campaign,request,receipt,{},summary,proof),
+                             frozenset(['r001-j0003']))
+            for status,code in [('failed',143),('passed',1),('passed',0)]:
+                changed=copy.deepcopy(summary); changed['jobs'][1].update(status=status,controller_exit_code=code)
+                with self.subTest(status=status,code=code),self.assertRaises(ValueError):
+                    partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
+            changed=copy.deepcopy(summary); changed['jobs'][1].update(task_status='FAIL')
+            with self.assertRaises(ValueError):
+                partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
+
     def test_unstarted_claim_refuses_real_log_and_every_allocated_identity(self):
         from deploy_test_native_cleanup import partial_campaign_jobs
         with tempfile.TemporaryDirectory() as tmp:
