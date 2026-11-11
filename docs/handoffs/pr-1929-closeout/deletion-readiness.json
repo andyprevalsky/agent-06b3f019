@@ -69,24 +69,9 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "tail -6",
-      "cwd": "/home/boxes/rose",
-      "pid": 1357260
-    },
-    {
-      "argv": "cut -c1-250",
-      "cwd": "/home/boxes/rose",
-      "pid": 1357261
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-1929-closeout/deletion-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1929-closeout/archive-index.json, docs/handoffs/pr-1929-closeout/deletion-manifest.json, docs/handoffs/pr-1929-closeout/recover_archive.py",
-    "live process 1357260 in this checkout: tail -6",
-    "live process 1357261 in this checkout: cut -c1-250"
-  ],
+  "open_items": [],
   "pr": 1929,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -608,20 +593,15 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/fix/sidebar-semantic-slim",
+      "branch": "refs/heads/records/pr1929-closeout",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1929-closeout/archive-index.json",
-        "docs/handoffs/pr-1929-closeout/deletion-manifest.json",
-        "docs/handoffs/pr-1929-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-1929-closeout/recover_archive.py"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
