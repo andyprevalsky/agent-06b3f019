@@ -15,7 +15,7 @@ export async function resolveMessageAccess(
   search: TeamSearchScope
 ): Promise<MessageAccess> {
   const grants =
-    search.scope === 'own' && search.teamId === undefined
+    search.ownerUserId === userId && search.teamId === undefined
       ? []
       : await resolveTeamDataAccess(userId, {
           teamId: search.teamId,
@@ -26,9 +26,8 @@ export async function resolveMessageAccess(
     search,
     grants: grants.filter(
       (grant) =>
-        (search.scope !== 'own' || grant.ownerUserId === userId) &&
-        ((grant.provider === 'gmail' && Boolean(grant.accountEmail?.trim())) ||
-          (grant.provider === 'imessage' && grant.accountId === ''))
+        (grant.provider === 'gmail' && Boolean(grant.accountEmail?.trim())) ||
+        (grant.provider === 'imessage' && grant.accountId === '')
     ),
   };
 }

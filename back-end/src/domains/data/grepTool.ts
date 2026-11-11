@@ -72,22 +72,16 @@ async function summaryResult(
   let text: string;
   if (includesPrivateSources(userId, scope)) {
     const summary = await getSummary(userId);
-    if (scope.scope === 'own') delete summary.teams;
+    if (scope.ownerUserId === userId) delete summary.teams;
     text = formatLocalDataSummary(summary);
   } else {
     const map = await getSharedDataMap(userId);
     map.teams = map.teams.filter((team) => scope.teamId === undefined || team.id === scope.teamId);
     map.accounts = map.accounts.filter(
       (account) =>
-        (scope.scope !== 'own' || account.ownerUserId === userId) &&
         (scope.teamId === undefined || account.teamId === scope.teamId) &&
         (scope.ownerUserId === undefined || account.ownerUserId === scope.ownerUserId) &&
         (scope.accountId === undefined || account.accountId === scope.accountId)
-    );
-    map.projectAgents = map.projectAgents.filter(
-      (agent) =>
-        (scope.teamId === undefined || agent.teamId === scope.teamId) &&
-        (scope.ownerUserId === undefined || agent.ownerUserId === scope.ownerUserId)
     );
     map.projects = map.projects.filter(
       (project) =>
@@ -172,9 +166,8 @@ async function unconnectedSources(
       source !== 'documents' &&
       isSourceName(source) &&
       !(
-        (params.scope === 'shared' ||
-          typeof params.team_id === 'string' ||
-          typeof params.owner_user_id === 'string') &&
+        (typeof params.team_id === 'string' ||
+          (typeof params.owner_user_id === 'string' && params.owner_user_id !== userId)) &&
         ['email', 'gmail', 'imessage'].includes(source)
       )
   );

@@ -139,7 +139,7 @@ def _backend_grep_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
 # Local, always-available sources: no external connector, so they never gate
 # and don't need a connectivity probe.
-_LOCAL_SOURCES = {"messages", "network", "agent_network", "agent_trajectories", "shared_project_agents", "summary"}
+_LOCAL_SOURCES = {"messages", "network", "agent_network", "agent_trajectories", "summary"}
 _DOCUMENT_PROVIDER_ALIASES = {
     "chat_gpt": "chatgpt",
     "chatgpy": "chatgpt",
@@ -186,7 +186,9 @@ def _extract_sources(tool_call: Dict[str, Any]) -> list:
     return _sources_named_by_filters(tool_call)
 
 
-def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, set]]:
+def _source_status_targets(
+    tool_call: Dict[str, Any], user_id: Optional[str] = None
+) -> tuple[list, Dict[str, set]]:
     """Map requested grep sources to concrete connector keys for gate probing.
 
     `documents` is a searchable corpus, not a real connector. If the caller
@@ -197,7 +199,8 @@ def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, s
     requested_sources = _extract_sources(tool_call)
     # Team availability is authorized by the backend per account. A reader's
     # missing personal connector must not block another member's shared inbox.
-    if tool_call.get("scope") == "shared" or tool_call.get("team_id") or tool_call.get("owner_user_id"):
+    owner = tool_call.get("owner_user_id")
+    if tool_call.get("team_id") or (owner and owner != user_id):
         requested_sources = [source for source in requested_sources if source not in {"email", "gmail", "imessage"}]
     document_provider = _document_provider(tool_call)
     targets: list = []
@@ -267,7 +270,7 @@ async def execute_grep(
         # can't pause) and hand the marker up. The parent workflow raises the
         # blocking source_connect gate after the explore agent returns.
         requested_sources = _extract_sources(tool_call)
-        gateable_sources, gate_target_search_sources = _source_status_targets(tool_call)
+        gateable_sources, gate_target_search_sources = _source_status_targets(tool_call, user_id)
         unavailable: list = []
         search_call = _backend_grep_call(tool_call)
         if gateable_sources:

@@ -658,7 +658,6 @@ class ApiRequestTool(BaseModel):
 
 _GREP_FILTER_VALUE_TYPES: Dict[str, Any] = {
     "person": str,
-    "project_id": str,
     "since": str,
     "until": str,
     "path": str,
@@ -712,7 +711,7 @@ class GrepTool(BaseModel):
         default=None,
         description=(
             "Regular expression over record text. Omit for agent_trajectories or "
-            "agent_network or shared_project_agents to list recent records using metadata filters. "
+            "agent_network to list recent records using metadata filters. "
             "Omit for calendar or drive to list a day or folder, or to read the one event or file a path names."
         ),
     )
@@ -725,7 +724,6 @@ class GrepTool(BaseModel):
                 "imessage",
                 "whatsapp",
                 "network",
-                "shared_project_agents",
                 "agent_network",
                 "agent_trajectories",
                 "transactions",
@@ -777,7 +775,6 @@ class GrepTool(BaseModel):
             "imessage",
             "whatsapp",
             "network",
-            "shared_project_agents",
             "agent_network",
             "agent_trajectories",
             "transactions",
@@ -790,13 +787,13 @@ class GrepTool(BaseModel):
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
     )
-    scope: Optional[Literal["own", "shared", "all"]] = Field(
-        default=None,
-        description="Default all: your own records plus explicitly shared team accounts. own limits to your data; shared requires direct accepted team account grants. No transitive access.",
+    owner_user_id: Optional[str] = Field(
+        default=None, description="Only this owner's records (ids from the shared data map)."
     )
-    team_id: Optional[str] = Field(default=None, description="Exact connected team ID; narrows to that team's explicit account grants.")
-    owner_user_id: Optional[str] = Field(default=None, description="Exact data owner user ID from the shared data map; never an identity guess.")
-    account_id: Optional[str] = Field(default=None, description="Exact inbox email, or empty string for default iMessage account. Narrows before counting and paging.")
+    team_id: Optional[str] = Field(default=None, description="Only accounts shared with this team.")
+    account_id: Optional[str] = Field(
+        default=None, description='Only this inbox email ("" = default iMessage account).'
+    )
     role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
         default=None,
         description="Message role in agent_trajectories or agent_network. Implies agent_trajectories when sources are omitted.",
@@ -890,7 +887,6 @@ class GrepTool(BaseModel):
             "Per-source filters. Each source accepts only its own keys:\n"
             "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
             "  network: path\n"
-            "  shared_project_agents: project_id, path (safe metadata only)\n"
             "  agent_network: path, role\n"
             "  agent_trajectories: path, since, until, role, surface, record_kind\n"
             "  transactions: since, until, account, min_amount, max_amount, "
@@ -1577,7 +1573,7 @@ class SpawnExploreAgentTool(BaseModel):
 
 
 class ListAgentsTool(BaseModel):
-    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints."""
+    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints. With project_id, owner_user_id or team_id it also lists teammates' agents in projects shared with you (title and status only)."""
 
     tool: Literal["list_agents"]
     node: Optional[str] = Field(
@@ -1590,6 +1586,9 @@ class ListAgentsTool(BaseModel):
     path_prefix: Optional[str] = Field(
         default=None, description="List agents at or below this path, e.g. /root/outreach."
     )
+    project_id: Optional[str] = Field(default=None, description="Only agents in this project.")
+    owner_user_id: Optional[str] = Field(default=None, description="Only this owner's project agents.")
+    team_id: Optional[str] = Field(default=None, description="Only projects shared with this team.")
 
 
 _AGENT_ADDRESS_DESCRIPTION = (

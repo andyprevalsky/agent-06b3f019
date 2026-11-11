@@ -12,16 +12,7 @@ export async function getSharedDataMap(userId: string) {
     listSharedProjects(userId),
   ]);
   return {
-    projectAgents: projects.flatMap((project) =>
-      project.agents.map(({ id, title, status, projectId, ownerUserId }) => ({
-        id,
-        title,
-        status,
-        projectId,
-        ownerUserId,
-        teamId: project.teamId,
-      }))
-    ),
+    you: { userId },
     teams: teams.map(({ id, name, role }) => ({ id, name, role })),
     accounts: grants
       .filter(
@@ -37,13 +28,12 @@ export async function getSharedDataMap(userId: string) {
         accountId,
         accountEmail,
       })),
-    projects: projects.map(({ projectId, teamId, teamName, ownerUserId, name, hasMoreAgents }) => ({
+    projects: projects.map(({ projectId, teamId, teamName, ownerUserId, name }) => ({
       projectId,
       teamId,
       teamName,
       ownerUserId,
       name,
-      hasMoreAgents,
     })),
   };
 }
@@ -53,7 +43,6 @@ export function formatSharedDataMap(map: Awaited<ReturnType<typeof getSharedData
   return (
     'CONNECTED TEAMS AND SHARED DATA MAP:\n' +
     JSON.stringify(map) +
-    '\nGrep defaults to own + explicit team account grants. Use scope, team_id, owner_user_id, account_id to narrow. ' +
-    'Use grep source=shared_project_agents with filters.project_id to search/page beyond the shown agents. Shared projects allow discovery only; they grant no credentials, iPhone access or other account data.'
+    '\ngrep and list_agents cover this shared data; filter by owner_user_id, team_id, account_id or project_id. Use exact ids; never guess identities.'
   );
 }

@@ -27,19 +27,21 @@ def format_team_context(data: dict) -> str:
     if not isinstance(data, dict) or not data.get("teams"):
         return ""
     fields = {
+        "you": ("userId",),
         "teams": ("id", "name", "role"),
         "accounts": ("teamId", "ownerUserId", "ownerName", "provider", "accountId", "accountEmail"),
-        "projectAgents": ("id", "title", "status", "projectId", "ownerUserId", "teamId"),
-        "projects": ("projectId", "teamId", "teamName", "ownerUserId", "name", "hasMoreAgents"),
+        "projects": ("projectId", "teamId", "teamName", "ownerUserId", "name"),
     }
-    safe = {
-        key: [{field: row.get(field) for field in allowed} for row in data.get(key, []) if isinstance(row, dict)]
-        for key, allowed in fields.items()
-    }
+
+    def rows(value: object, allowed: tuple) -> list:
+        items = value if isinstance(value, list) else [value]
+        return [{field: row.get(field) for field in allowed} for row in items if isinstance(row, dict)]
+
+    safe = {key: rows(data.get(key, []), allowed) for key, allowed in fields.items()}
+    safe["you"] = safe["you"][0] if safe["you"] else {}
     return (
         "## Connected Teams and Shared Data\n"
         + json.dumps(safe, ensure_ascii=False)
-        + "\nGrep defaults to own records plus explicit team account grants. Narrow with team_id, owner_user_id, account_id or scope. "
-        "Use grep source=shared_project_agents and filters.project_id for searchable, paged metadata beyond the shown agents. Shared projects permit discovery only; they grant no credentials, iPhone access or other accounts. "
-        "Use exact identities in this map; do not guess a teammate's identity."
+        + "\ngrep and list_agents cover this shared data; filter by owner_user_id, team_id, account_id or project_id. "
+        "Use exact ids; never guess identities."
     )

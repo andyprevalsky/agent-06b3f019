@@ -2,7 +2,6 @@
  * Data domain service — business logic for grep and summary operations.
  */
 
-import { searchSharedProjectAgents } from './projectAgentSearchService';
 import { getSharedDataMap } from './teamContext';
 import { includesPrivateSources } from './teamAccess';
 import { isPostgresRegexError } from './regexSafety';
@@ -72,7 +71,6 @@ async function searchSource(
   source: ValidSource,
   agentId: string | undefined
 ): Promise<SourceSearchResult> {
-  if (source === 'shared_project_agents') return searchSharedProjectAgents(userId, input);
   if (isMessageFamilySource(source)) return searchMessageSource({ userId, input, source });
   if (!includesPrivateSources(userId, input.teamScope))
     return {

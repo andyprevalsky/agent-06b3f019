@@ -2213,10 +2213,9 @@ def test_tool_prompts_open_with_declarative_sentence():
 # transactions so local-data benchmarks use the scoped DB search path instead
 # of public web tools or generic unfiltered searches.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
-    # +650 over the prior 1600: Teams sharing adds the load-bearing cross-owner
-    # access rules (scope/team_id/owner_user_id/account_id narrowing, never infer
-    # sharing from a shared project) and the shared_project_agents metadata-only bullet.
-    "grep": 2250,
+    # +160 over the prior 1600: Teams sharing adds one owner/account narrowing
+    # bullet (owner_user_id/team_id/account_id from the shared data map).
+    "grep": 1760,
     # +50: explore's one-line code-inspection hint (a code_session_id → inspect_code).
     "spawn_agent": 3650,
 }

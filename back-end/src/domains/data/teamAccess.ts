@@ -1,10 +1,9 @@
-/** Explicit search scope. Selectors narrow authority; they never grant it. */
+/** Search narrowing. Selectors narrow authority; they never grant it. */
 import { InvalidGrepParamError } from './errors';
 import type { TeamSearchScope } from './types.team';
 export type { TeamSearchScope } from './types.team';
 
 export function parseTeamSearchScope(params: {
-  scope?: unknown;
   team_id?: unknown;
   owner_user_id?: unknown;
   account_id?: unknown;
@@ -20,18 +19,12 @@ export function parseTeamSearchScope(params: {
   const teamId = value('team_id');
   const ownerUserId = value('owner_user_id');
   const accountId = value('account_id');
-  const scope = params.scope ?? 'all';
-  if (scope !== 'own' && scope !== 'shared' && scope !== 'all') {
-    throw new InvalidGrepParamError('scope', 'Use own, shared, or all.');
-  }
-  return { scope, teamId, ownerUserId, accountId };
+  return { teamId, ownerUserId, accountId };
 }
 
 export function includesOwnData(userId: string, scope: TeamSearchScope): boolean {
   return (
-    scope.scope !== 'shared' &&
-    scope.teamId === undefined &&
-    (scope.ownerUserId === undefined || scope.ownerUserId === userId)
+    scope.teamId === undefined && (scope.ownerUserId === undefined || scope.ownerUserId === userId)
   );
 }
 

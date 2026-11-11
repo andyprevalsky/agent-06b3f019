@@ -3,6 +3,7 @@
  *
  * POST /api/data/grep   - Search message threads by keyword pattern
  * GET  /api/data/summary - Get filesystem-like summary of available data sources
+ * GET  /api/data/project-agents - list_agents metadata for own and team-shared projects
  */
 
 import { Router, type Response } from 'express';
@@ -10,6 +11,7 @@ import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { getSharedDataMap } from './teamContext';
 import { executeGrepTool } from './grepTool';
+import { listProjectAgents, parseProjectAgentQuery } from './projectAgentSearchService';
 import {
   getSnapshot,
   getSourceStatus,
@@ -37,6 +39,28 @@ router.get(
       return;
     }
     res.json(await getSharedDataMap(userId));
+  })
+);
+
+router.get(
+  '/project-agents',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId =
+      req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : req.user?.id;
+    if (userId === undefined || userId === '') {
+      res.status(401).json({ error: 'User not authenticated' });
+      return;
+    }
+    try {
+      res.json(await listProjectAgents(userId, parseProjectAgentQuery(req.query)));
+    } catch (error) {
+      if (error instanceof InvalidGrepParamError) {
+        res.status(400).json({ error: `Invalid ${error.param}. ${error.hint ?? ''}`.trim() });
+        return;
+      }
+      throw error;
+    }
   })
 );
 

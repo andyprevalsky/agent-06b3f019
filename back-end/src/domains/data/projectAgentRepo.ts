@@ -1,57 +1,76 @@
-/** Search only safe agent metadata in explicitly shared projects. */
+/** Safe agent metadata in the reader's own projects and explicitly shared team projects. */
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { regexPredicate, pageSize } from './sharedGrepRepo';
-import type { ValidatedGrepInput } from './types';
 
-function query(userId: string, input: ValidatedGrepInput) {
-  const scope = input.teamScope;
-  const filter = input.filters.projectAgents;
-  const pattern = regexPredicate(
-    Prisma.sql`COALESCE(a.title, 'Untitled agent') || E'\\n' || a.status::text || E'\\n' || p.name`,
-    input.dbPattern,
-    input.caseInsensitive
-  );
-  return Prisma.sql`
-    FROM "TeamProjectShare" s
-    JOIN "Project" p ON p.id = s."projectId" AND p."userId" = s."ownerUserId"
-    JOIN "Agent" a ON a."projectId" = p.id AND a."userId" = p."userId" AND a."deletedAt" IS NULL
-    JOIN "TeamMember" reader ON reader."teamId" = s."teamId" AND reader."userId" = ${userId} AND reader.status = 'ACCEPTED'
-    JOIN "TeamMember" owner ON owner."teamId" = s."teamId" AND owner."userId" = p."userId" AND owner.status = 'ACCEPTED'
-    WHERE ${pattern}
-      ${scope.teamId === undefined ? Prisma.empty : Prisma.sql`AND s."teamId" = ${scope.teamId}`}
-      ${scope.ownerUserId === undefined ? Prisma.empty : Prisma.sql`AND p."userId" = ${scope.ownerUserId}`}
-      ${scope.scope === 'own' ? Prisma.sql`AND p."userId" = ${userId}` : Prisma.empty}
-      ${scope.accountId === undefined ? Prisma.empty : Prisma.sql`AND FALSE`}
-      ${filter?.agentId === undefined ? Prisma.empty : Prisma.sql`AND a.id = ${filter.agentId}`}
-      ${filter?.projectId === undefined ? Prisma.empty : Prisma.sql`AND p.id = ${filter.projectId}`}
-  `;
+export interface ProjectAgentQuery {
+  q?: string;
+  projectId?: string;
+  ownerUserId?: string;
+  teamId?: string;
+  offset: number;
+  limit: number;
 }
 
-export interface SharedProjectAgentRow {
+export interface ProjectAgentRow {
   id: string;
   title: string;
   status: string;
   projectId: string;
   projectName: string;
   ownerUserId: string;
+  ownerName: string | null;
   updatedAt: Date;
   teamIds: string[];
 }
-export async function searchSharedProjectAgentRows(userId: string, input: ValidatedGrepInput) {
+
+function likeWord(word: string): string {
+  return `%${word.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+}
+
+function wordPredicates(words: string[]): Prisma.Sql[] {
+  return words.map(
+    (word) => Prisma.sql`AND (COALESCE(a.title, '') || ' ' || p.name) ILIKE ${likeWord(word)}`
+  );
+}
+
+function query(userId: string, input: ProjectAgentQuery) {
+  // Own projects join only when a filter asks for them; a bare query adds just
+  // teammates' shared projects (the caller's own tree covers its own agents).
+  const includeOwn =
+    input.projectId !== undefined || input.ownerUserId !== undefined || input.teamId !== undefined;
+  const words = (input.q ?? '').split(/\s+/).filter((word) => word.length > 0);
+  return Prisma.sql`
+    FROM "Agent" a
+    JOIN "Project" p ON p.id = a."projectId" AND p."userId" = a."userId"
+    LEFT JOIN (
+      "TeamProjectShare" s
+      JOIN "TeamMember" reader ON reader."teamId" = s."teamId" AND reader."userId" = ${userId} AND reader.status = 'ACCEPTED'
+      JOIN "TeamMember" owner ON owner."teamId" = s."teamId" AND owner."userId" = s."ownerUserId" AND owner.status = 'ACCEPTED'
+    ) ON s."projectId" = p.id AND s."ownerUserId" = p."userId"
+    WHERE a."deletedAt" IS NULL
+      AND (s."teamId" IS NOT NULL ${includeOwn ? Prisma.sql`OR p."userId" = ${userId}` : Prisma.empty})
+      ${input.teamId === undefined ? Prisma.empty : Prisma.sql`AND s."teamId" = ${input.teamId}`}
+      ${input.ownerUserId === undefined ? Prisma.empty : Prisma.sql`AND p."userId" = ${input.ownerUserId}`}
+      ${input.projectId === undefined ? Prisma.empty : Prisma.sql`AND p.id = ${input.projectId}`}
+      ${words.length === 0 ? Prisma.empty : Prisma.join(wordPredicates(words), ' ')}
+  `;
+}
+
+export async function listProjectAgentRows(userId: string, input: ProjectAgentQuery) {
   const from = query(userId, input);
   const [count, rows] = await Promise.all([
     prisma.$queryRaw<
       Array<{ count: bigint }>
     >`SELECT COUNT(DISTINCT a.id)::bigint AS count ${from}`,
-    prisma.$queryRaw<SharedProjectAgentRow[]>`
+    prisma.$queryRaw<ProjectAgentRow[]>`
       SELECT a.id, COALESCE(a.title, 'Untitled agent') AS title, a.status::text AS status,
-        a."projectId", p.name AS "projectName", p."userId" AS "ownerUserId", a."updatedAt",
-        array_agg(DISTINCT s."teamId") AS "teamIds"
+        a."projectId", p.name AS "projectName", p."userId" AS "ownerUserId",
+        (SELECT u.name FROM "User" u WHERE u."userId" = p."userId") AS "ownerName", a."updatedAt",
+        COALESCE(array_agg(DISTINCT s."teamId") FILTER (WHERE s."teamId" IS NOT NULL), '{}') AS "teamIds"
       ${from}
       GROUP BY a.id, p.id
-      ORDER BY a."updatedAt" DESC, p.id ASC, a.id ASC
-      LIMIT ${pageSize(input.headLimit, input.offset)}
+      ORDER BY a."updatedAt" DESC, a.id ASC
+      LIMIT ${input.limit} OFFSET ${input.offset}
     `,
   ]);
   return { total: Number(count[0]?.count ?? 0), rows };

@@ -391,7 +391,7 @@ def test_grep_shared_provenance_survives_transcript_formatting():
         {"source": "messages", "path": "messages/a/one", "content": "Investor sent email", "ownership": {"owner_user_id": "owner-a", "account_id": "work-a@example.test", "team_ids": ["atlas", "orbit"], "provider": "gmail", "shared": True, "owner_name": "A", "unexpected_token": "MUST_NOT_EXPOSE"}, "records": [{"message_id": "one", "owner_user_id": "owner-a", "account_id": "work-a@example.test"}]},
         {"source": "messages", "path": "messages/b/two", "content": "Investor sent email", "ownership": {"owner_user_id": "owner-b", "account_id": "work-b@example.test", "team_ids": ["orbit"], "provider": "gmail", "shared": True, "owner_name": "B"}, "records": [{"message_id": "two", "owner_user_id": "owner-b", "account_id": "work-b@example.test"}]},
     ], "total_matches": 2}
-    text = format_tool_message({"scope": "all"}, result, 0.1, 0)
+    text = format_tool_message({}, result, 0.1, 0)
     for value in ["owner_user_id", "owner-a", "owner-b", "account_id", "work-a@example.test", "work-b@example.test", "team_ids", "atlas", "orbit", "message_id", "one", "two"]:
         assert value in text, f"Grep transcript dropped {value}"
     assert "MUST_NOT_EXPOSE" not in text

@@ -34,7 +34,7 @@ Daily benchmarks: `team-daily-investor-email-count` and `team-daily-access-bound
 
 The seeded requester uses phone authentication and has no User.email. Team creation and sending invitations must therefore accept nonanonymous phone-based users. Accepted members may have no profile email; invitations still target an exact mailbox and require its token. Never fabricate an owner email or force the requester to link an inbox merely to create a team.
 
-Shared-project agent discovery also has a dedicated metadata-only grep source, `shared_project_agents`, with project filtering and ordinary paging. The overview remains bounded; agents can search beyond it without receiving private goals or trajectories.
+Shared-project agent discovery goes through `list_agents`: `project_id`, `owner_user_id` or `team_id` (or a query when the caller is in a team) list own and team-shared project agents via `GET /api/data/project-agents`, metadata only, with paging. Grep has no `scope` parameter; it always searches own data plus explicit team account grants, narrowed by `owner_user_id`, `team_id` or `account_id`.
 
 ## Release handoff
 

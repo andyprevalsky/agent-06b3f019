@@ -77,16 +77,6 @@ export const DATA_SOURCE_CONFIGS = {
     connector: null,
     channel: null,
   },
-  shared_project_agents: {
-    description:
-      'Safe agent metadata in explicitly shared projects (no goals, messages or credentials)',
-    table: 'Agent' as const,
-    searchField: 'title/status/project name',
-    groupBy: 'projectId',
-    filters: ['project_id', 'path'] as const,
-    connector: null,
-    channel: null,
-  },
   agent_network: {
     description: 'Messages across the current agent tree',
     table: 'Message' as const,
@@ -214,7 +204,6 @@ export interface FormattedResult {
 }
 
 export interface GrepParams extends AgentMetadataParams {
-  scope?: 'own' | 'shared' | 'all';
   team_id?: string;
   owner_user_id?: string;
   account_id?: string;
@@ -323,7 +312,6 @@ export interface ValidatedGrepInput {
   pageAfterPath?: string;
   filters: {
     messages?: MessageGrepFilters;
-    projectAgents?: { projectId?: string; agentId?: string };
     network?: NetworkGrepFilters;
     agentNetwork?: AgentNetworkGrepFilters;
     agentTrajectories?: AgentTrajectoryGrepFilters;

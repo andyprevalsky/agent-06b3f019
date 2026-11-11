@@ -118,7 +118,7 @@ export function formatLocalDataSummary(summary: SummaryResult): string {
     ...(summary.teams && formatSharedDataMap(summary.teams)
       ? [
           formatSharedDataMap(summary.teams),
-          'The aggregate statistics below describe your own records only; query email/messages with scope=all for team totals.',
+          'The aggregate statistics below describe your own records only; grep email/messages for team totals.',
         ]
       : []),
     'LOCAL DATA SOURCES:',
