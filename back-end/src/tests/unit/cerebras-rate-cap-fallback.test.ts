@@ -20,7 +20,9 @@ function delayedCompletion(delayMs: number, signal?: AbortSignal | null): Promis
   return new Promise<Response>((resolve, reject) => {
     const timer = setTimeout(() => {
       const payload =
-        'data: {"choices":[{"index":0,"delta":{"content":"{\\"action\\":\\"direct_answer\\"}"}}]}\n\n' +
+        // A complete provider stream ends its last choice with finish_reason "stop";
+        // structured fallback replies only win the race on a clean stop.
+        'data: {"choices":[{"index":0,"delta":{"content":"{\\"action\\":\\"direct_answer\\"}"},"finish_reason":"stop"}]}\n\n' +
         'data: [DONE]\n\n';
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
