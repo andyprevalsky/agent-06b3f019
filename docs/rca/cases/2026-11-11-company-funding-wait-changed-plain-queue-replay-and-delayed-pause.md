@@ -41,3 +41,9 @@ Finish the requested validation and deploy while preserving strict criteria, pay
 ## Reusable lesson
 
 Longer external retry intervals require both interruptible waits and explicit replay-surface isolation. Preserve historical workflow commands on their original queue generation instead of treating a new timer as a harmless scheduling change.
+
+## Shared-source validation
+
+Applied in commit08e06669220cd78b2dc25872a92c0e8de80b160e. All seven actual shared registered funding cases and three adjacent pause/archive/abandoned-payment cases pass with external sockets denied. Their runner compiles the committed handler and reads the committed suite, with injected workflow state. Receipt: `.context/agentcard-stability/review1-stabilization/agents-public-final-results.json` and funding-public.log. This does not upgrade the offline oracle to real Temporal history replay or native production proof.
+
+The case remains OPEN for the remaining deployment/native verification and final evidence-preservation scope. Original failing/private artifacts are retained; no skipped or unexecuted test is converted to PASS.

@@ -198,3 +198,9 @@ above without treating them as new user approval or deployment authority.
 ## Reusable lesson
 
 Select an external operation's API and owner from its exact durable purchase provenance, and refuse ambiguous or missing ownership instead of inferring identity from current enrollment or identifier shape.
+
+## Shared-source validation
+
+Applied in commit08e06669220cd78b2dc25872a92c0e8de80b160e. The actual shared full v2 domain, default last4 unit, all27 issued-ledger cases and full backend TypeScript check pass. Receipt: `.context/agentcard-stability/review1-backend-public-20261111T044004Z-0e363f7c/receipt.json` SHA25627a97d494d8e07ed1ce2555d7c7b6349d60c6ee63634c5a63dbc60b87d4d395f. All2581 backend source/config members retain exact hashes, sizes and physical modes. Ten denied socket attempts remain explicitly recorded; their IPC interpretation is limited to source/pattern evidence, not original callsite capture. No external provider or financial send was admitted.
+
+The case remains OPEN for the remaining deployment/native verification and final evidence-preservation scope. Original failing/private artifacts are retained; no skipped or unexecuted test is converted to PASS.

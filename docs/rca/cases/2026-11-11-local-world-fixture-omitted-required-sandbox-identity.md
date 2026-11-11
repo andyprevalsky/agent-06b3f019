@@ -42,3 +42,9 @@ Preserve strict criteria, original failures, billing ownership and known no-remi
 
 A fixture driving the real launcher must produce its current identity contract before asserting later scheduling and cleanup behavior.
 
+
+## Shared-source validation
+
+Applied in commit08e06669220cd78b2dc25872a92c0e8de80b160e. The actual shared four-world owning fixture passes in16.720seconds and all11 adjacent world controls pass with canonical trace configuration. The first controls wrapper incorrectly forced TRACE_ARCHIVE_ENABLED=0; its setup failure is retained separately. Restoring the required value1 changed no source, assertions or timeouts. Receipt: `.context/agentcard-stability/review1-stabilization/agents-public-final-results.json`; corrected controls command took6.444seconds. No real browser, service or payment run is claimed.
+
+The case remains OPEN for the remaining deployment/native verification and final evidence-preservation scope. Original failing/private artifacts are retained; no skipped or unexecuted test is converted to PASS.

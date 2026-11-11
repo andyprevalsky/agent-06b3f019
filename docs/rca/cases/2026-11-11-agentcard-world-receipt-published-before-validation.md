@@ -47,7 +47,7 @@ Proof is under `.context/agentcard-stability/review-cycle1-repairs-20261111/rece
 
 ## Open scope
 
-OPEN pending parent application, full affected public validation including the real-PG case, and deployment/runtime verification. No real provisioning, financial, browser, database or native benchmark operation was performed for this proof. 
+OPEN for deployment/runtime verification; shared application and full public owning validation including the real-PG case are recorded below. No real provisioning, financial, browser, database or native benchmark operation was performed for this proof. 
 
 ## Human feedback
 
@@ -56,3 +56,9 @@ No incident-specific human feedback is recorded. The standing no-shared-edit/no-
 ## Reusable lesson
 
 Publish an optional receipt to shared lifecycle observers only after both its producer and its validation succeed; an uncommitted setup artifact must not prevent failure cleanup from recording reality.
+
+## Shared-source validation
+
+Applied in commit08e06669220cd78b2dc25872a92c0e8de80b160e. The actual shared full cleanup module passes97/97, including the existing real-PostgreSQL query case, with zero deselected tests. Receipt: `.context/agentcard-stability/review-cycle1-public-validation-20261111T044136Z-d5f8b952/final-receipt.json` SHA25628fdfad00ba41188d15f0e9057b6ebbd8ebfc920d3c7e155571518c53798d17b. The exact disposable PG server was stopped using its canonical pg_ctl lifecycle, its PID and cluster paths were verified absent, and no system, foreign or production database was accessed. The earlier private no-DB coverage limit is closed for this committed shared snapshot; native deployment verification remains separate.
+
+The case remains OPEN for the remaining deployment/native verification and final evidence-preservation scope. Original failing/private artifacts are retained; no skipped or unexecuted test is converted to PASS.

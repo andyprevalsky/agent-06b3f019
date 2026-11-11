@@ -43,7 +43,7 @@ Proof is retained under `.context/agentcard-stability/review-cycle1-repairs-2026
 
 ## Open scope
 
-OPEN pending parent application, affected public checks and deployment/runtime verification. No live probe, provider request, native benchmark or production process claim was made by these mocked tests.
+OPEN for deployment/runtime verification; shared application and public owning checks are recorded below. No live probe, provider request, native benchmark or production process claim was made by these mocked tests.
 
 ## Human feedback
 
@@ -52,3 +52,9 @@ No incident-specific human feedback is recorded; the review comments and parent 
 ## Reusable lesson
 
 Exclude positively identified irrelevant terminal process entries before requiring their command lines; retain strict refusal for unknown live entries and exact validation of the selected worker.
+
+## Shared-source validation
+
+Applied in commit08e06669220cd78b2dc25872a92c0e8de80b160e. Actual shared ProviderContract19, worker-pool40 and retained-client33 tests pass. Receipt: `.context/agentcard-stability/review-cycle1-public-validation-20261111T044136Z-d5f8b952/final-receipt.json` SHA25628fdfad00ba41188d15f0e9057b6ebbd8ebfc920d3c7e155571518c53798d17b. All13464 tracked source entries retain exact byte hashes and physical modes. This is owning mocked proof, not a new production fleet observation.
+
+The case remains OPEN for the remaining deployment/native verification and final evidence-preservation scope. Original failing/private artifacts are retained; no skipped or unexecuted test is converted to PASS.

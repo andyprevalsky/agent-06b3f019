@@ -42,3 +42,9 @@ Preserve strict criteria, original failures, billing ownership and known no-remi
 
 When a runtime contract is strengthened, update the owning test to assert the whole stronger contract rather than dropping the new invariants.
 
+
+## Shared-source validation
+
+Applied in commit08e06669220cd78b2dc25872a92c0e8de80b160e. The actual shared auth-test-site-benchmark domain passes in9.903seconds with the strict six-field integrity assertion intact. Source/test bytes remain unchanged after execution. Receipt: `.context/agentcard-stability/review1-stabilization/agents-public-final-results.json` and auth-domain.public.json. No provider or production behavior is inferred from this fixture regression.
+
+The case remains OPEN for the remaining deployment/native verification and final evidence-preservation scope. Original failing/private artifacts are retained; no skipped or unexecuted test is converted to PASS.

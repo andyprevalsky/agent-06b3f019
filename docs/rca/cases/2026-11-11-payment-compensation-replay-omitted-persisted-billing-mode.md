@@ -32,7 +32,7 @@ The actual default compensation orchestrator was run with persistence, card and 
 
 ## Solution
 
-The private candidate forwards purchase.stripeLivemode as expectedLivemode. It changes no provider choice, keys, retry timing, reclaim policy or mode fallback. All25 registered issued-ledger scenarios pass with real network denied; backend TypeScript, touched-file lint and formatting pass. Independent review accepted exact patch95114af3587344302d79462afad90f8705ca52d3525e1dfe1be6328191d5956f. Integration and final deployed-source validation remain pending; no live payment, reclaim, native benchmark or production outcome is claimed.
+The private candidate forwards purchase.stripeLivemode as expectedLivemode. It changes no provider choice, keys, retry timing, reclaim policy or mode fallback. All25 registered issued-ledger scenarios pass with real network denied; backend TypeScript, touched-file lint and formatting pass. Independent review accepted exact patch95114af3587344302d79462afad90f8705ca52d3525e1dfe1be6328191d5956f. Final deployed-source validation remains pending; shared integration and owning checks are recorded below; no live payment, reclaim, native benchmark or production outcome is claimed.
 
 ## Human feedback
 
@@ -42,3 +42,9 @@ Preserve strict criteria, original failures, billing ownership and known no-remi
 
 A stricter provider input contract must be carried through recovery and compensation callers using the original persisted intent, not reconstructed from current account state.
 
+
+## Shared-source validation
+
+Applied in commit08e06669220cd78b2dc25872a92c0e8de80b160e. The actual shared default compensation/issued-ledger suite passes all27 cases, including the two adjacent fail-closed retry controls. The full v2 domain, real default last4 unit and full backend TypeScript check also pass. Receipt: `.context/agentcard-stability/review1-backend-public-20261111T044004Z-0e363f7c/receipt.json` SHA25627a97d494d8e07ed1ce2555d7c7b6349d60c6ee63634c5a63dbc60b87d4d395f. These are mocked owning boundaries, not live compensation or native E2E proof.
+
+The case remains OPEN for the remaining deployment/native verification and final evidence-preservation scope. Original failing/private artifacts are retained; no skipped or unexecuted test is converted to PASS.
