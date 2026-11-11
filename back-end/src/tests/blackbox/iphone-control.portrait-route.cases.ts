@@ -28,9 +28,16 @@ portraitRouteCases.push([
         original,
         'Documented production launch/text shapes rejected'
       );
+    for (const original of ['on', 'off'] as const)
+      assert.equal(
+        provePortraitRoute(portraitRouteEvents(original, 'production-cold'), context)
+          ?.originalAssistiveTouch,
+        original,
+        'Cold Settings relaunch (fresh: true) rejected'
+      );
     const production = portraitRouteEvents('off', 'production');
     for (const change of [
-      (e: typeof production) => (e[0].args = { name: 'Settings', fresh: true }),
+      (e: typeof production) => (e[0].args = { name: 'Settings', fresh: 'yes' }),
       (e: typeof production) => (e[0].args = { name: 'Settings', fresh: false, url: 'x' }),
       (e: typeof production) => (e[0].result = 'com.apple.mobileslideshow'),
       (e: typeof production) => (e[4].args = { s: 'AssistiveTouch', delay: 'x' }),
@@ -254,14 +261,18 @@ portraitRouteCases.push([
     );
   },
 ]);
-for (const original of ['on', 'off'] as const)
+for (const [original, shape] of [
+  ['on', 'production'],
+  ['off', 'production'],
+  ['off', 'production-cold'],
+] as const)
   portraitRouteCases.push([
-    `portrait verify proves the production-shaped native route (original ${original})`,
+    `portrait verify proves the ${shape}-shaped native route (original ${original})`,
     async (h) => {
       const f = await freshSetup(h);
       h.framePng = portraitFrame(original === 'on');
       h.observationResult = portraitOcr();
-      await seedPortraitRoute(h, f, original, 'production');
+      await seedPortraitRoute(h, f, original, shape);
       const evidence = await observe(h, f);
       const result = await setupPost(h, f, {
         action: 'verify',
