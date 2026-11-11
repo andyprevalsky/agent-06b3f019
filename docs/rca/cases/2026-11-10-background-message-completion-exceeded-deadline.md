@@ -4,9 +4,9 @@ date: 2026-11-10
 title: Background message smoke completed after its unchanged deadline
 surface: agents
 component: agent-workflow-completion
-classification: our-bug
-problem_class: concurrency-inefficiency
-first_bad_boundary: root completion summary started only after the attempt_completion verifier returned, adding a serial LLM call before durable COMPLETED
+classification: undetermined
+problem_class: other
+first_bad_boundary: verified output was followed by serial final-summary generation before durable completion
 symptoms:
   - "Timeout after 182s (task timeout=180s)"
   - "Agent status: ACTIVE (expected COMPLETED)"
@@ -33,30 +33,11 @@ Strict read-only materialization recovered eighteen complete base calls and eigh
 
 Gate: NOT_INTRODUCED, narrowly for source effects versus accepted 8b46515e5 and observed main58be9c. Independent review checked the complete changed-path inventory, all sixteen actual executed guest helper payloads, native image/dependency identities, configuration and timing owners. Relevant changed branches were positively excluded on this trace, including backend chat-only paths and archive draining after terminal status. Whole environment/service-time causality remains UNKNOWN. Different live cross-workstream occupancy was observed but is not attributed as contention.
 
-## Repair diagnosis (2026-11-11)
-
-Authentic dumps of the failed root and the accepted 8b46515e5 root (strict R2 materialization, same gpt-6.1-sol / xhigh configuration) separate three effects:
-
-| Call | Failed TTFT / round trip | Accepted TTFT / round trip |
-| --- | --- | --- |
-| wait_for turn | 8.66 / 8.66 s | 2.08 / 2.09 s |
-| send_message_to_agent turn | 10.73 / 10.73 s | 2.95 / 2.97 s |
-| display turn | 23.32 / 39.11 s | 10.52 / 24.85 s |
-| attempt_completion turn | 8.05 / 8.06 s | 2.77 / 2.77 s |
-| verifier_execute | 14.75 / 74.04 s (2,392 output tokens) | 12.61 / 18.19 s (916) |
-| completion_summary | 15.31 / 15.88 s | 8.61 / 8.98 s |
-
-1. Provider time-to-first-token was uniformly about 6 s higher on every call of the failed run (environment; not source).
-2. The slower root turns delayed forwarding until 03:08:30.6, after the first explore run had already finished (03:08:24.2): the task's accepted completed-first race. The verifier then reasoned at length about that procedural caveat (1,062 reasoning characters versus none) and emitted 2.6x the tokens before still scoring 1.0.
-3. The root's completion summary is an independent presentation call over the same conversation, yet it started only after the verifier returned, so its whole round trip sat on the critical path between verified output and COMPLETED.
-
-Recorded history (119 attempts) shows a long latency tail: p90 about 145 s, maximum 187 s. Items 1 and 2 are external/model variance and are not changed. Item 3 is a harness ordering defect that converts every slow verifier into a longer completion.
-
 ## Solution
 
-The root workflow starts the unchanged `generate_completion_summary` activity (same model, effort, prompt and context) when the execute-loop verifier starts, via `run_agent(on_verification_started=..., on_verification_settled=...)`. `_mark_complete` adopts it only after that verdict passes; a rejected, interrupted or errored verdict discards it with its usage still accounted, and a failed or empty speculative summary falls back to the existing serial call. The final summary row is still posted before `mark_finished`/COMPLETED. Only the verifier's own structured output is absent from the speculative prompt, where it was awareness-only. Sub-agents and plan-phase verification keep the serial path. For the failed trace this moves durable COMPLETED from about T+185 to about T+170. Regressions: `run_agent.blackbox.py::completion_summary_hooks_bracket_verifier` and `workflow.blackbox.py::wf_root_completion_summary_overlaps_verifier`.
+OPEN. Preserve the final-summary-before-COMPLETED consumer contract; a bare status reorder is invalid. Investigate the authentic captured requests and serial publication boundary without changing original task assertions, clocks, deadlines, models or cache data. No source repair is claimed here.
 
-10k-agent behavior: at most one extra concurrent activity per root attempt_completion and no shared state; a rejected attempt costs one discarded summary call, which is accounted.
+As an additional non-introduced FLAKY task, it carries the required in-definition quarantine metadata and a retained failed-test packet. It still executes all original assertions and reports its native result. Dispatch the independent repair goal only after PR1905 merges, on a different Bugs devbox with durable evidence. Link the actual repair thread in the reviewed records follow-up. This is not a waiver or handoff of the assigned chat evidence repair.
 
 ## Human feedback
 
