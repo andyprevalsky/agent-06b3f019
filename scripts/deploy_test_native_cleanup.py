@@ -12,6 +12,7 @@ import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
+SOURCE_REFUSAL = 'private fleet source validation failed'
 ISOLATED_RENEWAL_PHASES = frozenset({'triage', 'needs-focused-plan', 'failed-gates'})
 
 # Bound raw run evidence per proof; ordinary receipts retain their existing limit.
@@ -59,6 +60,30 @@ def fields(raw):
 
 def finite(value):
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def native_run_admission(proof, participants, bindings):
+    """Explicit exact-size allocations inside the existing native proof budget."""
+    if 'native_run_admission' not in proof:
+        return {}
+    need(proof.get('layout') == 'campaign-v1' and proof.get('purpose') == 'isolated-validation',
+         'native run admission scope')
+    admission = proof['native_run_admission']
+    need(isinstance(admission, dict) and set(admission) == {'kind', 'files'}
+         and admission['kind'] == 'native-isolated-shared-raw-v1', 'native run admission shape')
+    allocations = admission['files']
+    expected = {str(fleet / '_batch/run.json') for fleet in participants}
+    need(isinstance(allocations, dict) and set(allocations) == expected,
+         'native run admission participant closure')
+    total = 0
+    for path, row in allocations.items():
+        need(isinstance(row, dict) and set(row) == {'bytes', 'sha256'}
+             and type(row['bytes']) is int and 0 < row['bytes'] <= RUN_RECORD_MAX_BYTES
+             and isinstance(row['sha256'], str) and re.fullmatch('[0-9a-f]{64}', row['sha256'])
+             and row['sha256'] == bindings.get(path), 'native run admission allocation')
+        total += row['bytes']
+    need(total <= MAX_RAW_RUN_PROOF_BYTES, 'native run aggregate raw admission bound exceeded')
+    return allocations
 
 
 def recovered_roots(path, bench, bound):
@@ -213,6 +238,152 @@ def stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, 
          'stopped startup positive terminal boundary')
 
 
+STOPPED_INERT_PRODUCER_SHA256 = '51f69b6cf96ca6ff4bceabb9c1b3a8b0c3da2ad5a0d5e7aa35368e4ed76685be'
+
+
+def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, pair, bound, document):
+    """Admit execution isolation for a reviewed STOP-retained inert fresh allocation only."""
+    import ast
+    spec = evidence['stopped_inert_allocation']
+    need(isinstance(spec, dict) and set(spec) == {'operator', 'result', 'intent', 'stopped'},
+         'stopped inert descriptor')
+    operator = bound(spec['operator'])
+    need(hashlib.sha256(operator).hexdigest()
+         == STOPPED_INERT_PRODUCER_SHA256,
+         'unreviewed stopped inert producer')
+    result, intent, final = (document(spec[k]) for k in ('result', 'intent', 'stopped'))
+    machine, volume, owner = row['machine_id'], row['volume_id'], row['fleet_owner_token']
+    need(result.get('kind') == 'exact-worker-stop-retain-v1' and result.get('status') == 'STOPPED_RETAINED'
+         and all(result.get(k) is False for k in ('task_credit', 'evidence_credit', 'cleanup_complete'))
+         and all(result.get(k) is True for k in ('custody_unchanged', 'primary_sealed_evidence_unchanged',
+                                                'runtime_latch_retained', 'ledger_retained')),
+         'stopped inert retention result')
+    names = {'MID', 'VOL', 'OWNER', 'REF', 'PRIMARY', 'INSTANCE', 'CONFIG_SHA'}
+    constants = {target.id: ast.literal_eval(node.value) for node in ast.parse(operator).body
+                 if isinstance(node, ast.Assign) for target in node.targets
+                 if isinstance(target, ast.Name) and target.id in names}
+    need(constants == {'MID': machine, 'VOL': volume, 'OWNER': owner, 'REF': receipt['source']['head'],
+                       'PRIMARY': result.get('primary_untouched'), 'INSTANCE': intent.get('instance_id'),
+                       'CONFIG_SHA': intent.get('config_sha256')}, 'stopped inert producer target binding')
+    need(result.get('machine') == intent.get('machine') == machine
+         and result.get('volume') == intent.get('volume') == volume
+         and result.get('owner') == intent.get('owner') == owner
+         and intent.get('kind') == 'exact-worker-stop-retain-intent-v1'
+         and intent.get('source') == receipt['source']['head']
+         and intent.get('script_sha256') == hashlib.sha256(operator).hexdigest()
+         and intent.get('method') == 'POST' and intent.get('path') == '/machines/' + machine + '/stop'
+         and intent.get('evidence_credit') is False
+         and result.get('stop_intent_sha256') == hashlib.sha256(bound(spec['intent'])).hexdigest()
+         and result.get('native_stopped_sha256') == hashlib.sha256(bound(spec['stopped'])).hexdigest(),
+         'stopped inert receipt binding')
+    attempt = Path(intent['attempt'])
+    before, after = (document(attempt / (name + '.private.json')) for name in ('native-before', 'native-after'))
+    guest, custody = document(attempt / 'guest-proof.json'), document(attempt / 'custody.private.json')
+    need(before == after and final.get('machine', {}).get('state') == 'stopped',
+         'stopped inert native capture')
+    initial, stopped = before['machine'], final['machine']
+    config = initial['config']
+    need(initial.get('id') == stopped.get('id') == machine and initial.get('state') == 'started'
+         and initial.get('instance_id') == stopped.get('instance_id') == intent.get('instance_id')
+         and isinstance(intent.get('instance_id'), str) and bool(intent['instance_id'])
+         and isinstance(initial.get('image_ref'), dict)
+         and re.fullmatch('sha256:[0-9a-f]{64}', initial['image_ref'].get('digest', ''))
+         and initial.get('image_ref') == stopped.get('image_ref')
+         and config == stopped.get('config')
+         and hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest() == intent.get('config_sha256')
+         and config.get('init') == {'cmd': ['sleep', 'infinity']} and config.get('restart') == {'policy': 'no'}
+         and not any(config.get(k) for k in ('auto_destroy', 'containers', 'processes', 'standbys', 'schedule'))
+         and config.get('env', {}).get('REF') == receipt['source']['head']
+         and config.get('env', {}).get('CLOUDBENCH_RUN_TOKEN') == token
+         and len(config.get('mounts', [])) == 1 and config['mounts'][0].get('volume') == volume
+         and config['mounts'][0].get('path') == '/data'
+         and before['volume'] == after['volume'] == final['volume']
+         and final['volume'].get('id') == volume and final['volume'].get('state') == 'created'
+         and final['volume'].get('attached_machine_id') == machine, 'stopped inert immutable native identity')
+    nonce = attempt.name.removeprefix('preflight-')
+    need(re.fullmatch('[0-9a-f]{32}', nonce) and guest.get('nonce') == nonce
+         and guest.get('kind') == 'exact-inert-quiescence-v1' and guest.get('machine') == machine
+         and re.fullmatch('[0-9a-f-]{36}', guest.get('boot', '')) and guest.get('unknown') == []
+         and isinstance(guest.get('inert_sleepers'), list) and guest['inert_sleepers']
+         and isinstance(guest.get('idle_pinned_agents'), list)
+         and isinstance(guest.get('idle_platform_hallpass'), list) and len(guest['idle_platform_hallpass']) <= 1
+         and finite(guest.get('observed_epoch')) and finite(intent.get('epoch'))
+         and receipt['finished_at'] <= guest['observed_epoch'] <= intent['epoch'] <= proof['confirmed_at'],
+         'stopped inert guest quiescence')
+    classified = guest['inert_sleepers'] + guest['idle_pinned_agents'] + guest['idle_platform_hallpass']
+    need(len(classified) <= 4096 and all(type(p.get('pid')) is int and p['pid'] > 1
+         and isinstance(p.get('birth'), str) and p['birth'].isdigit() for p in classified)
+         and len({p['pid'] for p in classified}) == len(classified), 'stopped inert process identities')
+    helper = bound(root / 'scripts/cloudbench-original-volume-capture.py')
+    # Reviewed 2026-11-11 (PR #1927): BILLING_GUEST is byte-identical to the ddde11af producer; the helper
+    # changed only in host-side capture validation (regular_bytes, verify_capture, cross_check_receipts).
+    need(hashlib.sha256(helper).hexdigest() == '7622b415d3b300219a2f17bb1dad1ea723fac037220fcab0d89519461018eb06',
+         'stopped inert guest producer changed')
+    source = next(ast.literal_eval(node.value) for node in ast.parse(helper).body
+                  if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BILLING_GUEST'
+                                                         for t in node.targets))
+    old_pin = "'1fc252c042a279787eb1a83a15c7e19d634fc0059ad8abf4acaa9a752f5684a2'"
+    source = source.replace(old_pin, old_pin + ", 'ead561de4c1c9488463aad634677d8be63d2e7d162b6b1b8f476727af4dc0310'")
+    source = source.replace('TARGET', repr(machine)).replace('NONCE', repr(nonce))
+    need(hashlib.sha256(source.encode()).hexdigest() == intent.get('guest_code_sha256'),
+         'stopped inert scanner identity')
+    primary = result.get('primary_untouched')
+    benches = json.loads(bound(fleet / '_batch/benches.json'))
+    need(len(benches) == 1 and isinstance(primary, str) and primary != machine
+         and intent.get('primary_untouched') == primary and row.get('source_machine_id') == primary,
+         'stopped inert worker source')
+    out = fleet / benches[0]['name']
+    need(bound(out / '.cid') == ('clone ' + primary + '\n').encode()
+         and bound(out / 'worker-clones.ids').decode().splitlines().count(machine) == 1
+         and machine not in bound(out / 'worker-ready.ids').decode().splitlines()
+         and not (out / 'worker-runtime-evidence' / machine).exists()
+         and not list(out.glob('worker-' + machine + '*'))
+         and not (out / 'worker-borrowed' / (machine + '.json')).exists(), 'stopped inert worker staged')
+    registry, audit = fleet_ownership_root(root) / owner, fleet_audit_root(root) / owner
+    need((registry / 'runtime-evidence-unconfirmed').is_file()
+         and fields(bound(registry / 'clones' / row['clone_name']))
+             == {'name': row['clone_name'], 'id': machine, 'volume_id': volume}, 'stopped inert custody released')
+    need(not (root / '.git/cloudbench-pool-claims' / machine).exists()
+         and not (registry / 'cold-handoff-outgoing').exists(), 'stopped inert reassigned')
+    need(hashlib.sha256(bound(fleet / 'execution-provenance.json')).hexdigest() == custody.get('source'),
+         'stopped inert source custody')
+    for name, base in (('registry', registry), ('audit', audit), ('index', fleet / '.native-retirement-index')):
+        saved = custody[name]
+        need(set(saved) == {str(base), *(str(p) for p in base.rglob('*'))}, 'stopped inert custody inventory')
+        for path, value in saved.items():
+            path = Path(path); st = path.lstat()
+            need(path.resolve() == path and not path.is_symlink(), 'stopped inert custody path')
+            current = ['directory' if path.is_dir() else 'file', st.st_dev, st.st_ino, st.st_mode]
+            if path.is_file(): current.append(hashlib.sha256(bound(path)).hexdigest())
+            need(current == value, 'stopped inert custody drift')
+    seal = custody['primary_seal']; runtime = out / 'remote-logs/runtime-evidence'
+    manifest_raw = bound(runtime / 'manifest.json'); manifest = json.loads(manifest_raw)
+    need(hashlib.sha256(manifest_raw).hexdigest() == seal.get('manifest_sha256')
+         and manifest.get('machine_id') == primary and manifest.get('run_token') == token
+         and set(manifest['files']) == set(seal['files']), 'stopped inert primary seal')
+    total = 0
+    for name, info in manifest['files'].items():
+        need(Path(name).as_posix() == name and not Path(name).is_absolute() and '..' not in Path(name).parts,
+             'stopped inert primary path')
+        data = bound(runtime / name, MAX_RAW_RUN_PROOF_BYTES); total += len(data)
+        digest = hashlib.sha256(data).hexdigest()
+        need(total <= MAX_RAW_RUN_PROOF_BYTES and digest == seal['files'][name]
+             and info == {'bytes': len(data), 'sha256': digest}, 'stopped inert primary file changed')
+    need(total == seal['bytes'], 'stopped inert primary bytes')
+    for observed in pair:
+        native = json.loads(bound(observed['raw_response']))
+        expected = final[observed['kind']]
+        need(finite(observed.get('observed_at')) and intent['epoch'] <= observed['observed_at'] <= proof['confirmed_at'],
+             'stopped inert current provider clock')
+        need(native.get('id') == expected['id'] and native.get('state') == expected['state'],
+             'stopped inert provider rebound')
+        if observed['kind'] == 'machine':
+            need(native.get('instance_id') == stopped['instance_id'] and native.get('config') == config
+                 and native.get('image_ref') == stopped.get('image_ref'), 'stopped inert provider reused')
+        else:
+            need(native.get('attached_machine_id') == machine, 'stopped inert volume rebound')
+
+
 def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
     owner = life['fleet_owner_token']
@@ -263,7 +434,13 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
             stopped_startup = next(r for r in pair if r['kind'] == 'machine')['metadata'].get('state') == 'stopped'
             if stopped_startup:
                 need(registry.exists() and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
-                stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document)
+                if 'stopped_inert_allocation' in evidence:
+                    need(set(evidence) == {'provider_pair', 'stopped_inert_allocation'}, 'stopped inert evidence fields')
+                    stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, pair, bound, document)
+                else:
+                    stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document)
+            else:
+                need('stopped_inert_allocation' not in evidence, 'stopped inert allocation is not stopped')
             for observed in pair:
                 need(observed['method'] == 'GET' and observed['http_status'] == 200 and observed['no_retry'] is True
                      and observed['expected_volume'] == row['volume_id']
@@ -986,6 +1163,7 @@ def validate(receipt, owner, proof):
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
+    validated_sizes = {}
     run_artifacts = set()
     raw_remaining = [MAX_RAW_RUN_PROOF_BYTES]
     historical_sources = {}
@@ -1008,6 +1186,7 @@ def validate(receipt, owner, proof):
             raw = path.read_bytes()
         need(bindings.get(str(path)) == hashlib.sha256(raw).hexdigest(), 'file hash mismatch: ' + str(path))
         used.add(str(path))
+        validated_sizes[str(path)] = len(raw)
         if historical_head is not None:
             historical_sources[str(path)] = historical_head
         return raw
@@ -1271,7 +1450,12 @@ def validate(receipt, owner, proof):
             need(one and one[0] not in parents and type(job.get('controller_pid')) is int
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
                  'campaign parent identity')
-            parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code']}
+            # A campaign-v1 parent whose controller refused at private fleet source validation
+            # stopped before allocation; it is held to the same zero-resource admission checks.
+            refusals = [x for x in lines if x.startswith(SOURCE_REFUSAL)]
+            parents[one[0]] = {'checks': {job['task']}, 'exit': job['controller_exit_code'],
+                               'source_refused': layout == 'campaign-v1' and job['status'] == 'failed'
+                               and job['controller_exit_code'] == 1 and len(refusals) == 1}
             handles.extend(one)
         need(len(handles) == len(set(handles)), 'duplicate campaign participant')
     else:
@@ -1302,10 +1486,13 @@ def validate(receipt, owner, proof):
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    run_admission = native_run_admission(proof, participants, bindings)
     admission_parents = frozenset()
     if layout == 'campaign-admission-rejected-v1':
         from deploy_test_native_admission import validate_campaign
         admission_parents = validate_campaign(receipt, proof, root, runs, parents, participants, bound, document)
+    if layout == 'campaign-v1':
+        admission_parents = admission_parents | frozenset(f for f, p in parents.items() if p.get('source_refused'))
     cancelled_parent_zero = frozenset()
     if 'cancelled_parent_admission' in proof:
         from deploy_test_native_cancelled_parent import cancelled_parent_admission
@@ -1323,9 +1510,12 @@ def validate(receipt, owner, proof):
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
+            allocation = run_admission.get(str(run_path))
             run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
-                                    raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
-                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES)
+                                    raw_limit=allocation['bytes'] if allocation else min(
+                                        RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
+                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES,
+                                    expected_size=allocation['bytes'] if allocation else None)
             used.add(str(run_path))
             run_artifacts.add(str(run_path))
         else:
@@ -1490,10 +1680,13 @@ def validate(receipt, owner, proof):
         for path in bindings:
             if path in run_artifacts:
                 from deploy_test_run_artifact import read_run_artifact
+                allocation = run_admission.get(path)
                 read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES,
-                                  raw_limit=MAX_RAW_FORENSIC_RUN_BYTES)
+                                  raw_limit=allocation['bytes'] if allocation else MAX_RAW_FORENSIC_RUN_BYTES,
+                                  expected_size=allocation['bytes'] if allocation else None)
             else:
-                bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
+                # Rehash each exact file within the size already verified by its owning reader.
+                bound(path, max(MAX_RECEIPT_BYTES, validated_sizes.get(path, 0)))
     need(used == set(bindings), 'proof file closure')
     result = {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
@@ -1678,6 +1871,99 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
+# The historical coordinator recorded this exception before opening output or
+# calling run_command. Authenticate its immutable producer and exact request;
+# missing output by itself never establishes an unexecuted operation.
+LEGACY_ISOLATED_REFUSAL = {
+    'source': {'head': 'e979f73b8930bedb3dd5d3dba1518520e2931d8d',
+               'digest': '9febe7d354fb883b518af2f9ce74778220088dd43816fdc748418b645ee19847'},
+    'token': '1958fbf77dd84099b9fb21a6259fca71',
+    'request_sha256': 'fa2938ec9282fc49a0a91f3f30aa763858ad250cd24023711397d6404b6f95b3',
+    'relative_request': '.context/deploy-pipeline/attempts/13/focused/smoke/request.json',
+    'phase': 'focused',
+}
+ISOLATED_REFUSAL_PRODUCERS = {
+    'scripts/deploy_test_cycle.py': 'b1d74544dce3577ac87babea109b7e4e022da453e6a7309911bb3bbc8c396f19',
+    'scripts/deploy_test_native_cleanup.py': '45fe68918105a0bb05b315fba73e1f1ababc734898b654099463a0bb12248759',
+}
+ISOLATED_REFUSAL_KIND = 'isolated-native-pre-command-refusal-v1'
+ISOLATED_REFUSAL_REASON = 'native cleanup: next source/inventory binding'
+
+
+def isolated_refusal_successor(state, prior, latest):
+    """A proved pre-command refusal adds no native operation to renew or retire."""
+    from deploy_test_cycle import bounded_read, sha_file
+    rows = [(a, r) for a in state['attempts'] for r in a.get('results', [])
+            if r.get('gate') == prior['gate']]
+    need(latest.get('pre_command_refusal') is None or isinstance(latest['pre_command_refusal'], dict),
+         'malformed pre-command refusal witness')
+    if ((latest.get('pre_command_refusal') or {}).get('kind') != ISOLATED_REFUSAL_KIND
+            and latest.get('reason') != ISOLATED_REFUSAL_REASON):
+        return latest  # Unknown or executed debt follows the original strict path.
+    need(len(rows) >= 2 and rows[-1][1] is latest, 'refusal latest identity')
+    attempt, row = rows[-1]
+    root = Path(prior['owner']['worker_root'])
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    witness = row.get('pre_command_refusal')
+    if witness is None:
+        capture = LEGACY_ISOLATED_REFUSAL
+        request_path = root / capture['relative_request']
+        need(row == dict(gate=prior['gate'], status='FAIL', complete=False,
+                         cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'),
+                         source=capture['source'], reason=ISOLATED_REFUSAL_REASON),
+             'legacy pre-command refusal shape')
+        need(attempt.get('source') == capture['source'] and attempt.get('phase') == capture['phase']
+             and not attempt.get('stale') and not attempt.get('interrupted'), 'legacy refusal attempt')
+        for relative, expected in ISOLATED_REFUSAL_PRODUCERS.items():
+            raw = subprocess.check_output(['git', '-C', str(root), 'show',
+                capture['source']['head'] + ':' + relative], timeout=30)
+            need(hashlib.sha256(raw).hexdigest() == expected, 'legacy refusal producer')
+        need(sha_file(request_path) == capture['request_sha256'], 'legacy refusal request hash')
+        token = capture['token']
+        allowed = {'request.json'}
+    else:
+        need(isinstance(witness, dict) and set(witness) == {'kind', 'request', 'request_sha256',
+             'stage', 'command_started'} and witness.get('stage') == 'isolated_request'
+             and witness.get('command_started') is False, 'typed refusal witness')
+        request_path = Path(witness['request'])
+        need(request_path.is_relative_to(root / '.context') and request_path.name == 'request.json'
+             and request_path.parent.name == prior['gate'] and request_path.parent.parent.name == attempt.get('phase')
+             and request_path.parent.parent.parent.name.isdigit()
+             and request_path.parent.parent.parent.parent.name == 'attempts', 'typed refusal locator')
+        need(sha_file(request_path) == witness['request_sha256']
+             and bounded_read(request_path.parent / 'receipt.json', 'pre-command receipt') == row,
+             'typed refusal sealed request/receipt')
+        token = row.get('token')
+        need(row == dict(gate=prior['gate'], status='FAIL', complete=False,
+                         cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=attempt.get('source'),
+                         reason=ISOLATED_REFUSAL_REASON, token=token, executed=False, native_exit=None,
+                         pre_command_refusal=witness), 'typed pre-command refusal shape')
+        allowed = {'request.json', 'receipt.json'}
+    need(request_path.resolve() == request_path and not request_path.is_symlink()
+         and {p.name for p in request_path.parent.iterdir()} == allowed
+         and all(p.is_file() and not p.is_symlink() for p in request_path.parent.iterdir()),
+         'refusal request-only namespace')
+    request = bounded_read(request_path, 'pre-command request')
+    need(isinstance(token, str) and re.fullmatch('[0-9a-f]{32}', token)
+         and request.get('token') == token and request.get('gate') == prior['gate']
+         and request.get('source') == row['source'] == attempt.get('source')
+         and request.get('phase') == attempt.get('phase')
+         and attempt.get('phase') in {'focused', 'failed-gates', 'initial', 'final', 'triage'}
+         and not attempt.get('stale') and not attempt.get('interrupted'), 'refusal request identity')
+    checks, skips = request.get('checks'), request.get('skips')
+    need(isinstance(checks, list) and all(isinstance(v, str) for v in checks)
+         and isinstance(skips, dict) and not set(checks) & set(skips)
+         and len(checks) == len(set(checks)) and set(checks) | set(skips) == set(gate['checks'])
+         and len(set(gate['checks'])) == len(gate['checks'])
+         and request.get('worker_recipe') == gate.get('worker_recipe'), 'refusal full inventory')
+    native_root = root / '.context/deploy-cloud' / hashlib.sha256(token.encode()).hexdigest()
+    need(not native_root.exists() and not native_root.is_symlink(), 'refusal native root exists')
+    # Never skip a second unknown/refused row or an admitted incomplete operation.
+    successor = rows[-2][1]
+    need(successor.get('executed') is True, 'refusal preceding executed successor required')
+    return successor
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
@@ -1696,6 +1982,8 @@ def renew_isolated_validation(state, request_token, proof):
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
     latest = latest_receipts(state).get(prior['gate'])
+    if latest is not None and latest != receipt:
+        latest = isolated_refusal_successor(state, prior, latest)
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
@@ -1720,6 +2008,15 @@ def reconcile(state, occurrence_id, proof):
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
+        # Existing isolated obligations use the same guarded renewal regardless of
+        # whether the caller supplies the original failure ID or request token.
+        registered = [entry for key, entry in state.get('reconciled_owners', {}).items()
+                      if entry.get('purpose') == 'isolated-validation'
+                      and (key == proof.get('receipt_sha256') or entry.get('token') == proof.get('request_token'))]
+        if failure is not None and registered and proof != registered[0]['proof']:
+            need(len(registered) == 1 and registered[0].get('occurrence') == occurrence_id,
+                 'existing isolated reconciliation identity')
+            return renew_isolated_validation(state, registered[0]['token'], proof)
         if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
                 and proof.get('purpose') == 'isolated-validation'):
             return renew_isolated_validation(state, occurrence_id, proof)

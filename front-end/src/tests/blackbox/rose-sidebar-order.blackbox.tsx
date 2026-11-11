@@ -5,7 +5,7 @@
  * newest user message. A pinned row is the only way a finished agent outranks
  * a running one, so an expanded pinned row shows a pin.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { screen, within } from '@testing-library/react';
 
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
@@ -15,9 +15,9 @@ import { expandBar, mockProjectsApi, signedInUser } from './rose-sidebar.fixture
 import { renderWithProviders } from './test-wrapper';
 
 const RUNNING = { status: 'ACTIVE' as const, temporal_workflow_id: 'wf-1' };
-// Fixture times are relative to a pinned clock: finished rows idle > 4 days move
-// behind "View old agents" (oldAgents.ts), so a wall-clock `now` would expire them.
-const NOW = Date.parse('2026-11-07T12:00:00Z');
+// Relative to now: finished agents last active over 4 days ago leave the bar (oldAgents.ts),
+// so a fixed calendar anchor silently aged these rows out on 2026-11-11.
+const NOW = Date.now();
 const at = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString();
 
 function renderBar(overrides: Parameters<typeof defaultProps>[0]) {
@@ -36,16 +36,11 @@ function agentOrder(): string[] {
 
 describe('Rose left bar row order', () => {
   beforeEach(() => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(NOW);
     localStorage.clear();
     mockSession();
     mockProjectsApi([]);
   });
-  afterEach(() => {
-    localStorage.clear();
-    vi.useRealTimers();
-  });
+  afterEach(() => localStorage.clear());
 
   it('keeps running and needs-input agents above finished ones, whatever order the API returns', async () => {
     // Finished rows carry the freshest updated_at and are listed first.

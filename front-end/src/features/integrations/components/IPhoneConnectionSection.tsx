@@ -4,7 +4,8 @@
  *   section header "IPHONE" · row: app-icon tile · "iPhone" · right-side status + action
  *
  *   [LOADING]        "Checking…" (Connect waits for the first read)
- *   [DISABLED]       account not enabled/configured → mailto copy under the row, no action
+ *   [DISABLED]       "Request access" → persists request + admin SMS → [ACCESS_REQUESTED]
+ *   [ACCESS_REQUESTED] disabled "Access requested"; survives reload until account enablement
  *   [NOT_CONNECTED]  "Connect" ──click──> POST /iphone/connect (one request key)
  *                      ok → [SETTING_UP] + opens the Phone app in DEVICE VIEW (watch boot-up)
  *                      error → inline error, stays [NOT_CONNECTED]
@@ -48,14 +49,14 @@ function AppleIcon() {
 const STATUS_CLASSES = 'shrink-0 text-[12px] text-muted-foreground';
 
 export default function IPhoneConnectionSection() {
-  const { status, busy, error, connect } = useIPhoneConnection();
+  const { status, busy, error, connect, requestAccess, refresh } = useIPhoneConnection();
   const launcher = usePhoneLauncher();
   const roseDesktop = useRoseDesktop();
   const phoneApp = roseDesktop && launcher !== null ? launcher : null;
   const unavailable = status !== null && (!status.enabled || !status.configured);
-  const ready = status?.status === 'ready';
-  const settingUp = status?.status === 'setting_up';
-  const reauth = status?.status === 'needs_reauth';
+  const ready = !unavailable && status?.status === 'ready';
+  const settingUp = !unavailable && status?.status === 'setting_up';
+  const reauth = !unavailable && status?.status === 'needs_reauth';
   const label =
     status === null
       ? error === null
@@ -70,7 +71,7 @@ export default function IPhoneConnectionSection() {
             : reauth
               ? 'Needs reauth'
               : null;
-  const canConnect = !ready && !settingUp && !unavailable;
+  const canConnect = status !== null && !ready && !settingUp && !unavailable;
   const onConnect = async () => {
     const started = await connect();
     if (started !== null && started.status === 'setting_up') phoneApp?.openPhoneDevice();
@@ -132,20 +133,38 @@ export default function IPhoneConnectionSection() {
               )}
             </button>
           )}
+          {unavailable && (
+            <button
+              type="button"
+              className={ACTION_CLASSES}
+              disabled={busy || status.accessRequested}
+              onClick={() => void requestAccess()}
+              aria-label={
+                status.accessRequested ? 'iPhone access requested' : 'Request iPhone access'
+              }
+            >
+              {status.accessRequested
+                ? 'Access requested'
+                : busy
+                  ? 'Requesting…'
+                  : 'Request access'}
+            </button>
+          )}
+          {status === null && error !== null && (
+            <button
+              type="button"
+              className={ACTION_CLASSES}
+              onClick={() => void refresh()}
+              aria-label="Retry iPhone connection"
+            >
+              Retry
+            </button>
+          )}
         </div>
         {settingUp && status !== null && (
           <div className="ml-[46px] mt-2">
             <IPhoneSetupProgress connection={status} variant="inline" />
           </div>
-        )}
-        {unavailable && (
-          <p className="ml-[46px] mt-1 text-xs text-muted-foreground">
-            To enable iPhone access, email{' '}
-            <a className="underline" href="mailto:andy@roselabs.ai">
-              andy@roselabs.ai
-            </a>
-            .
-          </p>
         )}
         {error && (
           <p role="alert" className="ml-[46px] mt-1 text-xs text-destructive dark:text-red-300">

@@ -30,7 +30,7 @@
  */
 
 import { useSyncExternalStore } from 'react';
-import { AlertCircle, Check, X } from 'lucide-react';
+import { AlertCircle, Bot, Check, X } from 'lucide-react';
 
 import { useRoseTheme } from '@/features/rose-theme';
 import { cn } from '@/lib/utils';
@@ -140,14 +140,18 @@ function DoneGlyph({ failed }: { failed: boolean }) {
 export default function AgentStatusIndicator({
   status,
   seed,
+  mobile = false,
 }: {
   status: AgentRunStatus;
   /** Agent id — desyncs this row's animation from its neighbours'. */
   seed?: string;
+  /** Mobile sidebar activity uses a static robot. */
+  mobile?: boolean;
 }) {
   return (
     <span role="img" aria-label={status.label} title={status.label}>
-      {status.state === 'active' && <ActiveDots seed={seed} />}
+      {status.state === 'active' &&
+        (mobile ? <Bot className="h-3.5 w-3.5" aria-hidden="true" /> : <ActiveDots seed={seed} />)}
       {status.state === 'needs-help' && <NeedsHelpDot />}
       {status.state === 'done' && <DoneGlyph failed={status.failed === true} />}
     </span>

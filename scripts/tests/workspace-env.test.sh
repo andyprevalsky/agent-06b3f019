@@ -701,7 +701,7 @@ sandbox_base() {
     # shellcheck source=/dev/null
     . "$HELPER_SRC"
     export BACKEND_URL="http://localhost:24740" "$@"
-    export_sandbox_backend_base_url
+    export_sandbox_backend_base_url || return $?
     printf '%s|%s' "${ROSE_UI_PUBLISH_BASE_URL:-}" "${USERCONTENT_BASE_URL:-}"
   )
 }
@@ -713,6 +713,16 @@ expect_eq "$(sandbox_base PUBLIC_BASE_URL=https://t.example ROSE_UI_PUBLISH_BASE
   "https://explicit.example|" "an explicit ROSE_UI_PUBLISH_BASE_URL wins"
 grep -qx 'export_sandbox_backend_base_url' "$ROOT_DIR/scripts/run.sh" \
   || { echo "FAIL: run.sh does not export the sandbox backend base after the tunnel" >&2; exit 1; }
+for inherited in http://localhost:24740 https://foreign.example https://owned.example/foreign \
+ 'https://owned.example?query=x' 'https://owned.example/#fragment' 'https://user:password@owned.example' https://owned.example:0; do
+ if sandbox_base BENCHMARK_PUBLIC_TUNNEL_RUN_ID=fixture PUBLIC_BASE_URL=https://owned.example ROSE_UI_PUBLISH_BASE_URL="$inherited" >/dev/null 2>&1; then
+  echo 'FAIL: scoped mismatching callback origin was accepted' >&2; exit 1
+ fi
+done
+expect_eq "$(sandbox_base BENCHMARK_PUBLIC_TUNNEL_RUN_ID=fixture PUBLIC_BASE_URL=https://owned.example/ ROSE_UI_PUBLISH_BASE_URL=https://owned.example/)" \
+ 'https://owned.example/|http://localhost:24740' 'matching scoped override preserves trailing slash and local usercontent'
+expect_eq "$(sandbox_base BENCHMARK_PUBLIC_TUNNEL_RUN_ID=fixture PUBLIC_BASE_URL=https://owned.example ROSE_UI_PUBLISH_BASE_URL=https://OWNED.example:443)" \
+ 'https://OWNED.example:443|http://localhost:24740' 'matching normalized origin is accepted unchanged'
 echo "PASS: run.sh exports the sandbox backend base"
 
 # cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;

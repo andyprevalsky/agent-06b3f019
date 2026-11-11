@@ -218,6 +218,7 @@ export default function RoseAgentBranch({
           depth={depth}
           indented={indented}
           status={childStatus(row)}
+          mobile={mobile}
           onSelectAgent={s.onSelectAgent}
         />
       );
@@ -246,6 +247,7 @@ export default function RoseAgentBranch({
         <RoseCodeAgentRow
           key={entry.code.code_agent_id}
           codeAgent={entry.code}
+          mobile={mobile}
           isExpanded
           parentIndented={indented}
           depth={depth + 1}

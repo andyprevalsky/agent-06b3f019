@@ -18,6 +18,7 @@ tags:
   - cloudbench
 sources:
   - PR #1905
+  - PR #1915
   - commit cb7a8ae130a179f92bb20e1a1ab848f7d76d9092
 repro: executed
 status: open
@@ -35,7 +36,7 @@ Both independent investigations reproduced the exact owning import failure with 
 
 ## Solution
 
-The requirements now pin Playwright 1.63.0, matching the SDK contract the existing owner implements. The existing post-copy image verification step also imports the real owner, so an incompatible graph fails before publication/activation. Retain its native process-exit, cancellation and resource ownership behavior; do not rename one private import and assume the newer SDK has identical internals. Keep the existing owning browser-cleanup suite and all browser/payment task assertions. A new compatible source-bound image and fresh native task/publisher/full-gate acceptance remain required before closure.
+The requirements now pin Playwright 1.63.0, matching the SDK contract the existing owner implements. The warm benchmark image verification step imports the real owner after source copy. The production worker Dockerfile also runs that import after switching to its final non-root runtime user, so each artifact rejects an incompatible graph during its own build before publication/activation. Retain its native process-exit, cancellation and resource ownership behavior; do not rename one private import and assume the newer SDK has identical internals. Keep the existing owning browser-cleanup suite and all browser/payment task assertions. A new compatible source-bound image and fresh native task/publisher/full-gate acceptance remain required before closure.
 
 ## Verification and retained limits
 
@@ -50,22 +51,109 @@ venv/bin/python tests/blackbox/browser_cleanup_receipt.blackbox.py
 
 Before repair the actual image installed 1.65 and the unchanged owner import/native cases failed. The installed 1.63 control passes the same native startup/cancellation assertions; it supplies no full task or image acceptance credit. The new image must pass its real import guard and the unchanged native browser/payment tasks at their original deadlines.
 
+## Production recurrence on November 10
+
+Agent 546485cc-45c4-48f7-80cf-1e7f3d4fb2a8 encountered three initialization
+failures before any action or navigation. The exact failed worker's stopped
+image was inspected through authenticated registry reads without restarting it.
+Its checksum-verified dependency layer contains intact Playwright 1.65.0 and
+the public `connection.py`/`transport.py` paths, matching the official wheel;
+the owner's required `_connection.py` is absent. This is an incompatible
+resolved SDK, rather than a corrupted installation, site failure or OAuth error.
+The owner bytes match the unchanged reproduction and compatible 1.63 control.
+
+The independent recurrence on agent 03f268b1-384c-5092-8ea8-8a7fbb022789
+has the same zero-action stack and actual failed-machine readback of 1.65.0.
+Its existing phone coordinator owns the eventual original-device retry.
+PR #1915 reconciled with the original repair owner and reused the exact
+three-file compatibility patch. Independent existing owning suites pass all
+55 startup/cancellation cases with 1.63; the identical owner import fails with
+the authentic 1.65 wheel. These controls do not establish a production rollout.
+Exact merged-source deployment, live installed-package/import readback and
+production browser navigation remain required for this assigned repair.
+
+The first PR #1915 cloud smoke campaign retained eleven native successes and
+two native SKIPPED non-passes: one judge capacity classification and one exact
+sandbox AgentCard release stall. Neither supplies acceptance credit or a waiver
+for the assigned SDK failure. All original controller and cleanup receipts are
+retained. A separate semantic adapter defect dropped completed retried UI
+assertion failures to UNVERIFIED; its distinct case records the reporting repair.
+
+### Production recurrence on November 10 at 23:06–23:07 UTC
+
+Root agent `64d34b38-7a15-49f9-a347-d153dd0d69b9` reported two independent
+browser launches failing before navigation. Independently retained native logs
+show zero-action initialization failures at 23:06:48.571462602 and
+23:07:28.589502646 UTC on machine `8676e2ae915e28`. An authenticated read of that
+exact worker bound image `75309c5d7f48f0392b3a401c0065807dba3e1c6b3af13eb189d7d132f327c423`
+to source `c1a3a0c71`. A read-only Python probe found installed Playwright 1.65.0,
+no private `_connection` module and the unchanged owner SHA256
+`58fd96e0cbbfaaf32c6303b8a191c27146fb302f8730ad8d3a3cba88ed9c7955`.
+The real owner import exited one with the exact original ModuleNotFoundError.
+This corroborates the same owning dependency boundary, not a ChatGPT site or
+authentication failure. No services, credentials or browser workflow changed
+to collect the proof. Private original attachments and checksums are retained
+under `.context/rca-playwright/reconciliation-64d34/recurrence/`.
+
+This recurrence adds no production repair credit. The user approved one exact-source
+verification review for 4bcda6aa9cb5b7df9467e7fd2940e6638c686dcb. That review
+completed; the deployment remains unmerged and native production acceptance is
+still required. Subsequent tooling and diagnostic changes do not inherit that
+review approval.
+
+Independent review of the later production recurrence identified an artifact
+coverage gap: the warm benchmark Dockerfile import check does not validate the
+production worker Dockerfile. The production image now executes the same real
+owner import after source copy and the final USER worker directive. The exact
+RUN command, executed against the retained authentic 1.65 wheel, fails at the
+original owner.py:14; the unchanged command with installed 1.63 passes. These
+command-level controls are not an image-build or production acceptance claim.
+The production artifact must actually build with this check before activation,
+and live installed-package/import readback and browser navigation remain required.
+
+## Validation follow-up on November 11
+
+The exact production Dockerfile built successfully on source 4bcda6a. A fresh
+container running as its final worker user verified installed Playwright 1.63.0
+and the unchanged real owner import; the existing 55 native startup/cancellation
+cases also passed in that image. These are local artifact controls, not a live
+rollout or navigation result.
+
+The current source-bound semantic run retained UI 53 PASS / 5 FAIL and latency
+5 PASS, complete cleanup and unchanged source. Three failures match the existing
+sidebar repair's native evidence; two real-agent message-count failures remain
+UNKNOWN. Four checksum-verified retained checkpoints expose failed Rose callback
+requests but do not establish their effective destination or timely parent
+publication. Neither a prior passing run nor the unchanged browser pin supplies
+causal attribution for these additional failures.
+
+Reuse the existing owner's published diagnostic collector from
+cf0aa8a31e46d2197492b9c59d220aae9010bcbe: retain already-created private model
+dumps and manifest/numeric worker logs under unchanged size limits, log only the
+constructed callback origin, and record fixed native monitor/close metadata.
+The actual existing owning checks fail before this reuse and pass afterward:
+70 transport tests, six backend tests and nine registered agent functions.
+Privacy and diagnostic-sink controls preserve normal URLs, providers, completion
+predicates, goals, deadlines, assertions and concurrency. This repairs an
+observation gap, not the original realtime behavior. Further native RCA and the
+assigned SDK production import/startup/navigation verification remain required.
+
 ## Related cases
 
 The warm-image fingerprint mismatch case concerns selecting a compatible dependency source. This incident also shows that equal unbounded manifest fingerprints do not establish an identical resolved SDK. The native driver ownership case remains the authority for cancellation and exact process cleanup. Neither an old passing task nor a source-only comparison replaces actual runtime proof.
 
 ## Human feedback
 
-No new feedback for this SDK repair. The existing assignment requires unchanged task assertions, deadlines, concurrency, privacy guards and native outcomes.
+The user approved only the exact-source verification review described above.
+The existing prohibition on new paid AgentCard operations and the exact selected
+check election remain in effect. The assignment retains unchanged assertions,
+deadlines, concurrency, privacy guards and native outcomes; it does not authorize
+account or physical-phone actions by this repair coordinator.
 
 ## Reusable lesson
 
 Pin an SDK when ownership depends on its private APIs. Verify the installed adapter boundary before publishing an image; matching unbounded manifests alone does not establish runtime compatibility.
 
-## PR1881 follow-on integration
+## PR1920 integration provenance
 
-PR1881 consumed an already published dependency image and independently reached the same SDK import boundary. Its original source `b5ede511a36a1f9a0eab538d6c539bdbefba3415` reused the published donor snapshot without resolving dependencies. Six native browser/payment tasks failed with their original assertions; scoped payment snapshots showed no new financial identifiers. Its authentic earlier passing image contained Playwright 1.64.1, while the failing image contained 1.65.0. The same frozen owner imports successfully against the former and fails against the latter. This differs from the earlier PR1905 handler baseline described above; neither comparison identifies the earlier image publisher.
-
-A subsequent six-check stage consumed the new pinned image but correctly refused the old unpinned source fingerprint before executing tasks. All six checks remain UNVERIFIED; their original resource and financial obligations remain quarantined. The existing isolated-validation contract permits a separate execution namespace with the six exact old Machine/Volume pairs excluded, without granting cleanup or execution credit.
-
-PR1881 integrates the established minimal SDK pin and post-copy import guard from commit `848540637510d2090ecaa11a1b49f7f1515cf3dc`. On November 10 UTC, its unchanged registered browser-cleanup suite passed all 55 cases. Fresh source-bound native task acceptance and full deployment gates remain pending; this local result does not close the original task failures.
+The sidebar repair deploy reused the published owning implementation and tests after its original source-bound cloud smoke independently reached this same boundary. This reuse does not claim the originating repair goal or whole benchmark acceptance complete. Fresh final-source deployment validation remains independently required.
