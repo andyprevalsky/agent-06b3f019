@@ -1079,6 +1079,192 @@ class Cycle(unittest.TestCase):
         self.assertEqual([], before['attempts']); self.assertEqual({}, before['skips'])
         self.assertEqual(new, before['plan']); self.assertEqual(2, len(before['historical_no_retry_custody']))
 
+    def pending_custody_fixture(self):
+        new = self.custody_fixture()
+        for plan in (self.plan, new): plan['gates'][2]['category'] = 'semantic-stack'
+        self.state['plan'] = copy.deepcopy(self.plan)
+        self.state['plan_digest'] = c.digest(self.plan)
+        gate = self.plan['gates'][2]
+        evidence = {'causes': [{'attribution': 'UNKNOWN', 'error': 'original realtime failure'}]}
+        result = self.root / '.context/pending/result.json'
+        adapter = dict(token='pending-native', source=self.state['source'], gate='ui',
+                       cases={'c': 'FAIL'}, complete=True, cleanup_complete=True, source_unchanged=True,
+                       interrupted=False, reused=False, native_exit=1, evidence={'c': evidence})
+        c.write(result, adapter)
+        receipt = dict(adapter, status='FAIL', executed=True, timed_out=False, cancelled=False,
+                       lingering_group=False, worker_result=str(result),
+                       worker_evidence={'c': evidence}, command=gate['command'])
+        self.state['attempts'].append(dict(phase='focused', source=self.state['source'], results=[receipt]))
+        pending = dict(id='pending-nonfinancial', gate='ui', check='ui/c', source=self.state['source'],
+                       complete=True, native_result='FAIL', phase='focused', command=gate['command'],
+                       worker_result=str(result), worker_evidence=evidence)
+        self.state['failures'].append(pending)
+        self.state.update(phase='triage', ready=False, pending=[pending['id']])
+        return new, result
+
+    def test_historical_custody_refresh_preserves_quiescent_nonfinancial_pending(self):
+        import deploy_test_historical_custody as h
+        new, result = self.pending_custody_fixture()
+        before = copy.deepcopy(self.state)
+        proof = h.build(self.state, self.plan, new, self.root)
+        self.assertEqual(before, self.state)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        for key in ('pending', 'failures', 'attempts', 'pending_post_merge'):
+            self.assertEqual(before[key], self.state[key])
+        self.assertEqual(new['source'], self.state['source'])
+        self.assertEqual(('quick', 'triage', False),
+                         (self.state['phase'], self.state['next_after_quick'], self.state['ready']))
+        self.assertEqual('UNKNOWN', self.state['failures'][-1]['worker_evidence']['causes'][0]['attribution'])
+        self.assertEqual([4396, 4396], [r['original_amount_cents'] for r in self.state['historical_no_retry_custody']])
+        self.assertTrue(all(not any(r['credit'].values()) for r in self.state['historical_no_retry_custody']))
+        c.advance(self.state, [])  # The ordinary quick handoff returns to unresolved triage.
+        self.assertEqual(('triage', False), (self.state['phase'], self.state['ready']))
+        self.assertEqual(before['failures'], self.state['failures'])
+
+    def test_historical_pending_custody_refuses_unsafe_rows_and_drift(self):
+        import deploy_test_historical_custody as h
+        new, result = self.pending_custody_fixture()
+        original, adapter = copy.deepcopy(self.state), c.read(result)
+        for case in ('running', 'live', 'resume', 'cancel', 'owner', 'unknown-owner', 'missing',
+                     'duplicate', 'malformed', 'incomplete', 'financial', 'cloud', 'unknown-category',
+                     'bad-source', 'missing-adapter', 'bad-cleanup', 'bad-case', 'bad-receipt'):
+            state = copy.deepcopy(original); c.write(result, adapter)
+            if case == 'running': state['running'] = True
+            elif case == 'live': state['live_failures'] = []
+            elif case == 'resume': state['resume_phase'] = 'focused'
+            elif case == 'cancel': c.CANCEL.set()
+            elif case == 'owner': state['attempts'][-1]['results'][0]['cleanup_owner'] = {'owned': True}
+            elif case == 'unknown-owner':
+                state['attempts'][-1]['results'][0]['complete'] = False
+                result.unlink()
+            elif case == 'missing': state['pending'] = ['absent']
+            elif case == 'duplicate': state['pending'] *= 2
+            elif case == 'malformed': state['pending'] = [None]
+            elif case == 'incomplete': state['failures'][-1]['complete'] = False
+            elif case == 'financial': state['pending'] = [state['failures'][0]['id']]
+            elif case == 'cloud': state['plan']['gates'][2]['native_cloud'] = True
+            elif case == 'unknown-category': state['plan']['gates'][2]['category'] = 'unclassified-financial'
+            elif case == 'bad-source': state['failures'][-1]['source'] = {'head': 'wrong'}
+            elif case == 'missing-adapter': result.unlink()
+            elif case == 'bad-cleanup': c.write(result, {**adapter, 'cleanup_complete': False})
+            elif case == 'bad-case': c.write(result, {**adapter, 'cases': {'c': 'UNVERIFIED'}})
+            elif case == 'bad-receipt': state['attempts'][-1]['results'][0]['token'] = 'foreign'
+            # Contract mutations need a matching old plan so this exercises pending admission itself.
+            old = copy.deepcopy(state['plan']); state['plan_digest'] = c.digest(old)
+            before = copy.deepcopy(state)
+            with self.subTest(case=case), self.assertRaises((ValueError, OSError)):
+                h.build(state, old, new, self.root)
+            self.assertEqual(before, state); c.CANCEL.clear()
+        c.write(result, adapter)
+        proof = h.build(original, self.plan, new, self.root)
+        for key in ('before_state_sha256', 'old_plan_digest', 'current_binding', 'cases', 'pending_rca'):
+            bad = copy.deepcopy(proof); bad[key] = 'drift'
+            state = copy.deepcopy(original)
+            with self.subTest(proof=key), self.assertRaises((ValueError, TypeError)):
+                c.refresh(state, self.plan, new, self.root, historical_no_retry_proof=bad)
+            self.assertEqual(original, state)
+        c.write(result, {**adapter, 'cleanup_complete': False})
+        with self.assertRaises(ValueError): h.prepare(original, self.plan, new, proof, self.root)
+        self.assertEqual(original, self.state)
+
+    def recipe_bound_pending_fixture(self):
+        new, path = self.pending_custody_fixture()
+        gate = self.plan['gates'][2]
+        gate.update(worker_recipe={'cases': {'c': {'command': ['true']}}}, worker_root=gate['cwd'])
+        new['gates'][2] = copy.deepcopy(gate)
+        self.state['plan'] = copy.deepcopy(self.plan)
+        self.state['plan_digest'] = c.digest(self.plan)
+        adapter = c.read(path)
+        adapter.update(recipe_digest=c.digest(gate['worker_recipe']), worker_root=gate['worker_root'])
+        c.write(path, adapter)
+        self.state['attempts'][-1]['results'][0].update(recipe_digest=adapter['recipe_digest'],
+                                                      worker_root=adapter['worker_root'])
+        return new, path
+
+    def test_pending_custody_rechecks_original_recipe_and_isolation_root(self):
+        import deploy_test_historical_custody as h
+        new, path = self.recipe_bound_pending_fixture()
+        before, adapter = copy.deepcopy(self.state), c.read(path)
+        for mutation in ({'recipe_digest': '0' * 64}, {'worker_root': '/foreign/worker'}):
+            c.write(path, {**adapter, **mutation})
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                h.build(self.state, self.plan, new, self.root)
+            self.assertEqual(before, self.state)
+        c.write(path, adapter)
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        for key in ('pending', 'failures', 'attempts'):
+            self.assertEqual(before[key], self.state[key])
+        self.assertEqual(('quick', 'triage', False),
+                         (self.state['phase'], self.state['next_after_quick'], self.state['ready']))
+
+    def test_pending_custody_rejects_untyped_or_contradictory_terminal_evidence(self):
+        import deploy_test_historical_custody as h
+        new, path = self.pending_custody_fixture()
+        original, adapter = copy.deepcopy(self.state), c.read(path)
+        cases = ('adapter-exit-bool', 'receipt-exit-bool', 'missing-interrupted', 'receipt-timeout',
+                 'receipt-cancelled', 'receipt-status-pass', 'missing-receipt-timeout',
+                 'missing-receipt-cancelled', 'missing-receipt-lingering', 'adapter-reused',
+                 'adapter-interrupted', 'receipt-interrupted', 'receipt-timeout-int',
+                 'adapter-exit-missing', 'receipt-exit-missing')
+        for case in cases:
+            state, data = copy.deepcopy(original), copy.deepcopy(adapter)
+            receipt = state['attempts'][-1]['results'][0]
+            if case == 'adapter-exit-bool': data['native_exit'] = True
+            elif case == 'receipt-exit-bool': receipt['native_exit'] = True
+            elif case == 'missing-interrupted': del data['interrupted']
+            elif case == 'receipt-timeout': receipt['timed_out'] = True
+            elif case == 'receipt-cancelled': receipt['cancelled'] = True
+            elif case == 'receipt-status-pass': receipt['status'] = 'PASS'
+            elif case == 'missing-receipt-timeout': del receipt['timed_out']
+            elif case == 'missing-receipt-cancelled': del receipt['cancelled']
+            elif case == 'missing-receipt-lingering': del receipt['lingering_group']
+            elif case == 'adapter-reused': data['reused'] = True
+            elif case == 'adapter-interrupted': data['interrupted'] = True
+            elif case == 'receipt-interrupted': receipt['interrupted'] = True
+            elif case == 'receipt-timeout-int': receipt['timed_out'] = 0
+            elif case == 'adapter-exit-missing': del data['native_exit']
+            elif case == 'receipt-exit-missing': del receipt['native_exit']
+            elif case == 'adapter-timeout': data['timed_out'] = True
+            elif case == 'adapter-cancelled': data['cancelled'] = True
+            elif case == 'adapter-lingering': data['lingering_group'] = True
+            elif case == 'adapter-status-pass': data['status'] = 'PASS'
+            elif case == 'receipt-reused': receipt['reused'] = True
+            else: receipt['source_unchanged'] = False
+            c.write(path, data); before = copy.deepcopy(state)
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                h.build(state, self.plan, new, self.root)
+            self.assertEqual(before, state)
+
+    def test_pending_custody_malformed_shapes_refuse_without_mutating_state(self):
+        import deploy_test_historical_custody as h
+        new, path = self.pending_custody_fixture()
+        original, adapter = copy.deepcopy(self.state), c.read(path)
+        for case in ('adapter-list', 'evidence-list', 'cases-list', 'attempt-none', 'results-none',
+                     'receipt-none', 'receipt-cases-list', 'failure-check-list', 'failure-none',
+                     'failure-evidence-list', 'failure-native-task-list', 'pending-dict', 'old-gate-none', 'adapter-path-list'):
+            state, data, old = copy.deepcopy(original), copy.deepcopy(adapter), copy.deepcopy(self.plan)
+            if case == 'adapter-list': data = []
+            elif case == 'evidence-list': data['evidence'] = []
+            elif case == 'cases-list': data['cases'] = []
+            elif case == 'attempt-none': state['attempts'].append(None)
+            elif case == 'results-none': state['attempts'][-1]['results'] = None
+            elif case == 'receipt-none': state['attempts'][-1]['results'].append(None)
+            elif case == 'receipt-cases-list': state['attempts'][-1]['results'][0]['cases'] = []
+            elif case == 'failure-check-list': state['failures'][-1]['check'] = []
+            elif case == 'failure-none': state['failures'].append(None)
+            elif case == 'failure-evidence-list': state['failures'][-1]['worker_evidence'] = []
+            elif case == 'failure-native-task-list': state['failures'][-1]['worker_evidence']['native_task'] = []
+            elif case == 'pending-dict': state['pending'] = {'id': 'wrong-shape'}
+            elif case == 'adapter-path-list': state['failures'][-1]['worker_result'] = []
+            else:
+                old['gates'][2] = None
+                state['plan_digest'] = c.digest(old)
+            c.write(path, data); before = copy.deepcopy(state)
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                h.build(state, old, new, self.root)
+            self.assertEqual(before, state)
+
     def test_historical_stall_cannot_refresh_into_new_card_request_without_proof(self):
         new = self.custody_fixture()
         before = copy.deepcopy(self.state)
