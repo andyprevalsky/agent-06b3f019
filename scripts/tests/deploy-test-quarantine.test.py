@@ -446,8 +446,10 @@ class ReleaseReport(unittest.TestCase):
         self.assertEqual('tests/test_unit.py',
                          q.validate_attribution({**base, 'detail': dotted}, entry, self.root)['marker'])
         # Same class + method in ANOTHER module, or a __main__ id with no tie to the marker file, is refused.
+        unmarked = 'FAIL: test_other (tests.test_unit.Suite.test_other)\n'  # a second failure with no marker
         for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.'),
-                       dotted.replace('tests.test_unit.', 'tests.test_other.'), failure.split('Traceback')[0]):
+                       dotted.replace('tests.test_unit.', 'tests.test_other.'), failure.split('Traceback')[0],
+                       dotted + unmarked):
             with self.subTest(detail=detail), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
                 q.validate_attribution({**base, 'detail': detail}, entry, self.root)
 

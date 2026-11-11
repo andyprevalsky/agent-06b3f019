@@ -180,9 +180,13 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     path = entry.get('marker')
     if not isinstance(path, str) or not path.strip() or Path(path).is_absolute() or '..' in Path(path).parts:
         raise ValueError('NOT_INTRODUCED requires marker: the repo-relative test file carrying the quarantine marker')
-    found = [m for m in markers(root, [path])
-             if unit_matches(m, occurrence['unit'])
-             or any(named_test_matches(m, test_id, path, occurrence) for test_id in failed_unittest_names(occurrence))]
+    candidates = markers(root, [path])
+    found = [m for m in candidates if unit_matches(m, occurrence['unit'])]
+    named = failed_unittest_names(occurrence)
+    if not found and named:
+        # A suite-level unit is attributed only when EVERY failed test it names carries a marker here.
+        matched = [[m for m in candidates if named_test_matches(m, test_id, path, occurrence)] for test_id in named]
+        found = [m for group in matched for m in group] if all(matched) else []
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records

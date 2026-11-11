@@ -157,6 +157,8 @@ def serve(fake):
             status, payload = fake.handle(self.command, self.path, body, self.headers.get("fly-machine-lease-nonce"))
             raw = b"" if payload is None else json.dumps(payload).encode()
             self.send_response(status)
+            if status == 429:
+                self.send_header("Retry-After", "0")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -195,6 +197,28 @@ class FakeApiCase(unittest.TestCase):
 
 
 class WarmSource(FakeApiCase):
+    def test_metadata_write_backs_off_through_a_rate_limited_burst(self):
+        # PR #1928 smoke: 13 concurrent jobs wrote last-used metadata on one warm source and Fly answered
+        # 429; the write retries with backoff, and a 429 that never clears still fails the selection.
+        mid = self.donor
+        self.fake.add_machine(mid, "cloudbench-warm", "stopped")
+        real = self.fake.handle
+        throttled = {"left": 2}
+
+        def handle(method, path, body, nonce):
+            if "/metadata/" in path and method == "POST" and throttled["left"] > 0:
+                throttled["left"] -= 1
+                return 429, {"error": "rate limited"}
+            return real(method, path, body, nonce)
+
+        self.fake.handle = handle
+        self.api.write_metadata(mid, self.mod["LAST_USED_KEY"], "123")
+        self.assertEqual("123", self.meta(mid)[self.mod["LAST_USED_KEY"]])
+        self.assertEqual(0, throttled["left"])
+        throttled["left"] = self.mod["RATE_LIMIT_ATTEMPTS"]
+        with self.assertRaisesRegex(self.mod["WarmSourceError"], "HTTP 429"):
+            self.api.write_metadata(mid, self.mod["LAST_USED_KEY"], "456")
+
     def test_names_are_per_dependency_set_and_never_task_shaped(self):
         set_a, machine_a, volume_a = self.mod["names"](NODE_A, PY_A)
         set_b, machine_b, _ = self.mod["names"](NODE_B, PY_B)

@@ -387,6 +387,13 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
     machine_less = [r for r in rows if not r.get('machine_id')]
     need(not machine_less or not registry.exists() and meta.get('status') == 'provider-teardown-verified',
          'machine-less rows need a sealed provider release')
+    if machine_less:  # the same sealed-release proof a Machine row's `sealed_native_release` must carry
+        local = fleet / 'teardown-ownership'
+        seal = tree(local)
+        need(tree(audit) == seal and fields(bound(local / 'source-audit')) == {'path': str(audit), 'sha256': seal},
+             'machine-less release seal')
+        release = float(bound(audit / 'provider-teardown-verified.epoch'))
+        need(finite(release) and receipt['started_at'] <= release <= proof['confirmed_at'], 'machine-less release clock')
     need(all(r.get('fleet_owner_token') == owner and r.get('run_id') == fleet.name
              and r.get('source') == 'fresh-clone' and r.get('app') == meta['app']
              and (r.get('disposition') == 'destroyed-provider-retained'
@@ -1495,7 +1502,7 @@ def validate(receipt, owner, proof):
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
         life = document(fleet / '_batch/lifecycle.json')
-        failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
+        failed_canary = layout in {'campaign-v1', 'campaign-mixed-preallocation-v1'} and fleet not in parents and life.get('status') == 'failed'
         run_path = fleet / '_batch/run.json'
         if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control

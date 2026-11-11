@@ -5808,6 +5808,12 @@ class Cycle(unittest.TestCase):
         self.tearDown(); self.setUp()
         state, failure, proof, *_ = self.failed_infra_canary((dict(rows[0], volume_id='vol_a'),))
         with self.assertRaises(ValueError): c.reconcile(state, failure['id'], proof)
+        # An audit changed after its seal cannot excuse Machine-less rows from observation.
+        self.tearDown(); self.setUp()
+        state, failure, proof, fleet, life, life_path, audit, canonical, log, bind = self.failed_infra_canary(rows)
+        (canonical / 'fresh' / 'cloudbench-a').write_text((canonical / 'fresh' / 'cloudbench-a').read_text() + 'x=1\n')
+        bind()
+        with self.assertRaises(ValueError): c.reconcile(state, failure['id'], proof)
 
     def normal_failed_canary_state(self, zero=False, machine_less=()):
         import hashlib, shutil
@@ -9414,6 +9420,26 @@ class RelayStartupEvidence(unittest.TestCase):
         proof.update(worker_result_sha256=reference['result_sha256'],layout='campaign-mixed-preallocation-v1')
         self.save(Path(receipt['log']).parent/'receipt.json',receipt);proof['receipt_sha256']=c.sha_file(Path(receipt['log']).parent/'receipt.json')
         self.reseal();return receipt,owner,proof,fleets
+
+    def test_mixed_preallocation_with_a_cancelled_infra_canary_reconciles(self):
+        # PR #1928 smoke: 10 jobs were refused before allocation (warm source 429) while the infra canary
+        # was TERMed mid-preflight; mixed preallocation must also admit that linked, released canary.
+        receipt, owner, proof, fleets = self.mixed_preallocation_fixture()
+        canary = fleets[-1]; batch = canary / '_batch'
+        life = json.loads((batch / 'lifecycle.json').read_text())
+        life.update(status='failed', controller_exit_code=143); self.save(batch / 'lifecycle.json', life)
+        self.save(batch / 'run.json', dict(run_id=canary.name, controller_exit_code=143, status='failed',
+            tasks=[dict(name='infra-probe', status='INFRA_ERROR', passed=False, lifecycle_stage='released',
+                        failure_reason='no current run artifact produced')]))
+        log = self.campaign / 'r001-j0001.log'
+        log.write_text(log.read_text().replace(f'{self.base}/scripts/run-bench monitor {canary}\n',
+            f"ref    : {receipt['source']['head']}  (committed source)\n"
+            'mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n'
+            f'{self.base}/scripts/run-bench monitor {canary}\n'
+            f"owner: {life['fleet_owner_token']}; private controller diagnostics stay in this run directory.\n"))
+        self.reseal()
+        result = self.validate_fixture(receipt, owner, proof)
+        self.assertFalse(result['credit_granted'])
 
     def test_mixed_preallocation_cleanup_preserves_all_unverified_without_credit(self):
         receipt,owner,proof,fleets=self.mixed_preallocation_fixture()

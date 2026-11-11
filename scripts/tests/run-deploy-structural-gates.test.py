@@ -2034,11 +2034,14 @@ if __name__ == "__main__":
         import deploy_gate_progress as progress
         first = ("FAIL: test_a (__main__.C.test_a)\nTraceback (most recent call last):\n"
                  + "  frame\n" * 2000 + "AssertionError: boom\nRan 3 tests in 0.1s\n\nFAILED (failures=1)\n")
-        detail = self.module.flaky_detail(["suite"], first)
+        other = "ERROR: test_b (__main__.D.test_b)\nTraceback (most recent call last):\n  frame\n"
+        detail = self.module.flaky_detail(["suite[1/2]", "suite[2/2]"], [other, first])
         tail = detail[-progress.DETAIL_LIMIT:]
-        self.assertTrue(detail.startswith("passed on rerun: suite\n" + first))
+        self.assertTrue(detail.startswith("passed on rerun: suite[1/2], suite[2/2]\n" + first))
+        # Every flaky shard's failure stays attributable, not only the last shard's.
         self.assertIn("FAIL: test_a (__main__.C.test_a)", tail)
-        self.assertEqual("passed on rerun: suite\nno headers", self.module.flaky_detail(["suite"], "no headers"))
+        self.assertIn("ERROR: test_b (__main__.D.test_b)", tail)
+        self.assertEqual("passed on rerun: suite\nno headers", self.module.flaky_detail(["suite"], ["no headers"]))
 
     def test_failure_parser_names_only_complete_own_unittest_failures(self) -> None:
         parse = self.module.failed_unittest_ids

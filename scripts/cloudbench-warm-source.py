@@ -41,6 +41,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import runpy
 import signal
@@ -101,6 +102,19 @@ def metadata_of(row) -> dict:
     return ((row or {}).get("config") or {}).get("metadata") or {}
 
 
+RATE_LIMIT_ATTEMPTS = 6
+RATE_LIMIT_MAX_DELAY = 16.0
+
+
+def rate_limit_delay(retry_after, attempt):
+    """Seconds to wait before retrying a 429: Fly's Retry-After when given, else jittered exponential backoff."""
+    try:
+        base = float(retry_after)
+    except (TypeError, ValueError):
+        base = min(2.0 ** attempt, RATE_LIMIT_MAX_DELAY)
+    return min(max(base, 0.0), RATE_LIMIT_MAX_DELAY) + random.uniform(0.0, 0.5)
+
+
 class Api(Fly):
     """Machines API client with the lease and lease-nonce calls this helper needs."""
 
@@ -112,15 +126,22 @@ class Api(Fly):
             headers["fly-machine-lease-nonce"] = nonce
         request = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
                                          method=method, headers=headers)
-        self.calls.append((method, path))
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                payload = response.read()
-                return response.status, (json.loads(payload) if payload else None)
-        except urllib.error.HTTPError as error:
-            return error.code, None
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            raise WarmSourceError(f"{method} {path} -> {error}") from error
+        for attempt in range(RATE_LIMIT_ATTEMPTS):
+            self.calls.append((method, path))
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    payload = response.read()
+                    return response.status, (json.loads(payload) if payload else None)
+            except urllib.error.HTTPError as error:
+                # A fleet's concurrent jobs share one warm source: Fly answers its burst of metadata
+                # writes with 429 (PR #1928 smoke, 10 of 13 jobs). Back off and retry; any other
+                # status, or a 429 that outlasts the bounded attempts, still reaches the caller.
+                if error.code != 429 or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                    return error.code, None
+                time.sleep(rate_limit_delay(error.headers.get("Retry-After"), attempt))
+            except (urllib.error.URLError, OSError, ValueError) as error:
+                raise WarmSourceError(f"{method} {path} -> {error}") from error
+        raise AssertionError("unreachable")
 
     def acquire_lease(self, machine_id, ttl=LEASE_TTL_SECONDS):
         status, body = self._leased("POST", f"/machines/{machine_id}/lease",

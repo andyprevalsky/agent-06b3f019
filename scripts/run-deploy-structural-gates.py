@@ -105,16 +105,17 @@ UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
 UNITTEST_OK = re.compile(r"^OK(?: \(([^)]*)\))?\s*$", re.M)
 
 
-def flaky_detail(labels: Sequence[str], first_output: str) -> str:
-    """FLAKY progress detail: the failed first attempt, ending with its unittest failure headers.
+def flaky_detail(labels: Sequence[str], first_outputs: Sequence[str]) -> str:
+    """FLAKY progress detail: the last failed first attempt, ending with EVERY flaky shard's failure headers.
 
     The progress row keeps only the detail's tail (deploy_gate_progress.DETAIL_LIMIT); a long traceback
     would otherwise cut the "FAIL: name (module.Class.name)" lines that suite-level /RCA attribution
-    matches against the quarantine marker (deploy_test_quarantine.failed_unittest_names).
+    matches against the quarantine marker (deploy_test_quarantine.failed_unittest_names), and a suite
+    with several flaky shards must name all of their failures so each one needs attribution.
     """
-    headers = [m.group(0) for m in UNITTEST_FAILURE.finditer(first_output)]
+    headers = [m.group(0) for output in first_outputs for m in UNITTEST_FAILURE.finditer(output)]
     tail = ("\nfailed unittest headers:\n" + "\n".join(headers)) if headers else ""
-    return f"passed on rerun: {', '.join(labels)}\n" + first_output + tail
+    return f"passed on rerun: {', '.join(labels)}\n" + (first_outputs[-1] if first_outputs else "") + tail
 
 
 def failed_unittest_ids(command: Sequence[str], output: str) -> tuple[str, ...]:
@@ -974,7 +975,7 @@ def run_gates(
                             report_progress(
                                 suite,
                                 "FLAKY",
-                                detail=flaky_detail(suite_flaky, flaky[suite_flaky[-1]]),
+                                detail=flaky_detail(suite_flaky, [flaky[label] for label in suite_flaky]),
                                 # The failed first attempt is the evidence /RCA attributes.
                                 log=str(output_root / (suite_flaky[-1].replace("/", "-of-") + ".log")),
                             )
