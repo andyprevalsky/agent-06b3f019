@@ -48,3 +48,25 @@ None; found by the staged deploy cycle of PR #1744.
 ## Reusable lesson
 
 Test fixtures that background work must reap it before they return, and a fixed sleep before a DB-backed effect is a load flake.
+
+## November 11 recurrence: first rejection was still unobserved
+
+PR #1915 source f2686db6966a960be2ee667c6463289207552192 executed the normal
+backend coverage gate. All blackboxes and 389 of 390 unit files passed;
+error-alert.test.ts:147 failed `the first alert reached the rejecting transport`
+with `0 !== 1`. The prior repair waited for a later successful retry but still
+asserted that the first rejection had happened after a fixed 30 ms sleep.
+
+The complete current test body and real errorAlert/sharedState/retry modules
+were replayed with a controlled 120 ms acquisition at the mocked SQL boundary:
+the original first-rejection assertion failed exactly, while the same body
+with a rejection event and its existing bounded wait passed. A held-lease
+control still failed. This demonstrates the observation race; the original
+native SQL schedule was not captured, so it is not claimed as a unique
+scheduling reconstruction. No product API, lease behavior, timeout, assertion
+or retry limit changes. The root owns the repair and full normal backend
+rerun, with source attribution UNKNOWN and no waiver.
+
+Sources: plan: existing backend-coverage-blackbox gate, complete native units
+log SHA256 fccceca817f7dd7d7bc54e1cdbe6660c584bb179d5fecf32aebc0373e5ac9872;
+private PR1915 error-alert-unit/minimal attribution packet and replay receipt.

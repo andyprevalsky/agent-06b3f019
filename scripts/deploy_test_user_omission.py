@@ -1,4 +1,4 @@
-"""Prospective user election for the existing exact six AgentCard checks; no native credit."""
+"""Distinct prospective user elections and paid-action prohibitions; no native credit."""
 from __future__ import annotations
 
 import copy
@@ -7,6 +7,9 @@ import re
 
 KIND = 'explicit-agentcard-preexecution-election-v1'
 FIELD = 'user_elected_omissions'
+PROHIBITION_KIND = 'explicit-paid-agentcard-prohibition-v1'
+PROHIBITION_FIELD = 'user_paid_agentcard_prohibition'
+CATALOG_ROOT = Path(__file__).resolve().parents[1]
 DISPOSITION = 'user / overridden'
 
 
@@ -126,13 +129,9 @@ def search_continuation_authority(proof):
     # The original read hides its body; its gap is never relabeled complete.
 
 
-def validate(request, state):
-    """Bind one exact selected intersection to current source, environment, plan, inputs and native authority."""
+def validate_binding(request, state):
+    """Shared immutable source/environment/plan boundary for both typed records."""
     import deploy_test_cycle as c
-    from deploy_failure_report import USER_OVERRIDE_CHECKS
-    need(isinstance(request, dict) and set(request) == {'kind', 'source', 'environment', 'plan_digest',
-         'input_fingerprints', 'checks', 'question_checks', 'authority'} and request['kind'] == KIND,
-         'typed election request required')
     need(request['source'] == state['source'] and request['environment'] == state['environment']
          and request['plan_digest'] == state['plan_digest'] == c.digest(state['plan'])
          and state['plan'].get('source') == state['source'], 'current source/environment/plan binding changed')
@@ -142,6 +141,15 @@ def validate(request, state):
          and isinstance(source['digest'], str) and re.fullmatch('[0-9a-f]{64}', source['digest'])
          and isinstance(request['environment'], str) and re.fullmatch('[0-9a-f]{64}', request['environment']),
          'typed source/environment digest required')
+
+
+def validate_original(request, state):
+    """Bind one exact selected intersection to current source, environment, plan, inputs and native authority."""
+    from deploy_failure_report import USER_OVERRIDE_CHECKS
+    need(isinstance(request, dict) and set(request) == {'kind', 'source', 'environment', 'plan_digest',
+         'input_fingerprints', 'checks', 'question_checks', 'authority'} and request['kind'] == KIND,
+         'typed election request required')
+    validate_binding(request, state)
     questions, checks = request['question_checks'], request['checks']
     selected = {g['name'] + '/' + case for g in state['plan']['gates'] for case in g['checks']}
     expected = selected & USER_OVERRIDE_CHECKS
@@ -159,6 +167,90 @@ def validate(request, state):
     authority(request['authority'])
 
 
+def payment_catalog(binding):
+    """Bind classification to the native catalog and the actual fixture predicate, without importing runners."""
+    import ast
+    import hashlib
+    import json
+    need(isinstance(binding, dict) and set(binding) == {'tasks_sha256', 'local_sha256'},
+         'typed native payment catalog binding required')
+    raw = {}
+    for key, filename in (('tasks_sha256', 'tasks.json'), ('local_sha256', 'local.py')):
+        data = (CATALOG_ROOT / 'agents/benchmarks' / filename).read_bytes()
+        need(binding[key] == hashlib.sha256(data).hexdigest(), 'native payment catalog changed')
+        raw[filename] = data
+    tasks = json.loads(raw['tasks.json'])
+    need(isinstance(tasks, list) and all(isinstance(t, dict) and isinstance(t.get('name'), str) for t in tasks),
+         'native payment catalog rows required')
+    need(len({t['name'] for t in tasks}) == len(tasks), 'duplicate native catalog identity')
+    # Evaluate only the literal dependencies of AGENT_PAYMENT_TASK_NAMES. Never
+    # import local.py: that module owns live runners, environment and providers.
+    tree = ast.parse(raw['local.py'])
+    assignments = {n.targets[0].id: n.value for n in tree.body if isinstance(n, ast.Assign)
+                   and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+    def literal(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str): return node.value
+        if isinstance(node, ast.Set): return {literal(e) for e in node.elts}
+        if isinstance(node, ast.Name) and node.id in assignments: return literal(assignments[node.id])
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return literal(node.left) | literal(node.right)
+        raise ValueError('user omission election: unsupported native payment predicate dependency')
+    need('AGENT_PAYMENT_TASK_NAMES' in assignments, 'native payment task predicate required')
+    names = literal(assignments['AGENT_PAYMENT_TASK_NAMES'])
+    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'needs_payment_fixture']
+    expected = ast.parse('def needs_payment_fixture(tasks):\n return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks))').body[0]
+    need(len(functions) == 1 and ast.dump(ast.Module(body=functions[0].body, type_ignores=[]))
+         == ast.dump(ast.Module(body=expected.body, type_ignores=[])), 'native payment fixture predicate changed')
+    return {t['name']: t for t in tasks}, names
+
+
+def validate(request, state):
+    """Keep the original six-question election distinct from the later paid-action prohibition."""
+    if not isinstance(request, dict) or request.get('kind') != PROHIBITION_KIND:
+        return validate_original(request, state)
+    from deploy_failure_report import USER_OVERRIDE_CHECKS
+    need(set(request) == {'kind', 'source', 'environment', 'plan_digest', 'input_fingerprints',
+                         'checks', 'authority', 'catalog'}, 'typed paid prohibition request required')
+    validate_binding(request, state)
+    selected = {g['name'] + '/' + case for g in state['plan']['gates'] for case in g['checks']}
+    authority(request['authority'])
+    need(isinstance(request['authority'], dict)
+         and request['authority'].get('kind') == 'native-search-continuation-v1',
+         'later native user prohibition evidence required')
+    tasks, native_paid = payment_catalog(request['catalog'])
+    eligible = set()
+    for check in selected - USER_OVERRIDE_CHECKS:
+        gate, name = check.split('/', 1)
+        task = tasks.get(name)
+        if gate != 'smoke' or name not in native_paid or task is None: continue
+        tags, environment = task.get('tags'), task.get('environment')
+        lifecycle = task.get('expected_payment_lifecycle')
+        need(isinstance(tags, list) and all(isinstance(t, str) for t in tags)
+             and {'payment', 'agentcard-lifecycle-sandbox'} <= set(tags)
+             and isinstance(environment, dict) and isinstance(environment.get('db_fixtures'), list)
+             and 'agent_payment_lifecycle_v1' in environment['db_fixtures']
+             and isinstance(lifecycle, dict) and task.get('runner') == 'agent'
+             and task.get('harness') == 'rose' and task.get('bench') == 'pipeline-e2e',
+             'selected native paid task lacks lifecycle contract')
+        integrity = lifecycle.get('integrity')
+        need(isinstance(integrity, dict) and type(integrity.get('cardCount')) is int
+             and integrity['cardCount'] > 0, 'positive paid card lifecycle required')
+        for key in ('stripeHold', 'orgTransfer'):
+            row = lifecycle.get(key)
+            need(isinstance(row, dict) and type(row.get('amountCents')) is int and row['amountCents'] > 0,
+                 'positive paid lifecycle evidence required')
+        eligible.add(check)
+    checks = request['checks']
+    need(isinstance(checks, list) and checks and all(isinstance(x, str) for x in checks)
+         and len(set(checks)) == len(checks) and set(checks) == eligible,
+         'exact selected native paid tasks outside original six required')
+    fingerprints = request['input_fingerprints']
+    need(isinstance(fingerprints, dict) and set(fingerprints) == {x.split('/', 1)[0] for x in checks}
+         and all(value == state['input_fingerprints'].get(gate) and isinstance(value, str)
+                 and re.fullmatch('[0-9a-f]{64}', value) for gate, value in fingerprints.items()),
+         'current selected paid gate inputs changed')
+
+
 def entry(request, check):
     """A selection record, never a fabricated failure or native receipt."""
     return {'check': check, 'source': copy.deepcopy(request['source']),
@@ -171,33 +263,35 @@ def entry(request, check):
 
 def verify(state):
     """Re-read native authority and reject stale or altered elections on every reuse."""
-    record = state.get(FIELD)
-    if record is None:
-        return
     import deploy_test_cycle as c
-    need(isinstance(record, dict) and set(record) == {'request', 'request_sha256', 'entries'},
-         'election record schema changed')
-    request = record['request']
-    validate(request, state)
-    need(record['request_sha256'] == c.digest(request)
-         and record['entries'] == {check: entry(request, check) for check in request['checks']},
-         'election record changed or claimed execution credit')
+    for field, kind in ((FIELD, KIND), (PROHIBITION_FIELD, PROHIBITION_KIND)):
+        if field not in state: continue
+        record = state[field]
+        need(isinstance(record, dict) and set(record) == {'request', 'request_sha256', 'entries'},
+             'election record schema changed')
+        request = record['request']
+        need(isinstance(request, dict) and request.get('kind') == kind, 'election ledger kind changed')
+        validate(request, state)
+        need(record['request_sha256'] == c.digest(request)
+             and record['entries'] == {check: entry(request, check) for check in request['checks']},
+             'election record changed or claimed execution credit')
 
 
 def qualifications(state, gate, occupied):
-    """Project omissions only after existing waiver/custody validation; custody always wins."""
+    """Validate both ledgers; prior custody always wins over prospective omissions."""
     verify(state)
-    record = state.get(FIELD)
-    if record is None:
-        return {}
     prefix = gate['name'] + '/'
-    return {check[len(prefix):]: copy.deepcopy(row) for check, row in record['entries'].items()
+    return {check[len(prefix):]: copy.deepcopy(row)
+            for field in (FIELD, PROHIBITION_FIELD)
+            for check, row in state.get(field, {}).get('entries', {}).items()
             if check.startswith(prefix) and check[len(prefix):] not in occupied}
 
 
 def elect(state, request, root):
     """Apply a quiescent, current-input election atomically without rewriting any native history."""
     import deploy_test_cycle as c
+    for field in (FIELD, PROHIBITION_FIELD):
+        need(field not in state or isinstance(state[field], dict), 'retained election record object required')
     need(not c.CANCEL.is_set() and state.get('phase') in {'quick', 'triage', 'needs-focused-plan',
          'focused', 'failed-gates', 'initial', 'final'} and 'live_failures' not in state
          and not state.get('running') and not state.get('resume_phase'), 'quiescent nonterminal cycle required')
@@ -213,7 +307,8 @@ def elect(state, request, root):
     need(not c.retained_owners(state, names), 'live or retained native owners forbid election')
     record = {'request': copy.deepcopy(request), 'request_sha256': c.digest(request),
               'entries': {check: entry(request, check) for check in request['checks']}}
-    previous = state.get(FIELD)
+    field = PROHIBITION_FIELD if request['kind'] == PROHIBITION_KIND else FIELD
+    previous = state.get(field)
     if previous == record:
         verify(state)
         return
@@ -228,8 +323,8 @@ def elect(state, request, root):
     # All external reads and guards above precede either mutation. Stale election
     # remains fail-closed after refresh until this explicit current-input renewal.
     if previous is not None:
-        state.setdefault('superseded_user_elected_omissions', []).append(copy.deepcopy(previous))
-    state[FIELD] = record
+        state.setdefault('superseded_' + field, []).append(copy.deepcopy(previous))
+    state[field] = record
 
 
 def report_lines(state):
@@ -237,4 +332,5 @@ def report_lines(state):
     verify(state)
     return [f"{check}: ⚠️ Overridden — elected UNEXECUTED/SKIP, native exit UNRECORDED; "
             "no execution/assertion/financial credit; original results and $43.96 custody unchanged."
-            for check in state.get(FIELD, {}).get('entries', {})]
+            for field in (FIELD, PROHIBITION_FIELD)
+            for check in state.get(field, {}).get('entries', {})]

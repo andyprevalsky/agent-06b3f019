@@ -439,5 +439,169 @@ class ProspectiveElection(unittest.TestCase):
         self.reject({**self.request, 'authority': proof})
 
 
+
+    def broad_fixture(self):
+        import deploy_test_user_omission as e
+        self.plan['gates'] = self.plan['gates'][:1]
+        self.fingerprints.pop('agentcard-lifecycle')
+        extras = ['browser-auth-guest-purchase', 'browser-auth-member-discount-purchase']
+        self.plan['gates'][0]['checks'] += extras
+        self.state.update(plan=self.plan, plan_digest=c.digest(self.plan))
+        self.put(self.plan_path, self.plan)
+        self.request.update(plan_digest=c.digest(self.plan), input_fingerprints=self.fingerprints,
+                            checks=[x for x in self.six if x.startswith('smoke/')])
+        proof, _ = self.bundle()
+        self.request['authority'] = proof
+        self.assertEqual(self.cli(), 0)
+        state = self.read()
+        request = {k: copy.deepcopy(v) for k, v in self.request.items() if k != 'question_checks'}
+        request.update(kind='explicit-paid-agentcard-prohibition-v1', checks=['smoke/' + x for x in extras],
+                       catalog={k: self.sha(HERE / 'agents/benchmarks' / f) for k, f in
+                                [('tasks_sha256', 'tasks.json'), ('local_sha256', 'local.py')]})
+        return e, state, request, extras
+
+    def test_broad_prohibition_real_native_consumer_preserves_original_election_and_custody(self):
+        e, before, request, extras = self.broad_fixture()
+        self.assertEqual(self.cli(request, before), 0)
+        state = self.read()
+        self.assertEqual(state['user_elected_omissions'], before['user_elected_omissions'])
+        for key in ('pending', 'failures', 'attempts', 'historical_no_retry_custody', 'historical_custody_history'):
+            self.assertEqual(state[key], before[key])
+        record = state['user_paid_agentcard_prohibition']
+        self.assertEqual(set(record['entries']), set(request['checks']))
+        for row in record['entries'].values():
+            self.assertEqual(row['native_result'], 'UNEXECUTED')
+            self.assertEqual(row['status'], 'SKIP')
+            self.assertFalse(any(row['credit'].values()))
+            self.assertIs(row['executed'], False)
+        import deploy_test_historical_custody as h
+        custody = {'agent-payment-abandonment': {'disposition': 'NO_RETRY_CUSTODY', 'source': self.source}}
+        directory = self.root / '.context/cycle'; directory.mkdir(parents=True)
+        state['resource_warnings'] = []
+        self.put(directory / 'cycle.json', state)
+        class BeforeTransport(Exception): pass
+        with patch.object(h, 'known', return_value={}), patch.object(h, 'guard', return_value=custody), \
+             patch.object(h, 'runtime_identity', return_value={}), \
+             patch.object(h, 'environment_identity', return_value='fixture'), \
+             patch.object(c, 'isolated_request', return_value=[]), \
+             patch.object(c, 'run_command', side_effect=BeforeTransport):
+            with self.assertRaises(BeforeTransport):
+                c._execute(self.plan['gates'][0], state, directory, self.root)
+        native = json.loads((directory / 'attempts/4/triage/smoke/request.json').read_text())
+        self.assertEqual(native['checks'], ['browser-smoke', 'MASS-t7'])
+        self.assertEqual(len(native['skips']), 7)
+        self.assertEqual(native['skips']['agent-payment-abandonment'], custody['agent-payment-abandonment'])
+        with patch.object(h, 'guard', return_value=custody), \
+             patch.object(h, 'runtime_identity', return_value={}), \
+             patch.object(h, 'environment_identity', return_value='fixture'), patch.object(c, 'run_command') as transport:
+            h.admission(native, self.root)
+            changed = copy.deepcopy(state)
+            changed['user_paid_agentcard_prohibition']['request']['catalog']['tasks_sha256'] = '0' * 64
+            self.put(directory / 'cycle.json', changed)
+            with self.assertRaises(ValueError): h.admission(native, self.root)
+            transport.assert_not_called()
+        for field in ('user_elected_omissions', 'user_paid_agentcard_prohibition'):
+            changed = copy.deepcopy(state)
+            changed[field]['request']['source']['head'] = '9' * 40
+            with self.assertRaises(ValueError): e.qualifications(changed, self.plan['gates'][0], {})
+
+    def test_broad_prohibition_refuses_scope_catalog_authority_and_input_drift(self):
+        e, state, request, extras = self.broad_fixture()
+        self.assertEqual(self.cli(request, state), 0)
+        for field, value in [('checks', request['checks'] + ['smoke/browser-smoke']),
+                             ('checks', request['checks'] + ['smoke/browser-auth-signup-purchase']),
+                             ('checks', request['checks'][:1]),
+                             ('checks', request['checks'] + [request['checks'][0]]),
+                             ('source', {'head': '9' * 40, 'digest': '8' * 64}),
+                             ('catalog', {**request['catalog'], 'local_sha256': '0' * 64}),
+                             ('authority', self.request['authority'] | {'kind': 'agent-assertion'}),
+                             ('input_fingerprints', {'smoke': '0' * 64})]:
+            with self.subTest(field=field, value=value): self.reject({**request, field: value}, state)
+        self.reject({**self.request, 'checks': self.request['checks'] + request['checks']}, state)
+        # Rehash an altered catalog: shape/predicate checks must refuse it, too.
+        catalog_root = self.root / 'catalog'; folder = catalog_root / 'agents/benchmarks'; folder.mkdir(parents=True)
+        (folder / 'local.py').write_bytes((HERE / 'agents/benchmarks/local.py').read_bytes())
+        original = json.loads((HERE / 'agents/benchmarks/tasks.json').read_text())
+        for mutate in (lambda t: t.update(tags=['browser', 'payment']),
+                       lambda t: t.update(expected_payment_lifecycle={}),
+                       lambda t: t.update(environment={'db_fixtures': []}),
+                       lambda t: t.update(runner='mock'),
+                       lambda t: t['expected_payment_lifecycle']['integrity'].update(cardCount=0)):
+            tasks = copy.deepcopy(original)
+            mutate(next(t for t in tasks if t['name'] == extras[0]))
+            self.put(folder / 'tasks.json', tasks)
+            changed = copy.deepcopy(request)
+            changed['catalog']['tasks_sha256'] = self.sha(folder / 'tasks.json')
+            with patch.object(e, 'CATALOG_ROOT', catalog_root): self.reject(changed, state)
+        proof, docs = self.bundle()
+        docs['continuation']['transcript']['messages'][0]['role'] = 'assistant'
+        self.put(Path(proof['continuation']['path']), docs['continuation'])
+        proof['continuation']['sha256'] = self.sha(Path(proof['continuation']['path']))
+        self.reject({**request, 'authority': proof}, state)
+
+    def test_broad_prohibition_explicit_source_renewal_preserves_both_ledgers_and_audit(self):
+        e, before, request, extras = self.broad_fixture()
+        self.assertEqual(self.cli(request, before), 0)
+        original = self.read()
+        # As with the original election, refresh preserves stale records and
+        # default execution fails closed until each kind is explicitly renewed.
+        self.source.update(head='9' * 40, digest='8' * 64)
+        self.plan['source'] = self.source
+        self.put(self.plan_path, self.plan)
+        renewed = copy.deepcopy(original)
+        renewed.update(source=self.source, plan=self.plan, plan_digest=c.digest(self.plan))
+        with self.assertRaises(ValueError): e.verify(renewed)
+        old_request = copy.deepcopy(self.request)
+        old_request.update(source=self.source, plan_digest=c.digest(self.plan))
+        self.assertEqual(self.cli(old_request, renewed), 0)
+        halfway = self.read()
+        with self.assertRaises(ValueError): c.revalidate_standing_skips(halfway)
+        new_request = copy.deepcopy(request)
+        new_request.update(source=self.source, plan_digest=c.digest(self.plan))
+        self.assertEqual(self.cli(new_request, halfway), 0)
+        final = self.read()
+        e.verify(final)
+        self.assertEqual(final['superseded_user_paid_agentcard_prohibition'],
+                         [original['user_paid_agentcard_prohibition']])
+        self.assertEqual(final['superseded_user_elected_omissions'], [original['user_elected_omissions']])
+        for key in ('failures', 'pending', 'attempts', 'historical_no_retry_custody', 'historical_custody_history'):
+            self.assertEqual(final[key], original[key])
+        self.assertEqual(self.cli(new_request, final), 0)
+        self.assertEqual(self.read(), final)
+        # The later restriction is independent of whether an original question
+        # happens to be selected. No occurrence-ID or fixed pair allowlist.
+        standalone = copy.deepcopy(final)
+        standalone.pop('user_elected_omissions')
+        standalone.pop('user_paid_agentcard_prohibition')
+        self.plan['gates'][0]['checks'] = extras + ['browser-smoke']
+        standalone.update(plan=self.plan, plan_digest=c.digest(self.plan))
+        self.put(self.plan_path, self.plan)
+        new_request['plan_digest'] = c.digest(self.plan)
+        self.assertEqual(self.cli(new_request, standalone), 0)
+        e.verify(self.read())
+
+    def test_null_or_nonobject_election_ledgers_refuse_before_projection_or_mutation(self):
+        e, before, request, _ = self.broad_fixture()
+        self.assertEqual(self.cli(request, before), 0)
+        valid = self.read()
+        for field in ('user_elected_omissions', 'user_paid_agentcard_prohibition'):
+            for value in (None, [], 'invalid'):
+                for consumer in ('verify', 'qualifications', 'report', 'elect'):
+                    with self.subTest(field=field, value=value, consumer=consumer):
+                        state = copy.deepcopy(valid)
+                        state[field] = value
+                        unchanged = copy.deepcopy(state)
+                        with self.assertRaises(ValueError):
+                            if consumer == 'verify': e.verify(state)
+                            elif consumer == 'qualifications': e.qualifications(state, self.plan['gates'][0], {})
+                            elif consumer == 'report': e.report_lines(state)
+                            else:
+                                with patch.object(c, 'source', return_value=self.source), \
+                                     patch.object(c, 'environment_digest', return_value=self.environment), \
+                                     patch.object(c, 'input_fingerprints', return_value=self.fingerprints), \
+                                     patch.object(c, 'retained_owners', return_value=[]):
+                                    e.elect(state, request, self.root)
+                        self.assertEqual(state, unchanged)
+
 if __name__ == '__main__':
     unittest.main()
