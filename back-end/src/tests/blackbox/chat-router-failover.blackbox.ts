@@ -65,6 +65,7 @@ import { fileURLToPath } from 'node:url';
 
 import { prisma } from '../../providers/database';
 import { quarantinedLiveFailoverCase } from './flake-quarantines.support';
+import { waitFor } from '../helpers/waitFor';
 import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
@@ -565,6 +566,10 @@ async function testExhaustedBudgetSurfacesOneNotice(): Promise<void> {
         where: { agentId: seeded.agentId, text: CHAT_HANDLER_FAILURE_NOTICE },
       });
       assert.equal(notices, 1, 'exactly one notice');
+      // alertError is fire-and-forget (dedupe write, then fetch): await the alert, then assert it.
+      await waitFor('the exhausted-budget alert', () => network.alerts.length > 0, 5_000).catch(
+        () => undefined
+      );
       assert.ok(network.alerts.length > 0, 'an exhausted router budget is still alerted');
       assert.equal(agent.status, 'ACTIVE', 'a recoverable miss never fails the agent');
     } finally {
