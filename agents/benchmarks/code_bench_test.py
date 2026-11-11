@@ -164,6 +164,21 @@ def test_commit_fixture_pushed_fix_fails(tmp_path):
     assert _failed(result) == ["git.origin_unchanged"]
 
 
+def test_fixture_origin_push_starts_no_auto_maintenance(tmp_path):
+    """A push into the fixture origin must not start receive-pack auto maintenance.
+
+    Git >= 2.47 runs it as ``maintenance run --auto --detach``: its
+    ``origin.git/objects/maintenance.lock`` can appear while the result archive
+    is written (``-c`` options never reach the receiving side of a local push).
+    """
+    repo = _solve(tmp_path, COMMIT)
+    trace = tmp_path / "trace2.json"
+    env = {**cb._git_env(repo.parent.parent), "GIT_TRACE2_EVENT": str(trace)}
+    cb._git(["push", "-q", "origin", "main"], repo, env)
+    spawned = [json.loads(line).get("argv") or [] for line in trace.read_text().splitlines()]
+    assert not [argv for argv in spawned if "gc" in argv or "maintenance" in argv], spawned
+
+
 def test_commit_fixture_new_remote_branch_fails(tmp_path):
     repo = _solve(tmp_path, COMMIT)
     _git(repo, "push", "-q", "origin", "HEAD:refs/heads/agent-fix")
