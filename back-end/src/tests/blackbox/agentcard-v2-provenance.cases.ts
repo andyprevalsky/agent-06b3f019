@@ -138,9 +138,9 @@ export async function assertAgentCardProviderProvenance(): Promise<void> {
 const assert = require('node:assert/strict'), Module = require('node:module'), path = require('node:path');
 global.fetch = async () => { throw new Error('UNEXPECTED_PROVIDER_NETWORK'); };
 require('node:net').Socket.prototype.connect = () => { throw new Error('UNEXPECTED_DATABASE_OR_NETWORK'); };
-let funding = null, writes = [], orgCardholder = 'ch-current';
+let funding = null, writes = [], orgCardholder = 'ch-current', purchaseOwned = true;
 const purchase = { id: 'owned-intent', userId: 'rose-owned', agentId: 'agent-owned', totalCents: 100, stripeLivemode: false, cardId: 'card_legacy' };
-const db = { purchaseSpend: { findUnique: async () => ({ ...purchase, walletFunding: funding }), findFirst: async () => ({ ...purchase, walletFunding: funding }) }, purchaseWalletFunding: { upsert: async args => { writes.push(args); funding ??= { id: 'funding-owned', ...args.create }; return funding; } } };
+const db = { purchaseSpend: { findUnique: async () => ({ ...purchase, walletFunding: funding }), findFirst: async () => (purchaseOwned ? { ...purchase, walletFunding: funding } : null) }, purchaseWalletFunding: { upsert: async args => { writes.push(args); funding ??= { id: 'funding-owned', ...args.create }; return funding; } } };
 const id = require.resolve(path.join(process.cwd(), 'src/providers/database.ts')); const m = new Module(id); m.loaded = true; m.exports = { prisma: db }; require.cache[id] = m;
 const storeId = require.resolve(path.join(process.cwd(), 'src/providers/agentcard/store.ts')); const sm = new Module(storeId); sm.loaded = true; sm.exports = { getV2ConnectedUserId: async () => 'usr-current', getOrgManagedCardholderId: async () => orgCardholder }; require.cache[storeId] = sm;
 const { preparePurchaseWalletCollection } = require('./src/providers/purchase-wallet-funding.ts');
@@ -201,6 +201,16 @@ const request = { amountCents: 100, idempotencyKey: 'purchase:owned-intent', fun
   assert.equal(await resolveAgentCardCardRail('rose-owned', 'card_legacy'), 'v2', 'known v2 never falls back for absent credentials');
   funding.metadata = {};
   assert.equal(await resolveAgentCardCardRail('rose-owned', 'card_legacy'), 'legacy', 'legacy-only install retains exact MCP card access');
+  process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'fixture-v2-client';
+  assert.equal(await resolveAgentCardCardRail('rose-owned', 'card_legacy'), 'legacy', 'owned pre-v2 card with empty funding metadata keeps its legacy rail after v2 is configured');
+  const savedFunding = funding; funding = null;
+  assert.equal(await resolveAgentCardCardRail('rose-owned', 'card_legacy'), 'legacy', 'owned pre-funding card keeps its legacy rail after v2 is configured');
+  purchaseOwned = false;
+  assert.equal(await resolveAgentCardCardRail('rose-owned', 'card_legacy'), 'unknown', 'a card with no Rose ownership row never guesses the legacy rail once v2 is configured');
+  purchaseOwned = true; funding = savedFunding;
+  process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = '';
+  assert.equal(await resolveAgentCardCardRail('rose-owned', 'card_legacy'), 'unknown', 'owned pre-v2 card without legacy credentials stays unknown');
+  process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = ''; process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'fixture-legacy-token';
   orgCardholder = undefined;
   const legacyUserCard = new AgentCardRoutingProvider('rose-owned', {
     resolveOrgCardholderId: async () => orgCardholder,

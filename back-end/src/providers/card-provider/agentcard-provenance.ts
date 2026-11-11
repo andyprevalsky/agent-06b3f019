@@ -100,7 +100,11 @@ export async function resolveAgentCardCardRail(
       return (await ownerMatches(userId, funding.metadata, rail)) ? rail : 'unknown';
     if (funding.metadata && Object.keys(funding.metadata).length > 0) return 'unknown';
   }
-  // Legacy-only installations can still read/close exact owned MCP cards. Known v2 evidence above never falls back.
+  const legacyCredential = Boolean(process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN?.trim());
+  // A Rose purchase owns this exact card but carries no rail marker. v2 persists its rail before the
+  // first provider call, so this card predates v2 and stays on its legacy MCP rail even after v2 is configured.
+  if (purchase) return legacyCredential ? 'legacy' : 'unknown';
+  // No Rose ownership row: only legacy-only installations may read/close exact MCP cards. Known v2 evidence above never falls back.
   return !process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID?.trim() &&
     process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN?.trim()
     ? 'legacy'

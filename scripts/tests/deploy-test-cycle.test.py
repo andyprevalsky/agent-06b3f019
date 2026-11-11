@@ -261,6 +261,17 @@ class Cycle(unittest.TestCase):
         self.assertIn('Original SKIPPED', text.getvalue())
         self.assertIn('4396 cents sandbox', text.getvalue())
 
+    def test_recovered_debt_coverage_requires_the_exact_recovered_check(self):
+        # PR #1864 review: an unrelated covered failure must not satisfy canonical recovered stall debt.
+        import deploy_test_historical_custody as h
+        check = h.RECOVERED_AUTHORITY['gate'] + '/' + h.RECOVERED_AUTHORITY['task']
+        unrelated = {'k1': {'id': 'k1', 'check': 'smoke/chat-mode'}}
+        exact = {**unrelated, 'k2': {'id': 'k2', 'check': check}}
+        self.assertFalse(h.recovered_debt_covered({}, set()))
+        self.assertFalse(h.recovered_debt_covered(unrelated, set()))
+        self.assertTrue(h.recovered_debt_covered(exact, set()))
+        self.assertTrue(h.recovered_debt_covered({}, {'origin-digest'}))
+
     def test_recovered_native_warning_refuses_invalid_native_and_contract(self):
         h, native, document, persist, old_head = self.recovered_fixture()
         mutations = [lambda d: d['tasks'][0].update(passed=True),

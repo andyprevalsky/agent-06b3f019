@@ -473,6 +473,13 @@ def recovered_debt(state, gate=None):
         f.get('check') == name + '/' + task for f in state.get('failures', []))
 
 
+def recovered_debt_covered(covered, covered_origins):
+    """Canonical recovered debt is covered only by a recovered origin or a covered legacy failure for
+    that exact recovered check; unrelated covered failures never satisfy it."""
+    check = RECOVERED_AUTHORITY['gate'] + '/' + RECOVERED_AUTHORITY['task']
+    return bool(covered_origins) or any(f.get('check') == check for f in covered.values())
+
+
 def recovered_projection(record, source):
     """Existing cleanup transport shape; canonical provenance/credit remain in the ledger."""
     import deploy_test_cycle as c
@@ -917,7 +924,7 @@ def canonical_override(state, default, root):
            'canonical-custody-uncovered')
     covered_origins = {c.digest(r['origin']) for r in verify_recovered(state, root)}
     if recovered_debt(canonical):
-        refuse(bool(covered_origins) or bool(covered), 'canonical-custody-uncovered')
+        refuse(recovered_debt_covered(covered, covered_origins), 'canonical-custody-uncovered')
     refuse(all(c.digest(r['origin']) in covered_origins for r in recovered), 'canonical-custody-uncovered')
     identity = c.digest(canonical)
     derived = ((state.get('historical_custody_import') or {}).get('donor', {}).get('state_digest') == identity
