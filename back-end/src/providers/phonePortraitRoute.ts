@@ -97,10 +97,61 @@ function assistiveQuery(args: Record<string, unknown>) {
 }
 export const portraitRouteDigest = (events: PortraitRouteEvent[]) =>
   phoneCommandHash('portrait-causal-route-v1', events, 'agent');
+export type PortraitRouteBreak = { stage: string; cursor: number; operation: string; next: string };
+const RESTART = 'If an action did not take effect, restart from a new Settings launch at the root.';
+/** The next native step each stage expects; returned to the agent when a route breaks. */
+const NEXT_STEP: Record<string, string> = {
+  launch: 'apps.launch Settings, then screen.text of the Settings root showing Search.',
+  root: 'screen.text of the Settings root showing Search, then tap that observed Search.',
+  root_tap: 'tap the observed Search.',
+  query: 'input.text AssistiveTouch with keystrokes true into the focused search field.',
+  results:
+    'screen.text showing the AssistiveTouch result with its Accessibility → Touch breadcrumb; if the query did not register, type it with keystrokes true after a new Settings launch.',
+  result_tap: 'tap the observed AssistiveTouch result.',
+  detail: 'screen.text of the AssistiveTouch detail page.',
+  back: 'tap the top-left back control to the Touch page.',
+  touch: 'screen.text of Touch showing the AssistiveTouch On/Off value.',
+  touch_tap: 'tap the observed AssistiveTouch row on Touch.',
+  detail_known: 'screen.text of the AssistiveTouch detail page.',
+  toggle: 'tap the AssistiveTouch switch at the right end of its row (x 500-720), not the label.',
+  detail_enabled: 'screen.text of the AssistiveTouch detail page.',
+  back_enabled: 'tap the top-left back control to the Touch page.',
+  touch_enabled: 'screen.text of Touch showing AssistiveTouch On.',
+  touch_tap_enabled: 'tap the observed AssistiveTouch row on Touch.',
+  detail_final: 'screen.text of the AssistiveTouch detail page.',
+  float: 'tap the floating AssistiveTouch button at the right edge (x 625-750).',
+  menu: 'screen.text of the AssistiveTouch menu.',
+  menu_tap: 'tap the observed Control Center label.',
+  cc: 'screen.text of Control Center, then setup.verify.',
+  cc_ready: 'setup.verify immediately after the Control Center observation.',
+  lock_tap: 'tap the returned portraitActionHint at its evidenceCursor.',
+};
+export function portraitRouteNext(stage: string) {
+  return `${NEXT_STEP[stage] ?? NEXT_STEP.launch} ${RESTART}`;
+}
 export function provePortraitRoute(
   events: PortraitRouteEvent[],
   context: Context
 ): { digest: string; originalAssistiveTouch: AssistiveOriginal } | null {
+  const verdict = portraitRouteVerdict(events, context);
+  return 'proof' in verdict ? verdict.proof : null;
+}
+/** Same proof; a rejection names the first event that broke the route and the step it expected. */
+export function portraitRouteVerdict(
+  events: PortraitRouteEvent[],
+  context: Context
+):
+  | { proof: { digest: string; originalAssistiveTouch: AssistiveOriginal } }
+  | { break: PortraitRouteBreak } {
+  let stage = 'launch';
+  const reject = (e?: PortraitRouteEvent) => ({
+    break: {
+      stage,
+      cursor: e?.cursor ?? events.at(-1)?.cursor ?? 0,
+      operation: e?.operation ?? events.at(-1)?.operation ?? 'none',
+      next: portraitRouteNext(stage),
+    },
+  });
   if (
     events.length === 0 ||
     events.length > 64 ||
@@ -109,7 +160,7 @@ export function provePortraitRoute(
     !Number.isSafeInteger(context.revision) ||
     context.revision < 0
   )
-    return null;
+    return reject();
   if (
     events.some(
       (e, i) =>
@@ -118,15 +169,15 @@ export function provePortraitRoute(
         (i > 0 && e.cursor <= events[i - 1].cursor)
     )
   )
-    return null;
+    return reject();
   let prefix = -1;
   for (let i = 0; i < events.length; i++) if (events[i].operation === 'apps.launch') prefix = i;
-  if (prefix < 0) return null;
+  if (prefix < 0) return reject();
   const route = events.slice(prefix);
   const first = route[0];
-  if (!settingsLaunch(first) || !Number.isSafeInteger(first.revision)) return null;
+  if (!settingsLaunch(first) || !Number.isSafeInteger(first.revision)) return reject();
   let revision = first.revision;
-  let stage = 'root';
+  stage = 'root';
   let pending: ObservedTarget | null = null;
   let original: AssistiveOriginal | null = null;
   let body: TextRow | null = null;
@@ -137,7 +188,7 @@ export function provePortraitRoute(
       e.revision !== revision ||
       (i > 0 && e.cursor !== route[i - 1].cursor + 1)
     )
-      return null;
+      return reject(e);
     if (i === 0) continue;
     if (e.operation === 'screen.bounds') {
       const b = e.result as Record<string, unknown> | null;
@@ -149,7 +200,7 @@ export function provePortraitRoute(
         b.w !== 750 ||
         b.h !== 1334
       )
-        return null;
+        return reject(e);
       continue;
     }
     if (e.operation === 'setup.verify') {
@@ -167,13 +218,13 @@ export function provePortraitRoute(
         context.now < Date.parse(p.capturedAt) ||
         context.now - Date.parse(p.capturedAt) > 30000
       )
-        return null;
+        return reject(e);
       revision++;
       stage = 'lock_tap';
       continue;
     }
     if (e.operation === 'input.text') {
-      if (stage !== 'query' || !assistiveQuery(e.args)) return null;
+      if (stage !== 'query' || !assistiveQuery(e.args)) return reject(e);
       stage = 'results';
       continue;
     }
@@ -198,7 +249,7 @@ export function provePortraitRoute(
         e.args.y === 529
       )
         stage = 'cc';
-      else return null;
+      else return reject(e);
       pending = null;
       continue;
     }
@@ -207,20 +258,20 @@ export function provePortraitRoute(
       Object.keys(e.args).some((k) => k !== 'min_confidence') ||
       (e.args.min_confidence !== undefined && e.args.min_confidence !== 0.3)
     )
-      return null;
+      return reject(e);
     const rows = portraitTextRows(e.result);
-    if (rows === null) return null;
+    if (rows === null) return reject(e);
     if (stage === 'query') continue; // Read-only look at the focused search field before typing.
     if (stage === 'root' || stage === 'root_tap') {
-      if (!rows.some((r) => normal(r.text) === 'Settings' && r.y < 250)) return null;
+      if (!rows.some((r) => normal(r.text) === 'Settings' && r.y < 250)) return reject(e);
       pending = named(rows, 'Search');
-      if (!pending) return null;
+      if (!pending) return reject(e);
       stage = 'root_tap';
     } else if (stage === 'results' || stage === 'result_tap') {
       if (!rows.some((r) => r.text.includes('Accessibility') && r.text.includes('Touch')))
-        return null;
+        return reject(e);
       pending = named(rows, 'AssistiveTouch', (r) => r.y > 100 && r.y < 1100);
-      if (!pending) return null;
+      if (!pending) return reject(e);
       stage = 'result_tap';
     } else if (
       [
@@ -234,31 +285,31 @@ export function provePortraitRoute(
         'float',
       ].includes(stage)
     ) {
-      if (!detail(rows)) return null;
+      if (!detail(rows)) return reject(e);
       body = named(rows, 'AssistiveTouch', (r) => r.y > 150 && r.y < 400);
-      if (!body) return null;
+      if (!body) return reject(e);
       if (stage === 'detail') stage = 'back';
       else if (stage === 'detail_known') stage = original === 'off' ? 'toggle' : 'float';
       else if (stage === 'detail_enabled') stage = 'back_enabled';
       else if (stage === 'detail_final') stage = 'float';
     } else if (['touch', 'touch_tap', 'touch_enabled', 'touch_tap_enabled'].includes(stage)) {
-      if (!rows.some((r) => normal(r.text) === 'Touch' && r.y < 150)) return null;
+      if (!rows.some((r) => normal(r.text) === 'Touch' && r.y < 150)) return reject(e);
       pending = named(rows, 'AssistiveTouch', (r) => r.x < 450 && r.y > 150);
-      if (!pending) return null;
+      if (!pending) return reject(e);
       const values = rows.filter(
         (r) =>
           r.x > 500 &&
           Math.abs(r.y - pending!.y) <= 20 &&
           /^(On|Off)(?:\s*›)?$/.test(normal(r.text))
       );
-      if (values.length !== 1) return null;
+      if (values.length !== 1) return reject(e);
       const value = normal(values[0].text).startsWith('On') ? 'on' : 'off';
       if (stage === 'touch' || stage === 'touch_tap') {
-        if (original !== null && original !== value) return null;
+        if (original !== null && original !== value) return reject(e);
         original = value;
         stage = 'touch_tap';
       } else {
-        if (value !== 'on') return null;
+        if (value !== 'on') return reject(e);
         stage = 'touch_tap_enabled';
       }
     } else if (stage === 'menu' || stage === 'menu_tap') {
@@ -268,16 +319,16 @@ export function provePortraitRoute(
         !named(rows, 'Custom') ||
         !named(rows, 'Gestures')
       )
-        return null;
+        return reject(e);
       pending = controlCenter(rows);
-      if (!pending) return null;
+      if (!pending) return reject(e);
       stage = 'menu_tap';
     } else if (stage === 'cc' || stage === 'cc_ready') {
-      if (portraitControlCenterAnchors(e.result) === null) return null;
+      if (portraitControlCenterAnchors(e.result) === null) return reject(e);
       stage = 'cc_ready';
-    } else return null;
+    } else return reject(e);
   }
   return stage === 'cc_ready' && original !== null && revision === context.revision
-    ? { digest: portraitRouteDigest(route), originalAssistiveTouch: original }
-    : null;
+    ? { proof: { digest: portraitRouteDigest(route), originalAssistiveTouch: original } }
+    : reject(route.at(-1));
 }

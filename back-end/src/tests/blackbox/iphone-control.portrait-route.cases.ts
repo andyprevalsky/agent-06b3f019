@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'crypto';
 import { provePortraitRoute } from '../../providers/phonePortraitRoute';
-import { portraitRouteEvents, seedPortraitRoute } from './iphone-portrait-route.fixture';
+import {
+  portraitRouteCommands,
+  portraitRouteEvents,
+  seedPortraitCommands,
+  seedPortraitRoute,
+  unchangedSearchRows,
+} from './iphone-portrait-route.fixture';
 import { portraitFrame, portraitOcr } from './iphone-portrait.fixture';
 import { freshSetup, observe, setupPost, type SetupDto } from './iphone-control.setup-fixtures';
 import type { Case } from './iphone-control.cases';
@@ -290,5 +296,70 @@ for (const [original, shape] of [
           .verification.checks.portrait_lock.status,
         original === 'on' ? 'confirmed' : 'disabled'
       );
+    },
+  ]);
+
+type RouteBreak = { stage: string; cursor: number; operation: string; next: string };
+const routeBreakCases: Array<
+  [string, (c: ReturnType<typeof portraitRouteCommands>) => void, string, RegExp]
+> = [
+  [
+    'a lost AssistiveTouch query (search field unchanged after typing)',
+    (c) => {
+      const typed = c.findIndex((e) => e.operation === 'input.text');
+      c.splice(typed + 1, c.length, {
+        operation: 'screen.text',
+        args: { min_confidence: 0.3 },
+        result: unchangedSearchRows(),
+      });
+    },
+    'results',
+    /keystrokes.*true/,
+  ],
+  [
+    'an AssistiveTouch label tap where the switch was required',
+    (c) => {
+      const toggle = c.findIndex((e) => e.operation === 'input.tap' && e.args.x === 645);
+      c.splice(toggle, c.length, {
+        operation: 'input.tap',
+        args: { x: 177, y: 271 },
+        result: true,
+      });
+    },
+    'toggle',
+    /switch/,
+  ],
+];
+for (const [label, deviate, stage, next] of routeBreakCases)
+  portraitRouteCases.push([
+    `portrait verify names the exact route break for ${label}`,
+    async (h) => {
+      const f = await freshSetup(h);
+      h.framePng = portraitFrame(false);
+      h.observationResult = portraitOcr();
+      const commands = portraitRouteCommands('off', 'production-cold');
+      deviate(commands);
+      await seedPortraitCommands(h, f, commands);
+      const evidence = await observe(h, f);
+      const before = h.calls.length;
+      const result = await setupPost(h, f, {
+        action: 'verify',
+        verificationTarget: 'portrait_lock',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: evidence.cursor,
+        evidenceOperationIds: [evidence.id],
+        requestKey: randomUUID(),
+      });
+      assert.equal(result.data.operation?.status, 'FAILED');
+      assert.equal(result.data.operation?.errorCode, 'phone_portrait_route_unproven');
+      assert.equal(h.calls.length, before, 'Unproven route crossed into private capture');
+      const routeBreak = (result.data.operation?.result as { portraitRoute?: RouteBreak } | null)
+        ?.portraitRoute;
+      assert.ok(routeBreak, 'Unproven route did not name where it broke');
+      assert.equal(routeBreak.stage, stage);
+      assert.ok(Number.isSafeInteger(routeBreak.cursor) && routeBreak.cursor > 0);
+      assert.match(routeBreak.next, next);
+      assert.match(routeBreak.next, /new Settings launch/);
     },
   ]);
