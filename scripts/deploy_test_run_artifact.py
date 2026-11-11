@@ -232,9 +232,11 @@ class _Reader:
             s.charged = old_charge
 
 
-def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=None, raw_remaining=None, raw_aggregate_limit=None):
+def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=None, raw_remaining=None, raw_aggregate_limit=None, expected_size=None):
     """Higher raw_limit is explicit and caller-bound; the generic default stays unchanged."""
     checkpoint(deadline)
+    if expected_size is not None and (type(expected_size) is not int or expected_size <= 0):
+        raise ValueError('native artifact: invalid exact-size contract')
     raw_limit = MAX_RECEIPT_BYTES if raw_limit is None else raw_limit
     if type(raw_limit) is not int or raw_limit <= 0 or type(limit) is not int or limit <= 0:
         raise ValueError('native artifact: invalid byte contract')
@@ -251,6 +253,8 @@ def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=
             raise ValueError('native artifact: regular fd required')
         if not 0 < before.st_size <= raw_limit:
             raise ValueError('native artifact: raw file byte bound exceeded (proof file too large)')
+        if expected_size is not None and before.st_size != expected_size:
+            raise ValueError('native artifact: exact raw file size mismatch')
         if raw_remaining is not None:
             if (not isinstance(raw_remaining, list) or len(raw_remaining) != 1
                     or type(raw_remaining[0]) is not int

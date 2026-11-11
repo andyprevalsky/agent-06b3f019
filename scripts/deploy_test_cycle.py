@@ -2358,10 +2358,20 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
         if state.get('pending'):
             raise ValueError('interrupted pending triage must resume before refresh')
     pending_refresh = bool(state.get('pending'))
-    if pending_refresh and (state.get('phase') != 'triage' or CANCEL.is_set()
+    quick_names = {g['name'] for g in old['gates'] if g.get('quick')}
+    pending_quick_refresh = (
+        pending_refresh and state.get('phase') == 'quick' and state.get('ready') is False
+        and state.get('next_after_quick') == 'triage' and state.get('failure_phase') == 'refresh'
+        and not any(key in state for key in ('active', 'running', 'resume', 'resume_phase', 'live_failures'))
+        and isinstance(state['pending'], list) and len(set(state['pending'])) == len(state['pending'])
+        and set(state['pending']) <= {f['id'] for f in state['failures']}
+        and not any((a.get('phase') == 'quick' and a.get('source') == state['source'])
+                    or any(r.get('gate') in quick_names and r.get('source', a.get('source')) == state['source']
+                           for r in a.get('results', [])) for a in state.get('attempts', [])))
+    if pending_refresh and (state.get('phase') != 'triage' and not pending_quick_refresh or CANCEL.is_set()
             or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
         raise ValueError("adjudicate pending occurrences or reach quiescent triage before binding a changed source")
-    unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
+    unstarted_quick = (state["phase"] == "quick" and (not state.get('pending') or pending_quick_refresh)
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
     unstarted_final = (state['phase'] == 'final' and not state.get('pending')
