@@ -37,7 +37,7 @@ try {
     true,
     'invalid storage selection must preserve existing files'
   );
-  console.log('coverage raw directory test passed');
+  process.stdout.write('coverage raw directory test passed\n');
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
