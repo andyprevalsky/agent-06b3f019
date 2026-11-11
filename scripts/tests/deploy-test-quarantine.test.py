@@ -522,6 +522,28 @@ class ReleaseReport(unittest.TestCase):
             q.validate_attribution({**occurrence, 'detail': tap + 'not ok 3 - another\n'},
                                    {**entry, 'case': title}, self.root)
 
+    def test_typescript_case_table_runner_binds_name_fn_marker(self):
+        occurrence_id = 'e' * 32
+        name = 'concurrent first use mints one agent identity for the user'
+        source = ("export const cases = [\n  { name: 'other case', fn: () => undefined },\n  {\n"
+                  "    name: '%s',\n    fn: quarantine(\n      {\n        since: '2026-11-11',\n"
+                  "        repair: 'pending-handoff:%s',\n        error: 'Foreign key constraint violated',\n"
+                  "        evidence: 'rca-cases',\n      },\n      () => undefined,\n      { unit: '%s' }\n    ),\n  },\n];\n"
+                  % (name, occurrence_id, name))
+        (self.root / 'tests' / 'identity.cases.ts').write_text(source)
+        detail = 'FAIL %s\nPrismaClientKnownRequestError:\n\nResults: 17 passed, 1 failed\n' % name
+        occurrence = {'id': occurrence_id, 'gate': 'backend-coverage-blackbox', 'unit': 'auth-options',
+                      'detail': detail, 'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-cases', 'marker': 'tests/identity.cases.ts',
+                 'post_merge': packet, 'case': name}
+        self.assertEqual('NOT_INTRODUCED', q.validate_attribution(occurrence, entry, self.root)['attribution'])
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': detail + 'FAIL other case\n'}, entry, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': 'FAIL other case\n'},
+                                   {**entry, 'case': 'other case'}, self.root)
+
     def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
         self.write_catalog()
         self.assertEqual({'cloud-smoke': META}, q.catalog_quarantines(self.root))

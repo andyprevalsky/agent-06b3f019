@@ -371,8 +371,9 @@ def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) 
 
 
 _ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
-# node:test TAP top-level failures and the custom blackbox runners' `FAIL  <case> (<ms>ms)` lines.
-_TS_FAILED_CASE = (re.compile(r'^not ok \d+ - (.+?)\s*$', re.M), re.compile(r'^FAIL  (.+?) \(\d+ms\)$', re.M))
+# node:test TAP top-level failures and the custom blackbox runners' `FAIL  <case> (<ms>ms)` / `FAIL <case>` lines.
+_TS_FAILED_CASE = (re.compile(r'^not ok \d+ - (.+?)\s*$', re.M), re.compile(r'^FAIL  (.+?) \(\d+ms\)$', re.M),
+                   re.compile(r'^FAIL (?! )(.+?)\s*$', re.M))
 
 
 def _ts_first_attempt_texts(occurrence: dict, root: Path) -> list[str]:
@@ -409,7 +410,7 @@ def _ts_domain_case_markers(occurrence: dict, case: object, root: Path, path: st
         return []
     # Bind the quoted case label written directly before its marker, independent of earlier literals.
     lines = {text.count('\n', 0, hit.end() - len(hit.group(2))) + 1 for hit in re.finditer(
-        r'([\'"`])' + re.escape(case) + r'\1\s*,\s*(quarantine\(\s*\{)', text)}
+        r'([\'"`])' + re.escape(case) + r'\1\s*,\s*(?:fn\s*:\s*)?(quarantine\(\s*\{)', text)}
     if len(lines) > 1:
         raise ValueError(f'{path} must mark case {case} exactly once')
     return [m for m in markers(root, [path]) if m['line'] in lines and m.get('owner') is None]
