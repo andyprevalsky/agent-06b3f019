@@ -7220,6 +7220,30 @@ class Cycle(unittest.TestCase):
         c.reconcile(state, original['token'], {**proof, 'validation_source':copy.deepcopy(state['source'])})
         self.assertEqual(same, state)
 
+    def test_clean_historical_successor_renews_after_added_selection_reason_only(self):
+        # PR1682: a later diff added a run_all reason; execution contract and inventory unchanged.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        state['attempts'][-1]['source'] = copy.deepcopy(successor['source'])
+        gate['selection_evidence'] = ['run_all trigger: a', 'runtime/contract path trigger']
+        successor['execution_binding']['contract_digest'] = c.digest(gate)
+        c.write(folder/'receipt.json', successor)
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        for name, current in (('replaced', ['run_all trigger: b', 'runtime/contract path trigger']),
+                              ('reordered', ['runtime/contract path trigger', 'run_all trigger: a']),
+                              ('removed', ['run_all trigger: a']),
+                              ('not-a-list', {'run_all trigger: a': True})):
+            candidate = copy.deepcopy(state)
+            next(g for g in candidate['plan']['gates'] if g['name']==gate['name'])['selection_evidence'] = current
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        gate['selection_evidence'] = ['run_all trigger: a', 'run_all trigger: b', 'runtime/contract path trigger']
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertIsNone(c.full_pass_binding(state, gate))
+
     def test_clean_historical_successor_refuses_noninventory_or_unbound_attempt_drift(self):
         state, paths, proof, gate, packet, original, folder, successor = self.historical_clean_successor_state()
         renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
@@ -7276,6 +7300,27 @@ class Cycle(unittest.TestCase):
         self.assertIsNone(c.full_pass_binding(state, gate))  # Native FAIL has not become coverage credit.
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
+
+    def test_isolated_renewal_ignores_later_prelaunch_admission_refusals(self):
+        # PR1682 rounds 19/21: admission raised before launch; run_phase recorded a token-less row.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False, source=copy.deepcopy(state['source']),
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), reason='native cleanup: next source/inventory binding')
+        for stale in (True, None):
+            state['attempts'].append(dict(phase='focused', stale=stale, results=[copy.deepcopy(refusal)]))
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        # Any row with a request token, execution flag or non-UNVERIFIED case is still a successor.
+        for name, mutate in (('token', lambda r: r.update(token='launched')), ('executed', lambda r: r.update(executed=False)),
+                             ('pass', lambda r: r['cases'].update({gate['checks'][0]: 'PASS'}))):
+            candidate = copy.deepcopy(before); mutate(candidate['attempts'][-1]['results'][0])
+            snapshot = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(snapshot, candidate)
 
     def test_isolated_successor_renewal_rejects_bad_or_tampered_successors_atomically(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()

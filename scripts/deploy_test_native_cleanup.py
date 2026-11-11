@@ -1551,6 +1551,17 @@ def clean_isolated_successor(state, prior, original, successor):
              'successor historical inventory must preserve original debt')
         gate = copy.deepcopy(gate)
         gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
+        # Selection evidence records why the planner chose the gate, not how it executes (local and
+        # backend cleanup already exclude it). A later diff can only add reasons, so accept an
+        # in-order subset of the current reasons only when it hashes to the immutable contract.
+        evidence = gate.get('selection_evidence')
+        if (binding.get('contract_digest') != digest(gate) and isinstance(evidence, list)
+                and len(evidence) <= 12 and all(isinstance(v, str) for v in evidence)):
+            for mask in range(1 << len(evidence)):
+                candidate = dict(gate, selection_evidence=[v for i, v in enumerate(evidence) if mask >> i & 1])
+                if digest(candidate) == binding.get('contract_digest'):
+                    gate = candidate
+                    break
     need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
@@ -1678,9 +1689,18 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
+def prelaunch_refusal(row):
+    """run_phase's record for a gate whose admission raised before any worker launched."""
+    return (isinstance(row, dict) and 'token' not in row and 'executed' not in row
+            and set(row) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+            and row['status'] == 'FAIL' and row['complete'] is False
+            and isinstance(row['cases'], dict) and row['cases']
+            and all(v == 'UNVERIFIED' for v in row['cases'].values()))
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
-    from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
+    from deploy_test_cycle import CANCEL, receipt_owner, source
     need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
          and not state.get('running')
          and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
@@ -1695,7 +1715,11 @@ def renew_isolated_validation(state, request_token, proof):
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
-    latest = latest_receipts(state).get(prior['gate'])
+    # A pre-launch admission refusal (run_phase's exception row: no request token, never
+    # executed) launched no worker and owns no resource, so it is not a successor execution.
+    rows = [r for a in state.get('attempts', []) for r in a.get('results', [])
+            if r.get('gate') == prior['gate'] and not prelaunch_refusal(r)]
+    latest = rows[-1] if rows else None
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
