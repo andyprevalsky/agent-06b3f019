@@ -9588,6 +9588,8 @@ class CleanupPrepareEvidence(unittest.TestCase):
         def source(args,**kwargs):
             if args[0]=='ps': return original(args,**kwargs)
             if args[-1].endswith('cloudbench-shared-relay.py'): return b'original-broker'
+            if args[-1].endswith(':agents/benchmarks/tasks.json'):
+                return b'[]' if getattr(self, 'foreign_catalog', False) else (self.base/'agents/benchmarks/tasks.json').read_bytes()
             return (self.base/'scripts'/args[-1].rsplit('/',1)[-1]).read_bytes()
         with patch.dict(sys.modules,deploy_test_cloud=published), patch.object(self.native.runpy,'run_path',return_value={}), \
              patch.object(self.native.subprocess,'check_output',side_effect=source):
@@ -9873,6 +9875,105 @@ class CleanupPrepareEvidence(unittest.TestCase):
         self.save(folder/'receipt.json',receipt);proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),worker_result_sha256=reference['result_sha256'])
         self.reseal()
         return receipt,owner,proof,request
+
+    def omitted_prepare_fixture(self):
+        import hashlib
+        receipt, owner, proof, request = self.source_bound_prepare_fixture()
+        omitted = 'test-mass-agent-run-0'
+        checks = [name for name in request['checks'] if name != omitted]
+        request['checks'] = checks
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        gate = ledger['plan']['gates'][0]
+        gate.update(checks=[name for name in gate['checks'] if name != omitted],
+                    category='smoke', native_cloud=True)
+        ledger['deploy_selection_omissions'] = [dict(source=copy.deepcopy(ledger['source']),
+            checks={'smoke/' + omitted: 'Explicit user deploy exclusion'},
+            executed=False, credit_granted=False)]
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        folder = Path(receipt['log']).parent
+        self.save(folder/'request.json', request)
+        receipt.update(checks=checks, cases={**dict.fromkeys(checks, 'UNVERIFIED'),
+                                           'agent-payment-abandonment': 'SKIP'})
+        adapter = json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks, cases=dict.fromkeys(checks, 'UNVERIFIED'),
+                       native_command=['bash', 'scripts/run-bench', *checks, '--runs', '1',
+                                       '--concurrency', '13', '--retry-infra', '0',
+                                       '--ref', receipt['source']['head']])
+        self.save(Path(receipt['worker_result']), adapter)
+        summary = json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=13, task_count=13, total_jobs=13)
+        summary['cleanup_cohorts'][0]['expected_count'] = 13
+        summary['jobs'] = summary['jobs'][:13]
+        for job, name in zip(summary['jobs'], checks):
+            job.update(task=name, controller_command=['bash', str(self.base/'scripts/run-bench'),
+                                                      name, '--ref', receipt['source']['head'], '--foreground'])
+        self.save(self.campaign/'summary.json', summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',
+                  dict(cohort_id='c001', jobs=dict.fromkeys(j['job_id'] for j in summary['jobs'])))
+        catalog = self.base/'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        self.save(catalog, [{'name': omitted, 'deploy_quarantine': 'Explicit user deploy exclusion'}])
+        receipt['native_cleanup_reference']['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json', receipt)
+        proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=receipt['native_cleanup_reference']['result_sha256'])
+        self.reseal()
+        return receipt, owner, proof, request
+
+    def test_source_bound_prepare_accepts_only_authenticated_current_omission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.omitted_prepare_fixture()
+        before = {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            entry = self.validate_prepare_fixture(receipt, owner, proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(13, list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+        self.foreign_catalog = True
+        try:
+            with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+                 patch.object(custody, 'state_identity', side_effect=c.digest), \
+                 patch.object(custody, 'guard', return_value=request['skips']):
+                with self.assertRaisesRegex(ValueError, 'catalog source'):
+                    self.validate_prepare_fixture(receipt, owner, proof)
+        finally:
+            self.foreign_catalog = False
+
+    def test_source_bound_prepare_rejects_unproved_omission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.omitted_prepare_fixture()
+        ledger_path = Path(proof['custody_ledger'])
+        catalog = self.base/'agents/benchmarks/tasks.json'
+        original = ledger_path.read_bytes()
+        for fault in ('missing', 'stale', 'credit', 'executed', 'reason', 'foreign', 'ordinary', 'arbitrary'):
+            with self.subTest(fault=fault):
+                ledger = json.loads(original)
+                row = ledger['deploy_selection_omissions'][0]
+                self.save(catalog, [{'name': 'test-mass-agent-run-0', 'deploy_quarantine': 'Explicit user deploy exclusion'}])
+                if fault == 'missing': ledger.pop('deploy_selection_omissions')
+                elif fault == 'stale': row['source'] = {'head': 'f'*40, 'digest': 'f'*64}
+                elif fault == 'credit': row['credit_granted'] = True
+                elif fault == 'executed': row['executed'] = True
+                elif fault == 'reason': row['checks']['smoke/test-mass-agent-run-0'] = 'Other reason'
+                elif fault == 'foreign': ledger['source'] = {'head': 'f'*40, 'digest': 'f'*64}
+                elif fault == 'ordinary': self.save(catalog, [{'name': 'test-mass-agent-run-0', 'quarantine': {'error': 'still runs'}}])
+                elif fault == 'arbitrary': row['checks'] = {'smoke/arbitrary-task': 'Explicit user deploy exclusion'}
+                self.save(ledger_path, ledger)
+                request['custody_state_sha256'] = c.digest(ledger)
+                self.save(Path(receipt['log']).parent/'request.json', request)
+                self.reseal()
+                with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+                     patch.object(custody, 'state_identity', side_effect=c.digest), \
+                     patch.object(custody, 'guard', return_value=request['skips']):
+                    with self.assertRaises(ValueError): self.validate_prepare_fixture(receipt, owner, proof)
 
     def test_source_bound_prepare_preserves_unknown_and_authenticates_custody(self):
         import deploy_test_native_prepare as prepare

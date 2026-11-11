@@ -103,7 +103,7 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     count = 12 if current else 14
     if source_bound:
         from deploy_test_historical_custody import guard, state_identity
-        from deploy_test_cycle import digest
+        from deploy_test_cycle import current_deploy_omissions, digest
         ledger = document(Path(proof.get('custody_ledger', '')))
         need(ledger.get('source') == receipt['source']
              and state_identity(ledger) == request.get('custody_state_sha256')
@@ -113,10 +113,19 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
         gate = gates[0]
         current_binding = {k: ledger[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
         expected = guard(ledger, gate, root, current=current_binding)
+        omissions = current_deploy_omissions(ledger, gate, root)
+        if omissions:
+            need(bound(root / 'agents/benchmarks/tasks.json') == subprocess.check_output(
+                ['git', '--no-replace-objects', '-C', str(root), 'show',
+                 head + ':agents/benchmarks/tasks.json']), 'prepare omission catalog source')
+        original_checks = list(CURRENT_PREPARE_CHECKS) + [
+            'browser-auth-guest-purchase', 'browser-auth-member-discount-purchase']
+        need(set(omissions) <= set(original_checks), 'prepare unknown deploy omission')
+        expected_checks = [name for name in original_checks if name not in omissions]
+        count = len(expected_checks)
         need(request.get('skips') == expected and receipt.get('custody_skips') == expected
              and request['checks'] == [name for name in gate['checks'] if name not in expected]
-             and request['checks'] == list(CURRENT_PREPARE_CHECKS) +
-                 ['browser-auth-guest-purchase', 'browser-auth-member-discount-purchase']
+             and request['checks'] == expected_checks
              and set(expected) == {'agent-payment-abandonment'}, 'prepare custody inventory')
     expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
     if current or source_bound:
