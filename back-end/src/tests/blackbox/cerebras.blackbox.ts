@@ -198,7 +198,7 @@ async function run(): Promise<void> {
       await quarantine(
         {
           since: '2026-11-11',
-          repair: 'pending-handoff:d2ba002c0abd4af6a10da8c847d6ec2c',
+          repair: 'https://boxes.dev/thread/thr_719de2a2f98548dfafffc794968d720b',
           error:
             'AssertionError [ERR_ASSERTION]: chat model probe must stay under the lifecycle ratchet (23593ms)',
           evidence: '.context/rca-cerebras/d2ba002c/findings.json',
