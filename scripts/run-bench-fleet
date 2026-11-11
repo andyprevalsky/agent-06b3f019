@@ -16224,12 +16224,120 @@ private_fleet_source_admission() {
     }
 }
 validate_private_fleet_source() {
-    local machines volumes snapshots
-    machines="$(FLY machines list -a "$APP" --json)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json)" || return 1
-    snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
+    local machines volumes snapshots capture deadline attempt pause remaining status
+    local read_index=0 validation_raw snapshot_raw machines_raw volumes_raw
+    capture="$GIT_COMMON_DIR/cloudbench-source-validation/$FLEET_OWNER_TOKEN/$RUN_ID"
+    deadline="$(python3 - "$FLEET_CONTROLLER_STARTED_EPOCH" "$START_BARRIER_WAIT_SECONDS" <<'PY_SOURCE_DEADLINE'
+import math, os, sys, time
+value = int(sys.argv[1]) + int(sys.argv[2])
+if os.environ.get('RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC'):
+    earlier = float(os.environ['RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC'])
+    assert math.isfinite(earlier)
+    value = min(value, int(time.time() + earlier - time.monotonic()))
+print(value)
+PY_SOURCE_DEADLINE
+)" || return 1
+    python3 - "$capture" "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$deadline" "$GIT_COMMON_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" <<'PY_SOURCE_INTENT' || return 1
+import hashlib, json, os, pathlib, re, runpy, shutil, stat, sys
+path, helper, manifest, expected, deadline, git, owner, run = sys.argv[1:]
+path = pathlib.Path(path)
+git=pathlib.Path(git)
+assert git.resolve(strict=True)==git and git.stat().st_uid==os.geteuid() and not git.stat().st_mode & 0o022
+assert re.fullmatch('[a-f0-9]{32}',owner) and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]*',run)
+base=git/'cloudbench-source-validation'
+try:os.mkdir(base,0o700)
+except FileExistsError:pass
+info=base.lstat();assert stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o700
+assert base.resolve(strict=True)==base
+os.mkdir(base/owner,0o700)
+raw = pathlib.Path(manifest).read_bytes()
+assert hashlib.sha256(raw).hexdigest() == expected
+source = runpy.run_path(helper)['manifest'](raw)
+os.mkdir(path, 0o700)
+binary = pathlib.Path(shutil.which('flyctl')).resolve(strict=True)
+value = dict(schema='private-source-validation-reads-v1', manifest_sha256=expected,
+    machine_id=source['machine_id'], volume_id=source['volume_id'], snapshot_id=source['snapshot_id'],
+    owner_token=owner,run_id=run,controller_deadline_epoch=int(deadline), max_snapshot_reads=12, max_read_seconds=20,
+    selected_token_sha256=hashlib.sha256(os.environ.get('FLY_API_TOKEN','').encode()).hexdigest(),
+    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), binary=str(binary),
+    channel='fly_with_timeout combined CLI stdout/stderr; separate wrapper stderr')
+with os.fdopen(os.open(path/'intent.json', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+PY_SOURCE_INTENT
+    # The existing timeout wrapper owns/reaps its exact CLI children. Its raw
+    # channel combines CLI stdout/stderr; never label it a native HTTP capture.
+    private_source_validation_read() {
+        local kind="$1" record began rc; shift
+        if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+            private_source_lease_guard || return 1
+        fi
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$remaining" -le 20 ] || remaining=20
+        read_index=$((read_index + 1))
+        printf -v record '%s/%02d-%s' "$capture" "$read_index" "$kind"
+        began="$(date +%s)"
+        if (umask 077; set -C; { set +C; fly_with_timeout "$remaining" "$@"; } >"$record.raw" 2>"$record.stderr"); then rc=0; else rc=$?; fi
+        python3 - "$record" "$kind" "$rc" "$began" "$deadline" "$@" <<'PY_SOURCE_READ' || return 1
+import hashlib, json, os, pathlib, stat, sys, time
+name, kind, rc, began, deadline, *argv = sys.argv[1:]
+value = dict(kind=kind, argv=argv, exit_code=int(rc), began_at=int(began), ended_at=time.time(), controller_deadline_epoch=int(deadline))
+for suffix in ('raw','stderr'):
+    path=pathlib.Path(name+'.'+suffix);info=path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1
+    value[suffix+'_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+with os.fdopen(os.open(name+'.json', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600),'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+PY_SOURCE_READ
+        [ "$rc" = 0 ] && [ "$(date +%s)" -lt "$deadline" ] || return 1
+        validation_raw="$record.raw"
+    }
+    for attempt in $(seq 1 12); do
+        private_source_validation_read snapshots volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json || return 1
+        status=0
+        python3 - "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$validation_raw" <<'PY_SOURCE_SNAPSHOTS' || status=$?
+import hashlib, json, pathlib, runpy, sys
+try:
+    helper=runpy.run_path(sys.argv[1]);raw=pathlib.Path(sys.argv[2]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest()==sys.argv[3]
+    manifest=helper['manifest'](raw)
+    rows=json.loads(pathlib.Path(sys.argv[4]).read_bytes(),object_pairs_hook=helper['storage']['unique_object'])
+    if isinstance(rows,list) and not rows:raise SystemExit(75)
+    helper['exact'](rows,manifest['snapshot_id'],'snapshot')
+except (ValueError, TypeError, KeyError, OSError, AssertionError):
+    print('private fleet source validation failed: snapshot inventory refused',file=sys.stderr);raise SystemExit(1)
+PY_SOURCE_SNAPSHOTS
+        if [ "$status" = 0 ]; then snapshot_raw="$validation_raw"; break; fi
+        [ "$status" = 75 ] || return 1
+        if [ "$attempt" = 12 ]; then
+            echo 'private fleet source validation failed: snapshot inventory remained empty after 12 bounded reads' >&2
+            return 1
+        fi
+        # Same consistency envelope as list_donor_snapshots, never a new task
+        # deadline. A valid [] is unavailable observation, not absence proof.
+        pause=$((attempt * 5)); [ "$pause" -le 30 ] || pause=30
+        pause=$((pause + RANDOM % 4))
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$pause" -le "$remaining" ] || pause="$remaining"
+        sleep "$pause"
+    done
+    # Refresh identity/storage AFTER the successful snapshot observation.
+    private_source_validation_read machines machines list -a "$APP" --json || return 1
+    machines_raw="$validation_raw"
+    private_source_validation_read volumes volumes list -a "$APP" --json || return 1
+    volumes_raw="$validation_raw"
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    machines="$(cat "$machines_raw")"; volumes="$(cat "$volumes_raw")"; snapshots="$(cat "$snapshot_raw")"
+    status=0
     printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
-        | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
+        | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256" || status=$?
+    [ "$(date +%s)" -lt "$deadline" ] || status=1
+    (umask 077; set -C; printf '%s\n' "$status" >"$capture/verify.status") || return 1
+    return "$status"
 }
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
     campaign_inventory_wait start_machines_snapshot_loop || exit $?

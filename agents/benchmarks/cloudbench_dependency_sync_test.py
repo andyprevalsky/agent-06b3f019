@@ -29067,6 +29067,13 @@ ROOT_DIR="$FIXTURE/workspace"
 GIT_COMMON_DIR="$FIXTURE/common"
 WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
 FLEET_DIR="$ROOT_DIR/.context/run"
+# This extracted preflight owns one explicit fixture operation and the same
+# original 20-second budget as its unchanged subprocess timeout below.
+FLEET_OWNER_TOKEN=cccccccccccccccccccccccccccccccc
+RUN_ID=private-source-preflight-fixture
+FLEET_CONTROLLER_STARTED_EPOCH="$(date +%s)"
+START_BARRIER_WAIT_SECONDS=20
+FLY_API_TOKEN=fixture-private-source-selected-token
 source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}
 mkdir -p "$FLEET_DIR"
 SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}
@@ -29089,7 +29096,6 @@ FLY() {{
     *) echo 'unexpected provider mutation' >&2; return 88 ;;
   esac
 }}
-fly_with_timeout() {{ shift; FLY "$@"; }}
 pool_machine_state() {{ echo started; }}
 sleep() {{ :; }}
 cloudbench_node_dependency_fingerprint() {{ printf '%s\\n' {node}; }}

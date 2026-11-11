@@ -237,4 +237,112 @@ clone_create_owned_volume "$FIXTURE/ledger" cloudbench-abc 11111111111111 iad sh
             text=FLEET.read_text();claim=text[text.index('claim_reusable_worker() {'):text.index('return_reusable_worker() {')]
             self.assertLess(claim.index('owned_capsule_worker_source_admission "$proof"'),claim.index('write_pool_claim'))
 
+
+class PrivateSourceSnapshotReads(unittest.TestCase):
+    # Original Root read-only 15-concurrency captures, not reconstructed smoke bytes.
+    EMPTY = b'[]\n'
+    HEALTHY = b'[\n    {\n        "id": "vs_24P7lJepAPORsxx5yblJp",\n        "size": 42359770871,\n        "volume_size": 42949672960,\n        "digest": "4cdadcfde36f13eceb1b6c0d0e57342ec736a5944d80e09fc7a271513769e06c",\n        "created_at": "2026-11-10T03:36:22Z",\n        "status": "created",\n        "retention_days": 5\n    },\n    {\n        "id": "vs_nj5w9Bley5MNfzKva4eoA",\n        "size": 944314,\n        "volume_size": 42949672960,\n        "digest": "dba247c2460226b094d393b644bfc27a35ce6cc538d3f3b87970754056eedd54",\n        "created_at": "2026-11-10T22:52:39Z",\n        "status": "created",\n        "retention_days": 5\n    }\n]\n'
+
+    def validation(self, replies, *, provider_exit=0, expired=False, earlier_deadline=False,
+                   guardian_lost=False, tamper_manifest=False, wrong_owner=False, journal=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);registry=root/'registry';registry.mkdir(mode=0o700)
+            git=root/'.git';git.mkdir(mode=0o700);owner='1'*32;run='fixture-source-read'
+            base=git/'cloudbench-source-validation'
+            if journal:
+                base.mkdir(mode=0o700)
+                if journal=='symlink':(base/owner).symlink_to(registry,target_is_directory=True)
+                else:(base/owner).mkdir(mode=0o700)
+            fixture=runpy.run_path(str(ROOT/'scripts/tests/cloudbench-source-version.test.py'))['SourceVersion']()
+            fixture.setUp();manifest=fixture.owned()
+            manifest['snapshot_id']=json.loads(self.HEALTHY)[0]['id']
+            meta=fixture.machine['config']['metadata']
+            meta.update(cloudbench_source_protocol=manifest['lease_protocol'],cloudbench_source_create_nonce=manifest['creation_nonce'],
+                        cloudbench_source_guest_env_mode='owned-capsule-v1',cloudbench_source_guest_env_capsule_sha256='f'*64)
+            if wrong_owner:meta['cloudbench_source_owner']='b'*32
+            source=root/'source.json';source.write_text(json.dumps(manifest));digest=hashlib.sha256(source.read_bytes()).hexdigest()
+            for role in ('machines','volumes'):(root/(role+'.json')).write_text(json.dumps(fixture.inventory[role]))
+            for index,body in enumerate(replies):(root/('reply-'+str(index))).write_bytes(body)
+            fake=root/'provider.py';fake.write_text(r"""import json,os,pathlib,sys
+p=pathlib.Path(os.environ['FIXTURE']);args=sys.argv[1:]
+with (p/'calls').open('a') as f:f.write(json.dumps(args)+'\n')
+if args[:3]==['volume','snapshots','list']:
+ counter=p/'count';n=int(counter.read_text()) if counter.exists() else 0;counter.write_text(str(n+1))
+ raw=(p/('reply-'+str(min(n,int(os.environ['REPLIES'])-1)))).read_bytes()
+ if os.environ['TAMPER']=='1':(p/'source.json').write_text((p/'source.json').read_text()+' ')
+ sys.stdout.buffer.write(raw);sys.exit(int(os.environ['PROVIDER_EXIT']))
+elif args[:2] in (['machines','list'],['volumes','list']):sys.stdout.buffer.write((p/(args[0]+'.json')).read_bytes())
+else:raise SystemExit('unexpected provider operation')
+""")
+            source_code=FLEET.read_text();function=re.search(r'^validate_private_fleet_source\(\) \{.*?^\}',source_code,re.M|re.S).group(0)
+            inventory=(ROOT/'scripts/lib/cloudbench-inventory.sh').read_text()
+            bounded=re.search(r'^fly_with_timeout\(\) \{.*?^\}',inventory,re.M|re.S).group(0)
+            shell='set -euo pipefail\nFLY() { python3 "$FIXTURE/provider.py" "$@"; }\nprivate_source_lease_guard() {\n printf guard\\n >> "$FIXTURE/guards"\n if [ "$GUARD_LOST" = 1 ] && [ -f "$FIXTURE/count" ]; then return 1; fi\n}\nsleep() { printf \'%s\\n\' "$1" >> "$FIXTURE/sleeps"; }\n'+bounded+'\n'+function+'\nvalidate_private_fleet_source\n'
+            env={**os.environ,'FIXTURE':str(root),'FLEET_REGISTRY_DIR':str(registry),'GIT_COMMON_DIR':str(git),'FLEET_OWNER_TOKEN':owner,'RUN_ID':run,'PRIVATE_SOURCE_FILE':str(source),
+                 'PRIVATE_SOURCE_SHA256':digest,'PRIVATE_SOURCE_VOLUME_ID':'vol_owned','PRIVATE_SOURCE_LEASE_PROTOCOL':'cloudbench-source-lease-v1',
+                 'SOURCE_HELPER':str(ROOT/'scripts/cloudbench-source.py'),'APP':'navi-whisper-lux-bench','WARM_PARKED_VM_MEMORY':'2048',
+                 'FLEET_CONTROLLER_STARTED_EPOCH':str(int(__import__('time').time())-(6000 if expired else 0)),
+                 'START_BARRIER_WAIT_SECONDS':'600','FLY_API_TOKEN':'snapshot-capture-secret-canary','REPLIES':str(len(replies)),
+                 'PROVIDER_EXIT':str(provider_exit),'GUARD_LOST':str(int(guardian_lost)),'TAMPER':str(int(tamper_manifest))}
+            env.pop('RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC',None)
+            if earlier_deadline:env['RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC']=str(__import__('time').monotonic()-1)
+            result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True,timeout=15)
+            calls=[json.loads(line) for line in (root/'calls').read_text().splitlines()] if (root/'calls').exists() else []
+            capture=git/'cloudbench-source-validation'/owner/run
+            self.assertFalse(capture.is_relative_to(registry))
+            __import__('shutil').rmtree(registry)  # Normal registry retirement must not remove private original reads.
+            files={p.name:p.read_bytes() for p in capture.iterdir() if p.is_file()} if capture.exists() else {}
+            modes={p.name:p.stat().st_mode & 0o777 for p in capture.iterdir() if p.is_file()} if capture.exists() else {}
+            self.assertNotIn('snapshot-capture-secret-canary',result.stdout+result.stderr+repr(calls)+repr(files))
+            sleeps=[int(v) for v in (root/'sleeps').read_text().splitlines()] if (root/'sleeps').exists() else []
+            return result,calls,files,modes,sleeps
+
+    def test_captured_empty_reconciles_to_exact_snapshot_with_private_original_reads(self):
+        result,calls,files,modes,sleeps=self.validation([self.EMPTY,self.HEALTHY])
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual([v[:2] for v in calls],[['volume','snapshots'],['volume','snapshots'],['machines','list'],['volumes','list']])
+        self.assertEqual(files['01-snapshots.raw'],self.EMPTY)
+        self.assertEqual(files['02-snapshots.raw'],self.HEALTHY)
+        self.assertEqual(json.loads(files['01-snapshots.json'])['exit_code'],0)
+        self.assertEqual(json.loads(files['01-snapshots.json'])['raw_sha256'],hashlib.sha256(self.EMPTY).hexdigest())
+        self.assertEqual(files['verify.status'],b'0\n')
+        self.assertEqual(json.loads(files['intent.json'])['owner_token'],'1'*32)
+        self.assertTrue(all(v==0o600 for v in modes.values()))
+        self.assertEqual(len(sleeps),1);self.assertTrue(5<=sleeps[0]<=8)
+
+    def test_private_empty_reobservation_has_original_bounded_attempt_and_deadline(self):
+        result,calls,files,modes,sleeps=self.validation([self.EMPTY])
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(len(calls),12);self.assertTrue(all(v[:3]==['volume','snapshots','list'] for v in calls))
+        self.assertEqual(len(sleeps),11)
+        self.assertTrue(all(min(i*5,30)<=v<=min(i*5,30)+3 for i,v in enumerate(sleeps,1)))
+        self.assertEqual(len([k for k in files if k.endswith('-snapshots.raw')]),12)
+        for kwargs in ({'expired':True},{'earlier_deadline':True}):
+            with self.subTest(kwargs=kwargs):
+                result,calls,*_=self.validation([self.HEALTHY],**kwargs)
+                self.assertNotEqual(result.returncode,0);self.assertEqual(calls,[])
+
+    def test_private_snapshot_invalid_observation_and_source_guards_never_retry_or_allocate(self):
+        rows=json.loads(self.HEALTHY)
+        variants=[('wrong',json.dumps([dict(rows[0],id='vs_foreign')]).encode(),{}),
+                  ('duplicate',json.dumps([rows[0],rows[0]]).encode(),{}),
+                  ('malformed',b'{not-json',{}),('null',b'null',{}),
+                  ('provider-exit',self.EMPTY,{'provider_exit':7}),
+                  ('manifest',self.HEALTHY,{'tamper_manifest':True}),
+                  ('guardian',self.EMPTY,{'guardian_lost':True})]
+        for name,body,kwargs in variants:
+            with self.subTest(name=name):
+                result,calls,files,*_=self.validation([body,self.HEALTHY],**kwargs)
+                self.assertNotEqual(result.returncode,0)
+                self.assertEqual(len(calls),1)
+                self.assertEqual(files['01-snapshots.raw'],body)
+        for journal in ('symlink','reused'):
+            with self.subTest(journal=journal):
+                result,calls,*_=self.validation([self.HEALTHY],journal=journal)
+                self.assertNotEqual(result.returncode,0);self.assertEqual(calls,[])
+        result,calls,files,*_=self.validation([self.HEALTHY],wrong_owner=True)
+        self.assertNotEqual(result.returncode,0);self.assertEqual(len(calls),3)
+        self.assertEqual(files['verify.status'],b'1\n')
+
+
 if __name__=='__main__':unittest.main()

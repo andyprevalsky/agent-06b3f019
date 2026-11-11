@@ -1443,6 +1443,231 @@ def inventory_init_failure(root, runs, campaign, request, receipt, adapter, boun
         need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
 
 
+SOURCE_REFUSAL_PRODUCERS = {'scripts/run-bench': 'd6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e', 'scripts/run-bench-campaign.py': 'bc906abd2450d58b7b9668ba6ab7db972aa79097fa9bef139a0e6031aab2c20a', 'scripts/run-bench-fleet': 'd0e6b6a4c82183560a8e51564c0f3ae2fecc722e91b4b66d11cf90255e6352fa', 'scripts/deploy_test_cloud.py': '96badb95c00fd2a735a7ddeb7f1e5616eb336c389534ca85ae71264b1c808e29', 'scripts/cloudbench-script-snapshot.py': '4065ecfecaf533b74f8b296b2c192a8d55036304e4fc4fbc52cf860e225671bc', 'scripts/cloudbench_execution_provenance.py': '04122d46f536923a0c8aa8e7859d6dcf1d1395e5d8a1998f6cad573a7073c6c2', 'scripts/cloudbench-source-lease.py': '29697fd3049d50ee6c4423eecb9e6475f5d9c544077a6798742ad5d770df0718', 'scripts/cloudbench-prepare-source-create.py': '9a65c6bd2ddb964998257b1eab58316b403021ddc3cb4a86059a6615139d2384', 'scripts/cloudbench-source.py': 'e8a03c13e9b59379d92a71502bb92c54126a64e1655620bd639d6b37eddd1ba3', 'scripts/cloudbench-volume-migration.py': '5e00ce80101dcb21b1e746f4d1a4de6fafdbeba6185d885e366e10a9cdbc1b54', 'scripts/cloudbench-disposable-controller.py': '2155f76fa604797bb1b5de224a4d97d18c34081b202c7fc51c555d7aaa3ae43d', 'scripts/cloudbench-select-snapshot.py': '8037c6cb618c772a2753c1abd80500eef4e465e17cf39afa6a86949ddfb65128', 'scripts/cloudbench-campaign-machines.py': 'e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b', 'scripts/cloudbench-shared-relay.py': 'f28934b757c6c22427687a04af1b551ad3e18a05594a61028568b09aab5a8fbe', 'scripts/cloudbench-campaign-inventory.sh': 'e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d', 'scripts/lib/cloudbench-env.sh': '9b65b1fd201bdac49ab4e718b41f3b7c57fe89cfa0ef95934989c17ee765e93a', 'back-end/scripts/blackbox-kernel-proxy-custody.cjs': 'caa4b6a7d1941cdcda84d578009deb078594720916eaaa6a23cbcabae0aba0a9'}
+
+def source_validation_refusal(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree):
+    """Cleanup only for the reviewed zero-allocation source validation refusal.
+
+    Original command and signal exits stay distinct. Environment preimages are
+    private inputs authenticated by original hashes, never historical captures.
+    SourceLease receipts certify the known producer's guarded semantic success;
+    they are not raw HTTP acknowledgements and confer no source/task credit.
+    """
+    import stat
+    need(set(proof) <= {'kind','layout','owner','request_token','source','receipt_sha256','worker_result_sha256',
+         'confirmed_at','observed_by','campaign','files','parent_environment_preimage','child_environment_preimage',
+         'source_recovery_journal','purpose'}, 'source refusal unknown proof authority')
+    from deploy_test_historical_custody import environment_identity, runtime_identity
+    from deploy_test_cloud import campaign_published
+    need(proof.get('purpose') is None and not proof.get('recovered_runtime')
+         and not proof.get('execution_quiescence'), 'source refusal cleanup only')
+    head = receipt['source']['head']
+    need(isinstance(head, str) and re.fullmatch('[0-9a-f]{40}', head), 'source refusal producer head')
+    for name, expected in SOURCE_REFUSAL_PRODUCERS.items():
+        raw = (bound(root / name, historical_head=head) if name.startswith('scripts/') else
+               subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',head+':'+name]))
+        need(hashlib.sha256(raw).hexdigest() == expected, 'source refusal producer closure differs')
+    campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+    need(proof.get('campaign') == str(campaign) and str(campaign) in cli_text
+         and owner['native_cleanup_reference']['native_directory'] == str(campaign), 'source refusal campaign')
+    request = document(Path(receipt['log']).parent / 'request.json')
+    need(runtime_identity(root) == request['custody_runtime'], 'source refusal original runtime config differs')
+    parent_path, child_path = (Path(proof[k]) for k in ('parent_environment_preimage', 'child_environment_preimage'))
+    for path in (parent_path, child_path):
+        need(path.is_file() and stat.S_IMODE(path.stat().st_mode) == 0o600
+             and path.stat().st_uid == os.geteuid(), 'private source refusal environment preimage')
+    parent, child = document(parent_path), document(child_path)
+    need(all(isinstance(k, str) and isinstance(v, str) for env in (parent, child) for k, v in env.items())
+         and environment_identity(parent) == receipt['execution_binding']['environment']
+         and environment_identity(child) == request['custody_child_environment'], 'original dispatch environment differs')
+    from run_deploy_pipeline import LANE_TOKEN_ENV
+    import deploy_gate_progress
+    expected_child = {**parent, 'DEPLOY_GATE_REQUEST': str(Path(receipt['log']).parent / 'request.json'),
+        'DEPLOY_GATE_RESULT': receipt['worker_result'], 'DEPLOY_GATE_TOKEN': receipt['token'],
+        deploy_gate_progress.ENV: str(Path(receipt['log']).parent / 'progress.jsonl'),
+        'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', LANE_TOKEN_ENV: receipt['token']}
+    need(environment_identity(expected_child) == environment_identity(child), 'noncanonical dispatch environment derivation')
+    forbidden = {'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONHOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+        'CLOUDBENCH_FLEET_ROOT', 'RUN_BENCH_ROOT', 'CLOUDBENCH_FAKE_DIR', 'CLOUDBENCH_FLY_CMD',
+        'FLY_FLAPS_BASE_URL', 'FLY_GRAPHQL_URL', 'FLY_API_HOSTNAME'}
+    need(not any(k in forbidden or 'UNDER_TEST' in k or k.startswith('CLOUDBENCH_SCRIPT_SNAPSHOT')
+                 or k.startswith('CLOUDBENCH_TEST_') for k in child), 'source refusal dispatch override')
+    need(child.get('CLOUDBENCH_KERNEL_PROXY_CUSTODY') == '1'
+         and child.get('BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL') == '0'
+         and child.get('NODE_OPTIONS') == '--require=' + str(root / 'back-end/scripts/blackbox-kernel-proxy-custody.cjs'),
+         'source refusal guarded dispatch')
+    summary = document(campaign / 'summary.json');jobs, checks = summary['jobs'], request['checks']
+    need(checks and len(set(checks)) == len(checks) and len(jobs) == len(checks)
+         and {j['task'] for j in jobs} == set(checks) and len({j['job_id'] for j in jobs}) == len(jobs)
+         and summary['campaign_id'] == campaign.name and summary['status'] == 'failed'
+         and summary['runs'] == 1 and summary['retry_infra'] == 0
+         and summary['task_count'] == summary['total_jobs'] == len(checks)
+         and summary['concurrency'] == summary['peak_concurrency'] == len(checks)
+         and not any(summary.get(k) for k in ('startup_cohorts', 'cleanup_ticket_failure',
+             'shared_inventory_failed', 'shared_transport_cleanup_pending', 'e2e_timeout_exceeded')),
+         'source refusal original campaign inventory')
+    active = dict.fromkeys(checks, 'UNVERIFIED');active.update(dict.fromkeys(request.get('skips', {}), 'SKIP'))
+    need(receipt['cases'] == active and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED') and adapter['complete'] is False
+         and adapter['cleanup_complete'] is False and receipt['status'] == 'FAIL', 'source refusal original outcomes')
+    need(adapter['native_command'] == ['bash', 'scripts/run-bench', *checks, '--runs', '1', '--concurrency',
+        str(len(checks)), '--retry-infra', '0', '--ref', head], 'source refusal original native command')
+    failures = [j for j in jobs if j['status'] == 'failed']
+    need(len(failures) == 1 and failures[0]['controller_exit_code'] == 1, 'source refusal trigger')
+    from datetime import datetime
+    instant = lambda x: datetime.fromisoformat(x).timestamp()
+    start, finish = instant(summary['started_at']), instant(summary['finished_at'])
+    trigger = instant(failures[0]['finished_at'])
+    need(adapter['started_at'] <= start <= trigger <= finish <= receipt['finished_at'] <= proof['confirmed_at'],
+         'source refusal clocks')
+    for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):document(campaign / name)
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    need(campaign_published(summary, campaign, adapter['started_at'], native), 'source refusal publication')
+    supervision = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
+    need(supervision['orphaned_children'] is False, 'source refusal orphaned child')
+    parents, participants, source_links = {}, set(), {}
+    for job in jobs:
+        need(re.fullmatch('r001-j[0-9]{4}', job['job_id']) and job['run'] == job['attempt'] == 1
+             and job['attempts'] == [] and job['controller_exit_code'] == 1
+             and type(job['controller_pid']) is int and job['controller_pid'] > 1,
+             'source refusal job identity')
+        need(job['controller_command'] == ['bash', str(root / 'scripts/run-bench'), job['task'], '--ref', head, '--foreground'],
+             'source refusal controller command')
+        log = campaign / (job['job_id'] + '.log');need(job['log'] == str(log), 'source refusal job log')
+        text = bound(log).decode();lines = text.splitlines();handles=[];infra=False;ref=None
+        if job is failures[0]:
+            need(text.count('private fleet source validation failed: snapshot identity missing or duplicate') == 1,
+                 'source refusal exact original boundary')
+        else:
+            need(job['status'] == 'cancelled' and instant(job['started_at']) <= trigger <= instant(job['finished_at'])
+                 and sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line) is not None
+                         for line in lines) >= 1, 'source refusal cancelled command/signal chain')
+        for index, line in enumerate(lines):
+            m = re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line.strip())
+            if m:ref=m[1];need(ref == head, 'source refusal foreign ref')
+            if line.strip() == 'mode: --infra-probe (strict barrier, no LLM / run_benchmark)':infra=True
+            if str(root / 'scripts/run-bench') + ' monitor ' not in line:continue
+            args=shlex.split(line.strip());need(len(args)==3 and args[:2]==[str(root/'scripts/run-bench'),'monitor'], 'source refusal handle')
+            fleet=Path(args[2]);m=re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory[.]',lines[index+1].strip())
+            need(m is not None and fleet.parent==runs and fleet not in participants, 'source refusal owner link')
+            if handles:need(infra and ref==head, 'source refusal canary code linkage')
+            source_links[fleet]=m[1];handles.append(fleet);participants.add(fleet)
+        need(handles and handles[0].name.rsplit('-',1)[-1]==str(job['controller_pid']), 'source refusal original parent')
+        if job is not failures[0]:
+            need(sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line) is not None for line in lines)==len(handles), 'source refusal exact linked termination count')
+        parents[handles[0]]=job
+    need(participants == {p for p in runs.iterdir() if p.is_dir() and p.name!='_hub'}
+         and len(participants)==len(parents)+1, 'source refusal exact participant closure')
+    recoveries=Path(proof['source_recovery_journal']);recovery_intent=document(recoveries/'intent.json')
+    results=json.loads(bound(recoveries/'results.json'))
+    need(recovery_intent['head']==head and recovery_intent['owners']==[v['owner'] for v in results]
+         and len(results)==len(participants) and len({v['owner'] for v in results})==len(results), 'source refusal recovery inventory')
+    seals={};retained={};status_facts={}
+    from cloudbench_execution_provenance import validate_provenance,validate_task_matrix_binding
+    for fleet in sorted(participants):
+        life=document(fleet/'_batch/lifecycle.json');owner_token=source_links[fleet]
+        need(type(life['version']) is int and life['version']==1 and life['fleet_owner_token']==owner_token and life['run_id']==fleet.name
+             and life['workspace_root']==str(root) and life['status']=='failed' and life['cleanup_verified'] is False
+             and life['hub_publication_failed'] is False and life['controller_exit_code']==(1 if fleet in parents and parents[fleet] is failures[0] else 143),
+             'source refusal original lifecycle facts')
+        status_facts[str(fleet)]={'command_exit':parents[fleet]['controller_exit_code']if fleet in parents else None,
+                                  'signal_lifecycle_exit':life['controller_exit_code'],'original_cleanup_verified':False}
+        benches=json.loads(bound(fleet/'_batch/benches.json'));names={b['name']for b in benches}
+        need(benches and len(names)==len(benches) and all(b['mode']=='REAL'for b in benches) and (names=={parents[fleet]['task']}if fleet in parents else len(benches)==2), 'source refusal bench inventory')
+        run=document(fleet/'_batch/run.json');tasks=run['tasks']
+        need(run['run_id']==fleet.name and run['status']=='failed' and run['controller_exit_code']==life['controller_exit_code']
+             and len(tasks)==len(names) and {t['name']for t in tasks}==names
+             and all(t.get('status')=='INFRA_ERROR' and t.get('passed') is False and t.get('agent_id') is None
+                     and not t.get('owned_roots') and t.get('lifecycle_stage')=='released' for t in tasks), 'source refusal no guest task')
+        for bench in names:
+            for name in ('cloudbench-run.json','.cid','primary.ids','worker-clones.ids'):
+                need(not (fleet/bench/name).exists() and not (fleet/bench/name).is_symlink(), 'source refusal guest artifact')
+        paths=[fleet/'execution-provenance.json',fleet/'execution-task-matrix.json']
+        if any(p.exists()for p in paths):
+            need(all(p.is_file()for p in paths), 'source refusal partial original provenance')
+            prov,matrix=map(document,paths)
+            need(not validate_provenance(prov) and not validate_task_matrix_binding(prov,matrix)
+                 and prov['base_sha']==head and prov['workspace_patch_sha256']=='none', 'source refusal original controller provenance')
+        audit=fleet/'teardown-ownership';canonical=fleet_audit_root(root)/owner_token;seal=tree(audit)
+        need(tree(canonical)==seal==life['audit_sha256'] and fields(bound(audit/'source-audit'))=={'path':str(canonical),'sha256':seal}, 'source refusal original audit seal')
+        meta=fields(bound(audit/'meta'))
+        need(meta.get('version')=='1' and meta.get('status')=='provider-teardown-verified' and meta.get('fleet_owner_token')==owner_token
+             and meta.get('run_id')==fleet.name and meta.get('workspace_root')==str(root) and meta.get('app')=='navi-whisper-lux-bench', 'source refusal audit identity')
+        allowed={'meta','source-audit','source-manifest.json','owned-clones.ids','owned-clones.names','provider-teardown-verified.epoch','fresh','expected-fresh','by-machine-id','pool','pool-handoffs','volume-migrations'}
+        need({p.name for p in audit.iterdir()}<=allowed, 'source refusal unknown intent class')
+        for name in ('fresh','expected-fresh','by-machine-id','pool','pool-handoffs','volume-migrations'):
+            path=audit/name;need(not path.exists()or path.is_dir()and not path.is_symlink()and not any(path.iterdir()), 'source refusal allocation intent')
+        need(bound(audit/'owned-clones.ids')==bound(audit/'owned-clones.names')==b'', 'source refusal resource IDs')
+        epoch=float(bound(audit/'provider-teardown-verified.epoch'));need(start<=epoch<=proof['confirmed_at'], 'source refusal release clock')
+        registry=fleet_ownership_root(root)/owner_token;need(not registry.exists()and not registry.is_symlink(), 'source refusal registry retained')
+        dc=document(fleet/'_batch/disposable-cleanup.json');need(dc=={'schema':'disposable-cleanup-v1','owner':owner_token,'guest_cleanup_missing':False,'runtime_evidence_missing':False,'successful_runtime_inferred':False}, 'source refusal disposable facts')
+        journal=fleet/'source-lease';claim=document(journal/'claim.json');ready=document(journal/'ready.json')
+        physical=document(journal/'recovered-physical-closure.json');closed=document(journal/'recovered-close.json')
+        value=json.loads(claim['owned']['value']);manifest=claim['manifest'];custody=value['custody']
+        need(set(claim)=={'manifest','owned','consumer_owner','run_id','parent_pid','parent_birth','workspace'}
+             and set(claim['owned'])=={'key','value'}
+             and set(value)=={'version','source_owner','creation_nonce','machine_id','instance_id','volume_id','snapshot_id','source_manifest_sha256','custody','consumer_owner','run_id','nonce'}
+             and type(value['version']) is int and value['version']==1 and set(custody)=={'workspace','registry_dir','audit_dir','lifecycle','manifest_digest','original_registry_sha256'}
+             and set(ready)=={'claim_guard_deadline_monotonic','claimed','consumer_owner','guard_kind','holder_birth','holder_pid','native_lease_held','parent_birth','parent_pid','protocol','run_id','source_machine_id','source_manifest_sha256'}
+             and ready['claimed'] is False and ready['native_lease_held'] is False and ready['claim_guard_deadline_monotonic']==0
+             and ready['protocol']=='cloudbench-source-lease-v1' and ready['guard_kind']=='durable-consumer-claim'
+             and ready['source_machine_id']==manifest['machine_id'] and ready['source_manifest_sha256']==value['source_manifest_sha256']
+             and set(physical)=={'schema','consumer_owner','run_id','source_manifest_sha256','custody','original_claim_sha256','source_audit_sha256','original_lifecycle_sha256','native_observations','historical_task_credit','producer','started_epoch','observed_epoch'}
+             and set(physical['producer'])=={'pid','birth','helper_sha256'}, 'source refusal typed claim/closure records')
+        for name in ('claim.json','ready.json','recovered-physical-closure.json','recovered-close.json'):
+            info=(journal/name).stat()
+            need(stat.S_IMODE(info.st_mode)==0o600 and info.st_uid==os.geteuid() and info.st_nlink==1,
+                 'source refusal private producer receipt')
+        retired_local_process({'pid':ready['holder_pid'],'birth':ready['holder_birth'].replace('linux:','proc-start:',1)})
+        source=runpy.run_path(str(Path(__file__).with_name('cloudbench-source.py')))
+        source['manifest'](bound(fleet/'source-manifest.json'))
+        need(json.loads(bound(fleet/'source-manifest.json'))==manifest and bound(audit/'source-manifest.json')==bound(fleet/'source-manifest.json'), 'source refusal source manifest')
+        manifest_sha=hashlib.sha256(bound(fleet/'source-manifest.json')).hexdigest()
+        need(meta.get('source_manifest_sha256')==manifest_sha and json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False)==claim['owned']['value'], 'source refusal canonical source claim bytes')
+        need(claim['consumer_owner']==value['consumer_owner']==ready['consumer_owner']==owner_token
+             and claim['run_id']==value['run_id']==ready['run_id']==fleet.name and claim['workspace']==str(root)
+             and claim['parent_pid']==ready['parent_pid']==int(fleet.name.rsplit('-',1)[-1])
+             and claim['parent_birth']==ready['parent_birth'] and claim['owned']['key']=='cloudbench_source_consumer_'+owner_token
+             and re.fullmatch('[0-9a-f]{32}',value['nonce']) and value['source_manifest_sha256']==manifest_sha
+             and value['source_owner']==manifest['owner_token'] and value['creation_nonce']==manifest['creation_nonce']
+             and all(value[k]==manifest[k]for k in ('machine_id','instance_id','volume_id','snapshot_id')),
+             'source refusal original native claim')
+        retired_local_process({'pid':claim['parent_pid'],'birth':claim['parent_birth'].replace('linux:','proc-start:',1)})
+        need(custody==physical['custody'] and custody['audit_dir']==str(canonical) and custody['lifecycle']==str(fleet/'_batch/lifecycle.json')
+             and custody['workspace']==str(root) and custody['registry_dir']==str(registry) and custody['manifest_digest']==manifest_sha
+             and re.fullmatch('[0-9a-f]{64}',custody['original_registry_sha256']), 'source refusal original registry custody')
+        need(physical['schema']=='cloudbench-source-recovered-physical-closure-v1' and physical['consumer_owner']==owner_token
+             and physical['run_id']==fleet.name and physical['historical_task_credit'] is False
+             and physical['source_manifest_sha256']==manifest_sha and physical['source_audit_sha256']==seal
+             and physical['original_claim_sha256']==hashlib.sha256(bound(journal/'claim.json')).hexdigest()
+             and physical['original_lifecycle_sha256']==hashlib.sha256(bound(fleet/'_batch/lifecycle.json')).hexdigest()
+             and physical['native_observations']=={'machines':{},'volumes':{}}
+             and physical['producer']['helper_sha256']==SOURCE_REFUSAL_PRODUCERS['scripts/cloudbench-source-lease.py'], 'source refusal physical closure')
+        retired_local_process({'pid':physical['producer']['pid'],'birth':physical['producer']['birth'].replace('linux:','proc-start:',1)})
+        need(closed=={'closed':True,'consumer_owner':owner_token,'run_id':fleet.name,'physical_receipt_sha256':hashlib.sha256((json.dumps(physical,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n').encode()).hexdigest(),'historical_task_credit':False}, 'source refusal claim close')
+        result=document(recoveries/owner_token/'result.json');intent=document(recoveries/owner_token/'intent.json');log=bound(recoveries/owner_token/'canonical.log')
+        need(result in results and result['owner']==intent['owner']==owner_token and result['exit_code']==0
+             and result['closed_receipts']==[str(journal/'recovered-close.json')] and result['log_sha256']==hashlib.sha256(log).hexdigest()
+             and intent['argv']==['bash','scripts/run-bench','--recover-stale-owner',owner_token]
+             and intent['original_lifecycle_sha256']==physical['original_lifecycle_sha256']
+             and all(finite(x)for x in (intent['began_at'],physical['started_epoch'],physical['observed_epoch'],result['ended_at']))
+             and receipt['finished_at']<=intent['began_at']<=physical['started_epoch']<=physical['observed_epoch']<=result['ended_at']<=proof['confirmed_at']
+             and result['ended_at']-intent['began_at']<125, 'source refusal canonical recovery/lease lifetime')
+        seals[str(audit)]=seal
+        hub=Path(meta['hub_owner_file']);ho=fields(bound(hub));need(hub.parent==runs/'_hub'
+             and meta.get('hub_disposition')=='retained-exact-owner-transfer-required' and ho.get('version')=='1'
+             and ho.get('status')=='live-transfer-required' and ho.get('owner_token')==meta['hub_owner_token']
+             and ho.get('root')==str(runs) and ho.get('context_dir')==str(runs/'_hub')
+             and ho.get('command')==str(root/'agents/benchmarks/agent_link_server.py') and ho.get('pgid')==ho.get('pid')
+             and ho.get('runs_root')==str(runs) and ho.get('repo_root')==str(root)
+             and all(ho.get(k)==meta['hub_'+k]for k in ('pid','pid_start','argv_sha256')), 'source refusal retained Hub custody')
+        retained[str(hub)]={'path':str(hub),'sha256':hashlib.sha256(bound(hub)).hexdigest(),'owner':ho,'disposition':'retained-exact-owner-transfer-required'}
+    need(set(source_links.values())=={r['owner']for r in results}, 'source refusal full recovery closure')
+    return {'kind':KIND,'gate':receipt['gate'],'token':receipt['token'],'owner':copy.deepcopy(owner),
+        'worker_result_sha256':proof['worker_result_sha256'],'proof':copy.deepcopy(proof),'participants':sorted(map(str,participants)),
+        'native_audit_seals':seals,'retained_services':[retained[k]for k in sorted(retained)],'credit_granted':False,
+        'financial_cleanup_credit':False,'original_status_facts':status_facts,'source_validation_refusal_cleanup':True}
+
+
 def validate(receipt, owner, proof):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -1517,6 +1742,10 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-source-validation-refusal-v1':
+        result = source_validation_refusal(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)
+        need(used == set(bindings), 'source refusal proof file closure')
+        return result
     if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1', 'campaign-inventory-init-failure-v1'}:
         # Missing host tooling can stop inventory before any controller exists.
         # Reconcile only that zero-admission boundary, retaining every native
@@ -2144,7 +2373,8 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     normal = entry.get('proof', {})
     need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
          and entry.get('purpose') is None and normal.get('purpose') is None
-         and normal.get('layout') == 'campaign-v1' and key == normal.get('receipt_sha256')
+         and (normal.get('layout') == 'campaign-v1' or normal.get('layout') == 'campaign-source-validation-refusal-v1'
+              and entry.get('source_validation_refusal_cleanup') is True) and key == normal.get('receipt_sha256')
          and key == sha_file(folder / 'receipt.json') and entry.get('credit_granted') is False,
          'strict normal successor reconciliation required')
     reconciliation_occurrence(state, entry, successor)

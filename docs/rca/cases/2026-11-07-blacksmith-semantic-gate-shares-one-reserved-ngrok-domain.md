@@ -103,3 +103,53 @@ navigation when deciding whether an isolated test stack can omit public ingress.
 Use a uniquely owned endpoint and prove its route reaches this exact isolated
 stack before creating work; a static public origin or an unused local health
 check does not establish that binding.
+
+
+## Follow-up: cleanup fixture omitted the callback contract (2026-11-11)
+
+The callback repair introduced a separate offline fixture mismatch on frozen
+`6dba99e836331e74cca0ee57be320e9f83a1c17d`. Structural occurrence
+`eea7356baf4c4296a75a871a6077e51a` retained two failures in
+`test_actual_stack_shell_records_cleanup_exit_not_echo`: both cleanup-exit
+subcases expected shell exit 1 but received 2 at line 169. The native structural
+log records 11 tests and two failures; the subprocess stderr was empty. These
+results remain failures. This occurrence does not establish a production
+cleanup failure or a recurrence of the original remote callback transport error.
+
+Gate attribution for this fixture is INTRODUCED. Actual local Bash traces show
+its old `DEPLOY_SEMANTIC_TOKEN=request-token` failing the mandatory 32-character
+hex callback-token check before stack startup. The cleanup fixture also supplied
+none of the new callback manifest, tunnel-process and authenticated queue-pointer
+observation inputs. The exact original method passes against the retained
+pre-callback `3b48` shell and fails against the current shell. Thus the first bad
+boundary is outdated fixture setup, not cleanup-status recording.
+
+Archive searches were `test_actual_stack_shell_records_cleanup_exit_not_echo`
+and `semantic deploy fixture missing closure`. The September 11 lost-inner-
+evidence case and November 8 reporter-composition case were leads, not matching
+first-bad boundaries. Both original shell traces, the native failure excerpt,
+baseline result and candidate RED/GREEN are retained under
+`.context/preparation-recovery/semantic-cleanup-fixture-rca/`.
+
+The ignored test-only candidate supplies a protocol-valid request token and
+executes the unchanged inline Node callback validator. Filesystem/process,
+optional dotenv and HTTP boundaries are explicit local doubles; no tunnel,
+provider, database, browser or model is invoked. Six original assertions,
+including expected exit 1, cleanup exit/completion, lane results and readiness,
+remain AST-identical. The seventh still checks exact request-token equality;
+its input and expected fixture value both become the valid 32-character token.
+All other original test methods and the 20-second subprocess timeout are
+unchanged. No production guard is bypassed or weakened.
+
+The identical focused candidate command ran one method with both cleanup-exit
+subcases: RED with two failures in 0.064 seconds, then GREEN in 0.193 seconds.
+The retained original method against the pre-callback shell passed in 0.133
+seconds. These are provider-free owning-fixture results only. Root's separately
+retained native 61-case semantic PASS is not derived from this fixture. The
+candidate remains subject to independent review, integration and normal
+structural-gate acceptance; this record grants no whole-gate or deployment PASS.
+
+Coordinator constraint for this follow-up: preserve the original cleanup
+assertions, exit expectations, budgets and production guards; repair only the
+fixture's required inputs and retain the original failures. This is a current
+coordination constraint, not invented historical human feedback.
