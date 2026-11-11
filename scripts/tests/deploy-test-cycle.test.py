@@ -5796,6 +5796,88 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
 
+    def committed_historical_successor_fixture(self):
+        """Synthetic native custody uses the existing fixture; real retained records are replayed separately."""
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        state = self.state; gate = state['plan']['gates'][1]
+        skips = h.guard(state, gate, self.root)
+        checks = [name for name in gate['checks'] if name not in skips]
+        folder = self.directory / 'committed-successor'; token = 'committed-full-successor'
+        native = self.root / '.context/deploy-cloud' / __import__('hashlib').sha256(token.encode()).hexdigest()
+        prior = dict(gate=gate['name'], token='original-operation', owner={'worker_root':str(self.root)},
+                     proof={'receipt_sha256':'a'*64}, excluded_resources=[])
+        original = dict(token=prior['token'], finished_at=1000)
+        isolated = dict(original_receipt_sha256='a'*64, original_request_token=prior['token'],
+                        new_request_token=token, source=state['source'], new_native_root=str(native),
+                        excluded_resources=[], credit_granted=False)
+        request = dict(token=token, source=state['source'], gate=gate['name'], checks=checks, skips=skips,
+                       phase='focused', isolated_validation=[isolated], custody_state_sha256=h.state_identity(state))
+        leaf = folder/'native-task.json'; c.write(leaf, {'passed':True})
+        worker = dict(token=token, source=state['source'], gate=gate['name'],
+                      cases=dict.fromkeys(checks,'PASS'), complete=True, cleanup_complete=True, reused=False,
+                      evidence={name:dict(path=str(leaf),sha256=c.sha_file(leaf)) for name in checks},
+                      fleet_directory=str(native/'campaigns'/('deploy-'+native.name)),runner_log=str(native/'cli.log'))
+        c.write(folder/'result.json',worker)
+        successor = dict(gate=gate['name'], token=token, source=state['source'], status='PASS', executed=True,
+                         complete=True, native_exit=0, timed_out=False, cancelled=False, lingering_group=False,
+                         cleanup_owner=None, cases={**dict.fromkeys(skips,'SKIP'),**worker['cases']},
+                         case_complete={**dict.fromkeys(skips,False),**dict.fromkeys(checks,True)}, command=gate['command'],
+                         log=str(folder/'output.log'),worker_result=str(folder/'result.json'), started_at=1001,finished_at=1002,
+                         execution_binding=dict(contract_digest=c.digest(gate),input_fingerprint=state['input_fingerprints'][gate['name']],environment=state['environment']),
+                         isolated_validation=[isolated],native_cleanup_reference=dict(result=str(folder/'result.json'),
+                         native_directory=worker['fleet_directory'],cleanup_complete=True,result_sha256=c.sha_file(folder/'result.json'),native_evidence=worker['evidence']))
+        c.write(folder/'request.json',request);c.write(folder/'receipt.json',successor)
+        state['attempts']=[dict(phase='focused',results=[successor])]
+        return state, prior, original, successor, folder, request
+
+    def test_clean_successor_preserves_committed_historical_incomplete_skip_without_credit(self):
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        before = copy.deepcopy(state); files={p:c.sha_file(p) for p in folder.glob('*.json')}
+        self.assertIsNone(n.clean_isolated_successor(state,prior,original,successor))
+        self.assertEqual(before,state);self.assertEqual(files,{p:c.sha_file(p) for p in files})
+        for name,value in request['skips'].items():
+            self.assertIs(successor['case_complete'][name],False);self.assertEqual('SKIP',successor['cases'][name])
+            self.assertEqual({'test_execution':False,'assertions':False,'financial_release':False},value['credit'])
+        current=copy.deepcopy(state);current['source']={'head':'f'*40,'digest':'e'*64};current['plan']['source']=current['source']
+        self.assertIsNone(c.full_pass_binding(current,current['plan']['gates'][1],root=self.root))
+
+    def test_clean_successor_historical_completion_and_authority_tampering_refuses(self):
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        skip=next(iter(request['skips']));active=request['checks'][0]
+        mutations=[('historical-true',lambda s,q:s['case_complete'].update({skip:True})),
+            ('historical-int',lambda s,q:s['case_complete'].update({skip:0})),
+            ('active-false',lambda s,q:s['case_complete'].update({active:False})),
+            ('ordinary-skip',lambda s,q:q['skips'][skip].update(disposition='ordinary')),
+            ('kind',lambda s,q:q['skips'][skip].update(kind='ordinary')),
+            ('credit',lambda s,q:q['skips'][skip]['credit'].update(test_execution=True)),
+            ('source',lambda s,q:q['skips'][skip].update(source={'head':'f'*40,'digest':'e'*64})),
+            ('binding',lambda s,q:q['skips'][skip]['current_binding'].update(plan_digest='0'*64)),
+            ('commitment',lambda s,q:q.update(custody_state_sha256='0'*64))]
+        for label,mutate in mutations:
+            with self.subTest(label=label):
+                candidate=copy.deepcopy(state);row=candidate['attempts'][0]['results'][0];q=copy.deepcopy(request)
+                mutate(row,q);c.write(folder/'request.json',q);c.write(folder/'receipt.json',row);before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):n.clean_isolated_successor(candidate,prior,original,row)
+                self.assertEqual(before,candidate)
+        c.write(folder/'request.json',request);c.write(folder/'receipt.json',successor)
+
+    def test_clean_successor_historical_retained_history_and_native_bytes_are_required(self):
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        for name in ['historical_custody_history','failures']:
+            candidate=copy.deepcopy(state);candidate[name]=[];row=candidate['attempts'][0]['results'][0]
+            with self.subTest(name=name),self.assertRaises(ValueError):n.clean_isolated_successor(candidate,prior,original,row)
+        native=Path(state['historical_no_retry_custody'][0]['original_failure']['worker_evidence']['path']);raw=native.read_bytes()
+        native.write_bytes(raw+b' ')
+        with self.assertRaises(ValueError):n.clean_isolated_successor(state,prior,original,successor)
+        native.write_bytes(raw)
+        self.assertIsNone(n.clean_isolated_successor(state,prior,original,successor))
+
     def historical_clean_successor_contract_state(self):
         from deploy_test_historical_custody import state_identity
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()

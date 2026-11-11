@@ -2278,8 +2278,43 @@ def clean_isolated_successor(state, prior, original, successor, custody_state=No
     need(successor.get('worker_result') == str(result_path), 'successor result locator')
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
+    expected_complete = dict.fromkeys(gate['checks'], True)
+    historical = {name: value for name, value in skips.items()
+                  if value.get('disposition') == 'NO_RETRY_CUSTODY'}
+    if historical:
+        from deploy_test_historical_custody import KIND as CUSTODY_KIND, guard, state_identity
+        old_binding = next(iter(historical.values())).get('current_binding')
+        need(isinstance(old_binding, dict)
+             and set(old_binding) == {'source', 'plan_digest', 'environment', 'input_fingerprints'}
+             and old_binding['source'] == successor['source']
+             and old_binding['environment'] == binding['environment']
+             and isinstance(old_binding['plan_digest'], str)
+             and re.fullmatch('[a-f0-9]{64}', old_binding['plan_digest'])
+             and isinstance(old_binding['input_fingerprints'], dict)
+             and old_binding['input_fingerprints'].get(prior['gate']) == binding['input_fingerprint']
+             and all(value.get('kind') == CUSTODY_KIND and value.get('current_binding') == old_binding
+                     for value in historical.values()), 'successor historical custody authority')
+        # This committed projection is not an old full state. Current failure
+        # rows supply locators; guard() rejoins the committed original history
+        # and verifies the actual retained native closure without provider calls.
+        authority = {**copy.deepcopy(old_binding),
+            'historical_no_retry_custody': [{k:copy.deepcopy(v) for k,v in value.items() if k != 'source'}
+                                           for value in historical.values()],
+            'historical_custody_history': copy.deepcopy(state.get('historical_custody_history')),
+            'failures': copy.deepcopy(state.get('failures', [])),
+            'pending_post_merge': copy.deepcopy(state.get('pending_post_merge', []))}
+        for key in ('historical_custody_import', 'historical_custody_transfers'):
+            if key in state:
+                authority[key] = copy.deepcopy(state[key])
+        need(state_identity(authority) == request.get('custody_state_sha256')
+             and guard(authority, execution_gate, root, current=old_binding) == historical,
+             'successor historical custody proof')
+        need(isinstance(successor.get('case_complete'), dict)
+             and all(type(value) is bool for value in successor['case_complete'].values()),
+             'successor historical completion types')
+        expected_complete.update(dict.fromkeys(historical, False))
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-         and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
+         and successor.get('case_complete') == expected_complete
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')
     reference = successor['native_cleanup_reference']
