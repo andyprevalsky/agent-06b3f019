@@ -1198,6 +1198,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
             from deploy_test_interrupted_cleanup import still_bound
             return still_bound(state, receipt, entry)
+        if entry and entry.get('kind') == 'interrupted-fresh-campaign-custody-v1':
+            from deploy_test_interrupted_fresh_cleanup import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get("kind") == "native-cloud-cleanup-v1":
             from deploy_test_native_cleanup import still_bound
             return still_bound(entry, receipt, owner)
@@ -1293,6 +1296,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> 
     if proof.get('kind') == 'interrupted-preallocation-cleanup-v1':
         from deploy_test_interrupted_cleanup import reconcile as reconcile_interrupted
         reconcile_interrupted(state, occurrence_id, proof)
+        return
+    if proof.get('kind') == 'interrupted-fresh-campaign-custody-v1':
+        from deploy_test_interrupted_fresh_cleanup import reconcile as reconcile_fresh
+        reconcile_fresh(state, occurrence_id, proof)
         return
     if proof.get('kind') == 'local-supervisor-cleanup-v1':
         from deploy_test_local_cleanup import reconcile as reconcile_local

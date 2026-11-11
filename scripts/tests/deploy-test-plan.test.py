@@ -1370,4 +1370,595 @@ class NativeRunArtifact(unittest.TestCase):
      with self.assertRaisesRegex(ValueError,'materialization bound'):
          self.read(raw)
 
+
+
+class InterruptedFreshBoundary(unittest.TestCase):
+    """PR1918 native boundary captures, never synthetic release or success fixtures.
+
+    These tests document why neither accepted older contract is the recovery
+    authority. Positive fresh custody still requires the canonical producer,
+    post-release consumer and publication record; these tests grant no custody.
+    """
+    RECEIPT = {'token': '4ee3b87f768d4631ad68739dafcf7032',
+ 'source': {'head': '2d4c45c0da9c56e7145b2f3df8114cc5b95b7bb3',
+            'digest': '2cc09984798fed0d84196b7715677f5af083e0aac6277f8441054adf4622f2ec'},
+ 'gate': 'smoke',
+ 'status': 'FAIL',
+ 'cases': {'test-mass-agent-run-0': 'UNVERIFIED',
+           'chat-mode': 'UNVERIFIED',
+           'spawn-sub-agents': 'UNVERIFIED',
+           'parallel-tool-calls': 'UNVERIFIED',
+           'background-agent-message-smoke': 'UNVERIFIED',
+           'claude-code-agent': 'UNVERIFIED',
+           'browser-smoke': 'UNVERIFIED',
+           'agent-payment-test-shop': 'UNVERIFIED',
+           'agent-payment-setup-resume': 'UNVERIFIED',
+           'agent-payment-idempotent-abandonment': 'UNVERIFIED',
+           'agent-payment-abandonment': 'UNVERIFIED',
+           'browser-biometrics-webdecoy': 'UNVERIFIED',
+           'agent-payment-new-user-journey': 'UNVERIFIED'},
+ 'native_exit': -9,
+ 'executed': True,
+ 'complete': False,
+ 'timed_out': False,
+ 'cancelled': True,
+ 'lingering_group': True,
+ 'command': ['/home/boxes/rose/agents/venv/bin/python3', '/home/boxes/rose/scripts/deploy_test_cloud.py'],
+ 'log': '/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log',
+ 'started_at': 1794356345.6364365,
+ 'finished_at': 1794356449.096868,
+ 'execution_binding': {'input_fingerprint': '80d8d257414a0c7e055407d42efcc76980f3e8a5089f64a08fb828ae9a02c90d',
+                       'contract_digest': '7b5911eb9da076f899f658f2eb0cd8ae6ebbbc90488cbf8773277042b08f914c',
+                       'environment': '68b66631658a84f29a5507045c72868df2e7a86a797d68ae25f314d302093737'},
+ 'lifecycle': 'native-producer',
+ 'native_cleanup_reference': None,
+ 'cleanup_owner': {'request_token': '4ee3b87f768d4631ad68739dafcf7032',
+                   'worker_root': '/home/boxes/rose',
+                   'native_cleanup_reference': None},
+ 'worker_result': None}
+    SUMMARY = {'campaign_id': 'deploy-ccbb94ee0e246be9e4651d3a5b6214e8c2dbfe45d9a411ca8346e095f87522ef',
+ 'status': 'running',
+ 'started_at': '2026-11-11T00:19:11.917075+00:00',
+ 'finished_at': None,
+ 'runs': 1,
+ 'retry_infra': 0,
+ 'task_count': 13,
+ 'total_jobs': 13,
+ 'peak_concurrency': 13,
+ 'jobs': [{'job_id': 'r001-j0001',
+           'task': 'test-mass-agent-run-0',
+           'controller_pid': 3802154,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0002',
+           'task': 'chat-mode',
+           'controller_pid': 3802157,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0003',
+           'task': 'spawn-sub-agents',
+           'controller_pid': 3802161,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0004',
+           'task': 'parallel-tool-calls',
+           'controller_pid': 3802166,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0005',
+           'task': 'background-agent-message-smoke',
+           'controller_pid': 3802169,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0006',
+           'task': 'claude-code-agent',
+           'controller_pid': 3802173,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0007',
+           'task': 'browser-smoke',
+           'controller_pid': 3802177,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0008',
+           'task': 'agent-payment-test-shop',
+           'controller_pid': 3802182,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0009',
+           'task': 'agent-payment-setup-resume',
+           'controller_pid': 3802185,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0010',
+           'task': 'agent-payment-idempotent-abandonment',
+           'controller_pid': 3802196,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0011',
+           'task': 'agent-payment-abandonment',
+           'controller_pid': 3802201,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0012',
+           'task': 'browser-biometrics-webdecoy',
+           'controller_pid': 3802208,
+           'status': 'running',
+           'controller_exit_code': None},
+          {'job_id': 'r001-j0013',
+           'task': 'agent-payment-new-user-journey',
+           'controller_pid': 3802211,
+           'status': 'running',
+           'controller_exit_code': None}]}
+
+
+    def test_exact_null_adapter_retains_native_path_none_refusal(self):
+        import deploy_test_native_cleanup as native
+        receipt = copy.deepcopy(self.RECEIPT)
+        before = copy.deepcopy(receipt)
+        with self.assertRaisesRegex(TypeError, 'NoneType'):
+            native.validate(receipt, receipt['cleanup_owner'], {
+                'kind': native.KIND, 'owner': receipt['cleanup_owner'],
+                'request_token': receipt['token'], 'source': receipt['source']})
+        self.assertEqual(receipt, before)
+        self.assertEqual(list(receipt['cases'].values()), ['UNVERIFIED'] * 13)
+
+    def test_running_summary_is_not_cancelled_zero_allocation_authority(self):
+        import hashlib
+        import deploy_test_interrupted_cleanup as old
+        receipt, summary = copy.deepcopy(self.RECEIPT), copy.deepcopy(self.SUMMARY)
+        root = Path(receipt['cleanup_owner']['worker_root'])
+        base = root / '.context/deploy-cloud' / hashlib.sha256(receipt['token'].encode()).hexdigest()
+        campaign = base / 'campaigns' / summary['campaign_id']
+        raw = {str(base / 'cli.log'): (str(campaign) + '\n').encode(),
+               str(campaign / 'summary.json'): json.dumps(summary).encode()}
+        evidence = old.Evidence({p: hashlib.sha256(v).hexdigest() for p, v in raw.items()}, raw)
+        gate = dict(name='smoke', category='smoke', native_cloud=True,
+                    worker_transport='benchmark-cloud-cli', cwd=str(root), env={},
+                    command=receipt['command'], checks=list(receipt['cases']))
+        with self.assertRaisesRegex(ValueError, 'complete original campaign inventory required'):
+            old.cloud(root, gate, receipt, Path(receipt['log']).parent, {}, evidence)
+        self.assertEqual(summary, self.SUMMARY)
+        self.assertIsNone(summary['finished_at'])
+        self.assertEqual({j['status'] for j in summary['jobs']}, {'running'})
+
+    def test_native_publication_does_not_accept_a_running_summary(self):
+        import runpy
+        from deploy_test_cloud import campaign_published
+        native = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        summary = copy.deepcopy(self.SUMMARY)
+        for job in summary['jobs']:
+            job['run'] = 1
+        # Exercise the actual source-owned schedule producer. It preserves the
+        # absent end, so a normal final-publication verifier cannot consume it.
+        record = native['campaign_group_record'](summary)
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Path(directory)
+            (campaign / 'hub-group.json').write_text(json.dumps(record))
+            (campaign / 'hub-group-publication-ack.private.json').write_text('{}')
+            with self.assertRaisesRegex(TypeError, 'fromisoformat'):
+                campaign_published(summary, campaign, self.RECEIPT['started_at'], native)
+        self.assertIsNone(summary['finished_at'])
+        self.assertEqual(self.RECEIPT['cases'], dict.fromkeys(self.RECEIPT['cases'], 'UNVERIFIED'))
+
+    def test_existing_zero_allocation_contract_still_refuses_fresh_resources(self):
+        fixture = InterruptedCustody()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        state, receipt, proof = fixture.fixture(cloud=True)
+        # Use the established producer fixture and its seal writer. The old
+        # contract must reject allocations even when its summary is terminal.
+        fixture.put(fixture.audit / 'owned-clones.ids', '82ddd00ce36728\n683ed57a572168\n')
+        fixture.reseal(proof)
+        fixture.rebind(proof)
+        before = copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError, 'provider allocation was recorded'):
+            c.reconcile(state, receipt['token'], proof)
+        self.assertEqual(state, before)
+
+
+
+class InterruptedFreshRecovery(unittest.TestCase):
+    """Real no-start producer fixtures through the public custody dispatcher."""
+    def put(self, path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value) if isinstance(value, (dict, list)) else value)
+
+    def setUp(self):
+        import hashlib, runpy, shutil
+        import deploy_test_interrupted_fresh_cleanup as fresh
+        from cloudbench_execution_provenance import build_config, build_task_matrix
+        self.m = fresh
+        controls = runpy.run_path(str(ROOT / 'scripts/tests/cloudbench-prestart-recovery.test.py'))
+        self.h = controls['FreshPrestartRecoveryTest']()
+        self.h.setUp()
+        self.addCleanup(self.h.doCleanups)
+        self.hm = controls['MODULE']
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        subprocess.run(['git','init','-q',str(self.root)], check=True)
+        common = subprocess.check_output(['git','-C',str(ROOT),'rev-parse','--path-format=absolute','--git-common-dir'],text=True).strip()
+        self.put(self.root / '.git/objects/info/alternates', common + '/objects\n')
+        self.head = '2d4c45c0da9c56e7145b2f3df8114cc5b95b7bb3'
+        for name in fresh.POLICIES:
+            data = subprocess.check_output(['git','-C',str(ROOT),'show',self.head+':'+name])
+            path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+        for name in ('cloudbench-prestart-recovery.py','deploy_test_interrupted_fresh_cleanup.py',
+                     'deploy_test_interrupted_cleanup.py','deploy_test_native_cleanup.py'):
+            shutil.copyfile(ROOT/'scripts'/name,self.root/'scripts'/name)
+        self.r=copy.deepcopy(InterruptedFreshBoundary.RECEIPT)
+        self.r.update(source={'head':self.head,'digest':'d'*64},started_at=time.time()-100,finished_at=time.time()-90)
+        self.r['command']=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')]
+        self.r['cleanup_owner']['worker_root']=str(self.root)
+        self.gate=dict(name='smoke',category='smoke',native_cloud=True,command=self.r['command'],checks=list(self.r['cases']))
+        self.r['execution_binding']['contract_digest']=c.digest(self.gate)
+        self.r['execution_binding']['environment']='e'*64
+        self.folder=self.root/'.context/deploy-pipeline/attempts/4/final/smoke'
+        self.r['log']=str(self.folder/'output.log')
+        for name in ('output.log','stderr.log'):self.put(self.folder/name,'')
+        self.put(self.folder/'receipt.json',self.r)
+        self.put(self.folder/'request.json',dict(token=self.r['token'],source=self.r['source'],gate='smoke',checks=self.gate['checks'],skips={},phase='final',custody_runtime={'agents/.env':'c'*64},custody_child_environment='c'*64))
+        self.base=self.root/'.context/deploy-cloud'/hashlib.sha256(self.r['token'].encode()).hexdigest()
+        self.runs=self.base/'runs';self.runs.mkdir(parents=True)
+        self.campaign=self.base/'campaigns'/('deploy-'+self.base.name);self.campaign.mkdir(parents=True)
+        self.put(self.base/'cli.log',str(self.campaign))
+        self.state=dict(source=self.r['source'],environment='e'*64,phase='interrupted',resume_phase='final',ready=False,
+                        plan={'source':self.r['source'],'gates':[self.gate]},attempts=[{'phase':'final','interrupted':True,'results':[self.r]}],
+                        failures=[{'id':'ui-'+str(i),'status':'FAIL'} for i in range(5)],pending=[],reconciled_owners={'older':{'token':'owed','credit_granted':False}})
+        self.now=time.time()-10
+        self.proof=dict(kind=fresh.KIND,root=str(self.root),files={},confirmed_at=self.now,observed_by='owning fixture',
+                        recovery_directory=str(self.root/'.context/recovery'))
+        self.relay=Path(tempfile.mkdtemp(prefix='cb-relay-')).resolve()
+        self.addCleanup(shutil.rmtree,self.relay)
+        # tempfile uses exactly eight random characters, matching the native relay namespace.
+        boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        birth=lambda n:f'proc-start:{boot}:{n}'
+        self.parent_pid=99999998;hubpid=99999099
+        hub=self.runs/'_hub'/('agent-link-server.8765.'+'c'*32+'.owner')
+        self.put(hub, '\n'.join(f'{k}={v}' for k,v in dict(version=1,pid=hubpid,pid_start=birth(10),pgid=hubpid,owner_token='c'*32,
+            command=str(self.root/'agents/benchmarks/agent_link_server.py'),argv_sha256='a'*64,root=str(self.runs),runs_root=str(self.runs),
+            repo_root=str(self.root),context_dir=str(self.runs/'_hub'),host='127.0.0.1',port=8765,status='live-transfer-required').items())+'\n')
+        hub.chmod(0o444)
+        self.hub=hub
+        self.summary=copy.deepcopy(InterruptedFreshBoundary.SUMMARY)
+        self.summary['started_at']=__import__('datetime').datetime.fromtimestamp(self.r['started_at']+1,__import__('datetime').timezone.utc).isoformat()
+        pids=[]
+        for i,job in enumerate(self.summary['jobs']):
+            pid=99999000+i;pids.append(pid);owner=hashlib.md5(str(i).encode()).hexdigest()
+            fleet=self.runs/f'20260101-000000-{pid}';(fleet/'_batch').mkdir(parents=True)
+            job.update(controller_pid=pid,run=1,attempt=1,attempts=[],finished_at=None,started_at=self.summary['started_at'],
+                       controller_command=['bash',str(self.root/'scripts/run-bench'),job['task'],'--ref',self.head,'--foreground'])
+            job['log']=str(self.campaign/(job['job_id']+'.log'))
+            self.put(Path(job['log']),f'{self.root}/scripts/run-bench monitor {fleet}\nowner: {owner}; private controller diagnostics stay in this run directory.\n')
+            self.put(fleet/'_batch/benches.json',[{'name':job['task']}])
+            matrix=build_task_matrix([job['task']+'=real'])
+            config=build_config('cloudbench-fleet-config-v1',['task_matrix_sha256='+matrix['sha256'],'task_count=1'])
+            self.put(fleet/'execution-provenance.json',dict(schema_version='cloudbench-execution-provenance-v1',base_sha=self.head,
+                     workspace_patch_sha256='none',controller_snapshot={'schema_version':'cloudbench-controller-snapshot-v1','sha256':'a'*64},config=config))
+            self.put(fleet/'execution-task-matrix.json',matrix)
+            parent_provenance=json.loads((fleet/'execution-provenance.json').read_text())
+            self.put(fleet/'_batch/run.json',dict(run_id=fleet.name,status='failed',controller_exit_code=143,execution_provenance=parent_provenance,execution_task_matrix=matrix,
+                tasks=[dict(name=job['task'],passed=False,status='INFRA_ERROR',lifecycle_stage='released',failure_reason='no current run artifact produced')]))
+            self.put(fleet/'_batch/disposable-cleanup.json',dict(schema='disposable-cleanup-v1',owner=owner,
+                guest_cleanup_missing=False,runtime_evidence_missing=False,successful_runtime_inferred=False))
+            self.put(fleet/'_batch/llm-usage.json',dict(run_id=fleet.name,providers={'native':dict(calls=0,input_tokens=0,output_tokens=0,cost_usd=0,models={})}))
+            audit=self.root/'.git/cloudbench-fleet-audits'/owner
+            self.put(audit/'meta',f'version=1\nfleet_owner_token={owner}\nrun_id={fleet.name}\nworkspace_root={self.root}\nstatus=provider-teardown-verified\nhub_owner_file={hub}\n')
+            self.put(audit/'provider-teardown-verified.epoch',str(int(self.now)-1))
+            for name in ('owned-clones.ids','owned-clones.names'):self.put(audit/name,'')
+            self.put(fleet/'teardown-ownership.path',str(audit)+'\n')
+        self.put(self.campaign/'summary.json',self.summary)
+        first=next(p for p in self.runs.iterdir() if p.name.endswith('99999000'))
+        for name in ('run.json','disposable-cleanup.json','llm-usage.json'):(first/'_batch'/name).unlink()
+        # Relocate the established native producer fixture before generating any receipt.
+        h=self.h;oldrun=h.run;oldregistry=h.registry;oldaudit=h.audit
+        h.run_id='20260929-032004-99999999';h.run=self.runs/h.run_id
+        shutil.move(str(oldrun),h.run)
+        h.audit_root=self.root/'.git/cloudbench-fleet-audits';h.audit=h.audit_root/h.owner
+        shutil.move(str(oldaudit),h.audit)
+        h.registry=self.root/'.git/cloudbench-fleet-ownership'/h.owner;h.registry.parent.mkdir(parents=True)
+        shutil.move(str(oldregistry),h.registry)
+        h.scripts=self.root/'scripts';h.workspace=self.root
+        text=(h.registry/'meta').read_text().replace(str(oldrun.parent),str(self.runs)).replace(str(oldaudit),str(h.audit))
+        text=text.replace('run_id=20260929-032004-9714','run_id='+h.run_id).replace(str(ROOT),str(self.root))
+        self.put(h.registry/'meta',text)
+        for path in (h.audit/'fresh').iterdir():path.write_text(path.read_text().replace('20260929-032004-9714',h.run_id))
+        self.put(h.audit/'meta',f'version=1\nfleet_owner_token={h.owner}\nrun_id={h.run_id}\napp={h.app}\nworkspace_root={self.root}\nhub_owner_file={hub}\n')
+        matrix=build_task_matrix([bench+'=real' for bench,_,_ in h.mapping])
+        value=json.loads((h.run/'execution-provenance.json').read_text())
+        value['config']=build_config('cloudbench-fleet-config-v1',['boot_launch=1','requested_boot_transport=config','task_matrix_sha256='+matrix['sha256'],'task_count=2'])
+        self.put(h.run/'execution-provenance.json',value);self.put(h.run/'execution-task-matrix.json',matrix)
+        self.put(h.run/'teardown-ownership.path',str(h.audit)+'\n')
+        for machinepath in h.native.glob('*.json'):
+            value=json.loads(machinepath.read_text())
+            if isinstance(value,dict):value['config']['env']['CLOUDBENCH_START_BARRIER']=h.run_id
+            machinepath.write_text(json.dumps(value))
+        self.put(Path(self.summary['jobs'][0]['log']),Path(self.summary['jobs'][0]['log']).read_text()+
+                 f'mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n{self.root}/scripts/run-bench monitor {h.run}\nowner: {h.owner}; private controller diagnostics stay in this run directory.\n')
+        sharedids=[self.parent_pid,99999101,99999102,99999103,99999104,hubpid]
+        allpids=pids+[99999999]+sharedids
+        self.supervisor=dict(supervisor_pid=99999997,child_pid=self.parent_pid,native_exit=-9,cancelled=True,timed_out=False,
+                             quiescent=True,orphaned_children=True,remaining=[],error=None,reaped=[dict(pid=p,status=9) for p in allpids],term_sent=allpids,kill_sent=allpids)
+        self.put(self.base/'cli.log.process.json',self.supervisor)
+        inv={'pid':'99999104','pid_start':birth(5),'parent_pid':str(self.parent_pid),'parent_start':birth(1)}
+        authority=dict(schema='shared-relay-authority-v1',app=h.app,org_slug='personal',network='',parent_pid=self.parent_pid,
+                       parent_start=birth(1),source_sha256=c.sha_file(self.root/'scripts/cloudbench-shared-relay.py'),
+                       agent_socket=str(self.relay/'fly-agent.sock'),inventory_directory=str(self.campaign/'shared-inventory'),
+                       inventory_owner=inv,allowed_remote_ports=[3001,3003,8011],deadline=1e300)
+        self.put(self.relay/'authority.private.json',authority)
+        authoritysha=c.sha_file(self.relay/'authority.private.json')
+        agent={'pid':99999103,'birth':birth(4),'socket_identity':[1,2],'version':'0.4.115'}
+        broker={'pid':99999102,'birth':birth(3),'parent_pid':self.parent_pid,'parent_start':birth(1)}
+        self.put(self.relay/'broker-owner.json',broker)
+        self.put(self.relay/'bootstrap-owner.json',{'pid':99999101,'birth':birth(2),'parent_pid':self.parent_pid,'parent_start':birth(1)})
+        self.put(self.relay/'startup-agent.json',{'schema':'shared-relay-startup-agent-v1','authority_sha256':authoritysha,
+                 'agent':agent,'broker':{'pid':broker['pid'],'birth':broker['birth']},'parent':{'pid':self.parent_pid,'birth':birth(1)},'socket':authority['agent_socket']})
+        self.put(self.relay/'ready.json',dict(authority_sha256=authoritysha,agent=agent,pid=broker['pid'],birth=broker['birth'],socket=str(self.relay/'control.sock')))
+        self.put(self.relay/'serve.once.json',dict(authority_sha256=authoritysha,pid=broker['pid'],birth=broker['birth']))
+        for path in self.relay.iterdir():path.chmod(0o600)
+        self.put(self.campaign/'shared-relay-location.json',{'directory':str(self.relay)})
+        self.put(self.campaign/'shared-inventory/owner','\n'.join(k+'='+v for k,v in inv.items())+'\n')
+        self.put(h.audit/'owned-clones.ids',''.join(machine+'\n' for _,machine,_ in h.mapping))
+        self.put(h.audit/'owned-clones.names',''.join('cloudbench-'+machine+'\n' for _,machine,_ in h.mapping))
+        self.hm.publish(h.validate())
+        shutil.rmtree(h.registry)
+        with (h.audit/'meta').open('a') as stream:stream.write('status=provider-teardown-verified\n')
+        self.put(h.audit/'provider-teardown-verified.epoch',str(int(self.now)-1))
+        for path in (h.audit/'fresh').iterdir():path.write_text(path.read_text().replace('disposition=owned','disposition=destroyed-verified-absent'))
+        self.assertEqual(self.hm.verify_released_fresh(h.audit,h.run,h.scripts)['proof_credit'],0)
+        import socket
+        sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        sock.bind(str(self.relay/'control.sock'));sock.close()
+        os.mkfifo(self.campaign/'shared-inventory/inventory-refresh.wait')
+        self.control_manifest=self.root/'control-originals.json'
+        control_rows=[]
+        for path in (self.relay/'control.sock',self.campaign/'shared-inventory/inventory-refresh.wait',self.campaign/'shared-inventory/owner'):
+            st=path.lstat();row=dict(source=str(path),mode=st.st_mode,size=st.st_size,dev=st.st_dev,ino=st.st_ino,mtime_ns=st.st_mtime_ns,ctime_ns=st.st_ctime_ns)
+            if path.is_file():
+                original=self.root/'original-inventory-owner';original.write_bytes(path.read_bytes())
+                row.update(copy=str(original),sha256=c.sha_file(original))
+            control_rows.append(row)
+        self.put(self.control_manifest,dict(observed_at=time.time(),rows=control_rows))
+        self.proof['files']=self.m.capture_files(self.r,self.proof,controls_pending=True)
+
+    def prepare_publication(self):
+        import gzip, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        records=[]
+        class Hub(BaseHTTPRequestHandler):
+            def do_POST(server):
+                data=server.rfile.read(int(server.headers['Content-Length']))
+                records.append(json.loads(gzip.decompress(data)))
+                server.send_response(200);server.send_header('Content-Type','application/json');server.end_headers()
+                server.wfile.write(json.dumps({'run':{'run_id':records[-1]['run_id']}}).encode())
+            def log_message(*args): pass
+        hub=HTTPServer(('127.0.0.1',0),Hub)
+        thread=threading.Thread(target=hub.serve_forever,daemon=True);thread.start()
+        state_path=self.root/'state.json';proof_path=self.root/'proof.json'
+        self.put(state_path,self.state);self.put(proof_path,self.proof)
+        env=dict(os.environ,BENCHMARK_HUB_UPLOAD_URL=f'http://127.0.0.1:{hub.server_port}',
+                 BENCHMARK_HUB_API_KEY='local-owning-fixture',BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS='10')
+        for key in list(env):
+            if key.startswith('RUN_BENCH_CAMPAIGN_'):env.pop(key)
+        try:
+            for action in ('retire-controls','prepare','publish'):
+                result=subprocess.run([sys.executable,str(ROOT/'scripts/deploy_test_interrupted_fresh_cleanup.py'),action,
+                                       '--state',str(state_path),'--proof',str(proof_path),'--request-token',self.r['token'],
+                                       *(['--control-manifest',str(self.control_manifest)] if action=='retire-controls' else [])],env=env,capture_output=True,text=True,timeout=20)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.proof=json.loads(proof_path.read_text())
+            self.assertEqual(len(records),1)
+            self.assertEqual(records[0]['tasks'],[])
+            self.assertEqual(records[0]['run_group']['status'],'cancelled')
+        finally:
+            hub.shutdown();thread.join();hub.server_close()
+
+    def test_public_reconcile_real_producer_closure_and_idempotence(self):
+        self.prepare_publication()
+        original=copy.deepcopy(self.state)
+        c.reconcile(self.state,self.r['token'],self.proof)
+        self.assertEqual(self.state['attempts'],original['attempts'])
+        self.assertEqual(self.state['failures'],original['failures'])
+        self.assertEqual(self.state['reconciled_owners']['older'],original['reconciled_owners']['older'])
+        entry=self.state['reconciled_owners'][c.sha_file(self.folder/'receipt.json')]
+        self.assertFalse(entry['credit_granted']);self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(set(self.r['cases'].values()),{'UNVERIFIED'})
+        self.assertTrue(c._reconciled(self.state,self.r,self.r['cleanup_owner']))
+        before=copy.deepcopy(self.state);c.reconcile(self.state,self.r['token'],self.proof);self.assertEqual(self.state,before)
+
+    def test_every_original_controller_wait_is_required_atomically(self):
+        self.prepare_publication()
+        original=(self.base/'cli.log.process.json').read_bytes()
+        for job in self.summary['jobs']:
+            value=json.loads(original);value['reaped']=[r for r in value['reaped'] if r['pid']!=job['controller_pid']]
+            self.put(self.base/'cli.log.process.json',value)
+            self.proof['files'][str(self.base/'cli.log.process.json')]=c.sha_file(self.base/'cli.log.process.json')
+            before=copy.deepcopy(self.state)
+            with self.assertRaises((ValueError,KeyError)):c.reconcile(self.state,self.r['token'],self.proof)
+            self.assertEqual(self.state,before)
+        (self.base/'cli.log.process.json').write_bytes(original)
+        self.proof['files'][str(self.base/'cli.log.process.json')]=c.sha_file(self.base/'cli.log.process.json')
+
+    def test_missing_native_publication_and_nested_audit_refuse_atomically(self):
+        self.prepare_publication()
+        for path in (Path(self.proof['recovery_directory'])/'publication.json',self.h.audit/'provider-teardown-verified.epoch'):
+            original=path.read_bytes();path.unlink();before=copy.deepcopy(self.state)
+            with self.assertRaises((ValueError,OSError)):c.reconcile(self.state,self.r['token'],self.proof)
+            self.assertEqual(self.state,before);path.write_bytes(original)
+
+
+    def test_semantic_negative_controls_refuse_atomically(self):
+        import hashlib
+        self.prepare_publication()
+        proof_path=self.h.run/'_batch/fresh-prestart-recovery.json'
+        output=self.h.run/self.h.mapping[0][0]
+        machine=self.h.mapping[0][1]
+        out=Path(self.proof['recovery_directory'])
+        parent=self.runs/self.summary['jobs'][1]['log'].split('/')[-1]  # choose by native PID below
+        parent=next(p for p in self.runs.iterdir() if p.name.endswith(str(self.summary['jobs'][1]['controller_pid'])))
+        parent_audit=Path((parent/'teardown-ownership.path').read_text().strip())
+        def edit(document, keys, value):
+            obj=json.loads(document)
+            target=obj
+            for key in keys[:-1]:target=target[key]
+            target[keys[-1]]=value
+            return json.dumps(obj).encode()
+        faults=[
+            ('nested-owner',proof_path,lambda b:edit(b,['owner'],'0'*32)),
+            ('producer-refused',proof_path,lambda b:edit(b,['proof_credit'],1)),
+            ('started-guest',proof_path,lambda b:edit(b,['native',machine,1,'state'],'started')),
+            ('foreign-token',proof_path,lambda b:edit(b,['native',machine,1,'config','env','CLOUDBENCH_RUN_TOKEN'],'foreign')),
+            ('foreign-volume',proof_path,lambda b:edit(b,['native',machine,1,'config','mounts',0,'volume'],'vol_foreign')),
+            ('changed-payload',output/'cloudbench-boot-payload.json.gz',lambda b:b+b'foreign'),
+            ('parent-pending',parent_audit/'meta',lambda b:b.replace(b'provider-teardown-verified',b'incomplete')),
+            ('nested-pending',self.h.audit/'meta',lambda b:b.replace(b'provider-teardown-verified',b'incomplete')),
+            ('retained-hub',self.hub,lambda b:b.replace(b'pid=99999099',('pid='+str(os.getpid())).encode())),
+            ('foreign-capability',self.relay/'authority.private.json',lambda b:edit(b,['source_sha256'],'f'*64)),
+            ('publication-refused',out/'publication.json',lambda b:edit(b,['published'],False)),
+            ('publication-wrong-source',out/'publication.json',lambda b:edit(b,['source_sha256'],'f'*64)),
+            ('fake-original-result',self.folder/'receipt.json',lambda b:edit(b,['worker_result'],'fake-result.json')),
+            ('changed-old-summary',self.campaign/'summary.json',lambda b:edit(b,['status'],'failed')),
+            ('changed-source',parent/'execution-provenance.json',lambda b:edit(b,['base_sha'],'f'*40)),
+            ('false-publication-pass',out/'recovery-summary.json',lambda b:edit(b,['status'],'passed')),
+        ]
+        original_proof=copy.deepcopy(self.proof)
+        for label,path,change in faults:
+            with self.subTest(fault=label):
+                original=path.read_bytes();mode=path.stat().st_mode & 0o777;path.chmod(0o600);path.write_bytes(change(original));path.chmod(mode)
+                # Challenge semantics after binding the changed observation. The
+                # independent source/native/provenance authorities must reject it.
+                self.proof['files'][str(path)]=c.sha_file(path)
+                before=copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):c.reconcile(self.state,self.r['token'],self.proof)
+                self.assertEqual(self.state,before)
+                path.chmod(0o600);path.write_bytes(original);path.chmod(mode);self.proof=copy.deepcopy(original_proof)
+        for label,path in [('missing-native-publication',out/'publication.json'),
+                           ('missing-nested-audit',self.h.audit/'provider-teardown-verified.epoch'),
+                           ('missing-parent-audit',parent_audit/'provider-teardown-verified.epoch')]:
+            with self.subTest(fault=label):
+                original=path.read_bytes();path.unlink();before=copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):c.reconcile(self.state,self.r['token'],self.proof)
+                self.assertEqual(self.state,before);path.write_bytes(original)
+        for label,path in [('retained-registry',self.h.registry),('active-lease',self.relay/'leases/foreign'),
+                           ('unknown-worker',parent/self.summary['jobs'][1]['task']/'worker-clones.ids')]:
+            with self.subTest(fault=label):
+                if label=='retained-registry':path.mkdir()
+                else:
+                    path.parent.mkdir(exist_ok=True,parents=True);path.write_text('unknown')
+                    self.proof['files'][str(path)]=c.sha_file(path)
+                before=copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):c.reconcile(self.state,self.r['token'],self.proof)
+                self.assertEqual(self.state,before)
+                if label=='retained-registry':path.rmdir()
+                else:path.unlink()
+                self.proof=copy.deepcopy(original_proof)
+        before=copy.deepcopy(self.state)
+        self.state['source']={'head':'f'*40,'digest':'a'*64}
+        changed=copy.deepcopy(self.state)
+        with self.assertRaises(ValueError):c.reconcile(self.state,self.r['token'],self.proof)
+        self.assertEqual(self.state,changed);self.state=before
+        self.assertEqual(len(self.state['failures']),5)
+        self.assertEqual(set(self.r['cases'].values()),{'UNVERIFIED'})
+
+    def test_live_namespace_consumer_refuses_without_changing_state(self):
+        self.prepare_publication()
+        process=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],cwd=self.base)
+        try:
+            before=copy.deepcopy(self.state)
+            with self.assertRaisesRegex(ValueError,'consumer|holder'):
+                c.reconcile(self.state,self.r['token'],self.proof)
+            self.assertEqual(self.state,before)
+        finally:
+            process.terminate();process.wait(timeout=5)
+
+
+
+    def test_control_retirement_refuses_inode_changes_and_open_holders(self):
+        manifest=json.loads(self.control_manifest.read_text())
+        original=copy.deepcopy(manifest)
+        manifest['rows'][0]['ino']+=1
+        self.put(self.control_manifest,manifest)
+        with self.assertRaisesRegex(ValueError,'inode changed'):
+            self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+        self.put(self.control_manifest,original)
+        owner=self.campaign/'shared-inventory/owner'
+        with owner.open('rb'):
+            with self.assertRaisesRegex(ValueError,'holder'):
+                self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+        self.assertFalse((Path(self.proof['recovery_directory'])/'control-retirement-intent.json').exists())
+        self.assertTrue(owner.exists());self.assertTrue((self.relay/'control.sock').exists())
+
+    def test_control_retirement_joined_kernel_socket_is_mandatory(self):
+        import socket
+        path=self.relay/'control.sock';path.unlink()
+        server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);server.bind(str(path));server.listen()
+        try:
+            manifest=json.loads(self.control_manifest.read_text());st=path.lstat()
+            row=next(r for r in manifest['rows'] if r['source']==str(path))
+            row.update(mode=st.st_mode,size=st.st_size,dev=st.st_dev,ino=st.st_ino,mtime_ns=st.st_mtime_ns,ctime_ns=st.st_ctime_ns)
+            self.put(self.control_manifest,manifest)
+            with self.assertRaisesRegex(ValueError,'holder|kernel'):
+                self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+            self.assertTrue(path.exists())
+        finally:server.close()
+
+    def test_control_retirement_partial_retry_and_repeat_are_idempotent(self):
+        fifo=self.campaign/'shared-inventory/inventory-refresh.wait'
+        unlink=Path.unlink
+        def interrupted(path,*args,**kwargs):
+            if path==fifo:raise OSError('injected interruption after the first unlink')
+            return unlink(path,*args,**kwargs)
+        before=copy.deepcopy(self.state)
+        with patch.object(Path,'unlink',interrupted):
+            with self.assertRaisesRegex(OSError,'injected interruption'):
+                self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+        self.assertFalse((self.relay/'control.sock').exists());self.assertTrue(fifo.exists())
+        first=self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+        second=self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+        self.assertEqual(first,second);self.assertEqual(self.state,before)
+        self.assertTrue(first['verified_absent'])
+        self.assertFalse(fifo.exists());self.assertFalse((self.campaign/'shared-inventory/owner').exists())
+
+
+    def test_control_retirement_preview_is_read_only(self):
+        before=copy.deepcopy(self.proof)
+        paths=[Path(r['source']) for r in json.loads(self.control_manifest.read_text())['rows']]
+        identities=[(p.lstat().st_ino,p.lstat().st_ctime_ns) for p in paths]
+        result=self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest,dry_run=True)
+        self.assertTrue(result['dry_run']);self.assertEqual(self.proof,before)
+        self.assertEqual([(p.lstat().st_ino,p.lstat().st_ctime_ns) for p in paths],identities)
+        self.assertFalse(Path(self.proof['recovery_directory']).exists())
+
+    def test_control_retirement_crash_after_final_unlink_and_stale_proof_retry(self):
+        owner=self.campaign/'shared-inventory/owner'
+        unlink=Path.unlink
+        def after_final_unlink(path,*args,**kwargs):
+            result=unlink(path,*args,**kwargs)
+            if path==owner:raise OSError('injected crash after final owner unlink')
+            return result
+        original=copy.deepcopy(self.proof)
+        with patch.object(Path,'unlink',after_final_unlink):
+            with self.assertRaisesRegex(OSError,'after final owner unlink'):
+                self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+        self.assertFalse(owner.exists());self.assertEqual(self.proof,original)
+        first=self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+        # Model a crash after the operation receipt, before the CLI saved proof.
+        second=self.m.retire_controls(self.state,self.r,original,self.gate,self.control_manifest)
+        self.assertEqual(first,second)
+        self.assertNotIn(str(owner),original['files'])
+        self.assertIn(str(self.root/'original-inventory-owner'),original['files'])
+
+    def test_control_intent_directory_is_durable_before_first_unlink(self):
+        recovery=Path(self.proof['recovery_directory']);synced=[]
+        sync=self.m.fsync_directory;unlink=Path.unlink
+        def checked_sync(path):
+            result=sync(path);synced.append(path);return result
+        def checked_unlink(path,*args,**kwargs):
+            self.assertIn(recovery,synced)
+            self.assertIn(recovery.parent,synced)
+            return unlink(path,*args,**kwargs)
+        with patch.object(self.m,'fsync_directory',checked_sync),patch.object(Path,'unlink',checked_unlink):
+            self.m.retire_controls(self.state,self.r,self.proof,self.gate,self.control_manifest)
+
 if __name__=='__main__':unittest.main()
