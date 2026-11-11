@@ -6025,6 +6025,35 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
 
+    def test_isolated_renewal_ignores_an_unexecuted_prelaunch_refusal(self):
+        """PR1910 round 22: smoke refused before launch because renewal had not run yet.
+
+        That refusal issued no request and executed nothing; it must not become the
+        successor that blocks the renewal it was waiting for.
+        """
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False, source=copy.deepcopy(state['source']),
+                       reason='native cleanup: next source/inventory binding')
+        state['attempts'].append(dict(phase='focused', results=[refusal]))
+        before = copy.deepcopy(state)
+        renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}
+        c.reconcile(state, original['token'], renewed)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['source'], entry['validation_source'])
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['attempts'], state['attempts'])  # the refusal FAIL stays recorded
+        self.assertEqual(before['failures'], state['failures'])
+
+    def test_isolated_renewal_still_judges_an_executed_incomplete_successor(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        executed = dict(gate=gate['name'], status='FAIL', complete=False, source=copy.deepcopy(state['source']),
+                        reason='executed but incomplete', token='executed-incomplete', executed=True)
+        state['attempts'].append(dict(phase='focused', results=[executed]))
+        before = copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError, 'failed successor execution'):
+            c.reconcile(state, original['token'], {**proof, 'validation_source': copy.deepcopy(state['source'])})
+        self.assertEqual(before, state)
+
     def committed_historical_successor_fixture(self):
         """Synthetic native custody uses the existing fixture; real retained records are replayed separately."""
         import deploy_test_historical_custody as h

@@ -2526,6 +2526,14 @@ def renew_isolated_validation(state, request_token, proof):
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
     latest = latest_receipts(state).get(prior['gate'])
+    if (latest is not None and latest is not receipt and latest.get('token') is None
+            and latest.get('executed') is not True and latest.get('complete') is False
+            and latest.get('status') == 'FAIL' and isinstance(latest.get('reason'), str)):
+        # A launch refused before any request was issued (for example this missing renewal)
+        # executed nothing: it is not a successor. Its FAIL record stays in the history.
+        executed = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
+                    if row.get('gate') == prior['gate'] and row.get('token') is not None]
+        latest = executed[-1] if executed else None
     need(custody_state is None or latest is not None and latest != receipt
          and latest.get('complete') is True, 'historical contract requires clean successor')
     if latest != receipt:

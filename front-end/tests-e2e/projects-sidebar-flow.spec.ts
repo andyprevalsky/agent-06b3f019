@@ -144,6 +144,8 @@ for (const width of [1280, 390]) {
     const folderRow = page.getByTestId('rose-folder-f-ui').filter({ visible: true });
     await expect(folderRow.getByText('Rose work', { exact: true })).toBeVisible();
     await folderRow.getByRole('button', { name: 'Expand Rose work', exact: true }).click();
+    // A completed sub-agent sits in its owner's collapsed Finished agents drawer.
+    await folderRow.getByRole('button', { name: 'Finished agents (1)', exact: true }).click();
     await expect(folderRow.getByText('Audit navigation', { exact: true })).toBeVisible();
     await expect(folderRow.getByTestId('rose-agent-children-project-agent')).toContainText(
       'Audit navigation',
