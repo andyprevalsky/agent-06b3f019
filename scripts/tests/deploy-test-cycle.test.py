@@ -6208,6 +6208,22 @@ class Cycle(unittest.TestCase):
         narrowed = copy.deepcopy(extended); narrowed['checks'] = extended['checks'][1:]
         with self.assertRaisesRegex(ValueError, 'next source/inventory binding'):
             c.isolated_request(state, narrowed, dict(request, checks=narrowed['checks']), self.root, {})
+        # Only a catalog deploy omission of a native smoke case may narrow the bound inventory.
+        # Ordinary quarantine rows and non-smoke gates still refuse; the original debt stays.
+        smoke = dict(narrowed, category='smoke')
+        smoke_request = dict(request, checks=smoke['checks'])
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_text(json.dumps([{'name': extended['checks'][0], 'quarantine': {'error': 'still runs'}}]))
+        with self.assertRaisesRegex(ValueError, 'next source/inventory binding'):
+            c.isolated_request(state, smoke, smoke_request, self.root, {})
+        catalog.write_text(json.dumps([{'name': extended['checks'][0], 'deploy_quarantine': 'User exclusion'}]))
+        with self.assertRaisesRegex(ValueError, 'next source/inventory binding'):
+            c.isolated_request(state, narrowed, dict(request, checks=narrowed['checks']), self.root, {})
+        omitted = c.isolated_request(state, smoke, smoke_request, self.root, {})
+        self.assertEqual(bindings[0] | {'new_request_token': request['token']}, omitted[0])
+        self.assertFalse(omitted[0]['credit_granted'])
+        self.assertEqual(before, state)
         with self.assertRaisesRegex(ValueError, 'fresh native adapter'):
             c.isolated_request(state, extended, request, self.root, {'CLOUDBENCH_ARCHIVED_REUSE_REQUEST':'old'})
         self.assertEqual(before, state)

@@ -1254,8 +1254,17 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
     bindings = []
     for entry in entries:
         old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')
+        # Every old case stays mandatory unless the catalog omits it from all future deploys
+        # (native smoke only). The omission grants no credit and never releases the original debt.
+        missing = (set(old['checks']) | set(old.get('skips', {}))) - set(gate['checks'])
+        if missing:
+            try:
+                missing -= set(quarantine.deploy_selection_omissions(
+                    root, dict(gate, checks=[*gate['checks'], *sorted(missing)]), gate))
+            except (ValueError, OSError):
+                pass
         need(entry['validation_source'] == request['source'] and request['token'] != entry['token']
-             and (set(old['checks']) | set(old.get('skips', {}))) <= set(gate['checks']), 'next source/inventory binding')
+             and not missing, 'next source/inventory binding')
         bindings.append({'original_receipt_sha256': entry['proof']['receipt_sha256'],
                          'original_request_token': entry['token'], 'new_request_token': request['token'],
                          'source': request['source'], 'new_native_root': str(new_root),
