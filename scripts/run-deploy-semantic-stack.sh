@@ -188,6 +188,71 @@ semantic_report_lane() {
         export SEMANTIC_NATIVE_REPORT_PREFIX="$DEPLOY_SEMANTIC_ARTIFACT_DIR/$1"
     fi
 }
+# Read-only identity check before ANY semantic agent is created. The observed
+# queue pointer is DB-backed and the route explicitly admits observation only.
+semantic_verify_callback() {
+    node - "$ROOT_DIR" "$DEPLOY_SEMANTIC_CALLBACK_TOKEN" "$stack_pid" "$CP" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const assert = require('node:assert/strict');
+const [root, token, stackPid, backendPort] = process.argv.slice(2);
+(async () => {
+    assert.match(token, /^[a-f0-9]{32}$/);
+    const manifestPath = path.join(root, '.context/services.json');
+    assert.equal(fs.realpathSync(manifestPath), manifestPath);
+    const services = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    assert.equal(services.worktree, root);
+    assert.equal(services.status, 'running');
+    assert.equal(services.benchmark_mode, true);
+    assert.equal(services.run_sh_pid, Number(stackPid));
+    assert.equal(services.ports.backend, Number(backendPort));
+    const local = `http://localhost:${backendPort}`;
+    const origin = `https://rose-semantic-bench-${token}-bench.ngrok.app`;
+    assert.equal(services.urls.backend, local);
+    assert.equal(services.urls.public, origin);
+    assert.equal(typeof services.temporal_task_queue, 'string');
+    assert.match(services.temporal_task_queue, /^navi-agent-tasks-.+-deploy-[0-9]{14}-[0-9]+$/);
+    const tunnels = services.services.filter((row) => row.name === 'ngrok');
+    assert.equal(tunnels.length, 1);
+    const pid = tunnels[0].pid;
+    assert(Number.isInteger(pid) && pid > 1);
+    process.kill(pid, 0);
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1).split(' ');
+    assert.equal(Number(stat[1]), Number(stackPid));
+    assert(!['Z', 'X', 'x'].includes(stat[0]));
+    const argv = fs.readFileSync(`/proc/${pid}/cmdline`).toString().split('\0').filter(Boolean);
+    assert.equal(path.basename(argv[0]), 'ngrok');
+    assert.equal(argv[1], 'http');
+    assert.equal(argv[2], String(services.ports.frontend));
+    assert.equal(argv[argv.indexOf('--domain') + 1], new URL(origin).hostname);
+    const dotenv = require(path.join(root, 'node_modules/dotenv'));
+    const config = dotenv.parse(fs.readFileSync(path.join(root, 'back-end/.env')));
+    const key = process.env.BACKEND_API_KEY || config.BACKEND_API_KEY;
+    assert(typeof key === 'string' && key.length > 0);
+    const read = async (base) => {
+        const response = await fetch(base + '/api/agent-queue-pointer', {
+            headers: {'X-API-Key': key, 'X-Queue-Pointer-Observe': '1'},
+            redirect: 'error', signal: AbortSignal.timeout(5000),
+        });
+        assert.equal(response.status, 200);
+        const body = await response.json();
+        assert.equal(body.managedDeploymentProtocol, 1);
+        assert.equal(body.continuationAdmitted, false);
+        assert.equal(body.taskQueue, services.temporal_task_queue);
+        return body;
+    };
+    const [own, remote] = await Promise.all([read(local), read(origin)]);
+    for (const field of ['taskQueue', 'surfaceHash', 'updatedBy', 'updatedAt', 'managedQueue']) {
+        assert(Object.hasOwn(own, field) && Object.hasOwn(remote, field));
+        assert.deepEqual(remote[field], own[field]);
+    }
+    const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
+    console.log(`SEMANTIC_CALLBACK_READY origin_sha256=${hash(origin)} queue_sha256=${hash(own.taskQueue)}`);
+})().catch(() => {console.error('Semantic callback identity/reachability refused'); process.exitCode = 1;});
+NODE
+}
+
 cleanup() {
     if [ -n "$stack_pid" ] && kill -0 "$stack_pid" 2>/dev/null; then
         kill -TERM "$stack_pid" 2>/dev/null || true
@@ -207,11 +272,11 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p .context
-# No semantic spec reaches the stack through a public origin, so the stack takes no tunnel.
-# Every deploy's gate VM checks out to .../rose/rose and so derived the same reserved ngrok
-# domain (rose-rose.ngrok.app): a second deploy, or any `rose` checkout running a stack, held
-# it and this gate died before readiness (ERR_NGROK_334, 2026-11-07).
-BENCHMARK_SKIP_PUBLIC_TUNNEL=1 BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
+# Remote code sessions send user-facing messages back to this isolated stack.
+# A run-scoped named endpoint avoids the shared rose-rose reservation (Nov 7).
+export DEPLOY_SEMANTIC_CALLBACK_TOKEN="${DEPLOY_SEMANTIC_TOKEN:-$(python3 -c 'import secrets;print(secrets.token_hex(16))')}"
+[[ "$DEPLOY_SEMANTIC_CALLBACK_TOKEN" =~ ^[a-f0-9]{32}$ ]] || exit 2
+BENCHMARK_SKIP_PUBLIC_TUNNEL=0 NGROK_DOMAIN_SUFFIX=ngrok.app DISABLE_FAST_MODE_PROXY=1 BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
     bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &
 stack_pid=$!
 printf 'STEP5_STACK_PID=%s\n' "$stack_pid"
@@ -237,6 +302,7 @@ fi
 echo "STACK_READY $(date -u +%FT%TZ) epoch=$(date +%s)"
 CP=$(jq -er '.ports.backend' .context/services.json) || exit 2
 DBP=$(jq -er '.database.runtime_port' .context/services.json) || exit 2
+semantic_verify_callback || exit 1
 # Step 6b: UI specs on four workers with the latency ratchet excluded, then
 # the ratchet alone on one worker (the chat-lifecycle-ratchet.yml split).
 semantic_report_lane ui

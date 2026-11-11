@@ -19,6 +19,10 @@ public_tunnel_provider_for_mode() {
 # provider fronts it publicly (including an ERR_NGROK_334 fallback) is optional.
 public_tunnel_process_is_required() {
   local process_name="$1" ephemeral="$2"
+  if [ -n "${DEPLOY_SEMANTIC_CALLBACK_TOKEN:-}" ]; then
+    [ "$process_name" = ngrok ]
+    return
+  fi
   [ "$(public_tunnel_provider_for_mode "$ephemeral")" = "cloudflare" ] || return 1
   [ "$process_name" = "cloudflared" ]
 }
