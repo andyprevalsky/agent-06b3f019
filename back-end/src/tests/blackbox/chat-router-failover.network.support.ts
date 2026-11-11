@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
 import { prisma } from '../../providers/database';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
@@ -427,4 +428,21 @@ export function firstContentDt(events: RecordedEvent[]): number {
   const event = events.find((candidate) => /"content":"[^"]/.test(candidate.line));
   assert.ok(event, 'recorded stream must carry content');
   return event.dt;
+}
+
+export function warnTiming(condition: boolean, message: string): void {
+  if (!condition) process.stderr.write(`timing warning: ${message}\n`);
+}
+
+/** Wall-clock warnings for a measured turn; the router stream duration itself is required. */
+export function warnRouterTiming(
+  turnElapsedMs: number,
+  routerDurationMs: number | undefined
+): void {
+  warnTiming(turnElapsedMs < 40_000, `persisted turn took ${turnElapsedMs}ms`);
+  assert.ok(routerDurationMs !== undefined, 'actual router stream duration is required');
+  warnTiming(
+    routerDurationMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+    `measured router stream took ${routerDurationMs}ms; persisted turn took ${turnElapsedMs}ms`
+  );
 }

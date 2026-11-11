@@ -4664,6 +4664,16 @@ class _FakeWorkflowModule:
     def patched(self, _patch_id: str) -> bool:
         return True
 
+    async def wait_condition(self, fn, *, timeout=None, **_kwargs):
+        # Event-loop turns stand in for workflow time; a bounded wait times out.
+        for _ in range(200):
+            if fn():
+                return
+            await asyncio.sleep(0)
+        if timeout is not None:
+            raise asyncio.TimeoutError()
+        raise AssertionError("unbounded wait_condition never satisfied in fake")
+
     def info(self):
         class _Info:
             task_queue = "navi-agent-tasks@testgen"
@@ -11533,7 +11543,7 @@ async def test_workflow_root_completion_summary_overlaps_verifier():
         await wf._mark_complete(context=context, structured_response={"answer": "42"})
         summary_args = [args for name, args in fake.activity_calls if name == "generate_completion_summary"]
         assert len(summary_args) == 2, summary_args
-        assert summary_args[-1][3] == {"answer": "42"}
+        assert sorted(str(args[3]) for args in summary_args) == ["None", "{'answer': '42'}"], summary_args
         assert tracked.count(("completion_summary", 7, 3)) == 2, "discarded summary spend must stay accounted"
     finally:
         _restore_workflow(original)
@@ -11564,6 +11574,89 @@ async def test_workflow_root_completion_summary_overlaps_verifier():
     try:
         await wf._start_speculative_completion_summary(context)
         assert fake.activity_calls == []
+    finally:
+        _restore_workflow(original)
+
+    # The activity's own internal-failure fallback is not adopted: regenerate.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Agent completed goal: research RFCs",
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "generation_failed": True,
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(True)
+        await asyncio.sleep(0)
+        fake.activity_returns["generate_completion_summary"] = {"summary": "Regenerated summary.", "usage": {}}
+        await wf._mark_complete(context=context, structured_response={"answer": "42"})
+        names = [name for name, _ in fake.activity_calls]
+        assert names.count("generate_completion_summary") == 2, names
+        assert _final_summary_row(fake)[1]["completionSummary"]["summary"] == "Regenerated summary."
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_discarded_speculative_summary_never_holds_completed():
+    """A slow summary from a rejected attempt cannot delay the verified COMPLETED.
+
+    It is still accounted after COMPLETED (bounded wait), and a run that ends
+    by failure or continue-as-new settles it first.
+    """
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    release_rejected = asyncio.Event()
+    calls = []
+
+    async def execute(fn, args=None, **_kwargs):
+        name = getattr(fn, "__name__", str(fn))
+        fake.activity_calls.append((name, args))
+        if name == "generate_completion_summary":
+            calls.append(args)
+            if len(calls) == 1:
+                await release_rejected.wait()
+                return {"summary": "Rejected-attempt summary.", "usage": {"prompt_tokens": 11, "completion_tokens": 2}}
+            return {"summary": "Verified summary.", "usage": {"prompt_tokens": 7, "completion_tokens": 3}}
+        return None
+
+    fake.execute_activity = execute
+    context = [{"role": "USER", "text": "research RFCs"}]
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)  # attempt 1
+        await wf._settle_speculative_completion_summary(False)  # rejected, still running
+        await wf._start_speculative_completion_summary(context)  # attempt 2
+        await wf._settle_speculative_completion_summary(True)
+        completing = asyncio.create_task(wf._mark_complete(context=context, structured_response={"ok": True}))
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if any(name == "mark_finished" for name, _ in fake.activity_calls):
+                break
+        names = [name for name, _ in fake.activity_calls]
+        assert "mark_finished" in names, f"verified completion waited on a rejected summary: {names}"
+        assert _final_summary_row(fake)[1]["completionSummary"]["summary"] == "Verified summary."
+        release_rejected.set()
+        await asyncio.wait_for(completing, 1)
+        assert ("completion_summary", 11, 2) in tracked and ("completion_summary", 7, 3) in tracked, tracked
+    finally:
+        _restore_workflow(original)
+
+    # Failure / continue-as-new: retire settles finished discarded spend first.
+    wf, tracked = _speculative_summary_root()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "Discarded.",
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._start_speculative_completion_summary(context)
+        await wf._settle_speculative_completion_summary(True)  # verified, then superseded
+        await wf._retire_speculative_summaries()
+        assert tracked == [("completion_summary", 5, 1)], tracked
+        assert wf._speculative_summary_handle is None and wf._discarded_summary_accounting == []
     finally:
         _restore_workflow(original)
 
@@ -15010,6 +15103,10 @@ async def run_all_tests():
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async(
         "wf_root_completion_summary_overlaps_verifier", test_workflow_root_completion_summary_overlaps_verifier
+    )
+    await r.record_async(
+        "wf_discarded_speculative_summary_never_holds_completed",
+        test_workflow_discarded_speculative_summary_never_holds_completed,
     )
     await r.record_async(
         "wf_mark_complete_does_not_forward_full_context",

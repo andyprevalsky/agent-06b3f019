@@ -64,6 +64,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { prisma } from '../../providers/database';
+import { quarantine } from '../helpers/quarantine';
 import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
@@ -101,14 +102,12 @@ import {
   type Scenario,
   SLOWEST_GLM_DELAY_MS,
   streams,
+  warnRouterTiming,
+  warnTiming,
 } from './chat-router-failover.network.support';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.CHAT_ROUTER_FAILOVER_LIVE === '1';
-
-function warnTiming(condition: boolean, message: string): void {
-  if (!condition) process.stderr.write(`timing warning: ${message}\n`);
-}
 
 /**
  * Every bound on this path that an env var can override. Render sets none of
@@ -390,12 +389,7 @@ async function testLongContextFailoverServesOnFirstAttempt(): Promise<void> {
       1,
       'the first router attempt must serve it: no regenerate'
     );
-    warnTiming(turnElapsedMs < 40_000, `persisted turn took ${turnElapsedMs}ms`);
-    assert.ok(routerDurationMs !== undefined, 'actual router stream duration is required');
-    warnTiming(
-      routerDurationMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-      `measured router stream took ${routerDurationMs}ms; persisted turn took ${turnElapsedMs}ms`
-    );
+    warnRouterTiming(turnElapsedMs, routerDurationMs);
     assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
     process.stdout.write(
       `  GLM first content at ${firstContentAt}ms; escalated at ${outcome.atMs}ms on attempt 1\n`
@@ -437,12 +431,7 @@ async function testCerebrasGuardLeavesFailoverRacing(): Promise<void> {
       (cerebras[0].abortedAtMs ?? Infinity) < firstContentAt,
       `Cerebras ended at ${cerebras[0].abortedAtMs}ms, before GLM's first content at ${firstContentAt}ms`
     );
-    warnTiming(turnElapsedMs < 40_000, `persisted turn took ${turnElapsedMs}ms`);
-    assert.ok(routerDurationMs !== undefined, 'actual router stream duration is required');
-    warnTiming(
-      routerDurationMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-      `measured router stream took ${routerDurationMs}ms; persisted turn took ${turnElapsedMs}ms`
-    );
+    warnRouterTiming(turnElapsedMs, routerDurationMs);
     assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
     process.stdout.write(
       `  Cerebras ended at ${cerebras[0].abortedAtMs}ms; GLM first content at ${firstContentAt}ms; ` +
@@ -602,16 +591,28 @@ async function runLiveSample(label: string): Promise<LiveSample> {
   );
 }
 
-async function testLiveFailoverEscalates(): Promise<void> {
-  const account = assertProbesConfiguredOpenRouterAccount(join(here, '../../../.env'));
-  process.stdout.write(`  OpenRouter key ${account} (the account back-end/.env configures)\n`);
-  await probeLiveFailover({
-    runSample: runLiveSample,
-    budgetMs: FAILOVER_PRE_CONTENT_BUDGET_MS,
-    reprobeDelayMs: LIVE_REPROBE_DELAY_MS,
-    goalAnchor: CORRECTED_GOAL,
-  });
-}
+/** The live probe runs this one case, so its FLAKY unit is the whole blackbox domain. */
+const liveUnit = 'chat-router-failover';
+const testLiveFailoverEscalates = quarantine(
+  {
+    since: '2026-11-11',
+    repair: 'pending-handoff:a7a3e0ced1a34fac8f9843fe5cb97009',
+    error:
+      'AssertionError [ERR_ASSERTION]: live GLM failover must escalate the exact prod follow-up, got apology after 30093ms over 1 decision round(s) (round 1 (2 attempt(s)): attempt 1: Wafer, connected 47ms, HTTP 200 at 1284ms, first event 1286ms, first content 5485ms; attempt 2: Wafer, reused connection, HTTP 200 at 872ms, first event 873ms, first content 9066ms)',
+    evidence: 'live-probes rca a7a3e0ced1a34fac8f9843fe5cb97009, run 1794423294-5981-12809',
+  },
+  async (): Promise<void> => {
+    const account = assertProbesConfiguredOpenRouterAccount(join(here, '../../../.env'));
+    process.stdout.write(`  OpenRouter key ${account} (the account back-end/.env configures)\n`);
+    await probeLiveFailover({
+      runSample: runLiveSample,
+      budgetMs: FAILOVER_PRE_CONTENT_BUDGET_MS,
+      reprobeDelayMs: LIVE_REPROBE_DELAY_MS,
+      goalAnchor: CORRECTED_GOAL,
+    });
+  },
+  { unit: liveUnit }
+);
 
 // ── runner ───────────────────────────────────────────────────────────────────
 

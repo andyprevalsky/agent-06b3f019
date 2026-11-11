@@ -1982,6 +1982,43 @@ async def test_completion_summary_hooks_bracket_the_attempt_completion_verifier(
         assert str(exc) == "Not in activity context", exc
     assert events == [], f"plan verification must not start a completion summary: {events}"
 
+    # The summary sees the attempt's authored result, exactly like the verifier.
+    seen = []
+
+    async def capture(context):
+        seen.append([dict(m) for m in context])
+
+    async def settle_ok(_passed):
+        return None
+
+    await _run_single_iteration(
+        [{"tool": "attempt_completion", "result": "RFC 9110 HTTP Semantics; RFC 9111 HTTP Caching"}],
+        [("attempt_completion", "tc-authored", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        extra_run_agent_kwargs={"on_verification_started": capture, "on_verification_settled": settle_ok},
+    )
+    authored = [m for m in seen[-1] if (m.get("metadata") or {}).get("title") == "Authored result"]
+    assert len(authored) == 1 and "RFC 9111 HTTP Caching" in authored[0]["text"], seen[-1]
+
+    # A failing summary hook is an optional speedup: verification still completes.
+    verdicts = []
+
+    async def broken_start(_context):
+        raise RuntimeError("summary scheduling failed")
+
+    async def record_settle(passed):
+        verdicts.append(passed)
+
+    result, _posted, _executed = await _run_single_iteration(
+        [{"tool": "attempt_completion"}],
+        [("attempt_completion", "tc-hook-fails", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        extra_run_agent_kwargs={"on_verification_started": broken_start, "on_verification_settled": record_settle},
+    )
+    assert result["status"] == "completed" and verdicts == [True], (result.get("status"), verdicts)
+
 
 async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
     """Attention responses can change requirements without creating USER rows."""

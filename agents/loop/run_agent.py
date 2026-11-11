@@ -2392,7 +2392,23 @@ async def run_agent(
                 verifier_error = None
                 speculate_completion = not is_plan_loop and on_verification_started is not None
                 if speculate_completion:
-                    await on_verification_started(context)
+                    authored = tool_args.get("result") if isinstance(tool_args, dict) else None
+                    try:
+                        # The summary sees what the verifier sees, including the
+                        # attempt's own authored result.
+                        await on_verification_started(_with_authored_result(context, authored, tool_call_id or ""))
+                    except Exception as hook_error:
+                        if any(
+                            error_chain_has_type(hook_error, kind)
+                            for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested")
+                        ):
+                            raise
+                        # Optional speedup only: verification and the serial summary proceed.
+                        logger.warning(
+                            "[run_agent] Speculative completion summary did not start",
+                            agent_id=agent_id,
+                            error=extract_error_message(hook_error),
+                        )
                 try:
                     verifier_result = await _run_verifier(
                         execute_activity=execute_activity,
