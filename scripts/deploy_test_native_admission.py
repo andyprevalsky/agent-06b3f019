@@ -96,6 +96,12 @@ def validate_parent(fleet, life, benches, run, root, bound, document, tree, *, c
          'admission ownership closure missing')
     directories = {'fresh', 'expected-fresh', 'pool', 'pool-handoffs', 'volume-migrations', 'by-machine-id'}
     files = {'meta', 'source-audit', 'owned-clones.ids', 'owned-clones.names', 'provider-teardown-verified.epoch'}
+    # A private-source fleet keeps its captured source manifest beside the audit; only that exact copy.
+    copy = audit / 'source-manifest.json'
+    if copy.exists() or copy.is_symlink():
+        need(not copy.is_symlink() and bound(copy) == bound(fleet / 'source-manifest.json'),
+             'admission source manifest copy differs')
+        files = files | {'source-manifest.json'}
     need({p.name for p in audit.iterdir()} <= directories | files, 'unknown admission audit record')
     for name in directories:
         path = audit / name

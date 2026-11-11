@@ -16284,7 +16284,16 @@ validate_private_fleet_source() {
     local machines volumes snapshots
     machines="$(FLY machines list -a "$APP" --json)" || return 1
     volumes="$(FLY volumes list -a "$APP" --json)" || return 1
-    snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
+    # Under concurrent reads the Machines API can answer HTTP 200 with an empty
+    # or partial snapshot list for an existing snapshot (11/14 concurrent reads
+    # on 2026-11-11). Absence in one response is not authoritative: re-read a
+    # bounded number of times; the verifier below still fails closed.
+    local attempt
+    for attempt in 1 2 3 4 5 6; do
+        snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
+        case "$snapshots" in *"\"$PRIVATE_SOURCE_SNAPSHOT\""*) break ;; esac
+        [ "$attempt" -lt 6 ] && sleep "$((attempt * 2))"
+    done
     printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
         | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
 }

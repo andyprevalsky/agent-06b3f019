@@ -293,17 +293,25 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       });
       const routerHome = markCacheable(ROUTER_SYSTEM_PROMPT).content;
       const generatorHome = markCacheable(GENERATOR_SYSTEM_PROMPT).content;
+      const profile =
+        '# User Context\n\nYou are the user\'s personal assistant; they have named you "Rose".\nLocation: United States';
       const placed = await directAnswerTurn({ repoUrl: 'https://github.com/Rose-Ai-Labs/rose' });
       assertEqual(placed.router.length > 0 && placed.generator.length > 0, true, 'both phases ran');
-      for (const content of placed.router) assertEqual(content, routerHome + section, 'router');
+      for (const content of placed.router)
+        assertEqual(content, routerHome + section + '\n\n' + profile, 'router project and profile');
       for (const content of placed.generator) {
-        assertEqual(content, generatorHome + section, 'generator');
+        assertEqual(
+          content,
+          generatorHome + section + '\n\n' + profile,
+          'generator project and profile'
+        );
       }
       assertEqual(placed.projectReads, 1, 'one project read per turn, shared by both phases');
       const home = await directAnswerTurn(null);
-      for (const content of home.router) assertEqual(content, routerHome, 'Home router unchanged');
+      for (const content of home.router)
+        assertEqual(content, routerHome + profile, 'Home router profile');
       for (const content of home.generator) {
-        assertEqual(content, generatorHome, 'Home generator unchanged');
+        assertEqual(content, generatorHome + profile, 'Home generator profile');
       }
     },
   ],

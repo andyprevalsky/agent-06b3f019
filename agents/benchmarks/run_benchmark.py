@@ -12410,7 +12410,7 @@ def _judge_source_tree(data: dict) -> dict:
 def _compact_benchmark_state_for_judge(data: dict) -> dict:
     """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
-    compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps"}}
+    compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps", "judge_audits"}}
     if isinstance(raw.get("display_artifacts"), list):
         # Their bounded text is already a displayed_to_user evidence row.
         compact["display_artifacts"] = [
@@ -12804,14 +12804,6 @@ async def _call_declared_agentic_llm_judge(
     judge_agent_id = str(uuid.uuid4())
     tool_call_id = str(uuid.uuid4())
     code_provider = await _agentic_judge_code_provider(user_id)
-    token_data: dict[str, Any] = {}
-    if code_provider == "codex":
-        try:
-            token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
-        except httpx.HTTPError as exc:
-            # Optional verifier auth: the spawn leases the CLI credential itself.
-            print(f"    ⚠ Agentic judge GPT token fetch failed ({type(exc).__name__}); continuing without it")
-
     if getattr(task, "process_spec", None) is not None:
         from benchmarks.process_bench import process_evidence
 
@@ -12826,38 +12818,62 @@ async def _call_declared_agentic_llm_judge(
         "application/json",
     )
 
-    result = await spawn_claude_code_activity(
-        user_id=user_id,
-        agent_id=judge_agent_id,
-        goal=_build_agentic_judge_goal(task, evaluator),
-        tool_call_id=tool_call_id,
-        output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
-        attachments=[attachment],
-        code_provider=code_provider,
-        gpt_token=token_data.get("accessToken"),
-        gpt_account_id=token_data.get("accountId"),
-        gpt_token_source=token_data.get("source"),
-        gpt_token_pool_id=token_data.get("poolTokenId"),
-        fast_mode_cache_enabled=False,
-    )
-    # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
-    # limit mid-judge). Every subscription and funded path exhausted is a compute-token
-    # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
-    if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
-        raise ComputeTokenUnavailable(
-            "Codex compute token unavailable for agentic benchmark judge: "
-            "the spawn found every subscription and funded credential exhausted"
-        )
+    from benchmarks.judge_identity import judge_identity
+    from config import load_config
 
-    score, reasoning = await _parse_agentic_judge_verdict(result)
-    usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
-    usage = aggregate_usage_items(usage_items) if usage_items else None
-    return {
-        "score": score,
-        "reasoning": reasoning,
-        "usage": usage,
-        "judge_audit": _agentic_judge_audit(judge_agent_id, attachment, evidence_bytes),
-    }
+    audit = _agentic_judge_audit(judge_agent_id, attachment, evidence_bytes)
+    data.setdefault("_benchmark", {}).setdefault("judge_audits", []).append(audit)
+    goal = _build_agentic_judge_goal(task, evaluator)
+    async with judge_identity(
+        base_url=load_config().backend.api_url,
+        headers=_internal_api_headers(user_id),
+        agent_id=judge_agent_id,
+        goal=goal,
+        audit=audit,
+    ):
+        token_data: dict[str, Any] = {}
+        if code_provider == "codex":
+            try:
+                token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
+            except httpx.HTTPError as exc:
+                # Optional verifier auth: the spawn leases the CLI credential itself.
+                print(f"    ⚠ Agentic judge GPT token fetch failed ({type(exc).__name__}); continuing without it")
+
+        result = await spawn_claude_code_activity(
+            user_id=user_id,
+            agent_id=judge_agent_id,
+            goal=goal,
+            tool_call_id=tool_call_id,
+            output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
+            attachments=[attachment],
+            code_provider=code_provider,
+            gpt_token=token_data.get("accessToken"),
+            gpt_account_id=token_data.get("accountId"),
+            gpt_token_source=token_data.get("source"),
+            gpt_token_pool_id=token_data.get("poolTokenId"),
+            fast_mode_cache_enabled=False,
+        )
+        # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
+        # limit mid-judge). Every subscription and funded path exhausted is a compute-token
+        # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
+        if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
+            raise ComputeTokenUnavailable(
+                "Codex compute token unavailable for agentic benchmark judge: "
+                "the spawn found every subscription and funded credential exhausted"
+            )
+
+        score, reasoning = await _parse_agentic_judge_verdict(result)
+        usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
+        usage = aggregate_usage_items(usage_items) if usage_items else None
+        audit["verdict"] = {"score": score, "reasoning": reasoning}
+        audit["usage"] = usage
+        audit["output_files"] = result.get("output_files") or []
+        return {
+            "score": score,
+            "reasoning": reasoning,
+            "usage": usage,
+            "judge_audit": audit,
+        }
 
 
 def _agentic_judge_audit(judge_agent_id: str, attachment: Any, evidence_bytes: bytes) -> dict[str, Any]:
