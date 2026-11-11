@@ -7182,7 +7182,11 @@ class Cycle(unittest.TestCase):
             phase='focused', state_sha256=c.sha_file(self.directory / 'cycle.json'),
             plan_digest=state['plan_digest'], native={gate['name']: native},
             files={str(p):c.sha_file(p) for p in (folder/'request.json', folder/'result.json')})
-        with patch.object(c, 'settlement_native', return_value=native):
+        import deploy_test_process
+        # The offline journal has no live adapters; isolate this setup from the host process table so a
+        # loaded runner's transiently unreadable same-user process cannot refuse it (cf. 8e36ec4714).
+        with patch.object(c, 'settlement_native', return_value=native), \
+             patch.object(deploy_test_process, 'scan_same_user_processes', lambda inspect, refuse, grace=2.0: None):
             c.recover_round(state['plan'], self.directory, self.root, recovery)
         state = c.read(self.directory / 'cycle.json')
         state.update(source=c.source(self.root), phase='needs-focused-plan', ready=False)
