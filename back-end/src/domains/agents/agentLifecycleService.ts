@@ -1,4 +1,4 @@
-import { assertExternalExecution } from './agentExternalExecution';
+import { assertExternalExecution, EXTERNAL_EXECUTION_START_PHASE } from './agentExternalExecution';
 /**
  * Agent lifecycle service — create and delete agents.
  */
@@ -175,7 +175,11 @@ async function applyCreateBodyRules(
 }
 
 async function activateExternalExecution(agentId: string): Promise<null> {
-  await repo.updateAgent(agentId, { status: 'ACTIVE' });
+  // Persist ownership so follow-up messages never start chat or Temporal beside the executor.
+  await repo.updateAgent(agentId, {
+    status: 'ACTIVE',
+    workflowStartPhase: EXTERNAL_EXECUTION_START_PHASE,
+  });
   return null;
 }
 

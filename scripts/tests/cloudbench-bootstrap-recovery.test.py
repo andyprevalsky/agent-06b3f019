@@ -3254,6 +3254,26 @@ class CaptureReceiptAppendTests(unittest.TestCase):
         self.assertEqual(self.call()["guest-cleanup.backend.log"],
                          self.manifest["evidence"]["backend_log_sha256"])
 
+    def test_present_empty_manifest_is_rejected_not_skipped(self):
+        self.originals[self.log] = self.earlier
+        self.state["backend_log"]["bytes"] = len(self.earlier)
+        self.prior.unlink()
+        self.manifest = {}
+        self.receipts()
+        self.reject()
+
+    def test_session_evidence_in_appended_suffix_is_not_append(self):
+        for line in (
+            b'{"message":"Created Kernel browser session","sessionId":"late1234session"}\n',
+            b"[Steel] Created Steel session: late5678session\n",
+            b"[DB] model=BrowserSession operation=create id=late\n",
+            b'{"message":"Tilion request","method":"POST","path":"/v1/session","status":201}\n',
+        ):
+            with self.subTest(line=line[:40]):
+                self.originals[self.log] = self.earlier + line
+                self.receipts()
+                self.reject()
+
     def test_changed_prefix_and_truncation_are_not_append(self):
         self.receipts()
         for data in (b"X" + self.originals[self.log][1:], self.earlier[:-1], b"replacement" * 40):

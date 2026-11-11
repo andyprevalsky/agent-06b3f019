@@ -976,7 +976,28 @@ def verified_backend_append(out: Path, ident: dict, originals: dict[str, bytes],
     if (not earlier or not size <= len(earlier) <= len(current)
         or size >= len(current) or sha(earlier) != digest or not current.startswith(earlier)):
         return None
+    if appended_session_evidence(current[len(earlier):]):
+        return None  # The manifest and cleanup receipt cannot cover a later browser session.
     return digest
+
+
+def appended_session_evidence(suffix: bytes) -> bool:
+    """True when log lines after the manifest-bound prefix may own a browser session.
+
+    Uses the cleanup helper's own session parsers, so any allocation, provider
+    response, BrowserSession mutation or Tilion create the cleanup would have to
+    release refuses the append instead of leaving that session unreleased.
+    """
+    if not suffix:
+        return False
+    helper = sibling("cloudbench-exact-session-cleanup.py")
+    try:
+        text = helper["ANSI"].sub("", suffix.decode("utf-8"))
+        sessions, allocations, mutations = helper["collect_session_evidence"](text)
+        tilion_attempts, _ = helper["tilion_create_requests"](text)
+    except (UnicodeDecodeError, helper["CleanupEvidenceError"]):
+        return True  # Unparseable session evidence fails closed.
+    return bool(allocations or mutations or tilion_attempts or any(sessions.values()))
 
 
 def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) -> dict[str, str]:
@@ -985,8 +1006,9 @@ def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) ->
     state_path = out / "guest-cleanup.state.json"
     manifest_path = out / "guest-cleanup.provider-manifest.json"
     manifest = json_file(manifest_path) if lexists(manifest_path) else {}
-    if manifest and (manifest.get("machine_id") != ident["machine_id"]
-                     or manifest.get("guest_run_token") != ident["token"]):
+    # A present manifest, even an empty object, must carry this guest's identity.
+    if lexists(manifest_path) and (manifest.get("machine_id") != ident["machine_id"]
+                                   or manifest.get("guest_run_token") != ident["token"]):
         raise CaptureFailure("recovery manifest belongs to another guest")
     if lexists(state_path):
         state = json_file(state_path)
