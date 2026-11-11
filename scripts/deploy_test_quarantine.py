@@ -117,6 +117,19 @@ def _git_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+# unittest's own failure header (3.11): "FAIL: test_x (module.Class.test_x)".
+_UNITTEST_FAILURE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([^()\s]+)\)', re.M)
+
+
+def failed_unittest_names(occurrence: dict) -> list[str]:
+    """Exact unittest ids a suite-level FLAKY unit printed for its failed first attempt.
+
+    The structural runner names a FLAKY unit after its whole suite job, while a quarantine marker
+    sits on one test method; the occurrence's own failure output is what ties the two together.
+    """
+    return _UNITTEST_FAILURE.findall(str(occurrence.get('detail') or ''))
+
+
 def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     """The recorded /RCA attribution of one FLAKY occurrence, or ValueError.
 
@@ -145,7 +158,11 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     path = entry.get('marker')
     if not isinstance(path, str) or not path.strip() or Path(path).is_absolute() or '..' in Path(path).parts:
         raise ValueError('NOT_INTRODUCED requires marker: the repo-relative test file carrying the quarantine marker')
-    found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
+    named = failed_unittest_names(occurrence)
+    found = [m for m in markers(root, [path])
+             if unit_matches(m, occurrence['unit'])
+             or any(test_id.endswith('.' + '.'.join(filter(None, (m.get('owner'), m.get('name')))))
+                    for test_id in named)]
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records

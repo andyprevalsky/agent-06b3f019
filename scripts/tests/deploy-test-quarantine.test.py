@@ -431,6 +431,20 @@ class ReleaseReport(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     q.catalog_quarantines(self.root)
 
+    def test_suite_level_flaky_unit_matches_the_marker_named_by_its_own_failure_output(self):
+        # The structural runner reports a FLAKY unit as the suite job ("deploy-test-plan"); the marker
+        # sits on the one method unittest named in that job's failed first attempt (PR #1928).
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**packet, 'repair_owner': REPAIR}}
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        failure = 'FAIL: test_flaky_unit (__main__.Suite.test_flaky_unit)\nTraceback ...\n'
+        recorded = q.validate_attribution({**base, 'detail': 'passed on rerun\n' + failure}, entry, self.root)
+        self.assertEqual('tests/test_unit.py', recorded['marker'])
+        for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.')):
+            with self.subTest(detail=detail), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
+
     def test_cli_prints_the_table(self):
         self.write_ledger(['QUARANTINED_PASS'] * 5)
         out = subprocess.run([sys.executable, str(ROOT / 'scripts/test_quarantine.py'), 'report', '--root',
