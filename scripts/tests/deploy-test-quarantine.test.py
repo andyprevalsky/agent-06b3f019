@@ -487,6 +487,41 @@ class ReleaseReport(unittest.TestCase):
             q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
                                    self.root)
 
+    def test_typescript_domain_flake_binds_the_marker_of_its_single_failed_native_case(self):
+        occurrence_id = 'd' * 32
+        title = 'HMR: an agent write reaches the preview DOM in \u2264 3 s'
+        source = ("import { quarantine } from '../helpers/quarantine';\n\n"
+                  "test('a passing case', () => {});\n\n"
+                  # Unbalanced-looking literals within the parser's look-back window must not misname it.
+                  + "const noise = [\n" + "  `it's ${'x'} \"q\"`, 'don\\'t',\n" * 30 + "];\n\n" +
+                  "test(\n  '%s',\n  quarantine(\n    {\n      since: '2026-11-11',\n"
+                  "      repair: 'pending-handoff:%s',\n      error: 'page.waitForFunction: Timeout 10000ms exceeded.',\n"
+                  "      evidence: 'rca-ts',\n    },\n    async () => {}\n  )\n);\n" % (title, occurrence_id))
+        (self.root / 'tests' / 'preview.blackbox.ts').write_text(source)
+        tap = ('ok 1 - a passing case\nnot ok 2 - %s\n  ---\n  error: x\n  ...\n# fail 1\n' % title)
+        occurrence = {'id': occurrence_id, 'gate': 'backend-coverage-blackbox', 'unit': 'preview',
+                      'detail': '\x1b[36m' + tap + '\x1b[0m', 'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-ts', 'marker': 'tests/preview.blackbox.ts',
+                 'post_merge': packet}
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution(occurrence, entry, self.root)
+        recorded = q.validate_attribution(occurrence, {**entry, 'case': title}, self.root)
+        self.assertEqual(('NOT_INTRODUCED', 'preview', occurrence_id),
+                         tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # The custom runners' FAIL line binds the same way.
+        runner = {**occurrence, 'detail': 'FAIL  %s (112312ms)\nError: boom\n\n1/1 preview cases failed\n' % title}
+        q.validate_attribution(runner, {**entry, 'case': title}, self.root)
+        # A case that did not fail, an unmarked failed case, or two failed cases never bind.
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution(occurrence, {**entry, 'case': 'a passing case'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': 'not ok 1 - a passing case\n'},
+                                   {**entry, 'case': 'a passing case'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': tap + 'not ok 3 - another\n'},
+                                   {**entry, 'case': title}, self.root)
+
     def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
         self.write_catalog()
         self.assertEqual({'cloud-smoke': META}, q.catalog_quarantines(self.root))

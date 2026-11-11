@@ -64,6 +64,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { prisma } from '../../providers/database';
+import { quarantinedLiveFailoverCase } from './flake-quarantines.support';
 import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
@@ -635,12 +636,7 @@ async function main(): Promise<void> {
   }
 
   const cases: Array<[string, () => Promise<void>]> = LIVE
-    ? [
-        [
-          'live -- exact prod follow-up escalates through real OpenRouter',
-          testLiveFailoverEscalates,
-        ],
-      ]
+    ? [quarantinedLiveFailoverCase(testLiveFailoverEscalates)]
     : [
         [
           'exact prod follow-up escalates through the recorded GLM failover',
