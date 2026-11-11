@@ -7700,6 +7700,50 @@ class Cycle(unittest.TestCase):
                         c.reconcile(candidate, original['token'], renewed)
                     self.assertEqual(before, candidate)
 
+    def test_clean_historical_successor_renews_with_hash_bound_gate_contract_witness(self):
+        # A main sync changed only the planner's explanatory selection_evidence, so the
+        # successor's sealed contract cannot be reconstructed from the current gate. The
+        # exact historical gate, authenticated by that sealed digest, renews launch authority.
+        import deploy_test_native_cleanup as native
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        state['attempts'][-1]['source'] = copy.deepcopy(successor['source'])
+        current = next(g for g in state['plan']['gates'] if g['name'] == gate['name'])
+        current['selection_evidence'] = ['runtime/contract path trigger']
+        state['plan_digest'] = c.digest(state['plan'])
+        historical = copy.deepcopy(current)
+        historical['selection_evidence'] = ['run_all trigger: scripts/run.sh', 'runtime/contract path trigger']
+        successor['execution_binding']['contract_digest'] = c.digest(historical)
+        c.write(folder / 'receipt.json', successor)
+        renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}
+        witness = dict(kind=native.GATE_CONTRACT_WITNESS, request_token=successor['token'],
+                       receipt_sha256=c.sha_file(folder / 'receipt.json'), gate=historical)
+        def refused(candidate_witness, pattern):
+            candidate = copy.deepcopy(state); before = copy.deepcopy(candidate)
+            with self.assertRaisesRegex(ValueError, pattern):
+                c.reconcile(candidate, original['token'], renewed, renewal_witness=candidate_witness)
+            self.assertEqual(before, candidate)
+        with self.subTest('no witness'):
+            candidate = copy.deepcopy(state); before = copy.deepcopy(candidate)
+            with self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        refused(dict(witness, gate=dict(historical, command=['false'])), 'historical gate contract identity')
+        refused(dict(witness, request_token='foreign'), 'historical gate contract identity')
+        refused(dict(witness, receipt_sha256='0' * 64), 'historical gate contract identity')
+        candidate = copy.deepcopy(state); before = copy.deepcopy(candidate)
+        c.reconcile(candidate, original['token'], renewed, renewal_witness=witness)
+        entry = candidate['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['attempts'], candidate['attempts'])
+        self.assertEqual(before['failures'], candidate['failures'])
+        # A hash-bound historical gate that changed an executable field is still refused.
+        executable = dict(historical, cwd='/elsewhere')
+        successor['execution_binding']['contract_digest'] = c.digest(executable)
+        c.write(folder / 'receipt.json', successor)
+        state['attempts'][-1]['results'][0] = successor
+        refused(dict(witness, gate=executable, receipt_sha256=c.sha_file(folder / 'receipt.json')),
+                'historical gate contract changed')
+
     def test_clean_historical_successor_refuses_noninventory_or_unbound_attempt_drift(self):
         state, paths, proof, gate, packet, original, folder, successor = self.historical_clean_successor_state()
         renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}

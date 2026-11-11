@@ -1847,6 +1847,40 @@ def historical_successor_runtime(root, admitted_gate, request, binding):
     need(fingerprint == binding['input_fingerprint'], 'historical successor runtime fingerprint')
 
 
+GATE_CONTRACT_WITNESS = 'historical-gate-contract-v1'
+
+
+def historical_gate_contract(witness, successor, gate, root, binding, state):
+    """Authenticate a successor's historical gate by its sealed contract digest.
+
+    Only explanatory selection_evidence and the check inventory may differ from the current
+    gate: removed checks need catalog deploy omissions, kept checks keep their old order, and
+    the sealed environment must equal the current one. The gate bytes are hash-bound.
+    """
+    from deploy_test_cycle import digest, sha_file
+    historical = witness.get('gate')
+    need(isinstance(witness, dict) and set(witness) == {'kind', 'request_token', 'receipt_sha256', 'gate'}
+         and witness['request_token'] == successor['token']
+         and witness['receipt_sha256'] == sha_file(Path(successor['log']).parent / 'receipt.json')
+         and isinstance(historical, dict) and digest(historical) == binding.get('contract_digest')
+         and binding.get('environment') == state['environment'], 'historical gate contract identity')
+    need(set(historical) == set(gate) and historical.get('name') == gate['name']
+         and {k: v for k, v in historical.items() if k not in {'selection_evidence', 'checks'}}
+         == {k: v for k, v in gate.items() if k not in {'selection_evidence', 'checks'}}
+         and isinstance(historical.get('selection_evidence'), list)
+         and all(isinstance(reason, str) for reason in historical['selection_evidence']),
+         'historical gate contract changed')
+    old_checks, new_checks = historical.get('checks'), gate['checks']
+    need(isinstance(old_checks, list) and all(isinstance(k, str) for k in old_checks)
+         and len(set(old_checks)) == len(old_checks), 'historical gate inventory')
+    if old_checks != new_checks:
+        from deploy_test_quarantine import deploy_selection_omissions
+        removed = deploy_selection_omissions(root, historical, gate)
+        need([k for k in new_checks if k in set(old_checks)] == [k for k in old_checks if k not in removed],
+             'historical gate ordered catalog subset')
+    return historical
+
+
 def clean_isolated_successor(state, prior, original, successor, renewal_witness=None):
     """A later full native result may close execution without clearing historical debt or FAILs."""
     from deploy_test_cycle import bounded_read, digest, receipt_owner, sha_file, validate_result
@@ -1865,9 +1899,12 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     folder = Path(successor['log']).parent
     request = bounded_read(folder / 'request.json', 'successor request')
     root = Path(prior['owner']['worker_root'])
-    admitted_gate = (historical_successor_gate(renewal_witness, successor, request, gate, root)
-                     if renewal_witness is not None else gate)
     binding = successor.get('execution_binding', {})
+    if isinstance(renewal_witness, dict) and renewal_witness.get('kind') == GATE_CONTRACT_WITNESS:
+        admitted_gate = historical_gate_contract(renewal_witness, successor, gate, root, binding, state)
+    else:
+        admitted_gate = (historical_successor_gate(renewal_witness, successor, request, gate, root)
+                         if renewal_witness is not None else gate)
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
