@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 import uuid
 
 
@@ -143,7 +144,28 @@ def privileged_main():
         raise SystemExit(2)
 
 
+PRIVILEGED_SCAN_ATTEMPTS = 3
+PRIVILEGED_SCAN_RETRY_SECONDS = 0.5
+
+
 def privileged_scan(roots):
+    """Bounded re-observation: a refused or unavailable scan is retried, never assumed quiescent.
+
+    The fixed scanner fails closed on any transient /proc race on a loaded host (a stability run
+    saw one refusal in five), so a later complete positive observation is required instead.
+    """
+    for attempt in range(PRIVILEGED_SCAN_ATTEMPTS):
+        try:
+            return _privileged_scan_once(roots)
+        except ValueError as error:
+            transient = str(error) in {'privileged read-only process scan refused or unavailable',
+                                       'privileged read-only process scan unavailable'}
+            if not transient or attempt + 1 == PRIVILEGED_SCAN_ATTEMPTS:
+                raise
+            time.sleep(PRIVILEGED_SCAN_RETRY_SECONDS)
+
+
+def _privileged_scan_once(roots):
     if not 1 <= len(roots) <= 64:
         raise ValueError('scan input limit')
     uid,euid,birth,_=identity(os.getpid())

@@ -11321,7 +11321,7 @@ class CleanupPrepareEvidence(unittest.TestCase):
     setUp = RelayStartupEvidence.setUp
     fixture = RelayStartupEvidence.fixture
 
-    def prepare_fixture(self, producer_head='abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077'):
+    def prepare_fixture(self, producer_head='abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077', count=14, custody=False):
         import hashlib
         receipt, owner, proof = self.fixture()
         (self.relay / 'startup-cleanup.json').unlink()
@@ -11334,15 +11334,19 @@ class CleanupPrepareEvidence(unittest.TestCase):
         (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
         folder = Path(receipt['log']).parent
         request = json.loads((folder/'request.json').read_text())
-        tasks = ['fixture-task-%02d' % i for i in range(14)]
+        tasks = ['fixture-task-%02d' % i for i in range(count)]
         request['checks'] = tasks
+        held = {'fixture-custody': dict(disposition='NO_RETRY_CUSTODY', kind='historical-agentcard-no-retry-v1')} if custody else {}
+        request['skips'] = held
         self.save(folder/'request.json', request)
         cases = dict.fromkeys(tasks, 'UNVERIFIED')
-        receipt.update(checks=tasks, cases=cases)
+        receipt.update(checks=tasks, cases={**dict.fromkeys(held, 'SKIP'), **cases})
+        if custody:
+            receipt.update(custody_skips=copy.deepcopy(held), current_execution=dict.fromkeys(held, 'UNVERIFIED'))
         adapter = json.loads(Path(receipt['worker_result']).read_text())
         adapter.update(checks=tasks, cases=cases, complete=False, cleanup_complete=False,
                        fleet_directory=str(self.campaign), native_command=['bash', 'scripts/run-bench', *tasks,
-                       '--runs', '1', '--concurrency', '14', '--retry-infra', '0', '--ref', receipt['source']['head']])
+                       '--runs', '1', '--concurrency', str(count), '--retry-infra', '0', '--ref', receipt['source']['head']])
         self.save(Path(receipt['worker_result']), adapter)
         reference = receipt['native_cleanup_reference']
         reference['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
@@ -11351,8 +11355,8 @@ class CleanupPrepareEvidence(unittest.TestCase):
                      worker_result_sha256=reference['result_sha256'], layout='campaign-cleanup-prepare-v1')
         summary = json.loads((self.campaign/'summary.json').read_text())
         summary.pop('shared_inventory_failed')
-        summary.update(concurrency=14, task_count=14, total_jobs=14, cleanup_ticket_failure='prepare',
-                       cleanup_cohorts=[dict(cohort_id='c001',status='queued',ready_count=0,expected_count=14,
+        summary.update(concurrency=count, task_count=count, total_jobs=count, cleanup_ticket_failure='prepare',
+                       cleanup_cohorts=[dict(cohort_id='c001',status='queued',ready_count=0,expected_count=count,
                                             failed_count=0,released_count=0,released_at=None)],
                        jobs=[dict(job_id='r001-j%04d' % (i+1), task=task, run=1, attempt=1, attempts=[],
                            status='cancelled', controller_pid=None, controller_exit_code=None, started_at=None,
@@ -11461,6 +11465,30 @@ class CleanupPrepareEvidence(unittest.TestCase):
         self.published=False
         with self.assertRaisesRegex(ValueError,'terminal publication'):self.validate_prepare_fixture(receipt,owner,proof)
 
+
+    def test_prepare_accepts_full_width_with_no_retry_custody_and_current_producers(self):
+        # PR1682 round 29: 15 submitted smoke checks plus one NO_RETRY_CUSTODY case, refused at
+        # 'insufficient physical cleanup cohort floors' before any controller dispatch.
+        receipt,owner,proof=self.prepare_fixture('452e70ce9843c97b9587ed3125f6666cf10c7dfb',count=15,custody=True)
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertEqual([],entry['participants']);self.assertFalse(entry['credit_granted'])
+        folder=Path(receipt['log']).parent
+        def reseal_receipt(row):
+            self.save(folder/'receipt.json',row)
+            proof['receipt_sha256']=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest();self.reseal()
+        import hashlib
+        for name,mutate in [('custody-credited',lambda r:r['cases'].update({'fixture-custody':'PASS'})),
+                            ('custody-not-held',lambda r:r.update(custody_skips={})),
+                            ('custody-executed',lambda r:r.update(current_execution={})),
+                            ('check-credited',lambda r:r['cases'].update({'fixture-task-00':'PASS'}))]:
+            with self.subTest(name=name):
+                row=copy.deepcopy(receipt);mutate(row);reseal_receipt(row)
+                try:
+                    with self.assertRaises(ValueError):self.validate_prepare_fixture(row,owner,proof)
+                finally:reseal_receipt(receipt)
+        request=json.loads((folder/'request.json').read_text())
+        request['skips']['fixture-custody']['disposition']='resource_skip';self.save(folder/'request.json',request);self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
 
     def test_prepare_current_reviewed_pair_never_grants_credit(self):
         receipt,owner,proof=self.prepare_fixture('436576b7b05aa7421c597733c3df4f71f6f40eb7')
@@ -12636,6 +12664,30 @@ class ExplicitAgentCardOverride(unittest.TestCase):
 
 
 class ProcessScanExitedChildren(unittest.TestCase):
+    def test_privileged_scan_reobserves_transient_refusals_only_boundedly(self):
+        # PR1682 stability run 4: one loaded refusal must not fail the owning observation, but a
+        # refusal is never converted into quiescence and other errors are not retried.
+        import deploy_test_process_scan as scan
+        good = {'quiescent': True}
+        refused = ValueError('privileged read-only process scan refused or unavailable')
+        for outcomes, expect in (([refused, refused, good], good), ([refused] * 3, refused),
+                                 ([ValueError('privileged process scan response identity differs'), good], 'identity')):
+            calls = []
+            def once(roots, outcomes=list(outcomes)):
+                calls.append(roots); value = outcomes.pop(0)
+                if isinstance(value, Exception): raise value
+                return value
+            with self.subTest(expect=str(expect)), patch.object(scan, '_privileged_scan_once', side_effect=once), \
+                 patch.object(scan.time, 'sleep'):
+                if expect is good:
+                    self.assertEqual(good, scan.privileged_scan(['/x'])); self.assertEqual(3, len(calls))
+                elif expect is refused:
+                    with self.assertRaisesRegex(ValueError, 'refused'): scan.privileged_scan(['/x'])
+                    self.assertEqual(3, len(calls))
+                else:
+                    with self.assertRaisesRegex(ValueError, 'identity differs'): scan.privileged_scan(['/x'])
+                    self.assertEqual(1, len(calls))
+
     def test_privileged_scan_preserves_positive_unreaped_child_absence(self):
         import deploy_test_process_scan as scan
         self.assertNotEqual(os.geteuid(), 0)

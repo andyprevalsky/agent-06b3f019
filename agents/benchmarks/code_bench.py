@@ -200,7 +200,10 @@ def _git_env(home: Path) -> dict[str, str]:
 
 def _git(args: list[str], cwd: Path, env: dict[str, str]) -> str:
     result = subprocess.run(
-        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+        # Auto maintenance runs detached after commits and creates/removes .git lock files while the
+        # workspace is archived (code_bench_test FileNotFoundError on objects/maintenance.lock).
+        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+         "-c", "maintenance.auto=false", "-c", "gc.auto=0", *args],
         cwd=cwd,
         env=env,
         capture_output=True,

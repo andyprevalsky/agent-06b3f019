@@ -21,6 +21,12 @@ REVIEWED_SOURCE_SETS = (REVIEWED_SOURCES, {
     **REVIEWED_SOURCES,
     'run-bench-campaign.py': '8fc428d19f3052b54daf785741f66291e6ac42adef8320be6bb18e2c9900c6f9',
     'cloudbench-cleanup-tickets.py': 'b67ac4790306e542a06b2ad607d88b9582c8173f2eecc37cdcffc3df991b4734',
+}, {
+    # PR1682 452e70ce: R59 admission diagnostics and typed completion boundaries; prepare path unchanged.
+    'run-bench-campaign.py': '93adb28884d313ba4062d8297456daed96c3fbac1adb2240b1592db875b9319a',
+    'cloudbench-cleanup-tickets.py': '6a629fb01e68427bc7b8f2998547ead01683f2d92498354f801d916687fa2fa2',
+    'run-bench': 'e3b8c162354bfca92676b57a5317614c3d829f1611298026ec47f6f606a70f5b',
+    'deploy_test_cloud.py': 'ae3bda6d0d866c21ab834ef285619b60fdce1924e9c0a705f8cc8a566810fb6f',
 })
 
 
@@ -58,23 +64,35 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     need(proof.get('campaign') == str(campaign) and str(campaign) in cli_text
          and owner['native_cleanup_reference']['native_directory'] == str(campaign)
          and adapter.get('fleet_directory') == str(campaign), 'prepare campaign root')
+    # A prepare failure leaves cleanup incomplete, so no automatic rerun may exist.
+    need('rerun' not in adapter and not (runs.parent / 'rerun').exists()
+         and not (runs.parent / 'rerun').is_symlink(), 'prepare rerun absent')
     request = document(Path(receipt['log']).parent / 'request.json')
     summary = document(campaign / 'summary.json')
     checks, jobs = request['checks'], summary.get('jobs')
-    need(isinstance(checks, list) and len(checks) == len(set(checks)) == 14 and not request.get('skips')
-         and receipt['cases'] == adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
+    # Historical NO_RETRY_CUSTODY cases are request skips that never dispatch; every
+    # submitted check must stay UNVERIFIED with no execution credit.
+    skips = request.get('skips') or {}
+    custody = receipt.get('custody_skips') or {}
+    need(isinstance(skips, dict) and skips == custody
+         and all(isinstance(v, dict) and v.get('disposition') == 'NO_RETRY_CUSTODY' for v in skips.values())
+         and (receipt.get('current_execution') or {}) == dict.fromkeys(skips, 'UNVERIFIED'), 'prepare custody skips')
+    count = len(checks) if isinstance(checks, list) else 0
+    need(isinstance(checks, list) and 1 <= count == len(set(checks)) <= 9999 and not set(checks) & set(skips)
+         and receipt['cases'] == {**dict.fromkeys(skips, 'SKIP'), **dict.fromkeys(checks, 'UNVERIFIED')}
+         and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
          and adapter.get('complete') is False and adapter.get('cleanup_complete') is False, 'prepare unexecuted cases')
     need(summary.get('campaign_id') == campaign.name and summary.get('status') == 'failed'
          and summary.get('cleanup_ticket_failure') == 'prepare'
          and type(summary.get('peak_concurrency')) is int and summary['peak_concurrency'] == 0
          and all(type(summary.get(k)) is int and summary[k] == value for k, value in
-                 [('runs', 1), ('retry_infra', 0), ('concurrency', 14), ('task_count', 14), ('total_jobs', 14)])
+                 [('runs', 1), ('retry_infra', 0), ('concurrency', count), ('task_count', count), ('total_jobs', count)])
          and not any(summary.get(k) for k in ('shared_inventory_failed', 'shared_transport_cleanup_pending',
                     'startup_cohorts', 'workspace_binding', 'e2e_timeout_exceeded'))
-         and isinstance(jobs, list) and len(jobs) == 14 and all(isinstance(j, dict) for j in jobs), 'prepare terminal manifest')
-    ids = {'r001-j%04d' % i for i in range(1, 15)}
+         and isinstance(jobs, list) and len(jobs) == count and all(isinstance(j, dict) for j in jobs), 'prepare terminal manifest')
+    ids = {'r001-j%04d' % i for i in range(1, count + 1)}
     need({j.get('job_id') for j in jobs} == ids and {j.get('task') for j in jobs} == set(checks)
-         and len({j.get('task') for j in jobs}) == 14, 'prepare job inventory')
+         and len({j.get('task') for j in jobs}) == count, 'prepare job inventory')
     for job in jobs:
         log = campaign / (job['job_id'] + '.log')
         need(job.get('status') == 'cancelled' and job.get('attempts') == []
@@ -98,7 +116,7 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     need(document(cohort / 'manifest.json') == {'cohort_id': 'c001', 'jobs': dict.fromkeys(sorted(ids))}, 'prepare cohort membership')
     cohort_rows = summary.get('cleanup_cohorts')
     need(cohort_rows == [dict(cohort_id='c001', status='queued', ready_count=0,
-         expected_count=14, failed_count=0, released_count=0, released_at=None)]
+         expected_count=count, failed_count=0, released_count=0, released_at=None)]
          and all(type(cohort_rows[0][key]) is int for key in
                  ('ready_count', 'expected_count', 'failed_count', 'released_count')), 'prepare cohort state')
     grant = grant_path(root, budget)
