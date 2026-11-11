@@ -28,7 +28,7 @@ sources:
   - plan:.context/agentcard-stability/combined-observer-report-public-checks.json
   - plan:.context/agentcard-e2e/all-intents-custody-20261110/public-validation-20261110_231710-e5b2db06/results.json
 repro: agents/benchmarks/cloud_batch_cleanup_test.py::test_terminal_failed_setup_intent_requires_external_custody; back-end/src/tests/blackbox/test-payment-stripe-custody.cases.ts via existing test-payment.part2.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -175,11 +175,18 @@ The runner and receipt retain the isolated DB/environment bindings; these are
 historical verification commands, not instructions to reuse a retired fixture.
 No additional app test, DB, network or benchmark ran to integrate this archive.
 
-The corrected code has not yet produced final-source native E2E all-intent
-custody evidence. The ec6 series preceded application: 54 native passes and one
-session-expiry timeout remain unchanged, and no fifth-full-round or deployment
-credit follows from the observer fix. This case therefore remains OPEN; no
-product compensation bug or new native success is claimed.
+The original unchanged setup/resume task now has actual native automatic
+custody proof on c61c2b5f325e92bf8a4c0d8afaf9aaf7545f32b7: both persisted
+intents were observed, the initial intent canceled with no received or
+capturable funds, and the final intent paid correctly. The complete eleven-task
+regression PASSED with all twelve persisted intents independently joined by
+the native validator, zero operator GETs, eleven original verified recordings
+and twenty-two token-bound clean receipts. Parent audit verified all105 sealed
+artifact hashes; final packet SHA256 is
+1112d777b56e8bc9776f1fa1c78b6ec99bd26b8479f808abd0c40766571d876f.
+This closes the automated observation gap. It does not establish an earlier
+product compensation bug or deployment/production success. The historical
+54PASS/1FAIL remains unchanged.
 
 ## Human feedback
 
@@ -190,8 +197,8 @@ write, no broad customer/account sweeps, no weaker assertions/timeouts, no new
 paid CI and no edit of the frozen proof source. The actual canceled PI and
 original native results must remain distinct from the coverage gap. Parent
 review deferred application until source release. Exact e7e6 application and
-public DB-backed checks are now recorded; final-source native E2E custody proof
-remains outstanding.
+public DB-backed checks and actual native all-intent custody proof are now
+recorded; production verification remains separate.
 
 ## Reusable lesson
 

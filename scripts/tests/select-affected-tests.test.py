@@ -188,9 +188,35 @@ def check_extraction_precision(selector: sat.Selector) -> None:
                   f"edges.json: {sample} still selects the {len(expected)} unit(s) reading {target}")
 
 
+def check_worker_provider_gate_reachability(selector: sat.Selector) -> None:
+    owners = {
+        "cloudbench-provider-contract": "scripts/tests/cloudbench-provider-contract.test.py",
+        "worker-pool-cutover": "scripts/tests/worker-pool-cutover.test.py",
+        "retained-agent-machine": "scripts/tests/retained-agent-machine.test.py",
+    }
+    units = {unit.name: unit for unit in selector.lanes["deploy-structural-gates"].units}
+    for name, root in owners.items():
+        check(name in units and units[name].roots == [root],
+              f"provider/worker owning suite is a discovered deploy unit: {name}")
+        check(name in selector.select([root]).selected["deploy-structural-gates"],
+              f"provider/worker owning test selects its recurring gate: {name}")
+    for path, expected in (
+        ("scripts/run-bench-cloud", {"cloudbench-provider-contract"}),
+        ("scripts/worker_pool_runtime.py", {"cloudbench-provider-contract", "worker-pool-cutover"}),
+        ("scripts/retained_agent_machine.py", {"worker-pool-cutover", "retained-agent-machine"}),
+    ):
+        selected = selector.select([path]).selected["deploy-structural-gates"]
+        reached = selector.upstream({path}, package_scans=False)
+        direct = {unit.name for node in reached for unit in selector.root_units.get(node, [])
+                  if unit.lane == "deploy-structural-gates"}
+        check(expected <= selected and expected <= direct,
+              f"actual dependency edges retain owning provider/worker gates for {path}")
+
+
 def main() -> int:
     check_coverage_map_dependency_preflight()
     selector = sat.Selector()
+    check_worker_provider_gate_reachability(selector)
 
     problems = sat.self_check(selector)
     for problem in problems[:50]:

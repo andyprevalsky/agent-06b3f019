@@ -310,6 +310,26 @@ eleven-case regression and normal deployment/production verification remain
 pending. The historical54PASS/1FAIL remains unchanged; the ambiguous dry control
 and semantic generalization limits above are not erased by these observations.
 
+
+### Complete native regression, November 11
+
+After the five focused passes, the complete unchanged eleven-case regression
+PASSED on c61c2b5f325e92bf8a4c0d8afaf9aaf7545f32b7. The transition from d4
+changed only cloud operational code and RCA evidence; application, agent,
+browser, prompt, provider and local benchmark runtime bytes were unchanged.
+Every case reached COMPLETED/PASSED, including the session-expiry case, with
+all original recordings, exact native cleanup and automatic custody of all
+twelve persisted Stripe intents verified. Parent audit checked all105 sealed
+artifact hashes against the canonical task results. Final packet SHA256 is
+1112d777b56e8bc9776f1fa1c78b6ec99bd26b8479f808abd0c40766571d876f.
+
+The resulting evidence is five targeted consecutive passes plus one full
+regression, not five repeats of every case. The original54PASS/1FAIL, both
+historical rejection sequences, nondecisive model samples and the additional
+negative-control proof risk remain. This OPEN semantic-generalization record
+does not claim that finite passing samples establish universal compliance.
+Deployment and production verification remain separate.
+
 ## Human feedback
 
 Preserve the real failure, all eight rejections and the successful paid order.

@@ -262,3 +262,11 @@ The archive validator also passed1692cases. These are actual shared-source
 results, separate from the earlier private checks and successful read-only
 eight-worker observation. Original native cloud outcomes remain pending;
 no local managed or production provider setting was changed.
+
+The parent also found that earlier "registered" meant unittest discovery,
+not recurring deployment invocation. The reviewed94a054 patch adds the three
+existing mocked suites to the existing structural-gate registry, with exact
+command ownership and real dependency-selection regressions. Shared checks
+passed10 registry tests,66 selector checks and actual dispatch of all three
+new entries (17/40/33 tests). This strengthens recurrence without changing
+provider, application, native benchmark or concurrency behavior.
