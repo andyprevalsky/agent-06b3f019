@@ -10,6 +10,8 @@ first_bad_boundary: clean_isolated_successor compared a completed historical gat
 symptoms:
   - "native cleanup proof refused: native cleanup: successor contract"
   - Fresh full cloud validation refused despite unchanged execution checks and released successor ownership
+  - "historical witness requires complete successor after a pre-admission source refusal"
+  - "focused command omits an unresolved failing check after an authorized deploy-only omission"
 tags:
   - deploy
   - cleanup
@@ -37,6 +39,20 @@ An independently authenticated private archive recovery supplied the exact histo
 Keep the current generated plan and original cleanup proof intact. Accept an optional separate typed historical-successor witness during isolated source renewal. It identifies the exact successor receipt and a hash-bound recovered admission snapshot. Verify the snapshot's native admission seal, plan and source, then all three recorded execution-binding fields. Require exact keysets and type-preserving canonical equality for every gate field except the explicit string-list selection explanation. Altered checks, commands, environment, workers, unknown fields or boolean types still refuse.
 
 The original proof can still renew only its validation source. Record supplemental witness evidence separately, preserve all original native bytes, grades, clocks, exclusions and false cleanup/credit flags, and grant launch authority only. Existing strict successor collection, publisher quiescence, native evidence hashes, original proof replay, source and quiescence checks remain required. Fresh full current-source execution and normal publisher acceptance remain mandatory.
+
+## November 11 recurrence: authenticated historical inputs and future omissions
+
+A later source transition exposed three further distinctions. The user explicitly excluded the mass test from all future deploys while preserving manual benchmark eligibility and historical failures. The current native inventory therefore dropped that one case. A compatible independently owned immutable source also changed current environment inputs. The historical request's backend runtime hash differed from current configuration.
+
+During the transition, the custody guard refused before UUID generation, request creation or native adapter launch. Its six-field FAIL/UNVERIFIED row remained the latest smoke coverage, inside a stale attempt whose three sibling workers completed. It was not an incomplete native execution. Renewal now recognizes only that exact path: authenticated terminal sibling request/result/receipt bindings, no ownership or process flags, one enclosing namespace, and no smoke request namespace. Unknown, token-bearing, partial or owned execution still refuses. The immediate historical native predecessor must still pass all original validation.
+
+The typed historical witness continues to bind the exact original gate, environment and input fingerprint. An ordered current subset is allowed only through the existing catalog-approved deploy omission helper; all other execution fields remain identical. Historical runtime hashes must reproduce the sealed native input fingerprint using the existing Git input reconstruction. Current source, plan, environment, runtime and fingerprint bindings are validated independently. No old environment is restored, no historical secret is reconstructed, and no old native outcome supplies current acceptance.
+
+Canonical renewal on source `3a177851` exited zero while changing only the original proof's validation source. Its 567 file bindings, 13 participants, 14 exclusions, false cleanup/credit and historical financial no-retry authority remained unchanged. Five permanent regressions reproduced the owning refusals on the original runtime and passed unchanged after repair; the full existing suite passed 455 tests. The actual copied public replay was idempotent with 1,021 canonical/native inputs unchanged. These are launch-authority proofs, not current test or financial credit.
+
+The focused planner separately still demanded the historical mass failure after the current inventory had legitimately omitted it. It now uses the same catalog authority for historical required checks absent from current selection. Every currently selected failing check remains mandatory. The existing regression reproduces the old refusal, rejects ordinary failure-quarantine as an omission, and preserves failure history. All 455 owning tests pass. The mass task's prompt, evaluators and manual eligibility are unchanged; omission is never PASS.
+
+The prior frozen `9718c6e` full semantic run passed all 57 UI and five latency units without skips or flaky UI outcomes, and its structural/controller workers completed with verified cleanup. New combined-source full gates, a fresh unchanged native chat run and the normal full evidence publisher remain required before deployment. Original failures, missing capture context and clocks remain preserved.
 
 ## Verification and limits
 

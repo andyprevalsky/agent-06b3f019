@@ -1486,7 +1486,7 @@ def reexecute(state: dict, occurrence_id: str) -> None:
         state["phase"] = "needs-focused-plan"
 
 
-def focused_plan(state: dict, plan: dict, payload: dict) -> None:
+def focused_plan(state: dict, plan: dict, payload: dict, *, root: Path | None = None) -> None:
     if state["phase"] != "needs-focused-plan":
         raise ValueError("focused plan is only accepted for diagnosed failures")
     if payload.get("source") != state["source"]:
@@ -1502,6 +1502,12 @@ def focused_plan(state: dict, plan: dict, payload: dict) -> None:
             raise ValueError("focused check list is not in the gate inventory")
         required = {f["check"].split("/", 1)[1] for f in state["failures"]
                     if f["gate"] == gate and f.get("disposition") in {"blocking", "execution required"}}
+        # Retain failed history while honoring catalog-approved future deploy omissions.
+        # Checks still selected in the current gate cannot use this exception.
+        omitted = required - allowed[gate]
+        if omitted:
+            before = dict(original[gate], checks=[*original[gate]['checks'], *sorted(omitted)])
+            required -= set(quarantine.deploy_selection_omissions(root or ROOT, before, original[gate]))
         if not required <= set(task["checks"]):
             raise ValueError("focused command omits an unresolved failing check")
         if 'worker_recipe' in original[gate] and 'worker_recipe' not in task:
@@ -2893,7 +2899,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "focus":
                 if args.input is None:
                     raise ValueError("--input focused command plan required")
-                focused_plan(state, plan, read(args.input))
+                focused_plan(state, plan, read(args.input), root=args.root)
             elif args.action in {'triage-independent', 'repair-independent'}:
                 with cancellation_handlers():
                     run_phase(plan, state, directory, args.root, args.rca_launcher,

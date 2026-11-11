@@ -1797,6 +1797,9 @@ class Cycle(unittest.TestCase):
         gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])
         self.state = c.initialize(self.plan, self.root)
         self.state.update(phase='needs-focused-plan', repair_gates=['api'])
+        self.state['failures'] = [dict(id='old-mass', gate='api', check='api/mass',
+            disposition='execution required', source=copy.deepcopy(self.state['source']), native_result='FAIL')]
+        failures = copy.deepcopy(self.state['failures'])
         old = copy.deepcopy(self.plan)
         catalog = self.root / 'agents/benchmarks/tasks.json'
         catalog.parent.mkdir(parents=True)
@@ -1816,6 +1819,21 @@ class Cycle(unittest.TestCase):
         self.assertEqual(old['source'], omission['from_source'])
         self.assertEqual(new['source'], omission['source'])
         self.assertEqual(['peer'], self.state['plan']['gates'][1]['checks'])
+
+        self.assertEqual(failures, self.state['failures'])
+        self.state['phase'] = 'needs-focused-plan'  # existing quick contract has completed
+        task = {k:new['gates'][1][k] for k in ('command', 'checks', 'worker_recipe') if k in new['gates'][1]}
+        payload = dict(source=self.state['source'], gates={'api':task})
+        baseline = copy.deepcopy(self.state)
+        original_catalog = catalog.read_text()
+        catalog.write_text(json.dumps([{'name':'mass', 'quarantine':{'error':'ordinary failure still runs'}}, {'name':'peer'}]))
+        with patch.object(c, 'ROOT', self.root), self.assertRaises(ValueError):
+            c.focused_plan(copy.deepcopy(baseline), new, payload)
+        catalog.write_text(original_catalog)
+        with patch.object(c, 'ROOT', self.root):
+            c.focused_plan(self.state, new, payload)
+        self.assertEqual('focused', self.state['phase'])
+        self.assertEqual(failures, self.state['failures'])
 
     def local_rebind_fixture(self):
         import contextlib, io
