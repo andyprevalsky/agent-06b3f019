@@ -9,10 +9,19 @@ function delayedCompletion(
   firstContentMs: number,
   finishMs: number,
   signal: AbortSignal | undefined,
-  onAbort: () => void
+  onAbort: () => void,
+  finishReason?: string
 ): Response {
   const encodedContent = new TextEncoder().encode(
-    `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content } }] })}\n\n`
+    `data: ${JSON.stringify({
+      choices: [
+        {
+          index: 0,
+          delta: { content },
+          ...(finishReason ? { finish_reason: finishReason } : {}),
+        },
+      ],
+    })}\n\n`
   );
   const encodedDone = new TextEncoder().encode('data: [DONE]\n\n');
   const body = new ReadableStream<Uint8Array>({
@@ -37,7 +46,22 @@ function delayedCompletion(
   return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 
-async function run(): Promise<void> {
+/**
+ * A structured chat reply is usable only once it is complete, so the rate-cap
+ * fallback race must latch on the first COMPLETED answer for every json_schema
+ * call, not just the generator. Production (2026-11-11, agent 9e369cc8): after a
+ * Cerebras 429 the router's GLM leg streamed its first chunk at 441 ms, latched
+ * the race, then kept streaming an unclosed decision until the 15 s router
+ * deadline, while the same-model Qwen leg would have finished in about 2 s.
+ */
+async function raceScenario(params: {
+  schemaName: string;
+  schemaProperties: Record<string, { type: string }>;
+  glmContent: string;
+  qwenContent: string;
+  /** GLM stops early at its token cap instead of streaming slowly to the end. */
+  glmTruncated?: boolean;
+}): Promise<void> {
   const originalFetch = globalThis.fetch;
   const originalCerebrasKey = process.env.CEREBRAS_API_KEY;
   const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
@@ -55,7 +79,7 @@ async function run(): Promise<void> {
     const model = (JSON.parse(String(init?.body)) as { model: string }).model;
     if (model === 'qwen/qwen3.8-27b') {
       return delayedCompletion(
-        '{"reasoning":"","response":"qwen finished first"}',
+        params.qwenContent,
         650,
         750,
         init?.signal ?? undefined,
@@ -64,13 +88,14 @@ async function run(): Promise<void> {
     }
     assert.equal(model, 'z-ai/glm-5.3-flash');
     return delayedCompletion(
-      '{"reasoning":"","response":"glm spoke first"}',
+      params.glmContent,
       50,
-      1500,
+      params.glmTruncated ? 300 : 1500,
       init?.signal ?? undefined,
       () => {
         glmAborted = true;
-      }
+      },
+      params.glmTruncated ? 'length' : undefined
     );
   }) as typeof fetch;
 
@@ -83,12 +108,12 @@ async function run(): Promise<void> {
       response_format: {
         type: 'json_schema',
         json_schema: {
-          name: 'generator_response',
+          name: params.schemaName,
           strict: true,
           schema: {
             type: 'object',
-            properties: { reasoning: { type: 'string' }, response: { type: 'string' } },
-            required: ['reasoning', 'response'],
+            properties: params.schemaProperties,
+            required: Object.keys(params.schemaProperties),
             additionalProperties: false,
           },
         },
@@ -96,9 +121,10 @@ async function run(): Promise<void> {
     }))
       chunks.push(chunk);
     const text = chunks.map((chunk) => chunk.choices[0]?.delta?.content ?? '').join('');
-    assert.match(text, /qwen finished first/);
-    assert.doesNotMatch(text, /glm spoke first/);
-    assert.equal(glmAborted, true);
+    assert.equal(text, params.qwenContent, `${params.schemaName}: first completed answer wins`);
+    if (!params.glmTruncated) {
+      assert.equal(glmAborted, true, `${params.schemaName}: the slower GLM leg is cancelled`);
+    }
   } finally {
     globalThis.fetch = originalFetch;
     if (originalCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
@@ -108,6 +134,38 @@ async function run(): Promise<void> {
     if (originalHedgeMs === undefined) delete process.env.CEREBRAS_CHAT_HEDGE_MS;
     else process.env.CEREBRAS_CHAT_HEDGE_MS = originalHedgeMs;
   }
+}
+
+async function run(): Promise<void> {
+  await raceScenario({
+    schemaName: 'generator_response',
+    schemaProperties: { reasoning: { type: 'string' }, response: { type: 'string' } },
+    glmContent: '{"reasoning":"","response":"glm spoke first"}',
+    qwenContent: '{"reasoning":"","response":"qwen finished first"}',
+  });
+  await raceScenario({
+    schemaName: 'router_decision',
+    schemaProperties: {
+      reasoning: { type: 'string' },
+      action: { type: 'string' },
+      queries: { type: 'array' },
+    },
+    glmContent: '{"reasoning":"glm spoke first","action":"web_search","queries":["a","a ',
+    qwenContent: '{"reasoning":"qwen finished first","action":"web_search","queries":["a"]}',
+  });
+  // A leg that reaches its token cap first ends with unclosed JSON; it must not
+  // win over a leg that finishes cleanly.
+  await raceScenario({
+    schemaName: 'router_decision',
+    schemaProperties: {
+      reasoning: { type: 'string' },
+      action: { type: 'string' },
+      queries: { type: 'array' },
+    },
+    glmContent: '{"reasoning":"glm hit its cap","action":"web_search","queries":["a","a a","a a a',
+    qwenContent: '{"reasoning":"qwen finished cleanly","action":"web_search","queries":["a"]}',
+    glmTruncated: true,
+  });
 }
 
 run().catch((error: unknown) => {
