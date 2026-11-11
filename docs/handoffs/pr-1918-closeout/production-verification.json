@@ -1,0 +1,67 @@
+{
+  "kind": "deploy-production-qualified-result-v1",
+  "merge": "3d3b9a2de7c600d0b9665f8b312bc99cbae02de1",
+  "observed_at": "2026-11-11T05:26:17.064591+00:00",
+  "native_status": "FAIL",
+  "native_production_exit": 1,
+  "qualified": true,
+  "qualification_policy": ".claude/shared/deploy-failure-policy.md applies to production checks: additional NOT_INTRODUCED failures handed off after merge, user-only billing change externally waived; native failures remain unchanged.",
+  "render": "PASS exact3d live",
+  "backend-probes": "PASS endpoint smoke/log scan",
+  "production_chat_paths": {
+    "PASS": 4,
+    "run_id": 42962835963
+  },
+  "production_ui": {
+    "PASS": 48,
+    "FAIL": 4,
+    "SKIPPED": 6,
+    "run_id": 42962835963,
+    "three_sidebar": {
+      "id": "production-three-sidebar-42962835963",
+      "description": "Production sidebar tests: completed-child disclosure at1280/390 and mobile Working badges",
+      "evidence": "/home/boxes/rose/.context/rca-ebb350db/production-rca/sidebar/failed-test-packet.json",
+      "native_result": "FAIL (3 tests)",
+      "attribution": "NOT_INTRODUCED",
+      "repair_agent": "https://boxes.dev/thread/thr_bf0d1c6f6d034893b94c884ac213eab0",
+      "disposition": "delegated / waived"
+    },
+    "entry_fixture": {
+      "id": "production-entry-fixture-skew-42962835963",
+      "description": "Entry reload test intercepted an old build entry and missed the navigated script; expected4loads got1",
+      "evidence": "/home/boxes/rose/.context/rca-ebb350db/production-rca/entry/failed-test-packet.json",
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "repair_agent": "https://boxes.dev/thread/thr_9d1c16208c1448f496369f8e5585d385",
+      "disposition": "delegated / waived"
+    },
+    "native_skip_reasons": {
+      "browser-take-control": "requires local DB seed; native test.skip(IS_PROD)",
+      "login": "requires dev magic OTP; native test.skip(IS_PROD)",
+      "overlay-layers4": "fixture page local only; native test.skip(IS_PROD)"
+    }
+  },
+  "agentcard": {
+    "id": "production-agentcard-billing-3d3b9a2d",
+    "description": "Production AgentCard preflight requires dedicated live billing; user107 remains sandbox",
+    "evidence": "/home/boxes/rose/.context/rca-ebb350db/production-rca/agentcard-billing-attribution.json",
+    "native_result": "FAIL",
+    "attribution": "NOT_INTRODUCED",
+    "external_provider": {
+      "name": "Stripe / AgentCard production billing",
+      "reason": "credential or billing change"
+    },
+    "disposition": "external / waived"
+  },
+  "originals_unchanged": {
+    ".context/deploy-pipeline/production-lanes.json": "4bba928034c3097b9e66286f220ce505789abc832ea07574813374e3abcd4771"
+  },
+  "failure_report_sha256": "d859eac548b761d803d832bada4c2535d4f55c37bee6fe35743d29c974101afe",
+  "limits": [
+    "Native FAIL is never rewritten or reported PASS.",
+    "Live AgentCard lifecycle unexecuted after safe preflight refusal.",
+    "Sandbox43.96 unreleased remains open; no financial settlement credit.",
+    "Mac-only acceptance unverified on Linux; no applicable Mac release selected.",
+    "CodeRabbit stabilization review skipped for confirmed organization cap; merged unreviewed."
+  ]
+}
